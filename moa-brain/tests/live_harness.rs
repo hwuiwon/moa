@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use moa_brain::{TurnResult, build_default_pipeline, run_brain_turn};
 use moa_core::{Event, EventRange, Result, SessionMeta, SessionStore, UserId, WorkspaceId};
+use moa_memory::FileMemoryStore;
 use moa_providers::AnthropicProvider;
 use moa_session::TursoSessionStore;
 use tempfile::tempdir;
@@ -13,6 +14,7 @@ use tempfile::tempdir;
 async fn live_brain_turn_returns_brain_response() -> Result<()> {
     let dir = tempdir()?;
     let db_path = dir.path().join("brain-harness.db");
+    let memory_store = Arc::new(FileMemoryStore::new(dir.path()).await?);
     let store = Arc::new(TursoSessionStore::new_local(&db_path).await?);
     let provider = Arc::new(AnthropicProvider::from_env("claude-sonnet-4-6")?);
     let session_id = store
@@ -23,7 +25,8 @@ async fn live_brain_turn_returns_brain_response() -> Result<()> {
             ..SessionMeta::default()
         })
         .await?;
-    let pipeline = build_default_pipeline(&moa_core::MoaConfig::default(), store.clone());
+    let pipeline =
+        build_default_pipeline(&moa_core::MoaConfig::default(), store.clone(), memory_store);
 
     store
         .emit_event(

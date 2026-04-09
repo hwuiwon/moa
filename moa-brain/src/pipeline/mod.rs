@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    ContextProcessor, EventRange, EventRecord, MoaConfig, ProcessorOutput, Result, SessionStore,
-    WorkingContext,
+    ContextProcessor, EventRange, EventRecord, MemoryScope, MemoryStore, MoaConfig,
+    ProcessorOutput, Result, SessionStore, WorkingContext,
 };
 
 pub mod cache;
@@ -20,11 +20,15 @@ use cache::CacheOptimizer;
 use history::HistoryCompiler;
 use identity::IdentityProcessor;
 use instructions::InstructionProcessor;
-use memory::MemoryRetriever;
+use memory::{
+    MEMORY_STAGE_DATA_METADATA_KEY, MemoryRetriever, PreloadedMemoryStageData, RelevantMemoryPage,
+    extract_search_query,
+};
 use skills::SkillInjector;
 use tools::ToolDefinitionProcessor;
 
 pub(crate) const HISTORY_EVENTS_METADATA_KEY: &str = "moa.pipeline.history_events";
+const MEMORY_RESULTS_PER_SCOPE: usize = 2;
 
 /// Per-stage pipeline execution report.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +44,7 @@ pub struct PipelineStageReport {
 /// Ordered context compilation pipeline.
 pub struct ContextPipeline {
     session_store: Arc<dyn SessionStore>,
+    memory_store: Arc<dyn MemoryStore>,
     stages: Vec<Box<dyn ContextProcessor>>,
 }
 
@@ -47,10 +52,12 @@ impl ContextPipeline {
     /// Creates a pipeline from an ordered list of processors.
     pub fn new(
         session_store: Arc<dyn SessionStore>,
+        memory_store: Arc<dyn MemoryStore>,
         stages: Vec<Box<dyn ContextProcessor>>,
     ) -> Self {
         Self {
             session_store,
+            memory_store,
             stages,
         }
     }
@@ -60,7 +67,9 @@ impl ContextPipeline {
         let mut reports = Vec::with_capacity(self.stages.len());
 
         for stage in &self.stages {
-            if stage.stage() == 6 && !ctx.metadata.contains_key(HISTORY_EVENTS_METADATA_KEY) {
+            if (stage.stage() == 5 || stage.stage() == 6)
+                && !ctx.metadata.contains_key(HISTORY_EVENTS_METADATA_KEY)
+            {
                 let events = self
                     .session_store
                     .get_events(ctx.session_id.clone(), EventRange::all())
@@ -68,6 +77,16 @@ impl ContextPipeline {
                 ctx.metadata.insert(
                     HISTORY_EVENTS_METADATA_KEY.to_string(),
                     serde_json::to_value(events)?,
+                );
+            }
+
+            if stage.stage() == 5 && !ctx.metadata.contains_key(MEMORY_STAGE_DATA_METADATA_KEY) {
+                let events = load_history_events(ctx)?;
+                let memory_data =
+                    preload_memory_stage_data(&*self.memory_store, ctx, &events).await?;
+                ctx.metadata.insert(
+                    MEMORY_STAGE_DATA_METADATA_KEY.to_string(),
+                    serde_json::to_value(memory_data)?,
                 );
             }
 
@@ -104,9 +123,11 @@ impl ContextPipeline {
 pub fn build_default_pipeline(
     config: &MoaConfig,
     session_store: Arc<dyn SessionStore>,
+    memory_store: Arc<dyn MemoryStore>,
 ) -> ContextPipeline {
     ContextPipeline::new(
         session_store,
+        memory_store,
         vec![
             Box::new(IdentityProcessor),
             Box::new(InstructionProcessor::from_config(config)),
@@ -162,6 +183,55 @@ pub(crate) fn sort_json_keys(value: &mut serde_json::Value) {
     }
 }
 
+async fn preload_memory_stage_data(
+    memory_store: &dyn MemoryStore,
+    ctx: &WorkingContext,
+    events: &[EventRecord],
+) -> Result<PreloadedMemoryStageData> {
+    let user_scope = MemoryScope::User(ctx.user_id.clone());
+    let workspace_scope = MemoryScope::Workspace(ctx.workspace_id.clone());
+    let user_index = memory_store.get_index(user_scope.clone()).await?;
+    let workspace_index = memory_store.get_index(workspace_scope.clone()).await?;
+    let mut relevant_pages = Vec::new();
+
+    if let Some(query) = extract_search_query(events) {
+        for (scope_label, scope) in [
+            ("user", user_scope.clone()),
+            ("workspace", workspace_scope.clone()),
+        ] {
+            let results = memory_store
+                .search(&query, scope, MEMORY_RESULTS_PER_SCOPE)
+                .await?;
+            for result in results {
+                let excerpt = match memory_store.read_page(&result.path).await {
+                    Ok(page) => page.content,
+                    Err(error) => {
+                        tracing::debug!(
+                            path = %result.path,
+                            scope = scope_label,
+                            error = %error,
+                            "falling back to memory search snippet after read failure"
+                        );
+                        result.snippet.clone()
+                    }
+                };
+                relevant_pages.push(RelevantMemoryPage {
+                    scope_label: scope_label.to_string(),
+                    path: result.path.to_string(),
+                    title: result.title,
+                    excerpt,
+                });
+            }
+        }
+    }
+
+    Ok(PreloadedMemoryStageData {
+        user_index,
+        workspace_index,
+        relevant_pages,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -169,10 +239,11 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use moa_core::{
-        ContextProcessor, Event, EventFilter, EventRange, EventRecord, MoaError, ModelCapabilities,
+        ContextProcessor, Event, EventFilter, EventRange, EventRecord, MemoryPath, MemoryScope,
+        MemorySearchResult, MemoryStore, MoaError, ModelCapabilities, PageSummary, PageType,
         Platform, ProcessorOutput, Result, SequenceNum, SessionFilter, SessionId, SessionMeta,
         SessionStatus, SessionStore, SessionSummary, TokenPricing, ToolCallFormat, UserId,
-        WorkingContext, WorkspaceId,
+        WikiPage, WorkingContext, WorkspaceId,
     };
     use serde_json::json;
     use tokio::sync::Mutex;
@@ -250,6 +321,55 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct MockMemoryStore;
+
+    #[async_trait]
+    impl MemoryStore for MockMemoryStore {
+        async fn search(
+            &self,
+            _query: &str,
+            _scope: MemoryScope,
+            _limit: usize,
+        ) -> Result<Vec<MemorySearchResult>> {
+            Ok(Vec::new())
+        }
+
+        async fn read_page(&self, path: &MemoryPath) -> Result<WikiPage> {
+            Err(MoaError::StorageError(format!(
+                "mock page not found: {}",
+                path.as_str()
+            )))
+        }
+
+        async fn write_page(&self, _path: &MemoryPath, _page: WikiPage) -> Result<()> {
+            Ok(())
+        }
+
+        async fn delete_page(&self, _path: &MemoryPath) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list_pages(
+            &self,
+            _scope: MemoryScope,
+            _filter: Option<PageType>,
+        ) -> Result<Vec<PageSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_index(&self, scope: MemoryScope) -> Result<String> {
+            Ok(match scope {
+                MemoryScope::User(_) => "user memory".to_string(),
+                MemoryScope::Workspace(_) => "workspace memory".to_string(),
+            })
+        }
+
+        async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+            Ok(())
+        }
+    }
+
     struct TestStage {
         stage: u8,
         name: &'static str,
@@ -304,6 +424,7 @@ mod tests {
         let store = Arc::new(MockSessionStore::new(session.clone(), Vec::new()));
         let pipeline = ContextPipeline::new(
             store,
+            Arc::new(MockMemoryStore),
             vec![
                 Box::new(TestStage::new(1, "identity")),
                 Box::new(TestStage::new(2, "instructions")),

@@ -5,9 +5,10 @@ use chrono::Utc;
 use moa_brain::{TurnResult, build_default_pipeline, run_brain_turn};
 use moa_core::{
     CompletionRequest, CompletionResponse, CompletionStream, Event, EventFilter, EventRange,
-    EventRecord, LLMProvider, MoaConfig, ModelCapabilities, Result, SequenceNum, SessionFilter,
-    SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason, TokenPricing,
-    ToolCallFormat, UserId, WorkspaceId,
+    EventRecord, LLMProvider, MemoryPath, MemoryScope, MemorySearchResult, MemoryStore, MoaConfig,
+    ModelCapabilities, PageSummary, PageType, Result, SequenceNum, SessionFilter, SessionId,
+    SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason, TokenPricing,
+    ToolCallFormat, UserId, WikiPage, WorkspaceId,
 };
 use tokio::sync::Mutex;
 
@@ -96,6 +97,49 @@ impl SessionStore for MockSessionStore {
     }
 }
 
+#[derive(Default)]
+struct MockMemoryStore;
+
+#[async_trait]
+impl MemoryStore for MockMemoryStore {
+    async fn search(
+        &self,
+        _query: &str,
+        _scope: MemoryScope,
+        _limit: usize,
+    ) -> Result<Vec<MemorySearchResult>> {
+        Ok(Vec::new())
+    }
+
+    async fn read_page(&self, _path: &MemoryPath) -> Result<WikiPage> {
+        panic!("brain turn test does not expect memory reads")
+    }
+
+    async fn write_page(&self, _path: &MemoryPath, _page: WikiPage) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_page(&self, _path: &MemoryPath) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_pages(
+        &self,
+        _scope: MemoryScope,
+        _filter: Option<PageType>,
+    ) -> Result<Vec<PageSummary>> {
+        Ok(Vec::new())
+    }
+
+    async fn get_index(&self, _scope: MemoryScope) -> Result<String> {
+        Ok(String::new())
+    }
+
+    async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+        Ok(())
+    }
+}
+
 struct MockLlmProvider;
 
 #[async_trait]
@@ -168,7 +212,11 @@ async fn run_brain_turn_emits_brain_response_event() {
         },
     )];
     let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
-    let pipeline = build_default_pipeline(&MoaConfig::default(), store.clone());
+    let pipeline = build_default_pipeline(
+        &MoaConfig::default(),
+        store.clone(),
+        Arc::new(MockMemoryStore),
+    );
     let llm = Arc::new(MockLlmProvider);
 
     let result = run_brain_turn(session.id.clone(), store.clone(), llm, &pipeline)
