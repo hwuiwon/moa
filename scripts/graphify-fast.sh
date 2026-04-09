@@ -50,7 +50,9 @@ cleanup_scratch() {
         graphify-out/.needs_update \
         graphify-out/.update_changed.json \
         graphify-out/.update_noncode.json \
-        graphify-out/.update_semantic.json
+        graphify-out/.update_semantic.json \
+        graphify-out/.update_communities.json \
+        graphify-out/.update_labels.json
 }
 trap cleanup_scratch EXIT
 cleanup_scratch  # also wipe on entry, in case a previous run crashed
@@ -119,17 +121,72 @@ cohesion    = score_all(G, communities)
 gods        = god_nodes(G)
 surprises   = surprising_connections(G, communities)
 
-# 6. Load prior community labels from manifest.json (single persistent state file).
-#    This preserves human-readable labels across runs.
+# 6. Compute community labels. Strategy:
+#    (a) Load existing NON-placeholder labels from manifest (preserve LLM-authored names).
+#    (b) For everything else, auto-derive from source paths + most-central node.
+#    (c) Stale "Community N" placeholder labels from older manifests are rejected on load
+#        and rewritten on save, breaking any lock-in cycle.
+import re
+from os.path import commonpath, dirname
+from collections import Counter
+
+_PLACEHOLDER_LABEL = re.compile(r'^Community \d+$')
+
+def auto_label(graph, member_ids):
+    """Deterministic label from community content. Returns None if no source info."""
+    files = Counter()
+    for nid in member_ids:
+        sf = graph.nodes[nid].get('source_file', '')
+        if sf:
+            files[sf] += 1
+    if not files:
+        return None
+
+    unique = list(files.keys())
+    try:
+        prefix = commonpath(unique) if len(unique) > 1 else dirname(unique[0])
+    except ValueError:
+        prefix = ''
+    if not prefix or prefix == '.':
+        crates = Counter()
+        for f, c in files.items():
+            crates[f.split('/')[0]] += c
+        prefix = crates.most_common(1)[0][0]
+
+    # Readability: drop 'src' segments (moa-brain/src/pipeline -> moa-brain/pipeline)
+    parts = [p for p in prefix.split('/') if p and p != 'src']
+    cleaned = '/'.join(parts) if parts else prefix
+
+    # Qualifier: most-connected node label — disambiguates communities in the same dir
+    if len(member_ids) >= 3:
+        best = max(member_ids, key=lambda n: graph.degree(n))
+        top = graph.nodes[best].get('label', best).split('(')[0].strip(' .')
+        if top and len(top) < 35 and top.lower() not in cleaned.lower():
+            return f'{cleaned} · {top}'
+    return cleaned
+
 manifest_path = Path('graphify-out/manifest.json')
-prior_labels = {}
+stored_labels = {}
 if manifest_path.exists():
     try:
-        mf = json.loads(manifest_path.read_text())
-        prior_labels = {int(k): v for k, v in mf.get('community_labels', {}).items()}
-    except (json.JSONDecodeError, ValueError):
-        prior_labels = {}
-labels = {cid: prior_labels.get(cid, f'Community {cid}') for cid in communities}
+        mf_prev = json.loads(manifest_path.read_text())
+        for k, v in mf_prev.get('community_labels', {}).items():
+            if v and not _PLACEHOLDER_LABEL.match(v):
+                stored_labels[int(k)] = v
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+
+labels = {}
+auto_count = 0
+for cid, members in communities.items():
+    if cid in stored_labels:
+        labels[cid] = stored_labels[cid]
+    else:
+        derived = auto_label(G, members)
+        labels[cid] = derived or f'Community {cid}'
+        if derived:
+            auto_count += 1
+
 questions = suggest_questions(G, communities, labels)
 
 # 7. Write outputs
@@ -153,7 +210,7 @@ cost['runs'].append({'date': datetime.now(timezone.utc).isoformat(), 'input_toke
 cost_path.write_text(json.dumps(cost, indent=2))
 
 # 10. Summary
-print(f'[graphify-fast] Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges, {len(communities)} communities, {len(cached_hyperedges)} hyperedges')
+print(f'[graphify-fast] Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges, {len(communities)} communities ({auto_count} auto-labeled, {len(stored_labels)} preserved), {len(cached_hyperedges)} hyperedges')
 if non_code_changed:
     print(f'[graphify-fast] {len(non_code_changed)} non-code file(s) changed since last LLM run:')
     for f in non_code_changed[:5]:
