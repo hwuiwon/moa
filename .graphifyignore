@@ -3,3 +3,7 @@
 # docs
 docs/
 sequence/
+
+# graphify's own outputs (avoid self-reference loop)
+graphify-out/
+.omc/
