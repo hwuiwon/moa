@@ -9,6 +9,58 @@ use serde::Deserialize;
 
 use crate::router::{BuiltInTool, ToolContext};
 
+/// Built-in memory read tool.
+pub struct MemoryReadTool;
+
+#[async_trait]
+impl BuiltInTool for MemoryReadTool {
+    fn name(&self) -> &'static str {
+        "memory_read"
+    }
+
+    fn description(&self) -> &'static str {
+        "Read a memory wiki page by logical path."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Logical wiki path such as skills/deploy/SKILL.md." }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        })
+    }
+
+    fn risk_level(&self) -> moa_core::RiskLevel {
+        moa_core::RiskLevel::Low
+    }
+
+    async fn execute(
+        &self,
+        input: &serde_json::Value,
+        ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput> {
+        let params: MemoryReadInput = serde_json::from_value(input.clone())?;
+        let started_at = Instant::now();
+        let path = MemoryPath::new(params.path);
+        let page = ctx.memory_store.read_page(&path).await?;
+
+        Ok(ToolOutput {
+            stdout: format!(
+                "# {} ({})\n\n{}",
+                page.title,
+                path.as_str(),
+                page.content.trim()
+            ),
+            stderr: String::new(),
+            exit_code: 0,
+            duration: started_at.elapsed(),
+        })
+    }
+}
+
 /// Built-in memory search tool.
 pub struct MemorySearchTool;
 
@@ -177,6 +229,7 @@ impl BuiltInTool for MemoryWriteTool {
             auto_generated: existing_page.auto_generated,
             last_referenced: existing_page.last_referenced,
             reference_count: existing_page.reference_count,
+            metadata: existing_page.metadata,
         };
         ctx.memory_store.write_page(&path, page).await?;
 
@@ -198,6 +251,11 @@ struct MemorySearchInput {
     type_filter: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryReadInput {
+    path: String,
 }
 
 #[derive(Debug, Default, Deserialize)]

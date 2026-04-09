@@ -13,6 +13,7 @@ moa-hands = { path = "../moa-hands" }
 moa-memory = { path = "../moa-memory" }
 moa-providers = { path = "../moa-providers" }
 moa-session = { path = "../moa-session" }
+moa-skills = { path = "../moa-skills" }
 serde_json.workspace = true
 shell-words = "1.1"
 tokio.workspace = true

@@ -27,7 +27,7 @@ pub use types::{
     OutboundMessage, PageSummary, PageType, Platform, PlatformCapabilities, PlatformUser,
     PolicyAction, PolicyScope, ProcessorOutput, RiskLevel, RuntimeEvent, SandboxTier, SequenceNum,
     SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
-    SessionSummary, StartSessionRequest, StopReason, TokenPricing, ToolCallFormat, ToolCardStatus,
-    ToolInvocation, ToolOutput, ToolStatus, ToolUpdate, UserId, UserMessage, WakeContext, WikiPage,
-    WorkingContext, WorkspaceId,
+    SessionSummary, SkillMetadata, StartSessionRequest, StopReason, TokenPricing, ToolCallFormat,
+    ToolCardStatus, ToolInvocation, ToolOutput, ToolStatus, ToolUpdate, UserId, UserMessage,
+    WakeContext, WikiPage, WorkingContext, WorkspaceId,
 };

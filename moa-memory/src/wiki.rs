@@ -1,8 +1,11 @@
 //! Markdown wiki page parsing and serialization helpers.
 
+use std::collections::{HashMap, HashSet};
+
 use chrono::{DateTime, Utc};
 use moa_core::{ConfidenceLevel, MemoryPath, PageType, Result, WikiPage};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::memory_error;
 
@@ -32,10 +35,23 @@ struct PageFrontmatter {
     reference_count: Option<u64>,
 }
 
+const RESERVED_FRONTMATTER_KEYS: &[&str] = &[
+    "type",
+    "created",
+    "updated",
+    "confidence",
+    "related",
+    "sources",
+    "tags",
+    "auto_generated",
+    "last_referenced",
+    "reference_count",
+];
+
 /// Parses a markdown document into a shared `WikiPage`.
 pub fn parse_markdown(path: Option<MemoryPath>, markdown: &str) -> Result<WikiPage> {
     let now = Utc::now();
-    let (frontmatter, content) = split_frontmatter(markdown)?;
+    let (frontmatter, metadata, content) = split_frontmatter(markdown)?;
     let page_type = frontmatter
         .page_type
         .unwrap_or_else(|| infer_page_type(path.as_ref()));
@@ -55,6 +71,7 @@ pub fn parse_markdown(path: Option<MemoryPath>, markdown: &str) -> Result<WikiPa
         auto_generated: frontmatter.auto_generated.unwrap_or(false),
         last_referenced: frontmatter.last_referenced.unwrap_or(now),
         reference_count: frontmatter.reference_count.unwrap_or(0),
+        metadata,
     })
 }
 
@@ -81,7 +98,7 @@ pub fn render_markdown(page: &WikiPage) -> Result<String> {
         last_referenced: Some(page.last_referenced),
         reference_count: Some(page.reference_count),
     };
-    let yaml = serde_yaml::to_string(&frontmatter).map_err(memory_error)?;
+    let yaml = render_frontmatter(&frontmatter, &page.metadata)?;
     let body = page.content.trim_start_matches('\n');
 
     Ok(format!(
@@ -90,26 +107,29 @@ pub fn render_markdown(page: &WikiPage) -> Result<String> {
     ))
 }
 
-fn split_frontmatter(markdown: &str) -> Result<(PageFrontmatter, &str)> {
+fn split_frontmatter(markdown: &str) -> Result<(PageFrontmatter, HashMap<String, Value>, &str)> {
     if !markdown.starts_with(FRONTMATTER_DELIMITER) {
-        return Ok((PageFrontmatter::default(), markdown));
+        return Ok((PageFrontmatter::default(), HashMap::new(), markdown));
     }
 
     let remainder = markdown[FRONTMATTER_DELIMITER.len()..]
         .strip_prefix('\n')
         .or_else(|| markdown[FRONTMATTER_DELIMITER.len()..].strip_prefix("\r\n"));
     let Some(remainder) = remainder else {
-        return Ok((PageFrontmatter::default(), markdown));
+        return Ok((PageFrontmatter::default(), HashMap::new(), markdown));
     };
 
     let Some((yaml_block, body)) = remainder.split_once(&format!("\n{FRONTMATTER_DELIMITER}\n"))
     else {
-        return Ok((PageFrontmatter::default(), markdown));
+        return Ok((PageFrontmatter::default(), HashMap::new(), markdown));
     };
-    let frontmatter = serde_yaml::from_str::<PageFrontmatter>(yaml_block).map_err(memory_error)?;
+    let raw_yaml = serde_yaml::from_str::<serde_yaml::Value>(yaml_block).map_err(memory_error)?;
+    let frontmatter =
+        serde_yaml::from_value::<PageFrontmatter>(raw_yaml.clone()).map_err(memory_error)?;
+    let metadata = extract_extra_metadata(raw_yaml)?;
     let body = body.strip_prefix('\n').unwrap_or(body);
 
-    Ok((frontmatter, body))
+    Ok((frontmatter, metadata, body))
 }
 
 fn infer_page_type(path: Option<&MemoryPath>) -> PageType {
@@ -151,6 +171,114 @@ fn fallback_title(path: Option<&MemoryPath>) -> String {
         .unwrap_or(path.as_str())
         .trim_end_matches(".md")
         .replace('-', " ")
+}
+
+fn render_frontmatter(
+    frontmatter: &PageFrontmatter,
+    metadata: &HashMap<String, Value>,
+) -> Result<String> {
+    let mut mapping = serde_yaml::Mapping::new();
+    let reserved_keys: HashSet<&str> = RESERVED_FRONTMATTER_KEYS.iter().copied().collect();
+    let base = serde_yaml::to_value(frontmatter).map_err(memory_error)?;
+    let Some(base_mapping) = base.as_mapping() else {
+        return Err(memory_error("page frontmatter must serialize to a mapping"));
+    };
+    for (key, value) in base_mapping {
+        mapping.insert(key.clone(), value.clone());
+    }
+
+    for (key, value) in metadata {
+        if reserved_keys.contains(key.as_str()) {
+            continue;
+        }
+        mapping.insert(
+            serde_yaml::Value::String(key.clone()),
+            json_to_yaml_value(value)?,
+        );
+    }
+
+    serde_yaml::to_string(&mapping).map_err(memory_error)
+}
+
+fn extract_extra_metadata(raw_yaml: serde_yaml::Value) -> Result<HashMap<String, Value>> {
+    let Some(mapping) = raw_yaml.as_mapping() else {
+        return Err(memory_error("page frontmatter must be a YAML mapping"));
+    };
+    let reserved_keys: HashSet<&str> = RESERVED_FRONTMATTER_KEYS.iter().copied().collect();
+    let mut metadata = HashMap::new();
+
+    for (key, value) in mapping {
+        let Some(key) = key.as_str() else {
+            continue;
+        };
+        if reserved_keys.contains(key) {
+            continue;
+        }
+        metadata.insert(key.to_string(), yaml_to_json_value(value)?);
+    }
+
+    Ok(metadata)
+}
+
+fn yaml_to_json_value(value: &serde_yaml::Value) -> Result<Value> {
+    match value {
+        serde_yaml::Value::Null => Ok(Value::Null),
+        serde_yaml::Value::Bool(value) => Ok(Value::Bool(*value)),
+        serde_yaml::Value::Number(value) => {
+            if let Some(number) = value.as_i64() {
+                Ok(Value::Number(number.into()))
+            } else if let Some(number) = value.as_u64() {
+                Ok(Value::Number(number.into()))
+            } else if let Some(number) = value.as_f64() {
+                serde_json::Number::from_f64(number)
+                    .map(Value::Number)
+                    .ok_or_else(|| memory_error("invalid floating-point frontmatter value"))
+            } else {
+                Err(memory_error("unsupported numeric frontmatter value"))
+            }
+        }
+        serde_yaml::Value::String(value) => Ok(Value::String(value.clone())),
+        serde_yaml::Value::Sequence(values) => values
+            .iter()
+            .map(yaml_to_json_value)
+            .collect::<Result<Vec<_>>>()
+            .map(Value::Array),
+        serde_yaml::Value::Mapping(values) => {
+            let mut object = serde_json::Map::with_capacity(values.len());
+            for (key, value) in values {
+                let Some(key) = key.as_str() else {
+                    return Err(memory_error("frontmatter object keys must be strings"));
+                };
+                object.insert(key.to_string(), yaml_to_json_value(value)?);
+            }
+            Ok(Value::Object(object))
+        }
+        serde_yaml::Value::Tagged(value) => yaml_to_json_value(&value.value),
+    }
+}
+
+fn json_to_yaml_value(value: &Value) -> Result<serde_yaml::Value> {
+    match value {
+        Value::Null => Ok(serde_yaml::Value::Null),
+        Value::Bool(value) => Ok(serde_yaml::Value::Bool(*value)),
+        Value::Number(value) => Ok(serde_yaml::to_value(value).map_err(memory_error)?),
+        Value::String(value) => Ok(serde_yaml::Value::String(value.clone())),
+        Value::Array(values) => values
+            .iter()
+            .map(json_to_yaml_value)
+            .collect::<Result<Vec<_>>>()
+            .map(serde_yaml::Value::Sequence),
+        Value::Object(values) => {
+            let mut mapping = serde_yaml::Mapping::new();
+            for (key, value) in values {
+                mapping.insert(
+                    serde_yaml::Value::String(key.clone()),
+                    json_to_yaml_value(value)?,
+                );
+            }
+            Ok(serde_yaml::Value::Mapping(mapping))
+        }
+    }
 }
 
 #[cfg(test)]

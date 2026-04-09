@@ -225,7 +225,9 @@ fn rule_matches(rule: &ApprovalRule, tool: &str, normalized_input: &str) -> bool
 fn normalize_tool_input(tool: &str, input: &Value) -> Result<String> {
     let value = match tool {
         "bash" => required_string_field(input, "cmd")?,
-        "file_read" | "file_write" | "memory_write" => required_string_field(input, "path")?,
+        "file_read" | "file_write" | "memory_read" | "memory_write" => {
+            required_string_field(input, "path")?
+        }
         "file_search" => required_string_field(input, "pattern")?,
         "memory_search" | "web_search" => required_string_field(input, "query")?,
         "web_fetch" => required_string_field(input, "url")?,
@@ -240,6 +242,7 @@ fn summarize_tool_input(tool: &str, input: &Value, normalized_input: &str) -> St
         "bash" => format!("Command: {normalized_input}"),
         "file_read" | "file_write" => format!("Path: {normalized_input}"),
         "file_search" => format!("Pattern: {normalized_input}"),
+        "memory_read" => format!("Path: {normalized_input}"),
         "memory_search" => format!("Query: {normalized_input}"),
         "memory_write" => format!("Path: {normalized_input}"),
         "web_search" => format!("Query: {normalized_input}"),
@@ -278,7 +281,7 @@ fn risk_level_for_tool(tool: &str) -> RiskLevel {
 
 fn categorize_tool(tool: &str) -> ToolCategory {
     match tool {
-        "file_read" | "file_search" | "memory_search" => ToolCategory::Read,
+        "file_read" | "file_search" | "memory_read" | "memory_search" => ToolCategory::Read,
         "file_write" | "memory_write" => ToolCategory::Write,
         "web_search" | "web_fetch" => ToolCategory::Network,
         "bash" => ToolCategory::Execute,

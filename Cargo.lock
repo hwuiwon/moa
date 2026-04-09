@@ -1701,6 +1701,7 @@ dependencies = [
  "moa-memory",
  "moa-providers",
  "moa-session",
+ "moa-skills",
  "serde",
  "serde_json",
  "tempfile",
@@ -1773,6 +1774,7 @@ dependencies = [
  "libsql",
  "moa-core",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tempfile",
  "tokio",
@@ -1791,6 +1793,7 @@ dependencies = [
  "moa-memory",
  "moa-providers",
  "moa-session",
+ "moa-skills",
  "serde_json",
  "shell-words",
  "tempfile",
@@ -1848,7 +1851,17 @@ dependencies = [
 name = "moa-skills"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
  "moa-core",
+ "moa-memory",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

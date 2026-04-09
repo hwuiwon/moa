@@ -1402,6 +1402,31 @@ pub struct PageSummary {
     pub updated: DateTime<Utc>,
 }
 
+/// Tier-1 skill metadata injected into the context pipeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillMetadata {
+    /// Logical page path for the skill document.
+    pub path: MemoryPath,
+    /// Stable skill name from `SKILL.md`.
+    pub name: String,
+    /// Version string for the skill.
+    pub version: String,
+    /// Short single-line summary used in Stage 4.
+    pub one_liner: String,
+    /// User-defined tags.
+    pub tags: Vec<String>,
+    /// Tools referenced by the skill.
+    pub tools_required: Vec<String>,
+    /// Estimated token cost for the full skill body.
+    pub estimated_tokens: usize,
+    /// Historical usage count.
+    pub use_count: u32,
+    /// Historical success rate between `0.0` and `1.0`.
+    pub success_rate: f32,
+    /// Whether the skill was auto-generated.
+    pub auto_generated: bool,
+}
+
 /// Full wiki page representation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WikiPage {
@@ -1431,6 +1456,9 @@ pub struct WikiPage {
     pub last_referenced: DateTime<Utc>,
     /// Reference count.
     pub reference_count: u64,
+    /// Arbitrary frontmatter fields preserved across parse/render round-trips.
+    #[serde(default)]
+    pub metadata: HashMap<String, Value>,
 }
 
 /// Stored credential material.

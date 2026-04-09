@@ -110,6 +110,7 @@ impl ToolRegistry {
     /// Returns the canonical local registry for Step 06.
     pub fn default_local() -> Self {
         let mut registry = Self::new();
+        registry.register_builtin(Arc::new(memory::MemoryReadTool));
         registry.register_builtin(Arc::new(memory::MemorySearchTool));
         registry.register_builtin(Arc::new(memory::MemoryWriteTool));
         registry.register_hand(
@@ -181,6 +182,7 @@ impl ToolRegistry {
             RiskLevel::Medium,
         )));
         registry.default_loadout = vec![
+            "memory_read".to_string(),
             "memory_search".to_string(),
             "memory_write".to_string(),
             "bash".to_string(),
