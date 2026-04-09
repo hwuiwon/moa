@@ -470,3 +470,76 @@ Consequence:
 Recommended review:
 
 - Decide later whether the binaries should keep failing fast on unwritable local state, or offer a documented temporary-directory fallback for constrained environments.
+
+## 21. The Step 09 diff viewer is driven by TUI-local approval payloads, not shared core events
+
+Current state:
+
+- The session event log still stores the approval request as:
+  - tool name
+  - input summary
+  - risk level
+- The richer diff payload used by the TUI lives only in `moa-tui::runner::ApprovalPrompt`.
+
+Issue:
+
+- This keeps Step 09 scoped correctly to the TUI and avoids changing the stable core event schema.
+- It also means the diff preview is a client-side enhancement, not a replayable property of the persisted approval event.
+
+Consequence:
+
+- The TUI can render inline diff previews and a full-screen diff viewer during a live approval.
+- A later client that replays old approvals from the event log will not have enough information to reconstruct the same diff UI without re-deriving it from tool input and current filesystem state.
+
+Recommended review:
+
+- Decide later whether rich approval context should remain a client-local concern or be promoted into a shared replayable approval payload.
+
+## 22. The current diff viewer only has first-class semantics for `file_write`
+
+Current state:
+
+- Step 09 derives diff previews only for `file_write`.
+- Other approval types still render structured parameters and risk coloring, but no diff.
+
+Issue:
+
+- This matches the current requirement, which is specifically about file-write approvals and diff previews.
+- It does not yet generalize to:
+  - multi-file write batches
+  - patch-oriented tools
+  - future tools that mutate structured state without mapping cleanly to one text file
+
+Consequence:
+
+- The current diff experience is good for the existing built-in file write flow.
+- Future write tools will need their own approval preview model instead of assuming the same before/after text-file shape.
+
+Recommended review:
+
+- Introduce a richer "approval preview" abstraction later if additional mutating tools need specialized visualizations.
+
+## 23. `e` is still a placeholder, not a real approval-parameter editor
+
+Current state:
+
+- The Step 09 approval widget shows the documented `e` shortcut.
+- Pressing it currently surfaces a status message instead of opening an editor.
+
+Issue:
+
+- The shortcut is present so the approval UI matches the spec surface and does not paint the implementation into a different keyboard contract.
+- The actual parameter-editing workflow has not been built yet.
+
+Consequence:
+
+- The important approval flow works:
+  - allow once
+  - deny
+  - always allow
+  - open diff
+- Parameter editing should still be considered unimplemented, not partially complete.
+
+Recommended review:
+
+- Treat `e` as reserved UI space until there is a concrete design for editing, validating, and resubmitting tool inputs safely.

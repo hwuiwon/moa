@@ -8,7 +8,10 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::{app::ChatEntry, widgets::tool_card::render_tool_card};
+use crate::{
+    app::ChatEntry,
+    widgets::{approval::render_approval_card, tool_card::render_tool_card},
+};
 
 /// Returns the maximum vertical scroll offset for the current transcript.
 pub(crate) fn max_scroll(entries: &[ChatEntry], width: u16, height: u16) -> u16 {
@@ -49,6 +52,9 @@ fn transcript_lines(entries: &[ChatEntry], width: u16) -> Vec<Line<'static>> {
                     Style::default().add_modifier(Modifier::BOLD),
                 )]));
                 lines.extend(wrap_prefixed(text, content_width));
+            }
+            ChatEntry::Approval(card) => {
+                lines.extend(render_approval_card(card, width));
             }
             ChatEntry::Status(text) => {
                 lines.push(Line::from(vec![Span::styled(

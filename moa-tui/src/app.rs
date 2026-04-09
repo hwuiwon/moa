@@ -24,7 +24,10 @@ use crate::{
     runner::{
         ApprovalPrompt, ChatRuntime, RuntimeCommand, RuntimeEvent, ToolCardStatus, ToolUpdate,
     },
-    views::chat,
+    views::{
+        chat,
+        diff::{self, DiffViewState},
+    },
     widgets::prompt::PromptWidget,
 };
 
@@ -41,6 +44,8 @@ pub enum AppMode {
     Running,
     /// The turn is waiting for a human approval decision.
     WaitingApproval,
+    /// The full-screen diff viewer is open.
+    ViewingDiff,
 }
 
 /// Renderable transcript entry.
@@ -48,8 +53,26 @@ pub enum AppMode {
 pub(crate) enum ChatEntry {
     User(String),
     Assistant { text: String, streaming: bool },
+    Approval(ApprovalEntry),
     Tool(ToolCardEntry),
     Status(String),
+}
+
+/// Renderable inline approval card state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ApprovalEntry {
+    pub(crate) prompt: ApprovalPrompt,
+    pub(crate) status: ApprovalCardStatus,
+    pub(crate) note: Option<String>,
+}
+
+/// Current approval outcome shown on the inline approval card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApprovalCardStatus {
+    Pending,
+    AllowedOnce,
+    AllowedAlways,
+    Denied,
 }
 
 /// Renderable inline tool card state.
@@ -69,10 +92,12 @@ pub struct App {
     prompt: PromptWidget,
     entries: Vec<ChatEntry>,
     total_tokens: usize,
+    viewport_width: u16,
     scroll: u16,
     auto_scroll: bool,
     should_exit: bool,
     pending_approval: Option<ApprovalPrompt>,
+    diff_view: Option<DiffViewState>,
     runtime_event_tx: mpsc::UnboundedSender<RuntimeEvent>,
     runtime_event_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
     control_tx: Option<mpsc::UnboundedSender<RuntimeCommand>>,
@@ -91,10 +116,12 @@ impl App {
             prompt: PromptWidget::new(),
             entries: Vec::new(),
             total_tokens: 0,
+            viewport_width: 0,
             scroll: 0,
             auto_scroll: true,
             should_exit: false,
             pending_approval: None,
+            diff_view: None,
             runtime_event_tx,
             runtime_event_rx,
             control_tx: None,
@@ -131,6 +158,13 @@ impl App {
             KeyAction::ApproveOnce => {
                 self.send_approval(ApprovalDecision::AllowOnce);
             }
+            KeyAction::OpenDiff => self.open_diff_view(),
+            KeyAction::CloseDiff => self.close_diff_view(),
+            KeyAction::ToggleDiffMode => self.toggle_diff_mode(),
+            KeyAction::NextDiffFile => self.move_diff_file(true),
+            KeyAction::PreviousDiffFile => self.move_diff_file(false),
+            KeyAction::NextDiffHunk => self.move_diff_hunk(true),
+            KeyAction::PreviousDiffHunk => self.move_diff_hunk(false),
             KeyAction::AlwaysAllow => {
                 if let Some(prompt) = &self.pending_approval {
                     self.send_approval(ApprovalDecision::AlwaysAllow {
@@ -140,6 +174,12 @@ impl App {
             }
             KeyAction::Deny => {
                 self.send_approval(ApprovalDecision::Deny { reason: None });
+            }
+            KeyAction::EditApproval => {
+                self.entries.push(ChatEntry::Status(
+                    "Editing approval parameters is not implemented yet.".to_string(),
+                ));
+                self.auto_scroll = true;
             }
             KeyAction::ScrollUp => {
                 self.auto_scroll = false;
@@ -165,6 +205,7 @@ impl App {
     /// Renders the full app into a frame.
     pub fn draw(&mut self, frame: &mut Frame<'_>) {
         let size = frame.area();
+        self.viewport_width = size.width;
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -192,10 +233,14 @@ impl App {
         self.prompt.render(frame, layout[2], self.mode);
 
         let footer = Paragraph::new(Line::from(
-            "Enter: send  Shift+Enter: newline  Ctrl+C/Esc: cancel  /help  y/n/a: approval",
+            "Enter: send  Shift+Enter: newline  Ctrl+C/Esc: cancel  /help  y/n/a: approval  d: diff",
         ))
         .block(Block::default().borders(Borders::ALL));
         frame.render_widget(footer, layout[3]);
+
+        if let Some(diff_view) = &self.diff_view {
+            diff::render_diff_view(frame, size, diff_view);
+        }
     }
 
     async fn submit_prompt(&mut self) -> Result<()> {
@@ -313,10 +358,11 @@ impl App {
                 self.auto_scroll = true;
             }
             RuntimeEvent::ToolUpdate(update) => {
-                self.upsert_tool_card(update);
+                self.handle_tool_update(update);
                 self.auto_scroll = true;
             }
             RuntimeEvent::ApprovalRequested(prompt) => {
+                self.upsert_approval_card(prompt.clone());
                 self.pending_approval = Some(prompt);
                 self.mode = AppMode::WaitingApproval;
                 self.auto_scroll = true;
@@ -330,11 +376,26 @@ impl App {
             }
             RuntimeEvent::TurnCompleted => {
                 self.pending_approval = None;
+                self.diff_view = None;
                 self.control_tx = None;
                 self.active_task = None;
                 self.sync_mode_with_prompt();
             }
         }
+    }
+
+    fn handle_tool_update(&mut self, update: ToolUpdate) {
+        if update.status == ToolCardStatus::WaitingApproval {
+            return;
+        }
+
+        if update.status == ToolCardStatus::Failed
+            && self.approval_status(update.tool_id) == Some(ApprovalCardStatus::Denied)
+        {
+            return;
+        }
+
+        self.upsert_tool_card(update);
     }
 
     fn upsert_tool_card(&mut self, update: ToolUpdate) {
@@ -357,15 +418,44 @@ impl App {
         }
     }
 
+    fn upsert_approval_card(&mut self, prompt: ApprovalPrompt) {
+        let request_id = prompt.request.request_id;
+        let entry = ApprovalEntry {
+            prompt,
+            status: ApprovalCardStatus::Pending,
+            note: None,
+        };
+
+        if let Some(ChatEntry::Approval(existing)) = self.entries.iter_mut().find(|entry| {
+            matches!(
+                entry,
+                ChatEntry::Approval(card) if card.prompt.request.request_id == request_id
+            )
+        }) {
+            *existing = entry;
+        } else {
+            self.entries.push(ChatEntry::Approval(entry));
+        }
+    }
+
     fn send_approval(&mut self, decision: ApprovalDecision) {
+        if let Some(prompt) = &self.pending_approval {
+            let (status, note) = approval_status_and_note(&decision);
+            self.update_approval_entry(prompt.request.request_id, status, note);
+        }
         if let Some(control_tx) = &self.control_tx {
             let _ = control_tx.send(RuntimeCommand::Approval(decision));
             self.pending_approval = None;
+            self.diff_view = None;
             self.mode = AppMode::Running;
         }
     }
 
     fn cancel_or_exit(&mut self) {
+        if self.diff_view.is_some() {
+            self.close_diff_view();
+            return;
+        }
         if self.mode == AppMode::Running || self.mode == AppMode::WaitingApproval {
             self.cancel_active_turn();
             self.entries.push(ChatEntry::Status(
@@ -382,10 +472,15 @@ impl App {
         }
         self.control_tx = None;
         self.pending_approval = None;
+        self.diff_view = None;
         self.sync_mode_with_prompt();
     }
 
     fn sync_mode_with_prompt(&mut self) {
+        if self.diff_view.is_some() {
+            self.mode = AppMode::ViewingDiff;
+            return;
+        }
         if self.active_task.is_some() {
             if self.pending_approval.is_some() {
                 self.mode = AppMode::WaitingApproval;
@@ -400,6 +495,92 @@ impl App {
         } else {
             AppMode::Composing
         };
+    }
+
+    fn update_approval_entry(
+        &mut self,
+        request_id: uuid::Uuid,
+        status: ApprovalCardStatus,
+        note: Option<String>,
+    ) {
+        if let Some(ChatEntry::Approval(entry)) = self.entries.iter_mut().find(|entry| {
+            matches!(
+                entry,
+                ChatEntry::Approval(card) if card.prompt.request.request_id == request_id
+            )
+        }) {
+            entry.status = status;
+            entry.note = note;
+        }
+    }
+
+    fn approval_status(&self, request_id: uuid::Uuid) -> Option<ApprovalCardStatus> {
+        self.entries.iter().find_map(|entry| match entry {
+            ChatEntry::Approval(approval) if approval.prompt.request.request_id == request_id => {
+                Some(approval.status)
+            }
+            _ => None,
+        })
+    }
+
+    fn open_diff_view(&mut self) {
+        let Some(prompt) = &self.pending_approval else {
+            return;
+        };
+        self.diff_view = DiffViewState::from_file_diffs(&prompt.file_diffs, self.viewport_width);
+        self.sync_mode_with_prompt();
+    }
+
+    fn close_diff_view(&mut self) {
+        self.diff_view = None;
+        self.sync_mode_with_prompt();
+    }
+
+    fn toggle_diff_mode(&mut self) {
+        if let Some(diff_view) = &mut self.diff_view {
+            diff_view.toggle_mode(self.viewport_width);
+        }
+    }
+
+    fn move_diff_file(&mut self, forward: bool) {
+        if let Some(diff_view) = &mut self.diff_view {
+            if forward {
+                diff_view.next_file();
+            } else {
+                diff_view.previous_file();
+            }
+        }
+    }
+
+    fn move_diff_hunk(&mut self, forward: bool) {
+        if let Some(diff_view) = &mut self.diff_view {
+            if forward {
+                diff_view.next_hunk();
+            } else {
+                diff_view.previous_hunk();
+            }
+        }
+    }
+}
+
+fn approval_status_and_note(decision: &ApprovalDecision) -> (ApprovalCardStatus, Option<String>) {
+    match decision {
+        ApprovalDecision::AllowOnce => (
+            ApprovalCardStatus::AllowedOnce,
+            Some("Allowed once".to_string()),
+        ),
+        ApprovalDecision::AlwaysAllow { pattern } => (
+            ApprovalCardStatus::AllowedAlways,
+            Some(format!("Always allow rule stored: {pattern}")),
+        ),
+        ApprovalDecision::Deny { reason } => (
+            ApprovalCardStatus::Denied,
+            Some(
+                reason
+                    .clone()
+                    .unwrap_or_else(|| "Denied by the user".to_string()),
+            ),
+        ),
     }
 }
 
@@ -444,10 +625,13 @@ async fn run_event_loop(
 #[cfg(test)]
 mod tests {
     use crossterm::event::KeyCode;
+    use moa_core::{ApprovalRequest, RiskLevel};
     use ratatui::{Terminal, backend::TestBackend};
     use tokio::runtime::Runtime;
+    use uuid::Uuid;
 
     use super::*;
+    use crate::runner::{ApprovalField, ApprovalFileDiff};
 
     fn test_app() -> App {
         Runtime::new().unwrap().block_on(async {
@@ -460,10 +644,12 @@ mod tests {
                 prompt: PromptWidget::new(),
                 entries: Vec::new(),
                 total_tokens: 0,
+                viewport_width: 100,
                 scroll: 0,
                 auto_scroll: true,
                 should_exit: false,
                 pending_approval: None,
+                diff_view: None,
                 runtime_event_tx,
                 runtime_event_rx,
                 control_tx: None,
@@ -508,6 +694,45 @@ mod tests {
             text: "Hi there".to_string(),
             streaming: false,
         });
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+    }
+
+    #[test]
+    fn diff_overlay_renders_for_file_write_approval() {
+        let backend = TestBackend::new(140, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = test_app();
+        let prompt = ApprovalPrompt {
+            request: ApprovalRequest {
+                request_id: Uuid::new_v4(),
+                tool_name: "file_write".to_string(),
+                input_summary: "Path: scratch-step09.txt".to_string(),
+                risk_level: RiskLevel::Medium,
+            },
+            pattern: "scratch-step09.txt".to_string(),
+            parameters: vec![
+                ApprovalField {
+                    label: "Path".to_string(),
+                    value: "scratch-step09.txt".to_string(),
+                },
+                ApprovalField {
+                    label: "Content".to_string(),
+                    value: "11 chars".to_string(),
+                },
+            ],
+            file_diffs: vec![ApprovalFileDiff {
+                path: "scratch-step09.txt".to_string(),
+                before: String::new(),
+                after: "alpha\nbeta\n".to_string(),
+                language_hint: Some("txt".to_string()),
+            }],
+        };
+
+        app.pending_approval = Some(prompt.clone());
+        app.upsert_approval_card(prompt);
+        app.open_diff_view();
+        assert_eq!(app.mode(), AppMode::ViewingDiff);
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
     }

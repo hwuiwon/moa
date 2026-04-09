@@ -1,6 +1,8 @@
 //! Shared single-session chat runtime used by the TUI and `moa exec`.
 
 use std::env;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -11,9 +13,12 @@ use moa_core::{
     ToolInvocation, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
+use moa_hands::tools::file_read::resolve_sandbox_path;
 use moa_memory::FileMemoryStore;
 use moa_providers::AnthropicProvider;
 use moa_session::TursoSessionStore;
+use serde_json::Value;
+use tokio::fs;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -60,6 +65,32 @@ pub struct ApprovalPrompt {
     pub request: ApprovalRequest,
     /// Suggested rule pattern when the user chooses "Always Allow".
     pub pattern: String,
+    /// Structured parameters rendered by the approval widget.
+    pub parameters: Vec<ApprovalField>,
+    /// Optional file diffs rendered inline and in the full-screen diff viewer.
+    pub file_diffs: Vec<ApprovalFileDiff>,
+}
+
+/// One rendered approval field shown as `Label: Value`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalField {
+    /// Field label.
+    pub label: String,
+    /// Human-readable value.
+    pub value: String,
+}
+
+/// A text file diff attached to a pending approval request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalFileDiff {
+    /// Logical file path shown to the user.
+    pub path: String,
+    /// Existing file contents before the tool executes.
+    pub before: String,
+    /// Proposed file contents after the tool executes.
+    pub after: String,
+    /// Optional syntax hint derived from the file extension.
+    pub language_hint: Option<String>,
 }
 
 /// Inline tool card state rendered by the TUI and surfaced by `moa exec`.
@@ -382,6 +413,8 @@ impl ChatRuntime {
                 let _ = event_tx.send(RuntimeEvent::ApprovalRequested(ApprovalPrompt {
                     request,
                     pattern,
+                    parameters: approval_fields_for_call(&self.config, call),
+                    file_diffs: self.approval_diffs_for_call(call).await?,
                 }));
 
                 match wait_for_approval(control_rx).await? {
@@ -560,6 +593,33 @@ impl ChatRuntime {
             }
         }
     }
+
+    async fn approval_diffs_for_call(
+        &self,
+        call: &ToolInvocation,
+    ) -> Result<Vec<ApprovalFileDiff>> {
+        if call.name != "file_write" {
+            return Ok(Vec::new());
+        }
+
+        let Some(path) = call.input.get("path").and_then(Value::as_str) else {
+            return Ok(Vec::new());
+        };
+        let Some(content) = call.input.get("content").and_then(Value::as_str) else {
+            return Ok(Vec::new());
+        };
+
+        let sandbox_root = expand_local_path(&self.config.local.sandbox_dir)?;
+        let file_path = resolve_sandbox_path(&sandbox_root, path)?;
+        let before = read_existing_text_file(&file_path).await?;
+
+        Ok(vec![ApprovalFileDiff {
+            path: path.to_string(),
+            before,
+            after: content.to_string(),
+            language_hint: language_hint_for_path(path),
+        }])
+    }
 }
 
 fn summarize_tool_completion(call: &ToolInvocation, output: &moa_core::ToolOutput) -> String {
@@ -620,6 +680,105 @@ fn always_allow_pattern(tool_name: &str, normalized_input: &str) -> String {
     }
 
     normalized_input.to_string()
+}
+
+fn approval_fields_for_call(config: &MoaConfig, call: &ToolInvocation) -> Vec<ApprovalField> {
+    match call.name.as_str() {
+        "bash" => {
+            let command = call
+                .input
+                .get("cmd")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let working_dir = expand_local_path(&config.local.sandbox_dir)
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| config.local.sandbox_dir.clone());
+            vec![
+                ApprovalField {
+                    label: "Command".to_string(),
+                    value: command,
+                },
+                ApprovalField {
+                    label: "Working dir".to_string(),
+                    value: working_dir,
+                },
+            ]
+        }
+        "file_write" => {
+            let path = call
+                .input
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let content_len = call
+                .input
+                .get("content")
+                .and_then(Value::as_str)
+                .map(|content| content.chars().count())
+                .unwrap_or_default();
+            vec![
+                ApprovalField {
+                    label: "Path".to_string(),
+                    value: path,
+                },
+                ApprovalField {
+                    label: "Content".to_string(),
+                    value: format!("{content_len} chars"),
+                },
+            ]
+        }
+        "file_read" => single_approval_field("Path", &call.input, "path"),
+        "file_search" => single_approval_field("Pattern", &call.input, "pattern"),
+        "memory_search" | "web_search" => single_approval_field("Query", &call.input, "query"),
+        "memory_write" => single_approval_field("Path", &call.input, "path"),
+        "web_fetch" => single_approval_field("URL", &call.input, "url"),
+        _ => serde_json::to_string_pretty(&call.input)
+            .map(|value| {
+                vec![ApprovalField {
+                    label: "Input".to_string(),
+                    value,
+                }]
+            })
+            .unwrap_or_default(),
+    }
+}
+
+fn single_approval_field(label: &str, input: &Value, field: &str) -> Vec<ApprovalField> {
+    let value = input
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    vec![ApprovalField {
+        label: label.to_string(),
+        value,
+    }]
+}
+
+fn expand_local_path(path: &str) -> Result<PathBuf> {
+    if let Some(relative) = path.strip_prefix("~/") {
+        let home = env::var("HOME").map_err(|_| MoaError::HomeDirectoryNotFound)?;
+        return Ok(PathBuf::from(home).join(relative));
+    }
+
+    Ok(PathBuf::from(path))
+}
+
+async fn read_existing_text_file(path: &Path) -> Result<String> {
+    match fs::read(path).await {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn language_hint_for_path(path: &str) -> Option<String> {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(ToOwned::to_owned)
 }
 
 fn local_user_id() -> UserId {
