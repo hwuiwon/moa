@@ -12,6 +12,7 @@ moa-brain = { path = "../moa-brain" }
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
 moa-memory = { path = "../moa-memory" }
+moa-orchestrator = { path = "../moa-orchestrator" }
 moa-providers = { path = "../moa-providers" }
 moa-session = { path = "../moa-session" }
 ratatui.workspace = true

@@ -6,7 +6,7 @@ use ratatui::{
 };
 
 use crate::app::ToolCardEntry;
-use crate::runner::ToolCardStatus;
+use moa_core::ToolCardStatus;
 
 /// Renders a tool card into boxed transcript lines.
 pub(crate) fn render_tool_card(card: &ToolCardEntry, width: u16) -> Vec<Line<'static>> {

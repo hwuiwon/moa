@@ -17,13 +17,13 @@ use ratatui::{
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 
-use moa_core::{ApprovalDecision, MoaConfig, Result};
+use moa_core::{
+    ApprovalDecision, ApprovalPrompt, MoaConfig, Result, RuntimeEvent, ToolCardStatus, ToolUpdate,
+};
 
 use crate::{
     keybindings::{KeyAction, map_key_event},
-    runner::{
-        ApprovalPrompt, ChatRuntime, RuntimeCommand, RuntimeEvent, ToolCardStatus, ToolUpdate,
-    },
+    runner::ChatRuntime,
     views::{
         chat,
         diff::{self, DiffViewState},
@@ -100,7 +100,6 @@ pub struct App {
     diff_view: Option<DiffViewState>,
     runtime_event_tx: mpsc::UnboundedSender<RuntimeEvent>,
     runtime_event_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
-    control_tx: Option<mpsc::UnboundedSender<RuntimeCommand>>,
     active_task: Option<JoinHandle<()>>,
 }
 
@@ -124,7 +123,6 @@ impl App {
             diff_view: None,
             runtime_event_tx,
             runtime_event_rx,
-            control_tx: None,
             active_task: None,
         })
     }
@@ -154,10 +152,8 @@ impl App {
                 self.prompt.insert_newline();
                 self.sync_mode_with_prompt();
             }
-            KeyAction::Cancel => self.cancel_or_exit(),
-            KeyAction::ApproveOnce => {
-                self.send_approval(ApprovalDecision::AllowOnce);
-            }
+            KeyAction::Cancel => self.cancel_or_exit().await?,
+            KeyAction::ApproveOnce => self.send_approval(ApprovalDecision::AllowOnce).await?,
             KeyAction::OpenDiff => self.open_diff_view(),
             KeyAction::CloseDiff => self.close_diff_view(),
             KeyAction::ToggleDiffMode => self.toggle_diff_mode(),
@@ -169,11 +165,13 @@ impl App {
                 if let Some(prompt) = &self.pending_approval {
                     self.send_approval(ApprovalDecision::AlwaysAllow {
                         pattern: prompt.pattern.clone(),
-                    });
+                    })
+                    .await?;
                 }
             }
             KeyAction::Deny => {
-                self.send_approval(ApprovalDecision::Deny { reason: None });
+                self.send_approval(ApprovalDecision::Deny { reason: None })
+                    .await?
             }
             KeyAction::EditApproval => {
                 self.entries.push(ChatEntry::Status(
@@ -265,10 +263,8 @@ impl App {
         let runtime = self.runtime.clone();
         let prompt = trimmed.to_string();
         let event_tx = self.runtime_event_tx.clone();
-        let (control_tx, control_rx) = mpsc::unbounded_channel();
-        self.control_tx = Some(control_tx);
         self.active_task = Some(tokio::spawn(async move {
-            if let Err(error) = runtime.run_turn(prompt, event_tx.clone(), control_rx).await {
+            if let Err(error) = runtime.run_turn(prompt, event_tx.clone()).await {
                 let _ = event_tx.send(RuntimeEvent::Error(error.to_string()));
                 let _ = event_tx.send(RuntimeEvent::TurnCompleted);
             }
@@ -288,7 +284,7 @@ impl App {
                 self.should_exit = true;
             }
             "/clear" => {
-                self.cancel_active_turn();
+                self.cancel_active_turn().await?;
                 self.entries.clear();
                 self.total_tokens = 0;
                 let _session_id = self.runtime.reset_session().await?;
@@ -377,7 +373,6 @@ impl App {
             RuntimeEvent::TurnCompleted => {
                 self.pending_approval = None;
                 self.diff_view = None;
-                self.control_tx = None;
                 self.active_task = None;
                 self.sync_mode_with_prompt();
             }
@@ -438,42 +433,46 @@ impl App {
         }
     }
 
-    fn send_approval(&mut self, decision: ApprovalDecision) {
+    async fn send_approval(&mut self, decision: ApprovalDecision) -> Result<()> {
         if let Some(prompt) = &self.pending_approval {
+            let request_id = prompt.request.request_id;
             let (status, note) = approval_status_and_note(&decision);
-            self.update_approval_entry(prompt.request.request_id, status, note);
+            self.update_approval_entry(request_id, status, note);
+            self.runtime
+                .respond_to_approval(request_id, decision)
+                .await?;
         }
-        if let Some(control_tx) = &self.control_tx {
-            let _ = control_tx.send(RuntimeCommand::Approval(decision));
-            self.pending_approval = None;
-            self.diff_view = None;
-            self.mode = AppMode::Running;
-        }
+        self.pending_approval = None;
+        self.diff_view = None;
+        self.mode = AppMode::Running;
+        Ok(())
     }
 
-    fn cancel_or_exit(&mut self) {
+    async fn cancel_or_exit(&mut self) -> Result<()> {
         if self.diff_view.is_some() {
             self.close_diff_view();
-            return;
+            return Ok(());
         }
         if self.mode == AppMode::Running || self.mode == AppMode::WaitingApproval {
-            self.cancel_active_turn();
+            self.cancel_active_turn().await?;
             self.entries.push(ChatEntry::Status(
                 "Cancelled current generation.".to_string(),
             ));
         } else {
             self.should_exit = true;
         }
+        Ok(())
     }
 
-    fn cancel_active_turn(&mut self) {
+    async fn cancel_active_turn(&mut self) -> Result<()> {
+        self.runtime.cancel_active_generation().await?;
         if let Some(task) = self.active_task.take() {
             task.abort();
         }
-        self.control_tx = None;
         self.pending_approval = None;
         self.diff_view = None;
         self.sync_mode_with_prompt();
+        Ok(())
     }
 
     fn sync_mode_with_prompt(&mut self) {
@@ -625,13 +624,12 @@ async fn run_event_loop(
 #[cfg(test)]
 mod tests {
     use crossterm::event::KeyCode;
-    use moa_core::{ApprovalRequest, RiskLevel};
+    use moa_core::{ApprovalField, ApprovalFileDiff, ApprovalRequest, RiskLevel};
     use ratatui::{Terminal, backend::TestBackend};
     use tokio::runtime::Runtime;
     use uuid::Uuid;
 
     use super::*;
-    use crate::runner::{ApprovalField, ApprovalFileDiff};
 
     fn test_app() -> App {
         Runtime::new().unwrap().block_on(async {
@@ -652,7 +650,6 @@ mod tests {
                 diff_view: None,
                 runtime_event_tx,
                 runtime_event_rx,
-                control_tx: None,
                 active_task: None,
             }
         })
