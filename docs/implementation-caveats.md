@@ -632,3 +632,141 @@ Consequence:
 Recommended review:
 
 - Keep treating local cron as infrastructure plumbing until the first concrete maintenance job is wired through it.
+
+## 28. The TUI only keeps one live runtime observer attached at a time
+
+Current state:
+
+- Step 11 added tabbed multi-session viewing in the TUI.
+- The UI now keeps exactly one live runtime subscription attached to the currently selected session.
+- Background sessions continue running in the `LocalOrchestrator`, and their tab/status metadata is refreshed by polling the session store.
+
+Issue:
+
+- This is the smallest design that satisfies the Step 11 requirement that switching tabs does not kill running sessions.
+- It does not provide simultaneous live transcript streaming for every open tab.
+
+Consequence:
+
+- The selected tab shows incremental assistant/tool/approval updates in real time.
+- Background tabs keep accurate coarse status, but their transcripts only catch up when the user switches back to them.
+
+Recommended review:
+
+- Decide later whether the TUI should stay single-observer for simplicity or maintain a lightweight live observer per visible session.
+
+## 29. Persisted approval events do not contain the full rich approval payload
+
+Current state:
+
+- The event log stores `ApprovalRequested` with:
+  - `request_id`
+  - `tool_name`
+  - `input_summary`
+  - `risk_level`
+- The live TUI approval widget also needs:
+  - parsed parameter fields
+  - diff previews
+  - the exact normalized pattern used for "Always Allow"
+
+Issue:
+
+- That richer approval prompt exists in live `RuntimeEvent::ApprovalRequested`, but not in the persisted `Event::ApprovalRequested`.
+- When the TUI reconstructs an older session from the event log alone, it can only rebuild a minimal approval card.
+
+Consequence:
+
+- Switching tabs during the same app session keeps the full rich approval card because the view cache preserves it.
+- Rehydrating a waiting-for-approval session from storage alone loses the exact diff/pattern fidelity of the original live prompt.
+
+Recommended review:
+
+- Consider either enriching the stored approval event shape later or storing a separate durable approval payload keyed by `request_id`.
+
+## 30. Session picker previews currently use an N+1 query pattern
+
+Current state:
+
+- The session picker shows workspace, status, and a last-message preview.
+- `ChatRuntime::list_session_previews()` loads:
+  - the session summaries
+  - then a small recent event slice per session to derive the preview text
+
+Issue:
+
+- This is reasonable for the current local TUI scale.
+- It is not an especially efficient listing strategy if the number of sessions grows large.
+
+Consequence:
+
+- The picker is accurate and simple now.
+- Large local histories may eventually want denormalized preview fields or a batched query path.
+
+Recommended review:
+
+- Revisit preview derivation once local users have enough sessions for picker latency to matter.
+
+## 31. Prompt draft state is global to the TUI, not per session tab
+
+Current state:
+
+- Step 11 introduced multiple session tabs.
+- The compose box is still a single shared prompt widget for the whole TUI process.
+
+Issue:
+
+- This keeps the app state much smaller and simpler.
+- It means switching tabs does not preserve a separate in-progress draft per session.
+
+Consequence:
+
+- Multi-session chat works cleanly.
+- Per-tab draft preservation remains a UX gap for later refinement.
+
+Recommended review:
+
+- Decide later whether draft text should move into per-session UI state once the basic session-management workflow has settled.
+
+## 32. Queued prompts are buffered in memory until the current turn boundary
+
+Current state:
+
+- A prompt queued while a session is actively running is no longer written to the event log immediately.
+- The orchestrator now buffers queued prompts in memory and flushes them as `QueuedMessage` events only after the current turn finishes.
+
+Issue:
+
+- This fixes the provider-facing conversation ordering bug where a queued user message could be persisted before the in-flight assistant reply, causing the next Anthropic request to end with an assistant message.
+- It introduces a small durability gap: if the local process crashes after the user queues a prompt but before the current turn reaches its flush point, that queued prompt is lost.
+
+Consequence:
+
+- Normal queued follow-ups now produce correct event ordering and valid Anthropic request bodies.
+- Crash recovery for in-flight queued prompts is weaker than the rest of the session-log-based design until a durable side queue or explicit pending-signal store exists.
+
+Recommended review:
+
+- Decide later whether queued prompts should move into a durable pending-signal table so MOA can keep both correct conversational ordering and crash-safe queue persistence.
+
+## 33. Resuming a cancelled session now waits for fresh input instead of auto-continuing old tail work
+
+Current state:
+
+- `resume_session()` no longer auto-runs persisted tail events when the stored session status is `Cancelled`.
+- This prevents a soft-stopped tool call from later resuming into an assistant response just because the session was reopened.
+
+Issue:
+
+- The architecture docs describe `resume_session()` as “wake from last event,” but they do not say whether a user-stopped session should continue the interrupted turn or remain stopped until new input arrives.
+
+Consequence:
+
+- Current behavior treats stop as authoritative: reopening or reattaching to a cancelled session leaves it idle.
+- The next turn starts only after a new `QueueMessage` or user prompt arrives.
+- If later product semantics want “pause and resume the interrupted turn,” this behavior will need to change.
+
+Recommended review:
+
+- Decide explicitly whether `Cancelled` means:
+  - permanently stop the interrupted turn until fresh user input, or
+  - pause execution and allow `resume_session()` to continue where it left off.

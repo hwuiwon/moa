@@ -3,3 +3,4 @@
 pub mod approval;
 pub mod prompt;
 pub mod tool_card;
+pub mod toolbar;

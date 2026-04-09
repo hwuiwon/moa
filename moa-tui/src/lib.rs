@@ -1,4 +1,4 @@
-//! Terminal UI and single-session runtime for local MOA chat flows.
+//! Terminal UI and local runtime glue for multi-session MOA chat flows.
 
 pub mod app;
 pub mod keybindings;

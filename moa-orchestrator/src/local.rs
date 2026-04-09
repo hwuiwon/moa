@@ -298,7 +298,8 @@ impl BrainOrchestrator for LocalOrchestrator {
         }
 
         let wake = self.session_store.wake(session_id.clone()).await?;
-        let initial_turn_requested = session_requires_processing(&wake.recent_events);
+        let initial_turn_requested =
+            session_requires_processing(&wake.session, &wake.recent_events);
         self.spawn_session(session_id.clone(), initial_turn_requested)
             .await?;
         Ok(SessionHandle { session_id })
@@ -392,6 +393,7 @@ async fn run_session_task(
         context.memory_store.clone(),
         context.tool_router.tool_schemas(),
     );
+    let mut queued_messages = Vec::new();
 
     loop {
         if !turn_requested {
@@ -459,11 +461,22 @@ async fn run_session_task(
             &runtime_tx,
             &mut signal_rx,
             &mut turn_requested,
+            &mut queued_messages,
         )
         .await;
 
         match disposition {
             Ok(TurnDisposition::Completed) => {
+                if flush_next_queued_message(
+                    &context.session_store,
+                    &event_tx,
+                    &context.session_id,
+                    &mut queued_messages,
+                )
+                .await?
+                {
+                    turn_requested = true;
+                }
                 if turn_requested {
                     continue;
                 }
@@ -477,6 +490,13 @@ async fn run_session_task(
                 let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
             }
             Ok(TurnDisposition::Cancelled) => {
+                flush_queued_messages(
+                    &context.session_store,
+                    &event_tx,
+                    &context.session_id,
+                    &mut queued_messages,
+                )
+                .await?;
                 update_status(
                     &context.session_store,
                     &status,
@@ -496,6 +516,13 @@ async fn run_session_task(
                         message: error.to_string(),
                         recoverable: false,
                     },
+                )
+                .await?;
+                flush_queued_messages(
+                    &context.session_store,
+                    &event_tx,
+                    &context.session_id,
+                    &mut queued_messages,
                 )
                 .await?;
                 update_status(
@@ -520,6 +547,7 @@ async fn drive_turn(
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
+    queued_messages: &mut Vec<UserMessage>,
 ) -> Result<TurnDisposition> {
     let mut soft_cancel_requested = false;
 
@@ -540,6 +568,7 @@ async fn drive_turn(
             runtime_tx,
             signal_rx,
             turn_requested,
+            queued_messages,
             &events,
             &mut soft_cancel_requested,
         )
@@ -559,6 +588,7 @@ async fn drive_turn(
                 runtime_tx,
                 signal_rx,
                 turn_requested,
+                queued_messages,
                 pending,
                 &mut soft_cancel_requested,
             )
@@ -599,14 +629,7 @@ async fn drive_turn(
                 signal = signal_rx.recv() => {
                     match signal {
                         Some(SessionSignal::QueueMessage(message)) => {
-                            accept_user_message(
-                                &context.session_store,
-                                event_tx,
-                                &context.session_id,
-                                message,
-                                true,
-                            )
-                            .await?;
+                            buffer_queued_message(queued_messages, message);
                             *turn_requested = true;
                             let _ = runtime_tx.send(RuntimeEvent::Notice(
                                 "Message queued. Will process after current turn.".to_string(),
@@ -662,6 +685,17 @@ async fn drive_turn(
                     runtime_tx,
                     signal_rx,
                     turn_requested,
+                    queued_messages,
+                    &mut soft_cancel_requested,
+                )
+                .await?;
+                drain_signal_queue(
+                    context,
+                    event_tx,
+                    runtime_tx,
+                    signal_rx,
+                    turn_requested,
+                    queued_messages,
                     &mut soft_cancel_requested,
                 )
                 .await?;
@@ -669,6 +703,9 @@ async fn drive_turn(
                     ToolCallOutcome::Executed => executed_tool = true,
                     ToolCallOutcome::Skipped => {}
                     ToolCallOutcome::Cancelled => return Ok(TurnDisposition::Cancelled),
+                }
+                if soft_cancel_requested {
+                    return Ok(TurnDisposition::Cancelled);
                 }
             }
         }
@@ -707,6 +744,7 @@ async fn handle_tool_call(
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
+    queued_messages: &mut Vec<UserMessage>,
     soft_cancel_requested: &mut bool,
 ) -> Result<ToolCallOutcome> {
     let tool_id = parse_tool_id(call);
@@ -826,6 +864,7 @@ async fn handle_tool_call(
                 runtime_tx,
                 signal_rx,
                 turn_requested,
+                queued_messages,
                 soft_cancel_requested,
             )
             .await?
@@ -851,6 +890,7 @@ async fn wait_for_signal_approval(
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
+    queued_messages: &mut Vec<UserMessage>,
     soft_cancel_requested: &mut bool,
 ) -> Result<bool> {
     loop {
@@ -937,14 +977,7 @@ async fn wait_for_signal_approval(
                 };
             }
             Some(SessionSignal::QueueMessage(message)) => {
-                accept_user_message(
-                    &context.session_store,
-                    event_tx,
-                    &context.session_id,
-                    message,
-                    true,
-                )
-                .await?;
+                buffer_queued_message(queued_messages, message);
                 *turn_requested = true;
                 let _ = runtime_tx.send(RuntimeEvent::Notice(
                     "Message queued. Will process after the approval decision.".to_string(),
@@ -979,6 +1012,7 @@ async fn process_resolved_approval(
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
+    queued_messages: &mut Vec<UserMessage>,
     events: &[EventRecord],
     soft_cancel_requested: &mut bool,
 ) -> Result<bool> {
@@ -1071,6 +1105,7 @@ async fn process_resolved_approval(
         runtime_tx,
         signal_rx,
         turn_requested,
+        queued_messages,
         soft_cancel_requested,
     )
     .await?;
@@ -1085,6 +1120,7 @@ async fn wait_for_approval(
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
+    queued_messages: &mut Vec<UserMessage>,
     pending: PendingToolApproval,
     soft_cancel_requested: &mut bool,
 ) -> Result<bool> {
@@ -1202,14 +1238,7 @@ async fn wait_for_approval(
                 };
             }
             Some(SessionSignal::QueueMessage(message)) => {
-                accept_user_message(
-                    &context.session_store,
-                    event_tx,
-                    &context.session_id,
-                    message,
-                    true,
-                )
-                .await?;
+                buffer_queued_message(queued_messages, message);
                 *turn_requested = true;
             }
             Some(SessionSignal::SoftCancel) => {
@@ -1231,24 +1260,18 @@ async fn wait_for_approval(
 }
 
 async fn drain_signal_queue(
-    context: &SessionTaskContext,
-    event_tx: &broadcast::Sender<EventRecord>,
+    _context: &SessionTaskContext,
+    _event_tx: &broadcast::Sender<EventRecord>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
+    queued_messages: &mut Vec<UserMessage>,
     soft_cancel_requested: &mut bool,
 ) -> Result<()> {
     loop {
         match signal_rx.try_recv() {
             Ok(SessionSignal::QueueMessage(message)) => {
-                accept_user_message(
-                    &context.session_store,
-                    event_tx,
-                    &context.session_id,
-                    message,
-                    true,
-                )
-                .await?;
+                buffer_queued_message(queued_messages, message);
                 *turn_requested = true;
                 let _ = runtime_tx.send(RuntimeEvent::Notice(
                     "Message queued. Will process after current turn.".to_string(),
@@ -1367,6 +1390,38 @@ async fn accept_user_message(
     Ok(())
 }
 
+fn buffer_queued_message(queued_messages: &mut Vec<UserMessage>, message: UserMessage) {
+    queued_messages.push(message);
+}
+
+async fn flush_queued_messages(
+    session_store: &Arc<TursoSessionStore>,
+    event_tx: &broadcast::Sender<EventRecord>,
+    session_id: &SessionId,
+    queued_messages: &mut Vec<UserMessage>,
+) -> Result<()> {
+    for message in queued_messages.drain(..) {
+        accept_user_message(session_store, event_tx, session_id, message, true).await?;
+    }
+
+    Ok(())
+}
+
+async fn flush_next_queued_message(
+    session_store: &Arc<TursoSessionStore>,
+    event_tx: &broadcast::Sender<EventRecord>,
+    session_id: &SessionId,
+    queued_messages: &mut Vec<UserMessage>,
+) -> Result<bool> {
+    if queued_messages.is_empty() {
+        return Ok(false);
+    }
+
+    let message = queued_messages.remove(0);
+    accept_user_message(session_store, event_tx, session_id, message, true).await?;
+    Ok(true)
+}
+
 async fn update_status(
     session_store: &Arc<TursoSessionStore>,
     status: &Arc<RwLock<SessionStatus>>,
@@ -1405,7 +1460,11 @@ async fn append_event(
     Ok(record)
 }
 
-fn session_requires_processing(events: &[EventRecord]) -> bool {
+fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) -> bool {
+    if matches!(session.status, SessionStatus::Cancelled) {
+        return false;
+    }
+
     if find_pending_tool_approval(events).is_some() || find_resolved_pending_tool(events).is_some()
     {
         return true;
