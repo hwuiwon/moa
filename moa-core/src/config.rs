@@ -203,6 +203,10 @@ pub struct GeneralConfig {
     pub default_model: String,
     /// Requested reasoning effort.
     pub reasoning_effort: String,
+    /// Optional workspace-level instructions injected into the prompt.
+    pub workspace_instructions: Option<String>,
+    /// Optional user-level preferences injected into the prompt.
+    pub user_instructions: Option<String>,
 }
 
 impl Default for GeneralConfig {
@@ -211,6 +215,8 @@ impl Default for GeneralConfig {
             default_provider: "anthropic".to_string(),
             default_model: "claude-sonnet-4-6".to_string(),
             reasoning_effort: "medium".to_string(),
+            workspace_instructions: None,
+            user_instructions: None,
         }
     }
 }
