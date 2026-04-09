@@ -27,5 +27,5 @@ pub use types::{
     ProcessorOutput, RiskLevel, SandboxTier, SequenceNum, SessionFilter, SessionHandle, SessionId,
     SessionMeta, SessionSignal, SessionStatus, SessionSummary, StartSessionRequest, StopReason,
     TokenPricing, ToolCallFormat, ToolInvocation, ToolOutput, ToolStatus, UserId, UserMessage,
-    WikiPage, WorkingContext, WorkspaceId,
+    WakeContext, WikiPage, WorkingContext, WorkspaceId,
 };

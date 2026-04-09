@@ -369,6 +369,31 @@ pub struct SessionMeta {
     pub last_checkpoint_seq: Option<SequenceNum>,
 }
 
+impl Default for SessionMeta {
+    fn default() -> Self {
+        let now = Utc::now();
+        Self {
+            id: SessionId::new(),
+            workspace_id: WorkspaceId::new(""),
+            user_id: UserId::new(""),
+            title: None,
+            status: SessionStatus::Created,
+            platform: Platform::Tui,
+            platform_channel: None,
+            model: String::new(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            parent_session_id: None,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cost_cents: 0,
+            event_count: 0,
+            last_checkpoint_seq: None,
+        }
+    }
+}
+
 /// A compact session listing record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSummary {
@@ -480,6 +505,17 @@ pub struct EventRecord {
 pub struct EventStream {
     /// Buffered events currently available in the stream.
     pub events: Vec<EventRecord>,
+}
+
+/// Recovered session state returned when a brain wakes from the event log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WakeContext {
+    /// Current persisted session metadata.
+    pub session: SessionMeta,
+    /// Most recent checkpoint summary, if one exists.
+    pub checkpoint_summary: Option<String>,
+    /// Events that occurred after the checkpoint, or all events when no checkpoint exists.
+    pub recent_events: Vec<EventRecord>,
 }
 
 /// Cron specification for scheduled background jobs.
