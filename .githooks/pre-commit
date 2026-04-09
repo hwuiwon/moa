@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+run_check() {
+  local label="$1"
+  shift
+
+  echo "[pre-commit] $label"
+  "$@"
+}
+
+run_check "cargo fmt --all --check" cargo fmt --all --check
+run_check "cargo build" cargo build
+run_check "cargo clippy --workspace --all-targets -- -D warnings" \
+  cargo clippy --workspace --all-targets -- -D warnings
+run_check "cargo test" cargo test
+
+echo "[pre-commit] all checks passed"
