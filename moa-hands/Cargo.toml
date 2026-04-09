@@ -5,5 +5,16 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+globset = "0.4"
 moa-core = { path = "../moa-core" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
 
+[dev-dependencies]
+moa-memory = { path = "../moa-memory" }
+tempfile = "3"
