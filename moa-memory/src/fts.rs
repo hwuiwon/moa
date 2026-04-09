@@ -148,6 +148,10 @@ impl FtsIndex {
         if normalized_query.is_empty() {
             return Ok(Vec::new());
         }
+        let fts_query = build_fts_query(normalized_query);
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let sql = r#"
 SELECT path, title, page_type, snippet, confidence, updated, reference_count
@@ -173,10 +177,7 @@ LIMIT ?
 "#;
         let mut rows = self
             .connection
-            .query(
-                sql,
-                params![normalized_query, scope_key(scope), limit as i64],
-            )
+            .query(sql, params![fts_query, scope_key(scope), limit as i64])
             .await
             .map_err(memory_error)?;
         let mut results = Vec::new();
@@ -364,4 +365,14 @@ fn parse_timestamp(raw: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
         .map(|timestamp| timestamp.with_timezone(&Utc))
         .map_err(memory_error)
+}
+
+fn build_fts_query(query: &str) -> String {
+    query
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(|token| format!("\"{token}\""))
+        .collect::<Vec<_>>()
+        .join(" ")
 }

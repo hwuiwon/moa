@@ -23,6 +23,7 @@ use moa_hands::tools::file_read::resolve_sandbox_path;
 use moa_memory::FileMemoryStore;
 use moa_providers::AnthropicProvider;
 use moa_session::TursoSessionStore;
+use moa_skills::maybe_distill_skill;
 use serde_json::Value;
 use tokio::fs;
 use tokio::sync::{RwLock, broadcast, mpsc};
@@ -479,6 +480,38 @@ async fn run_session_task(
                 }
                 if turn_requested {
                     continue;
+                }
+                let session = context
+                    .session_store
+                    .get_session(context.session_id.clone())
+                    .await?;
+                let events = context
+                    .session_store
+                    .get_events(context.session_id.clone(), EventRange::all())
+                    .await?;
+                if let Some(skill) = maybe_distill_skill(
+                    &session,
+                    &events,
+                    context.memory_store.clone(),
+                    context.llm_provider.clone(),
+                )
+                .await?
+                {
+                    append_event(
+                        &context.session_store,
+                        &event_tx,
+                        context.session_id.clone(),
+                        Event::MemoryWrite {
+                            path: skill.path.to_string(),
+                            scope: session.workspace_id.to_string(),
+                            summary: format!("Distilled skill {}", skill.name),
+                        },
+                    )
+                    .await?;
+                    let _ = runtime_tx.send(RuntimeEvent::Notice(format!(
+                        "Distilled skill: {}",
+                        skill.name
+                    )));
                 }
                 update_status(
                     &context.session_store,
@@ -1699,7 +1732,7 @@ fn approval_fields_for_call(config: &MoaConfig, call: &ToolInvocation) -> Vec<Ap
                 },
             ]
         }
-        "file_read" => single_approval_field("Path", &call.input, "path"),
+        "file_read" | "memory_read" => single_approval_field("Path", &call.input, "path"),
         "file_search" => single_approval_field("Pattern", &call.input, "pattern"),
         "memory_search" | "web_search" => single_approval_field("Query", &call.input, "query"),
         "memory_write" => single_approval_field("Path", &call.input, "path"),
@@ -1761,7 +1794,7 @@ fn summarize_call_for_runtime(tool_name: &str, input: &Value) -> String {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        "file_write" | "file_read" | "memory_write" => input
+        "file_write" | "file_read" | "memory_read" | "memory_write" => input
             .get("path")
             .and_then(Value::as_str)
             .map(|path| format!("Path: {path}"))
@@ -1788,7 +1821,7 @@ fn normalized_input_for_runtime(tool_name: &str, input: &Value) -> String {
             .unwrap_or_default()
             .trim()
             .to_string(),
-        "file_write" | "file_read" | "memory_write" => input
+        "file_write" | "file_read" | "memory_read" | "memory_write" => input
             .get("path")
             .and_then(Value::as_str)
             .unwrap_or_default()
@@ -1818,7 +1851,7 @@ fn normalized_input_for_runtime(tool_name: &str, input: &Value) -> String {
 
 fn risk_level_for_tool(tool_name: &str) -> moa_core::RiskLevel {
     match tool_name {
-        "file_read" | "file_search" | "memory_search" => moa_core::RiskLevel::Low,
+        "file_read" | "file_search" | "memory_read" | "memory_search" => moa_core::RiskLevel::Low,
         "file_write" | "memory_write" => moa_core::RiskLevel::Medium,
         _ => moa_core::RiskLevel::High,
     }

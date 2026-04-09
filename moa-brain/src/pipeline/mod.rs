@@ -7,6 +7,7 @@ use moa_core::{
     ContextProcessor, EventRange, EventRecord, MemoryScope, MemoryStore, MoaConfig,
     ProcessorOutput, Result, SessionStore, WorkingContext,
 };
+use moa_skills::SkillRegistry;
 
 pub mod cache;
 pub mod history;
@@ -24,7 +25,7 @@ use memory::{
     MEMORY_STAGE_DATA_METADATA_KEY, MemoryRetriever, PreloadedMemoryStageData, RelevantMemoryPage,
     extract_search_query,
 };
-use skills::SkillInjector;
+use skills::{SKILLS_STAGE_DATA_METADATA_KEY, SkillInjector};
 use tools::ToolDefinitionProcessor;
 
 pub(crate) const HISTORY_EVENTS_METADATA_KEY: &str = "moa.pipeline.history_events";
@@ -45,6 +46,7 @@ pub struct PipelineStageReport {
 pub struct ContextPipeline {
     session_store: Arc<dyn SessionStore>,
     memory_store: Arc<dyn MemoryStore>,
+    skill_registry: Arc<SkillRegistry>,
     stages: Vec<Box<dyn ContextProcessor>>,
 }
 
@@ -53,11 +55,13 @@ impl ContextPipeline {
     pub fn new(
         session_store: Arc<dyn SessionStore>,
         memory_store: Arc<dyn MemoryStore>,
+        skill_registry: Arc<SkillRegistry>,
         stages: Vec<Box<dyn ContextProcessor>>,
     ) -> Self {
         Self {
             session_store,
             memory_store,
+            skill_registry,
             stages,
         }
     }
@@ -67,6 +71,17 @@ impl ContextPipeline {
         let mut reports = Vec::with_capacity(self.stages.len());
 
         for stage in &self.stages {
+            if stage.stage() == 4 && !ctx.metadata.contains_key(SKILLS_STAGE_DATA_METADATA_KEY) {
+                let skills = self
+                    .skill_registry
+                    .list_for_pipeline(&ctx.workspace_id)
+                    .await?;
+                ctx.metadata.insert(
+                    SKILLS_STAGE_DATA_METADATA_KEY.to_string(),
+                    serde_json::to_value(skills)?,
+                );
+            }
+
             if (stage.stage() == 5 || stage.stage() == 6)
                 && !ctx.metadata.contains_key(HISTORY_EVENTS_METADATA_KEY)
             {
@@ -135,9 +150,11 @@ pub fn build_default_pipeline_with_tools(
     memory_store: Arc<dyn MemoryStore>,
     tool_schemas: Vec<serde_json::Value>,
 ) -> ContextPipeline {
+    let registry_memory: Arc<dyn MemoryStore> = memory_store.clone();
     ContextPipeline::new(
         session_store,
         memory_store,
+        Arc::new(SkillRegistry::new(registry_memory)),
         vec![
             Box::new(IdentityProcessor),
             Box::new(InstructionProcessor::from_config(config)),
@@ -435,6 +452,7 @@ mod tests {
         let pipeline = ContextPipeline::new(
             store,
             Arc::new(MockMemoryStore),
+            Arc::new(moa_skills::SkillRegistry::new(Arc::new(MockMemoryStore))),
             vec![
                 Box::new(TestStage::new(1, "identity")),
                 Box::new(TestStage::new(2, "instructions")),

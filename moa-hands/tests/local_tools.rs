@@ -244,6 +244,7 @@ async fn memory_search_returns_indexed_results() {
                 auto_generated: false,
                 last_referenced: chrono::Utc::now(),
                 reference_count: 1,
+                metadata: std::collections::HashMap::new(),
             },
         )
         .await
@@ -268,4 +269,54 @@ async fn memory_search_returns_indexed_results() {
 
     assert!(output.stdout.contains("OAuth Notes"));
     assert!(output.stdout.contains("refresh"));
+}
+
+#[tokio::test]
+async fn memory_read_returns_page_contents() {
+    let dir = tempdir().unwrap();
+    let memory_root = dir.path().join("memory-root");
+    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
+    memory_store
+        .write_page_in_scope(
+            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryPath::new("skills/oauth-refresh/SKILL.md"),
+            WikiPage {
+                path: Some(MemoryPath::new("skills/oauth-refresh/SKILL.md")),
+                title: "OAuth Refresh".to_string(),
+                page_type: PageType::Skill,
+                content: "# OAuth Refresh\nUse the exact workflow.".to_string(),
+                created: chrono::Utc::now(),
+                updated: chrono::Utc::now(),
+                confidence: moa_core::ConfidenceLevel::High,
+                related: Vec::new(),
+                sources: Vec::new(),
+                tags: vec!["auth".to_string()],
+                auto_generated: false,
+                last_referenced: chrono::Utc::now(),
+                reference_count: 1,
+                metadata: std::collections::HashMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let memory_store_trait: Arc<dyn MemoryStore> = memory_store;
+    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
+        .await
+        .unwrap();
+    let session = session();
+    let (_, output) = router
+        .execute(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "memory_read".to_string(),
+                input: json!({ "path": "skills/oauth-refresh/SKILL.md" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(output.stdout.contains("# OAuth Refresh"));
+    assert!(output.stdout.contains("Use the exact workflow."));
 }

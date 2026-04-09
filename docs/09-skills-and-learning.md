@@ -26,24 +26,24 @@ skills/
 ```markdown
 ---
 name: deploy-to-fly
-version: "1.2"
 description: "Deploy applications to Fly.io staging and production"
-one_liner: "Fly.io deploy workflow with health checks"
-tags: [deployment, fly, devops]
-tools_required: [bash, file_read]
-created: 2026-04-09T14:30:00Z
-updated: 2026-04-09T16:00:00Z
-auto_generated: true
-source_session: "abc123"
-use_count: 7
-last_used: 2026-04-09T16:00:00Z
-success_rate: 0.86
-# MOA extensions
-moa:
-  brain_affinity: general      # general | coding | research | devops
-  sandbox_tier: container      # none | container | microvm
-  estimated_tokens: 1200       # full body token count
-  improved_from: null          # previous version if self-improved
+compatibility: "Requires flyctl auth and repo write access"
+allowed-tools: bash file_read
+metadata:
+  moa-version: "1.2"
+  moa-one-liner: "Fly.io deploy workflow with health checks"
+  moa-tags: "deployment, fly, devops"
+  moa-created: "2026-04-09T14:30:00Z"
+  moa-updated: "2026-04-09T16:00:00Z"
+  moa-auto-generated: "true"
+  moa-source-session: "abc123"
+  moa-use-count: "7"
+  moa-last-used: "2026-04-09T16:00:00Z"
+  moa-success-rate: "0.86"
+  moa-brain-affinity: "general"    # general | coding | research | devops
+  moa-sandbox-tier: "container"    # none | container | microvm
+  moa-estimated-tokens: "1200"     # full body token count
+  moa-improved-from: ""            # previous version if self-improved
 ---
 
 # Deploy to Fly.io
@@ -255,9 +255,10 @@ impl SkillRegistry {
 
 pub struct SkillMetadata {
     pub name: String,
+    pub version: String,
     pub one_liner: String,
     pub tags: Vec<String>,
-    pub tools_required: Vec<String>,
+    pub tools_required: Vec<String>, // derived from allowed-tools
     pub estimated_tokens: usize,
     pub use_count: u32,
     pub success_rate: f32,

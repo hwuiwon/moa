@@ -21,6 +21,7 @@ fn sample_page(title: &str, page_type: PageType, content: &str) -> WikiPage {
         auto_generated: false,
         last_referenced: timestamp,
         reference_count: 5,
+        metadata: std::collections::HashMap::new(),
     }
 }
 
@@ -88,6 +89,32 @@ async fn fts_search_finds_ranked_results() -> Result<()> {
     assert!(!results.is_empty());
     assert!(results[0].snippet.contains("OAuth") || results[0].title.contains("OAuth"));
     assert_eq!(results[0].path.as_str(), "topics/page-0.md");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn fts_search_handles_hyphenated_queries() -> Result<()> {
+    let dir = tempdir()?;
+    let store = FileMemoryStore::new(dir.path()).await?;
+    let scope = MemoryScope::Workspace("ws1".into());
+
+    store
+        .write_page_in_scope(
+            &scope,
+            &"skills/oauth-refresh/SKILL.md".into(),
+            sample_page(
+                "OAuth Refresh",
+                PageType::Skill,
+                "# OAuth Refresh\n\nDebug the refresh-token rotation failure.\n",
+            ),
+        )
+        .await?;
+
+    let results = store.search("refresh-token", scope, 5).await?;
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].path.as_str(), "skills/oauth-refresh/SKILL.md");
 
     Ok(())
 }

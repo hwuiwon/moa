@@ -17,6 +17,7 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_session::TursoSessionStore;
+use moa_skills::{build_skill_path, parse_skill_markdown, wiki_page_from_skill};
 use serde_json::json;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
@@ -179,6 +180,46 @@ impl LLMProvider for MockLlmProvider {
         Ok(CompletionStream::from_response(CompletionResponse {
             text: "Hi there".to_string(),
             content: vec![moa_core::CompletionContent::Text("Hi there".to_string())],
+            stop_reason: StopReason::EndTurn,
+            model: "claude-sonnet-4-6".to_string(),
+            input_tokens: 32,
+            output_tokens: 8,
+            cached_input_tokens: 0,
+            duration_ms: 25,
+        }))
+    }
+}
+
+#[derive(Clone)]
+struct CapturingTextLlmProvider {
+    text: String,
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+impl CapturingTextLlmProvider {
+    fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for CapturingTextLlmProvider {
+    fn name(&self) -> &str {
+        "capturing-text"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        MockLlmProvider.capabilities()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        self.requests.lock().await.push(request);
+        Ok(CompletionStream::from_response(CompletionResponse {
+            text: self.text.clone(),
+            content: vec![moa_core::CompletionContent::Text(self.text.clone())],
             stop_reason: StopReason::EndTurn,
             model: "claude-sonnet-4-6".to_string(),
             input_tokens: 32,
@@ -611,4 +652,102 @@ async fn always_allow_rule_persists_and_skips_next_approval() {
 
     assert_eq!(final_result, TurnResult::Complete);
     assert_eq!(llm.requests.lock().await.len(), 4);
+}
+
+#[tokio::test]
+async fn pipeline_stage_four_injects_workspace_skill_metadata() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("sessions.db");
+    let memory_root = dir.path().join("memory");
+    let store = Arc::new(TursoSessionStore::new_local(&db_path).await.unwrap());
+    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
+    let session = SessionMeta {
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: "claude-sonnet-4-6".to_string(),
+        ..SessionMeta::default()
+    };
+    let session_id = store.create_session(session.clone()).await.unwrap();
+    let skill = parse_skill_markdown(
+        r#"---
+name: debug-oauth-refresh
+description: "Investigate and fix OAuth refresh-token bugs"
+compatibility: "Requires local repo access"
+allowed-tools: bash file_read
+metadata:
+  moa-version: "1.0"
+  moa-one-liner: "Repeatable OAuth refresh-token debugging workflow"
+  moa-tags: "oauth, auth, debugging"
+  moa-created: "2026-04-09T14:30:00Z"
+  moa-updated: "2026-04-09T16:00:00Z"
+  moa-auto-generated: "true"
+  moa-source-session: "session-1"
+  moa-use-count: "4"
+  moa-last-used: "2026-04-09T16:00:00Z"
+  moa-success-rate: "0.9"
+  moa-brain-affinity: "coding"
+  moa-sandbox-tier: "container"
+  moa-estimated-tokens: "900"
+---
+
+# Debug OAuth refresh
+
+1. Reproduce the bug.
+2. Verify the refresh-token fix.
+"#,
+    )
+    .unwrap();
+    let skill_path = build_skill_path(&skill.frontmatter.name);
+    memory_store
+        .write_page_in_scope(
+            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &skill_path,
+            wiki_page_from_skill(&skill, Some(skill_path.clone())).unwrap(),
+        )
+        .await
+        .unwrap();
+    store
+        .emit_event(
+            session_id.clone(),
+            Event::UserMessage {
+                text: "Debug the OAuth refresh token failure.".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let pipeline =
+        build_default_pipeline(&MoaConfig::default(), store.clone(), memory_store.clone());
+    let llm = Arc::new(CapturingTextLlmProvider::new(
+        "I will use the skill metadata.",
+    ));
+
+    let result = run_brain_turn(session_id.clone(), store.clone(), llm.clone(), &pipeline)
+        .await
+        .unwrap();
+
+    assert_eq!(result, TurnResult::Complete);
+    let requests = llm.requests.lock().await.clone();
+    assert_eq!(requests.len(), 1);
+    let rendered_prompt = requests[0]
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered_prompt.contains("<available_skills>"));
+    assert!(rendered_prompt.contains("debug-oauth-refresh"));
+    let events = store
+        .get_events(session_id, EventRange::all())
+        .await
+        .unwrap();
+    let response = events
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::BrainResponse { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(response.contains("skill metadata"));
 }
