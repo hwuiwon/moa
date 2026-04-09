@@ -1391,6 +1391,7 @@ dependencies = [
  "globset",
  "moa-core",
  "moa-memory",
+ "moa-security",
  "serde",
  "serde_json",
  "tempfile",
@@ -1440,7 +1441,13 @@ dependencies = [
 name = "moa-security"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
+ "globset",
  "moa-core",
+ "serde_json",
+ "shell-words",
+ "uuid",
 ]
 
 [[package]]
@@ -1451,6 +1458,7 @@ dependencies = [
  "chrono",
  "libsql",
  "moa-core",
+ "moa-security",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2280,6 +2288,12 @@ dependencies = [
  "cpufeatures",
  "digest",
 ]
+
+[[package]]
+name = "shell-words"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shlex"

@@ -6,9 +6,11 @@ use async_trait::async_trait;
 use chrono::Utc;
 use libsql::{Builder, Connection, TransactionBehavior, Value, params};
 use moa_core::{
-    Event, EventFilter, EventRange, EventRecord, MoaError, Result, SessionFilter, SessionMeta,
-    SessionStatus, SessionStore, SessionSummary, WakeContext,
+    ApprovalRule, Event, EventFilter, EventRange, EventRecord, MoaError, PolicyAction, PolicyScope,
+    Result, SessionFilter, SessionMeta, SessionStatus, SessionStore, SessionSummary, WakeContext,
+    WorkspaceId,
 };
+use moa_security::ApprovalRuleStore;
 use uuid::Uuid;
 
 use crate::queries::{
@@ -137,6 +139,100 @@ impl TursoSessionStore {
             })?;
         let next_value: i64 = row.get(0).map_err(map_db_error)?;
         Ok(next_value as u64)
+    }
+
+    /// Lists approval rules visible to the provided workspace.
+    pub async fn list_approval_rules(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Result<Vec<ApprovalRule>> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, workspace_id, tool, pattern, action, scope, created_by, created_at \
+                 FROM approval_rules WHERE workspace_id = ? OR scope = 'global' \
+                 ORDER BY created_at ASC",
+                [workspace_id.to_string()],
+            )
+            .await
+            .map_err(map_db_error)?;
+        let mut rules = Vec::new();
+
+        while let Some(row) = rows.next().await.map_err(map_db_error)? {
+            let id: String = row.get(0).map_err(map_db_error)?;
+            let workspace_id: String = row.get(1).map_err(map_db_error)?;
+            let tool: String = row.get(2).map_err(map_db_error)?;
+            let pattern: String = row.get(3).map_err(map_db_error)?;
+            let action: String = row.get(4).map_err(map_db_error)?;
+            let scope: String = row.get(5).map_err(map_db_error)?;
+            let created_by: String = row.get(6).map_err(map_db_error)?;
+            let created_at: String = row.get(7).map_err(map_db_error)?;
+
+            rules.push(ApprovalRule {
+                id: Uuid::parse_str(&id)?,
+                workspace_id: WorkspaceId::new(workspace_id),
+                tool,
+                pattern,
+                action: policy_action_from_db(&action)?,
+                scope: policy_scope_from_db(&scope)?,
+                created_by: moa_core::UserId::new(created_by),
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map_err(|error| MoaError::StorageError(error.to_string()))?
+                    .with_timezone(&Utc),
+            });
+        }
+
+        Ok(rules)
+    }
+
+    /// Creates or updates an approval rule.
+    pub async fn upsert_approval_rule(&self, rule: &ApprovalRule) -> Result<()> {
+        self.connection
+            .execute(
+                "INSERT INTO approval_rules (id, workspace_id, tool, pattern, action, scope, created_by, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(workspace_id, tool, pattern) DO UPDATE SET \
+                     action = excluded.action, \
+                     scope = excluded.scope, \
+                     created_by = excluded.created_by, \
+                     created_at = excluded.created_at",
+                params![
+                    rule.id.to_string(),
+                    rule.workspace_id.to_string(),
+                    rule.tool.clone(),
+                    rule.pattern.clone(),
+                    policy_action_to_db(&rule.action),
+                    policy_scope_to_db(&rule.scope),
+                    rule.created_by.to_string(),
+                    rule.created_at.to_rfc3339(),
+                ],
+            )
+            .await
+            .map_err(map_db_error)?;
+
+        Ok(())
+    }
+
+    /// Deletes an approval rule by tool and pattern within a workspace.
+    pub async fn delete_approval_rule(
+        &self,
+        workspace_id: &WorkspaceId,
+        tool: &str,
+        pattern: &str,
+    ) -> Result<()> {
+        self.connection
+            .execute(
+                "DELETE FROM approval_rules WHERE workspace_id = ? AND tool = ? AND pattern = ?",
+                params![
+                    workspace_id.to_string(),
+                    tool.to_string(),
+                    pattern.to_string()
+                ],
+            )
+            .await
+            .map_err(map_db_error)?;
+
+        Ok(())
     }
 }
 
@@ -462,6 +558,29 @@ impl SessionStore for TursoSessionStore {
     }
 }
 
+#[async_trait]
+impl ApprovalRuleStore for TursoSessionStore {
+    /// Lists approval rules visible to a workspace.
+    async fn list_approval_rules(&self, workspace_id: &WorkspaceId) -> Result<Vec<ApprovalRule>> {
+        self.list_approval_rules(workspace_id).await
+    }
+
+    /// Creates or updates an approval rule.
+    async fn upsert_approval_rule(&self, rule: ApprovalRule) -> Result<()> {
+        self.upsert_approval_rule(&rule).await
+    }
+
+    /// Deletes an approval rule by tool and pattern.
+    async fn delete_approval_rule(
+        &self,
+        workspace_id: &WorkspaceId,
+        tool: &str,
+        pattern: &str,
+    ) -> Result<()> {
+        self.delete_approval_rule(workspace_id, tool, pattern).await
+    }
+}
+
 fn event_hand_id(event: &Event) -> Option<String> {
     match event {
         Event::ToolCall { hand_id, .. } => hand_id.clone(),
@@ -478,4 +597,40 @@ fn is_remote_url(url: &str) -> bool {
 
 fn map_db_error(error: libsql::Error) -> MoaError {
     MoaError::StorageError(error.to_string())
+}
+
+fn policy_action_to_db(action: &PolicyAction) -> &'static str {
+    match action {
+        PolicyAction::Allow => "allow",
+        PolicyAction::Deny => "deny",
+        PolicyAction::RequireApproval => "require_approval",
+    }
+}
+
+fn policy_action_from_db(value: &str) -> Result<PolicyAction> {
+    match value {
+        "allow" => Ok(PolicyAction::Allow),
+        "deny" => Ok(PolicyAction::Deny),
+        "require_approval" => Ok(PolicyAction::RequireApproval),
+        other => Err(MoaError::StorageError(format!(
+            "unknown approval rule action `{other}`"
+        ))),
+    }
+}
+
+fn policy_scope_to_db(scope: &PolicyScope) -> &'static str {
+    match scope {
+        PolicyScope::Workspace => "workspace",
+        PolicyScope::Global => "global",
+    }
+}
+
+fn policy_scope_from_db(value: &str) -> Result<PolicyScope> {
+    match value {
+        "workspace" => Ok(PolicyScope::Workspace),
+        "global" => Ok(PolicyScope::Global),
+        other => Err(MoaError::StorageError(format!(
+            "unknown approval rule scope `{other}`"
+        ))),
+    }
 }

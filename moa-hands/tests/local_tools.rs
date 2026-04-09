@@ -72,7 +72,7 @@ async fn file_read_reads_written_content() {
     let session = session();
 
     router
-        .execute(
+        .execute_authorized(
             &session,
             &ToolInvocation {
                 id: None,
@@ -83,7 +83,7 @@ async fn file_read_reads_written_content() {
         .await
         .unwrap();
     let (_, output) = router
-        .execute(
+        .execute_authorized(
             &session,
             &ToolInvocation {
                 id: None,
@@ -107,7 +107,7 @@ async fn file_search_finds_files_by_glob() {
     let session = session();
 
     router
-        .execute(
+        .execute_authorized(
             &session,
             &ToolInvocation {
                 id: None,
@@ -118,7 +118,7 @@ async fn file_search_finds_files_by_glob() {
         .await
         .unwrap();
     router
-        .execute(
+        .execute_authorized(
             &session,
             &ToolInvocation {
                 id: None,
@@ -130,7 +130,7 @@ async fn file_search_finds_files_by_glob() {
         .unwrap();
 
     let (_, output) = router
-        .execute(
+        .execute_authorized(
             &session,
             &ToolInvocation {
                 id: None,
@@ -155,7 +155,7 @@ async fn file_operations_reject_path_traversal() {
     let session = session();
 
     let error = router
-        .execute(
+        .execute_authorized(
             &session,
             &ToolInvocation {
                 id: None,
@@ -179,7 +179,7 @@ async fn bash_captures_stdout_and_stderr() {
     let session = session();
 
     let (_, output) = router
-        .execute(
+        .execute_authorized(
             &session,
             &ToolInvocation {
                 id: None,
@@ -205,7 +205,7 @@ async fn bash_respects_timeout() {
     let session = session();
 
     let error = router
-        .execute(
+        .execute_authorized(
             &session,
             &ToolInvocation {
                 id: None,
