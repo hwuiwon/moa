@@ -4,6 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[dependencies]
-moa-core = { path = "../moa-core" }
+[[bin]]
+name = "moa"
+path = "src/main.rs"
 
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+moa-core = { path = "../moa-core" }
+moa-tui = { path = "../moa-tui" }
+tokio.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true

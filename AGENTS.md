@@ -32,6 +32,7 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 8. **Run `cargo clippy` and `cargo fmt` before considering any step complete.**
 9. **No `unwrap()` in library code.** Use `?` or explicit error handling.
 10. **Feature flags** control optional dependencies: `telegram`, `slack`, `discord`, `cloud`, `temporal`.
+11. **If `graphify-out/GRAPH_REPORT.md` exists, consult it before broad repo exploration or raw-file search.**
 
 ## Conventions
 
@@ -41,11 +42,3 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 - JSON: `serde_json::Value` for dynamic payloads
 - Paths: `std::path::PathBuf` for filesystem, `String` for logical paths (memory wiki paths)
 - Errors: One `Error` enum per crate with `#[derive(thiserror::Error)]`
-
-## graphify
-
-This project has a graphify knowledge graph at graphify-out/.
-
-Rules:
-- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
-- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
