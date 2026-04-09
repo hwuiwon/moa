@@ -1,0 +1,8 @@
+//! Built-in hand and memory tool implementations.
+
+pub mod bash;
+pub mod file_read;
+pub mod file_search;
+pub mod file_write;
+pub mod memory;
+pub mod stub;

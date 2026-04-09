@@ -125,13 +125,23 @@ pub fn build_default_pipeline(
     session_store: Arc<dyn SessionStore>,
     memory_store: Arc<dyn MemoryStore>,
 ) -> ContextPipeline {
+    build_default_pipeline_with_tools(config, session_store, memory_store, Vec::new())
+}
+
+/// Builds the default seven-stage context pipeline with a fixed tool loadout.
+pub fn build_default_pipeline_with_tools(
+    config: &MoaConfig,
+    session_store: Arc<dyn SessionStore>,
+    memory_store: Arc<dyn MemoryStore>,
+    tool_schemas: Vec<serde_json::Value>,
+) -> ContextPipeline {
     ContextPipeline::new(
         session_store,
         memory_store,
         vec![
             Box::new(IdentityProcessor),
             Box::new(InstructionProcessor::from_config(config)),
-            Box::new(ToolDefinitionProcessor::default()),
+            Box::new(ToolDefinitionProcessor::new(tool_schemas)),
             Box::new(SkillInjector),
             Box::new(MemoryRetriever),
             Box::new(HistoryCompiler),

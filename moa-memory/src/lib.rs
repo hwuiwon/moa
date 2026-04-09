@@ -1,5 +1,6 @@
 //! File-backed wiki memory store with an FTS5-derived search index.
 
+use std::env;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -41,7 +42,7 @@ impl FileMemoryStore {
 
     /// Creates a file-backed memory store from the local memory config.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
-        let memory_dir = PathBuf::from(&config.local.memory_dir);
+        let memory_dir = expand_local_path(&config.local.memory_dir)?;
         let base_dir = memory_dir.parent().map(Path::to_path_buf).ok_or_else(|| {
             MoaError::ConfigError("local.memory_dir must have a parent".to_string())
         })?;
@@ -204,6 +205,15 @@ impl FileMemoryStore {
 
         Ok(self.scope_root(scope).join(logical_path))
     }
+}
+
+fn expand_local_path(path: &str) -> Result<PathBuf> {
+    if let Some(relative) = path.strip_prefix("~/") {
+        let home = env::var("HOME").map_err(|_| MoaError::HomeDirectoryNotFound)?;
+        return Ok(PathBuf::from(home).join(relative));
+    }
+
+    Ok(PathBuf::from(path))
 }
 
 #[async_trait]

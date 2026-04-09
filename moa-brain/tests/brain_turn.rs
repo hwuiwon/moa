@@ -2,14 +2,20 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_brain::{TurnResult, build_default_pipeline, run_brain_turn};
-use moa_core::{
-    CompletionRequest, CompletionResponse, CompletionStream, Event, EventFilter, EventRange,
-    EventRecord, LLMProvider, MemoryPath, MemoryScope, MemorySearchResult, MemoryStore, MoaConfig,
-    ModelCapabilities, PageSummary, PageType, Result, SequenceNum, SessionFilter, SessionId,
-    SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason, TokenPricing,
-    ToolCallFormat, UserId, WikiPage, WorkspaceId,
+use moa_brain::{
+    TurnResult, build_default_pipeline, build_default_pipeline_with_tools, run_brain_turn,
+    run_brain_turn_with_tools,
 };
+use moa_core::{
+    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, Event, EventFilter,
+    EventRange, EventRecord, LLMProvider, MemoryPath, MemoryScope, MemorySearchResult, MemoryStore,
+    MoaConfig, ModelCapabilities, PageSummary, PageType, Result, SequenceNum, SessionFilter,
+    SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason, TokenPricing,
+    ToolCallFormat, ToolInvocation, UserId, WikiPage, WorkspaceId,
+};
+use moa_hands::ToolRouter;
+use serde_json::json;
+use tempfile::tempdir;
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
@@ -180,6 +186,77 @@ impl LLMProvider for MockLlmProvider {
     }
 }
 
+#[derive(Default)]
+struct ToolLoopLlmProvider {
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl LLMProvider for ToolLoopLlmProvider {
+    fn name(&self) -> &str {
+        "mock-tool-loop"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: "claude-sonnet-4-6".to_string(),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+            },
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let mut requests = self.requests.lock().await;
+        let response = if requests.is_empty() {
+            CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(ToolInvocation {
+                    id: Some("11111111-1111-1111-1111-111111111111".to_string()),
+                    name: "bash".to_string(),
+                    input: json!({ "cmd": "printf 'hello from tool'" }),
+                })],
+                stop_reason: StopReason::ToolUse,
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 12,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+                duration_ms: 10,
+            }
+        } else {
+            assert!(
+                request
+                    .messages
+                    .iter()
+                    .any(|message| message.content.contains("hello from tool"))
+            );
+            CompletionResponse {
+                text: "Tool said hello from tool".to_string(),
+                content: vec![CompletionContent::Text(
+                    "Tool said hello from tool".to_string(),
+                )],
+                stop_reason: StopReason::EndTurn,
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 20,
+                output_tokens: 7,
+                cached_input_tokens: 0,
+                duration_ms: 12,
+            }
+        };
+        requests.push(request);
+        Ok(CompletionStream::from_response(response))
+    }
+}
+
 fn make_event_record(session_id: &SessionId, sequence_num: u64, event: Event) -> EventRecord {
     EventRecord {
         id: uuid::Uuid::new_v4(),
@@ -242,4 +319,65 @@ async fn run_brain_turn_emits_brain_response_event() {
         }
         other => panic!("expected brain response event, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn run_brain_turn_executes_tool_calls_and_feeds_results_back() {
+    let session = SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: "claude-sonnet-4-6".to_string(),
+        ..SessionMeta::default()
+    };
+    let initial_events = vec![make_event_record(
+        &session.id,
+        0,
+        Event::UserMessage {
+            text: "Use a tool".to_string(),
+            attachments: Vec::new(),
+        },
+    )];
+    let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(MockMemoryStore);
+    let sandbox_dir = tempdir().unwrap();
+    let tool_router = Arc::new(
+        ToolRouter::new_local(memory_store.clone(), sandbox_dir.path())
+            .await
+            .unwrap(),
+    );
+    let pipeline = build_default_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        memory_store,
+        tool_router.tool_schemas(),
+    );
+    let llm = Arc::new(ToolLoopLlmProvider::default());
+
+    let result = run_brain_turn_with_tools(
+        session.id.clone(),
+        store.clone(),
+        llm.clone(),
+        &pipeline,
+        Some(tool_router),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result, TurnResult::Complete);
+    assert_eq!(llm.requests.lock().await.len(), 2);
+
+    let events = store.events.lock().await.clone();
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::ToolCall { tool_name, .. } if tool_name == "bash"
+    )));
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::ToolResult { output, success, .. } if *success && output.contains("hello from tool")
+    )));
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::BrainResponse { text, .. } if text == "Tool said hello from tool"
+    )));
 }
