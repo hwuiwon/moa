@@ -19,6 +19,22 @@ pub enum KeyAction {
     AlwaysAllow,
     /// Deny the pending tool.
     Deny,
+    /// Open the full-screen diff viewer for the focused approval.
+    OpenDiff,
+    /// Close the full-screen diff viewer.
+    CloseDiff,
+    /// Toggle unified versus side-by-side diff rendering.
+    ToggleDiffMode,
+    /// Move to the next file in the diff viewer.
+    NextDiffFile,
+    /// Move to the previous file in the diff viewer.
+    PreviousDiffFile,
+    /// Move to the next hunk in the diff viewer.
+    NextDiffHunk,
+    /// Move to the previous hunk in the diff viewer.
+    PreviousDiffHunk,
+    /// Edit approval parameters.
+    EditApproval,
     /// Scroll the transcript upward.
     ScrollUp,
     /// Scroll the transcript downward.
@@ -37,6 +53,20 @@ pub fn map_key_event(mode: AppMode, key: KeyEvent) -> KeyAction {
         return KeyAction::Cancel;
     }
 
+    if mode == AppMode::ViewingDiff {
+        return match key.code {
+            KeyCode::Esc | KeyCode::Char('f') | KeyCode::Char('F') => KeyAction::CloseDiff,
+            KeyCode::Char('t') | KeyCode::Char('T') => KeyAction::ToggleDiffMode,
+            KeyCode::Char('n') => KeyAction::NextDiffFile,
+            KeyCode::Char('N') => KeyAction::PreviousDiffFile,
+            KeyCode::Char('j') | KeyCode::Down => KeyAction::NextDiffHunk,
+            KeyCode::Char('k') | KeyCode::Up => KeyAction::PreviousDiffHunk,
+            KeyCode::Char('a') | KeyCode::Char('A') => KeyAction::ApproveOnce,
+            KeyCode::Char('r') | KeyCode::Char('R') => KeyAction::Deny,
+            _ => KeyAction::Noop,
+        };
+    }
+
     if key.code == KeyCode::Esc {
         return KeyAction::Cancel;
     }
@@ -46,6 +76,8 @@ pub fn map_key_event(mode: AppMode, key: KeyEvent) -> KeyAction {
             KeyCode::Char('y') | KeyCode::Char('Y') => return KeyAction::ApproveOnce,
             KeyCode::Char('a') | KeyCode::Char('A') => return KeyAction::AlwaysAllow,
             KeyCode::Char('n') | KeyCode::Char('N') => return KeyAction::Deny,
+            KeyCode::Char('d') | KeyCode::Char('D') => return KeyAction::OpenDiff,
+            KeyCode::Char('e') | KeyCode::Char('E') => return KeyAction::EditApproval,
             _ => {}
         }
     }
@@ -109,6 +141,35 @@ mod tests {
                 key(KeyCode::Char('y'), KeyModifiers::NONE)
             ),
             KeyAction::PromptInput
+        );
+        assert_eq!(
+            map_key_event(
+                AppMode::WaitingApproval,
+                key(KeyCode::Char('d'), KeyModifiers::NONE)
+            ),
+            KeyAction::OpenDiff
+        );
+    }
+
+    #[test]
+    fn diff_view_shortcuts_are_scoped_to_the_overlay() {
+        assert_eq!(
+            map_key_event(
+                AppMode::ViewingDiff,
+                key(KeyCode::Char('t'), KeyModifiers::NONE)
+            ),
+            KeyAction::ToggleDiffMode
+        );
+        assert_eq!(
+            map_key_event(
+                AppMode::ViewingDiff,
+                key(KeyCode::Char('a'), KeyModifiers::NONE)
+            ),
+            KeyAction::ApproveOnce
+        );
+        assert_eq!(
+            map_key_event(AppMode::ViewingDiff, key(KeyCode::Esc, KeyModifiers::NONE)),
+            KeyAction::CloseDiff
         );
     }
 

@@ -15,7 +15,10 @@ moa-memory = { path = "../moa-memory" }
 moa-providers = { path = "../moa-providers" }
 moa-session = { path = "../moa-session" }
 ratatui.workspace = true
+serde_json.workspace = true
 shell-words = "1.1"
+similar.workspace = true
+syntect.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
