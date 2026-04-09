@@ -1291,6 +1291,15 @@ impl ContextMessage {
             tools: None,
         }
     }
+
+    /// Creates a tool message.
+    pub fn tool(content: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::Tool,
+            content: content.into(),
+            tools: None,
+        }
+    }
 }
 
 /// Mutable context under compilation.
@@ -1316,6 +1325,93 @@ pub struct WorkingContext {
     pub metadata: HashMap<String, Value>,
 }
 
+impl WorkingContext {
+    /// Creates an empty working context for a session.
+    pub fn new(session: &SessionMeta, model_capabilities: ModelCapabilities) -> Self {
+        Self {
+            messages: Vec::new(),
+            token_count: 0,
+            token_budget: model_capabilities
+                .context_window
+                .saturating_sub(model_capabilities.max_output),
+            model_capabilities,
+            session_id: session.id.clone(),
+            user_id: session.user_id.clone(),
+            workspace_id: session.workspace_id.clone(),
+            cache_breakpoints: Vec::new(),
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Appends a system message and updates the approximate token count.
+    pub fn append_system(&mut self, content: impl Into<String>) {
+        self.append_message(ContextMessage::system(content));
+    }
+
+    /// Appends a message and updates the approximate token count.
+    pub fn append_message(&mut self, message: ContextMessage) {
+        self.token_count += estimate_text_tokens(&message.content);
+        self.messages.push(message);
+    }
+
+    /// Extends the context with multiple messages and updates token counts.
+    pub fn extend_messages<I>(&mut self, messages: I)
+    where
+        I: IntoIterator<Item = ContextMessage>,
+    {
+        for message in messages {
+            self.append_message(message);
+        }
+    }
+
+    /// Stores the active tool schemas for the request.
+    pub fn set_tools(&mut self, tools: Vec<Value>) {
+        self.metadata
+            .insert("tool_schemas".to_string(), Value::Array(tools));
+    }
+
+    /// Marks the current message index as a cache breakpoint.
+    pub fn mark_cache_breakpoint(&mut self) {
+        self.cache_breakpoints.push(self.messages.len());
+    }
+
+    /// Returns the approximate token count of the last message.
+    pub fn count_last(&self) -> usize {
+        self.messages
+            .last()
+            .map(|message| estimate_text_tokens(&message.content))
+            .unwrap_or(0)
+    }
+
+    /// Returns the most recent user-authored message text, if one exists.
+    pub fn last_user_message(&self) -> Option<&str> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User)
+            .map(|message| message.content.as_str())
+    }
+
+    /// Converts the compiled context into an LLM completion request.
+    pub fn into_request(self) -> CompletionRequest {
+        let tools = self
+            .metadata
+            .get("tool_schemas")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        CompletionRequest {
+            model: Some(self.model_capabilities.model_id.clone()),
+            messages: self.messages,
+            tools,
+            max_output_tokens: Some(self.model_capabilities.max_output),
+            temperature: None,
+            metadata: self.metadata,
+        }
+    }
+}
+
 /// Output emitted by a context processor stage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProcessorOutput {
@@ -1329,6 +1425,15 @@ pub struct ProcessorOutput {
     pub items_excluded: Vec<String>,
     /// Stage execution duration.
     pub duration: Duration,
+}
+
+fn estimate_text_tokens(text: &str) -> usize {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        0
+    } else {
+        trimmed.chars().count().div_ceil(4)
+    }
 }
 
 #[cfg(test)]
