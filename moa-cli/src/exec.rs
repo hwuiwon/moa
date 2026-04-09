@@ -3,20 +3,19 @@
 use std::io::{self, IsTerminal, Write};
 
 use anyhow::{Context, Result, bail};
-use moa_core::{ApprovalDecision, MoaConfig, Platform};
-use moa_tui::runner::{ApprovalPrompt, ChatRuntime, RuntimeCommand, RuntimeEvent, ToolUpdate};
+use moa_core::{ApprovalDecision, ApprovalPrompt, MoaConfig, Platform, RuntimeEvent, ToolUpdate};
+use moa_tui::runner::ChatRuntime;
 use tokio::sync::mpsc;
 
 /// Runs a one-shot prompt through the shared local chat runtime.
 pub async fn run_exec(config: MoaConfig, prompt: String) -> Result<()> {
     let runtime = ChatRuntime::from_config(config, Platform::Cli).await?;
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-    let (control_tx, control_rx) = mpsc::unbounded_channel();
     let task = tokio::spawn({
         let runtime = runtime.clone();
         let event_tx = event_tx.clone();
         async move {
-            if let Err(error) = runtime.run_turn(prompt, event_tx.clone(), control_rx).await {
+            if let Err(error) = runtime.run_turn(prompt, event_tx.clone()).await {
                 let _ = event_tx.send(RuntimeEvent::Error(error.to_string()));
                 let _ = event_tx.send(RuntimeEvent::TurnCompleted);
             }
@@ -33,7 +32,7 @@ pub async fn run_exec(config: MoaConfig, prompt: String) -> Result<()> {
                 eprintln!("{}", format_tool_update(&update));
             }
             RuntimeEvent::ApprovalRequested(prompt) => {
-                resolve_exec_approval(&control_tx, prompt)?;
+                resolve_exec_approval(&runtime, prompt).await?;
             }
             RuntimeEvent::UsageUpdated { total_tokens } => {
                 eprintln!("tokens: {total_tokens}");
@@ -56,10 +55,7 @@ pub async fn run_exec(config: MoaConfig, prompt: String) -> Result<()> {
     Ok(())
 }
 
-fn resolve_exec_approval(
-    control_tx: &mpsc::UnboundedSender<RuntimeCommand>,
-    prompt: ApprovalPrompt,
-) -> Result<()> {
+async fn resolve_exec_approval(runtime: &ChatRuntime, prompt: ApprovalPrompt) -> Result<()> {
     if !io::stdin().is_terminal() {
         bail!(
             "approval required for {} but stdin is not interactive",
@@ -87,8 +83,9 @@ fn resolve_exec_approval(
                 continue;
             }
         };
-        control_tx
-            .send(RuntimeCommand::Approval(decision))
+        runtime
+            .respond_to_approval(prompt.request.request_id, decision)
+            .await
             .context("failed to send approval decision")?;
         return Ok(());
     }
@@ -113,7 +110,7 @@ fn format_tool_update(update: &ToolUpdate) -> String {
 
 #[cfg(test)]
 mod tests {
-    use moa_tui::{ToolCardStatus, ToolUpdate};
+    use moa_core::{ToolCardStatus, ToolUpdate};
     use uuid::Uuid;
 
     use super::format_tool_update;

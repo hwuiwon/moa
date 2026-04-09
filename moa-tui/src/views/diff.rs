@@ -18,7 +18,7 @@ use syntect::{
     parsing::{SyntaxReference, SyntaxSet},
 };
 
-use crate::runner::ApprovalFileDiff;
+use moa_core::ApprovalFileDiff;
 
 const SIDE_BY_SIDE_WIDTH: u16 = 120;
 const DIFF_CONTEXT_LINES: usize = 3;

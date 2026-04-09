@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -502,11 +502,90 @@ pub struct EventRecord {
     pub token_count: Option<usize>,
 }
 
-/// Lightweight event stream placeholder.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// Lightweight event stream with optional live broadcast updates.
+#[derive(Serialize, Deserialize)]
 pub struct EventStream {
     /// Buffered events currently available in the stream.
     pub events: Vec<EventRecord>,
+    #[serde(skip)]
+    receiver: Option<broadcast::Receiver<EventRecord>>,
+}
+
+impl EventStream {
+    /// Creates an event stream from buffered historical events.
+    pub fn from_events(events: Vec<EventRecord>) -> Self {
+        Self {
+            events,
+            receiver: None,
+        }
+    }
+
+    /// Creates an event stream backed by a live broadcast receiver.
+    pub fn from_broadcast(receiver: broadcast::Receiver<EventRecord>) -> Self {
+        Self {
+            events: Vec::new(),
+            receiver: Some(receiver),
+        }
+    }
+
+    /// Creates an event stream from buffered history plus live broadcast updates.
+    pub fn from_history_and_broadcast(
+        events: Vec<EventRecord>,
+        receiver: broadcast::Receiver<EventRecord>,
+    ) -> Self {
+        Self {
+            events,
+            receiver: Some(receiver),
+        }
+    }
+
+    /// Receives the next buffered or live event from the stream.
+    pub async fn next(&mut self) -> Option<Result<EventRecord>> {
+        if !self.events.is_empty() {
+            return Some(Ok(self.events.remove(0)));
+        }
+
+        match &mut self.receiver {
+            Some(receiver) => loop {
+                match receiver.recv().await {
+                    Ok(event) => return Some(Ok(event)),
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            },
+            None => None,
+        }
+    }
+}
+
+impl Clone for EventStream {
+    fn clone(&self) -> Self {
+        Self {
+            events: self.events.clone(),
+            receiver: self.receiver.as_ref().map(broadcast::Receiver::resubscribe),
+        }
+    }
+}
+
+impl Default for EventStream {
+    fn default() -> Self {
+        Self::from_events(Vec::new())
+    }
+}
+
+impl fmt::Debug for EventStream {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EventStream")
+            .field("events", &self.events)
+            .field("live", &self.receiver.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for EventStream {
+    fn eq(&self, other: &Self) -> bool {
+        self.events == other.events
+    }
 }
 
 /// Recovered session state returned when a brain wakes from the event log.
@@ -981,6 +1060,102 @@ pub struct ApprovalRequest {
     pub input_summary: String,
     /// Risk level assigned to the request.
     pub risk_level: RiskLevel,
+}
+
+/// Human-readable approval field shown in local UI surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalField {
+    /// Field label.
+    pub label: String,
+    /// Human-readable value.
+    pub value: String,
+}
+
+/// A text file diff attached to a pending approval request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalFileDiff {
+    /// Logical file path shown to the user.
+    pub path: String,
+    /// Existing file contents before the tool executes.
+    pub before: String,
+    /// Proposed file contents after the tool executes.
+    pub after: String,
+    /// Optional syntax hint derived from the file extension.
+    pub language_hint: Option<String>,
+}
+
+/// Approval prompt emitted by the local orchestrator runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalPrompt {
+    /// Approval request displayed to the user.
+    pub request: ApprovalRequest,
+    /// Suggested rule pattern when the user chooses "Always Allow".
+    pub pattern: String,
+    /// Structured parameters rendered by the approval widget.
+    pub parameters: Vec<ApprovalField>,
+    /// Optional file diffs rendered inline and in the full-screen diff viewer.
+    pub file_diffs: Vec<ApprovalFileDiff>,
+}
+
+/// Inline tool card lifecycle state used by the local UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCardStatus {
+    /// The tool call is known but not yet executed.
+    Pending,
+    /// The tool is waiting for approval.
+    WaitingApproval,
+    /// The tool is actively executing.
+    Running,
+    /// The tool completed successfully.
+    Succeeded,
+    /// The tool failed or was denied.
+    Failed,
+}
+
+/// Update payload for a single inline tool card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolUpdate {
+    /// Stable tool call identifier.
+    pub tool_id: Uuid,
+    /// Tool name.
+    pub tool_name: String,
+    /// Current tool card status.
+    pub status: ToolCardStatus,
+    /// Concise single-line summary.
+    pub summary: String,
+    /// Optional detail shown below the summary.
+    pub detail: Option<String>,
+}
+
+/// Live runtime update emitted by the local orchestrator for UI/CLI rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeEvent {
+    /// A new assistant message started streaming.
+    AssistantStarted,
+    /// One streamed character from the assistant.
+    AssistantDelta(char),
+    /// A streamed assistant message finished.
+    AssistantFinished {
+        /// Final text for the completed assistant message.
+        text: String,
+    },
+    /// A tool card should be inserted or updated.
+    ToolUpdate(ToolUpdate),
+    /// Human approval is required before a tool can execute.
+    ApprovalRequested(ApprovalPrompt),
+    /// Session token totals changed.
+    UsageUpdated {
+        /// Aggregate input + output token count for the current session.
+        total_tokens: usize,
+    },
+    /// Informational status line from the runtime.
+    Notice(String),
+    /// The turn finished without more pending work.
+    TurnCompleted,
+    /// The runtime hit an error while processing the turn.
+    Error(String),
 }
 
 /// Persistent approval rule action.

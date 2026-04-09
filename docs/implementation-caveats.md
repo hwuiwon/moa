@@ -543,3 +543,92 @@ Consequence:
 Recommended review:
 
 - Treat `e` as reserved UI space until there is a concrete design for editing, validating, and resubmitting tool inputs safely.
+
+## 24. The Step 10 `LocalOrchestrator` is multi-session in-process, not yet a daemon
+
+Current state:
+
+- `LocalOrchestrator` now keeps multiple session actors alive as Tokio tasks inside the current process.
+- The TUI and `moa exec` both talk to that in-process orchestrator.
+
+Issue:
+
+- This satisfies the Step 10 requirement that sessions survive across TUI views and are no longer tied to one foreground turn task.
+- It does not yet satisfy the later daemon shape described in `docs/03-communication-layer.md`, where the orchestrator survives closing the TUI entirely.
+
+Consequence:
+
+- Switching UI views or holding multiple sessions in one process works.
+- Exiting the current process still stops all local session actors.
+
+Recommended review:
+
+- Introduce the planned local daemon / Unix socket boundary later instead of treating the current in-process orchestrator as the final local architecture.
+
+## 25. Live runtime observation is richer than the `BrainOrchestrator` trait surface
+
+Current state:
+
+- The stable trait still exposes `observe()` for persisted `EventRecord` streaming.
+- The TUI and CLI now also rely on a concrete `LocalOrchestrator::observe_runtime()` stream of `RuntimeEvent` values for:
+  - incremental assistant text
+  - inline tool-card updates
+  - rich approval prompts
+
+Issue:
+
+- This keeps the generic orchestrator trait small and storage-oriented.
+- It also means the local UI uses a local-only extension API that does not exist on `BrainOrchestrator` yet.
+
+Consequence:
+
+- The local TUI and CLI can preserve the Step 08 streaming UX after moving onto the orchestrator.
+- A future remote/daemon client will need either the same runtime stream promoted into a shared trait or a different transport-level observation contract.
+
+Recommended review:
+
+- Decide later whether live UI/runtime events belong in the stable orchestrator trait, in a separate observation trait, or purely in transport-specific adapters.
+
+## 26. Hard cancel is immediate at the task level, not cooperative inside tools
+
+Current state:
+
+- `HardCancel` aborts the session task from the orchestrator and marks the session cancelled.
+- `SoftCancel` is cooperative and stops after the current step.
+
+Issue:
+
+- This gives the correct user-facing distinction for Step 10:
+  - soft stop after current work
+  - hard stop immediately
+- It does not guarantee cleanup inside an already-running external command beyond what Tokio task abortion naturally interrupts.
+
+Consequence:
+
+- The local UX behaves correctly for cancellation semantics at the session level.
+- If a future hand backend needs strict process cleanup guarantees, cancellation will need to become hand-aware instead of only task-aware.
+
+Recommended review:
+
+- Revisit hard-cancel semantics when remote hands / containerized hands become first-class, especially for orphan-process cleanup.
+
+## 27. Local cron scheduling is real, but task execution is still a logging stub
+
+Current state:
+
+- `schedule_cron()` now uses `tokio-cron-scheduler`.
+- The scheduled job currently logs the requested job/task identity.
+
+Issue:
+
+- This is enough to validate the orchestrator wiring and return real local cron handles.
+- It is not yet connected to memory consolidation, skill improvement, or any other concrete background job implementation.
+
+Consequence:
+
+- The scheduling surface exists and is testable.
+- The actual cron work remains to be implemented in later phases.
+
+Recommended review:
+
+- Keep treating local cron as infrastructure plumbing until the first concrete maintenance job is wired through it.
