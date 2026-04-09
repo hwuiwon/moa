@@ -8,6 +8,7 @@ use moa_brain::{build_default_pipeline, run_brain_turn};
 use moa_core::{
     Event, EventRange, MoaConfig, Result, SessionMeta, SessionStore, UserId, WorkspaceId,
 };
+use moa_memory::FileMemoryStore;
 use moa_providers::AnthropicProvider;
 use moa_session::TursoSessionStore;
 use tempfile::TempDir;
@@ -17,6 +18,7 @@ use tempfile::TempDir;
 async fn main() -> Result<()> {
     let config = MoaConfig::load()?;
     let (session_db_path, _session_db_guard) = resolve_session_db_path();
+    let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
     let store = Arc::new(TursoSessionStore::new_local(Path::new(&session_db_path)).await?);
     let provider = Arc::new(AnthropicProvider::from_config(&config)?);
     let session_id = store
@@ -27,7 +29,7 @@ async fn main() -> Result<()> {
             ..SessionMeta::default()
         })
         .await?;
-    let pipeline = build_default_pipeline(&config, store.clone());
+    let pipeline = build_default_pipeline(&config, store.clone(), memory_store);
     let cli_prompt = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
 
     println!("MOA Step 04 chat harness");
