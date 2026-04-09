@@ -13,7 +13,7 @@
       "author": null,
       "contributor": null,
       "id": "memory_store_test_file",
-      "community": 41
+      "community": 42
     },
     {
       "label": "sample_page helper",
@@ -25,7 +25,7 @@
       "author": null,
       "contributor": null,
       "id": "memory_store_sample_page",
-      "community": 38
+      "community": 39
     },
     {
       "label": "create_read_update_and_delete_wiki_pages test",
@@ -37,7 +37,7 @@
       "author": null,
       "contributor": null,
       "id": "memory_store_test_crud",
-      "community": 38
+      "community": 39
     },
     {
       "label": "fts_search_finds_ranked_results test",
@@ -93,7 +93,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L1",
       "id": "lib",
-      "community": 5
+      "community": 9
     },
     {
       "label": "FileMemoryStore",
@@ -101,7 +101,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L24",
       "id": "lib_filememorystore",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".new()",
@@ -109,7 +109,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L31",
       "id": "lib_filememorystore_new",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".from_config()",
@@ -117,7 +117,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L44",
       "id": "lib_filememorystore_from_config",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".base_dir()",
@@ -125,7 +125,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L53",
       "id": "lib_filememorystore_base_dir",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".read_page_in_scope()",
@@ -133,7 +133,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L58",
       "id": "lib_filememorystore_read_page_in_scope",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".write_page_in_scope()",
@@ -141,7 +141,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L79",
       "id": "lib_filememorystore_write_page_in_scope",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".delete_page_in_scope()",
@@ -149,7 +149,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L99",
       "id": "lib_filememorystore_delete_page_in_scope",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".list_scope_files()",
@@ -157,7 +157,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L116",
       "id": "lib_filememorystore_list_scope_files",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".resolve_scope_for_path()",
@@ -165,7 +165,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L129",
       "id": "lib_filememorystore_resolve_scope_for_path",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".scope_root()",
@@ -173,7 +173,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L175",
       "id": "lib_filememorystore_scope_root",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".file_path()",
@@ -181,7 +181,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L186",
       "id": "lib_filememorystore_file_path",
-      "community": 5
+      "community": 9
     },
     {
       "label": "expand_local_path()",
@@ -189,7 +189,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L210",
       "id": "lib_expand_local_path",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".search()",
@@ -197,7 +197,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L222",
       "id": "lib_filememorystore_search",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".read_page()",
@@ -205,7 +205,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L232",
       "id": "lib_filememorystore_read_page",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".write_page()",
@@ -213,7 +213,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L238",
       "id": "lib_filememorystore_write_page",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".delete_page()",
@@ -221,7 +221,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L244",
       "id": "lib_filememorystore_delete_page",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".list_pages()",
@@ -229,7 +229,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L250",
       "id": "lib_filememorystore_list_pages",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".get_index()",
@@ -237,7 +237,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L279",
       "id": "lib_filememorystore_get_index",
-      "community": 5
+      "community": 9
     },
     {
       "label": ".rebuild_search_index()",
@@ -245,7 +245,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L285",
       "id": "lib_filememorystore_rebuild_search_index",
-      "community": 5
+      "community": 9
     },
     {
       "label": "memory_error()",
@@ -253,7 +253,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L298",
       "id": "lib_memory_error",
-      "community": 5
+      "community": 9
     },
     {
       "label": "collect_markdown_files()",
@@ -261,7 +261,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L302",
       "id": "lib_collect_markdown_files",
-      "community": 5
+      "community": 9
     },
     {
       "label": "try_exists()",
@@ -269,7 +269,7 @@
       "source_file": "moa-memory/src/lib.rs",
       "source_location": "L335",
       "id": "lib_try_exists",
-      "community": 5
+      "community": 9
     },
     {
       "label": "load_index_file",
@@ -413,7 +413,7 @@
       "author": null,
       "contributor": null,
       "id": "fts_scopes_for_path",
-      "community": 42
+      "community": 43
     },
     {
       "label": "parse_markdown",
@@ -849,7 +849,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L575",
       "id": "types_handhandle",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".local()",
@@ -857,7 +857,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L588",
       "id": "types_handhandle_local",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".docker()",
@@ -865,7 +865,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L593",
       "id": "types_handhandle_docker",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".daytona()",
@@ -873,7 +873,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L600",
       "id": "types_handhandle_daytona",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".e2b()",
@@ -881,7 +881,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L607",
       "id": "types_handhandle_e2b",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".daytona_id()",
@@ -889,7 +889,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L614",
       "id": "types_handhandle_daytona_id",
-      "community": 12
+      "community": 0
     },
     {
       "label": "HandStatus",
@@ -1225,7 +1225,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1139",
       "id": "types_memorypath_as_str",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".fmt()",
@@ -1305,7 +1305,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1301",
       "id": "types_contextmessage",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".system()",
@@ -1313,7 +1313,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1312",
       "id": "types_contextmessage_system",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".user()",
@@ -1321,7 +1321,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1321",
       "id": "types_contextmessage_user",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".assistant()",
@@ -1329,7 +1329,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1330",
       "id": "types_contextmessage_assistant",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".tool()",
@@ -1337,7 +1337,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1339",
       "id": "types_contextmessage_tool",
-      "community": 12
+      "community": 0
     },
     {
       "label": "WorkingContext",
@@ -1345,7 +1345,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1350",
       "id": "types_workingcontext",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".new()",
@@ -1361,7 +1361,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1390",
       "id": "types_workingcontext_append_system",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".append_message()",
@@ -1369,7 +1369,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1395",
       "id": "types_workingcontext_append_message",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".extend_messages()",
@@ -1377,7 +1377,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1401",
       "id": "types_workingcontext_extend_messages",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".set_tools()",
@@ -1385,7 +1385,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1411",
       "id": "types_workingcontext_set_tools",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".mark_cache_breakpoint()",
@@ -1393,7 +1393,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1417",
       "id": "types_workingcontext_mark_cache_breakpoint",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".count_last()",
@@ -1401,7 +1401,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1422",
       "id": "types_workingcontext_count_last",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".last_user_message()",
@@ -1409,7 +1409,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1430",
       "id": "types_workingcontext_last_user_message",
-      "community": 12
+      "community": 0
     },
     {
       "label": ".into_request()",
@@ -1417,7 +1417,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1439",
       "id": "types_workingcontext_into_request",
-      "community": 12
+      "community": 0
     },
     {
       "label": "ProcessorOutput",
@@ -1433,7 +1433,7 @@
       "source_file": "moa-core/src/types.rs",
       "source_location": "L1473",
       "id": "types_estimate_text_tokens",
-      "community": 12
+      "community": 0
     },
     {
       "label": "session_id_roundtrip()",
@@ -1465,7 +1465,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L1",
       "id": "events",
-      "community": 17
+      "community": 16
     },
     {
       "label": "Event",
@@ -1473,7 +1473,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L13",
       "id": "events_event",
-      "community": 17
+      "community": 16
     },
     {
       "label": ".event_type()",
@@ -1481,7 +1481,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L190",
       "id": "events_event_event_type",
-      "community": 17
+      "community": 16
     },
     {
       "label": ".type_name()",
@@ -1489,7 +1489,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L216",
       "id": "events_event_type_name",
-      "community": 17
+      "community": 16
     },
     {
       "label": ".input_tokens()",
@@ -1497,7 +1497,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L242",
       "id": "events_event_input_tokens",
-      "community": 17
+      "community": 16
     },
     {
       "label": ".output_tokens()",
@@ -1505,7 +1505,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L250",
       "id": "events_event_output_tokens",
-      "community": 17
+      "community": 16
     },
     {
       "label": ".cost_cents()",
@@ -1513,7 +1513,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L258",
       "id": "events_event_cost_cents",
-      "community": 17
+      "community": 16
     },
     {
       "label": ".token_count()",
@@ -1521,7 +1521,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L266",
       "id": "events_event_token_count",
-      "community": 17
+      "community": 16
     },
     {
       "label": "event_serialization_roundtrip()",
@@ -1529,7 +1529,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L289",
       "id": "events_event_serialization_roundtrip",
-      "community": 17
+      "community": 16
     },
     {
       "label": "brain_response_event_has_cost_fields()",
@@ -1537,7 +1537,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L301",
       "id": "events_brain_response_event_has_cost_fields",
-      "community": 17
+      "community": 16
     },
     {
       "label": "all_event_types_serialize()",
@@ -1545,7 +1545,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L316",
       "id": "events_all_event_types_serialize",
-      "community": 17
+      "community": 16
     },
     {
       "label": "error.rs",
@@ -1553,7 +1553,7 @@
       "source_file": "moa-core/src/error.rs",
       "source_location": "L1",
       "id": "error",
-      "community": 6
+      "community": 10
     },
     {
       "label": "MoaError",
@@ -1561,7 +1561,7 @@
       "source_file": "moa-core/src/error.rs",
       "source_location": "L14",
       "id": "error_moaerror",
-      "community": 6
+      "community": 10
     },
     {
       "label": "config.rs",
@@ -1569,7 +1569,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L1",
       "id": "config",
-      "community": 6
+      "community": 10
     },
     {
       "label": "MoaConfig",
@@ -1577,7 +1577,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L13",
       "id": "config_moaconfig",
-      "community": 6
+      "community": 10
     },
     {
       "label": ".load()",
@@ -1585,7 +1585,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L32",
       "id": "config_moaconfig_load",
-      "community": 6
+      "community": 10
     },
     {
       "label": ".load_from_path()",
@@ -1593,7 +1593,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L41",
       "id": "config_moaconfig_load_from_path",
-      "community": 6
+      "community": 10
     },
     {
       "label": "GeneralConfig",
@@ -1601,7 +1601,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L199",
       "id": "config_generalconfig",
-      "community": 6
+      "community": 10
     },
     {
       "label": ".default()",
@@ -1609,7 +1609,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L213",
       "id": "config_generalconfig_default",
-      "community": 6
+      "community": 10
     },
     {
       "label": "ProviderCredentialConfig",
@@ -1617,7 +1617,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L227",
       "id": "config_providercredentialconfig",
-      "community": 6
+      "community": 10
     },
     {
       "label": ".new()",
@@ -1625,7 +1625,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L234",
       "id": "config_providercredentialconfig_new",
-      "community": 6
+      "community": 10
     },
     {
       "label": ".default()",
@@ -1633,7 +1633,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L242",
       "id": "config_providercredentialconfig_default",
-      "community": 6
+      "community": 10
     },
     {
       "label": "ProvidersConfig",
@@ -1641,7 +1641,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L250",
       "id": "config_providersconfig",
-      "community": 6
+      "community": 10
     },
     {
       "label": ".default()",
@@ -1649,7 +1649,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L260",
       "id": "config_providersconfig_default",
-      "community": 6
+      "community": 10
     },
     {
       "label": "LocalConfig",
@@ -1657,7 +1657,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L272",
       "id": "config_localconfig",
-      "community": 6
+      "community": 10
     },
     {
       "label": ".default()",
@@ -1665,7 +1665,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L284",
       "id": "config_localconfig_default",
-      "community": 6
+      "community": 10
     },
     {
       "label": "CloudConfig",
@@ -1673,7 +1673,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L297",
       "id": "config_cloudconfig",
-      "community": 6
+      "community": 10
     },
     {
       "label": ".default()",
@@ -1681,7 +1681,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L313",
       "id": "config_cloudconfig_default",
-      "community": 6
+      "community": 10
     },
     {
       "label": "CloudTemporalConfig",
@@ -1689,7 +1689,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L328",
       "id": "config_cloudtemporalconfig",
-      "community": 6
+      "community": 10
     },
     {
       "label": ".default()",
@@ -1697,7 +1697,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L340",
       "id": "config_cloudtemporalconfig_default",
-      "community": 6
+      "community": 10
     },
     {
       "label": "CloudFlyioConfig",
@@ -1705,7 +1705,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L353",
       "id": "config_cloudflyioconfig",
-      "community": 6
+      "community": 10
     },
     {
       "label": ".default()",
@@ -1713,7 +1713,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L363",
       "id": "config_cloudflyioconfig_default",
-      "community": 6
+      "community": 10
     },
     {
       "label": "CloudHandsConfig",
@@ -1721,7 +1721,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L375",
       "id": "config_cloudhandsconfig",
-      "community": 6
+      "community": 10
     },
     {
       "label": ".default()",
@@ -1729,7 +1729,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L385",
       "id": "config_cloudhandsconfig_default",
-      "community": 6
+      "community": 10
     },
     {
       "label": "GatewayConfig",
@@ -1737,7 +1737,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L397",
       "id": "config_gatewayconfig",
-      "community": 6
+      "community": 10
     },
     {
       "label": ".default()",
@@ -1745,7 +1745,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L409",
       "id": "config_gatewayconfig_default",
-      "community": 6
+      "community": 10
     },
     {
       "label": "TuiConfig",
@@ -1753,7 +1753,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L422",
       "id": "config_tuiconfig",
-      "community": 6
+      "community": 10
     },
     {
       "label": ".default()",
@@ -1761,7 +1761,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L434",
       "id": "config_tuiconfig_default",
-      "community": 6
+      "community": 10
     },
     {
       "label": "PermissionsConfig",
@@ -1769,7 +1769,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L447",
       "id": "config_permissionsconfig",
-      "community": 6
+      "community": 10
     },
     {
       "label": ".default()",
@@ -1777,7 +1777,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L457",
       "id": "config_permissionsconfig_default",
-      "community": 6
+      "community": 10
     },
     {
       "label": "default_config_is_valid()",
@@ -1785,7 +1785,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L479",
       "id": "config_default_config_is_valid",
-      "community": 6
+      "community": 10
     },
     {
       "label": "config_loads_from_toml_string()",
@@ -1793,7 +1793,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L485",
       "id": "config_config_loads_from_toml_string",
-      "community": 6
+      "community": 10
     },
     {
       "label": "config_loads_from_file()",
@@ -1801,7 +1801,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L501",
       "id": "config_config_loads_from_file",
-      "community": 6
+      "community": 10
     },
     {
       "label": "traits.rs",
@@ -1809,7 +1809,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L1",
       "id": "traits",
-      "community": 5
+      "community": 9
     },
     {
       "label": "BrainOrchestrator",
@@ -1817,7 +1817,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L19",
       "id": "traits_brainorchestrator",
-      "community": 5
+      "community": 9
     },
     {
       "label": "SessionStore",
@@ -1825,7 +1825,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L41",
       "id": "traits_sessionstore",
-      "community": 5
+      "community": 9
     },
     {
       "label": "HandProvider",
@@ -1833,7 +1833,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L70",
       "id": "traits_handprovider",
-      "community": 5
+      "community": 9
     },
     {
       "label": "LLMProvider",
@@ -1841,7 +1841,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L95",
       "id": "traits_llmprovider",
-      "community": 5
+      "community": 9
     },
     {
       "label": "PlatformAdapter",
@@ -1849,7 +1849,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L108",
       "id": "traits_platformadapter",
-      "community": 5
+      "community": 9
     },
     {
       "label": "MemoryStore",
@@ -1857,7 +1857,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L130",
       "id": "traits_memorystore",
-      "community": 5
+      "community": 9
     },
     {
       "label": "ContextProcessor",
@@ -1865,7 +1865,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L163",
       "id": "traits_contextprocessor",
-      "community": 5
+      "community": 9
     },
     {
       "label": "CredentialVault",
@@ -1873,7 +1873,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L176",
       "id": "traits_credentialvault",
-      "community": 5
+      "community": 9
     },
     {
       "label": "exec.rs",
@@ -1881,7 +1881,7 @@
       "source_file": "moa-cli/src/exec.rs",
       "source_location": "L1",
       "id": "exec",
-      "community": 7
+      "community": 3
     },
     {
       "label": "run_exec()",
@@ -1889,7 +1889,7 @@
       "source_file": "moa-cli/src/exec.rs",
       "source_location": "L11",
       "id": "exec_run_exec",
-      "community": 7
+      "community": 3
     },
     {
       "label": "resolve_exec_approval()",
@@ -1897,7 +1897,7 @@
       "source_file": "moa-cli/src/exec.rs",
       "source_location": "L59",
       "id": "exec_resolve_exec_approval",
-      "community": 7
+      "community": 3
     },
     {
       "label": "format_tool_update()",
@@ -1905,7 +1905,7 @@
       "source_file": "moa-cli/src/exec.rs",
       "source_location": "L97",
       "id": "exec_format_tool_update",
-      "community": 7
+      "community": 3
     },
     {
       "label": "exec_mode_formats_tool_updates_compactly()",
@@ -1913,7 +1913,7 @@
       "source_file": "moa-cli/src/exec.rs",
       "source_location": "L122",
       "id": "exec_exec_mode_formats_tool_updates_compactly",
-      "community": 7
+      "community": 3
     },
     {
       "label": "main.rs",
@@ -1999,7 +1999,7 @@
       "label": "map_key_event()",
       "file_type": "code",
       "source_file": "moa-tui/src/keybindings.rs",
-      "source_location": "L35",
+      "source_location": "L51",
       "id": "keybindings_map_key_event",
       "community": 26
     },
@@ -2007,7 +2007,7 @@
       "label": "key()",
       "file_type": "code",
       "source_file": "moa-tui/src/keybindings.rs",
-      "source_location": "L76",
+      "source_location": "L108",
       "id": "keybindings_key",
       "community": 26
     },
@@ -2015,7 +2015,7 @@
       "label": "enter_submits_but_shift_enter_inserts_newline()",
       "file_type": "code",
       "source_file": "moa-tui/src/keybindings.rs",
-      "source_location": "L86",
+      "source_location": "L118",
       "id": "keybindings_enter_submits_but_shift_enter_inserts_newline",
       "community": 26
     },
@@ -2023,15 +2023,23 @@
       "label": "approval_shortcuts_only_activate_while_waiting()",
       "file_type": "code",
       "source_file": "moa-tui/src/keybindings.rs",
-      "source_location": "L98",
+      "source_location": "L130",
       "id": "keybindings_approval_shortcuts_only_activate_while_waiting",
+      "community": 26
+    },
+    {
+      "label": "diff_view_shortcuts_are_scoped_to_the_overlay()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/keybindings.rs",
+      "source_location": "L155",
+      "id": "keybindings_diff_view_shortcuts_are_scoped_to_the_overlay",
       "community": 26
     },
     {
       "label": "ctrl_c_and_escape_cancel()",
       "file_type": "code",
       "source_file": "moa-tui/src/keybindings.rs",
-      "source_location": "L116",
+      "source_location": "L177",
       "id": "keybindings_ctrl_c_and_escape_cancel",
       "community": 26
     },
@@ -2041,191 +2049,255 @@
       "source_file": "moa-tui/src/runner.rs",
       "source_location": "L1",
       "id": "runner",
-      "community": 7
+      "community": 3
     },
     {
       "label": "RuntimeEvent",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L22",
+      "source_location": "L27",
       "id": "runner_runtimeevent",
-      "community": 7
+      "community": 3
     },
     {
       "label": "RuntimeCommand",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L51",
+      "source_location": "L56",
       "id": "runner_runtimecommand",
-      "community": 7
+      "community": 3
     },
     {
       "label": "ApprovalPrompt",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L58",
+      "source_location": "L63",
       "id": "runner_approvalprompt",
-      "community": 7
+      "community": 3
+    },
+    {
+      "label": "ApprovalField",
+      "file_type": "code",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L76",
+      "id": "runner_approvalfield",
+      "community": 3
+    },
+    {
+      "label": "ApprovalFileDiff",
+      "file_type": "code",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L85",
+      "id": "runner_approvalfilediff",
+      "community": 3
     },
     {
       "label": "ToolCardStatus",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L67",
+      "source_location": "L98",
       "id": "runner_toolcardstatus",
-      "community": 7
+      "community": 3
     },
     {
       "label": "ToolUpdate",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L82",
+      "source_location": "L113",
       "id": "runner_toolupdate",
-      "community": 7
+      "community": 3
     },
     {
       "label": "ChatRuntime",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L97",
+      "source_location": "L128",
       "id": "runner_chatruntime",
-      "community": 7
+      "community": 3
     },
     {
       "label": ".from_config()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L112",
+      "source_location": "L143",
       "id": "runner_chatruntime_from_config",
-      "community": 7
+      "community": 3
     },
     {
       "label": ".session_id()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L142",
+      "source_location": "L173",
       "id": "runner_chatruntime_session_id",
-      "community": 7
+      "community": 3
     },
     {
       "label": ".model()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L147",
+      "source_location": "L178",
       "id": "runner_chatruntime_model",
-      "community": 7
+      "community": 3
     },
     {
       "label": ".reset_session()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L152",
+      "source_location": "L183",
       "id": "runner_chatruntime_reset_session",
-      "community": 7
+      "community": 3
     },
     {
       "label": ".set_model()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L165",
+      "source_location": "L196",
       "id": "runner_chatruntime_set_model",
-      "community": 7
+      "community": 3
     },
     {
       "label": ".session_meta()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L176",
+      "source_location": "L207",
       "id": "runner_chatruntime_session_meta",
-      "community": 7
+      "community": 3
     },
     {
       "label": ".run_turn()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L181",
+      "source_location": "L212",
       "id": "runner_chatruntime_run_turn",
-      "community": 7
+      "community": 3
     },
     {
       "label": ".handle_tool_call()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L286",
+      "source_location": "L317",
       "id": "runner_chatruntime_handle_tool_call",
-      "community": 7
+      "community": 3
     },
     {
       "label": ".execute_tool()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L494",
+      "source_location": "L527",
       "id": "runner_chatruntime_execute_tool",
-      "community": 7
+      "community": 3
+    },
+    {
+      "label": ".approval_diffs_for_call()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L597",
+      "id": "runner_chatruntime_approval_diffs_for_call",
+      "community": 3
     },
     {
       "label": "summarize_tool_completion()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L565",
+      "source_location": "L625",
       "id": "runner_summarize_tool_completion",
-      "community": 7
+      "community": 3
     },
     {
       "label": "format_tool_output()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L577",
+      "source_location": "L637",
       "id": "runner_format_tool_output",
-      "community": 7
+      "community": 3
     },
     {
       "label": "parse_tool_id()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L592",
+      "source_location": "L652",
       "id": "runner_parse_tool_id",
-      "community": 7
+      "community": 3
     },
     {
       "label": "wait_for_approval()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L599",
+      "source_location": "L659",
       "id": "runner_wait_for_approval",
-      "community": 7
+      "community": 3
     },
     {
       "label": "always_allow_pattern()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L610",
+      "source_location": "L670",
       "id": "runner_always_allow_pattern",
-      "community": 7
+      "community": 3
+    },
+    {
+      "label": "approval_fields_for_call()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L685",
+      "id": "runner_approval_fields_for_call",
+      "community": 3
+    },
+    {
+      "label": "single_approval_field()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L748",
+      "id": "runner_single_approval_field",
+      "community": 3
+    },
+    {
+      "label": "expand_local_path()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L760",
+      "id": "runner_expand_local_path",
+      "community": 3
+    },
+    {
+      "label": "read_existing_text_file()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L769",
+      "id": "runner_read_existing_text_file",
+      "community": 3
+    },
+    {
+      "label": "language_hint_for_path()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L777",
+      "id": "runner_language_hint_for_path",
+      "community": 3
     },
     {
       "label": "local_user_id()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L625",
+      "source_location": "L784",
       "id": "runner_local_user_id",
-      "community": 7
+      "community": 3
     },
     {
       "label": "create_session()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L633",
+      "source_location": "L792",
       "id": "runner_create_session",
-      "community": 7
+      "community": 3
     },
     {
       "label": ".for_test()",
       "file_type": "code",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L654",
+      "source_location": "L813",
       "id": "runner_chatruntime_for_test",
-      "community": 7
+      "community": 3
     },
     {
       "label": "app.rs",
@@ -2233,191 +2305,295 @@
       "source_file": "moa-tui/src/app.rs",
       "source_location": "L1",
       "id": "app",
-      "community": 10
+      "community": 4
     },
     {
       "label": "AppMode",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L35",
+      "source_location": "L38",
       "id": "app_appmode",
-      "community": 10
+      "community": 4
     },
     {
       "label": "ChatEntry",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L48",
+      "source_location": "L53",
       "id": "app_chatentry",
-      "community": 10
+      "community": 4
+    },
+    {
+      "label": "ApprovalEntry",
+      "file_type": "code",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L63",
+      "id": "app_approvalentry",
+      "community": 4
+    },
+    {
+      "label": "ApprovalCardStatus",
+      "file_type": "code",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L71",
+      "id": "app_approvalcardstatus",
+      "community": 4
     },
     {
       "label": "ToolCardEntry",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L57",
+      "source_location": "L80",
       "id": "app_toolcardentry",
-      "community": 10
+      "community": 4
     },
     {
       "label": "App",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L66",
+      "source_location": "L89",
       "id": "app_app",
-      "community": 10
+      "community": 4
     },
     {
       "label": ".new()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L84",
+      "source_location": "L109",
       "id": "app_app_new",
-      "community": 10
+      "community": 4
     },
     {
       "label": ".mode()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L106",
+      "source_location": "L133",
       "id": "app_app_mode",
-      "community": 10
+      "community": 4
     },
     {
       "label": ".should_exit()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L111",
+      "source_location": "L138",
       "id": "app_app_should_exit",
-      "community": 10
+      "community": 4
     },
     {
       "label": ".drain_runtime_events()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L116",
+      "source_location": "L143",
       "id": "app_app_drain_runtime_events",
-      "community": 10
+      "community": 4
     },
     {
       "label": ".handle_key_event()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L123",
+      "source_location": "L150",
       "id": "app_app_handle_key_event",
-      "community": 10
+      "community": 4
     },
     {
       "label": ".draw()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L166",
+      "source_location": "L206",
       "id": "app_app_draw",
-      "community": 10
+      "community": 4
     },
     {
       "label": ".submit_prompt()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L201",
+      "source_location": "L246",
       "id": "app_app_submit_prompt",
-      "community": 10
+      "community": 4
     },
     {
       "label": ".handle_slash_command()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L234",
+      "source_location": "L279",
       "id": "app_app_handle_slash_command",
-      "community": 10
+      "community": 4
     },
     {
       "label": ".handle_runtime_event()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L284",
+      "source_location": "L329",
       "id": "app_app_handle_runtime_event",
-      "community": 10
+      "community": 4
+    },
+    {
+      "label": ".handle_tool_update()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L387",
+      "id": "app_app_handle_tool_update",
+      "community": 4
     },
     {
       "label": ".upsert_tool_card()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L340",
+      "source_location": "L401",
       "id": "app_app_upsert_tool_card",
-      "community": 10
+      "community": 4
+    },
+    {
+      "label": ".upsert_approval_card()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L421",
+      "id": "app_app_upsert_approval_card",
+      "community": 4
     },
     {
       "label": ".send_approval()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L360",
+      "source_location": "L441",
       "id": "app_app_send_approval",
-      "community": 10
+      "community": 4
     },
     {
       "label": ".cancel_or_exit()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L368",
+      "source_location": "L454",
       "id": "app_app_cancel_or_exit",
-      "community": 10
+      "community": 4
     },
     {
       "label": ".cancel_active_turn()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L379",
+      "source_location": "L469",
       "id": "app_app_cancel_active_turn",
-      "community": 10
+      "community": 4
     },
     {
       "label": ".sync_mode_with_prompt()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L388",
+      "source_location": "L479",
       "id": "app_app_sync_mode_with_prompt",
-      "community": 10
+      "community": 4
+    },
+    {
+      "label": ".update_approval_entry()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L500",
+      "id": "app_app_update_approval_entry",
+      "community": 4
+    },
+    {
+      "label": ".approval_status()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L517",
+      "id": "app_app_approval_status",
+      "community": 4
+    },
+    {
+      "label": ".open_diff_view()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L526",
+      "id": "app_app_open_diff_view",
+      "community": 4
+    },
+    {
+      "label": ".close_diff_view()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L534",
+      "id": "app_app_close_diff_view",
+      "community": 4
+    },
+    {
+      "label": ".toggle_diff_mode()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L539",
+      "id": "app_app_toggle_diff_mode",
+      "community": 4
+    },
+    {
+      "label": ".move_diff_file()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L545",
+      "id": "app_app_move_diff_file",
+      "community": 4
+    },
+    {
+      "label": ".move_diff_hunk()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L555",
+      "id": "app_app_move_diff_hunk",
+      "community": 4
+    },
+    {
+      "label": "approval_status_and_note()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L566",
+      "id": "app_approval_status_and_note",
+      "community": 4
     },
     {
       "label": "run_tui()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L407",
+      "source_location": "L588",
       "id": "app_run_tui",
-      "community": 10
+      "community": 4
     },
     {
       "label": "run_event_loop()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L424",
+      "source_location": "L605",
       "id": "app_run_event_loop",
-      "community": 10
+      "community": 4
     },
     {
       "label": "test_app()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L452",
+      "source_location": "L636",
       "id": "app_test_app",
-      "community": 10
+      "community": 4
     },
     {
       "label": "app_state_transitions_follow_idle_composing_running_idle()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L476",
+      "source_location": "L662",
       "id": "app_app_state_transitions_follow_idle_composing_running_idle",
-      "community": 10
+      "community": 4
     },
     {
       "label": "rendering_smoke_test_does_not_panic()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L502",
+      "source_location": "L688",
       "id": "app_rendering_smoke_test_does_not_panic",
-      "community": 10
+      "community": 4
+    },
+    {
+      "label": "diff_overlay_renders_for_file_write_approval()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L702",
+      "id": "app_diff_overlay_renders_for_file_write_approval",
+      "community": 4
     },
     {
       "label": "mod.rs",
@@ -2425,7 +2601,287 @@
       "source_file": "moa-tui/src/views/mod.rs",
       "source_location": "L1",
       "id": "mod",
-      "community": 4
+      "community": 8
+    },
+    {
+      "label": "diff.rs",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L1",
+      "id": "diff",
+      "community": 6
+    },
+    {
+      "label": "DiffMode",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L28",
+      "id": "diff_diffmode",
+      "community": 6
+    },
+    {
+      "label": "DiffViewState",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L37",
+      "id": "diff_diffviewstate",
+      "community": 6
+    },
+    {
+      "label": "DiffFileView",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L45",
+      "id": "diff_difffileview",
+      "community": 6
+    },
+    {
+      "label": "UnifiedLine",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L54",
+      "id": "diff_unifiedline",
+      "community": 6
+    },
+    {
+      "label": "SplitLine",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L62",
+      "id": "diff_splitline",
+      "community": 6
+    },
+    {
+      "label": ".from_file_diffs()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L72",
+      "id": "diff_diffviewstate_from_file_diffs",
+      "community": 6
+    },
+    {
+      "label": ".toggle_mode()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L87",
+      "id": "diff_diffviewstate_toggle_mode",
+      "community": 6
+    },
+    {
+      "label": ".next_file()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L95",
+      "id": "diff_diffviewstate_next_file",
+      "community": 6
+    },
+    {
+      "label": ".previous_file()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L104",
+      "id": "diff_diffviewstate_previous_file",
+      "community": 6
+    },
+    {
+      "label": ".next_hunk()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L117",
+      "id": "diff_diffviewstate_next_hunk",
+      "community": 6
+    },
+    {
+      "label": ".previous_hunk()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L128",
+      "id": "diff_diffviewstate_previous_hunk",
+      "community": 6
+    },
+    {
+      "label": ".current_file()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L142",
+      "id": "diff_diffviewstate_current_file",
+      "community": 6
+    },
+    {
+      "label": ".current_hunk_range()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L146",
+      "id": "diff_diffviewstate_current_hunk_range",
+      "community": 6
+    },
+    {
+      "label": "default_mode_for_width()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L153",
+      "id": "diff_default_mode_for_width",
+      "community": 6
+    },
+    {
+      "label": "render_diff_view()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L162",
+      "id": "diff_render_diff_view",
+      "community": 6
+    },
+    {
+      "label": "render_compact_diff_preview()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L198",
+      "id": "diff_render_compact_diff_preview",
+      "community": 6
+    },
+    {
+      "label": "build_diff_file_view()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L220",
+      "id": "diff_build_diff_file_view",
+      "community": 6
+    },
+    {
+      "label": "render_unified_lines()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L317",
+      "id": "diff_render_unified_lines",
+      "community": 6
+    },
+    {
+      "label": "render_unified_line()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L338",
+      "id": "diff_render_unified_line",
+      "community": 6
+    },
+    {
+      "label": "render_side_by_side_lines()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L368",
+      "id": "diff_render_side_by_side_lines",
+      "community": 6
+    },
+    {
+      "label": "render_split_line()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L385",
+      "id": "diff_render_split_line",
+      "community": 6
+    },
+    {
+      "label": "render_side()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L416",
+      "id": "diff_render_side",
+      "community": 6
+    },
+    {
+      "label": "side_marker()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L440",
+      "id": "diff_side_marker",
+      "community": 6
+    },
+    {
+      "label": "diff_line_style()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L449",
+      "id": "diff_diff_line_style",
+      "community": 6
+    },
+    {
+      "label": "split_side_style()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L462",
+      "id": "diff_split_side_style",
+      "community": 6
+    },
+    {
+      "label": "highlighted_spans()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L475",
+      "id": "diff_highlighted_spans",
+      "community": 6
+    },
+    {
+      "label": "syntax_for_hint()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L493",
+      "id": "diff_syntax_for_hint",
+      "community": 6
+    },
+    {
+      "label": "syntax_set()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L506",
+      "id": "diff_syntax_set",
+      "community": 6
+    },
+    {
+      "label": "theme()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L511",
+      "id": "diff_theme",
+      "community": 6
+    },
+    {
+      "label": "to_ratatui_style()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L525",
+      "id": "diff_to_ratatui_style",
+      "community": 6
+    },
+    {
+      "label": "trim_change_line()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L549",
+      "id": "diff_trim_change_line",
+      "community": 6
+    },
+    {
+      "label": "truncate_to_width()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L553",
+      "id": "diff_truncate_to_width",
+      "community": 6
+    },
+    {
+      "label": "pad_or_truncate()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L557",
+      "id": "diff_pad_or_truncate",
+      "community": 6
+    },
+    {
+      "label": "diff_layout_switches_at_expected_threshold()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L568",
+      "id": "diff_diff_layout_switches_at_expected_threshold",
+      "community": 6
     },
     {
       "label": "chat.rs",
@@ -2433,47 +2889,47 @@
       "source_file": "moa-tui/src/views/chat.rs",
       "source_location": "L1",
       "id": "chat",
-      "community": 28
+      "community": 29
     },
     {
       "label": "max_scroll()",
       "file_type": "code",
       "source_file": "moa-tui/src/views/chat.rs",
-      "source_location": "L14",
+      "source_location": "L17",
       "id": "chat_max_scroll",
-      "community": 28
+      "community": 29
     },
     {
       "label": "render_chat()",
       "file_type": "code",
       "source_file": "moa-tui/src/views/chat.rs",
-      "source_location": "L20",
+      "source_location": "L23",
       "id": "chat_render_chat",
-      "community": 28
+      "community": 29
     },
     {
       "label": "transcript_lines()",
       "file_type": "code",
       "source_file": "moa-tui/src/views/chat.rs",
-      "source_location": "L28",
+      "source_location": "L31",
       "id": "chat_transcript_lines",
-      "community": 28
+      "community": 29
     },
     {
       "label": "wrap_prefixed()",
       "file_type": "code",
       "source_file": "moa-tui/src/views/chat.rs",
-      "source_location": "L74",
+      "source_location": "L80",
       "id": "chat_wrap_prefixed",
-      "community": 28
+      "community": 29
     },
     {
       "label": "wrap_line()",
       "file_type": "code",
       "source_file": "moa-tui/src/views/chat.rs",
-      "source_location": "L90",
+      "source_location": "L96",
       "id": "chat_wrap_line",
-      "community": 28
+      "community": 29
     },
     {
       "label": "prompt.rs",
@@ -2554,6 +3010,94 @@
       "source_location": "L65",
       "id": "prompt_build_textarea",
       "community": 20
+    },
+    {
+      "label": "approval.rs",
+      "file_type": "code",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L1",
+      "id": "approval",
+      "community": 17
+    },
+    {
+      "label": "render_approval_card()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L18",
+      "id": "approval_render_approval_card",
+      "community": 17
+    },
+    {
+      "label": "risk_border_style()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L81",
+      "id": "approval_risk_border_style",
+      "community": 17
+    },
+    {
+      "label": "border_line()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L89",
+      "id": "approval_border_line",
+      "community": 17
+    },
+    {
+      "label": "content_line()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L107",
+      "id": "approval_content_line",
+      "community": 17
+    },
+    {
+      "label": "approval_icon()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L121",
+      "id": "approval_approval_icon",
+      "community": 17
+    },
+    {
+      "label": "approval_label()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L129",
+      "id": "approval_approval_label",
+      "community": 17
+    },
+    {
+      "label": "status_style()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L138",
+      "id": "approval_status_style",
+      "community": 17
+    },
+    {
+      "label": "wrap_text()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L148",
+      "id": "approval_wrap_text",
+      "community": 17
+    },
+    {
+      "label": "truncate_to_width()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L179",
+      "id": "approval_truncate_to_width",
+      "community": 17
+    },
+    {
+      "label": "approval_card_uses_expected_border_color_for_each_risk_level()",
+      "file_type": "code",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L191",
+      "id": "approval_approval_card_uses_expected_border_color_for_each_risk_level",
+      "community": 17
     },
     {
       "label": "tool_card.rs",
@@ -2713,7 +3257,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L1",
       "id": "turso",
-      "community": 8
+      "community": 2
     },
     {
       "label": "TursoSessionStore",
@@ -2721,7 +3265,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L25",
       "id": "turso_tursosessionstore",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".new()",
@@ -2729,7 +3273,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L31",
       "id": "turso_tursosessionstore_new",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".new_local()",
@@ -2737,7 +3281,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L40",
       "id": "turso_tursosessionstore_new_local",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".wake()",
@@ -2745,7 +3289,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L60",
       "id": "turso_tursosessionstore_wake",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".new_remote()",
@@ -2753,7 +3297,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L108",
       "id": "turso_tursosessionstore_new_remote",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".next_sequence()",
@@ -2761,7 +3305,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L125",
       "id": "turso_tursosessionstore_next_sequence",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".list_approval_rules()",
@@ -2769,7 +3313,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L145",
       "id": "turso_tursosessionstore_list_approval_rules",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".upsert_approval_rule()",
@@ -2777,7 +3321,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L189",
       "id": "turso_tursosessionstore_upsert_approval_rule",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".delete_approval_rule()",
@@ -2785,7 +3329,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L217",
       "id": "turso_tursosessionstore_delete_approval_rule",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".create_session()",
@@ -2793,7 +3337,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L242",
       "id": "turso_tursosessionstore_create_session",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".emit_event()",
@@ -2801,7 +3345,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L282",
       "id": "turso_tursosessionstore_emit_event",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".get_events()",
@@ -2809,7 +3353,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L358",
       "id": "turso_tursosessionstore_get_events",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".get_session()",
@@ -2817,7 +3361,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L404",
       "id": "turso_tursosessionstore_get_session",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".update_status()",
@@ -2825,7 +3369,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L421",
       "id": "turso_tursosessionstore_update_status",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".search_events()",
@@ -2833,7 +3377,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L458",
       "id": "turso_tursosessionstore_search_events",
-      "community": 8
+      "community": 2
     },
     {
       "label": ".list_sessions()",
@@ -2841,7 +3385,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L520",
       "id": "turso_tursosessionstore_list_sessions",
-      "community": 8
+      "community": 2
     },
     {
       "label": "event_hand_id()",
@@ -2849,7 +3393,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L584",
       "id": "turso_event_hand_id",
-      "community": 8
+      "community": 2
     },
     {
       "label": "is_remote_url()",
@@ -2857,7 +3401,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L594",
       "id": "turso_is_remote_url",
-      "community": 8
+      "community": 2
     },
     {
       "label": "map_db_error()",
@@ -2865,7 +3409,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L598",
       "id": "turso_map_db_error",
-      "community": 8
+      "community": 2
     },
     {
       "label": "policy_action_to_db()",
@@ -2873,7 +3417,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L602",
       "id": "turso_policy_action_to_db",
-      "community": 8
+      "community": 2
     },
     {
       "label": "policy_action_from_db()",
@@ -2881,7 +3425,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L610",
       "id": "turso_policy_action_from_db",
-      "community": 8
+      "community": 2
     },
     {
       "label": "policy_scope_to_db()",
@@ -2889,7 +3433,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L621",
       "id": "turso_policy_scope_to_db",
-      "community": 8
+      "community": 2
     },
     {
       "label": "policy_scope_from_db()",
@@ -2897,7 +3441,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L628",
       "id": "turso_policy_scope_from_db",
-      "community": 8
+      "community": 2
     },
     {
       "label": "schema.rs",
@@ -2905,7 +3449,7 @@
       "source_file": "moa-session/src/schema.rs",
       "source_location": "L1",
       "id": "schema",
-      "community": 8
+      "community": 2
     },
     {
       "label": "migrate()",
@@ -2913,7 +3457,7 @@
       "source_file": "moa-session/src/schema.rs",
       "source_location": "L112",
       "id": "schema_migrate",
-      "community": 8
+      "community": 2
     },
     {
       "label": "queries.rs",
@@ -2921,7 +3465,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L1",
       "id": "queries",
-      "community": 16
+      "community": 2
     },
     {
       "label": "expand_local_path()",
@@ -2929,7 +3473,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L29",
       "id": "queries_expand_local_path",
-      "community": 16
+      "community": 2
     },
     {
       "label": "session_status_to_db()",
@@ -2937,7 +3481,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L44",
       "id": "queries_session_status_to_db",
-      "community": 16
+      "community": 2
     },
     {
       "label": "session_status_from_db()",
@@ -2945,7 +3489,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L57",
       "id": "queries_session_status_from_db",
-      "community": 16
+      "community": 2
     },
     {
       "label": "platform_to_db()",
@@ -2953,7 +3497,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L73",
       "id": "queries_platform_to_db",
-      "community": 16
+      "community": 2
     },
     {
       "label": "platform_from_db()",
@@ -2961,7 +3505,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L84",
       "id": "queries_platform_from_db",
-      "community": 16
+      "community": 2
     },
     {
       "label": "event_type_to_db()",
@@ -2969,7 +3513,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L98",
       "id": "queries_event_type_to_db",
-      "community": 16
+      "community": 2
     },
     {
       "label": "event_type_from_db()",
@@ -2977,7 +3521,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L124",
       "id": "queries_event_type_from_db",
-      "community": 16
+      "community": 2
     },
     {
       "label": "session_meta_from_row()",
@@ -2985,7 +3529,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L153",
       "id": "queries_session_meta_from_row",
-      "community": 16
+      "community": 2
     },
     {
       "label": "session_summary_from_row()",
@@ -2993,7 +3537,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L220",
       "id": "queries_session_summary_from_row",
-      "community": 16
+      "community": 2
     },
     {
       "label": "event_record_from_row()",
@@ -3001,7 +3545,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L256",
       "id": "queries_event_record_from_row",
-      "community": 16
+      "community": 2
     },
     {
       "label": "parse_timestamp()",
@@ -3009,7 +3553,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L294",
       "id": "queries_parse_timestamp",
-      "community": 16
+      "community": 2
     },
     {
       "label": "optional_text()",
@@ -3017,7 +3561,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L300",
       "id": "queries_optional_text",
-      "community": 16
+      "community": 2
     },
     {
       "label": "optional_i64()",
@@ -3025,7 +3569,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L313",
       "id": "queries_optional_i64",
-      "community": 16
+      "community": 2
     },
     {
       "label": "anthropic_live.rs",
@@ -3033,7 +3577,7 @@
       "source_file": "moa-providers/tests/anthropic_live.rs",
       "source_location": "L1",
       "id": "anthropic_live",
-      "community": 39
+      "community": 40
     },
     {
       "label": "anthropic_live_completion_returns_expected_answer()",
@@ -3041,7 +3585,7 @@
       "source_file": "moa-providers/tests/anthropic_live.rs",
       "source_location": "L6",
       "id": "anthropic_live_anthropic_live_completion_returns_expected_answer",
-      "community": 39
+      "community": 40
     },
     {
       "label": "anthropic_provider.rs",
@@ -3049,7 +3593,7 @@
       "source_file": "moa-providers/tests/anthropic_provider.rs",
       "source_location": "L1",
       "id": "anthropic_provider",
-      "community": 36
+      "community": 37
     },
     {
       "label": "provider_streams_tokens_incrementally()",
@@ -3057,7 +3601,7 @@
       "source_file": "moa-providers/tests/anthropic_provider.rs",
       "source_location": "L16",
       "id": "anthropic_provider_provider_streams_tokens_incrementally",
-      "community": 36
+      "community": 37
     },
     {
       "label": "provider_retries_after_rate_limit()",
@@ -3065,7 +3609,7 @@
       "source_file": "moa-providers/tests/anthropic_provider.rs",
       "source_location": "L90",
       "id": "anthropic_provider_provider_retries_after_rate_limit",
-      "community": 36
+      "community": 37
     },
     {
       "label": "anthropic.rs",
@@ -3425,7 +3969,7 @@
       "source_file": "moa-providers/src/common.rs",
       "source_location": "L1",
       "id": "common",
-      "community": 1
+      "community": 27
     },
     {
       "label": "build_http_client()",
@@ -3433,7 +3977,7 @@
       "source_file": "moa-providers/src/common.rs",
       "source_location": "L13",
       "id": "common_build_http_client",
-      "community": 1
+      "community": 27
     },
     {
       "label": "send_with_retry()",
@@ -3441,7 +3985,7 @@
       "source_file": "moa-providers/src/common.rs",
       "source_location": "L21",
       "id": "common_send_with_retry",
-      "community": 1
+      "community": 27
     },
     {
       "label": "parse_sse_json()",
@@ -3449,7 +3993,7 @@
       "source_file": "moa-providers/src/common.rs",
       "source_location": "L67",
       "id": "common_parse_sse_json",
-      "community": 1
+      "community": 27
     },
     {
       "label": "retry_delay()",
@@ -3457,7 +4001,7 @@
       "source_file": "moa-providers/src/common.rs",
       "source_location": "L80",
       "id": "common_retry_delay",
-      "community": 1
+      "community": 27
     },
     {
       "label": "response_text()",
@@ -3465,7 +4009,7 @@
       "source_file": "moa-providers/src/common.rs",
       "source_location": "L84",
       "id": "common_response_text",
-      "community": 1
+      "community": 27
     },
     {
       "label": "retries_on_rate_limit()",
@@ -3473,7 +4017,7 @@
       "source_file": "moa-providers/src/common.rs",
       "source_location": "L107",
       "id": "common_retries_on_rate_limit",
-      "community": 1
+      "community": 27
     },
     {
       "label": "policies.rs",
@@ -3481,7 +4025,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L1",
       "id": "policies",
-      "community": 11
+      "community": 12
     },
     {
       "label": "ApprovalRuleStore",
@@ -3489,7 +4033,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L13",
       "id": "policies_approvalrulestore",
-      "community": 11
+      "community": 12
     },
     {
       "label": "ToolPolicyContext",
@@ -3497,7 +4041,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L31",
       "id": "policies_toolpolicycontext",
-      "community": 11
+      "community": 12
     },
     {
       "label": ".from_session()",
@@ -3505,7 +4049,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L40",
       "id": "policies_toolpolicycontext_from_session",
-      "community": 11
+      "community": 12
     },
     {
       "label": "PolicyCheck",
@@ -3513,7 +4057,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L50",
       "id": "policies_policycheck",
-      "community": 11
+      "community": 12
     },
     {
       "label": "ToolPolicies",
@@ -3521,7 +4065,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L65",
       "id": "policies_toolpolicies",
-      "community": 11
+      "community": 12
     },
     {
       "label": ".from_config()",
@@ -3529,7 +4073,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L73",
       "id": "policies_toolpolicies_from_config",
-      "community": 11
+      "community": 12
     },
     {
       "label": ".check()",
@@ -3537,7 +4081,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L82",
       "id": "policies_toolpolicies_check",
-      "community": 11
+      "community": 12
     },
     {
       "label": ".default()",
@@ -3545,7 +4089,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L157",
       "id": "policies_toolpolicies_default",
-      "community": 11
+      "community": 12
     },
     {
       "label": "glob_match()",
@@ -3553,7 +4097,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L163",
       "id": "policies_glob_match",
-      "community": 11
+      "community": 12
     },
     {
       "label": "parse_and_match_bash()",
@@ -3561,7 +4105,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L170",
       "id": "policies_parse_and_match_bash",
-      "community": 11
+      "community": 12
     },
     {
       "label": "split_shell_chain()",
@@ -3569,7 +4113,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L184",
       "id": "policies_split_shell_chain",
-      "community": 11
+      "community": 12
     },
     {
       "label": "rule_visible_to_workspace()",
@@ -3577,7 +4121,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L213",
       "id": "policies_rule_visible_to_workspace",
-      "community": 11
+      "community": 12
     },
     {
       "label": "rule_matches()",
@@ -3585,7 +4129,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L217",
       "id": "policies_rule_matches",
-      "community": 11
+      "community": 12
     },
     {
       "label": "normalize_tool_input()",
@@ -3593,7 +4137,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L225",
       "id": "policies_normalize_tool_input",
-      "community": 11
+      "community": 12
     },
     {
       "label": "summarize_tool_input()",
@@ -3601,7 +4145,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L238",
       "id": "policies_summarize_tool_input",
-      "community": 11
+      "community": 12
     },
     {
       "label": "required_string_field()",
@@ -3609,7 +4153,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L259",
       "id": "policies_required_string_field",
-      "community": 11
+      "community": 12
     },
     {
       "label": "risk_level_for_tool()",
@@ -3617,7 +4161,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L271",
       "id": "policies_risk_level_for_tool",
-      "community": 11
+      "community": 12
     },
     {
       "label": "categorize_tool()",
@@ -3625,7 +4169,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L279",
       "id": "policies_categorize_tool",
-      "community": 11
+      "community": 12
     },
     {
       "label": "ToolCategory",
@@ -3633,7 +4177,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L290",
       "id": "policies_toolcategory",
-      "community": 11
+      "community": 12
     },
     {
       "label": "session()",
@@ -3641,7 +4185,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L306",
       "id": "policies_session",
-      "community": 11
+      "community": 12
     },
     {
       "label": "read_tools_are_auto_approved_and_bash_requires_approval()",
@@ -3649,7 +4193,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L316",
       "id": "policies_read_tools_are_auto_approved_and_bash_requires_approval",
-      "community": 11
+      "community": 12
     },
     {
       "label": "persistent_rule_matching_uses_glob_patterns()",
@@ -3657,7 +4201,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L332",
       "id": "policies_persistent_rule_matching_uses_glob_patterns",
-      "community": 11
+      "community": 12
     },
     {
       "label": "shell_command_parsing_detects_chained_commands()",
@@ -3665,7 +4209,7 @@
       "source_file": "moa-security/src/policies.rs",
       "source_location": "L355",
       "id": "policies_shell_command_parsing_detects_chained_commands",
-      "community": 11
+      "community": 12
     },
     {
       "label": "local_tools.rs",
@@ -3801,7 +4345,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L1",
       "id": "local",
-      "community": 9
+      "community": 11
     },
     {
       "label": "DockerSandbox",
@@ -3809,7 +4353,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L23",
       "id": "local_dockersandbox",
-      "community": 9
+      "community": 11
     },
     {
       "label": "LocalHandProvider",
@@ -3817,7 +4361,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L29",
       "id": "local_localhandprovider",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".new()",
@@ -3825,7 +4369,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L38",
       "id": "local_localhandprovider_new",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".docker_available()",
@@ -3833,7 +4377,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L51",
       "id": "local_localhandprovider_docker_available",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".with_command_timeout()",
@@ -3841,7 +4385,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L56",
       "id": "local_localhandprovider_with_command_timeout",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".create_sandbox_dir()",
@@ -3849,7 +4393,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L61",
       "id": "local_localhandprovider_create_sandbox_dir",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".provision_docker()",
@@ -3857,7 +4401,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L67",
       "id": "local_localhandprovider_provision_docker",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".execute_local_tool()",
@@ -3865,7 +4409,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L106",
       "id": "local_localhandprovider_execute_local_tool",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".execute_docker_tool()",
@@ -3873,7 +4417,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L123",
       "id": "local_localhandprovider_execute_docker_tool",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".destroy_local_sandbox()",
@@ -3881,7 +4425,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L152",
       "id": "local_localhandprovider_destroy_local_sandbox",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".provider_name()",
@@ -3889,7 +4433,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L163",
       "id": "local_localhandprovider_provider_name",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".provision()",
@@ -3897,7 +4441,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L167",
       "id": "local_localhandprovider_provision",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".execute()",
@@ -3905,7 +4449,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L190",
       "id": "local_localhandprovider_execute",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".status()",
@@ -3913,7 +4457,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L204",
       "id": "local_localhandprovider_status",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".pause()",
@@ -3921,7 +4465,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L231",
       "id": "local_localhandprovider_pause",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".resume()",
@@ -3929,7 +4473,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L253",
       "id": "local_localhandprovider_resume",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".destroy()",
@@ -3937,7 +4481,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L275",
       "id": "local_localhandprovider_destroy",
-      "community": 9
+      "community": 11
     },
     {
       "label": "detect_docker()",
@@ -3945,7 +4489,7 @@
       "source_file": "moa-hands/src/local.rs",
       "source_location": "L302",
       "id": "local_detect_docker",
-      "community": 9
+      "community": 11
     },
     {
       "label": "router.rs",
@@ -3953,7 +4497,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L1",
       "id": "router",
-      "community": 2
+      "community": 5
     },
     {
       "label": "ToolContext",
@@ -3961,7 +4505,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L27",
       "id": "router_toolcontext",
-      "community": 2
+      "community": 5
     },
     {
       "label": "BuiltInTool",
@@ -3969,7 +4513,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L36",
       "id": "router_builtintool",
-      "community": 2
+      "community": 5
     },
     {
       "label": "ToolExecution",
@@ -3977,7 +4521,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L59",
       "id": "router_toolexecution",
-      "community": 2
+      "community": 5
     },
     {
       "label": "ToolDefinition",
@@ -3985,7 +4529,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L69",
       "id": "router_tooldefinition",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".anthropic_schema()",
@@ -3993,7 +4537,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L86",
       "id": "router_tooldefinition_anthropic_schema",
-      "community": 2
+      "community": 5
     },
     {
       "label": "ToolRegistry",
@@ -4001,7 +4545,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L96",
       "id": "router_toolregistry",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".new()",
@@ -4009,7 +4553,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L103",
       "id": "router_toolregistry_new",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".default_local()",
@@ -4017,7 +4561,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L111",
       "id": "router_toolregistry_default_local",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".register_builtin()",
@@ -4025,7 +4569,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L197",
       "id": "router_toolregistry_register_builtin",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".register_hand()",
@@ -4033,7 +4577,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L213",
       "id": "router_toolregistry_register_hand",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".get()",
@@ -4041,7 +4585,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L238",
       "id": "router_toolregistry_get",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".default_tool_schemas()",
@@ -4049,7 +4593,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L243",
       "id": "router_toolregistry_default_tool_schemas",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".default()",
@@ -4057,7 +4601,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L253",
       "id": "router_toolregistry_default",
-      "community": 2
+      "community": 5
     },
     {
       "label": "ToolRouter",
@@ -4065,7 +4609,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L259",
       "id": "router_toolrouter",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".new()",
@@ -4073,7 +4617,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L270",
       "id": "router_toolrouter_new",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".new_local()",
@@ -4081,7 +4625,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L286",
       "id": "router_toolrouter_new_local",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".from_config()",
@@ -4089,7 +4633,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L306",
       "id": "router_toolrouter_from_config",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".with_rule_store()",
@@ -4097,7 +4641,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L317",
       "id": "router_toolrouter_with_rule_store",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".with_policies()",
@@ -4105,7 +4649,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L323",
       "id": "router_toolrouter_with_policies",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".tool_schemas()",
@@ -4113,7 +4657,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L329",
       "id": "router_toolrouter_tool_schemas",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".check_policy()",
@@ -4121,7 +4665,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L334",
       "id": "router_toolrouter_check_policy",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".store_approval_rule()",
@@ -4129,7 +4673,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L356",
       "id": "router_toolrouter_store_approval_rule",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".execute()",
@@ -4137,7 +4681,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L385",
       "id": "router_toolrouter_execute",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".execute_authorized()",
@@ -4145,7 +4689,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L405",
       "id": "router_toolrouter_execute_authorized",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".get_or_provision_hand()",
@@ -4153,7 +4697,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L443",
       "id": "router_toolrouter_get_or_provision_hand",
-      "community": 2
+      "community": 5
     },
     {
       "label": "session_provider_key()",
@@ -4161,7 +4705,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L475",
       "id": "router_session_provider_key",
-      "community": 2
+      "community": 5
     },
     {
       "label": "hand_id()",
@@ -4169,7 +4713,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L479",
       "id": "router_hand_id",
-      "community": 2
+      "community": 5
     },
     {
       "label": "expand_local_path()",
@@ -4177,7 +4721,7 @@
       "source_file": "moa-hands/src/router.rs",
       "source_location": "L488",
       "id": "router_expand_local_path",
-      "community": 2
+      "community": 5
     },
     {
       "label": "file_search.rs",
@@ -4185,7 +4729,7 @@
       "source_file": "moa-hands/src/tools/file_search.rs",
       "source_location": "L1",
       "id": "file_search",
-      "community": 33
+      "community": 34
     },
     {
       "label": "execute()",
@@ -4193,7 +4737,7 @@
       "source_file": "moa-hands/src/tools/file_search.rs",
       "source_location": "L12",
       "id": "file_search_execute",
-      "community": 33
+      "community": 34
     },
     {
       "label": "collect_matches()",
@@ -4201,7 +4745,7 @@
       "source_file": "moa-hands/src/tools/file_search.rs",
       "source_location": "L29",
       "id": "file_search_collect_matches",
-      "community": 33
+      "community": 34
     },
     {
       "label": "FileSearchInput",
@@ -4209,7 +4753,7 @@
       "source_file": "moa-hands/src/tools/file_search.rs",
       "source_location": "L58",
       "id": "file_search_filesearchinput",
-      "community": 33
+      "community": 34
     },
     {
       "label": "bash.rs",
@@ -4217,7 +4761,7 @@
       "source_file": "moa-hands/src/tools/bash.rs",
       "source_location": "L1",
       "id": "bash",
-      "community": 32
+      "community": 33
     },
     {
       "label": "execute_local()",
@@ -4225,7 +4769,7 @@
       "source_file": "moa-hands/src/tools/bash.rs",
       "source_location": "L11",
       "id": "bash_execute_local",
-      "community": 32
+      "community": 33
     },
     {
       "label": "execute_docker()",
@@ -4233,7 +4777,7 @@
       "source_file": "moa-hands/src/tools/bash.rs",
       "source_location": "L46",
       "id": "bash_execute_docker",
-      "community": 32
+      "community": 33
     },
     {
       "label": "BashToolInput",
@@ -4241,7 +4785,7 @@
       "source_file": "moa-hands/src/tools/bash.rs",
       "source_location": "L79",
       "id": "bash_bashtoolinput",
-      "community": 32
+      "community": 33
     },
     {
       "label": ".timeout()",
@@ -4249,7 +4793,7 @@
       "source_file": "moa-hands/src/tools/bash.rs",
       "source_location": "L86",
       "id": "bash_bashtoolinput_timeout",
-      "community": 32
+      "community": 33
     },
     {
       "label": "memory.rs",
@@ -4409,7 +4953,7 @@
       "source_file": "moa-hands/src/tools/file_write.rs",
       "source_location": "L1",
       "id": "file_write",
-      "community": 37
+      "community": 38
     },
     {
       "label": "execute()",
@@ -4417,7 +4961,7 @@
       "source_file": "moa-hands/src/tools/file_write.rs",
       "source_location": "L13",
       "id": "file_write_execute",
-      "community": 37
+      "community": 38
     },
     {
       "label": "FileWriteInput",
@@ -4425,7 +4969,7 @@
       "source_file": "moa-hands/src/tools/file_write.rs",
       "source_location": "L33",
       "id": "file_write_filewriteinput",
-      "community": 37
+      "community": 38
     },
     {
       "label": "stub.rs",
@@ -4433,7 +4977,7 @@
       "source_file": "moa-hands/src/tools/stub.rs",
       "source_location": "L1",
       "id": "stub",
-      "community": 2
+      "community": 5
     },
     {
       "label": "StubTool",
@@ -4441,7 +4985,7 @@
       "source_file": "moa-hands/src/tools/stub.rs",
       "source_location": "L9",
       "id": "stub_stubtool",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".new()",
@@ -4449,7 +4993,7 @@
       "source_file": "moa-hands/src/tools/stub.rs",
       "source_location": "L17",
       "id": "stub_stubtool_new",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".name()",
@@ -4457,7 +5001,7 @@
       "source_file": "moa-hands/src/tools/stub.rs",
       "source_location": "L28",
       "id": "stub_stubtool_name",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".description()",
@@ -4465,7 +5009,7 @@
       "source_file": "moa-hands/src/tools/stub.rs",
       "source_location": "L32",
       "id": "stub_stubtool_description",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".input_schema()",
@@ -4473,7 +5017,7 @@
       "source_file": "moa-hands/src/tools/stub.rs",
       "source_location": "L36",
       "id": "stub_stubtool_input_schema",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".risk_level()",
@@ -4481,7 +5025,7 @@
       "source_file": "moa-hands/src/tools/stub.rs",
       "source_location": "L47",
       "id": "stub_stubtool_risk_level",
-      "community": 2
+      "community": 5
     },
     {
       "label": ".execute()",
@@ -4489,7 +5033,7 @@
       "source_file": "moa-hands/src/tools/stub.rs",
       "source_location": "L51",
       "id": "stub_stubtool_execute",
-      "community": 2
+      "community": 5
     },
     {
       "label": "file_read.rs",
@@ -4497,7 +5041,7 @@
       "source_file": "moa-hands/src/tools/file_read.rs",
       "source_location": "L1",
       "id": "file_read",
-      "community": 34
+      "community": 35
     },
     {
       "label": "execute()",
@@ -4505,7 +5049,7 @@
       "source_file": "moa-hands/src/tools/file_read.rs",
       "source_location": "L11",
       "id": "file_read_execute",
-      "community": 34
+      "community": 35
     },
     {
       "label": "resolve_sandbox_path()",
@@ -4513,7 +5057,7 @@
       "source_file": "moa-hands/src/tools/file_read.rs",
       "source_location": "L25",
       "id": "file_read_resolve_sandbox_path",
-      "community": 34
+      "community": 35
     },
     {
       "label": "FileReadInput",
@@ -4521,7 +5065,7 @@
       "source_file": "moa-hands/src/tools/file_read.rs",
       "source_location": "L48",
       "id": "file_read_filereadinput",
-      "community": 34
+      "community": 35
     },
     {
       "label": "live_brain_turn_returns_brain_response test",
@@ -4533,7 +5077,7 @@
       "author": null,
       "contributor": null,
       "id": "live_harness_brain_turn_test",
-      "community": 43
+      "community": 44
     },
     {
       "label": "brain_turn.rs",
@@ -4541,7 +5085,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L1",
       "id": "brain_turn",
-      "community": 3
+      "community": 7
     },
     {
       "label": "MockSessionStore",
@@ -4549,7 +5093,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L25",
       "id": "brain_turn_mocksessionstore",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".new()",
@@ -4557,7 +5101,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L31",
       "id": "brain_turn_mocksessionstore_new",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".create_session()",
@@ -4565,7 +5109,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L41",
       "id": "brain_turn_mocksessionstore_create_session",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".emit_event()",
@@ -4573,7 +5117,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L47",
       "id": "brain_turn_mocksessionstore_emit_event",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".get_events()",
@@ -4581,7 +5125,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L64",
       "id": "brain_turn_mocksessionstore_get_events",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".get_session()",
@@ -4589,7 +5133,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L91",
       "id": "brain_turn_mocksessionstore_get_session",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".update_status()",
@@ -4597,7 +5141,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L95",
       "id": "brain_turn_mocksessionstore_update_status",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".search_events()",
@@ -4605,7 +5149,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L100",
       "id": "brain_turn_mocksessionstore_search_events",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".list_sessions()",
@@ -4613,7 +5157,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L104",
       "id": "brain_turn_mocksessionstore_list_sessions",
-      "community": 3
+      "community": 7
     },
     {
       "label": "MockMemoryStore",
@@ -4621,7 +5165,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L110",
       "id": "brain_turn_mockmemorystore",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".search()",
@@ -4629,7 +5173,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L114",
       "id": "brain_turn_mockmemorystore_search",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".read_page()",
@@ -4637,7 +5181,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L123",
       "id": "brain_turn_mockmemorystore_read_page",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".write_page()",
@@ -4645,7 +5189,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L127",
       "id": "brain_turn_mockmemorystore_write_page",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".delete_page()",
@@ -4653,7 +5197,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L131",
       "id": "brain_turn_mockmemorystore_delete_page",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".list_pages()",
@@ -4661,7 +5205,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L135",
       "id": "brain_turn_mockmemorystore_list_pages",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".get_index()",
@@ -4669,7 +5213,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L143",
       "id": "brain_turn_mockmemorystore_get_index",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".rebuild_search_index()",
@@ -4677,7 +5221,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L147",
       "id": "brain_turn_mockmemorystore_rebuild_search_index",
-      "community": 3
+      "community": 7
     },
     {
       "label": "MockLlmProvider",
@@ -4685,7 +5229,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L152",
       "id": "brain_turn_mockllmprovider",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".name()",
@@ -4693,7 +5237,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L156",
       "id": "brain_turn_mockllmprovider_name",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".capabilities()",
@@ -4701,7 +5245,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L160",
       "id": "brain_turn_mockllmprovider_capabilities",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".complete()",
@@ -4709,7 +5253,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L178",
       "id": "brain_turn_mockllmprovider_complete",
-      "community": 3
+      "community": 7
     },
     {
       "label": "ToolLoopLlmProvider",
@@ -4717,7 +5261,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L193",
       "id": "brain_turn_toolloopllmprovider",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".name()",
@@ -4725,7 +5269,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L199",
       "id": "brain_turn_toolloopllmprovider_name",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".capabilities()",
@@ -4733,7 +5277,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L203",
       "id": "brain_turn_toolloopllmprovider_capabilities",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".complete()",
@@ -4741,7 +5285,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L221",
       "id": "brain_turn_toolloopllmprovider_complete",
-      "community": 3
+      "community": 7
     },
     {
       "label": "RepeatingToolLlmProvider",
@@ -4749,7 +5293,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L264",
       "id": "brain_turn_repeatingtoolllmprovider",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".name()",
@@ -4757,7 +5301,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L270",
       "id": "brain_turn_repeatingtoolllmprovider_name",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".capabilities()",
@@ -4765,7 +5309,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L274",
       "id": "brain_turn_repeatingtoolllmprovider_capabilities",
-      "community": 3
+      "community": 7
     },
     {
       "label": ".complete()",
@@ -4773,7 +5317,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L292",
       "id": "brain_turn_repeatingtoolllmprovider_complete",
-      "community": 3
+      "community": 7
     },
     {
       "label": "make_event_record()",
@@ -4781,7 +5325,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L349",
       "id": "brain_turn_make_event_record",
-      "community": 3
+      "community": 7
     },
     {
       "label": "run_brain_turn_emits_brain_response_event()",
@@ -4789,7 +5333,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L364",
       "id": "brain_turn_run_brain_turn_emits_brain_response_event",
-      "community": 3
+      "community": 7
     },
     {
       "label": "run_brain_turn_pauses_for_approval_then_executes_tool()",
@@ -4797,7 +5341,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L414",
       "id": "brain_turn_run_brain_turn_pauses_for_approval_then_executes_tool",
-      "community": 3
+      "community": 7
     },
     {
       "label": "always_allow_rule_persists_and_skips_next_approval()",
@@ -4805,7 +5349,7 @@
       "source_file": "moa-brain/tests/brain_turn.rs",
       "source_location": "L503",
       "id": "brain_turn_always_allow_rule_persists_and_skips_next_approval",
-      "community": 3
+      "community": 7
     },
     {
       "label": "chat_harness.rs",
@@ -4813,7 +5357,7 @@
       "source_file": "moa-brain/examples/chat_harness.rs",
       "source_location": "L1",
       "id": "chat_harness",
-      "community": 35
+      "community": 36
     },
     {
       "label": "main()",
@@ -4821,7 +5365,7 @@
       "source_file": "moa-brain/examples/chat_harness.rs",
       "source_location": "L19",
       "id": "chat_harness_main",
-      "community": 35
+      "community": 36
     },
     {
       "label": "resolve_session_db_path()",
@@ -4829,7 +5373,7 @@
       "source_file": "moa-brain/examples/chat_harness.rs",
       "source_location": "L94",
       "id": "chat_harness_resolve_session_db_path",
-      "community": 35
+      "community": 36
     },
     {
       "label": "run_prompt()",
@@ -4837,7 +5381,7 @@
       "source_file": "moa-brain/examples/chat_harness.rs",
       "source_location": "L108",
       "id": "chat_harness_run_prompt",
-      "community": 35
+      "community": 36
     },
     {
       "label": "harness.rs",
@@ -4933,7 +5477,7 @@
       "source_file": "moa-brain/src/compaction.rs",
       "source_location": "L1",
       "id": "compaction",
-      "community": 40
+      "community": 41
     },
     {
       "label": "maybe_compact()",
@@ -4941,7 +5485,7 @@
       "source_file": "moa-brain/src/compaction.rs",
       "source_location": "L8",
       "id": "compaction_maybe_compact",
-      "community": 40
+      "community": 41
     },
     {
       "label": "cache.rs",
@@ -4949,7 +5493,7 @@
       "source_file": "moa-brain/src/pipeline/cache.rs",
       "source_location": "L1",
       "id": "cache",
-      "community": 29
+      "community": 30
     },
     {
       "label": "CacheOptimizer",
@@ -4957,7 +5501,7 @@
       "source_file": "moa-brain/src/pipeline/cache.rs",
       "source_location": "L10",
       "id": "cache_cacheoptimizer",
-      "community": 29
+      "community": 30
     },
     {
       "label": ".name()",
@@ -4965,7 +5509,7 @@
       "source_file": "moa-brain/src/pipeline/cache.rs",
       "source_location": "L13",
       "id": "cache_cacheoptimizer_name",
-      "community": 29
+      "community": 30
     },
     {
       "label": ".stage()",
@@ -4973,7 +5517,7 @@
       "source_file": "moa-brain/src/pipeline/cache.rs",
       "source_location": "L17",
       "id": "cache_cacheoptimizer_stage",
-      "community": 29
+      "community": 30
     },
     {
       "label": ".process()",
@@ -4981,7 +5525,7 @@
       "source_file": "moa-brain/src/pipeline/cache.rs",
       "source_location": "L21",
       "id": "cache_cacheoptimizer_process",
-      "community": 29
+      "community": 30
     },
     {
       "label": "cache_optimizer_validates_cache_breakpoint()",
@@ -4989,7 +5533,7 @@
       "source_file": "moa-brain/src/pipeline/cache.rs",
       "source_location": "L74",
       "id": "cache_cache_optimizer_validates_cache_breakpoint",
-      "community": 29
+      "community": 30
     },
     {
       "label": "instructions.rs",
@@ -4997,7 +5541,7 @@
       "source_file": "moa-brain/src/pipeline/instructions.rs",
       "source_location": "L1",
       "id": "instructions",
-      "community": 27
+      "community": 28
     },
     {
       "label": "InstructionProcessor",
@@ -5005,7 +5549,7 @@
       "source_file": "moa-brain/src/pipeline/instructions.rs",
       "source_location": "L9",
       "id": "instructions_instructionprocessor",
-      "community": 27
+      "community": 28
     },
     {
       "label": ".from_config()",
@@ -5013,7 +5557,7 @@
       "source_file": "moa-brain/src/pipeline/instructions.rs",
       "source_location": "L16",
       "id": "instructions_instructionprocessor_from_config",
-      "community": 27
+      "community": 28
     },
     {
       "label": ".name()",
@@ -5021,7 +5565,7 @@
       "source_file": "moa-brain/src/pipeline/instructions.rs",
       "source_location": "L25",
       "id": "instructions_instructionprocessor_name",
-      "community": 27
+      "community": 28
     },
     {
       "label": ".stage()",
@@ -5029,7 +5573,7 @@
       "source_file": "moa-brain/src/pipeline/instructions.rs",
       "source_location": "L29",
       "id": "instructions_instructionprocessor_stage",
-      "community": 27
+      "community": 28
     },
     {
       "label": ".process()",
@@ -5037,7 +5581,7 @@
       "source_file": "moa-brain/src/pipeline/instructions.rs",
       "source_location": "L33",
       "id": "instructions_instructionprocessor_process",
-      "community": 27
+      "community": 28
     },
     {
       "label": "instruction_processor_appends_config_backed_sections()",
@@ -5045,7 +5589,7 @@
       "source_file": "moa-brain/src/pipeline/instructions.rs",
       "source_location": "L77",
       "id": "instructions_instruction_processor_appends_config_backed_sections",
-      "community": 27
+      "community": 28
     },
     {
       "label": "tools.rs",
@@ -5053,7 +5597,7 @@
       "source_file": "moa-brain/src/pipeline/tools.rs",
       "source_location": "L1",
       "id": "tools",
-      "community": 9
+      "community": 11
     },
     {
       "label": "ToolDefinitionProcessor",
@@ -5061,7 +5605,7 @@
       "source_file": "moa-brain/src/pipeline/tools.rs",
       "source_location": "L10",
       "id": "tools_tooldefinitionprocessor",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".new()",
@@ -5069,7 +5613,7 @@
       "source_file": "moa-brain/src/pipeline/tools.rs",
       "source_location": "L16",
       "id": "tools_tooldefinitionprocessor_new",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".name()",
@@ -5077,7 +5621,7 @@
       "source_file": "moa-brain/src/pipeline/tools.rs",
       "source_location": "L22",
       "id": "tools_tooldefinitionprocessor_name",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".stage()",
@@ -5085,7 +5629,7 @@
       "source_file": "moa-brain/src/pipeline/tools.rs",
       "source_location": "L26",
       "id": "tools_tooldefinitionprocessor_stage",
-      "community": 9
+      "community": 11
     },
     {
       "label": ".process()",
@@ -5093,7 +5637,7 @@
       "source_file": "moa-brain/src/pipeline/tools.rs",
       "source_location": "L30",
       "id": "tools_tooldefinitionprocessor_process",
-      "community": 9
+      "community": 11
     },
     {
       "label": "tool_processor_serializes_tool_schemas()",
@@ -5101,7 +5645,7 @@
       "source_file": "moa-brain/src/pipeline/tools.rs",
       "source_location": "L68",
       "id": "tools_tool_processor_serializes_tool_schemas",
-      "community": 9
+      "community": 11
     },
     {
       "label": "MemoryRetriever (Stage 5)",
@@ -5137,7 +5681,7 @@
       "author": null,
       "contributor": null,
       "id": "pipeline_relevant_memory_page",
-      "community": 44
+      "community": 45
     },
     {
       "label": "extract_search_query",
@@ -5205,7 +5749,7 @@
       "source_file": "moa-brain/src/pipeline/skills.rs",
       "source_location": "L1",
       "id": "skills",
-      "community": 30
+      "community": 31
     },
     {
       "label": "SkillInjector",
@@ -5213,7 +5757,7 @@
       "source_file": "moa-brain/src/pipeline/skills.rs",
       "source_location": "L7",
       "id": "skills_skillinjector",
-      "community": 30
+      "community": 31
     },
     {
       "label": ".name()",
@@ -5221,7 +5765,7 @@
       "source_file": "moa-brain/src/pipeline/skills.rs",
       "source_location": "L10",
       "id": "skills_skillinjector_name",
-      "community": 30
+      "community": 31
     },
     {
       "label": ".stage()",
@@ -5229,7 +5773,7 @@
       "source_file": "moa-brain/src/pipeline/skills.rs",
       "source_location": "L14",
       "id": "skills_skillinjector_stage",
-      "community": 30
+      "community": 31
     },
     {
       "label": ".process()",
@@ -5237,7 +5781,7 @@
       "source_file": "moa-brain/src/pipeline/skills.rs",
       "source_location": "L18",
       "id": "skills_skillinjector_process",
-      "community": 30
+      "community": 31
     },
     {
       "label": "skill_injector_marks_cache_breakpoint()",
@@ -5245,7 +5789,7 @@
       "source_file": "moa-brain/src/pipeline/skills.rs",
       "source_location": "L34",
       "id": "skills_skill_injector_marks_cache_breakpoint",
-      "community": 30
+      "community": 31
     },
     {
       "label": "identity.rs",
@@ -5253,7 +5797,7 @@
       "source_file": "moa-brain/src/pipeline/identity.rs",
       "source_location": "L1",
       "id": "identity",
-      "community": 31
+      "community": 32
     },
     {
       "label": "IdentityProcessor",
@@ -5261,7 +5805,7 @@
       "source_file": "moa-brain/src/pipeline/identity.rs",
       "source_location": "L17",
       "id": "identity_identityprocessor",
-      "community": 31
+      "community": 32
     },
     {
       "label": ".name()",
@@ -5269,7 +5813,7 @@
       "source_file": "moa-brain/src/pipeline/identity.rs",
       "source_location": "L20",
       "id": "identity_identityprocessor_name",
-      "community": 31
+      "community": 32
     },
     {
       "label": ".stage()",
@@ -5277,7 +5821,7 @@
       "source_file": "moa-brain/src/pipeline/identity.rs",
       "source_location": "L24",
       "id": "identity_identityprocessor_stage",
-      "community": 31
+      "community": 32
     },
     {
       "label": ".process()",
@@ -5285,7 +5829,7 @@
       "source_file": "moa-brain/src/pipeline/identity.rs",
       "source_location": "L28",
       "id": "identity_identityprocessor_process",
-      "community": 31
+      "community": 32
     },
     {
       "label": "identity_processor_appends_system_prompt()",
@@ -5293,7 +5837,7 @@
       "source_file": "moa-brain/src/pipeline/identity.rs",
       "source_location": "L48",
       "id": "identity_identity_processor_appends_system_prompt",
-      "community": 31
+      "community": 32
     },
     {
       "label": "PipelineStageReport",
@@ -5301,7 +5845,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L35",
       "id": "mod_pipelinestagereport",
-      "community": 4
+      "community": 8
     },
     {
       "label": "ContextPipeline",
@@ -5309,7 +5853,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L45",
       "id": "mod_contextpipeline",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".new()",
@@ -5317,7 +5861,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L53",
       "id": "mod_contextpipeline_new",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".run()",
@@ -5325,7 +5869,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L66",
       "id": "mod_contextpipeline_run",
-      "community": 4
+      "community": 8
     },
     {
       "label": "build_default_pipeline()",
@@ -5333,7 +5877,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L123",
       "id": "mod_build_default_pipeline",
-      "community": 4
+      "community": 8
     },
     {
       "label": "build_default_pipeline_with_tools()",
@@ -5341,7 +5885,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L132",
       "id": "mod_build_default_pipeline_with_tools",
-      "community": 4
+      "community": 8
     },
     {
       "label": "estimate_tokens()",
@@ -5349,7 +5893,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L153",
       "id": "mod_estimate_tokens",
-      "community": 4
+      "community": 8
     },
     {
       "label": "load_history_events()",
@@ -5357,7 +5901,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L162",
       "id": "mod_load_history_events",
-      "community": 4
+      "community": 8
     },
     {
       "label": "sort_json_keys()",
@@ -5365,7 +5909,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L169",
       "id": "mod_sort_json_keys",
-      "community": 4
+      "community": 8
     },
     {
       "label": "preload_memory_stage_data()",
@@ -5373,7 +5917,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L196",
       "id": "mod_preload_memory_stage_data",
-      "community": 4
+      "community": 8
     },
     {
       "label": "MockSessionStore",
@@ -5381,7 +5925,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L264",
       "id": "mod_mocksessionstore",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".new()",
@@ -5389,7 +5933,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L270",
       "id": "mod_mocksessionstore_new",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".create_session()",
@@ -5397,7 +5941,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L280",
       "id": "mod_mocksessionstore_create_session",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".emit_event()",
@@ -5405,7 +5949,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L286",
       "id": "mod_mocksessionstore_emit_event",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".get_events()",
@@ -5413,7 +5957,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L304",
       "id": "mod_mocksessionstore_get_events",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".get_session()",
@@ -5421,7 +5965,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L312",
       "id": "mod_mocksessionstore_get_session",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".update_status()",
@@ -5429,7 +5973,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L316",
       "id": "mod_mocksessionstore_update_status",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".search_events()",
@@ -5437,7 +5981,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L321",
       "id": "mod_mocksessionstore_search_events",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".list_sessions()",
@@ -5445,7 +5989,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L329",
       "id": "mod_mocksessionstore_list_sessions",
-      "community": 4
+      "community": 8
     },
     {
       "label": "MockMemoryStore",
@@ -5453,7 +5997,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L335",
       "id": "mod_mockmemorystore",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".search()",
@@ -5461,7 +6005,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L339",
       "id": "mod_mockmemorystore_search",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".read_page()",
@@ -5469,7 +6013,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L348",
       "id": "mod_mockmemorystore_read_page",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".write_page()",
@@ -5477,7 +6021,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L355",
       "id": "mod_mockmemorystore_write_page",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".delete_page()",
@@ -5485,7 +6029,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L359",
       "id": "mod_mockmemorystore_delete_page",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".list_pages()",
@@ -5493,7 +6037,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L363",
       "id": "mod_mockmemorystore_list_pages",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".get_index()",
@@ -5501,7 +6045,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L371",
       "id": "mod_mockmemorystore_get_index",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".rebuild_search_index()",
@@ -5509,7 +6053,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L378",
       "id": "mod_mockmemorystore_rebuild_search_index",
-      "community": 4
+      "community": 8
     },
     {
       "label": "TestStage",
@@ -5517,7 +6061,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L383",
       "id": "mod_teststage",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".new()",
@@ -5525,7 +6069,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L389",
       "id": "mod_teststage_new",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".name()",
@@ -5533,7 +6077,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L395",
       "id": "mod_teststage_name",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".stage()",
@@ -5541,7 +6085,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L399",
       "id": "mod_teststage_stage",
-      "community": 4
+      "community": 8
     },
     {
       "label": ".process()",
@@ -5549,7 +6093,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L403",
       "id": "mod_teststage_process",
-      "community": 4
+      "community": 8
     },
     {
       "label": "pipeline_runner_executes_stages_in_order()",
@@ -5557,7 +6101,7 @@
       "source_file": "moa-brain/src/pipeline/mod.rs",
       "source_location": "L425",
       "id": "mod_pipeline_runner_executes_stages_in_order",
-      "community": 4
+      "community": 8
     },
     {
       "label": "history.rs",
@@ -9349,7 +9893,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/keybindings.rs",
-      "source_location": "L35",
+      "source_location": "L51",
       "weight": 1.0,
       "_src": "keybindings",
       "_tgt": "keybindings_map_key_event",
@@ -9361,7 +9905,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/keybindings.rs",
-      "source_location": "L76",
+      "source_location": "L108",
       "weight": 1.0,
       "_src": "keybindings",
       "_tgt": "keybindings_key",
@@ -9373,7 +9917,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/keybindings.rs",
-      "source_location": "L86",
+      "source_location": "L118",
       "weight": 1.0,
       "_src": "keybindings",
       "_tgt": "keybindings_enter_submits_but_shift_enter_inserts_newline",
@@ -9385,7 +9929,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/keybindings.rs",
-      "source_location": "L98",
+      "source_location": "L130",
       "weight": 1.0,
       "_src": "keybindings",
       "_tgt": "keybindings_approval_shortcuts_only_activate_while_waiting",
@@ -9397,7 +9941,19 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/keybindings.rs",
-      "source_location": "L116",
+      "source_location": "L155",
+      "weight": 1.0,
+      "_src": "keybindings",
+      "_tgt": "keybindings_diff_view_shortcuts_are_scoped_to_the_overlay",
+      "source": "keybindings",
+      "target": "keybindings_diff_view_shortcuts_are_scoped_to_the_overlay",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/keybindings.rs",
+      "source_location": "L177",
       "weight": 1.0,
       "_src": "keybindings",
       "_tgt": "keybindings_ctrl_c_and_escape_cancel",
@@ -9409,7 +9965,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L22",
+      "source_location": "L27",
       "weight": 1.0,
       "_src": "runner",
       "_tgt": "runner_runtimeevent",
@@ -9421,7 +9977,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L51",
+      "source_location": "L56",
       "weight": 1.0,
       "_src": "runner",
       "_tgt": "runner_runtimecommand",
@@ -9433,7 +9989,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L58",
+      "source_location": "L63",
       "weight": 1.0,
       "_src": "runner",
       "_tgt": "runner_approvalprompt",
@@ -9445,7 +10001,31 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L67",
+      "source_location": "L76",
+      "weight": 1.0,
+      "_src": "runner",
+      "_tgt": "runner_approvalfield",
+      "source": "runner",
+      "target": "runner_approvalfield",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L85",
+      "weight": 1.0,
+      "_src": "runner",
+      "_tgt": "runner_approvalfilediff",
+      "source": "runner",
+      "target": "runner_approvalfilediff",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L98",
       "weight": 1.0,
       "_src": "runner",
       "_tgt": "runner_toolcardstatus",
@@ -9457,7 +10037,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L82",
+      "source_location": "L113",
       "weight": 1.0,
       "_src": "runner",
       "_tgt": "runner_toolupdate",
@@ -9469,7 +10049,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L97",
+      "source_location": "L128",
       "weight": 1.0,
       "_src": "runner",
       "_tgt": "runner_chatruntime",
@@ -9481,7 +10061,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L565",
+      "source_location": "L625",
       "weight": 1.0,
       "_src": "runner",
       "_tgt": "runner_summarize_tool_completion",
@@ -9493,7 +10073,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L577",
+      "source_location": "L637",
       "weight": 1.0,
       "_src": "runner",
       "_tgt": "runner_format_tool_output",
@@ -9505,7 +10085,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L592",
+      "source_location": "L652",
       "weight": 1.0,
       "_src": "runner",
       "_tgt": "runner_parse_tool_id",
@@ -9517,7 +10097,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L599",
+      "source_location": "L659",
       "weight": 1.0,
       "_src": "runner",
       "_tgt": "runner_wait_for_approval",
@@ -9529,7 +10109,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L610",
+      "source_location": "L670",
       "weight": 1.0,
       "_src": "runner",
       "_tgt": "runner_always_allow_pattern",
@@ -9541,7 +10121,67 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L625",
+      "source_location": "L685",
+      "weight": 1.0,
+      "_src": "runner",
+      "_tgt": "runner_approval_fields_for_call",
+      "source": "runner",
+      "target": "runner_approval_fields_for_call",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L748",
+      "weight": 1.0,
+      "_src": "runner",
+      "_tgt": "runner_single_approval_field",
+      "source": "runner",
+      "target": "runner_single_approval_field",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L760",
+      "weight": 1.0,
+      "_src": "runner",
+      "_tgt": "runner_expand_local_path",
+      "source": "runner",
+      "target": "runner_expand_local_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L769",
+      "weight": 1.0,
+      "_src": "runner",
+      "_tgt": "runner_read_existing_text_file",
+      "source": "runner",
+      "target": "runner_read_existing_text_file",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L777",
+      "weight": 1.0,
+      "_src": "runner",
+      "_tgt": "runner_language_hint_for_path",
+      "source": "runner",
+      "target": "runner_language_hint_for_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L784",
       "weight": 1.0,
       "_src": "runner",
       "_tgt": "runner_local_user_id",
@@ -9553,7 +10193,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L633",
+      "source_location": "L792",
       "weight": 1.0,
       "_src": "runner",
       "_tgt": "runner_create_session",
@@ -9562,10 +10202,22 @@
       "confidence_score": 1.0
     },
     {
+      "relation": "imports_from",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L634",
+      "weight": 1.0,
+      "_src": "app",
+      "_tgt": "runner",
+      "source": "runner",
+      "target": "app",
+      "confidence_score": 1.0
+    },
+    {
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L300",
+      "source_location": "L331",
       "weight": 1.0,
       "_src": "runner_chatruntime_handle_tool_call",
       "_tgt": "runner_toolupdate",
@@ -9577,7 +10229,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L528",
+      "source_location": "L561",
       "weight": 1.0,
       "_src": "runner_chatruntime_execute_tool",
       "_tgt": "runner_toolupdate",
@@ -9589,7 +10241,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L112",
+      "source_location": "L143",
       "weight": 1.0,
       "_src": "runner_chatruntime",
       "_tgt": "runner_chatruntime_from_config",
@@ -9601,7 +10253,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L142",
+      "source_location": "L173",
       "weight": 1.0,
       "_src": "runner_chatruntime",
       "_tgt": "runner_chatruntime_session_id",
@@ -9613,7 +10265,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L147",
+      "source_location": "L178",
       "weight": 1.0,
       "_src": "runner_chatruntime",
       "_tgt": "runner_chatruntime_model",
@@ -9625,7 +10277,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L152",
+      "source_location": "L183",
       "weight": 1.0,
       "_src": "runner_chatruntime",
       "_tgt": "runner_chatruntime_reset_session",
@@ -9637,7 +10289,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L165",
+      "source_location": "L196",
       "weight": 1.0,
       "_src": "runner_chatruntime",
       "_tgt": "runner_chatruntime_set_model",
@@ -9649,7 +10301,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L176",
+      "source_location": "L207",
       "weight": 1.0,
       "_src": "runner_chatruntime",
       "_tgt": "runner_chatruntime_session_meta",
@@ -9661,7 +10313,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L181",
+      "source_location": "L212",
       "weight": 1.0,
       "_src": "runner_chatruntime",
       "_tgt": "runner_chatruntime_run_turn",
@@ -9673,7 +10325,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L286",
+      "source_location": "L317",
       "weight": 1.0,
       "_src": "runner_chatruntime",
       "_tgt": "runner_chatruntime_handle_tool_call",
@@ -9685,7 +10337,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L494",
+      "source_location": "L527",
       "weight": 1.0,
       "_src": "runner_chatruntime",
       "_tgt": "runner_chatruntime_execute_tool",
@@ -9697,7 +10349,19 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L654",
+      "source_location": "L597",
+      "weight": 1.0,
+      "_src": "runner_chatruntime",
+      "_tgt": "runner_chatruntime_approval_diffs_for_call",
+      "source": "runner_chatruntime",
+      "target": "runner_chatruntime_approval_diffs_for_call",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L813",
       "weight": 1.0,
       "_src": "runner_chatruntime",
       "_tgt": "runner_chatruntime_for_test",
@@ -9709,7 +10373,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L122",
+      "source_location": "L153",
       "weight": 1.0,
       "_src": "runner_chatruntime_from_config",
       "_tgt": "runner_local_user_id",
@@ -9721,7 +10385,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L125",
+      "source_location": "L156",
       "weight": 1.0,
       "_src": "runner_chatruntime_from_config",
       "_tgt": "runner_create_session",
@@ -9733,7 +10397,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L664",
+      "source_location": "L823",
       "weight": 1.0,
       "_src": "runner_chatruntime_for_test",
       "_tgt": "runner_chatruntime_from_config",
@@ -9745,7 +10409,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L153",
+      "source_location": "L184",
       "weight": 1.0,
       "_src": "runner_chatruntime_reset_session",
       "_tgt": "runner_create_session",
@@ -9757,7 +10421,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L172",
+      "source_location": "L203",
       "weight": 1.0,
       "_src": "runner_chatruntime_set_model",
       "_tgt": "runner_chatruntime_reset_session",
@@ -9769,7 +10433,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L260",
+      "source_location": "L291",
       "weight": 1.0,
       "_src": "runner_chatruntime_run_turn",
       "_tgt": "runner_chatruntime_handle_tool_call",
@@ -9781,7 +10445,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L293",
+      "source_location": "L324",
       "weight": 1.0,
       "_src": "runner_chatruntime_handle_tool_call",
       "_tgt": "runner_parse_tool_id",
@@ -9793,7 +10457,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L296",
+      "source_location": "L327",
       "weight": 1.0,
       "_src": "runner_chatruntime_handle_tool_call",
       "_tgt": "runner_always_allow_pattern",
@@ -9805,7 +10469,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L307",
+      "source_location": "L338",
       "weight": 1.0,
       "_src": "runner_chatruntime_handle_tool_call",
       "_tgt": "runner_chatruntime_execute_tool",
@@ -9817,7 +10481,31 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L387",
+      "source_location": "L416",
+      "weight": 1.0,
+      "_src": "runner_chatruntime_handle_tool_call",
+      "_tgt": "runner_approval_fields_for_call",
+      "source": "runner_chatruntime_handle_tool_call",
+      "target": "runner_approval_fields_for_call",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L417",
+      "weight": 1.0,
+      "_src": "runner_chatruntime_handle_tool_call",
+      "_tgt": "runner_chatruntime_approval_diffs_for_call",
+      "source": "runner_chatruntime_handle_tool_call",
+      "target": "runner_chatruntime_approval_diffs_for_call",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L420",
       "weight": 1.0,
       "_src": "runner_chatruntime_handle_tool_call",
       "_tgt": "runner_wait_for_approval",
@@ -9829,7 +10517,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L522",
+      "source_location": "L555",
       "weight": 1.0,
       "_src": "runner_chatruntime_execute_tool",
       "_tgt": "runner_format_tool_output",
@@ -9841,7 +10529,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L536",
+      "source_location": "L569",
       "weight": 1.0,
       "_src": "runner_chatruntime_execute_tool",
       "_tgt": "runner_summarize_tool_completion",
@@ -9853,7 +10541,55 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/runner.rs",
-      "source_location": "L678",
+      "source_location": "L612",
+      "weight": 1.0,
+      "_src": "runner_chatruntime_approval_diffs_for_call",
+      "_tgt": "runner_expand_local_path",
+      "source": "runner_chatruntime_approval_diffs_for_call",
+      "target": "runner_expand_local_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L614",
+      "weight": 1.0,
+      "_src": "runner_chatruntime_approval_diffs_for_call",
+      "_tgt": "runner_read_existing_text_file",
+      "source": "runner_chatruntime_approval_diffs_for_call",
+      "target": "runner_read_existing_text_file",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L694",
+      "weight": 1.0,
+      "_src": "runner_approval_fields_for_call",
+      "_tgt": "runner_expand_local_path",
+      "source": "runner_approval_fields_for_call",
+      "target": "runner_expand_local_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L732",
+      "weight": 1.0,
+      "_src": "runner_approval_fields_for_call",
+      "_tgt": "runner_single_approval_field",
+      "source": "runner_approval_fields_for_call",
+      "target": "runner_single_approval_field",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/runner.rs",
+      "source_location": "L837",
       "weight": 1.0,
       "_src": "runner_chatruntime_for_test",
       "_tgt": "runner_create_session",
@@ -9865,7 +10601,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L35",
+      "source_location": "L38",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_appmode",
@@ -9877,7 +10613,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L48",
+      "source_location": "L53",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_chatentry",
@@ -9889,7 +10625,31 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L57",
+      "source_location": "L63",
+      "weight": 1.0,
+      "_src": "app",
+      "_tgt": "app_approvalentry",
+      "source": "app",
+      "target": "app_approvalentry",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L71",
+      "weight": 1.0,
+      "_src": "app",
+      "_tgt": "app_approvalcardstatus",
+      "source": "app",
+      "target": "app_approvalcardstatus",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L80",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_toolcardentry",
@@ -9901,7 +10661,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L66",
+      "source_location": "L89",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_app",
@@ -9913,7 +10673,19 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L407",
+      "source_location": "L566",
+      "weight": 1.0,
+      "_src": "app",
+      "_tgt": "app_approval_status_and_note",
+      "source": "app",
+      "target": "app_approval_status_and_note",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L588",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_run_tui",
@@ -9925,7 +10697,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L424",
+      "source_location": "L605",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_run_event_loop",
@@ -9937,7 +10709,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L452",
+      "source_location": "L636",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_test_app",
@@ -9949,7 +10721,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L476",
+      "source_location": "L662",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_app_state_transitions_follow_idle_composing_running_idle",
@@ -9961,7 +10733,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L502",
+      "source_location": "L688",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_rendering_smoke_test_does_not_panic",
@@ -9970,10 +10742,22 @@
       "confidence_score": 1.0
     },
     {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L702",
+      "weight": 1.0,
+      "_src": "app",
+      "_tgt": "app_diff_overlay_renders_for_file_write_approval",
+      "source": "app",
+      "target": "app_diff_overlay_renders_for_file_write_approval",
+      "confidence_score": 1.0
+    },
+    {
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L84",
+      "source_location": "L109",
       "weight": 1.0,
       "_src": "app_app",
       "_tgt": "app_app_new",
@@ -9985,7 +10769,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L106",
+      "source_location": "L133",
       "weight": 1.0,
       "_src": "app_app",
       "_tgt": "app_app_mode",
@@ -9997,7 +10781,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L111",
+      "source_location": "L138",
       "weight": 1.0,
       "_src": "app_app",
       "_tgt": "app_app_should_exit",
@@ -10009,7 +10793,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L116",
+      "source_location": "L143",
       "weight": 1.0,
       "_src": "app_app",
       "_tgt": "app_app_drain_runtime_events",
@@ -10021,7 +10805,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L123",
+      "source_location": "L150",
       "weight": 1.0,
       "_src": "app_app",
       "_tgt": "app_app_handle_key_event",
@@ -10033,7 +10817,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L166",
+      "source_location": "L206",
       "weight": 1.0,
       "_src": "app_app",
       "_tgt": "app_app_draw",
@@ -10045,7 +10829,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L201",
+      "source_location": "L246",
       "weight": 1.0,
       "_src": "app_app",
       "_tgt": "app_app_submit_prompt",
@@ -10057,7 +10841,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L234",
+      "source_location": "L279",
       "weight": 1.0,
       "_src": "app_app",
       "_tgt": "app_app_handle_slash_command",
@@ -10069,7 +10853,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L284",
+      "source_location": "L329",
       "weight": 1.0,
       "_src": "app_app",
       "_tgt": "app_app_handle_runtime_event",
@@ -10081,7 +10865,19 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L340",
+      "source_location": "L387",
+      "weight": 1.0,
+      "_src": "app_app",
+      "_tgt": "app_app_handle_tool_update",
+      "source": "app_app",
+      "target": "app_app_handle_tool_update",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L401",
       "weight": 1.0,
       "_src": "app_app",
       "_tgt": "app_app_upsert_tool_card",
@@ -10093,7 +10889,19 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L360",
+      "source_location": "L421",
+      "weight": 1.0,
+      "_src": "app_app",
+      "_tgt": "app_app_upsert_approval_card",
+      "source": "app_app",
+      "target": "app_app_upsert_approval_card",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L441",
       "weight": 1.0,
       "_src": "app_app",
       "_tgt": "app_app_send_approval",
@@ -10105,7 +10913,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L368",
+      "source_location": "L454",
       "weight": 1.0,
       "_src": "app_app",
       "_tgt": "app_app_cancel_or_exit",
@@ -10117,7 +10925,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L379",
+      "source_location": "L469",
       "weight": 1.0,
       "_src": "app_app",
       "_tgt": "app_app_cancel_active_turn",
@@ -10129,7 +10937,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L388",
+      "source_location": "L479",
       "weight": 1.0,
       "_src": "app_app",
       "_tgt": "app_app_sync_mode_with_prompt",
@@ -10138,10 +10946,94 @@
       "confidence_score": 1.0
     },
     {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L500",
+      "weight": 1.0,
+      "_src": "app_app",
+      "_tgt": "app_app_update_approval_entry",
+      "source": "app_app",
+      "target": "app_app_update_approval_entry",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L517",
+      "weight": 1.0,
+      "_src": "app_app",
+      "_tgt": "app_app_approval_status",
+      "source": "app_app",
+      "target": "app_app_approval_status",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L526",
+      "weight": 1.0,
+      "_src": "app_app",
+      "_tgt": "app_app_open_diff_view",
+      "source": "app_app",
+      "target": "app_app_open_diff_view",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L534",
+      "weight": 1.0,
+      "_src": "app_app",
+      "_tgt": "app_app_close_diff_view",
+      "source": "app_app",
+      "target": "app_app_close_diff_view",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L539",
+      "weight": 1.0,
+      "_src": "app_app",
+      "_tgt": "app_app_toggle_diff_mode",
+      "source": "app_app",
+      "target": "app_app_toggle_diff_mode",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L545",
+      "weight": 1.0,
+      "_src": "app_app",
+      "_tgt": "app_app_move_diff_file",
+      "source": "app_app",
+      "target": "app_app_move_diff_file",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L555",
+      "weight": 1.0,
+      "_src": "app_app",
+      "_tgt": "app_app_move_diff_hunk",
+      "source": "app_app",
+      "target": "app_app_move_diff_hunk",
+      "confidence_score": 1.0
+    },
+    {
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L178",
+      "source_location": "L219",
       "weight": 1.0,
       "_src": "app_app_draw",
       "_tgt": "app_app_new",
@@ -10153,7 +11045,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L288",
+      "source_location": "L333",
       "weight": 1.0,
       "_src": "app_app_handle_runtime_event",
       "_tgt": "app_app_new",
@@ -10165,7 +11057,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L411",
+      "source_location": "L592",
       "weight": 1.0,
       "_src": "app_run_tui",
       "_tgt": "app_app_new",
@@ -10177,7 +11069,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L453",
+      "source_location": "L637",
       "weight": 1.0,
       "_src": "app_test_app",
       "_tgt": "app_app_new",
@@ -10189,7 +11081,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L484",
+      "source_location": "L670",
       "weight": 1.0,
       "_src": "app_app_state_transitions_follow_idle_composing_running_idle",
       "_tgt": "app_app_new",
@@ -10201,7 +11093,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L503",
+      "source_location": "L689",
       "weight": 1.0,
       "_src": "app_rendering_smoke_test_does_not_panic",
       "_tgt": "app_app_new",
@@ -10213,7 +11105,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L432",
+      "source_location": "L703",
+      "weight": 1.0,
+      "_src": "app_diff_overlay_renders_for_file_write_approval",
+      "_tgt": "app_app_new",
+      "source": "app_app_new",
+      "target": "app_diff_overlay_renders_for_file_write_approval",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L613",
       "weight": 1.0,
       "_src": "app_run_event_loop",
       "_tgt": "app_app_should_exit",
@@ -10225,7 +11129,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L118",
+      "source_location": "L145",
       "weight": 1.0,
       "_src": "app_app_drain_runtime_events",
       "_tgt": "app_app_handle_runtime_event",
@@ -10237,7 +11141,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L429",
+      "source_location": "L610",
       "weight": 1.0,
       "_src": "app_run_event_loop",
       "_tgt": "app_app_drain_runtime_events",
@@ -10249,7 +11153,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L125",
+      "source_location": "L152",
       "weight": 1.0,
       "_src": "app_app_handle_key_event",
       "_tgt": "app_app_submit_prompt",
@@ -10261,7 +11165,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L128",
+      "source_location": "L155",
       "weight": 1.0,
       "_src": "app_app_handle_key_event",
       "_tgt": "app_app_sync_mode_with_prompt",
@@ -10273,7 +11177,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L130",
+      "source_location": "L157",
       "weight": 1.0,
       "_src": "app_app_handle_key_event",
       "_tgt": "app_app_cancel_or_exit",
@@ -10285,7 +11189,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L132",
+      "source_location": "L159",
       "weight": 1.0,
       "_src": "app_app_handle_key_event",
       "_tgt": "app_app_send_approval",
@@ -10297,7 +11201,67 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L439",
+      "source_location": "L161",
+      "weight": 1.0,
+      "_src": "app_app_handle_key_event",
+      "_tgt": "app_app_open_diff_view",
+      "source": "app_app_handle_key_event",
+      "target": "app_app_open_diff_view",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L162",
+      "weight": 1.0,
+      "_src": "app_app_handle_key_event",
+      "_tgt": "app_app_close_diff_view",
+      "source": "app_app_handle_key_event",
+      "target": "app_app_close_diff_view",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L163",
+      "weight": 1.0,
+      "_src": "app_app_handle_key_event",
+      "_tgt": "app_app_toggle_diff_mode",
+      "source": "app_app_handle_key_event",
+      "target": "app_app_toggle_diff_mode",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L164",
+      "weight": 1.0,
+      "_src": "app_app_handle_key_event",
+      "_tgt": "app_app_move_diff_file",
+      "source": "app_app_handle_key_event",
+      "target": "app_app_move_diff_file",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L166",
+      "weight": 1.0,
+      "_src": "app_app_handle_key_event",
+      "_tgt": "app_app_move_diff_hunk",
+      "source": "app_app_handle_key_event",
+      "target": "app_app_move_diff_hunk",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L620",
       "weight": 1.0,
       "_src": "app_run_event_loop",
       "_tgt": "app_app_handle_key_event",
@@ -10309,7 +11273,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L430",
+      "source_location": "L611",
       "weight": 1.0,
       "_src": "app_run_event_loop",
       "_tgt": "app_app_draw",
@@ -10321,7 +11285,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L512",
+      "source_location": "L698",
       "weight": 1.0,
       "_src": "app_rendering_smoke_test_does_not_panic",
       "_tgt": "app_app_draw",
@@ -10333,7 +11297,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L210",
+      "source_location": "L737",
+      "weight": 1.0,
+      "_src": "app_diff_overlay_renders_for_file_write_approval",
+      "_tgt": "app_app_draw",
+      "source": "app_app_draw",
+      "target": "app_diff_overlay_renders_for_file_write_approval",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L255",
       "weight": 1.0,
       "_src": "app_app_submit_prompt",
       "_tgt": "app_app_sync_mode_with_prompt",
@@ -10345,7 +11321,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L211",
+      "source_location": "L256",
       "weight": 1.0,
       "_src": "app_app_submit_prompt",
       "_tgt": "app_app_handle_slash_command",
@@ -10357,7 +11333,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L246",
+      "source_location": "L291",
       "weight": 1.0,
       "_src": "app_app_handle_slash_command",
       "_tgt": "app_app_cancel_active_turn",
@@ -10369,7 +11345,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L280",
+      "source_location": "L325",
       "weight": 1.0,
       "_src": "app_app_handle_slash_command",
       "_tgt": "app_app_sync_mode_with_prompt",
@@ -10381,19 +11357,31 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L316",
+      "source_location": "L361",
       "weight": 1.0,
       "_src": "app_app_handle_runtime_event",
-      "_tgt": "app_app_upsert_tool_card",
+      "_tgt": "app_app_handle_tool_update",
       "source": "app_app_handle_runtime_event",
-      "target": "app_app_upsert_tool_card",
+      "target": "app_app_handle_tool_update",
       "confidence_score": 1.0
     },
     {
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L335",
+      "source_location": "L365",
+      "weight": 1.0,
+      "_src": "app_app_handle_runtime_event",
+      "_tgt": "app_app_upsert_approval_card",
+      "source": "app_app_handle_runtime_event",
+      "target": "app_app_upsert_approval_card",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L382",
       "weight": 1.0,
       "_src": "app_app_handle_runtime_event",
       "_tgt": "app_app_sync_mode_with_prompt",
@@ -10405,7 +11393,79 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L370",
+      "source_location": "L393",
+      "weight": 1.0,
+      "_src": "app_app_handle_tool_update",
+      "_tgt": "app_app_approval_status",
+      "source": "app_app_handle_tool_update",
+      "target": "app_app_approval_status",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L398",
+      "weight": 1.0,
+      "_src": "app_app_handle_tool_update",
+      "_tgt": "app_app_upsert_tool_card",
+      "source": "app_app_handle_tool_update",
+      "target": "app_app_upsert_tool_card",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L733",
+      "weight": 1.0,
+      "_src": "app_diff_overlay_renders_for_file_write_approval",
+      "_tgt": "app_app_upsert_approval_card",
+      "source": "app_app_upsert_approval_card",
+      "target": "app_diff_overlay_renders_for_file_write_approval",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L443",
+      "weight": 1.0,
+      "_src": "app_app_send_approval",
+      "_tgt": "app_approval_status_and_note",
+      "source": "app_app_send_approval",
+      "target": "app_approval_status_and_note",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L444",
+      "weight": 1.0,
+      "_src": "app_app_send_approval",
+      "_tgt": "app_app_update_approval_entry",
+      "source": "app_app_send_approval",
+      "target": "app_app_update_approval_entry",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L456",
+      "weight": 1.0,
+      "_src": "app_app_cancel_or_exit",
+      "_tgt": "app_app_close_diff_view",
+      "source": "app_app_cancel_or_exit",
+      "target": "app_app_close_diff_view",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L460",
       "weight": 1.0,
       "_src": "app_app_cancel_or_exit",
       "_tgt": "app_app_cancel_active_turn",
@@ -10417,7 +11477,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L385",
+      "source_location": "L476",
       "weight": 1.0,
       "_src": "app_app_cancel_active_turn",
       "_tgt": "app_app_sync_mode_with_prompt",
@@ -10429,7 +11489,31 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L481",
+      "source_location": "L531",
+      "weight": 1.0,
+      "_src": "app_app_open_diff_view",
+      "_tgt": "app_app_sync_mode_with_prompt",
+      "source": "app_app_sync_mode_with_prompt",
+      "target": "app_app_open_diff_view",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L536",
+      "weight": 1.0,
+      "_src": "app_app_close_diff_view",
+      "_tgt": "app_app_sync_mode_with_prompt",
+      "source": "app_app_sync_mode_with_prompt",
+      "target": "app_app_close_diff_view",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L667",
       "weight": 1.0,
       "_src": "app_app_state_transitions_follow_idle_composing_running_idle",
       "_tgt": "app_app_sync_mode_with_prompt",
@@ -10441,7 +11525,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L415",
+      "source_location": "L734",
+      "weight": 1.0,
+      "_src": "app_diff_overlay_renders_for_file_write_approval",
+      "_tgt": "app_app_open_diff_view",
+      "source": "app_app_open_diff_view",
+      "target": "app_diff_overlay_renders_for_file_write_approval",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L596",
       "weight": 1.0,
       "_src": "app_run_tui",
       "_tgt": "app_run_event_loop",
@@ -10453,7 +11549,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L477",
+      "source_location": "L663",
       "weight": 1.0,
       "_src": "app_app_state_transitions_follow_idle_composing_running_idle",
       "_tgt": "app_test_app",
@@ -10465,12 +11561,24 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L505",
+      "source_location": "L691",
       "weight": 1.0,
       "_src": "app_rendering_smoke_test_does_not_panic",
       "_tgt": "app_test_app",
       "source": "app_test_app",
       "target": "app_rendering_smoke_test_does_not_panic",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/app.rs",
+      "source_location": "L705",
+      "weight": 1.0,
+      "_src": "app_diff_overlay_renders_for_file_write_approval",
+      "_tgt": "app_test_app",
+      "source": "app_test_app",
+      "target": "app_diff_overlay_renders_for_file_write_approval",
       "confidence_score": 1.0
     },
     {
@@ -10632,8 +11740,740 @@
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L28",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_diffmode",
+      "source": "diff",
+      "target": "diff_diffmode",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L37",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_diffviewstate",
+      "source": "diff",
+      "target": "diff_diffviewstate",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L45",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_difffileview",
+      "source": "diff",
+      "target": "diff_difffileview",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L54",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_unifiedline",
+      "source": "diff",
+      "target": "diff_unifiedline",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L62",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_splitline",
+      "source": "diff",
+      "target": "diff_splitline",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L153",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_default_mode_for_width",
+      "source": "diff",
+      "target": "diff_default_mode_for_width",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L162",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_render_diff_view",
+      "source": "diff",
+      "target": "diff_render_diff_view",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L198",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_render_compact_diff_preview",
+      "source": "diff",
+      "target": "diff_render_compact_diff_preview",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L220",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_build_diff_file_view",
+      "source": "diff",
+      "target": "diff_build_diff_file_view",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L317",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_render_unified_lines",
+      "source": "diff",
+      "target": "diff_render_unified_lines",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L338",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_render_unified_line",
+      "source": "diff",
+      "target": "diff_render_unified_line",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L368",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_render_side_by_side_lines",
+      "source": "diff",
+      "target": "diff_render_side_by_side_lines",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L385",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_render_split_line",
+      "source": "diff",
+      "target": "diff_render_split_line",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L416",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_render_side",
+      "source": "diff",
+      "target": "diff_render_side",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L440",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_side_marker",
+      "source": "diff",
+      "target": "diff_side_marker",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L449",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_diff_line_style",
+      "source": "diff",
+      "target": "diff_diff_line_style",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L462",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_split_side_style",
+      "source": "diff",
+      "target": "diff_split_side_style",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L475",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_highlighted_spans",
+      "source": "diff",
+      "target": "diff_highlighted_spans",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L493",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_syntax_for_hint",
+      "source": "diff",
+      "target": "diff_syntax_for_hint",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L506",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_syntax_set",
+      "source": "diff",
+      "target": "diff_syntax_set",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L511",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_theme",
+      "source": "diff",
+      "target": "diff_theme",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L525",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_to_ratatui_style",
+      "source": "diff",
+      "target": "diff_to_ratatui_style",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L549",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_trim_change_line",
+      "source": "diff",
+      "target": "diff_trim_change_line",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L553",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_truncate_to_width",
+      "source": "diff",
+      "target": "diff_truncate_to_width",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L557",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_pad_or_truncate",
+      "source": "diff",
+      "target": "diff_pad_or_truncate",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L568",
+      "weight": 1.0,
+      "_src": "diff",
+      "_tgt": "diff_diff_layout_switches_at_expected_threshold",
+      "source": "diff",
+      "target": "diff_diff_layout_switches_at_expected_threshold",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L72",
+      "weight": 1.0,
+      "_src": "diff_diffviewstate",
+      "_tgt": "diff_diffviewstate_from_file_diffs",
+      "source": "diff_diffviewstate",
+      "target": "diff_diffviewstate_from_file_diffs",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L87",
+      "weight": 1.0,
+      "_src": "diff_diffviewstate",
+      "_tgt": "diff_diffviewstate_toggle_mode",
+      "source": "diff_diffviewstate",
+      "target": "diff_diffviewstate_toggle_mode",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L95",
+      "weight": 1.0,
+      "_src": "diff_diffviewstate",
+      "_tgt": "diff_diffviewstate_next_file",
+      "source": "diff_diffviewstate",
+      "target": "diff_diffviewstate_next_file",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L104",
+      "weight": 1.0,
+      "_src": "diff_diffviewstate",
+      "_tgt": "diff_diffviewstate_previous_file",
+      "source": "diff_diffviewstate",
+      "target": "diff_diffviewstate_previous_file",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L117",
+      "weight": 1.0,
+      "_src": "diff_diffviewstate",
+      "_tgt": "diff_diffviewstate_next_hunk",
+      "source": "diff_diffviewstate",
+      "target": "diff_diffviewstate_next_hunk",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L128",
+      "weight": 1.0,
+      "_src": "diff_diffviewstate",
+      "_tgt": "diff_diffviewstate_previous_hunk",
+      "source": "diff_diffviewstate",
+      "target": "diff_diffviewstate_previous_hunk",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L142",
+      "weight": 1.0,
+      "_src": "diff_diffviewstate",
+      "_tgt": "diff_diffviewstate_current_file",
+      "source": "diff_diffviewstate",
+      "target": "diff_diffviewstate_current_file",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L146",
+      "weight": 1.0,
+      "_src": "diff_diffviewstate",
+      "_tgt": "diff_diffviewstate_current_hunk_range",
+      "source": "diff_diffviewstate",
+      "target": "diff_diffviewstate_current_hunk_range",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L82",
+      "weight": 1.0,
+      "_src": "diff_diffviewstate_from_file_diffs",
+      "_tgt": "diff_default_mode_for_width",
+      "source": "diff_diffviewstate_from_file_diffs",
+      "target": "diff_default_mode_for_width",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L118",
+      "weight": 1.0,
+      "_src": "diff_diffviewstate_next_hunk",
+      "_tgt": "diff_diffviewstate_current_file",
+      "source": "diff_diffviewstate_next_hunk",
+      "target": "diff_diffviewstate_current_file",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L129",
+      "weight": 1.0,
+      "_src": "diff_diffviewstate_previous_hunk",
+      "_tgt": "diff_diffviewstate_current_file",
+      "source": "diff_diffviewstate_previous_hunk",
+      "target": "diff_diffviewstate_current_file",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L147",
+      "weight": 1.0,
+      "_src": "diff_diffviewstate_current_hunk_range",
+      "_tgt": "diff_diffviewstate_current_file",
+      "source": "diff_diffviewstate_current_file",
+      "target": "diff_diffviewstate_current_hunk_range",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L165",
+      "weight": 1.0,
+      "_src": "diff_render_diff_view",
+      "_tgt": "diff_diffviewstate_current_file",
+      "source": "diff_diffviewstate_current_file",
+      "target": "diff_render_diff_view",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L172",
+      "weight": 1.0,
+      "_src": "diff_render_diff_view",
+      "_tgt": "diff_diffviewstate_current_hunk_range",
+      "source": "diff_diffviewstate_current_hunk_range",
+      "target": "diff_render_diff_view",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L187",
+      "weight": 1.0,
+      "_src": "diff_render_diff_view",
+      "_tgt": "diff_render_unified_lines",
+      "source": "diff_render_diff_view",
+      "target": "diff_render_unified_lines",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L188",
+      "weight": 1.0,
+      "_src": "diff_render_diff_view",
+      "_tgt": "diff_render_side_by_side_lines",
+      "source": "diff_render_diff_view",
+      "target": "diff_render_side_by_side_lines",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L203",
+      "weight": 1.0,
+      "_src": "diff_render_compact_diff_preview",
+      "_tgt": "diff_build_diff_file_view",
+      "source": "diff_render_compact_diff_preview",
+      "target": "diff_build_diff_file_view",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L209",
+      "weight": 1.0,
+      "_src": "diff_render_compact_diff_preview",
+      "_tgt": "diff_render_unified_lines",
+      "source": "diff_render_compact_diff_preview",
+      "target": "diff_render_unified_lines",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L250",
+      "weight": 1.0,
+      "_src": "diff_build_diff_file_view",
+      "_tgt": "diff_trim_change_line",
+      "source": "diff_build_diff_file_view",
+      "target": "diff_trim_change_line",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L328",
+      "weight": 1.0,
+      "_src": "diff_render_unified_lines",
+      "_tgt": "diff_render_unified_line",
+      "source": "diff_render_unified_lines",
+      "target": "diff_render_unified_line",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L344",
+      "weight": 1.0,
+      "_src": "diff_render_unified_line",
+      "_tgt": "diff_diff_line_style",
+      "source": "diff_render_unified_line",
+      "target": "diff_diff_line_style",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L361",
+      "weight": 1.0,
+      "_src": "diff_render_unified_line",
+      "_tgt": "diff_truncate_to_width",
+      "source": "diff_render_unified_line",
+      "target": "diff_truncate_to_width",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L364",
+      "weight": 1.0,
+      "_src": "diff_render_unified_line",
+      "_tgt": "diff_highlighted_spans",
+      "source": "diff_render_unified_line",
+      "target": "diff_highlighted_spans",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L380",
+      "weight": 1.0,
+      "_src": "diff_render_side_by_side_lines",
+      "_tgt": "diff_render_split_line",
+      "source": "diff_render_side_by_side_lines",
+      "target": "diff_render_split_line",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L391",
+      "weight": 1.0,
+      "_src": "diff_render_split_line",
+      "_tgt": "diff_split_side_style",
+      "source": "diff_render_split_line",
+      "target": "diff_split_side_style",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L393",
+      "weight": 1.0,
+      "_src": "diff_render_split_line",
+      "_tgt": "diff_render_side",
+      "source": "diff_render_split_line",
+      "target": "diff_render_side",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L396",
+      "weight": 1.0,
+      "_src": "diff_render_split_line",
+      "_tgt": "diff_side_marker",
+      "source": "diff_render_split_line",
+      "target": "diff_side_marker",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L432",
+      "weight": 1.0,
+      "_src": "diff_render_side",
+      "_tgt": "diff_highlighted_spans",
+      "source": "diff_render_side",
+      "target": "diff_highlighted_spans",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L433",
+      "weight": 1.0,
+      "_src": "diff_render_side",
+      "_tgt": "diff_pad_or_truncate",
+      "source": "diff_render_side",
+      "target": "diff_pad_or_truncate",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L476",
+      "weight": 1.0,
+      "_src": "diff_highlighted_spans",
+      "_tgt": "diff_theme",
+      "source": "diff_highlighted_spans",
+      "target": "diff_theme",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L480",
+      "weight": 1.0,
+      "_src": "diff_highlighted_spans",
+      "_tgt": "diff_syntax_for_hint",
+      "source": "diff_highlighted_spans",
+      "target": "diff_syntax_for_hint",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L482",
+      "weight": 1.0,
+      "_src": "diff_highlighted_spans",
+      "_tgt": "diff_syntax_set",
+      "source": "diff_highlighted_spans",
+      "target": "diff_syntax_set",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L486",
+      "weight": 1.0,
+      "_src": "diff_highlighted_spans",
+      "_tgt": "diff_to_ratatui_style",
+      "source": "diff_highlighted_spans",
+      "target": "diff_to_ratatui_style",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L494",
+      "weight": 1.0,
+      "_src": "diff_syntax_for_hint",
+      "_tgt": "diff_syntax_set",
+      "source": "diff_syntax_for_hint",
+      "target": "diff_syntax_set",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/views/diff.rs",
+      "source_location": "L558",
+      "weight": 1.0,
+      "_src": "diff_pad_or_truncate",
+      "_tgt": "diff_truncate_to_width",
+      "source": "diff_truncate_to_width",
+      "target": "diff_pad_or_truncate",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/views/chat.rs",
-      "source_location": "L14",
+      "source_location": "L17",
       "weight": 1.0,
       "_src": "chat",
       "_tgt": "chat_max_scroll",
@@ -10645,7 +12485,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/views/chat.rs",
-      "source_location": "L20",
+      "source_location": "L23",
       "weight": 1.0,
       "_src": "chat",
       "_tgt": "chat_render_chat",
@@ -10657,7 +12497,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/views/chat.rs",
-      "source_location": "L28",
+      "source_location": "L31",
       "weight": 1.0,
       "_src": "chat",
       "_tgt": "chat_transcript_lines",
@@ -10669,7 +12509,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/views/chat.rs",
-      "source_location": "L74",
+      "source_location": "L80",
       "weight": 1.0,
       "_src": "chat",
       "_tgt": "chat_wrap_prefixed",
@@ -10681,7 +12521,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/views/chat.rs",
-      "source_location": "L90",
+      "source_location": "L96",
       "weight": 1.0,
       "_src": "chat",
       "_tgt": "chat_wrap_line",
@@ -10693,7 +12533,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/views/chat.rs",
-      "source_location": "L15",
+      "source_location": "L18",
       "weight": 1.0,
       "_src": "chat_max_scroll",
       "_tgt": "chat_transcript_lines",
@@ -10705,7 +12545,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/views/chat.rs",
-      "source_location": "L21",
+      "source_location": "L24",
       "weight": 1.0,
       "_src": "chat_render_chat",
       "_tgt": "chat_transcript_lines",
@@ -10717,7 +12557,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/views/chat.rs",
-      "source_location": "L39",
+      "source_location": "L42",
       "weight": 1.0,
       "_src": "chat_transcript_lines",
       "_tgt": "chat_wrap_prefixed",
@@ -10729,7 +12569,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/views/chat.rs",
-      "source_location": "L77",
+      "source_location": "L83",
       "weight": 1.0,
       "_src": "chat_wrap_prefixed",
       "_tgt": "chat_wrap_line",
@@ -10903,6 +12743,186 @@
       "_tgt": "prompt_promptwidget_default",
       "source": "prompt_promptwidget_default",
       "target": "prompt_build_textarea",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L18",
+      "weight": 1.0,
+      "_src": "approval",
+      "_tgt": "approval_render_approval_card",
+      "source": "approval",
+      "target": "approval_render_approval_card",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L81",
+      "weight": 1.0,
+      "_src": "approval",
+      "_tgt": "approval_risk_border_style",
+      "source": "approval",
+      "target": "approval_risk_border_style",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L89",
+      "weight": 1.0,
+      "_src": "approval",
+      "_tgt": "approval_border_line",
+      "source": "approval",
+      "target": "approval_border_line",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L107",
+      "weight": 1.0,
+      "_src": "approval",
+      "_tgt": "approval_content_line",
+      "source": "approval",
+      "target": "approval_content_line",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L121",
+      "weight": 1.0,
+      "_src": "approval",
+      "_tgt": "approval_approval_icon",
+      "source": "approval",
+      "target": "approval_approval_icon",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L129",
+      "weight": 1.0,
+      "_src": "approval",
+      "_tgt": "approval_approval_label",
+      "source": "approval",
+      "target": "approval_approval_label",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L138",
+      "weight": 1.0,
+      "_src": "approval",
+      "_tgt": "approval_status_style",
+      "source": "approval",
+      "target": "approval_status_style",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L148",
+      "weight": 1.0,
+      "_src": "approval",
+      "_tgt": "approval_wrap_text",
+      "source": "approval",
+      "target": "approval_wrap_text",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L179",
+      "weight": 1.0,
+      "_src": "approval",
+      "_tgt": "approval_truncate_to_width",
+      "source": "approval",
+      "target": "approval_truncate_to_width",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L191",
+      "weight": 1.0,
+      "_src": "approval",
+      "_tgt": "approval_approval_card_uses_expected_border_color_for_each_risk_level",
+      "source": "approval",
+      "target": "approval_approval_card_uses_expected_border_color_for_each_risk_level",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L20",
+      "weight": 1.0,
+      "_src": "approval_render_approval_card",
+      "_tgt": "approval_risk_border_style",
+      "source": "approval_render_approval_card",
+      "target": "approval_risk_border_style",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L28",
+      "weight": 1.0,
+      "_src": "approval_render_approval_card",
+      "_tgt": "approval_border_line",
+      "source": "approval_render_approval_card",
+      "target": "approval_border_line",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L32",
+      "weight": 1.0,
+      "_src": "approval_render_approval_card",
+      "_tgt": "approval_wrap_text",
+      "source": "approval_render_approval_card",
+      "target": "approval_wrap_text",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L33",
+      "weight": 1.0,
+      "_src": "approval_render_approval_card",
+      "_tgt": "approval_content_line",
+      "source": "approval_render_approval_card",
+      "target": "approval_content_line",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-tui/src/widgets/approval.rs",
+      "source_location": "L96",
+      "weight": 1.0,
+      "_src": "approval_border_line",
+      "_tgt": "approval_truncate_to_width",
+      "source": "approval_border_line",
+      "target": "approval_truncate_to_width",
       "confidence_score": 1.0
     },
     {
