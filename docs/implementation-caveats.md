@@ -273,3 +273,200 @@ Consequence:
 Recommended review:
 
 - Once the registry shape stabilizes, consider promoting the shared registry-facing types or traits into `moa-core`.
+
+## 12. Persistent approval matching is still string-normalization based
+
+Current state:
+
+- Approval rules are stored as `(workspace_id, tool, pattern, action)`.
+- Matching is performed against a normalized string representation of the tool input.
+- For `bash`, the normalization parses only a single command segment and rejects chained commands for rule matching.
+
+Issue:
+
+- This is intentionally safer than matching the raw shell string, but it is still not a full semantic command policy engine.
+- Equivalent shell inputs may normalize differently depending on quoting or wrapper structure.
+- Non-shell tools currently rely on tool-specific normalization and summaries rather than a shared typed policy input model.
+
+Consequence:
+
+- The current implementation correctly avoids obvious bypasses like matching `npm test && rm -rf /` against an `npm test*` rule.
+- It is also intentionally conservative: some safe inputs may fail to match an existing rule and require approval again.
+
+Recommended review:
+
+- If approval rules become a major surface area, consider promoting tool-specific normalized policy inputs into shared types rather than matching plain strings.
+
+## 13. Step 07 persists only workspace-scoped approval rules, even though the type system allows more
+
+Current state:
+
+- `PolicyScope` includes both `Workspace` and `Global`.
+- The current brain and router only create workspace-scoped rules for `AlwaysAllow`.
+- Rule lookup includes global rows if they exist, but the current flow does not create or manage them.
+
+Issue:
+
+- The data model is slightly ahead of the product behavior.
+- There is no current UX or API distinction between workspace-local and global persistent approvals.
+
+Consequence:
+
+- The implementation satisfies the current step requirement of per-workspace persistence.
+- Global scope exists in the types and storage layer but should be treated as reserved for later work, not as a finished feature.
+
+Recommended review:
+
+- Decide whether global approval rules are actually part of the intended product surface before later clients start depending on the enum value.
+
+## 14. Approval resume logic currently replays the session event log
+
+Current state:
+
+- On each turn, the brain scans the session event log to find:
+  - unresolved approval requests
+  - approval decisions that unblock a pending tool call
+  - completed tool executions
+
+Issue:
+
+- This keeps the implementation simple and faithful to the event log, but it derives approval state by replay rather than reading a materialized current-state record.
+
+Consequence:
+
+- The design is correct for the current milestone and small local sessions.
+- As sessions grow, repeatedly scanning the full event history on each turn may become a noticeable cost, especially once compaction and longer tool loops arrive.
+
+Recommended review:
+
+- Later options:
+  - keep replay as the source of truth but add cheap indexed/materialized session state
+  - or teach compaction/state recovery to preserve current approval state explicitly
+
+## 15. Policy enforcement is intentionally duplicated in the brain and the tool router
+
+Current state:
+
+- The brain checks policy first so it can emit `ApprovalRequested` and return `TurnResult::NeedsApproval` before execution.
+- The `ToolRouter` also checks policy inside `execute()` as a defense-in-depth guard.
+
+Issue:
+
+- This is the right safety posture for now, but it means policy behavior is expressed in two call paths:
+  - pre-execution orchestration in `moa-brain`
+  - final dispatch enforcement in `moa-hands`
+
+Consequence:
+
+- If those paths ever diverge, the user-facing event flow and the final execution gate could disagree.
+- The current tests cover the main behavior, but the duplication is still structural coupling worth reviewing later.
+
+Recommended review:
+
+- Once the approval flow stabilizes, consider whether policy evaluation should expose one canonical helper/output shape that both layers consume.
+
+## 16. The example chat harness is not yet a real approval UI
+
+Current state:
+
+- The `moa-brain` example harness can drive the live brain/tool loop.
+- After Step 07, a turn can now return `TurnResult::NeedsApproval`.
+
+Issue:
+
+- The example harness is still primarily a developer smoke-test harness, not a full approval client.
+- It does not yet provide a complete interactive flow for approving or denying pending tool calls.
+
+Consequence:
+
+- Tool-free chats still work as expected.
+- Tool-using prompts can now legitimately block on approval without the example offering the full decision UX described in the communication-layer docs.
+
+Recommended review:
+
+- Upgrade the example harness later if it is meant to remain a human-facing debug tool, or keep it intentionally minimal and treat approvals as a TUI/CLI/gateway concern.
+
+## 17. The Step 08 chat runtime duplicates part of the brain loop to expose streaming
+
+Current state:
+
+- `moa-brain::run_brain_turn_with_tools()` is the canonical buffered harness.
+- The new Step 08 `ChatRuntime` in `moa-tui` reimplements the compile → stream → tool/approval → continue loop locally.
+
+Issue:
+
+- This duplication exists because the current harness emits only final `BrainResponse` events after collection, while the TUI and `moa exec` need live streamed deltas.
+- The duplicated loop is intentionally close to the harness, but it is still a second implementation of overlapping orchestration logic.
+
+Consequence:
+
+- The TUI and exec mode now satisfy the streaming requirement.
+- It also means future changes to turn execution need to keep the buffered harness and the streamed runtime in sync unless the architecture converges on one shared streamed primitive.
+
+Recommended review:
+
+- When the orchestrator work settles, consider extracting a shared streamed turn engine instead of maintaining both a buffered and a TUI-specific turn loop.
+
+## 18. Step 08 cancellation is task-abort based, not provider-native cancellation
+
+Current state:
+
+- `Ctrl+C` and `Escape` abort the running turn task in the TUI.
+- This immediately returns control to the UI and stops further rendering for that turn.
+
+Issue:
+
+- The cancellation does not currently propagate a provider-native cancel request into Anthropic streaming or a richer session signal into the buffered brain harness.
+
+Consequence:
+
+- The visible user behavior is correct for the current step: generation stops and the UI becomes responsive again.
+- The underlying request may still terminate by task abortion rather than a graceful model/provider stop path.
+
+Recommended review:
+
+- Later work should decide whether cancellation belongs at the session/orchestrator layer, the provider layer, or both.
+
+## 19. `/clear` and `/model <name>` start a fresh session instead of preserving transcript continuity
+
+Current state:
+
+- `/clear` clears the visible transcript and creates a new empty session.
+- `/model <name>` also starts a new session after switching the default model.
+
+Issue:
+
+- This is the simplest way to keep the UI display consistent with the actual prompt context for a single-session Step 08 client.
+- It does mean these commands are implemented as session replacement, not in-place state mutation.
+
+Consequence:
+
+- The visible transcript always matches the real context sent to the model after these commands.
+- Old session history is not surfaced in the current TUI because tabs/session switching are later milestones.
+
+Recommended review:
+
+- Revisit once multi-session/tab support lands so `/clear` and model switching can have a clearer relationship to session history and persistence.
+
+## 20. The local CLI/TUI still assume the configured local paths are writable
+
+Current state:
+
+- The Step 08 runtime uses the configured local defaults:
+  - `~/.moa/sessions.db`
+  - `~/.moa/memory`
+  - `~/.moa/sandbox`
+
+Issue:
+
+- This is correct for real local usage.
+- In restricted environments such as the current sandbox, those paths may not be writable even when the implementation itself is correct.
+
+Consequence:
+
+- `moa exec` works end to end when the local paths are writable or overridden through config/env.
+- In locked-down environments, the runtime needs config overrides (for example `MOA__LOCAL__SESSION_DB`, `MOA__LOCAL__MEMORY_DIR`, `MOA__LOCAL__SANDBOX_DIR`) to run.
+
+Recommended review:
+
+- Decide later whether the binaries should keep failing fast on unwritable local state, or offer a documented temporary-directory fallback for constrained environments.
