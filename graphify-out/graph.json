@@ -9,7 +9,7 @@
       "source_file": "src/lib.rs",
       "source_location": "L1",
       "id": "lib",
-      "community": 5
+      "community": 2
     },
     {
       "label": "types.rs",
@@ -23,151 +23,151 @@
       "label": "SessionId",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L22",
+      "source_location": "L24",
       "id": "types_sessionid",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".new()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L26",
+      "source_location": "L28",
       "id": "types_sessionid_new",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".default()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L32",
+      "source_location": "L34",
       "id": "types_sessionid_default",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".fmt()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L38",
+      "source_location": "L40",
       "id": "types_sessionid_fmt",
-      "community": 1
+      "community": 3
     },
     {
       "label": "UserId",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L46",
+      "source_location": "L48",
       "id": "types_userid",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".new()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L50",
+      "source_location": "L52",
       "id": "types_userid_new",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".as_str()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L55",
+      "source_location": "L57",
       "id": "types_userid_as_str",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".fmt()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L61",
+      "source_location": "L63",
       "id": "types_userid_fmt",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".from()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L67",
+      "source_location": "L69",
       "id": "types_userid_from",
-      "community": 1
+      "community": 3
     },
     {
       "label": "WorkspaceId",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L81",
+      "source_location": "L83",
       "id": "types_workspaceid",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".new()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L85",
+      "source_location": "L87",
       "id": "types_workspaceid_new",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".as_str()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L90",
+      "source_location": "L92",
       "id": "types_workspaceid_as_str",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".fmt()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L96",
+      "source_location": "L98",
       "id": "types_workspaceid_fmt",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".from()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L102",
+      "source_location": "L104",
       "id": "types_workspaceid_from",
-      "community": 1
+      "community": 3
     },
     {
       "label": "BrainId",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L116",
+      "source_location": "L118",
       "id": "types_brainid",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".new()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L120",
+      "source_location": "L122",
       "id": "types_brainid_new",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".default()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L126",
+      "source_location": "L128",
       "id": "types_brainid_default",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".fmt()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L132",
+      "source_location": "L134",
       "id": "types_brainid_fmt",
-      "community": 1
+      "community": 3
     },
     {
       "label": "Platform",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L140",
+      "source_location": "L142",
       "id": "types_platform",
       "community": 0
     },
@@ -175,7 +175,7 @@
       "label": "SessionStatus",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L156",
+      "source_location": "L158",
       "id": "types_sessionstatus",
       "community": 0
     },
@@ -183,7 +183,7 @@
       "label": "SandboxTier",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L176",
+      "source_location": "L178",
       "id": "types_sandboxtier",
       "community": 0
     },
@@ -191,7 +191,7 @@
       "label": "RiskLevel",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L190",
+      "source_location": "L192",
       "id": "types_risklevel",
       "community": 0
     },
@@ -199,7 +199,7 @@
       "label": "ApprovalDecision",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L202",
+      "source_location": "L204",
       "id": "types_approvaldecision",
       "community": 0
     },
@@ -207,7 +207,7 @@
       "label": "ObserveLevel",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L214",
+      "source_location": "L216",
       "id": "types_observelevel",
       "community": 0
     },
@@ -215,7 +215,7 @@
       "label": "SessionSignal",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L226",
+      "source_location": "L228",
       "id": "types_sessionsignal",
       "community": 0
     },
@@ -223,7 +223,7 @@
       "label": "ToolCallFormat",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L245",
+      "source_location": "L247",
       "id": "types_toolcallformat",
       "community": 0
     },
@@ -231,7 +231,7 @@
       "label": "EventType",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L255",
+      "source_location": "L257",
       "id": "types_eventtype",
       "community": 0
     },
@@ -239,7 +239,7 @@
       "label": "UserMessage",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L300",
+      "source_location": "L302",
       "id": "types_usermessage",
       "community": 0
     },
@@ -247,7 +247,7 @@
       "label": "StartSessionRequest",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L309",
+      "source_location": "L311",
       "id": "types_startsessionrequest",
       "community": 0
     },
@@ -255,7 +255,7 @@
       "label": "SessionHandle",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L328",
+      "source_location": "L330",
       "id": "types_sessionhandle",
       "community": 0
     },
@@ -263,23 +263,23 @@
       "label": "SessionMeta",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L335",
+      "source_location": "L337",
       "id": "types_sessionmeta",
-      "community": 1
+      "community": 6
     },
     {
       "label": ".default()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L373",
+      "source_location": "L375",
       "id": "types_sessionmeta_default",
-      "community": 1
+      "community": 6
     },
     {
       "label": "SessionSummary",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L399",
+      "source_location": "L401",
       "id": "types_sessionsummary",
       "community": 0
     },
@@ -287,7 +287,7 @@
       "label": "SessionFilter",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L420",
+      "source_location": "L422",
       "id": "types_sessionfilter",
       "community": 0
     },
@@ -295,31 +295,31 @@
       "label": "EventRange",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L435",
+      "source_location": "L437",
       "id": "types_eventrange",
-      "community": 1
+      "community": 6
     },
     {
       "label": ".all()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L448",
+      "source_location": "L450",
       "id": "types_eventrange_all",
-      "community": 1
+      "community": 6
     },
     {
       "label": ".recent()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L453",
+      "source_location": "L455",
       "id": "types_eventrange_recent",
-      "community": 1
+      "community": 6
     },
     {
       "label": "EventFilter",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L463",
+      "source_location": "L465",
       "id": "types_eventfilter",
       "community": 0
     },
@@ -327,7 +327,7 @@
       "label": "EventRecord",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L482",
+      "source_location": "L484",
       "id": "types_eventrecord",
       "community": 0
     },
@@ -335,7 +335,7 @@
       "label": "EventStream",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L505",
+      "source_location": "L507",
       "id": "types_eventstream",
       "community": 0
     },
@@ -343,7 +343,7 @@
       "label": "WakeContext",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L512",
+      "source_location": "L514",
       "id": "types_wakecontext",
       "community": 0
     },
@@ -351,7 +351,7 @@
       "label": "CronSpec",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L523",
+      "source_location": "L525",
       "id": "types_cronspec",
       "community": 0
     },
@@ -359,7 +359,7 @@
       "label": "CronHandle",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L535",
+      "source_location": "L537",
       "id": "types_cronhandle",
       "community": 0
     },
@@ -367,7 +367,7 @@
       "label": "HandResources",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L544",
+      "source_location": "L546",
       "id": "types_handresources",
       "community": 0
     },
@@ -375,7 +375,7 @@
       "label": "HandSpec",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L553",
+      "source_location": "L555",
       "id": "types_handspec",
       "community": 0
     },
@@ -383,55 +383,55 @@
       "label": "HandHandle",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L573",
+      "source_location": "L575",
       "id": "types_handhandle",
-      "community": 8
+      "community": 6
     },
     {
       "label": ".local()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L586",
+      "source_location": "L588",
       "id": "types_handhandle_local",
-      "community": 8
+      "community": 6
     },
     {
       "label": ".docker()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L591",
+      "source_location": "L593",
       "id": "types_handhandle_docker",
-      "community": 8
+      "community": 6
     },
     {
       "label": ".daytona()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L598",
+      "source_location": "L600",
       "id": "types_handhandle_daytona",
-      "community": 8
+      "community": 6
     },
     {
       "label": ".e2b()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L605",
+      "source_location": "L607",
       "id": "types_handhandle_e2b",
-      "community": 8
+      "community": 6
     },
     {
       "label": ".daytona_id()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L612",
+      "source_location": "L614",
       "id": "types_handhandle_daytona_id",
-      "community": 8
+      "community": 6
     },
     {
       "label": "HandStatus",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L625",
+      "source_location": "L627",
       "id": "types_handstatus",
       "community": 0
     },
@@ -439,7 +439,7 @@
       "label": "ToolOutput",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L642",
+      "source_location": "L644",
       "id": "types_tooloutput",
       "community": 0
     },
@@ -447,7 +447,7 @@
       "label": "TokenPricing",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L655",
+      "source_location": "L657",
       "id": "types_tokenpricing",
       "community": 0
     },
@@ -455,7 +455,7 @@
       "label": "ModelCapabilities",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L666",
+      "source_location": "L668",
       "id": "types_modelcapabilities",
       "community": 0
     },
@@ -463,7 +463,7 @@
       "label": "ToolInvocation",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L689",
+      "source_location": "L691",
       "id": "types_toolinvocation",
       "community": 0
     },
@@ -471,7 +471,7 @@
       "label": "CompletionContent",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L701",
+      "source_location": "L703",
       "id": "types_completioncontent",
       "community": 0
     },
@@ -479,7 +479,7 @@
       "label": "StopReason",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L711",
+      "source_location": "L713",
       "id": "types_stopreason",
       "community": 0
     },
@@ -487,39 +487,103 @@
       "label": "CompletionRequest",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L726",
+      "source_location": "L728",
       "id": "types_completionrequest",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".new()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L743",
+      "source_location": "L745",
       "id": "types_completionrequest_new",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".simple()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L755",
+      "source_location": "L757",
       "id": "types_completionrequest_simple",
-      "community": 1
+      "community": 3
+    },
+    {
+      "label": "CompletionResponse",
+      "file_type": "code",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L764",
+      "id": "types_completionresponse",
+      "community": 0
     },
     {
       "label": "CompletionStream",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L762",
+      "source_location": "L784",
       "id": "types_completionstream",
-      "community": 0
+      "community": 10
+    },
+    {
+      "label": ".new()",
+      "file_type": "code",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L791",
+      "id": "types_completionstream_new",
+      "community": 10
+    },
+    {
+      "label": ".from_response()",
+      "file_type": "code",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L802",
+      "id": "types_completionstream_from_response",
+      "community": 10
+    },
+    {
+      "label": ".next()",
+      "file_type": "code",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L820",
+      "id": "types_completionstream_next",
+      "community": 10
+    },
+    {
+      "label": ".collect()",
+      "file_type": "code",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L825",
+      "id": "types_completionstream_collect",
+      "community": 10
+    },
+    {
+      "label": ".into_response()",
+      "file_type": "code",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L834",
+      "id": "types_completionstream_into_response",
+      "community": 10
+    },
+    {
+      "label": ".await_completion()",
+      "file_type": "code",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L838",
+      "id": "types_completionstream_await_completion",
+      "community": 10
+    },
+    {
+      "label": ".fmt()",
+      "file_type": "code",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L846",
+      "id": "types_completionstream_fmt",
+      "community": 10
     },
     {
       "label": "PlatformUser",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L783",
+      "source_location": "L853",
       "id": "types_platformuser",
       "community": 0
     },
@@ -527,7 +591,7 @@
       "label": "ChannelRef",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L795",
+      "source_location": "L865",
       "id": "types_channelref",
       "community": 0
     },
@@ -535,7 +599,7 @@
       "label": "Attachment",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L809",
+      "source_location": "L879",
       "id": "types_attachment",
       "community": 0
     },
@@ -543,7 +607,7 @@
       "label": "InboundMessage",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L824",
+      "source_location": "L894",
       "id": "types_inboundmessage",
       "community": 0
     },
@@ -551,39 +615,39 @@
       "label": "MessageId",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L846",
+      "source_location": "L916",
       "id": "types_messageid",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".new()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L850",
+      "source_location": "L920",
       "id": "types_messageid_new",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".as_str()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L855",
+      "source_location": "L925",
       "id": "types_messageid_as_str",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".fmt()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L861",
+      "source_location": "L931",
       "id": "types_messageid_fmt",
-      "community": 1
+      "community": 3
     },
     {
       "label": "ButtonStyle",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L869",
+      "source_location": "L939",
       "id": "types_buttonstyle",
       "community": 0
     },
@@ -591,7 +655,7 @@
       "label": "DiffHunk",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L880",
+      "source_location": "L950",
       "id": "types_diffhunk",
       "community": 0
     },
@@ -599,7 +663,7 @@
       "label": "ToolStatus",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L892",
+      "source_location": "L962",
       "id": "types_toolstatus",
       "community": 0
     },
@@ -607,7 +671,7 @@
       "label": "ApprovalRequest",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L905",
+      "source_location": "L975",
       "id": "types_approvalrequest",
       "community": 0
     },
@@ -615,7 +679,7 @@
       "label": "MessageContent",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L919",
+      "source_location": "L989",
       "id": "types_messagecontent",
       "community": 0
     },
@@ -623,7 +687,7 @@
       "label": "ActionButton",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L957",
+      "source_location": "L1027",
       "id": "types_actionbutton",
       "community": 0
     },
@@ -631,7 +695,7 @@
       "label": "OutboundMessage",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L970",
+      "source_location": "L1040",
       "id": "types_outboundmessage",
       "community": 0
     },
@@ -639,7 +703,7 @@
       "label": "PlatformCapabilities",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L983",
+      "source_location": "L1053",
       "id": "types_platformcapabilities",
       "community": 0
     },
@@ -647,7 +711,7 @@
       "label": "MemoryScope",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1007",
+      "source_location": "L1077",
       "id": "types_memoryscope",
       "community": 0
     },
@@ -655,47 +719,47 @@
       "label": "MemoryPath",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1017",
+      "source_location": "L1087",
       "id": "types_memorypath",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".new()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1021",
+      "source_location": "L1091",
       "id": "types_memorypath_new",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".as_str()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1026",
+      "source_location": "L1096",
       "id": "types_memorypath_as_str",
-      "community": 8
+      "community": 6
     },
     {
       "label": ".fmt()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1032",
+      "source_location": "L1102",
       "id": "types_memorypath_fmt",
-      "community": 1
+      "community": 3
     },
     {
       "label": ".from()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1038",
+      "source_location": "L1108",
       "id": "types_memorypath_from",
-      "community": 1
+      "community": 3
     },
     {
       "label": "ConfidenceLevel",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1052",
+      "source_location": "L1122",
       "id": "types_confidencelevel",
       "community": 0
     },
@@ -703,7 +767,7 @@
       "label": "PageType",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1064",
+      "source_location": "L1134",
       "id": "types_pagetype",
       "community": 0
     },
@@ -711,7 +775,7 @@
       "label": "MemorySearchResult",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1085",
+      "source_location": "L1155",
       "id": "types_memorysearchresult",
       "community": 0
     },
@@ -719,7 +783,7 @@
       "label": "PageSummary",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1104",
+      "source_location": "L1174",
       "id": "types_pagesummary",
       "community": 0
     },
@@ -727,7 +791,7 @@
       "label": "WikiPage",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1119",
+      "source_location": "L1189",
       "id": "types_wikipage",
       "community": 0
     },
@@ -735,7 +799,7 @@
       "label": "Credential",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1151",
+      "source_location": "L1221",
       "id": "types_credential",
       "community": 0
     },
@@ -743,7 +807,7 @@
       "label": "MessageRole",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1175",
+      "source_location": "L1245",
       "id": "types_messagerole",
       "community": 0
     },
@@ -751,39 +815,39 @@
       "label": "ContextMessage",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1188",
+      "source_location": "L1258",
       "id": "types_contextmessage",
-      "community": 9
+      "community": 12
     },
     {
       "label": ".system()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1199",
+      "source_location": "L1269",
       "id": "types_contextmessage_system",
-      "community": 9
+      "community": 12
     },
     {
       "label": ".user()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1208",
+      "source_location": "L1278",
       "id": "types_contextmessage_user",
-      "community": 9
+      "community": 12
     },
     {
       "label": ".assistant()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1217",
+      "source_location": "L1287",
       "id": "types_contextmessage_assistant",
-      "community": 9
+      "community": 12
     },
     {
       "label": "WorkingContext",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1228",
+      "source_location": "L1298",
       "id": "types_workingcontext",
       "community": 0
     },
@@ -791,7 +855,7 @@
       "label": "ProcessorOutput",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1251",
+      "source_location": "L1321",
       "id": "types_processoroutput",
       "community": 0
     },
@@ -799,15 +863,15 @@
       "label": "session_id_roundtrip()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1269",
+      "source_location": "L1339",
       "id": "types_session_id_roundtrip",
-      "community": 1
+      "community": 3
     },
     {
       "label": "session_status_serialization()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1277",
+      "source_location": "L1347",
       "id": "types_session_status_serialization",
       "community": 0
     },
@@ -815,7 +879,7 @@
       "label": "all_sandbox_tiers_exist()",
       "file_type": "code",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1284",
+      "source_location": "L1354",
       "id": "types_all_sandbox_tiers_exist",
       "community": 0
     },
@@ -825,7 +889,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L1",
       "id": "events",
-      "community": 6
+      "community": 7
     },
     {
       "label": "Event",
@@ -833,7 +897,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L13",
       "id": "events_event",
-      "community": 6
+      "community": 7
     },
     {
       "label": ".event_type()",
@@ -841,7 +905,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L190",
       "id": "events_event_event_type",
-      "community": 6
+      "community": 7
     },
     {
       "label": ".type_name()",
@@ -849,7 +913,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L216",
       "id": "events_event_type_name",
-      "community": 6
+      "community": 7
     },
     {
       "label": ".input_tokens()",
@@ -857,7 +921,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L242",
       "id": "events_event_input_tokens",
-      "community": 6
+      "community": 7
     },
     {
       "label": ".output_tokens()",
@@ -865,7 +929,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L250",
       "id": "events_event_output_tokens",
-      "community": 6
+      "community": 7
     },
     {
       "label": ".cost_cents()",
@@ -873,7 +937,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L258",
       "id": "events_event_cost_cents",
-      "community": 6
+      "community": 7
     },
     {
       "label": ".token_count()",
@@ -881,7 +945,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L266",
       "id": "events_event_token_count",
-      "community": 6
+      "community": 7
     },
     {
       "label": "event_serialization_roundtrip()",
@@ -889,7 +953,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L289",
       "id": "events_event_serialization_roundtrip",
-      "community": 6
+      "community": 7
     },
     {
       "label": "brain_response_event_has_cost_fields()",
@@ -897,7 +961,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L301",
       "id": "events_brain_response_event_has_cost_fields",
-      "community": 6
+      "community": 7
     },
     {
       "label": "all_event_types_serialize()",
@@ -905,7 +969,7 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L316",
       "id": "events_all_event_types_serialize",
-      "community": 6
+      "community": 7
     },
     {
       "label": "error.rs",
@@ -913,7 +977,7 @@
       "source_file": "moa-core/src/error.rs",
       "source_location": "L1",
       "id": "error",
-      "community": 5
+      "community": 2
     },
     {
       "label": "MoaError",
@@ -921,7 +985,7 @@
       "source_file": "moa-core/src/error.rs",
       "source_location": "L14",
       "id": "error_moaerror",
-      "community": 5
+      "community": 2
     },
     {
       "label": "config.rs",
@@ -1169,7 +1233,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L1",
       "id": "traits",
-      "community": 5
+      "community": 9
     },
     {
       "label": "BrainOrchestrator",
@@ -1177,7 +1241,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L19",
       "id": "traits_brainorchestrator",
-      "community": 5
+      "community": 9
     },
     {
       "label": "SessionStore",
@@ -1185,7 +1249,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L41",
       "id": "traits_sessionstore",
-      "community": 5
+      "community": 9
     },
     {
       "label": "HandProvider",
@@ -1193,7 +1257,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L70",
       "id": "traits_handprovider",
-      "community": 5
+      "community": 9
     },
     {
       "label": "LLMProvider",
@@ -1201,7 +1265,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L95",
       "id": "traits_llmprovider",
-      "community": 5
+      "community": 9
     },
     {
       "label": "PlatformAdapter",
@@ -1209,7 +1273,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L108",
       "id": "traits_platformadapter",
-      "community": 5
+      "community": 9
     },
     {
       "label": "MemoryStore",
@@ -1217,7 +1281,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L130",
       "id": "traits_memorystore",
-      "community": 5
+      "community": 9
     },
     {
       "label": "ContextProcessor",
@@ -1225,7 +1289,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L163",
       "id": "traits_contextprocessor",
-      "community": 5
+      "community": 9
     },
     {
       "label": "CredentialVault",
@@ -1233,7 +1297,7 @@
       "source_file": "moa-core/src/traits.rs",
       "source_location": "L176",
       "id": "traits_credentialvault",
-      "community": 5
+      "community": 9
     },
     {
       "label": "main.rs",
@@ -1241,7 +1305,7 @@
       "source_file": "moa-tui/src/main.rs",
       "source_location": "L1",
       "id": "main",
-      "community": 10
+      "community": 14
     },
     {
       "label": "main()",
@@ -1249,7 +1313,7 @@
       "source_file": "moa-tui/src/main.rs",
       "source_location": "L3",
       "id": "main_main",
-      "community": 10
+      "community": 14
     },
     {
       "label": "session_store.rs",
@@ -1257,7 +1321,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L1",
       "id": "session_store",
-      "community": 7
+      "community": 8
     },
     {
       "label": "create_session_and_emit_events()",
@@ -1265,7 +1329,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L9",
       "id": "session_store_create_session_and_emit_events",
-      "community": 7
+      "community": 8
     },
     {
       "label": "get_events_with_range_filter()",
@@ -1273,7 +1337,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L65",
       "id": "session_store_get_events_with_range_filter",
-      "community": 7
+      "community": 8
     },
     {
       "label": "get_events_filtered_by_type()",
@@ -1281,7 +1345,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L110",
       "id": "session_store_get_events_filtered_by_type",
-      "community": 7
+      "community": 8
     },
     {
       "label": "wake_finds_checkpoint_and_recent_events()",
@@ -1289,7 +1353,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L177",
       "id": "session_store_wake_finds_checkpoint_and_recent_events",
-      "community": 7
+      "community": 8
     },
     {
       "label": "wake_without_checkpoint_returns_all_events()",
@@ -1297,7 +1361,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L238",
       "id": "session_store_wake_without_checkpoint_returns_all_events",
-      "community": 7
+      "community": 8
     },
     {
       "label": "fts_search_finds_events()",
@@ -1305,7 +1369,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L271",
       "id": "session_store_fts_search_finds_events",
-      "community": 7
+      "community": 8
     },
     {
       "label": "list_sessions_filters_by_workspace()",
@@ -1313,7 +1377,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L308",
       "id": "session_store_list_sessions_filters_by_workspace",
-      "community": 7
+      "community": 8
     },
     {
       "label": "schema_is_idempotent()",
@@ -1321,7 +1385,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L344",
       "id": "session_store_schema_is_idempotent",
-      "community": 7
+      "community": 8
     },
     {
       "label": "update_status_persists_changes()",
@@ -1329,7 +1393,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L352",
       "id": "session_store_update_status_persists_changes",
-      "community": 7
+      "community": 8
     },
     {
       "label": "turso.rs",
@@ -1337,7 +1401,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L1",
       "id": "turso",
-      "community": 3
+      "community": 4
     },
     {
       "label": "TursoSessionStore",
@@ -1345,7 +1409,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L23",
       "id": "turso_tursosessionstore",
-      "community": 3
+      "community": 4
     },
     {
       "label": ".new()",
@@ -1353,7 +1417,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L29",
       "id": "turso_tursosessionstore_new",
-      "community": 3
+      "community": 4
     },
     {
       "label": ".new_local()",
@@ -1361,7 +1425,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L38",
       "id": "turso_tursosessionstore_new_local",
-      "community": 3
+      "community": 4
     },
     {
       "label": ".wake()",
@@ -1369,7 +1433,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L58",
       "id": "turso_tursosessionstore_wake",
-      "community": 3
+      "community": 4
     },
     {
       "label": ".new_remote()",
@@ -1377,7 +1441,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L106",
       "id": "turso_tursosessionstore_new_remote",
-      "community": 3
+      "community": 4
     },
     {
       "label": ".next_sequence()",
@@ -1385,7 +1449,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L123",
       "id": "turso_tursosessionstore_next_sequence",
-      "community": 3
+      "community": 4
     },
     {
       "label": ".create_session()",
@@ -1393,7 +1457,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L146",
       "id": "turso_tursosessionstore_create_session",
-      "community": 3
+      "community": 4
     },
     {
       "label": ".emit_event()",
@@ -1401,7 +1465,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L186",
       "id": "turso_tursosessionstore_emit_event",
-      "community": 3
+      "community": 4
     },
     {
       "label": ".get_events()",
@@ -1409,7 +1473,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L262",
       "id": "turso_tursosessionstore_get_events",
-      "community": 3
+      "community": 4
     },
     {
       "label": ".get_session()",
@@ -1417,7 +1481,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L308",
       "id": "turso_tursosessionstore_get_session",
-      "community": 3
+      "community": 4
     },
     {
       "label": ".update_status()",
@@ -1425,7 +1489,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L325",
       "id": "turso_tursosessionstore_update_status",
-      "community": 3
+      "community": 4
     },
     {
       "label": ".search_events()",
@@ -1433,7 +1497,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L362",
       "id": "turso_tursosessionstore_search_events",
-      "community": 3
+      "community": 4
     },
     {
       "label": ".list_sessions()",
@@ -1441,7 +1505,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L424",
       "id": "turso_tursosessionstore_list_sessions",
-      "community": 3
+      "community": 4
     },
     {
       "label": "event_hand_id()",
@@ -1449,7 +1513,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L465",
       "id": "turso_event_hand_id",
-      "community": 3
+      "community": 4
     },
     {
       "label": "is_remote_url()",
@@ -1457,7 +1521,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L475",
       "id": "turso_is_remote_url",
-      "community": 3
+      "community": 4
     },
     {
       "label": "map_db_error()",
@@ -1465,7 +1529,7 @@
       "source_file": "moa-session/src/turso.rs",
       "source_location": "L479",
       "id": "turso_map_db_error",
-      "community": 3
+      "community": 4
     },
     {
       "label": "schema.rs",
@@ -1473,7 +1537,7 @@
       "source_file": "moa-session/src/schema.rs",
       "source_location": "L1",
       "id": "schema",
-      "community": 3
+      "community": 4
     },
     {
       "label": "migrate()",
@@ -1481,7 +1545,7 @@
       "source_file": "moa-session/src/schema.rs",
       "source_location": "L112",
       "id": "schema_migrate",
-      "community": 3
+      "community": 4
     },
     {
       "label": "queries.rs",
@@ -1489,7 +1553,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L1",
       "id": "queries",
-      "community": 4
+      "community": 5
     },
     {
       "label": "expand_local_path()",
@@ -1497,7 +1561,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L29",
       "id": "queries_expand_local_path",
-      "community": 4
+      "community": 5
     },
     {
       "label": "session_status_to_db()",
@@ -1505,7 +1569,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L44",
       "id": "queries_session_status_to_db",
-      "community": 4
+      "community": 5
     },
     {
       "label": "session_status_from_db()",
@@ -1513,7 +1577,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L57",
       "id": "queries_session_status_from_db",
-      "community": 4
+      "community": 5
     },
     {
       "label": "platform_to_db()",
@@ -1521,7 +1585,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L73",
       "id": "queries_platform_to_db",
-      "community": 4
+      "community": 5
     },
     {
       "label": "platform_from_db()",
@@ -1529,7 +1593,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L84",
       "id": "queries_platform_from_db",
-      "community": 4
+      "community": 5
     },
     {
       "label": "event_type_to_db()",
@@ -1537,7 +1601,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L98",
       "id": "queries_event_type_to_db",
-      "community": 4
+      "community": 5
     },
     {
       "label": "event_type_from_db()",
@@ -1545,7 +1609,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L124",
       "id": "queries_event_type_from_db",
-      "community": 4
+      "community": 5
     },
     {
       "label": "session_meta_from_row()",
@@ -1553,7 +1617,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L153",
       "id": "queries_session_meta_from_row",
-      "community": 4
+      "community": 5
     },
     {
       "label": "session_summary_from_row()",
@@ -1561,7 +1625,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L220",
       "id": "queries_session_summary_from_row",
-      "community": 4
+      "community": 5
     },
     {
       "label": "event_record_from_row()",
@@ -1569,7 +1633,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L256",
       "id": "queries_event_record_from_row",
-      "community": 4
+      "community": 5
     },
     {
       "label": "parse_timestamp()",
@@ -1577,7 +1641,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L294",
       "id": "queries_parse_timestamp",
-      "community": 4
+      "community": 5
     },
     {
       "label": "optional_text()",
@@ -1585,7 +1649,7 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L300",
       "id": "queries_optional_text",
-      "community": 4
+      "community": 5
     },
     {
       "label": "optional_i64()",
@@ -1593,7 +1657,455 @@
       "source_file": "moa-session/src/queries.rs",
       "source_location": "L313",
       "id": "queries_optional_i64",
-      "community": 4
+      "community": 5
+    },
+    {
+      "label": "anthropic_live.rs",
+      "file_type": "code",
+      "source_file": "moa-providers/tests/anthropic_live.rs",
+      "source_location": "L1",
+      "id": "anthropic_live",
+      "community": 15
+    },
+    {
+      "label": "anthropic_live_completion_returns_expected_answer()",
+      "file_type": "code",
+      "source_file": "moa-providers/tests/anthropic_live.rs",
+      "source_location": "L6",
+      "id": "anthropic_live_anthropic_live_completion_returns_expected_answer",
+      "community": 15
+    },
+    {
+      "label": "anthropic_provider.rs",
+      "file_type": "code",
+      "source_file": "moa-providers/tests/anthropic_provider.rs",
+      "source_location": "L1",
+      "id": "anthropic_provider",
+      "community": 13
+    },
+    {
+      "label": "provider_streams_tokens_incrementally()",
+      "file_type": "code",
+      "source_file": "moa-providers/tests/anthropic_provider.rs",
+      "source_location": "L16",
+      "id": "anthropic_provider_provider_streams_tokens_incrementally",
+      "community": 13
+    },
+    {
+      "label": "provider_retries_after_rate_limit()",
+      "file_type": "code",
+      "source_file": "moa-providers/tests/anthropic_provider.rs",
+      "source_location": "L90",
+      "id": "anthropic_provider_provider_retries_after_rate_limit",
+      "community": 13
+    },
+    {
+      "label": "anthropic.rs",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L1",
+      "id": "anthropic",
+      "community": 1
+    },
+    {
+      "label": "AnthropicProvider",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L29",
+      "id": "anthropic_anthropicprovider",
+      "community": 1
+    },
+    {
+      "label": ".new()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L40",
+      "id": "anthropic_anthropicprovider_new",
+      "community": 1
+    },
+    {
+      "label": ".from_config()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L56",
+      "id": "anthropic_anthropicprovider_from_config",
+      "community": 1
+    },
+    {
+      "label": ".from_env()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L65",
+      "id": "anthropic_anthropicprovider_from_env",
+      "community": 1
+    },
+    {
+      "label": ".with_messages_url()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L73",
+      "id": "anthropic_anthropicprovider_with_messages_url",
+      "community": 1
+    },
+    {
+      "label": ".with_max_retries()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L79",
+      "id": "anthropic_anthropicprovider_with_max_retries",
+      "community": 1
+    },
+    {
+      "label": ".name()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L87",
+      "id": "anthropic_anthropicprovider_name",
+      "community": 1
+    },
+    {
+      "label": ".capabilities()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L91",
+      "id": "anthropic_anthropicprovider_capabilities",
+      "community": 1
+    },
+    {
+      "label": ".complete()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L95",
+      "id": "anthropic_anthropicprovider_complete",
+      "community": 1
+    },
+    {
+      "label": "canonical_model_id()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L139",
+      "id": "anthropic_canonical_model_id",
+      "community": 1
+    },
+    {
+      "label": "capabilities_for_model()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L149",
+      "id": "anthropic_capabilities_for_model",
+      "community": 1
+    },
+    {
+      "label": "build_request_body()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L187",
+      "id": "anthropic_build_request_body",
+      "community": 1
+    },
+    {
+      "label": "anthropic_message()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L239",
+      "id": "anthropic_anthropic_message",
+      "community": 1
+    },
+    {
+      "label": "consume_sse_events()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L252",
+      "id": "anthropic_consume_sse_events",
+      "community": 1
+    },
+    {
+      "label": "AnthropicStreamState",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L282",
+      "id": "anthropic_anthropicstreamstate",
+      "community": 1
+    },
+    {
+      "label": ".new()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L293",
+      "id": "anthropic_anthropicstreamstate_new",
+      "community": 1
+    },
+    {
+      "label": ".apply_event()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L305",
+      "id": "anthropic_anthropicstreamstate_apply_event",
+      "community": 1
+    },
+    {
+      "label": ".apply_block_start()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L349",
+      "id": "anthropic_anthropicstreamstate_apply_block_start",
+      "community": 1
+    },
+    {
+      "label": ".apply_block_delta()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L379",
+      "id": "anthropic_anthropicstreamstate_apply_block_delta",
+      "community": 1
+    },
+    {
+      "label": ".apply_block_stop()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L406",
+      "id": "anthropic_anthropicstreamstate_apply_block_stop",
+      "community": 1
+    },
+    {
+      "label": ".finish()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L446",
+      "id": "anthropic_anthropicstreamstate_finish",
+      "community": 1
+    },
+    {
+      "label": ".ensure_capacity()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L502",
+      "id": "anthropic_anthropicstreamstate_ensure_capacity",
+      "community": 1
+    },
+    {
+      "label": ".ensure_completed_capacity()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L508",
+      "id": "anthropic_anthropicstreamstate_ensure_completed_capacity",
+      "community": 1
+    },
+    {
+      "label": "BlockAccumulator",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L516",
+      "id": "anthropic_blockaccumulator",
+      "community": 1
+    },
+    {
+      "label": "MessageStartEvent",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L527",
+      "id": "anthropic_messagestartevent",
+      "community": 1
+    },
+    {
+      "label": "MessageEnvelope",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L532",
+      "id": "anthropic_messageenvelope",
+      "community": 1
+    },
+    {
+      "label": "Usage",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L539",
+      "id": "anthropic_usage",
+      "community": 1
+    },
+    {
+      "label": "ContentBlockStartEvent",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L549",
+      "id": "anthropic_contentblockstartevent",
+      "community": 1
+    },
+    {
+      "label": "ContentBlockStart",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L556",
+      "id": "anthropic_contentblockstart",
+      "community": 1
+    },
+    {
+      "label": "ContentBlockDeltaEvent",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L571",
+      "id": "anthropic_contentblockdeltaevent",
+      "community": 1
+    },
+    {
+      "label": "ContentBlockDelta",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L578",
+      "id": "anthropic_contentblockdelta",
+      "community": 1
+    },
+    {
+      "label": "ContentBlockStopEvent",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L590",
+      "id": "anthropic_contentblockstopevent",
+      "community": 1
+    },
+    {
+      "label": "MessageDeltaEvent",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L595",
+      "id": "anthropic_messagedeltaevent",
+      "community": 1
+    },
+    {
+      "label": "MessageDeltaPayload",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L602",
+      "id": "anthropic_messagedeltapayload",
+      "community": 1
+    },
+    {
+      "label": "ErrorEvent",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L608",
+      "id": "anthropic_errorevent",
+      "community": 1
+    },
+    {
+      "label": "StreamErrorPayload",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L613",
+      "id": "anthropic_streamerrorpayload",
+      "community": 1
+    },
+    {
+      "label": "initial_tool_input()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L619",
+      "id": "anthropic_initial_tool_input",
+      "community": 1
+    },
+    {
+      "label": "stop_reason_from_anthropic()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L633",
+      "id": "anthropic_stop_reason_from_anthropic",
+      "community": 1
+    },
+    {
+      "label": "completion_request_serializes_to_anthropic_format()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L659",
+      "id": "anthropic_completion_request_serializes_to_anthropic_format",
+      "community": 1
+    },
+    {
+      "label": "parses_recorded_sse_stream_into_content_blocks()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L701",
+      "id": "anthropic_parses_recorded_sse_stream_into_content_blocks",
+      "community": 1
+    },
+    {
+      "label": "supported_models_return_expected_capabilities()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L764",
+      "id": "anthropic_supported_models_return_expected_capabilities",
+      "community": 1
+    },
+    {
+      "label": "model_ids_resolve_without_aliasing()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L781",
+      "id": "anthropic_model_ids_resolve_without_aliasing",
+      "community": 1
+    },
+    {
+      "label": "provider_accepts_documented_default_models()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L790",
+      "id": "anthropic_provider_accepts_documented_default_models",
+      "community": 1
+    },
+    {
+      "label": "common.rs",
+      "file_type": "code",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L1",
+      "id": "common",
+      "community": 11
+    },
+    {
+      "label": "build_http_client()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L13",
+      "id": "common_build_http_client",
+      "community": 11
+    },
+    {
+      "label": "send_with_retry()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L21",
+      "id": "common_send_with_retry",
+      "community": 11
+    },
+    {
+      "label": "parse_sse_json()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L67",
+      "id": "common_parse_sse_json",
+      "community": 11
+    },
+    {
+      "label": "retry_delay()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L80",
+      "id": "common_retry_delay",
+      "community": 11
+    },
+    {
+      "label": "response_text()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L84",
+      "id": "common_response_text",
+      "community": 11
+    },
+    {
+      "label": "retries_on_rate_limit()",
+      "file_type": "code",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L107",
+      "id": "common_retries_on_rate_limit",
+      "community": 11
     }
   ],
   "links": [
@@ -1661,7 +2173,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L22",
+      "source_location": "L24",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_sessionid",
@@ -1673,7 +2185,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L46",
+      "source_location": "L48",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_userid",
@@ -1685,7 +2197,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L81",
+      "source_location": "L83",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_workspaceid",
@@ -1697,7 +2209,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L116",
+      "source_location": "L118",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_brainid",
@@ -1709,7 +2221,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L140",
+      "source_location": "L142",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_platform",
@@ -1721,7 +2233,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L156",
+      "source_location": "L158",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_sessionstatus",
@@ -1733,7 +2245,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L176",
+      "source_location": "L178",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_sandboxtier",
@@ -1745,7 +2257,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L190",
+      "source_location": "L192",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_risklevel",
@@ -1757,7 +2269,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L202",
+      "source_location": "L204",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_approvaldecision",
@@ -1769,7 +2281,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L214",
+      "source_location": "L216",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_observelevel",
@@ -1781,7 +2293,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L226",
+      "source_location": "L228",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_sessionsignal",
@@ -1793,7 +2305,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L245",
+      "source_location": "L247",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_toolcallformat",
@@ -1805,7 +2317,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L255",
+      "source_location": "L257",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_eventtype",
@@ -1817,7 +2329,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L300",
+      "source_location": "L302",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_usermessage",
@@ -1829,7 +2341,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L309",
+      "source_location": "L311",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_startsessionrequest",
@@ -1841,7 +2353,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L328",
+      "source_location": "L330",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_sessionhandle",
@@ -1853,7 +2365,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L335",
+      "source_location": "L337",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_sessionmeta",
@@ -1865,7 +2377,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L399",
+      "source_location": "L401",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_sessionsummary",
@@ -1877,7 +2389,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L420",
+      "source_location": "L422",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_sessionfilter",
@@ -1889,7 +2401,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L435",
+      "source_location": "L437",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_eventrange",
@@ -1901,7 +2413,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L463",
+      "source_location": "L465",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_eventfilter",
@@ -1913,7 +2425,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L482",
+      "source_location": "L484",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_eventrecord",
@@ -1925,7 +2437,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L505",
+      "source_location": "L507",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_eventstream",
@@ -1937,7 +2449,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L512",
+      "source_location": "L514",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_wakecontext",
@@ -1949,7 +2461,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L523",
+      "source_location": "L525",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_cronspec",
@@ -1961,7 +2473,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L535",
+      "source_location": "L537",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_cronhandle",
@@ -1973,7 +2485,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L544",
+      "source_location": "L546",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_handresources",
@@ -1985,7 +2497,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L553",
+      "source_location": "L555",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_handspec",
@@ -1997,7 +2509,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L573",
+      "source_location": "L575",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_handhandle",
@@ -2009,7 +2521,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L625",
+      "source_location": "L627",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_handstatus",
@@ -2021,7 +2533,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L642",
+      "source_location": "L644",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_tooloutput",
@@ -2033,7 +2545,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L655",
+      "source_location": "L657",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_tokenpricing",
@@ -2045,7 +2557,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L666",
+      "source_location": "L668",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_modelcapabilities",
@@ -2057,7 +2569,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L689",
+      "source_location": "L691",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_toolinvocation",
@@ -2069,7 +2581,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L701",
+      "source_location": "L703",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_completioncontent",
@@ -2081,7 +2593,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L711",
+      "source_location": "L713",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_stopreason",
@@ -2093,7 +2605,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L726",
+      "source_location": "L728",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_completionrequest",
@@ -2105,7 +2617,19 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L762",
+      "source_location": "L764",
+      "weight": 1.0,
+      "_src": "types",
+      "_tgt": "types_completionresponse",
+      "source": "types",
+      "target": "types_completionresponse",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L784",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_completionstream",
@@ -2117,7 +2641,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L783",
+      "source_location": "L853",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_platformuser",
@@ -2129,7 +2653,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L795",
+      "source_location": "L865",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_channelref",
@@ -2141,7 +2665,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L809",
+      "source_location": "L879",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_attachment",
@@ -2153,7 +2677,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L824",
+      "source_location": "L894",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_inboundmessage",
@@ -2165,7 +2689,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L846",
+      "source_location": "L916",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_messageid",
@@ -2177,7 +2701,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L869",
+      "source_location": "L939",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_buttonstyle",
@@ -2189,7 +2713,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L880",
+      "source_location": "L950",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_diffhunk",
@@ -2201,7 +2725,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L892",
+      "source_location": "L962",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_toolstatus",
@@ -2213,7 +2737,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L905",
+      "source_location": "L975",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_approvalrequest",
@@ -2225,7 +2749,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L919",
+      "source_location": "L989",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_messagecontent",
@@ -2237,7 +2761,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L957",
+      "source_location": "L1027",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_actionbutton",
@@ -2249,7 +2773,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L970",
+      "source_location": "L1040",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_outboundmessage",
@@ -2261,7 +2785,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L983",
+      "source_location": "L1053",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_platformcapabilities",
@@ -2273,7 +2797,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1007",
+      "source_location": "L1077",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_memoryscope",
@@ -2285,7 +2809,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1017",
+      "source_location": "L1087",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_memorypath",
@@ -2297,7 +2821,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1052",
+      "source_location": "L1122",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_confidencelevel",
@@ -2309,7 +2833,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1064",
+      "source_location": "L1134",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_pagetype",
@@ -2321,7 +2845,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1085",
+      "source_location": "L1155",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_memorysearchresult",
@@ -2333,7 +2857,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1104",
+      "source_location": "L1174",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_pagesummary",
@@ -2345,7 +2869,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1119",
+      "source_location": "L1189",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_wikipage",
@@ -2357,7 +2881,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1151",
+      "source_location": "L1221",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_credential",
@@ -2369,7 +2893,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1175",
+      "source_location": "L1245",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_messagerole",
@@ -2381,7 +2905,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1188",
+      "source_location": "L1258",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_contextmessage",
@@ -2393,7 +2917,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1228",
+      "source_location": "L1298",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_workingcontext",
@@ -2405,7 +2929,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1251",
+      "source_location": "L1321",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_processoroutput",
@@ -2417,7 +2941,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1269",
+      "source_location": "L1339",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_session_id_roundtrip",
@@ -2429,7 +2953,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1277",
+      "source_location": "L1347",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_session_status_serialization",
@@ -2441,7 +2965,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1284",
+      "source_location": "L1354",
       "weight": 1.0,
       "_src": "types",
       "_tgt": "types_all_sandbox_tiers_exist",
@@ -2477,7 +3001,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L26",
+      "source_location": "L28",
       "weight": 1.0,
       "_src": "types_sessionid",
       "_tgt": "types_sessionid_new",
@@ -2489,7 +3013,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L32",
+      "source_location": "L34",
       "weight": 1.0,
       "_src": "types_sessionid",
       "_tgt": "types_sessionid_default",
@@ -2501,7 +3025,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L38",
+      "source_location": "L40",
       "weight": 1.0,
       "_src": "types_sessionid",
       "_tgt": "types_sessionid_fmt",
@@ -2513,7 +3037,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L33",
+      "source_location": "L35",
       "weight": 1.0,
       "_src": "types_sessionid_default",
       "_tgt": "types_memorypath_new",
@@ -2525,7 +3049,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L39",
+      "source_location": "L41",
       "weight": 1.0,
       "_src": "types_sessionid_fmt",
       "_tgt": "types_memorypath_fmt",
@@ -2537,7 +3061,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L50",
+      "source_location": "L52",
       "weight": 1.0,
       "_src": "types_userid",
       "_tgt": "types_userid_new",
@@ -2549,7 +3073,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L55",
+      "source_location": "L57",
       "weight": 1.0,
       "_src": "types_userid",
       "_tgt": "types_userid_as_str",
@@ -2561,7 +3085,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L61",
+      "source_location": "L63",
       "weight": 1.0,
       "_src": "types_userid",
       "_tgt": "types_userid_fmt",
@@ -2573,7 +3097,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L73",
+      "source_location": "L75",
       "weight": 1.0,
       "_src": "types_userid",
       "_tgt": "types_userid_from",
@@ -2585,7 +3109,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L62",
+      "source_location": "L64",
       "weight": 1.0,
       "_src": "types_userid_fmt",
       "_tgt": "types_memorypath_fmt",
@@ -2597,7 +3121,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L68",
+      "source_location": "L70",
       "weight": 1.0,
       "_src": "types_userid_from",
       "_tgt": "types_memorypath_new",
@@ -2609,7 +3133,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L85",
+      "source_location": "L87",
       "weight": 1.0,
       "_src": "types_workspaceid",
       "_tgt": "types_workspaceid_new",
@@ -2621,7 +3145,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L90",
+      "source_location": "L92",
       "weight": 1.0,
       "_src": "types_workspaceid",
       "_tgt": "types_workspaceid_as_str",
@@ -2633,7 +3157,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L96",
+      "source_location": "L98",
       "weight": 1.0,
       "_src": "types_workspaceid",
       "_tgt": "types_workspaceid_fmt",
@@ -2645,7 +3169,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L108",
+      "source_location": "L110",
       "weight": 1.0,
       "_src": "types_workspaceid",
       "_tgt": "types_workspaceid_from",
@@ -2657,7 +3181,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L97",
+      "source_location": "L99",
       "weight": 1.0,
       "_src": "types_workspaceid_fmt",
       "_tgt": "types_memorypath_fmt",
@@ -2669,7 +3193,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L103",
+      "source_location": "L105",
       "weight": 1.0,
       "_src": "types_workspaceid_from",
       "_tgt": "types_memorypath_new",
@@ -2681,7 +3205,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L120",
+      "source_location": "L122",
       "weight": 1.0,
       "_src": "types_brainid",
       "_tgt": "types_brainid_new",
@@ -2693,7 +3217,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L126",
+      "source_location": "L128",
       "weight": 1.0,
       "_src": "types_brainid",
       "_tgt": "types_brainid_default",
@@ -2705,7 +3229,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L132",
+      "source_location": "L134",
       "weight": 1.0,
       "_src": "types_brainid",
       "_tgt": "types_brainid_fmt",
@@ -2717,7 +3241,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L127",
+      "source_location": "L129",
       "weight": 1.0,
       "_src": "types_brainid_default",
       "_tgt": "types_memorypath_new",
@@ -2729,7 +3253,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L133",
+      "source_location": "L135",
       "weight": 1.0,
       "_src": "types_brainid_fmt",
       "_tgt": "types_memorypath_fmt",
@@ -2741,7 +3265,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L373",
+      "source_location": "L375",
       "weight": 1.0,
       "_src": "types_sessionmeta",
       "_tgt": "types_sessionmeta_default",
@@ -2753,7 +3277,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L376",
+      "source_location": "L378",
       "weight": 1.0,
       "_src": "types_sessionmeta_default",
       "_tgt": "types_memorypath_new",
@@ -2765,7 +3289,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L449",
+      "source_location": "L451",
       "weight": 1.0,
       "_src": "types_eventrange_all",
       "_tgt": "types_sessionmeta_default",
@@ -2777,7 +3301,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L456",
+      "source_location": "L458",
       "weight": 1.0,
       "_src": "types_eventrange_recent",
       "_tgt": "types_sessionmeta_default",
@@ -2789,7 +3313,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L448",
+      "source_location": "L450",
       "weight": 1.0,
       "_src": "types_eventrange",
       "_tgt": "types_eventrange_all",
@@ -2801,7 +3325,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L453",
+      "source_location": "L455",
       "weight": 1.0,
       "_src": "types_eventrange",
       "_tgt": "types_eventrange_recent",
@@ -2813,7 +3337,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L586",
+      "source_location": "L588",
       "weight": 1.0,
       "_src": "types_handhandle",
       "_tgt": "types_handhandle_local",
@@ -2825,7 +3349,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L591",
+      "source_location": "L593",
       "weight": 1.0,
       "_src": "types_handhandle",
       "_tgt": "types_handhandle_docker",
@@ -2837,7 +3361,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L598",
+      "source_location": "L600",
       "weight": 1.0,
       "_src": "types_handhandle",
       "_tgt": "types_handhandle_daytona",
@@ -2849,7 +3373,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L605",
+      "source_location": "L607",
       "weight": 1.0,
       "_src": "types_handhandle",
       "_tgt": "types_handhandle_e2b",
@@ -2861,7 +3385,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L612",
+      "source_location": "L614",
       "weight": 1.0,
       "_src": "types_handhandle",
       "_tgt": "types_handhandle_daytona_id",
@@ -2873,7 +3397,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L614",
+      "source_location": "L616",
       "weight": 1.0,
       "_src": "types_handhandle_daytona_id",
       "_tgt": "types_memorypath_as_str",
@@ -2885,7 +3409,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L743",
+      "source_location": "L745",
       "weight": 1.0,
       "_src": "types_completionrequest",
       "_tgt": "types_completionrequest_new",
@@ -2897,7 +3421,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L755",
+      "source_location": "L757",
       "weight": 1.0,
       "_src": "types_completionrequest",
       "_tgt": "types_completionrequest_simple",
@@ -2909,7 +3433,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L747",
+      "source_location": "L749",
       "weight": 1.0,
       "_src": "types_completionrequest_new",
       "_tgt": "types_memorypath_new",
@@ -2921,7 +3445,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L756",
+      "source_location": "L758",
       "weight": 1.0,
       "_src": "types_completionrequest_simple",
       "_tgt": "types_memorypath_new",
@@ -2933,7 +3457,127 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L850",
+      "source_location": "L791",
+      "weight": 1.0,
+      "_src": "types_completionstream",
+      "_tgt": "types_completionstream_new",
+      "source": "types_completionstream",
+      "target": "types_completionstream_new",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L802",
+      "weight": 1.0,
+      "_src": "types_completionstream",
+      "_tgt": "types_completionstream_from_response",
+      "source": "types_completionstream",
+      "target": "types_completionstream_from_response",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L820",
+      "weight": 1.0,
+      "_src": "types_completionstream",
+      "_tgt": "types_completionstream_next",
+      "source": "types_completionstream",
+      "target": "types_completionstream_next",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L825",
+      "weight": 1.0,
+      "_src": "types_completionstream",
+      "_tgt": "types_completionstream_collect",
+      "source": "types_completionstream",
+      "target": "types_completionstream_collect",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L834",
+      "weight": 1.0,
+      "_src": "types_completionstream",
+      "_tgt": "types_completionstream_into_response",
+      "source": "types_completionstream",
+      "target": "types_completionstream_into_response",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L838",
+      "weight": 1.0,
+      "_src": "types_completionstream",
+      "_tgt": "types_completionstream_await_completion",
+      "source": "types_completionstream",
+      "target": "types_completionstream_await_completion",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L846",
+      "weight": 1.0,
+      "_src": "types_completionstream",
+      "_tgt": "types_completionstream_fmt",
+      "source": "types_completionstream",
+      "target": "types_completionstream_fmt",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L816",
+      "weight": 1.0,
+      "_src": "types_completionstream_from_response",
+      "_tgt": "types_memorypath_new",
+      "source": "types_completionstream_from_response",
+      "target": "types_memorypath_new",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L830",
+      "weight": 1.0,
+      "_src": "types_completionstream_collect",
+      "_tgt": "types_completionstream_await_completion",
+      "source": "types_completionstream_collect",
+      "target": "types_completionstream_await_completion",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L835",
+      "weight": 1.0,
+      "_src": "types_completionstream_into_response",
+      "_tgt": "types_completionstream_await_completion",
+      "source": "types_completionstream_into_response",
+      "target": "types_completionstream_await_completion",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-core/src/types.rs",
+      "source_location": "L920",
       "weight": 1.0,
       "_src": "types_messageid",
       "_tgt": "types_messageid_new",
@@ -2945,7 +3589,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L855",
+      "source_location": "L925",
       "weight": 1.0,
       "_src": "types_messageid",
       "_tgt": "types_messageid_as_str",
@@ -2957,7 +3601,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L861",
+      "source_location": "L931",
       "weight": 1.0,
       "_src": "types_messageid",
       "_tgt": "types_messageid_fmt",
@@ -2969,7 +3613,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L862",
+      "source_location": "L932",
       "weight": 1.0,
       "_src": "types_messageid_fmt",
       "_tgt": "types_memorypath_fmt",
@@ -2981,7 +3625,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1021",
+      "source_location": "L1091",
       "weight": 1.0,
       "_src": "types_memorypath",
       "_tgt": "types_memorypath_new",
@@ -2993,7 +3637,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1026",
+      "source_location": "L1096",
       "weight": 1.0,
       "_src": "types_memorypath",
       "_tgt": "types_memorypath_as_str",
@@ -3005,7 +3649,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1032",
+      "source_location": "L1102",
       "weight": 1.0,
       "_src": "types_memorypath",
       "_tgt": "types_memorypath_fmt",
@@ -3017,7 +3661,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1044",
+      "source_location": "L1114",
       "weight": 1.0,
       "_src": "types_memorypath",
       "_tgt": "types_memorypath_from",
@@ -3029,7 +3673,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1039",
+      "source_location": "L1109",
       "weight": 1.0,
       "_src": "types_memorypath_from",
       "_tgt": "types_memorypath_new",
@@ -3041,7 +3685,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1270",
+      "source_location": "L1340",
       "weight": 1.0,
       "_src": "types_session_id_roundtrip",
       "_tgt": "types_memorypath_new",
@@ -3053,7 +3697,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1199",
+      "source_location": "L1269",
       "weight": 1.0,
       "_src": "types_contextmessage",
       "_tgt": "types_contextmessage_system",
@@ -3065,7 +3709,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1208",
+      "source_location": "L1278",
       "weight": 1.0,
       "_src": "types_contextmessage",
       "_tgt": "types_contextmessage_user",
@@ -3077,7 +3721,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/types.rs",
-      "source_location": "L1217",
+      "source_location": "L1287",
       "weight": 1.0,
       "_src": "types_contextmessage",
       "_tgt": "types_contextmessage_assistant",
@@ -4571,6 +5215,1134 @@
       "_tgt": "queries_optional_i64",
       "source": "queries_event_record_from_row",
       "target": "queries_optional_i64",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/tests/anthropic_live.rs",
+      "source_location": "L6",
+      "weight": 1.0,
+      "_src": "anthropic_live",
+      "_tgt": "anthropic_live_anthropic_live_completion_returns_expected_answer",
+      "source": "anthropic_live",
+      "target": "anthropic_live_anthropic_live_completion_returns_expected_answer",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/tests/anthropic_provider.rs",
+      "source_location": "L16",
+      "weight": 1.0,
+      "_src": "anthropic_provider",
+      "_tgt": "anthropic_provider_provider_streams_tokens_incrementally",
+      "source": "anthropic_provider",
+      "target": "anthropic_provider_provider_streams_tokens_incrementally",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/tests/anthropic_provider.rs",
+      "source_location": "L90",
+      "weight": 1.0,
+      "_src": "anthropic_provider",
+      "_tgt": "anthropic_provider_provider_retries_after_rate_limit",
+      "source": "anthropic_provider",
+      "target": "anthropic_provider_provider_retries_after_rate_limit",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports_from",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L18",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "common",
+      "source": "anthropic",
+      "target": "common",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L29",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_anthropicprovider",
+      "source": "anthropic",
+      "target": "anthropic_anthropicprovider",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L139",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_canonical_model_id",
+      "source": "anthropic",
+      "target": "anthropic_canonical_model_id",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L149",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_capabilities_for_model",
+      "source": "anthropic",
+      "target": "anthropic_capabilities_for_model",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L187",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_build_request_body",
+      "source": "anthropic",
+      "target": "anthropic_build_request_body",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L239",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_anthropic_message",
+      "source": "anthropic",
+      "target": "anthropic_anthropic_message",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L252",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_consume_sse_events",
+      "source": "anthropic",
+      "target": "anthropic_consume_sse_events",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L282",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_anthropicstreamstate",
+      "source": "anthropic",
+      "target": "anthropic_anthropicstreamstate",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L516",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_blockaccumulator",
+      "source": "anthropic",
+      "target": "anthropic_blockaccumulator",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L527",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_messagestartevent",
+      "source": "anthropic",
+      "target": "anthropic_messagestartevent",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L532",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_messageenvelope",
+      "source": "anthropic",
+      "target": "anthropic_messageenvelope",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L539",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_usage",
+      "source": "anthropic",
+      "target": "anthropic_usage",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L549",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_contentblockstartevent",
+      "source": "anthropic",
+      "target": "anthropic_contentblockstartevent",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L556",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_contentblockstart",
+      "source": "anthropic",
+      "target": "anthropic_contentblockstart",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L571",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_contentblockdeltaevent",
+      "source": "anthropic",
+      "target": "anthropic_contentblockdeltaevent",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L578",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_contentblockdelta",
+      "source": "anthropic",
+      "target": "anthropic_contentblockdelta",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L590",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_contentblockstopevent",
+      "source": "anthropic",
+      "target": "anthropic_contentblockstopevent",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L595",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_messagedeltaevent",
+      "source": "anthropic",
+      "target": "anthropic_messagedeltaevent",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L602",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_messagedeltapayload",
+      "source": "anthropic",
+      "target": "anthropic_messagedeltapayload",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L608",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_errorevent",
+      "source": "anthropic",
+      "target": "anthropic_errorevent",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L613",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_streamerrorpayload",
+      "source": "anthropic",
+      "target": "anthropic_streamerrorpayload",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L619",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_initial_tool_input",
+      "source": "anthropic",
+      "target": "anthropic_initial_tool_input",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L633",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_stop_reason_from_anthropic",
+      "source": "anthropic",
+      "target": "anthropic_stop_reason_from_anthropic",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L659",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_completion_request_serializes_to_anthropic_format",
+      "source": "anthropic",
+      "target": "anthropic_completion_request_serializes_to_anthropic_format",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L701",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_parses_recorded_sse_stream_into_content_blocks",
+      "source": "anthropic",
+      "target": "anthropic_parses_recorded_sse_stream_into_content_blocks",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L764",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_supported_models_return_expected_capabilities",
+      "source": "anthropic",
+      "target": "anthropic_supported_models_return_expected_capabilities",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L781",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_model_ids_resolve_without_aliasing",
+      "source": "anthropic",
+      "target": "anthropic_model_ids_resolve_without_aliasing",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L790",
+      "weight": 1.0,
+      "_src": "anthropic",
+      "_tgt": "anthropic_provider_accepts_documented_default_models",
+      "source": "anthropic",
+      "target": "anthropic_provider_accepts_documented_default_models",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L40",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider",
+      "_tgt": "anthropic_anthropicprovider_new",
+      "source": "anthropic_anthropicprovider",
+      "target": "anthropic_anthropicprovider_new",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L56",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider",
+      "_tgt": "anthropic_anthropicprovider_from_config",
+      "source": "anthropic_anthropicprovider",
+      "target": "anthropic_anthropicprovider_from_config",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L65",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider",
+      "_tgt": "anthropic_anthropicprovider_from_env",
+      "source": "anthropic_anthropicprovider",
+      "target": "anthropic_anthropicprovider_from_env",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L73",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider",
+      "_tgt": "anthropic_anthropicprovider_with_messages_url",
+      "source": "anthropic_anthropicprovider",
+      "target": "anthropic_anthropicprovider_with_messages_url",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L79",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider",
+      "_tgt": "anthropic_anthropicprovider_with_max_retries",
+      "source": "anthropic_anthropicprovider",
+      "target": "anthropic_anthropicprovider_with_max_retries",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L87",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider",
+      "_tgt": "anthropic_anthropicprovider_name",
+      "source": "anthropic_anthropicprovider",
+      "target": "anthropic_anthropicprovider_name",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L91",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider",
+      "_tgt": "anthropic_anthropicprovider_capabilities",
+      "source": "anthropic_anthropicprovider",
+      "target": "anthropic_anthropicprovider_capabilities",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L95",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider",
+      "_tgt": "anthropic_anthropicprovider_complete",
+      "source": "anthropic_anthropicprovider",
+      "target": "anthropic_anthropicprovider_complete",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L42",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider_new",
+      "_tgt": "anthropic_canonical_model_id",
+      "source": "anthropic_anthropicprovider_new",
+      "target": "anthropic_canonical_model_id",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L43",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider_new",
+      "_tgt": "anthropic_capabilities_for_model",
+      "source": "anthropic_anthropicprovider_new",
+      "target": "anthropic_capabilities_for_model",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L61",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider_from_config",
+      "_tgt": "anthropic_anthropicstreamstate_new",
+      "source": "anthropic_anthropicprovider_from_config",
+      "target": "anthropic_anthropicstreamstate_new",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L69",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider_from_env",
+      "_tgt": "anthropic_anthropicstreamstate_new",
+      "source": "anthropic_anthropicprovider_from_env",
+      "target": "anthropic_anthropicstreamstate_new",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L101",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider_complete",
+      "_tgt": "anthropic_canonical_model_id",
+      "source": "anthropic_anthropicprovider_complete",
+      "target": "anthropic_canonical_model_id",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L102",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider_complete",
+      "_tgt": "anthropic_capabilities_for_model",
+      "source": "anthropic_anthropicprovider_complete",
+      "target": "anthropic_capabilities_for_model",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L103",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider_complete",
+      "_tgt": "anthropic_build_request_body",
+      "source": "anthropic_anthropicprovider_complete",
+      "target": "anthropic_build_request_body",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L126",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider_complete",
+      "_tgt": "anthropic_consume_sse_events",
+      "source": "anthropic_anthropicprovider_complete",
+      "target": "anthropic_consume_sse_events",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L135",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicprovider_complete",
+      "_tgt": "anthropic_anthropicstreamstate_new",
+      "source": "anthropic_anthropicprovider_complete",
+      "target": "anthropic_anthropicstreamstate_new",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L686",
+      "weight": 1.0,
+      "_src": "anthropic_completion_request_serializes_to_anthropic_format",
+      "_tgt": "anthropic_canonical_model_id",
+      "source": "anthropic_canonical_model_id",
+      "target": "anthropic_completion_request_serializes_to_anthropic_format",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L766",
+      "weight": 1.0,
+      "_src": "anthropic_supported_models_return_expected_capabilities",
+      "_tgt": "anthropic_canonical_model_id",
+      "source": "anthropic_canonical_model_id",
+      "target": "anthropic_supported_models_return_expected_capabilities",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L687",
+      "weight": 1.0,
+      "_src": "anthropic_completion_request_serializes_to_anthropic_format",
+      "_tgt": "anthropic_capabilities_for_model",
+      "source": "anthropic_capabilities_for_model",
+      "target": "anthropic_completion_request_serializes_to_anthropic_format",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L766",
+      "weight": 1.0,
+      "_src": "anthropic_supported_models_return_expected_capabilities",
+      "_tgt": "anthropic_capabilities_for_model",
+      "source": "anthropic_capabilities_for_model",
+      "target": "anthropic_supported_models_return_expected_capabilities",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L192",
+      "weight": 1.0,
+      "_src": "anthropic_build_request_body",
+      "_tgt": "anthropic_anthropicstreamstate_new",
+      "source": "anthropic_build_request_body",
+      "target": "anthropic_anthropicstreamstate_new",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L201",
+      "weight": 1.0,
+      "_src": "anthropic_build_request_body",
+      "_tgt": "anthropic_anthropic_message",
+      "source": "anthropic_build_request_body",
+      "target": "anthropic_anthropic_message",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L684",
+      "weight": 1.0,
+      "_src": "anthropic_completion_request_serializes_to_anthropic_format",
+      "_tgt": "anthropic_build_request_body",
+      "source": "anthropic_build_request_body",
+      "target": "anthropic_completion_request_serializes_to_anthropic_format",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L262",
+      "weight": 1.0,
+      "_src": "anthropic_consume_sse_events",
+      "_tgt": "anthropic_anthropicstreamstate_new",
+      "source": "anthropic_consume_sse_events",
+      "target": "anthropic_anthropicstreamstate_new",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L268",
+      "weight": 1.0,
+      "_src": "anthropic_consume_sse_events",
+      "_tgt": "anthropic_anthropicstreamstate_apply_event",
+      "source": "anthropic_consume_sse_events",
+      "target": "anthropic_anthropicstreamstate_apply_event",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L278",
+      "weight": 1.0,
+      "_src": "anthropic_consume_sse_events",
+      "_tgt": "anthropic_anthropicstreamstate_finish",
+      "source": "anthropic_consume_sse_events",
+      "target": "anthropic_anthropicstreamstate_finish",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L730",
+      "weight": 1.0,
+      "_src": "anthropic_parses_recorded_sse_stream_into_content_blocks",
+      "_tgt": "anthropic_consume_sse_events",
+      "source": "anthropic_consume_sse_events",
+      "target": "anthropic_parses_recorded_sse_stream_into_content_blocks",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L293",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate",
+      "_tgt": "anthropic_anthropicstreamstate_new",
+      "source": "anthropic_anthropicstreamstate",
+      "target": "anthropic_anthropicstreamstate_new",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L305",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate",
+      "_tgt": "anthropic_anthropicstreamstate_apply_event",
+      "source": "anthropic_anthropicstreamstate",
+      "target": "anthropic_anthropicstreamstate_apply_event",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L349",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate",
+      "_tgt": "anthropic_anthropicstreamstate_apply_block_start",
+      "source": "anthropic_anthropicstreamstate",
+      "target": "anthropic_anthropicstreamstate_apply_block_start",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L379",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate",
+      "_tgt": "anthropic_anthropicstreamstate_apply_block_delta",
+      "source": "anthropic_anthropicstreamstate",
+      "target": "anthropic_anthropicstreamstate_apply_block_delta",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L406",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate",
+      "_tgt": "anthropic_anthropicstreamstate_apply_block_stop",
+      "source": "anthropic_anthropicstreamstate",
+      "target": "anthropic_anthropicstreamstate_apply_block_stop",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L446",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate",
+      "_tgt": "anthropic_anthropicstreamstate_finish",
+      "source": "anthropic_anthropicstreamstate",
+      "target": "anthropic_anthropicstreamstate_finish",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L502",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate",
+      "_tgt": "anthropic_anthropicstreamstate_ensure_capacity",
+      "source": "anthropic_anthropicstreamstate",
+      "target": "anthropic_anthropicstreamstate_ensure_capacity",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L508",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate",
+      "_tgt": "anthropic_anthropicstreamstate_ensure_completed_capacity",
+      "source": "anthropic_anthropicstreamstate",
+      "target": "anthropic_anthropicstreamstate_ensure_completed_capacity",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L314",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate_apply_event",
+      "_tgt": "anthropic_anthropicstreamstate_new",
+      "source": "anthropic_anthropicstreamstate_new",
+      "target": "anthropic_anthropicstreamstate_apply_event",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L358",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate_apply_block_start",
+      "_tgt": "anthropic_anthropicstreamstate_new",
+      "source": "anthropic_anthropicstreamstate_new",
+      "target": "anthropic_anthropicstreamstate_apply_block_start",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L396",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate_apply_block_delta",
+      "_tgt": "anthropic_anthropicstreamstate_new",
+      "source": "anthropic_anthropicstreamstate_new",
+      "target": "anthropic_anthropicstreamstate_apply_block_delta",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L417",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate_apply_block_stop",
+      "_tgt": "anthropic_anthropicstreamstate_new",
+      "source": "anthropic_anthropicstreamstate_new",
+      "target": "anthropic_anthropicstreamstate_apply_block_stop",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L462",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate_finish",
+      "_tgt": "anthropic_anthropicstreamstate_new",
+      "source": "anthropic_anthropicstreamstate_new",
+      "target": "anthropic_anthropicstreamstate_finish",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L621",
+      "weight": 1.0,
+      "_src": "anthropic_initial_tool_input",
+      "_tgt": "anthropic_anthropicstreamstate_new",
+      "source": "anthropic_anthropicstreamstate_new",
+      "target": "anthropic_initial_tool_input",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L734",
+      "weight": 1.0,
+      "_src": "anthropic_parses_recorded_sse_stream_into_content_blocks",
+      "_tgt": "anthropic_anthropicstreamstate_new",
+      "source": "anthropic_anthropicstreamstate_new",
+      "target": "anthropic_parses_recorded_sse_stream_into_content_blocks",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L791",
+      "weight": 1.0,
+      "_src": "anthropic_provider_accepts_documented_default_models",
+      "_tgt": "anthropic_anthropicstreamstate_new",
+      "source": "anthropic_anthropicstreamstate_new",
+      "target": "anthropic_provider_accepts_documented_default_models",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L316",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate_apply_event",
+      "_tgt": "anthropic_anthropicstreamstate_apply_block_start",
+      "source": "anthropic_anthropicstreamstate_apply_event",
+      "target": "anthropic_anthropicstreamstate_apply_block_start",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L317",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate_apply_event",
+      "_tgt": "anthropic_anthropicstreamstate_apply_block_delta",
+      "source": "anthropic_anthropicstreamstate_apply_event",
+      "target": "anthropic_anthropicstreamstate_apply_block_delta",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L318",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate_apply_event",
+      "_tgt": "anthropic_anthropicstreamstate_apply_block_stop",
+      "source": "anthropic_anthropicstreamstate_apply_event",
+      "target": "anthropic_anthropicstreamstate_apply_block_stop",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L353",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate_apply_block_start",
+      "_tgt": "anthropic_anthropicstreamstate_ensure_capacity",
+      "source": "anthropic_anthropicstreamstate_apply_block_start",
+      "target": "anthropic_anthropicstreamstate_ensure_capacity",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L364",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate_apply_block_start",
+      "_tgt": "anthropic_initial_tool_input",
+      "source": "anthropic_anthropicstreamstate_apply_block_start",
+      "target": "anthropic_initial_tool_input",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L383",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate_apply_block_delta",
+      "_tgt": "anthropic_anthropicstreamstate_ensure_capacity",
+      "source": "anthropic_anthropicstreamstate_apply_block_delta",
+      "target": "anthropic_anthropicstreamstate_ensure_capacity",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L410",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate_apply_block_stop",
+      "_tgt": "anthropic_anthropicstreamstate_ensure_capacity",
+      "source": "anthropic_anthropicstreamstate_apply_block_stop",
+      "target": "anthropic_anthropicstreamstate_ensure_capacity",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L411",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate_apply_block_stop",
+      "_tgt": "anthropic_anthropicstreamstate_ensure_completed_capacity",
+      "source": "anthropic_anthropicstreamstate_apply_block_stop",
+      "target": "anthropic_anthropicstreamstate_ensure_completed_capacity",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/anthropic.rs",
+      "source_location": "L448",
+      "weight": 1.0,
+      "_src": "anthropic_anthropicstreamstate_finish",
+      "_tgt": "anthropic_anthropicstreamstate_ensure_completed_capacity",
+      "source": "anthropic_anthropicstreamstate_finish",
+      "target": "anthropic_anthropicstreamstate_ensure_completed_capacity",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L13",
+      "weight": 1.0,
+      "_src": "common",
+      "_tgt": "common_build_http_client",
+      "source": "common",
+      "target": "common_build_http_client",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L21",
+      "weight": 1.0,
+      "_src": "common",
+      "_tgt": "common_send_with_retry",
+      "source": "common",
+      "target": "common_send_with_retry",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L67",
+      "weight": 1.0,
+      "_src": "common",
+      "_tgt": "common_parse_sse_json",
+      "source": "common",
+      "target": "common_parse_sse_json",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L80",
+      "weight": 1.0,
+      "_src": "common",
+      "_tgt": "common_retry_delay",
+      "source": "common",
+      "target": "common_retry_delay",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L84",
+      "weight": 1.0,
+      "_src": "common",
+      "_tgt": "common_response_text",
+      "source": "common",
+      "target": "common_response_text",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L107",
+      "weight": 1.0,
+      "_src": "common",
+      "_tgt": "common_retries_on_rate_limit",
+      "source": "common",
+      "target": "common_retries_on_rate_limit",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L132",
+      "weight": 1.0,
+      "_src": "common_retries_on_rate_limit",
+      "_tgt": "common_build_http_client",
+      "source": "common_build_http_client",
+      "target": "common_retries_on_rate_limit",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L34",
+      "weight": 1.0,
+      "_src": "common_send_with_retry",
+      "_tgt": "common_response_text",
+      "source": "common_send_with_retry",
+      "target": "common_response_text",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L42",
+      "weight": 1.0,
+      "_src": "common_send_with_retry",
+      "_tgt": "common_retry_delay",
+      "source": "common_send_with_retry",
+      "target": "common_retry_delay",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-providers/src/common.rs",
+      "source_location": "L134",
+      "weight": 1.0,
+      "_src": "common_retries_on_rate_limit",
+      "_tgt": "common_send_with_retry",
+      "source": "common_send_with_retry",
+      "target": "common_retries_on_rate_limit",
       "confidence_score": 1.0
     }
   ],

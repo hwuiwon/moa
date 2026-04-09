@@ -1,0 +1,794 @@
+//! Anthropic Claude provider implementation with SSE streaming support.
+
+use std::env;
+use std::time::{Duration, Instant};
+
+use eventsource_stream::{Event as SseEvent, Eventsource};
+use futures_util::{Stream, StreamExt, pin_mut};
+use moa_core::{
+    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
+    LLMProvider, MessageRole, MoaConfig, MoaError, ModelCapabilities, Result, StopReason,
+    TokenPricing, ToolCallFormat, ToolInvocation,
+};
+use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use serde::Deserialize;
+use serde_json::{Map, Value, json};
+use tokio::sync::mpsc;
+
+use crate::common::{build_http_client, parse_sse_json, send_with_retry};
+
+const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+const DEFAULT_STREAM_BUFFER: usize = 64;
+const DEFAULT_MAX_RETRIES: usize = 3;
+const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4_096;
+const MODEL_OPUS_4_6: &str = "claude-opus-4-6";
+const MODEL_SONNET_4_6: &str = "claude-sonnet-4-6";
+
+/// Anthropic Claude provider backed by the Messages API.
+pub struct AnthropicProvider {
+    client: reqwest::Client,
+    api_key: String,
+    default_model: String,
+    default_capabilities: ModelCapabilities,
+    messages_url: String,
+    max_retries: usize,
+}
+
+impl AnthropicProvider {
+    /// Creates a provider from an API key and default model identifier.
+    pub fn new(api_key: impl Into<String>, default_model: impl Into<String>) -> Result<Self> {
+        let default_model = default_model.into();
+        let resolved_default_model = canonical_model_id(&default_model)?;
+        let default_capabilities = capabilities_for_model(&resolved_default_model)?;
+
+        Ok(Self {
+            client: build_http_client()?,
+            api_key: api_key.into(),
+            default_model: resolved_default_model,
+            default_capabilities,
+            messages_url: ANTHROPIC_MESSAGES_URL.to_string(),
+            max_retries: DEFAULT_MAX_RETRIES,
+        })
+    }
+
+    /// Creates a provider from the configured Anthropic environment variable.
+    pub fn from_config(config: &MoaConfig) -> Result<Self> {
+        let api_key_env = config.providers.anthropic.api_key_env.clone();
+        let api_key = env::var(&api_key_env)
+            .map_err(|_| MoaError::MissingEnvironmentVariable(api_key_env.clone()))?;
+
+        Self::new(api_key, config.general.default_model.clone())
+    }
+
+    /// Creates a provider from the `ANTHROPIC_API_KEY` environment variable.
+    pub fn from_env(default_model: impl Into<String>) -> Result<Self> {
+        let api_key = env::var("ANTHROPIC_API_KEY")
+            .map_err(|_| MoaError::MissingEnvironmentVariable("ANTHROPIC_API_KEY".to_string()))?;
+
+        Self::new(api_key, default_model)
+    }
+
+    /// Overrides the Messages API URL, primarily for tests.
+    pub fn with_messages_url(mut self, messages_url: impl Into<String>) -> Self {
+        self.messages_url = messages_url.into();
+        self
+    }
+
+    /// Overrides the retry budget for rate-limited requests.
+    pub fn with_max_retries(mut self, max_retries: usize) -> Self {
+        self.max_retries = max_retries;
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl LLMProvider for AnthropicProvider {
+    fn name(&self) -> &str {
+        "anthropic"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        self.default_capabilities.clone()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let requested_model = request
+            .model
+            .as_deref()
+            .unwrap_or(self.default_model.as_str())
+            .to_string();
+        let resolved_model = canonical_model_id(&requested_model)?;
+        let model_capabilities = capabilities_for_model(&resolved_model)?;
+        let request_body = build_request_body(&request, &resolved_model, &model_capabilities)?;
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        let messages_url = self.messages_url.clone();
+        let max_retries = self.max_retries;
+        let (tx, rx) = mpsc::channel(DEFAULT_STREAM_BUFFER);
+
+        let completion_task = tokio::spawn(async move {
+            let started_at = Instant::now();
+            let response = send_with_retry(
+                || {
+                    client
+                        .post(&messages_url)
+                        .header("x-api-key", &api_key)
+                        .header("anthropic-version", ANTHROPIC_API_VERSION)
+                        .header(ACCEPT, "text/event-stream")
+                        .header(CONTENT_TYPE, "application/json")
+                        .json(&request_body)
+                },
+                max_retries,
+            )
+            .await?;
+
+            consume_sse_events(
+                response.bytes_stream().eventsource(),
+                tx,
+                resolved_model,
+                started_at,
+            )
+            .await
+        });
+
+        Ok(CompletionStream::new(rx, completion_task))
+    }
+}
+
+fn canonical_model_id(model: &str) -> Result<String> {
+    match model {
+        MODEL_OPUS_4_6 => Ok(MODEL_OPUS_4_6.to_string()),
+        MODEL_SONNET_4_6 => Ok(MODEL_SONNET_4_6.to_string()),
+        unsupported => Err(MoaError::Unsupported(format!(
+            "unsupported Anthropic model '{unsupported}'"
+        ))),
+    }
+}
+
+fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
+    match model {
+        MODEL_OPUS_4_6 => Ok(ModelCapabilities {
+            model_id: MODEL_OPUS_4_6.to_string(),
+            context_window: 1_000_000,
+            max_output: 128_000,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: Some(Duration::from_secs(300)),
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 5.0,
+                output_per_mtok: 25.0,
+                cached_input_per_mtok: Some(0.5),
+            },
+        }),
+        MODEL_SONNET_4_6 => Ok(ModelCapabilities {
+            model_id: MODEL_SONNET_4_6.to_string(),
+            context_window: 1_000_000,
+            max_output: 64_000,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: Some(Duration::from_secs(300)),
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+            },
+        }),
+        unsupported => Err(MoaError::Unsupported(format!(
+            "unsupported Anthropic model '{unsupported}'"
+        ))),
+    }
+}
+
+fn build_request_body(
+    request: &CompletionRequest,
+    model: &str,
+    capabilities: &ModelCapabilities,
+) -> Result<Value> {
+    let mut system_messages = Vec::new();
+    let mut messages = Vec::new();
+
+    for message in &request.messages {
+        if message.role == MessageRole::System {
+            system_messages.push(message.content.clone());
+            continue;
+        }
+
+        messages.push(anthropic_message(message));
+    }
+
+    if messages.is_empty() {
+        return Err(MoaError::ValidationError(
+            "Anthropic requests require at least one non-system message".to_string(),
+        ));
+    }
+
+    let max_tokens = request
+        .max_output_tokens
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
+        .min(capabilities.max_output);
+
+    let mut body = Map::new();
+    body.insert("model".to_string(), Value::String(model.to_string()));
+    body.insert("max_tokens".to_string(), json!(max_tokens));
+    body.insert("messages".to_string(), Value::Array(messages));
+    body.insert("stream".to_string(), Value::Bool(true));
+
+    if !system_messages.is_empty() {
+        body.insert(
+            "system".to_string(),
+            Value::String(system_messages.join("\n\n")),
+        );
+    }
+
+    if let Some(temperature) = request.temperature {
+        body.insert("temperature".to_string(), json!(temperature));
+    }
+
+    if !request.tools.is_empty() {
+        body.insert("tools".to_string(), Value::Array(request.tools.clone()));
+    }
+
+    Ok(Value::Object(body))
+}
+
+fn anthropic_message(message: &ContextMessage) -> Value {
+    let role = match message.role {
+        MessageRole::User | MessageRole::Tool => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::System => unreachable!("system messages are handled separately"),
+    };
+
+    json!({
+        "role": role,
+        "content": message.content,
+    })
+}
+
+async fn consume_sse_events<S, E>(
+    events: S,
+    tx: mpsc::Sender<Result<CompletionContent>>,
+    fallback_model: String,
+    started_at: Instant,
+) -> Result<CompletionResponse>
+where
+    S: Stream<Item = std::result::Result<SseEvent, E>>,
+    E: std::fmt::Display,
+{
+    let mut state = AnthropicStreamState::new(fallback_model);
+    pin_mut!(events);
+
+    while let Some(event) = events.next().await {
+        let event = event
+            .map_err(|error| MoaError::StreamError(format!("failed to read SSE event: {error}")))?;
+        let emitted = state.apply_event(&event)?;
+
+        for block in emitted {
+            if tx.send(Ok(block)).await.is_err() {
+                tracing::debug!("completion stream receiver dropped before the response finished");
+                break;
+            }
+        }
+    }
+
+    Ok(state.finish(started_at))
+}
+
+#[derive(Debug)]
+struct AnthropicStreamState {
+    model: String,
+    stop_reason: StopReason,
+    input_tokens: usize,
+    output_tokens: usize,
+    cached_input_tokens: usize,
+    blocks: Vec<BlockAccumulator>,
+    completed_content: Vec<Option<CompletionContent>>,
+}
+
+impl AnthropicStreamState {
+    fn new(model: String) -> Self {
+        Self {
+            model,
+            stop_reason: StopReason::Other("unknown".to_string()),
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+            blocks: Vec::new(),
+            completed_content: Vec::new(),
+        }
+    }
+
+    fn apply_event(&mut self, event: &SseEvent) -> Result<Vec<CompletionContent>> {
+        match event.event.as_str() {
+            "message_start" => {
+                let payload: MessageStartEvent = parse_sse_json(event)?;
+                self.model = payload.message.model;
+                if let Some(usage) = payload.message.usage {
+                    self.input_tokens = usage.input_tokens;
+                    self.cached_input_tokens = usage.cache_read_input_tokens;
+                }
+                Ok(Vec::new())
+            }
+            "content_block_start" => self.apply_block_start(parse_sse_json(event)?),
+            "content_block_delta" => self.apply_block_delta(parse_sse_json(event)?),
+            "content_block_stop" => self.apply_block_stop(parse_sse_json(event)?),
+            "message_delta" => {
+                let payload: MessageDeltaEvent = parse_sse_json(event)?;
+                self.stop_reason = payload
+                    .delta
+                    .stop_reason
+                    .map(stop_reason_from_anthropic)
+                    .unwrap_or_else(|| StopReason::Other("unknown".to_string()));
+                if let Some(usage) = payload.usage {
+                    self.output_tokens = usage.output_tokens;
+                    if usage.cache_read_input_tokens > 0 {
+                        self.cached_input_tokens = usage.cache_read_input_tokens;
+                    }
+                }
+                Ok(Vec::new())
+            }
+            "message_stop" | "ping" => Ok(Vec::new()),
+            "error" => {
+                let payload: ErrorEvent = parse_sse_json(event)?;
+                Err(MoaError::ProviderError(format!(
+                    "Anthropic stream error ({}): {}",
+                    payload.error.kind, payload.error.message
+                )))
+            }
+            _ => {
+                tracing::debug!(event = %event.event, "ignoring unknown Anthropic SSE event");
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    fn apply_block_start(
+        &mut self,
+        payload: ContentBlockStartEvent,
+    ) -> Result<Vec<CompletionContent>> {
+        self.ensure_capacity(payload.index);
+        match payload.content_block {
+            ContentBlockStart::Text { text } => {
+                self.blocks[payload.index] = BlockAccumulator::Text(text.clone());
+                if text.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    Ok(vec![CompletionContent::Text(text)])
+                }
+            }
+            ContentBlockStart::ToolUse { id, name, input } => {
+                let partial_json = initial_tool_input(input)?;
+                self.blocks[payload.index] = BlockAccumulator::Tool {
+                    id,
+                    name,
+                    partial_json,
+                };
+                Ok(Vec::new())
+            }
+            ContentBlockStart::Unknown => {
+                self.blocks[payload.index] = BlockAccumulator::Ignored;
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    fn apply_block_delta(
+        &mut self,
+        payload: ContentBlockDeltaEvent,
+    ) -> Result<Vec<CompletionContent>> {
+        self.ensure_capacity(payload.index);
+        match (&mut self.blocks[payload.index], payload.delta) {
+            (BlockAccumulator::Text(text), ContentBlockDelta::TextDelta { text: delta }) => {
+                text.push_str(&delta);
+                Ok(vec![CompletionContent::Text(delta)])
+            }
+            (
+                BlockAccumulator::Tool { partial_json, .. },
+                ContentBlockDelta::InputJsonDelta {
+                    partial_json: delta,
+                },
+            ) => {
+                partial_json.push_str(&delta);
+                Ok(Vec::new())
+            }
+            (_, ContentBlockDelta::Unknown) => Ok(Vec::new()),
+            _ => Err(MoaError::StreamError(
+                "received an Anthropic content delta that did not match the active block"
+                    .to_string(),
+            )),
+        }
+    }
+
+    fn apply_block_stop(
+        &mut self,
+        payload: ContentBlockStopEvent,
+    ) -> Result<Vec<CompletionContent>> {
+        self.ensure_capacity(payload.index);
+        self.ensure_completed_capacity(payload.index);
+
+        let block = std::mem::replace(&mut self.blocks[payload.index], BlockAccumulator::Ignored);
+        match block {
+            BlockAccumulator::Text(text) => {
+                self.completed_content[payload.index] = Some(CompletionContent::Text(text));
+                Ok(Vec::new())
+            }
+            BlockAccumulator::Tool {
+                id,
+                name,
+                partial_json,
+            } => {
+                let input = if partial_json.trim().is_empty() {
+                    Value::Object(Map::new())
+                } else {
+                    serde_json::from_str(&partial_json).map_err(|error| {
+                        MoaError::SerializationError(format!(
+                            "failed to parse Anthropic tool input JSON: {error}"
+                        ))
+                    })?
+                };
+                let tool_call = ToolInvocation {
+                    id: Some(id),
+                    name,
+                    input,
+                };
+                let content = CompletionContent::ToolCall(tool_call.clone());
+                self.completed_content[payload.index] = Some(content.clone());
+                Ok(vec![content])
+            }
+            BlockAccumulator::Ignored => Ok(Vec::new()),
+        }
+    }
+
+    fn finish(mut self, started_at: Instant) -> CompletionResponse {
+        for index in 0..self.blocks.len() {
+            self.ensure_completed_capacity(index);
+            match &self.blocks[index] {
+                BlockAccumulator::Text(text) => {
+                    if self.completed_content[index].is_none() {
+                        self.completed_content[index] = Some(CompletionContent::Text(text.clone()));
+                    }
+                }
+                BlockAccumulator::Tool {
+                    id,
+                    name,
+                    partial_json,
+                } => {
+                    if self.completed_content[index].is_none() {
+                        let input = if partial_json.trim().is_empty() {
+                            Value::Object(Map::new())
+                        } else {
+                            match serde_json::from_str(partial_json) {
+                                Ok(value) => value,
+                                Err(_) => Value::Object(Map::new()),
+                            }
+                        };
+                        self.completed_content[index] =
+                            Some(CompletionContent::ToolCall(ToolInvocation {
+                                id: Some(id.clone()),
+                                name: name.clone(),
+                                input,
+                            }));
+                    }
+                }
+                BlockAccumulator::Ignored => {}
+            }
+        }
+
+        let content: Vec<_> = self.completed_content.into_iter().flatten().collect();
+        let text = content
+            .iter()
+            .filter_map(|block| match block {
+                CompletionContent::Text(text) => Some(text.as_str()),
+                CompletionContent::ToolCall(_) => None,
+            })
+            .collect::<String>();
+
+        CompletionResponse {
+            text,
+            content,
+            stop_reason: self.stop_reason,
+            model: self.model,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cached_input_tokens: self.cached_input_tokens,
+            duration_ms: started_at.elapsed().as_millis() as u64,
+        }
+    }
+
+    fn ensure_capacity(&mut self, index: usize) {
+        while self.blocks.len() <= index {
+            self.blocks.push(BlockAccumulator::Ignored);
+        }
+    }
+
+    fn ensure_completed_capacity(&mut self, index: usize) {
+        while self.completed_content.len() <= index {
+            self.completed_content.push(None);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum BlockAccumulator {
+    Text(String),
+    Tool {
+        id: String,
+        name: String,
+        partial_json: String,
+    },
+    Ignored,
+}
+
+#[derive(Debug, Deserialize)]
+struct MessageStartEvent {
+    message: MessageEnvelope,
+}
+
+#[derive(Debug, Deserialize)]
+struct MessageEnvelope {
+    model: String,
+    #[serde(default)]
+    usage: Option<Usage>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Usage {
+    #[serde(default)]
+    input_tokens: usize,
+    #[serde(default)]
+    output_tokens: usize,
+    #[serde(default)]
+    cache_read_input_tokens: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContentBlockStartEvent {
+    index: usize,
+    content_block: ContentBlockStart,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ContentBlockStart {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: Value,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContentBlockDeltaEvent {
+    index: usize,
+    delta: ContentBlockDelta,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ContentBlockDelta {
+    TextDelta {
+        text: String,
+    },
+    InputJsonDelta {
+        partial_json: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContentBlockStopEvent {
+    index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct MessageDeltaEvent {
+    delta: MessageDeltaPayload,
+    #[serde(default)]
+    usage: Option<Usage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MessageDeltaPayload {
+    #[serde(default)]
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorEvent {
+    error: StreamErrorPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamErrorPayload {
+    #[serde(rename = "type")]
+    kind: String,
+    message: String,
+}
+
+fn initial_tool_input(input: Value) -> Result<String> {
+    if input.is_null() {
+        return Ok(String::new());
+    }
+
+    if let Value::Object(map) = &input
+        && map.is_empty()
+    {
+        return Ok(String::new());
+    }
+
+    serde_json::to_string(&input).map_err(MoaError::from)
+}
+
+fn stop_reason_from_anthropic(stop_reason: String) -> StopReason {
+    match stop_reason.as_str() {
+        "end_turn" => StopReason::EndTurn,
+        "max_tokens" => StopReason::MaxTokens,
+        "tool_use" => StopReason::ToolUse,
+        "cancelled" => StopReason::Cancelled,
+        other => StopReason::Other(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use eventsource_stream::Eventsource;
+    use futures_util::stream;
+    use moa_core::{CompletionContent, CompletionRequest, ContextMessage, LLMProvider, StopReason};
+    use serde_json::json;
+    use tokio::sync::mpsc;
+
+    use super::{
+        AnthropicProvider, MODEL_OPUS_4_6, MODEL_SONNET_4_6, build_request_body,
+        canonical_model_id, capabilities_for_model, consume_sse_events,
+    };
+
+    #[test]
+    fn completion_request_serializes_to_anthropic_format() {
+        let request = CompletionRequest {
+            model: Some(MODEL_SONNET_4_6.to_string()),
+            messages: vec![
+                ContextMessage::system("System one"),
+                ContextMessage::system("System two"),
+                ContextMessage::user("Hello"),
+                ContextMessage::assistant("Hi"),
+            ],
+            tools: vec![json!({
+                "name": "bash",
+                "description": "Run shell commands",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "cmd": { "type": "string" }
+                    },
+                    "required": ["cmd"]
+                }
+            })],
+            max_output_tokens: Some(512),
+            temperature: Some(0.2),
+            metadata: Default::default(),
+        };
+
+        let body = build_request_body(
+            &request,
+            &canonical_model_id(MODEL_SONNET_4_6).unwrap(),
+            &capabilities_for_model(MODEL_SONNET_4_6).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(body["model"], MODEL_SONNET_4_6);
+        assert_eq!(body["system"], "System one\n\nSystem two");
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "Hello");
+        assert_eq!(body["messages"][1]["role"], "assistant");
+        assert_eq!(body["tools"][0]["name"], "bash");
+        assert_eq!(body["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn parses_recorded_sse_stream_into_content_blocks() {
+        let sse = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":12,\"cache_read_input_tokens\":3}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"bash\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":\\\"ls\\\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"}\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":5}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+        let raw_stream = stream::iter(vec![Ok::<Vec<u8>, std::io::Error>(sse.as_bytes().to_vec())]);
+        let events = raw_stream.eventsource();
+        let (tx, mut rx) = mpsc::channel(8);
+
+        let response = consume_sse_events(events, tx, MODEL_SONNET_4_6.to_string(), Instant::now())
+            .await
+            .unwrap();
+
+        let mut streamed_blocks = Vec::new();
+        while let Some(block) = rx.recv().await {
+            streamed_blocks.push(block.unwrap());
+        }
+
+        assert_eq!(streamed_blocks.len(), 3);
+        assert_eq!(
+            streamed_blocks[0],
+            CompletionContent::Text("Hel".to_string())
+        );
+        assert_eq!(
+            streamed_blocks[1],
+            CompletionContent::Text("lo".to_string())
+        );
+        match &streamed_blocks[2] {
+            CompletionContent::ToolCall(tool_call) => {
+                assert_eq!(tool_call.name, "bash");
+                assert_eq!(tool_call.input["cmd"], "ls");
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
+        assert_eq!(response.text, "Hello");
+        assert_eq!(response.model, MODEL_SONNET_4_6);
+        assert_eq!(response.input_tokens, 12);
+        assert_eq!(response.cached_input_tokens, 3);
+        assert_eq!(response.output_tokens, 5);
+        assert!(matches!(response.stop_reason, StopReason::ToolUse));
+    }
+
+    #[test]
+    fn supported_models_return_expected_capabilities() {
+        let opus_caps =
+            capabilities_for_model(&canonical_model_id(MODEL_OPUS_4_6).unwrap()).unwrap();
+        let sonnet_caps =
+            capabilities_for_model(&canonical_model_id(MODEL_SONNET_4_6).unwrap()).unwrap();
+
+        assert_eq!(opus_caps.context_window, 1_000_000);
+        assert_eq!(sonnet_caps.context_window, 1_000_000);
+        assert_eq!(opus_caps.max_output, 128_000);
+        assert_eq!(sonnet_caps.max_output, 64_000);
+        assert_eq!(opus_caps.pricing.input_per_mtok, 5.0);
+        assert_eq!(sonnet_caps.pricing.input_per_mtok, 3.0);
+        assert_eq!(opus_caps.model_id, MODEL_OPUS_4_6);
+        assert_eq!(sonnet_caps.model_id, MODEL_SONNET_4_6);
+    }
+
+    #[test]
+    fn model_ids_resolve_without_aliasing() {
+        assert_eq!(canonical_model_id(MODEL_OPUS_4_6).unwrap(), MODEL_OPUS_4_6);
+        assert_eq!(
+            canonical_model_id(MODEL_SONNET_4_6).unwrap(),
+            MODEL_SONNET_4_6
+        );
+    }
+
+    #[test]
+    fn provider_accepts_documented_default_models() {
+        let provider = AnthropicProvider::new("test-key", MODEL_SONNET_4_6).unwrap();
+        assert_eq!(provider.capabilities().model_id, MODEL_SONNET_4_6);
+    }
+}

@@ -483,7 +483,7 @@ scheduler.add(consolidation_job).await?;
 
 [general]
 default_provider = "anthropic"  # anthropic | openai | openrouter
-default_model = "claude-sonnet-4-20250514"
+default_model = "claude-sonnet-4-6"
 reasoning_effort = "medium"     # low | medium | high | xhigh
 
 [providers.anthropic]

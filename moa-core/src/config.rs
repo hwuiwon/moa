@@ -209,7 +209,7 @@ impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
             default_provider: "anthropic".to_string(),
-            default_model: "claude-sonnet-4-20250514".to_string(),
+            default_model: "claude-sonnet-4-6".to_string(),
             reasoning_effort: "medium".to_string(),
         }
     }

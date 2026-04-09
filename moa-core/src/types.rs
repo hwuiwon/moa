@@ -8,6 +8,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::error::{MoaError, Result};
@@ -759,7 +761,7 @@ impl CompletionRequest {
 
 /// Provider completion response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CompletionStream {
+pub struct CompletionResponse {
     /// Aggregated text response.
     pub text: String,
     /// Structured response blocks.
@@ -776,6 +778,74 @@ pub struct CompletionStream {
     pub cached_input_tokens: usize,
     /// Total request duration in milliseconds.
     pub duration_ms: u64,
+}
+
+/// Streaming provider response wrapper.
+pub struct CompletionStream {
+    receiver: mpsc::Receiver<Result<CompletionContent>>,
+    completion: JoinHandle<Result<CompletionResponse>>,
+}
+
+impl CompletionStream {
+    /// Creates a new completion stream from a content receiver and completion task.
+    pub fn new(
+        receiver: mpsc::Receiver<Result<CompletionContent>>,
+        completion: JoinHandle<Result<CompletionResponse>>,
+    ) -> Self {
+        Self {
+            receiver,
+            completion,
+        }
+    }
+
+    /// Creates a replayable stream from a fully buffered response.
+    pub fn from_response(response: CompletionResponse) -> Self {
+        let buffered_blocks = response.content.clone();
+        let capacity = buffered_blocks.len().max(1);
+        let (tx, rx) = mpsc::channel(capacity);
+        let completion = tokio::spawn(async move {
+            for block in buffered_blocks {
+                if tx.send(Ok(block)).await.is_err() {
+                    break;
+                }
+            }
+
+            Ok(response)
+        });
+
+        Self::new(rx, completion)
+    }
+
+    /// Receives the next streamed content block, if one is available.
+    pub async fn next(&mut self) -> Option<Result<CompletionContent>> {
+        self.receiver.recv().await
+    }
+
+    /// Drains the remaining stream and returns the final aggregated response.
+    pub async fn collect(mut self) -> Result<CompletionResponse> {
+        while let Some(block) = self.receiver.recv().await {
+            block?;
+        }
+
+        self.await_completion().await
+    }
+
+    /// Waits for the provider task to finish and returns the final aggregated response.
+    pub async fn into_response(self) -> Result<CompletionResponse> {
+        self.await_completion().await
+    }
+
+    async fn await_completion(self) -> Result<CompletionResponse> {
+        self.completion.await.map_err(|error| {
+            MoaError::ProviderError(format!("completion task failed to join: {error}"))
+        })?
+    }
+}
+
+impl fmt::Debug for CompletionStream {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CompletionStream").finish_non_exhaustive()
+    }
 }
 
 /// Platform-specific user identity.

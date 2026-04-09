@@ -301,7 +301,7 @@ mod tests {
     fn brain_response_event_has_cost_fields() {
         let event = Event::BrainResponse {
             text: "Hi there".to_string(),
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
             input_tokens: 100,
             output_tokens: 50,
             cost_cents: 2,

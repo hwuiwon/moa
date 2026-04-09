@@ -19,13 +19,14 @@ pub use traits::{
 };
 pub use types::{
     ActionButton, ApprovalDecision, ApprovalRequest, Attachment, BrainId, ButtonStyle, ChannelRef,
-    CompletionContent, CompletionRequest, CompletionStream, ConfidenceLevel, ContextMessage,
-    Credential, CronHandle, CronSpec, EventFilter, EventRange, EventRecord, EventStream, EventType,
-    HandHandle, HandResources, HandSpec, HandStatus, InboundMessage, MemoryPath, MemoryScope,
-    MemorySearchResult, MessageContent, MessageId, MessageRole, ModelCapabilities, ObserveLevel,
-    OutboundMessage, PageSummary, PageType, Platform, PlatformCapabilities, PlatformUser,
-    ProcessorOutput, RiskLevel, SandboxTier, SequenceNum, SessionFilter, SessionHandle, SessionId,
-    SessionMeta, SessionSignal, SessionStatus, SessionSummary, StartSessionRequest, StopReason,
-    TokenPricing, ToolCallFormat, ToolInvocation, ToolOutput, ToolStatus, UserId, UserMessage,
-    WakeContext, WikiPage, WorkingContext, WorkspaceId,
+    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ConfidenceLevel,
+    ContextMessage, Credential, CronHandle, CronSpec, EventFilter, EventRange, EventRecord,
+    EventStream, EventType, HandHandle, HandResources, HandSpec, HandStatus, InboundMessage,
+    MemoryPath, MemoryScope, MemorySearchResult, MessageContent, MessageId, MessageRole,
+    ModelCapabilities, ObserveLevel, OutboundMessage, PageSummary, PageType, Platform,
+    PlatformCapabilities, PlatformUser, ProcessorOutput, RiskLevel, SandboxTier, SequenceNum,
+    SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
+    SessionSummary, StartSessionRequest, StopReason, TokenPricing, ToolCallFormat, ToolInvocation,
+    ToolOutput, ToolStatus, UserId, UserMessage, WakeContext, WikiPage, WorkingContext,
+    WorkspaceId,
 };

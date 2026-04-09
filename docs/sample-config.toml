@@ -1,6 +1,6 @@
 [general]
 default_provider = "anthropic"
-default_model = "claude-sonnet-4-20250514"
+default_model = "claude-sonnet-4-6"
 reasoning_effort = "medium"
 
 [providers.anthropic]

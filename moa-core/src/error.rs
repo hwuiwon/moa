@@ -24,6 +24,10 @@ pub enum MoaError {
     #[error("provider error: {0}")]
     ProviderError(String),
 
+    /// A required environment variable is not set.
+    #[error("missing environment variable: {0}")]
+    MissingEnvironmentVariable(String),
+
     /// Configuration loading or validation failed.
     #[error("configuration error: {0}")]
     ConfigError(String),
@@ -43,6 +47,28 @@ pub enum MoaError {
     /// Serialization or deserialization failed.
     #[error("serialization error: {0}")]
     SerializationError(String),
+
+    /// An HTTP request returned a non-success status.
+    #[error("http status {status}: {message}")]
+    HttpStatus {
+        /// The HTTP status code.
+        status: u16,
+        /// The error message or response body.
+        message: String,
+    },
+
+    /// The provider rate limited the request after retries.
+    #[error("rate limited after {retries} retries: {message}")]
+    RateLimited {
+        /// Number of retry attempts performed.
+        retries: usize,
+        /// Provider-supplied error message when available.
+        message: String,
+    },
+
+    /// An error occurred while parsing or consuming a stream.
+    #[error("stream error: {0}")]
+    StreamError(String),
 
     /// Permission to perform an action was denied.
     #[error("permission denied: {0}")]
