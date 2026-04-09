@@ -124,6 +124,7 @@ pub struct App {
     runtime_event_tx: mpsc::UnboundedSender<SessionRuntimeEvent>,
     runtime_event_rx: mpsc::UnboundedReceiver<SessionRuntimeEvent>,
     observation_task: Option<JoinHandle<()>>,
+    observed_session_id: Option<SessionId>,
     last_session_refresh: Instant,
 }
 
@@ -147,6 +148,7 @@ impl App {
             runtime_event_tx,
             runtime_event_rx,
             observation_task: None,
+            observed_session_id: None,
             last_session_refresh: Instant::now() - SESSION_REFRESH_INTERVAL,
         };
         app.refresh_sessions_if_due().await?;
@@ -482,7 +484,9 @@ impl App {
 
     async fn load_session_if_needed(&mut self, session_id: SessionId) -> Result<()> {
         let should_reload = match self.session_views.get(&session_id) {
-            Some(view) if view.loaded && self.active_session_is_live(session_id.clone()) => false,
+            Some(view) if view.loaded && self.active_session_is_live(session_id.clone()) => {
+                self.observed_session_id.as_ref() != Some(&session_id)
+            }
             Some(view) => !view.loaded || !self.active_session_is_live(session_id.clone()),
             None => true,
         };
@@ -511,6 +515,7 @@ impl App {
         let runtime = self.runtime.clone();
         let session_id = self.active_session_id.clone();
         let event_tx = self.runtime_event_tx.clone();
+        self.observed_session_id = Some(session_id.clone());
         self.observation_task = Some(tokio::spawn(async move {
             let _ = runtime.observe_session(session_id, event_tx).await;
         }));
@@ -1217,7 +1222,7 @@ async fn run_event_loop(
 mod tests {
     use chrono::Utc;
     use crossterm::event::KeyCode;
-    use moa_core::{Platform, SessionSummary, UserId, WorkspaceId};
+    use moa_core::{Platform, SessionStore, SessionSummary, UserId, WorkspaceId};
     use ratatui::{Terminal, backend::TestBackend};
     use tokio::runtime::Runtime;
 
@@ -1257,6 +1262,7 @@ mod tests {
                 runtime_event_tx,
                 runtime_event_rx,
                 observation_task: None,
+                observed_session_id: None,
                 last_session_refresh: Instant::now(),
             };
             app.sync_mode_with_state();
@@ -1350,5 +1356,74 @@ mod tests {
         assert_eq!(app.mode(), AppMode::ViewingDiff);
 
         terminal.draw(|frame| app.draw(frame)).expect("draw");
+    }
+
+    #[test]
+    fn switching_back_to_live_session_reloads_pending_approval_from_history() {
+        let runtime = Runtime::new().expect("runtime");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = MoaConfig::default();
+        config.local.session_db = dir.path().join("sessions.db").display().to_string();
+        config.local.memory_dir = dir.path().join("memory").display().to_string();
+        config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+
+        runtime.block_on(async move {
+            let mut app = App::new(config.clone()).await.expect("app");
+            let first_session_id = app.active_session_id.clone();
+            app.create_new_session().await.expect("new session");
+            let second_session_id = app.active_session_id.clone();
+            assert_ne!(first_session_id, second_session_id);
+
+            let store = moa_session::TursoSessionStore::new(&config.local.session_db)
+                .await
+                .expect("session store");
+            let request_id = Uuid::new_v4();
+            store
+                .emit_event(
+                    first_session_id.clone(),
+                    Event::ToolCall {
+                        tool_id: request_id,
+                        tool_name: "bash".to_string(),
+                        input: serde_json::json!({ "cmd": "pwd" }),
+                        hand_id: None,
+                    },
+                )
+                .await
+                .expect("tool call");
+            store
+                .emit_event(
+                    first_session_id.clone(),
+                    Event::ApprovalRequested {
+                        request_id,
+                        tool_name: "bash".to_string(),
+                        input_summary: "pwd".to_string(),
+                        risk_level: RiskLevel::High,
+                    },
+                )
+                .await
+                .expect("approval request");
+            store
+                .update_status(first_session_id.clone(), SessionStatus::WaitingApproval)
+                .await
+                .expect("status");
+
+            app.refresh_session_list().await.expect("refresh");
+            app.switch_to_session(first_session_id.clone())
+                .await
+                .expect("switch");
+
+            assert_eq!(app.mode(), AppMode::WaitingApproval);
+            let view = app.active_view().expect("active view");
+            assert_eq!(
+                view.pending_approval
+                    .as_ref()
+                    .map(|prompt| prompt.request.request_id),
+                Some(request_id)
+            );
+            assert!(view.entries.iter().any(|entry| matches!(
+                entry,
+                ChatEntry::Approval(card) if card.prompt.request.request_id == request_id
+            )));
+        });
     }
 }

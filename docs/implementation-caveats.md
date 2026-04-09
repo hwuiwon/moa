@@ -726,3 +726,47 @@ Consequence:
 Recommended review:
 
 - Decide later whether draft text should move into per-session UI state once the basic session-management workflow has settled.
+
+## 32. Queued prompts are buffered in memory until the current turn boundary
+
+Current state:
+
+- A prompt queued while a session is actively running is no longer written to the event log immediately.
+- The orchestrator now buffers queued prompts in memory and flushes them as `QueuedMessage` events only after the current turn finishes.
+
+Issue:
+
+- This fixes the provider-facing conversation ordering bug where a queued user message could be persisted before the in-flight assistant reply, causing the next Anthropic request to end with an assistant message.
+- It introduces a small durability gap: if the local process crashes after the user queues a prompt but before the current turn reaches its flush point, that queued prompt is lost.
+
+Consequence:
+
+- Normal queued follow-ups now produce correct event ordering and valid Anthropic request bodies.
+- Crash recovery for in-flight queued prompts is weaker than the rest of the session-log-based design until a durable side queue or explicit pending-signal store exists.
+
+Recommended review:
+
+- Decide later whether queued prompts should move into a durable pending-signal table so MOA can keep both correct conversational ordering and crash-safe queue persistence.
+
+## 33. Resuming a cancelled session now waits for fresh input instead of auto-continuing old tail work
+
+Current state:
+
+- `resume_session()` no longer auto-runs persisted tail events when the stored session status is `Cancelled`.
+- This prevents a soft-stopped tool call from later resuming into an assistant response just because the session was reopened.
+
+Issue:
+
+- The architecture docs describe `resume_session()` as “wake from last event,” but they do not say whether a user-stopped session should continue the interrupted turn or remain stopped until new input arrives.
+
+Consequence:
+
+- Current behavior treats stop as authoritative: reopening or reattaching to a cancelled session leaves it idle.
+- The next turn starts only after a new `QueueMessage` or user prompt arrives.
+- If later product semantics want “pause and resume the interrupted turn,” this behavior will need to change.
+
+Recommended review:
+
+- Decide explicitly whether `Cancelled` means:
+  - permanently stop the interrupted turn until fresh user input, or
+  - pause execution and allow `resume_session()` to continue where it left off.
