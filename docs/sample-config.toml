@@ -1,0 +1,57 @@
+[general]
+default_provider = "anthropic"
+default_model = "claude-sonnet-4-20250514"
+reasoning_effort = "medium"
+
+[providers.anthropic]
+api_key_env = "ANTHROPIC_API_KEY"
+
+[providers.openai]
+api_key_env = "OPENAI_API_KEY"
+
+[providers.openrouter]
+api_key_env = "OPENROUTER_API_KEY"
+
+[local]
+docker_enabled = true
+sandbox_dir = "~/.moa/sandbox"
+session_db = "~/.moa/sessions.db"
+memory_dir = "~/.moa/memory"
+
+[cloud]
+enabled = false
+turso_url = ""
+turso_auth_token_env = "TURSO_AUTH_TOKEN"
+
+[cloud.temporal]
+address = ""
+namespace = ""
+task_queue = "moa-brains"
+api_key_env = "TEMPORAL_API_KEY"
+
+[cloud.flyio]
+api_token_env = "FLY_API_TOKEN"
+app_name = ""
+region = "iad"
+
+[cloud.hands]
+default_provider = "daytona"
+daytona_api_key_env = "DAYTONA_API_KEY"
+e2b_api_key_env = "E2B_API_KEY"
+
+[gateway]
+telegram_token_env = "TELEGRAM_BOT_TOKEN"
+slack_token_env = "SLACK_BOT_TOKEN"
+slack_app_token_env = "SLACK_APP_TOKEN"
+discord_token_env = "DISCORD_BOT_TOKEN"
+
+[tui]
+theme = "default"
+sidebar_auto = true
+tab_limit = 8
+diff_style = "auto"
+
+[permissions]
+default_posture = "approve"
+auto_approve = ["file_read", "file_search", "web_search"]
+always_deny = []

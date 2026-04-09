@@ -1,0 +1,1 @@
+//! Memory store crate placeholder.

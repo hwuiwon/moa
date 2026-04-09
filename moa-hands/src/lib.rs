@@ -1,0 +1,1 @@
+//! Hand provider crate placeholder.

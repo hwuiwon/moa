@@ -1,0 +1,9 @@
+[package]
+name = "moa-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+moa-core = { path = "../moa-core" }
+

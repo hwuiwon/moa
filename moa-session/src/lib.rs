@@ -1,0 +1,1 @@
+//! Session store crate placeholder.

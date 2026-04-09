@@ -1,0 +1,9 @@
+[package]
+name = "moa-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+moa-core = { path = "../moa-core" }
+

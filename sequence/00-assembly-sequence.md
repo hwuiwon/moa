@@ -8,35 +8,35 @@ _Build order from empty repo to production. 23 steps, each with a self-contained
 
 ```
 Step 01: Scaffold ──────────────────────────────────────────────────────┐
-    │                                                                    │
+    │                                                                   │
 Step 02: Session Store ─────────────────────────────────┐               │
-    │                                                    │               │
+    │                                                   │               │
 Step 03: Anthropic Provider ────────────┐               │               │
-    │                                    │               │               │
+    │                                   │               │               │
 Step 04: Brain Harness + Pipeline ──────┤               │               │
-    │                                    │               │               │
+    │                                   │               │               │
 Step 05: Memory Store + FTS5 ───────────┤               │               │
-    │                                    │               │               │
+    │                                   │               │               │
 Step 06: Tool Registry + Local Hand ────┤               │               │
-    │                                    │               │               │
+    │                                   │               │               │
 Step 07: Tool Router + Approvals ───────┤               │               │
-    │                                    │               │               │
-Step 08: CLI + TUI Chat ───────────────┐│               │               │
-    │                                   ││               │               │
-Step 09: TUI Approval + Diff ──────────┤│               │               │
-    │                                   ││               │               │
-Step 10: LocalOrchestrator ────────────┤│               │               │
-    │                                   ││               │               │
-Step 11: TUI Sessions + Observe ───────┘│               │               │
-    │                                    │               │               │
+    │                                   │               │               │
+Step 08: CLI + TUI Chat ────────────────┤               │               │
+    │                                   │               │               │
+Step 09: TUI Approval + Diff ───────────┤               │               │
+    │                                   │               │               │
+Step 10: LocalOrchestrator ─────────────┤               │               │
+    │                                   │               │               │
+Step 11: TUI Sessions + Observe ────────┤               │               │
+    │                                   |               │               │
 Step 12: Skills System ─────────────────┘               │               │
-    │                                                    │               │
+    │                                                   │               │
 Step 13: Consolidation + Wiki ──────────────────────────┘               │
-    │                                                                    │
+    │                                                                   │
 Step 14: Telegram ──────────────────────┐                               │
 Step 15: Slack ─────────────────────────┤                               │
 Step 16: Discord + Platform UX ─────────┘                               │
-    │                                                                    │
+    │                                                                   │
 Step 17: Temporal Orchestrator ─────────────────────────────────────────┤
 Step 18: Daytona + E2B + MCP ───────────────────────────────────────────┤
 Step 19: Security Hardening ────────────────────────────────────────────┤
