@@ -13,6 +13,8 @@ pub enum KeyAction {
     InsertNewline,
     /// Cancel the current generation or exit when idle.
     Cancel,
+    /// Queue the current prompt behind a running turn.
+    QueuePrompt,
     /// Approve the pending tool exactly once.
     ApproveOnce,
     /// Persist an always-allow rule for the pending tool.
@@ -41,6 +43,28 @@ pub enum KeyAction {
     ScrollDown,
     /// Jump back to auto-scroll at the bottom.
     ScrollEnd,
+    /// Create a new session tab.
+    NewSession,
+    /// Cycle to the next visible session tab.
+    NextSession,
+    /// Cycle to the previous visible session tab.
+    PreviousSession,
+    /// Switch directly to the indexed session tab.
+    SwitchSessionTab(usize),
+    /// Start the `Ctrl+O, S` session-picker chord.
+    StartSessionPickerChord,
+    /// Start the `Ctrl+X, S` soft-stop chord.
+    StartSoftStopChord,
+    /// Move the session picker selection upward.
+    PickerUp,
+    /// Move the session picker selection downward.
+    PickerDown,
+    /// Confirm the currently selected session picker entry.
+    PickerSelect,
+    /// Remove one character from the session picker query.
+    PickerBackspace,
+    /// Forward a key into the session picker query.
+    SessionPickerInput,
     /// Forward the key into the prompt widget.
     PromptInput,
     /// Ignore the key press.
@@ -51,6 +75,18 @@ pub enum KeyAction {
 pub fn map_key_event(mode: AppMode, key: KeyEvent) -> KeyAction {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return KeyAction::Cancel;
+    }
+
+    if mode == AppMode::PickingSession {
+        return match key.code {
+            KeyCode::Esc => KeyAction::Cancel,
+            KeyCode::Enter => KeyAction::PickerSelect,
+            KeyCode::Up => KeyAction::PickerUp,
+            KeyCode::Down => KeyAction::PickerDown,
+            KeyCode::Backspace => KeyAction::PickerBackspace,
+            KeyCode::Char(_) | KeyCode::Delete => KeyAction::SessionPickerInput,
+            _ => KeyAction::Noop,
+        };
     }
 
     if mode == AppMode::ViewingDiff {
@@ -69,6 +105,27 @@ pub fn map_key_event(mode: AppMode, key: KeyEvent) -> KeyAction {
 
     if key.code == KeyCode::Esc {
         return KeyAction::Cancel;
+    }
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return match key.code {
+            KeyCode::Char('n') | KeyCode::Char('N') => KeyAction::NewSession,
+            KeyCode::Char('o') | KeyCode::Char('O') => KeyAction::StartSessionPickerChord,
+            KeyCode::Char('q') | KeyCode::Char('Q') => KeyAction::QueuePrompt,
+            KeyCode::Char('x') | KeyCode::Char('X') => KeyAction::StartSoftStopChord,
+            _ => KeyAction::Noop,
+        };
+    }
+
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        return match key.code {
+            KeyCode::Char('[') => KeyAction::PreviousSession,
+            KeyCode::Char(']') => KeyAction::NextSession,
+            KeyCode::Char(ch @ '1'..='9') => {
+                KeyAction::SwitchSessionTab((ch as usize) - ('1' as usize))
+            }
+            _ => KeyAction::Noop,
+        };
     }
 
     if mode == AppMode::WaitingApproval {
@@ -185,6 +242,57 @@ mod tests {
         assert_eq!(
             map_key_event(AppMode::Running, key(KeyCode::Esc, KeyModifiers::NONE)),
             KeyAction::Cancel
+        );
+    }
+
+    #[test]
+    fn tab_and_session_shortcuts_map_correctly() {
+        assert_eq!(
+            map_key_event(
+                AppMode::Idle,
+                key(KeyCode::Char('n'), KeyModifiers::CONTROL)
+            ),
+            KeyAction::NewSession
+        );
+        assert_eq!(
+            map_key_event(AppMode::Idle, key(KeyCode::Char(']'), KeyModifiers::ALT)),
+            KeyAction::NextSession
+        );
+        assert_eq!(
+            map_key_event(AppMode::Idle, key(KeyCode::Char('1'), KeyModifiers::ALT)),
+            KeyAction::SwitchSessionTab(0)
+        );
+        assert_eq!(
+            map_key_event(
+                AppMode::Idle,
+                key(KeyCode::Char('o'), KeyModifiers::CONTROL)
+            ),
+            KeyAction::StartSessionPickerChord
+        );
+    }
+
+    #[test]
+    fn session_picker_keys_are_scoped_to_picker_mode() {
+        assert_eq!(
+            map_key_event(
+                AppMode::PickingSession,
+                key(KeyCode::Down, KeyModifiers::NONE)
+            ),
+            KeyAction::PickerDown
+        );
+        assert_eq!(
+            map_key_event(
+                AppMode::PickingSession,
+                key(KeyCode::Char('s'), KeyModifiers::NONE)
+            ),
+            KeyAction::SessionPickerInput
+        );
+        assert_eq!(
+            map_key_event(
+                AppMode::Composing,
+                key(KeyCode::Char('s'), KeyModifiers::NONE)
+            ),
+            KeyAction::PromptInput
         );
     }
 }

@@ -15,6 +15,7 @@ moa-memory = { path = "../moa-memory" }
 moa-orchestrator = { path = "../moa-orchestrator" }
 moa-providers = { path = "../moa-providers" }
 moa-session = { path = "../moa-session" }
+nucleo.workspace = true
 ratatui.workspace = true
 serde_json.workspace = true
 shell-words = "1.1"
