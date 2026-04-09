@@ -1,0 +1,62 @@
+#!/bin/sh
+# post-checkout: graphify rebuild on branch switch (code files only).
+#
+# Lives in .githooks/ (the repo's core.hooksPath target). Mirrors the logic
+# graphify installs in .git/hooks/ but includes the same upstream monkey-patch
+# workaround as post-commit (see comments there for details).
+
+PREV_HEAD=$1
+NEW_HEAD=$2
+BRANCH_SWITCH=$3
+
+# Only run on branch switches, not file checkouts
+if [ "$BRANCH_SWITCH" != "1" ]; then
+    exit 0
+fi
+
+# Only rebuild if a graph has been built at least once
+if [ ! -d "graphify-out" ]; then
+    exit 0
+fi
+
+GRAPHIFY_BIN=$(command -v graphify 2>/dev/null)
+if [ -z "$GRAPHIFY_BIN" ]; then
+    exit 0
+fi
+
+PYTHON="python3"
+if ! "$PYTHON" -c "import graphify" 2>/dev/null; then
+    if command -v pyenv >/dev/null 2>&1; then
+        PYTHON="$(pyenv which python3 2>/dev/null || echo python3)"
+    fi
+fi
+if ! "$PYTHON" -c "import graphify" 2>/dev/null; then
+    echo "[graphify] graphify python package not importable - skipping"
+    exit 0
+fi
+
+echo "[graphify] Branch switched - rebuilding knowledge graph (code files)..."
+"$PYTHON" <<'PY'
+import sys
+from pathlib import Path
+
+# Upstream workaround (see .githooks/post-commit for details).
+import graphify.detect as _gd
+_orig_detect = _gd.detect
+def _patched_detect(*args, **kwargs):
+    result = _orig_detect(*args, **kwargs)
+    files = result.get("files", {})
+    for ft in _gd.FileType:
+        result[ft] = files.get(ft.value, [])
+    return result
+_gd.detect = _patched_detect
+
+try:
+    from graphify.watch import _rebuild_code
+    ok = _rebuild_code(Path('.'))
+except Exception as exc:
+    print(f'[graphify] Rebuild failed: {exc}')
+    sys.exit(1)
+
+sys.exit(0 if ok else 1)
+PY

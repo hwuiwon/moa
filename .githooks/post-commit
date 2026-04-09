@@ -1,0 +1,83 @@
+#!/bin/sh
+# post-commit: graphify auto-rebuild of knowledge graph (code files only, no LLM).
+#
+# Lives in .githooks/ (the repo's core.hooksPath target), NOT .git/hooks/.
+# `graphify hook install` writes to .git/hooks/ and silently no-ops when
+# core.hooksPath is set — this file is the one git actually runs.
+#
+# Includes a monkey-patch workaround for an upstream bug in
+# graphify/watch.py:_rebuild_code where it indexes detect()'s result with
+# the FileType enum, but detect() returns files nested under
+# result["files"]["<value>"]. The patch re-exposes enum keys so the
+# lazy import inside _rebuild_code picks up the fixed detect().
+
+CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD 2>/dev/null)
+if [ -z "$CHANGED" ]; then
+    exit 0
+fi
+
+# Resolve a python that has `graphify` importable. Prefer whatever
+# `graphify` itself resolves to via pyenv/pipx/venv.
+GRAPHIFY_BIN=$(command -v graphify 2>/dev/null)
+if [ -z "$GRAPHIFY_BIN" ]; then
+    exit 0
+fi
+
+PYTHON="python3"
+if ! "$PYTHON" -c "import graphify" 2>/dev/null; then
+    # Fall back to resolving through pyenv if plain python3 can't find it
+    if command -v pyenv >/dev/null 2>&1; then
+        PYTHON="$(pyenv which python3 2>/dev/null || echo python3)"
+    fi
+fi
+if ! "$PYTHON" -c "import graphify" 2>/dev/null; then
+    echo "[graphify hook] graphify python package not importable - skipping"
+    exit 0
+fi
+
+export GRAPHIFY_CHANGED="$CHANGED"
+"$PYTHON" <<'PY'
+import os, sys
+from pathlib import Path
+
+CODE_EXTS = {
+    '.py', '.ts', '.tsx', '.js', '.jsx', '.go', '.rs', '.java',
+    '.cpp', '.c', '.cc', '.cxx', '.h', '.hpp', '.rb', '.swift',
+    '.kt', '.kts', '.cs', '.scala', '.php', '.lua',
+}
+
+changed_raw = os.environ.get('GRAPHIFY_CHANGED', '')
+changed = [Path(f.strip()) for f in changed_raw.splitlines() if f.strip()]
+code_changed = [f for f in changed if f.suffix.lower() in CODE_EXTS and f.exists()]
+if not code_changed:
+    sys.exit(0)
+
+print(f'[graphify hook] {len(code_changed)} code file(s) changed - rebuilding graph...')
+
+# --- Upstream workaround ---------------------------------------------------
+# graphify/watch.py _rebuild_code does:
+#     detected = detect(...)
+#     code_files = [Path(f) for f in detected[FileType.CODE]]
+# but detect() returns files under detected["files"]["code"] (string key).
+# Wrap detect() so enum lookups resolve to the nested list. Becomes a no-op
+# after upstream fix.
+import graphify.detect as _gd
+_orig_detect = _gd.detect
+def _patched_detect(*args, **kwargs):
+    result = _orig_detect(*args, **kwargs)
+    files = result.get("files", {})
+    for ft in _gd.FileType:
+        result[ft] = files.get(ft.value, [])
+    return result
+_gd.detect = _patched_detect
+# --- end workaround --------------------------------------------------------
+
+try:
+    from graphify.watch import _rebuild_code
+    ok = _rebuild_code(Path('.'))
+except Exception as exc:
+    print(f'[graphify hook] Rebuild failed: {exc}')
+    sys.exit(1)
+
+sys.exit(0 if ok else 1)
+PY
