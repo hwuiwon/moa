@@ -14,3 +14,6 @@ uuid.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+moa-providers = { path = "../moa-providers" }
+moa-session = { path = "../moa-session" }
+tempfile = "3"
