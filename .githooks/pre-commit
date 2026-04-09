@@ -4,6 +4,39 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+# Paths that never affect Rust compilation/tests. When a commit only touches
+# files under these prefixes, skip the expensive cargo pipeline.
+DOC_ONLY_PREFIXES=("docs/" "graphify-out/" "sequence/")
+
+staged="$(git diff --cached --name-only)"
+
+if [ -z "$staged" ]; then
+  echo "[pre-commit] no staged files — nothing to check"
+  exit 0
+fi
+
+is_doc_only=true
+while IFS= read -r path; do
+  matched=false
+  for prefix in "${DOC_ONLY_PREFIXES[@]}"; do
+    case "$path" in
+      "$prefix"*) matched=true; break ;;
+    esac
+  done
+  if ! $matched; then
+    is_doc_only=false
+    break
+  fi
+done <<< "$staged"
+
+if $is_doc_only; then
+  echo "[pre-commit] doc-only change set — skipping cargo checks"
+  while IFS= read -r path; do
+    echo "[pre-commit]   $path"
+  done <<< "$staged"
+  exit 0
+fi
+
 run_check() {
   local label="$1"
   shift
