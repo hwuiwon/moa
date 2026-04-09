@@ -983,6 +983,49 @@ pub struct ApprovalRequest {
     pub risk_level: RiskLevel,
 }
 
+/// Persistent approval rule action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyAction {
+    /// Automatically allow matching tool calls.
+    Allow,
+    /// Automatically deny matching tool calls.
+    Deny,
+    /// Require an explicit human approval.
+    RequireApproval,
+}
+
+/// Scope a persistent approval rule applies to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyScope {
+    /// Rule applies within a single workspace.
+    Workspace,
+    /// Rule applies globally across workspaces.
+    Global,
+}
+
+/// Persistent approval rule stored for tool execution policies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalRule {
+    /// Stable rule identifier.
+    pub id: Uuid,
+    /// Workspace the rule belongs to.
+    pub workspace_id: WorkspaceId,
+    /// Tool name this rule applies to.
+    pub tool: String,
+    /// Glob pattern used for matching normalized inputs.
+    pub pattern: String,
+    /// Action to take when the rule matches.
+    pub action: PolicyAction,
+    /// Scope the rule applies to.
+    pub scope: PolicyScope,
+    /// User who created the rule.
+    pub created_by: UserId,
+    /// Rule creation timestamp.
+    pub created_at: DateTime<Utc>,
+}
+
 /// Outbound message content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

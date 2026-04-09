@@ -7,13 +7,16 @@ use moa_brain::{
     run_brain_turn_with_tools,
 };
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, Event, EventFilter,
-    EventRange, EventRecord, LLMProvider, MemoryPath, MemoryScope, MemorySearchResult, MemoryStore,
-    MoaConfig, ModelCapabilities, PageSummary, PageType, Result, SequenceNum, SessionFilter,
-    SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason, TokenPricing,
-    ToolCallFormat, ToolInvocation, UserId, WikiPage, WorkspaceId,
+    ApprovalDecision, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
+    Event, EventFilter, EventRange, EventRecord, LLMProvider, MemoryPath, MemoryScope,
+    MemorySearchResult, MemoryStore, MoaConfig, ModelCapabilities, PageSummary, PageType, Result,
+    SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
+    SessionSummary, StopReason, TokenPricing, ToolCallFormat, ToolInvocation, UserId, WikiPage,
+    WorkspaceId,
 };
 use moa_hands::ToolRouter;
+use moa_memory::FileMemoryStore;
+use moa_session::TursoSessionStore;
 use serde_json::json;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
@@ -257,6 +260,92 @@ impl LLMProvider for ToolLoopLlmProvider {
     }
 }
 
+#[derive(Default)]
+struct RepeatingToolLlmProvider {
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl LLMProvider for RepeatingToolLlmProvider {
+    fn name(&self) -> &str {
+        "mock-repeating-tool-loop"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: "claude-sonnet-4-6".to_string(),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+            },
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let mut requests = self.requests.lock().await;
+        let request_index = requests.len();
+        let response = match request_index {
+            0 | 2 => CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(ToolInvocation {
+                    id: Some(format!(
+                        "00000000-0000-0000-0000-00000000000{}",
+                        request_index + 1
+                    )),
+                    name: "bash".to_string(),
+                    input: json!({ "cmd": "printf 'hello from tool'" }),
+                })],
+                stop_reason: StopReason::ToolUse,
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 12,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+                duration_ms: 10,
+            },
+            1 | 3 => {
+                assert!(
+                    request
+                        .messages
+                        .iter()
+                        .any(|message| message.content.contains("hello from tool"))
+                );
+                CompletionResponse {
+                    text: format!("Tool said hello from tool ({request_index})"),
+                    content: vec![CompletionContent::Text(format!(
+                        "Tool said hello from tool ({request_index})"
+                    ))],
+                    stop_reason: StopReason::EndTurn,
+                    model: "claude-sonnet-4-6".to_string(),
+                    input_tokens: 20,
+                    output_tokens: 7,
+                    cached_input_tokens: 0,
+                    duration_ms: 12,
+                }
+            }
+            _ => CompletionResponse {
+                text: "done".to_string(),
+                content: vec![CompletionContent::Text("done".to_string())],
+                stop_reason: StopReason::EndTurn,
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 10,
+                output_tokens: 2,
+                cached_input_tokens: 0,
+                duration_ms: 5,
+            },
+        };
+        requests.push(request);
+        Ok(CompletionStream::from_response(response))
+    }
+}
+
 fn make_event_record(session_id: &SessionId, sequence_num: u64, event: Event) -> EventRecord {
     EventRecord {
         id: uuid::Uuid::new_v4(),
@@ -322,7 +411,7 @@ async fn run_brain_turn_emits_brain_response_event() {
 }
 
 #[tokio::test]
-async fn run_brain_turn_executes_tool_calls_and_feeds_results_back() {
+async fn run_brain_turn_pauses_for_approval_then_executes_tool() {
     let session = SessionMeta {
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
@@ -359,12 +448,40 @@ async fn run_brain_turn_executes_tool_calls_and_feeds_results_back() {
         store.clone(),
         llm.clone(),
         &pipeline,
+        Some(tool_router.clone()),
+    )
+    .await
+    .unwrap();
+
+    let request = match result {
+        TurnResult::NeedsApproval(request) => request,
+        other => panic!("expected pending approval, got {other:?}"),
+    };
+    assert_eq!(llm.requests.lock().await.len(), 1);
+    store
+        .emit_event(
+            session.id.clone(),
+            Event::ApprovalDecided {
+                request_id: request.request_id,
+                decision: ApprovalDecision::AllowOnce,
+                decided_by: "user".to_string(),
+                decided_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let resumed = run_brain_turn_with_tools(
+        session.id.clone(),
+        store.clone(),
+        llm.clone(),
+        &pipeline,
         Some(tool_router),
     )
     .await
     .unwrap();
 
-    assert_eq!(result, TurnResult::Complete);
+    assert_eq!(resumed, TurnResult::Complete);
     assert_eq!(llm.requests.lock().await.len(), 2);
 
     let events = store.events.lock().await.clone();
@@ -380,4 +497,118 @@ async fn run_brain_turn_executes_tool_calls_and_feeds_results_back() {
         &record.event,
         Event::BrainResponse { text, .. } if text == "Tool said hello from tool"
     )));
+}
+
+#[tokio::test]
+async fn always_allow_rule_persists_and_skips_next_approval() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("sessions.db");
+    let memory_root = dir.path().join("memory");
+    let store = Arc::new(TursoSessionStore::new_local(&db_path).await.unwrap());
+    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
+    let tool_router = Arc::new(
+        ToolRouter::new_local(memory_store.clone(), dir.path())
+            .await
+            .unwrap()
+            .with_rule_store(store.clone()),
+    );
+    let session_id = store
+        .create_session(SessionMeta {
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            model: "claude-sonnet-4-6".to_string(),
+            ..SessionMeta::default()
+        })
+        .await
+        .unwrap();
+    store
+        .emit_event(
+            session_id.clone(),
+            Event::UserMessage {
+                text: "Use a tool".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let pipeline = build_default_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        memory_store.clone(),
+        tool_router.tool_schemas(),
+    );
+    let llm = Arc::new(RepeatingToolLlmProvider::default());
+
+    let first = run_brain_turn_with_tools(
+        session_id.clone(),
+        store.clone(),
+        llm.clone(),
+        &pipeline,
+        Some(tool_router.clone()),
+    )
+    .await
+    .unwrap();
+    let request = match first {
+        TurnResult::NeedsApproval(request) => request,
+        other => panic!("expected pending approval, got {other:?}"),
+    };
+
+    store
+        .emit_event(
+            session_id.clone(),
+            Event::ApprovalDecided {
+                request_id: request.request_id,
+                decision: ApprovalDecision::AlwaysAllow {
+                    pattern: "printf *".to_string(),
+                },
+                decided_by: "user".to_string(),
+                decided_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let resumed = run_brain_turn_with_tools(
+        session_id.clone(),
+        store.clone(),
+        llm.clone(),
+        &pipeline,
+        Some(tool_router.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed, TurnResult::Complete);
+    assert_eq!(
+        store
+            .list_approval_rules(&WorkspaceId::new("workspace"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    store
+        .emit_event(
+            session_id.clone(),
+            Event::UserMessage {
+                text: "Use the same tool again".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let final_result = run_brain_turn_with_tools(
+        session_id.clone(),
+        store.clone(),
+        llm.clone(),
+        &pipeline,
+        Some(tool_router),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(final_result, TurnResult::Complete);
+    assert_eq!(llm.requests.lock().await.len(), 4);
 }

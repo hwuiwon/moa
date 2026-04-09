@@ -8,11 +8,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
-    HandHandle, HandProvider, HandResources, HandSpec, MemoryStore, MoaConfig, MoaError, Result,
-    RiskLevel, SandboxTier, SessionMeta, ToolInvocation, ToolOutput,
+    ApprovalRule, HandHandle, HandProvider, HandResources, HandSpec, MemoryStore, MoaConfig,
+    MoaError, PolicyAction, Result, RiskLevel, SandboxTier, SessionMeta, ToolInvocation,
+    ToolOutput, UserId,
 };
+use moa_security::{ApprovalRuleStore, PolicyCheck, ToolPolicies, ToolPolicyContext};
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::local::LocalHandProvider;
 use crate::tools::{memory, stub};
@@ -258,6 +261,8 @@ pub struct ToolRouter {
     memory_store: Arc<dyn MemoryStore>,
     providers: HashMap<String, Arc<dyn HandProvider>>,
     active_hands: RwLock<HashMap<String, HandHandle>>,
+    policies: ToolPolicies,
+    rule_store: Option<Arc<dyn ApprovalRuleStore>>,
 }
 
 impl ToolRouter {
@@ -272,6 +277,8 @@ impl ToolRouter {
             memory_store,
             providers,
             active_hands: RwLock::new(HashMap::new()),
+            policies: ToolPolicies::default(),
+            rule_store: None,
         }
     }
 
@@ -301,7 +308,21 @@ impl ToolRouter {
         memory_store: Arc<dyn MemoryStore>,
     ) -> Result<Self> {
         let sandbox_root = expand_local_path(&config.local.sandbox_dir)?;
-        Self::new_local(memory_store, sandbox_root).await
+        Ok(Self::new_local(memory_store, sandbox_root)
+            .await?
+            .with_policies(ToolPolicies::from_config(config)))
+    }
+
+    /// Attaches a persistent approval rule store to the router.
+    pub fn with_rule_store(mut self, rule_store: Arc<dyn ApprovalRuleStore>) -> Self {
+        self.rule_store = Some(rule_store);
+        self
+    }
+
+    /// Overrides the router's policy configuration.
+    pub fn with_policies(mut self, policies: ToolPolicies) -> Self {
+        self.policies = policies;
+        self
     }
 
     /// Returns the ordered tool schemas for prompt compilation.
@@ -309,8 +330,79 @@ impl ToolRouter {
         self.registry.default_tool_schemas()
     }
 
+    /// Evaluates the policy action for a tool invocation in the current session.
+    pub async fn check_policy(
+        &self,
+        session: &SessionMeta,
+        invocation: &ToolInvocation,
+    ) -> Result<PolicyCheck> {
+        let rules = if let Some(rule_store) = &self.rule_store {
+            rule_store
+                .list_approval_rules(&session.workspace_id)
+                .await?
+        } else {
+            Vec::new()
+        };
+
+        self.policies.check(
+            &invocation.name,
+            &invocation.input,
+            &ToolPolicyContext::from_session(session),
+            &rules,
+        )
+    }
+
+    /// Persists an approval rule for the current workspace.
+    pub async fn store_approval_rule(
+        &self,
+        session: &SessionMeta,
+        tool: &str,
+        pattern: &str,
+        action: PolicyAction,
+        created_by: UserId,
+    ) -> Result<()> {
+        let Some(rule_store) = &self.rule_store else {
+            return Err(MoaError::Unsupported(
+                "tool router does not have an approval rule store".to_string(),
+            ));
+        };
+
+        rule_store
+            .upsert_approval_rule(ApprovalRule {
+                id: Uuid::new_v4(),
+                workspace_id: session.workspace_id.clone(),
+                tool: tool.to_string(),
+                pattern: pattern.to_string(),
+                action,
+                scope: moa_core::PolicyScope::Workspace,
+                created_by,
+                created_at: chrono::Utc::now(),
+            })
+            .await
+    }
+
     /// Executes a single tool invocation for a session.
     pub async fn execute(
+        &self,
+        session: &SessionMeta,
+        invocation: &ToolInvocation,
+    ) -> Result<(Option<String>, ToolOutput)> {
+        let policy = self.check_policy(session, invocation).await?;
+        match policy.action {
+            PolicyAction::Allow => self.execute_authorized(session, invocation).await,
+            PolicyAction::Deny => Err(MoaError::PermissionDenied(format!(
+                "tool {} denied by policy",
+                invocation.name
+            ))),
+            PolicyAction::RequireApproval => Err(MoaError::PermissionDenied(format!(
+                "tool {} requires approval: {}",
+                invocation.name, policy.input_summary
+            ))),
+        }
+    }
+
+    /// Executes a tool invocation after approval has already been granted.
+    pub async fn execute_authorized(
         &self,
         session: &SessionMeta,
         invocation: &ToolInvocation,

@@ -9,6 +9,7 @@ async-trait.workspace = true
 chrono.workspace = true
 libsql = { version = "0.9.30", default-features = false, features = ["core", "remote", "tls"] }
 moa-core = { path = "../moa-core" }
+moa-security = { path = "../moa-security" }
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

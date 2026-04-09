@@ -5,5 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+globset = "0.4"
 moa-core = { path = "../moa-core" }
+serde_json.workspace = true
+shell-words = "1.1"
 
+[dev-dependencies]
+chrono.workspace = true
+uuid.workspace = true
