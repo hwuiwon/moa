@@ -2561,87 +2561,103 @@
       "source_file": "moa-core/src/events.rs",
       "source_location": "L1",
       "id": "events",
-      "community": 54
+      "community": 49
     },
     {
       "label": "Event",
       "file_type": "code",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L13",
+      "source_location": "L15",
       "id": "events_event",
-      "community": 54
+      "community": 49
     },
     {
       "label": ".event_type()",
       "file_type": "code",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L190",
+      "source_location": "L197",
       "id": "events_event_event_type",
-      "community": 54
+      "community": 49
     },
     {
       "label": ".type_name()",
       "file_type": "code",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L216",
+      "source_location": "L223",
       "id": "events_event_type_name",
-      "community": 54
+      "community": 49
     },
     {
       "label": ".input_tokens()",
       "file_type": "code",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L242",
+      "source_location": "L249",
       "id": "events_event_input_tokens",
-      "community": 54
+      "community": 49
     },
     {
       "label": ".output_tokens()",
       "file_type": "code",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L250",
+      "source_location": "L257",
       "id": "events_event_output_tokens",
-      "community": 54
+      "community": 49
     },
     {
       "label": ".cost_cents()",
       "file_type": "code",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L258",
+      "source_location": "L265",
       "id": "events_event_cost_cents",
-      "community": 54
+      "community": 49
     },
     {
       "label": ".token_count()",
       "file_type": "code",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L266",
+      "source_location": "L273",
       "id": "events_event_token_count",
-      "community": 54
+      "community": 49
     },
     {
       "label": "event_serialization_roundtrip()",
       "file_type": "code",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L289",
+      "source_location": "L296",
       "id": "events_event_serialization_roundtrip",
-      "community": 54
+      "community": 49
     },
     {
       "label": "brain_response_event_has_cost_fields()",
       "file_type": "code",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L301",
+      "source_location": "L308",
       "id": "events_brain_response_event_has_cost_fields",
-      "community": 54
+      "community": 49
     },
     {
       "label": "all_event_types_serialize()",
       "file_type": "code",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L316",
+      "source_location": "L323",
       "id": "events_all_event_types_serialize",
-      "community": 54
+      "community": 49
+    },
+    {
+      "label": "approval_requested_event_round_trips_full_prompt()",
+      "file_type": "code",
+      "source_file": "moa-core/src/events.rs",
+      "source_location": "L364",
+      "id": "events_approval_requested_event_round_trips_full_prompt",
+      "community": 49
+    },
+    {
+      "label": "approval_requested_event_deserializes_without_prompt()",
+      "file_type": "code",
+      "source_file": "moa-core/src/events.rs",
+      "source_location": "L398",
+      "id": "events_approval_requested_event_deserializes_without_prompt",
+      "community": 49
     },
     {
       "label": "error.rs",
@@ -2665,7 +2681,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L1",
       "id": "config",
-      "community": 14
+      "community": 15
     },
     {
       "label": "MoaConfig",
@@ -2673,7 +2689,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L13",
       "id": "config_moaconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".load()",
@@ -2681,7 +2697,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L38",
       "id": "config_moaconfig_load",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".default_path()",
@@ -2689,7 +2705,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L43",
       "id": "config_moaconfig_default_path",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".load_from_path()",
@@ -2697,7 +2713,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L51",
       "id": "config_moaconfig_load_from_path",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".save()",
@@ -2705,7 +2721,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L292",
       "id": "config_moaconfig_save",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".save_to_path()",
@@ -2713,7 +2729,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L297",
       "id": "config_moaconfig_save_to_path",
-      "community": 14
+      "community": 15
     },
     {
       "label": "GeneralConfig",
@@ -2721,7 +2737,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L312",
       "id": "config_generalconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".default()",
@@ -2729,7 +2745,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L326",
       "id": "config_generalconfig_default",
-      "community": 14
+      "community": 15
     },
     {
       "label": "ProviderCredentialConfig",
@@ -2737,7 +2753,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L340",
       "id": "config_providercredentialconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".new()",
@@ -2745,7 +2761,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L347",
       "id": "config_providercredentialconfig_new",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".default()",
@@ -2753,7 +2769,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L355",
       "id": "config_providercredentialconfig_default",
-      "community": 14
+      "community": 15
     },
     {
       "label": "ProvidersConfig",
@@ -2761,7 +2777,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L363",
       "id": "config_providersconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".default()",
@@ -2769,7 +2785,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L373",
       "id": "config_providersconfig_default",
-      "community": 14
+      "community": 15
     },
     {
       "label": "LocalConfig",
@@ -2777,7 +2793,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L385",
       "id": "config_localconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".default()",
@@ -2785,7 +2801,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L397",
       "id": "config_localconfig_default",
-      "community": 14
+      "community": 15
     },
     {
       "label": "DaemonConfig",
@@ -2793,7 +2809,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L410",
       "id": "config_daemonconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".default()",
@@ -2801,7 +2817,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L422",
       "id": "config_daemonconfig_default",
-      "community": 14
+      "community": 15
     },
     {
       "label": "ObservabilityConfig",
@@ -2809,7 +2825,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L435",
       "id": "config_observabilityconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".default()",
@@ -2817,7 +2833,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L445",
       "id": "config_observabilityconfig_default",
-      "community": 14
+      "community": 15
     },
     {
       "label": "CloudConfig",
@@ -2825,7 +2841,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L457",
       "id": "config_cloudconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".default()",
@@ -2833,7 +2849,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L477",
       "id": "config_cloudconfig_default",
-      "community": 14
+      "community": 15
     },
     {
       "label": "CloudTemporalConfig",
@@ -2841,7 +2857,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L494",
       "id": "config_cloudtemporalconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".default()",
@@ -2849,7 +2865,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L506",
       "id": "config_cloudtemporalconfig_default",
-      "community": 14
+      "community": 15
     },
     {
       "label": "CloudFlyioConfig",
@@ -2857,7 +2873,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L519",
       "id": "config_cloudflyioconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".default()",
@@ -2865,7 +2881,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L535",
       "id": "config_cloudflyioconfig_default",
-      "community": 14
+      "community": 15
     },
     {
       "label": "CloudHandsConfig",
@@ -2873,7 +2889,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L550",
       "id": "config_cloudhandsconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".default()",
@@ -2881,7 +2897,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L570",
       "id": "config_cloudhandsconfig_default",
-      "community": 14
+      "community": 15
     },
     {
       "label": "McpTransportConfig",
@@ -2889,7 +2905,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L587",
       "id": "config_mcptransportconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": "McpCredentialConfig",
@@ -2897,7 +2913,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L600",
       "id": "config_mcpcredentialconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": "McpServerConfig",
@@ -2905,7 +2921,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L623",
       "id": "config_mcpserverconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": "GatewayConfig",
@@ -2913,7 +2929,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L643",
       "id": "config_gatewayconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".default()",
@@ -2921,7 +2937,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L655",
       "id": "config_gatewayconfig_default",
-      "community": 14
+      "community": 15
     },
     {
       "label": "TuiConfig",
@@ -2929,7 +2945,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L668",
       "id": "config_tuiconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".default()",
@@ -2937,7 +2953,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L680",
       "id": "config_tuiconfig_default",
-      "community": 14
+      "community": 15
     },
     {
       "label": "PermissionsConfig",
@@ -2945,7 +2961,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L693",
       "id": "config_permissionsconfig",
-      "community": 14
+      "community": 15
     },
     {
       "label": ".default()",
@@ -2953,7 +2969,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L703",
       "id": "config_permissionsconfig_default",
-      "community": 14
+      "community": 15
     },
     {
       "label": "default_config_is_valid()",
@@ -2961,7 +2977,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L725",
       "id": "config_default_config_is_valid",
-      "community": 14
+      "community": 15
     },
     {
       "label": "config_loads_from_toml_string()",
@@ -2969,7 +2985,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L732",
       "id": "config_config_loads_from_toml_string",
-      "community": 14
+      "community": 15
     },
     {
       "label": "config_loads_mcp_server_configuration()",
@@ -2977,7 +2993,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L748",
       "id": "config_config_loads_mcp_server_configuration",
-      "community": 14
+      "community": 15
     },
     {
       "label": "config_loads_from_file()",
@@ -2985,7 +3001,7 @@
       "source_file": "moa-core/src/config.rs",
       "source_location": "L774",
       "id": "config_config_loads_from_file",
-      "community": 14
+      "community": 15
     },
     {
       "label": "daemon.rs",
@@ -3721,7 +3737,7 @@
       "source_file": "moa-tui/src/keybindings.rs",
       "source_location": "L1",
       "id": "keybindings",
-      "community": 51
+      "community": 52
     },
     {
       "label": "KeyAction",
@@ -3729,7 +3745,7 @@
       "source_file": "moa-tui/src/keybindings.rs",
       "source_location": "L9",
       "id": "keybindings_keyaction",
-      "community": 51
+      "community": 52
     },
     {
       "label": "map_key_event()",
@@ -3737,7 +3753,7 @@
       "source_file": "moa-tui/src/keybindings.rs",
       "source_location": "L135",
       "id": "keybindings_map_key_event",
-      "community": 51
+      "community": 52
     },
     {
       "label": "key()",
@@ -3745,7 +3761,7 @@
       "source_file": "moa-tui/src/keybindings.rs",
       "source_location": "L281",
       "id": "keybindings_key",
-      "community": 51
+      "community": 52
     },
     {
       "label": "enter_submits_but_shift_enter_inserts_newline()",
@@ -3753,7 +3769,7 @@
       "source_file": "moa-tui/src/keybindings.rs",
       "source_location": "L291",
       "id": "keybindings_enter_submits_but_shift_enter_inserts_newline",
-      "community": 51
+      "community": 52
     },
     {
       "label": "approval_shortcuts_only_activate_while_waiting()",
@@ -3761,7 +3777,7 @@
       "source_file": "moa-tui/src/keybindings.rs",
       "source_location": "L303",
       "id": "keybindings_approval_shortcuts_only_activate_while_waiting",
-      "community": 51
+      "community": 52
     },
     {
       "label": "diff_view_shortcuts_are_scoped_to_the_overlay()",
@@ -3769,7 +3785,7 @@
       "source_file": "moa-tui/src/keybindings.rs",
       "source_location": "L328",
       "id": "keybindings_diff_view_shortcuts_are_scoped_to_the_overlay",
-      "community": 51
+      "community": 52
     },
     {
       "label": "ctrl_c_and_escape_cancel()",
@@ -3777,7 +3793,7 @@
       "source_file": "moa-tui/src/keybindings.rs",
       "source_location": "L350",
       "id": "keybindings_ctrl_c_and_escape_cancel",
-      "community": 51
+      "community": 52
     },
     {
       "label": "tab_and_session_shortcuts_map_correctly()",
@@ -3785,7 +3801,7 @@
       "source_file": "moa-tui/src/keybindings.rs",
       "source_location": "L365",
       "id": "keybindings_tab_and_session_shortcuts_map_correctly",
-      "community": 51
+      "community": 52
     },
     {
       "label": "session_picker_keys_are_scoped_to_picker_mode()",
@@ -3793,7 +3809,7 @@
       "source_file": "moa-tui/src/keybindings.rs",
       "source_location": "L391",
       "id": "keybindings_session_picker_keys_are_scoped_to_picker_mode",
-      "community": 51
+      "community": 52
     },
     {
       "label": "command_palette_memory_and_settings_have_dedicated_maps()",
@@ -3801,7 +3817,7 @@
       "source_file": "moa-tui/src/keybindings.rs",
       "source_location": "L416",
       "id": "keybindings_command_palette_memory_and_settings_have_dedicated_maps",
-      "community": 51
+      "community": 52
     },
     {
       "label": "tab_accepts_completion_in_chat_mode()",
@@ -3809,7 +3825,7 @@
       "source_file": "moa-tui/src/keybindings.rs",
       "source_location": "L452",
       "id": "keybindings_tab_accepts_completion_in_chat_mode",
-      "community": 51
+      "community": 52
     },
     {
       "label": "runner.rs",
@@ -5375,7 +5391,7 @@
       "label": ".handle_tool_update()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1666",
+      "source_location": "L1669",
       "id": "app_sessionviewstate_handle_tool_update",
       "community": 2
     },
@@ -5383,7 +5399,7 @@
       "label": ".upsert_tool_card()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1681",
+      "source_location": "L1684",
       "id": "app_sessionviewstate_upsert_tool_card",
       "community": 2
     },
@@ -5391,7 +5407,7 @@
       "label": ".upsert_approval_card()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1701",
+      "source_location": "L1704",
       "id": "app_sessionviewstate_upsert_approval_card",
       "community": 2
     },
@@ -5399,7 +5415,7 @@
       "label": ".update_approval_entry()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1721",
+      "source_location": "L1724",
       "id": "app_sessionviewstate_update_approval_entry",
       "community": 2
     },
@@ -5407,7 +5423,7 @@
       "label": ".approval_status()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1738",
+      "source_location": "L1741",
       "id": "app_sessionviewstate_approval_status",
       "community": 2
     },
@@ -5415,7 +5431,7 @@
       "label": "existing_tool_name()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1748",
+      "source_location": "L1751",
       "id": "app_existing_tool_name",
       "community": 2
     },
@@ -5423,7 +5439,7 @@
       "label": "truncate_detail()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1758",
+      "source_location": "L1761",
       "id": "app_truncate_detail",
       "community": 2
     },
@@ -5431,7 +5447,7 @@
       "label": "minimal_approval_prompt()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1767",
+      "source_location": "L1770",
       "id": "app_minimal_approval_prompt",
       "community": 2
     },
@@ -5439,7 +5455,7 @@
       "label": "session_summary_from_meta()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1789",
+      "source_location": "L1792",
       "id": "app_session_summary_from_meta",
       "community": 2
     },
@@ -5447,7 +5463,7 @@
       "label": "approval_status_and_note()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1802",
+      "source_location": "L1805",
       "id": "app_approval_status_and_note",
       "community": 2
     },
@@ -5455,7 +5471,7 @@
       "label": "palette_actions()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1823",
+      "source_location": "L1826",
       "id": "app_palette_actions",
       "community": 2
     },
@@ -5463,7 +5479,7 @@
       "label": "render_help_overlay()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1876",
+      "source_location": "L1879",
       "id": "app_render_help_overlay",
       "community": 2
     },
@@ -5471,7 +5487,7 @@
       "label": "completion_for_prompt()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1920",
+      "source_location": "L1923",
       "id": "app_completion_for_prompt",
       "community": 2
     },
@@ -5479,7 +5495,7 @@
       "label": "complete_slash_command()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1971",
+      "source_location": "L1974",
       "id": "app_complete_slash_command",
       "community": 2
     },
@@ -5487,7 +5503,7 @@
       "label": "complete_file_reference()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1976",
+      "source_location": "L1979",
       "id": "app_complete_file_reference",
       "community": 2
     },
@@ -5495,7 +5511,7 @@
       "label": "slash_commands()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1988",
+      "source_location": "L1991",
       "id": "app_slash_commands",
       "community": 2
     },
@@ -5503,7 +5519,7 @@
       "label": "default_config_path()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2010",
+      "source_location": "L2013",
       "id": "app_default_config_path",
       "community": 2
     },
@@ -5511,7 +5527,7 @@
       "label": "workspace_name_from_input()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2015",
+      "source_location": "L2018",
       "id": "app_workspace_name_from_input",
       "community": 2
     },
@@ -5519,7 +5535,7 @@
       "label": "collect_sandbox_files()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2028",
+      "source_location": "L2031",
       "id": "app_collect_sandbox_files",
       "community": 2
     },
@@ -5527,7 +5543,7 @@
       "label": "run_tui()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2058",
+      "source_location": "L2061",
       "id": "app_run_tui",
       "community": 2
     },
@@ -5535,7 +5551,7 @@
       "label": "run_tui_with_options()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2063",
+      "source_location": "L2066",
       "id": "app_run_tui_with_options",
       "community": 2
     },
@@ -5543,7 +5559,7 @@
       "label": "run_event_loop()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2097",
+      "source_location": "L2100",
       "id": "app_run_event_loop",
       "community": 2
     },
@@ -5551,7 +5567,7 @@
       "label": "test_app()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2128",
+      "source_location": "L2131",
       "id": "app_test_app",
       "community": 2
     },
@@ -5559,7 +5575,7 @@
       "label": "app_state_transitions_follow_idle_composing_running_waiting_idle()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2191",
+      "source_location": "L2194",
       "id": "app_app_state_transitions_follow_idle_composing_running_waiting_idle",
       "community": 2
     },
@@ -5567,7 +5583,7 @@
       "label": "rendering_smoke_test_does_not_panic()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2222",
+      "source_location": "L2225",
       "id": "app_rendering_smoke_test_does_not_panic",
       "community": 2
     },
@@ -5575,7 +5591,7 @@
       "label": "diff_overlay_renders_for_file_write_approval()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2238",
+      "source_location": "L2241",
       "id": "app_diff_overlay_renders_for_file_write_approval",
       "community": 2
     },
@@ -5583,7 +5599,7 @@
       "label": "switching_back_to_live_session_reloads_pending_approval_from_history()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2279",
+      "source_location": "L2282",
       "id": "app_switching_back_to_live_session_reloads_pending_approval_from_history",
       "community": 2
     },
@@ -5591,7 +5607,7 @@
       "label": "slash_completion_and_sidebar_toggle_modes_are_reachable()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2348",
+      "source_location": "L2382",
       "id": "app_slash_completion_and_sidebar_toggle_modes_are_reachable",
       "community": 2
     },
@@ -5599,7 +5615,7 @@
       "label": "memory_and_settings_overlays_change_app_mode()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2362",
+      "source_location": "L2396",
       "id": "app_memory_and_settings_overlays_change_app_mode",
       "community": 2
     },
@@ -5607,7 +5623,7 @@
       "label": "settings_persist_to_disk_and_reload()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2375",
+      "source_location": "L2409",
       "id": "app_settings_persist_to_disk_and_reload",
       "community": 2
     },
@@ -5615,7 +5631,7 @@
       "label": "file_completion_prefers_frecency_and_replaces_active_token()",
       "file_type": "code",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2392",
+      "source_location": "L2426",
       "id": "app_file_completion_prefers_frecency_and_replaces_active_token",
       "community": 2
     },
@@ -6993,7 +7009,7 @@
       "source_file": "moa-tui/src/widgets/toolbar.rs",
       "source_location": "L1",
       "id": "toolbar",
-      "community": 52
+      "community": 53
     },
     {
       "label": "ToolbarMetrics",
@@ -7001,7 +7017,7 @@
       "source_file": "moa-tui/src/widgets/toolbar.rs",
       "source_location": "L17",
       "id": "toolbar_toolbarmetrics",
-      "community": 52
+      "community": 53
     },
     {
       "label": "render_toolbar()",
@@ -7009,7 +7025,7 @@
       "source_file": "moa-tui/src/widgets/toolbar.rs",
       "source_location": "L29",
       "id": "toolbar_render_toolbar",
-      "community": 52
+      "community": 53
     },
     {
       "label": "build_tab_spans()",
@@ -7017,7 +7033,7 @@
       "source_file": "moa-tui/src/widgets/toolbar.rs",
       "source_location": "L67",
       "id": "toolbar_build_tab_spans",
-      "community": 52
+      "community": 53
     },
     {
       "label": "visible_window()",
@@ -7025,7 +7041,7 @@
       "source_file": "moa-tui/src/widgets/toolbar.rs",
       "source_location": "L104",
       "id": "toolbar_visible_window",
-      "community": 52
+      "community": 53
     },
     {
       "label": "tab_title()",
@@ -7033,7 +7049,7 @@
       "source_file": "moa-tui/src/widgets/toolbar.rs",
       "source_location": "L117",
       "id": "toolbar_tab_title",
-      "community": 52
+      "community": 53
     },
     {
       "label": "short_session_id()",
@@ -7041,7 +7057,7 @@
       "source_file": "moa-tui/src/widgets/toolbar.rs",
       "source_location": "L136",
       "id": "toolbar_short_session_id",
-      "community": 52
+      "community": 53
     },
     {
       "label": "truncate_title()",
@@ -7049,7 +7065,7 @@
       "source_file": "moa-tui/src/widgets/toolbar.rs",
       "source_location": "L140",
       "id": "toolbar_truncate_title",
-      "community": 52
+      "community": 53
     },
     {
       "label": "status_icon()",
@@ -7057,7 +7073,7 @@
       "source_file": "moa-tui/src/widgets/toolbar.rs",
       "source_location": "L148",
       "id": "toolbar_status_icon",
-      "community": 52
+      "community": 53
     },
     {
       "label": "preview()",
@@ -7065,7 +7081,7 @@
       "source_file": "moa-tui/src/widgets/toolbar.rs",
       "source_location": "L166",
       "id": "toolbar_preview",
-      "community": 52
+      "community": 53
     },
     {
       "label": "visible_window_caps_tabs_to_requested_limit()",
@@ -7073,7 +7089,7 @@
       "source_file": "moa-tui/src/widgets/toolbar.rs",
       "source_location": "L183",
       "id": "toolbar_visible_window_caps_tabs_to_requested_limit",
-      "community": 52
+      "community": 53
     },
     {
       "label": "toolbar_labels_include_status_icons_and_tab_limit()",
@@ -7081,7 +7097,7 @@
       "source_file": "moa-tui/src/widgets/toolbar.rs",
       "source_location": "L190",
       "id": "toolbar_toolbar_labels_include_status_icons_and_tab_limit",
-      "community": 52
+      "community": 53
     },
     {
       "label": "telegram.rs",
@@ -7305,7 +7321,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L1",
       "id": "renderer",
-      "community": 15
+      "community": 16
     },
     {
       "label": "TelegramRenderChunk",
@@ -7313,7 +7329,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L32",
       "id": "renderer_telegramrenderchunk",
-      "community": 15
+      "community": 16
     },
     {
       "label": "TelegramRenderer",
@@ -7321,7 +7337,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L41",
       "id": "renderer_telegramrenderer",
-      "community": 15
+      "community": 16
     },
     {
       "label": ".new()",
@@ -7329,7 +7345,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L45",
       "id": "renderer_telegramrenderer_new",
-      "community": 15
+      "community": 16
     },
     {
       "label": ".render()",
@@ -7337,7 +7353,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L50",
       "id": "renderer_telegramrenderer_render",
-      "community": 15
+      "community": 16
     },
     {
       "label": ".capabilities()",
@@ -7345,7 +7361,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L110",
       "id": "renderer_telegramrenderer_capabilities",
-      "community": 15
+      "community": 16
     },
     {
       "label": ".platform()",
@@ -7353,7 +7369,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L125",
       "id": "renderer_telegramrenderer_platform",
-      "community": 15
+      "community": 16
     },
     {
       "label": "SlackRenderChunk",
@@ -7361,7 +7377,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L133",
       "id": "renderer_slackrenderchunk",
-      "community": 15
+      "community": 16
     },
     {
       "label": "SlackRenderer",
@@ -7369,7 +7385,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L143",
       "id": "renderer_slackrenderer",
-      "community": 15
+      "community": 16
     },
     {
       "label": ".new()",
@@ -7377,7 +7393,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L148",
       "id": "renderer_slackrenderer_new",
-      "community": 15
+      "community": 16
     },
     {
       "label": ".render()",
@@ -7385,7 +7401,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L153",
       "id": "renderer_slackrenderer_render",
-      "community": 15
+      "community": 16
     },
     {
       "label": ".capabilities()",
@@ -7393,7 +7409,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L212",
       "id": "renderer_slackrenderer_capabilities",
-      "community": 15
+      "community": 16
     },
     {
       "label": ".platform()",
@@ -7401,7 +7417,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L227",
       "id": "renderer_slackrenderer_platform",
-      "community": 15
+      "community": 16
     },
     {
       "label": "DiscordRenderChunk",
@@ -7409,7 +7425,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L235",
       "id": "renderer_discordrenderchunk",
-      "community": 15
+      "community": 16
     },
     {
       "label": "DiscordRenderer",
@@ -7417,7 +7433,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L251",
       "id": "renderer_discordrenderer",
-      "community": 15
+      "community": 16
     },
     {
       "label": ".new()",
@@ -7425,7 +7441,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L256",
       "id": "renderer_discordrenderer_new",
-      "community": 15
+      "community": 16
     },
     {
       "label": ".render()",
@@ -7433,7 +7449,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L261",
       "id": "renderer_discordrenderer_render",
-      "community": 15
+      "community": 16
     },
     {
       "label": ".capabilities()",
@@ -7441,7 +7457,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L338",
       "id": "renderer_discordrenderer_capabilities",
-      "community": 15
+      "community": 16
     },
     {
       "label": ".platform()",
@@ -7449,7 +7465,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L353",
       "id": "renderer_discordrenderer_platform",
-      "community": 15
+      "community": 16
     },
     {
       "label": "render_diff()",
@@ -7457,7 +7473,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L358",
       "id": "renderer_render_diff",
-      "community": 15
+      "community": 16
     },
     {
       "label": "render_tool_card()",
@@ -7465,7 +7481,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L378",
       "id": "renderer_render_tool_card",
-      "community": 15
+      "community": 16
     },
     {
       "label": "render_approval_request()",
@@ -7473,7 +7489,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L392",
       "id": "renderer_render_approval_request",
-      "community": 15
+      "community": 16
     },
     {
       "label": "tool_status_icon()",
@@ -7481,7 +7497,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L402",
       "id": "renderer_tool_status_icon",
-      "community": 15
+      "community": 16
     },
     {
       "label": "tool_status_color()",
@@ -7489,7 +7505,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L412",
       "id": "renderer_tool_status_color",
-      "community": 15
+      "community": 16
     },
     {
       "label": "session_status_icon()",
@@ -7497,7 +7513,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L421",
       "id": "renderer_session_status_icon",
-      "community": 15
+      "community": 16
     },
     {
       "label": "session_status_color()",
@@ -7505,7 +7521,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L434",
       "id": "renderer_session_status_color",
-      "community": 15
+      "community": 16
     },
     {
       "label": "risk_icon()",
@@ -7513,7 +7529,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L446",
       "id": "renderer_risk_icon",
-      "community": 15
+      "community": 16
     },
     {
       "label": "risk_color()",
@@ -7521,7 +7537,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L455",
       "id": "renderer_risk_color",
-      "community": 15
+      "community": 16
     },
     {
       "label": "split_fenced_block()",
@@ -7529,7 +7545,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L463",
       "id": "renderer_split_fenced_block",
-      "community": 15
+      "community": 16
     },
     {
       "label": "split_plain_text()",
@@ -7537,7 +7553,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L481",
       "id": "renderer_split_plain_text",
-      "community": 15
+      "community": 16
     },
     {
       "label": "append_piece()",
@@ -7545,7 +7561,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L505",
       "id": "renderer_append_piece",
-      "community": 15
+      "community": 16
     },
     {
       "label": "split_hard()",
@@ -7553,7 +7569,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L524",
       "id": "renderer_split_hard",
-      "community": 15
+      "community": 16
     },
     {
       "label": "slack_blocks_for_chunk()",
@@ -7561,7 +7577,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L540",
       "id": "renderer_slack_blocks_for_chunk",
-      "community": 15
+      "community": 16
     },
     {
       "label": "slack_button()",
@@ -7569,7 +7585,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L569",
       "id": "renderer_slack_button",
-      "community": 15
+      "community": 16
     },
     {
       "label": "renderer_splits_long_text_at_telegram_limit()",
@@ -7577,7 +7593,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L593",
       "id": "renderer_renderer_splits_long_text_at_telegram_limit",
-      "community": 15
+      "community": 16
     },
     {
       "label": "renderer_keeps_buttons_on_last_chunk_only()",
@@ -7585,7 +7601,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L619",
       "id": "renderer_renderer_keeps_buttons_on_last_chunk_only",
-      "community": 15
+      "community": 16
     },
     {
       "label": "slack_renderer_splits_long_text_at_slack_limit()",
@@ -7593,7 +7609,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L645",
       "id": "renderer_slack_renderer_splits_long_text_at_slack_limit",
-      "community": 15
+      "community": 16
     },
     {
       "label": "slack_renderer_attaches_buttons_to_last_chunk_only()",
@@ -7601,7 +7617,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L672",
       "id": "renderer_slack_renderer_attaches_buttons_to_last_chunk_only",
-      "community": 15
+      "community": 16
     },
     {
       "label": "discord_renderer_uses_embed_limit_for_long_text()",
@@ -7609,7 +7625,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L703",
       "id": "renderer_discord_renderer_uses_embed_limit_for_long_text",
-      "community": 15
+      "community": 16
     },
     {
       "label": "discord_renderer_attaches_buttons_to_last_chunk_only()",
@@ -7617,7 +7633,7 @@
       "source_file": "moa-gateway/src/renderer.rs",
       "source_location": "L731",
       "id": "renderer_discord_renderer_attaches_buttons_to_last_chunk_only",
-      "community": 15
+      "community": 16
     },
     {
       "label": "discord.rs",
@@ -8321,7 +8337,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L1",
       "id": "session_store",
-      "community": 49
+      "community": 50
     },
     {
       "label": "create_session_and_emit_events()",
@@ -8329,7 +8345,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L9",
       "id": "session_store_create_session_and_emit_events",
-      "community": 49
+      "community": 50
     },
     {
       "label": "get_events_with_range_filter()",
@@ -8337,7 +8353,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L65",
       "id": "session_store_get_events_with_range_filter",
-      "community": 49
+      "community": 50
     },
     {
       "label": "get_events_filtered_by_type()",
@@ -8345,7 +8361,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L110",
       "id": "session_store_get_events_filtered_by_type",
-      "community": 49
+      "community": 50
     },
     {
       "label": "wake_finds_checkpoint_and_recent_events()",
@@ -8353,7 +8369,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L177",
       "id": "session_store_wake_finds_checkpoint_and_recent_events",
-      "community": 49
+      "community": 50
     },
     {
       "label": "wake_without_checkpoint_returns_all_events()",
@@ -8361,7 +8377,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L238",
       "id": "session_store_wake_without_checkpoint_returns_all_events",
-      "community": 49
+      "community": 50
     },
     {
       "label": "fts_search_finds_events()",
@@ -8369,7 +8385,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L271",
       "id": "session_store_fts_search_finds_events",
-      "community": 49
+      "community": 50
     },
     {
       "label": "fts_search_handles_hyphenated_queries()",
@@ -8377,7 +8393,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L308",
       "id": "session_store_fts_search_handles_hyphenated_queries",
-      "community": 49
+      "community": 50
     },
     {
       "label": "list_sessions_filters_by_workspace()",
@@ -8385,7 +8401,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L345",
       "id": "session_store_list_sessions_filters_by_workspace",
-      "community": 49
+      "community": 50
     },
     {
       "label": "schema_is_idempotent()",
@@ -8393,7 +8409,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L381",
       "id": "session_store_schema_is_idempotent",
-      "community": 49
+      "community": 50
     },
     {
       "label": "from_config_uses_local_store_when_cloud_sync_is_disabled()",
@@ -8401,7 +8417,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L389",
       "id": "session_store_from_config_uses_local_store_when_cloud_sync_is_disabled",
-      "community": 49
+      "community": 50
     },
     {
       "label": "cloud_sync_requires_file_backed_session_db()",
@@ -8409,7 +8425,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L403",
       "id": "session_store_cloud_sync_requires_file_backed_session_db",
-      "community": 49
+      "community": 50
     },
     {
       "label": "update_status_persists_changes()",
@@ -8417,7 +8433,7 @@
       "source_file": "moa-session/tests/session_store.rs",
       "source_location": "L420",
       "id": "session_store_update_status_persists_changes",
-      "community": 49
+      "community": 50
     },
     {
       "label": "turso.rs",
@@ -10009,7 +10025,7 @@
       "source_file": "moa-security/src/injection.rs",
       "source_location": "L1",
       "id": "injection",
-      "community": 50
+      "community": 51
     },
     {
       "label": "InputClassification",
@@ -10017,7 +10033,7 @@
       "source_file": "moa-security/src/injection.rs",
       "source_location": "L12",
       "id": "injection_inputclassification",
-      "community": 50
+      "community": 51
     },
     {
       "label": "InputInspection",
@@ -10025,7 +10041,7 @@
       "source_file": "moa-security/src/injection.rs",
       "source_location": "L23",
       "id": "injection_inputinspection",
-      "community": 50
+      "community": 51
     },
     {
       "label": "classify_input()",
@@ -10033,7 +10049,7 @@
       "source_file": "moa-security/src/injection.rs",
       "source_location": "L35",
       "id": "injection_classify_input",
-      "community": 50
+      "community": 51
     },
     {
       "label": "inspect_input()",
@@ -10041,7 +10057,7 @@
       "source_file": "moa-security/src/injection.rs",
       "source_location": "L40",
       "id": "injection_inspect_input",
-      "community": 50
+      "community": 51
     },
     {
       "label": "inject_canary()",
@@ -10049,7 +10065,7 @@
       "source_file": "moa-security/src/injection.rs",
       "source_location": "L90",
       "id": "injection_inject_canary",
-      "community": 50
+      "community": 51
     },
     {
       "label": "check_canary()",
@@ -10057,7 +10073,7 @@
       "source_file": "moa-security/src/injection.rs",
       "source_location": "L99",
       "id": "injection_check_canary",
-      "community": 50
+      "community": 51
     },
     {
       "label": "contains_canary_tokens()",
@@ -10065,7 +10081,7 @@
       "source_file": "moa-security/src/injection.rs",
       "source_location": "L104",
       "id": "injection_contains_canary_tokens",
-      "community": 50
+      "community": 51
     },
     {
       "label": "wrap_untrusted_tool_output()",
@@ -10073,7 +10089,7 @@
       "source_file": "moa-security/src/injection.rs",
       "source_location": "L109",
       "id": "injection_wrap_untrusted_tool_output",
-      "community": 50
+      "community": 51
     },
     {
       "label": "working_context()",
@@ -10081,7 +10097,7 @@
       "source_file": "moa-security/src/injection.rs",
       "source_location": "L123",
       "id": "injection_working_context",
-      "community": 50
+      "community": 51
     },
     {
       "label": "classifier_flags_known_attack_patterns()",
@@ -10089,7 +10105,7 @@
       "source_file": "moa-security/src/injection.rs",
       "source_location": "L146",
       "id": "injection_classifier_flags_known_attack_patterns",
-      "community": 50
+      "community": 51
     },
     {
       "label": "canary_detection_works()",
@@ -10097,7 +10113,7 @@
       "source_file": "moa-security/src/injection.rs",
       "source_location": "L155",
       "id": "injection_canary_detection_works",
-      "community": 50
+      "community": 51
     },
     {
       "label": "untrusted_wrapper_uses_explicit_tags()",
@@ -10105,7 +10121,7 @@
       "source_file": "moa-security/src/injection.rs",
       "source_location": "L168",
       "id": "injection_untrusted_wrapper_uses_explicit_tags",
-      "community": 50
+      "community": 51
     },
     {
       "label": "policies.rs",
@@ -10609,7 +10625,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L1",
       "id": "local_orchestrator",
-      "community": 17
+      "community": 14
     },
     {
       "label": "MockProvider",
@@ -10617,7 +10633,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L21",
       "id": "local_orchestrator_mockprovider",
-      "community": 17
+      "community": 14
     },
     {
       "label": ".name()",
@@ -10625,7 +10641,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L28",
       "id": "local_orchestrator_mockprovider_name",
-      "community": 17
+      "community": 14
     },
     {
       "label": ".capabilities()",
@@ -10633,7 +10649,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L32",
       "id": "local_orchestrator_mockprovider_capabilities",
-      "community": 17
+      "community": 14
     },
     {
       "label": ".complete()",
@@ -10641,7 +10657,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L50",
       "id": "local_orchestrator_mockprovider_complete",
-      "community": 17
+      "community": 14
     },
     {
       "label": "last_user_message()",
@@ -10649,7 +10665,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L81",
       "id": "local_orchestrator_last_user_message",
-      "community": 17
+      "community": 14
     },
     {
       "label": "test_orchestrator()",
@@ -10657,7 +10673,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L89",
       "id": "local_orchestrator_test_orchestrator",
-      "community": 17
+      "community": 14
     },
     {
       "label": "test_orchestrator_with_delay()",
@@ -10665,7 +10681,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L93",
       "id": "local_orchestrator_test_orchestrator_with_delay",
-      "community": 17
+      "community": 14
     },
     {
       "label": "test_orchestrator_with_provider()",
@@ -10673,7 +10689,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L101",
       "id": "local_orchestrator_test_orchestrator_with_provider",
-      "community": 17
+      "community": 14
     },
     {
       "label": "RequestGuardProvider",
@@ -10681,7 +10697,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L124",
       "id": "local_orchestrator_requestguardprovider",
-      "community": 17
+      "community": 14
     },
     {
       "label": ".name()",
@@ -10689,7 +10705,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L132",
       "id": "local_orchestrator_requestguardprovider_name",
-      "community": 17
+      "community": 14
     },
     {
       "label": ".capabilities()",
@@ -10697,7 +10713,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L136",
       "id": "local_orchestrator_requestguardprovider_capabilities",
-      "community": 17
+      "community": 14
     },
     {
       "label": ".complete()",
@@ -10705,7 +10721,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L154",
       "id": "local_orchestrator_requestguardprovider_complete",
-      "community": 17
+      "community": 14
     },
     {
       "label": "ToolCancelProvider",
@@ -10713,7 +10729,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L204",
       "id": "local_orchestrator_toolcancelprovider",
-      "community": 17
+      "community": 14
     },
     {
       "label": ".name()",
@@ -10721,7 +10737,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L211",
       "id": "local_orchestrator_toolcancelprovider_name",
-      "community": 17
+      "community": 14
     },
     {
       "label": ".capabilities()",
@@ -10729,7 +10745,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L215",
       "id": "local_orchestrator_toolcancelprovider_capabilities",
-      "community": 17
+      "community": 14
     },
     {
       "label": ".complete()",
@@ -10737,7 +10753,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L233",
       "id": "local_orchestrator_toolcancelprovider_complete",
-      "community": 17
+      "community": 14
     },
     {
       "label": "ToolThenEchoProvider",
@@ -10745,7 +10761,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L270",
       "id": "local_orchestrator_toolthenechoprovider",
-      "community": 17
+      "community": 14
     },
     {
       "label": ".name()",
@@ -10753,7 +10769,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L278",
       "id": "local_orchestrator_toolthenechoprovider_name",
-      "community": 17
+      "community": 14
     },
     {
       "label": ".capabilities()",
@@ -10761,7 +10777,7 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L282",
       "id": "local_orchestrator_toolthenechoprovider_capabilities",
-      "community": 17
+      "community": 14
     },
     {
       "label": ".complete()",
@@ -10769,143 +10785,191 @@
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
       "source_location": "L300",
       "id": "local_orchestrator_toolthenechoprovider_complete",
-      "community": 17
+      "community": 14
+    },
+    {
+      "label": "FileWriteApprovalProvider",
+      "file_type": "code",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L338",
+      "id": "local_orchestrator_filewriteapprovalprovider",
+      "community": 14
+    },
+    {
+      "label": ".name()",
+      "file_type": "code",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L345",
+      "id": "local_orchestrator_filewriteapprovalprovider_name",
+      "community": 14
+    },
+    {
+      "label": ".capabilities()",
+      "file_type": "code",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L349",
+      "id": "local_orchestrator_filewriteapprovalprovider_capabilities",
+      "community": 14
+    },
+    {
+      "label": ".complete()",
+      "file_type": "code",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L367",
+      "id": "local_orchestrator_filewriteapprovalprovider_complete",
+      "community": 14
     },
     {
       "label": "start_session()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L337",
+      "source_location": "L404",
       "id": "local_orchestrator_start_session",
-      "community": 17
+      "community": 14
     },
     {
       "label": "wait_for_status()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L351",
+      "source_location": "L418",
       "id": "local_orchestrator_wait_for_status",
-      "community": 17
+      "community": 14
     },
     {
       "label": "wait_for_approval_request()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L372",
+      "source_location": "L439",
       "id": "local_orchestrator_wait_for_approval_request",
-      "community": 17
+      "community": 14
+    },
+    {
+      "label": "wait_for_approval_event()",
+      "file_type": "code",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L464",
+      "id": "local_orchestrator_wait_for_approval_event",
+      "community": 14
     },
     {
       "label": "brain_response_texts()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L397",
+      "source_location": "L489",
       "id": "local_orchestrator_brain_response_texts",
-      "community": 17
+      "community": 14
     },
     {
       "label": "starts_two_sessions_and_processes_both()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L408",
+      "source_location": "L500",
       "id": "local_orchestrator_starts_two_sessions_and_processes_both",
-      "community": 17
+      "community": 14
     },
     {
       "label": "soft_cancel_marks_session_cancelled()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L466",
+      "source_location": "L558",
       "id": "local_orchestrator_soft_cancel_marks_session_cancelled",
-      "community": 17
+      "community": 14
     },
     {
       "label": "soft_cancel_stops_after_current_tool_call()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L489",
+      "source_location": "L581",
       "id": "local_orchestrator_soft_cancel_stops_after_current_tool_call",
-      "community": 17
+      "community": 14
     },
     {
       "label": "queued_message_is_processed_after_current_turn()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L549",
+      "source_location": "L641",
       "id": "local_orchestrator_queued_message_is_processed_after_current_turn",
-      "community": 17
+      "community": 14
+    },
+    {
+      "label": "approval_requested_event_persists_full_prompt_details()",
+      "file_type": "code",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L689",
+      "id": "local_orchestrator_approval_requested_event_persists_full_prompt_details",
+      "community": 14
     },
     {
       "label": "queued_follow_up_request_ends_with_user_message()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L597",
+      "source_location": "L737",
       "id": "local_orchestrator_queued_follow_up_request_ends_with_user_message",
-      "community": 17
+      "community": 14
     },
     {
       "label": "multiple_queued_messages_are_processed_fifo_one_turn_at_a_time()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L651",
+      "source_location": "L791",
       "id": "local_orchestrator_multiple_queued_messages_are_processed_fifo_one_turn_at_a_time",
-      "community": 17
+      "community": 14
     },
     {
       "label": "queued_message_waiting_for_approval_runs_after_allowed_turn()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L717",
+      "source_location": "L857",
       "id": "local_orchestrator_queued_message_waiting_for_approval_runs_after_allowed_turn",
-      "community": 17
+      "community": 14
     },
     {
       "label": "denied_tool_preserves_queued_follow_up()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L788",
+      "source_location": "L928",
       "id": "local_orchestrator_denied_tool_preserves_queued_follow_up",
-      "community": 17
+      "community": 14
     },
     {
       "label": "resume_cancelled_session_waits_for_new_input()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L854",
+      "source_location": "L994",
       "id": "local_orchestrator_resume_cancelled_session_waits_for_new_input",
-      "community": 17
+      "community": 14
     },
     {
       "label": "observe_stream_receives_events_in_order()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L940",
+      "source_location": "L1080",
       "id": "local_orchestrator_observe_stream_receives_events_in_order",
-      "community": 17
+      "community": 14
     },
     {
       "label": "list_sessions_includes_active_session()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L977",
+      "source_location": "L1117",
       "id": "local_orchestrator_list_sessions_includes_active_session",
-      "community": 17
+      "community": 14
     },
     {
       "label": "memory_maintenance_runs_due_workspace_consolidation()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L990",
+      "source_location": "L1130",
       "id": "local_orchestrator_memory_maintenance_runs_due_workspace_consolidation",
-      "community": 17
+      "community": 14
     },
     {
       "label": "memory_maintenance_skips_when_threshold_or_cooldown_not_met()",
       "file_type": "code",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L1055",
+      "source_location": "L1195",
       "id": "local_orchestrator_memory_maintenance_skips_when_threshold_or_cooldown_not_met",
-      "community": 17
+      "community": 14
     },
     {
       "label": "live_provider_roundtrip.rs",
@@ -10913,7 +10977,7 @@
       "source_file": "moa-orchestrator/tests/live_provider_roundtrip.rs",
       "source_location": "L1",
       "id": "live_provider_roundtrip",
-      "community": 53
+      "community": 54
     },
     {
       "label": "LiveProvider",
@@ -10921,7 +10985,7 @@
       "source_file": "moa-orchestrator/tests/live_provider_roundtrip.rs",
       "source_location": "L18",
       "id": "live_provider_roundtrip_liveprovider",
-      "community": 53
+      "community": 54
     },
     {
       "label": ".label()",
@@ -10929,7 +10993,7 @@
       "source_file": "moa-orchestrator/tests/live_provider_roundtrip.rs",
       "source_location": "L25",
       "id": "live_provider_roundtrip_liveprovider_label",
-      "community": 53
+      "community": 54
     },
     {
       "label": ".model()",
@@ -10937,7 +11001,7 @@
       "source_file": "moa-orchestrator/tests/live_provider_roundtrip.rs",
       "source_location": "L33",
       "id": "live_provider_roundtrip_liveprovider_model",
-      "community": 53
+      "community": 54
     },
     {
       "label": ".into_arc()",
@@ -10945,7 +11009,7 @@
       "source_file": "moa-orchestrator/tests/live_provider_roundtrip.rs",
       "source_location": "L41",
       "id": "live_provider_roundtrip_liveprovider_into_arc",
-      "community": 53
+      "community": 54
     },
     {
       "label": "available_live_providers()",
@@ -10953,7 +11017,7 @@
       "source_file": "moa-orchestrator/tests/live_provider_roundtrip.rs",
       "source_location": "L50",
       "id": "live_provider_roundtrip_available_live_providers",
-      "community": 53
+      "community": 54
     },
     {
       "label": "live_orchestrator_with_provider()",
@@ -10961,7 +11025,7 @@
       "source_file": "moa-orchestrator/tests/live_provider_roundtrip.rs",
       "source_location": "L64",
       "id": "live_provider_roundtrip_live_orchestrator_with_provider",
-      "community": 53
+      "community": 54
     },
     {
       "label": "wait_for_status()",
@@ -10969,7 +11033,7 @@
       "source_file": "moa-orchestrator/tests/live_provider_roundtrip.rs",
       "source_location": "L91",
       "id": "live_provider_roundtrip_wait_for_status",
-      "community": 53
+      "community": 54
     },
     {
       "label": "wait_for_approval_request()",
@@ -10977,7 +11041,7 @@
       "source_file": "moa-orchestrator/tests/live_provider_roundtrip.rs",
       "source_location": "L116",
       "id": "live_provider_roundtrip_wait_for_approval_request",
-      "community": 53
+      "community": 54
     },
     {
       "label": "wait_for_file()",
@@ -10985,7 +11049,7 @@
       "source_file": "moa-orchestrator/tests/live_provider_roundtrip.rs",
       "source_location": "L141",
       "id": "live_provider_roundtrip_wait_for_file",
-      "community": 53
+      "community": 54
     },
     {
       "label": "wait_for_final_response()",
@@ -10993,7 +11057,7 @@
       "source_file": "moa-orchestrator/tests/live_provider_roundtrip.rs",
       "source_location": "L162",
       "id": "live_provider_roundtrip_wait_for_final_response",
-      "community": 53
+      "community": 54
     },
     {
       "label": "live_providers_complete_tool_approval_roundtrip_when_available()",
@@ -11001,7 +11065,7 @@
       "source_file": "moa-orchestrator/tests/live_provider_roundtrip.rs",
       "source_location": "L191",
       "id": "live_provider_roundtrip_live_providers_complete_tool_approval_roundtrip_when_available",
-      "community": 53
+      "community": 54
     },
     {
       "label": "temporal_orchestrator.rs",
@@ -11009,7 +11073,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L1",
       "id": "temporal_orchestrator",
-      "community": 16
+      "community": 17
     },
     {
       "label": "TemporalEchoProvider",
@@ -11017,7 +11081,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L27",
       "id": "temporal_orchestrator_temporalechoprovider",
-      "community": 16
+      "community": 17
     },
     {
       "label": ".name()",
@@ -11025,7 +11089,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L35",
       "id": "temporal_orchestrator_temporalechoprovider_name",
-      "community": 16
+      "community": 17
     },
     {
       "label": ".capabilities()",
@@ -11033,7 +11097,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L39",
       "id": "temporal_orchestrator_temporalechoprovider_capabilities",
-      "community": 16
+      "community": 17
     },
     {
       "label": ".complete()",
@@ -11041,7 +11105,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L43",
       "id": "temporal_orchestrator_temporalechoprovider_complete",
-      "community": 16
+      "community": 17
     },
     {
       "label": "TemporalToolThenEchoProvider",
@@ -11049,7 +11113,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L58",
       "id": "temporal_orchestrator_temporaltoolthenechoprovider",
-      "community": 16
+      "community": 17
     },
     {
       "label": ".name()",
@@ -11057,7 +11121,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L67",
       "id": "temporal_orchestrator_temporaltoolthenechoprovider_name",
-      "community": 16
+      "community": 17
     },
     {
       "label": ".capabilities()",
@@ -11065,7 +11129,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L71",
       "id": "temporal_orchestrator_temporaltoolthenechoprovider_capabilities",
-      "community": 16
+      "community": 17
     },
     {
       "label": ".complete()",
@@ -11073,7 +11137,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L75",
       "id": "temporal_orchestrator_temporaltoolthenechoprovider_complete",
-      "community": 16
+      "community": 17
     },
     {
       "label": "mock_capabilities()",
@@ -11081,7 +11145,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L110",
       "id": "temporal_orchestrator_mock_capabilities",
-      "community": 16
+      "community": 17
     },
     {
       "label": "delayed_text_stream()",
@@ -11089,7 +11153,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L128",
       "id": "temporal_orchestrator_delayed_text_stream",
-      "community": 16
+      "community": 17
     },
     {
       "label": "last_user_message()",
@@ -11097,7 +11161,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L153",
       "id": "temporal_orchestrator_last_user_message",
-      "community": 16
+      "community": 17
     },
     {
       "label": "TemporalDevServer",
@@ -11105,7 +11169,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L161",
       "id": "temporal_orchestrator_temporaldevserver",
-      "community": 16
+      "community": 17
     },
     {
       "label": ".start()",
@@ -11113,7 +11177,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L167",
       "id": "temporal_orchestrator_temporaldevserver_start",
-      "community": 16
+      "community": 17
     },
     {
       "label": ".wait_ready()",
@@ -11121,7 +11185,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L189",
       "id": "temporal_orchestrator_temporaldevserver_wait_ready",
-      "community": 16
+      "community": 17
     },
     {
       "label": ".drop()",
@@ -11129,7 +11193,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L205",
       "id": "temporal_orchestrator_temporaldevserver_drop",
-      "community": 16
+      "community": 17
     },
     {
       "label": "temporal_test_orchestrator_with_provider()",
@@ -11137,7 +11201,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L211",
       "id": "temporal_orchestrator_temporal_test_orchestrator_with_provider",
-      "community": 16
+      "community": 17
     },
     {
       "label": "temporal_test_orchestrator()",
@@ -11145,7 +11209,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L274",
       "id": "temporal_orchestrator_temporal_test_orchestrator",
-      "community": 16
+      "community": 17
     },
     {
       "label": "temporal_helper_binary()",
@@ -11153,7 +11217,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L292",
       "id": "temporal_orchestrator_temporal_helper_binary",
-      "community": 16
+      "community": 17
     },
     {
       "label": "build_temporal_helper_binary()",
@@ -11161,7 +11225,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L296",
       "id": "temporal_orchestrator_build_temporal_helper_binary",
-      "community": 16
+      "community": 17
     },
     {
       "label": "spawn_temporal_helper()",
@@ -11169,7 +11233,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L312",
       "id": "temporal_orchestrator_spawn_temporal_helper",
-      "community": 16
+      "community": 17
     },
     {
       "label": "unused_port()",
@@ -11177,7 +11241,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L343",
       "id": "temporal_orchestrator_unused_port",
-      "community": 16
+      "community": 17
     },
     {
       "label": "wait_for_status()",
@@ -11185,7 +11249,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L351",
       "id": "temporal_orchestrator_wait_for_status",
-      "community": 16
+      "community": 17
     },
     {
       "label": "wait_for_event_text()",
@@ -11193,7 +11257,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L389",
       "id": "temporal_orchestrator_wait_for_event_text",
-      "community": 16
+      "community": 17
     },
     {
       "label": "wait_for_store_status()",
@@ -11201,7 +11265,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L416",
       "id": "temporal_orchestrator_wait_for_store_status",
-      "community": 16
+      "community": 17
     },
     {
       "label": "wait_for_store_event_text()",
@@ -11209,7 +11273,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L440",
       "id": "temporal_orchestrator_wait_for_store_event_text",
-      "community": 16
+      "community": 17
     },
     {
       "label": "wait_for_tool_result()",
@@ -11217,7 +11281,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L466",
       "id": "temporal_orchestrator_wait_for_tool_result",
-      "community": 16
+      "community": 17
     },
     {
       "label": "wait_for_brain_response_count()",
@@ -11225,7 +11289,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L496",
       "id": "temporal_orchestrator_wait_for_brain_response_count",
-      "community": 16
+      "community": 17
     },
     {
       "label": "wait_for_session_id_file()",
@@ -11233,7 +11297,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L523",
       "id": "temporal_orchestrator_wait_for_session_id_file",
-      "community": 16
+      "community": 17
     },
     {
       "label": "brain_response_texts()",
@@ -11241,7 +11305,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L546",
       "id": "temporal_orchestrator_brain_response_texts",
-      "community": 16
+      "community": 17
     },
     {
       "label": "temporal_orchestrator_runs_workflow_and_unblocks_on_approval()",
@@ -11249,7 +11313,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L558",
       "id": "temporal_orchestrator_temporal_orchestrator_runs_workflow_and_unblocks_on_approval",
-      "community": 16
+      "community": 17
     },
     {
       "label": "temporal_orchestrator_waits_for_first_message_on_blank_session()",
@@ -11257,7 +11321,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L634",
       "id": "temporal_orchestrator_temporal_orchestrator_waits_for_first_message_on_blank_session",
-      "community": 16
+      "community": 17
     },
     {
       "label": "temporal_orchestrator_processes_two_sessions_independently()",
@@ -11265,7 +11329,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L697",
       "id": "temporal_orchestrator_temporal_orchestrator_processes_two_sessions_independently",
-      "community": 16
+      "community": 17
     },
     {
       "label": "temporal_orchestrator_processes_multiple_queued_messages_fifo()",
@@ -11273,7 +11337,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L760",
       "id": "temporal_orchestrator_temporal_orchestrator_processes_multiple_queued_messages_fifo",
-      "community": 16
+      "community": 17
     },
     {
       "label": "temporal_orchestrator_queues_message_while_waiting_for_approval()",
@@ -11281,7 +11345,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L830",
       "id": "temporal_orchestrator_temporal_orchestrator_queues_message_while_waiting_for_approval",
-      "community": 16
+      "community": 17
     },
     {
       "label": "temporal_orchestrator_soft_cancel_stops_after_current_tool_call()",
@@ -11289,7 +11353,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L912",
       "id": "temporal_orchestrator_temporal_orchestrator_soft_cancel_stops_after_current_tool_call",
-      "community": 16
+      "community": 17
     },
     {
       "label": "temporal_orchestrator_soft_cancel_waiting_for_approval()",
@@ -11297,7 +11361,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L989",
       "id": "temporal_orchestrator_temporal_orchestrator_soft_cancel_waiting_for_approval",
-      "community": 16
+      "community": 17
     },
     {
       "label": "temporal_orchestrator_live_anthropic_smoke()",
@@ -11305,7 +11369,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L1044",
       "id": "temporal_orchestrator_temporal_orchestrator_live_anthropic_smoke",
-      "community": 16
+      "community": 17
     },
     {
       "label": "temporal_orchestrator_recovers_after_worker_process_restart()",
@@ -11313,7 +11377,7 @@
       "source_file": "moa-orchestrator/tests/temporal_orchestrator.rs",
       "source_location": "L1119",
       "id": "temporal_orchestrator_temporal_orchestrator_recovers_after_worker_process_restart",
-      "community": 16
+      "community": 17
     },
     {
       "label": "temporal_worker_helper.rs",
@@ -11615,7 +11679,7 @@
       "label": "wait_for_signal_approval()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L948",
+      "source_location": "L950",
       "id": "local_wait_for_signal_approval",
       "community": 5
     },
@@ -11623,7 +11687,7 @@
       "label": "process_resolved_approval()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1073",
+      "source_location": "L1075",
       "id": "local_process_resolved_approval",
       "community": 5
     },
@@ -11631,7 +11695,7 @@
       "label": "wait_for_approval()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1196",
+      "source_location": "L1198",
       "id": "local_wait_for_approval",
       "community": 5
     },
@@ -11639,7 +11703,7 @@
       "label": "drain_signal_queue()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1343",
+      "source_location": "L1345",
       "id": "local_drain_signal_queue",
       "community": 5
     },
@@ -11647,7 +11711,7 @@
       "label": "execute_tool()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1378",
+      "source_location": "L1380",
       "id": "local_execute_tool",
       "community": 5
     },
@@ -11655,7 +11719,7 @@
       "label": "accept_user_message()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1452",
+      "source_location": "L1454",
       "id": "local_accept_user_message",
       "community": 5
     },
@@ -11663,7 +11727,7 @@
       "label": "buffer_queued_message()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1474",
+      "source_location": "L1476",
       "id": "local_buffer_queued_message",
       "community": 5
     },
@@ -11671,7 +11735,7 @@
       "label": "flush_queued_messages()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1478",
+      "source_location": "L1480",
       "id": "local_flush_queued_messages",
       "community": 5
     },
@@ -11679,7 +11743,7 @@
       "label": "flush_next_queued_message()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1491",
+      "source_location": "L1493",
       "id": "local_flush_next_queued_message",
       "community": 5
     },
@@ -11687,7 +11751,7 @@
       "label": "update_status()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1506",
+      "source_location": "L1508",
       "id": "local_update_status",
       "community": 5
     },
@@ -11695,7 +11759,7 @@
       "label": "append_event()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1519",
+      "source_location": "L1521",
       "id": "local_append_event",
       "community": 5
     },
@@ -11703,7 +11767,7 @@
       "label": "session_requires_processing()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1544",
+      "source_location": "L1546",
       "id": "local_session_requires_processing",
       "community": 5
     },
@@ -11711,7 +11775,7 @@
       "label": "summarize_tool_completion()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1568",
+      "source_location": "L1570",
       "id": "local_summarize_tool_completion",
       "community": 5
     },
@@ -11719,7 +11783,7 @@
       "label": "format_tool_output()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1583",
+      "source_location": "L1585",
       "id": "local_format_tool_output",
       "community": 5
     },
@@ -11727,7 +11791,7 @@
       "label": "parse_tool_id()",
       "file_type": "code",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1587",
+      "source_location": "L1589",
       "id": "local_parse_tool_id",
       "community": 5
     },
@@ -15223,7 +15287,7 @@
       "label": "find_pending_tool_approval()",
       "file_type": "code",
       "source_file": "moa-brain/src/turn.rs",
-      "source_location": "L190",
+      "source_location": "L191",
       "id": "turn_find_pending_tool_approval",
       "community": 4
     },
@@ -15231,7 +15295,7 @@
       "label": "find_resolved_pending_tool_approval()",
       "file_type": "code",
       "source_file": "moa-brain/src/turn.rs",
-      "source_location": "L241",
+      "source_location": "L242",
       "id": "turn_find_resolved_pending_tool_approval",
       "community": 4
     },
@@ -15295,7 +15359,7 @@
       "label": "format_tool_output()",
       "file_type": "code",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L365",
+      "source_location": "L372",
       "id": "harness_format_tool_output",
       "community": 4
     },
@@ -15303,7 +15367,7 @@
       "label": "process_resolved_approval()",
       "file_type": "code",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L369",
+      "source_location": "L376",
       "id": "harness_process_resolved_approval",
       "community": 4
     },
@@ -15311,7 +15375,7 @@
       "label": "execute_pending_tool()",
       "file_type": "code",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L417",
+      "source_location": "L424",
       "id": "harness_execute_pending_tool",
       "community": 4
     },
@@ -15319,7 +15383,7 @@
       "label": "SecuredToolOutput",
       "file_type": "code",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L472",
+      "source_location": "L479",
       "id": "harness_securedtooloutput",
       "community": 4
     },
@@ -15327,7 +15391,7 @@
       "label": "secure_tool_output()",
       "file_type": "code",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L476",
+      "source_location": "L483",
       "id": "harness_secure_tool_output",
       "community": 4
     },
@@ -15335,7 +15399,7 @@
       "label": "emit_tool_output_warning()",
       "file_type": "code",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L488",
+      "source_location": "L495",
       "id": "harness_emit_tool_output_warning",
       "community": 4
     },
@@ -23097,7 +23161,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L13",
+      "source_location": "L15",
       "weight": 1.0,
       "_src": "events",
       "_tgt": "events_event",
@@ -23109,7 +23173,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L289",
+      "source_location": "L296",
       "weight": 1.0,
       "_src": "events",
       "_tgt": "events_event_serialization_roundtrip",
@@ -23121,7 +23185,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L301",
+      "source_location": "L308",
       "weight": 1.0,
       "_src": "events",
       "_tgt": "events_brain_response_event_has_cost_fields",
@@ -23133,7 +23197,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L316",
+      "source_location": "L323",
       "weight": 1.0,
       "_src": "events",
       "_tgt": "events_all_event_types_serialize",
@@ -23142,10 +23206,34 @@
       "confidence_score": 1.0
     },
     {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-core/src/events.rs",
+      "source_location": "L364",
+      "weight": 1.0,
+      "_src": "events",
+      "_tgt": "events_approval_requested_event_round_trips_full_prompt",
+      "source": "events",
+      "target": "events_approval_requested_event_round_trips_full_prompt",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-core/src/events.rs",
+      "source_location": "L398",
+      "weight": 1.0,
+      "_src": "events",
+      "_tgt": "events_approval_requested_event_deserializes_without_prompt",
+      "source": "events",
+      "target": "events_approval_requested_event_deserializes_without_prompt",
+      "confidence_score": 1.0
+    },
+    {
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L190",
+      "source_location": "L197",
       "weight": 1.0,
       "_src": "events_event",
       "_tgt": "events_event_event_type",
@@ -23157,7 +23245,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L216",
+      "source_location": "L223",
       "weight": 1.0,
       "_src": "events_event",
       "_tgt": "events_event_type_name",
@@ -23169,7 +23257,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L242",
+      "source_location": "L249",
       "weight": 1.0,
       "_src": "events_event",
       "_tgt": "events_event_input_tokens",
@@ -23181,7 +23269,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L250",
+      "source_location": "L257",
       "weight": 1.0,
       "_src": "events_event",
       "_tgt": "events_event_output_tokens",
@@ -23193,7 +23281,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L258",
+      "source_location": "L265",
       "weight": 1.0,
       "_src": "events_event",
       "_tgt": "events_event_cost_cents",
@@ -23205,7 +23293,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-core/src/events.rs",
-      "source_location": "L266",
+      "source_location": "L273",
       "weight": 1.0,
       "_src": "events_event",
       "_tgt": "events_event_token_count",
@@ -28293,7 +28381,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1748",
+      "source_location": "L1751",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_existing_tool_name",
@@ -28305,7 +28393,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1758",
+      "source_location": "L1761",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_truncate_detail",
@@ -28317,7 +28405,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1767",
+      "source_location": "L1770",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_minimal_approval_prompt",
@@ -28329,7 +28417,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1789",
+      "source_location": "L1792",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_session_summary_from_meta",
@@ -28341,7 +28429,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1802",
+      "source_location": "L1805",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_approval_status_and_note",
@@ -28353,7 +28441,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1823",
+      "source_location": "L1826",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_palette_actions",
@@ -28365,7 +28453,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1876",
+      "source_location": "L1879",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_render_help_overlay",
@@ -28377,7 +28465,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1920",
+      "source_location": "L1923",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_completion_for_prompt",
@@ -28389,7 +28477,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1971",
+      "source_location": "L1974",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_complete_slash_command",
@@ -28401,7 +28489,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1976",
+      "source_location": "L1979",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_complete_file_reference",
@@ -28413,7 +28501,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1988",
+      "source_location": "L1991",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_slash_commands",
@@ -28425,7 +28513,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2010",
+      "source_location": "L2013",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_default_config_path",
@@ -28437,7 +28525,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2015",
+      "source_location": "L2018",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_workspace_name_from_input",
@@ -28449,7 +28537,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2028",
+      "source_location": "L2031",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_collect_sandbox_files",
@@ -28461,7 +28549,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2058",
+      "source_location": "L2061",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_run_tui",
@@ -28473,7 +28561,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2063",
+      "source_location": "L2066",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_run_tui_with_options",
@@ -28485,7 +28573,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2097",
+      "source_location": "L2100",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_run_event_loop",
@@ -28497,7 +28585,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2128",
+      "source_location": "L2131",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_test_app",
@@ -28509,7 +28597,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2191",
+      "source_location": "L2194",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_app_state_transitions_follow_idle_composing_running_waiting_idle",
@@ -28521,7 +28609,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2222",
+      "source_location": "L2225",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_rendering_smoke_test_does_not_panic",
@@ -28533,7 +28621,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2238",
+      "source_location": "L2241",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_diff_overlay_renders_for_file_write_approval",
@@ -28545,7 +28633,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2279",
+      "source_location": "L2282",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_switching_back_to_live_session_reloads_pending_approval_from_history",
@@ -28557,7 +28645,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2348",
+      "source_location": "L2382",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_slash_completion_and_sidebar_toggle_modes_are_reachable",
@@ -28569,7 +28657,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2362",
+      "source_location": "L2396",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_memory_and_settings_overlays_change_app_mode",
@@ -28581,7 +28669,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2375",
+      "source_location": "L2409",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_settings_persist_to_disk_and_reload",
@@ -28593,7 +28681,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2392",
+      "source_location": "L2426",
       "weight": 1.0,
       "_src": "app",
       "_tgt": "app_file_completion_prefers_frecency_and_replaces_active_token",
@@ -28617,7 +28705,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1666",
+      "source_location": "L1669",
       "weight": 1.0,
       "_src": "app_sessionviewstate",
       "_tgt": "app_sessionviewstate_handle_tool_update",
@@ -28629,7 +28717,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1681",
+      "source_location": "L1684",
       "weight": 1.0,
       "_src": "app_sessionviewstate",
       "_tgt": "app_sessionviewstate_upsert_tool_card",
@@ -28641,7 +28729,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1701",
+      "source_location": "L1704",
       "weight": 1.0,
       "_src": "app_sessionviewstate",
       "_tgt": "app_sessionviewstate_upsert_approval_card",
@@ -28653,7 +28741,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1721",
+      "source_location": "L1724",
       "weight": 1.0,
       "_src": "app_sessionviewstate",
       "_tgt": "app_sessionviewstate_update_approval_entry",
@@ -28665,7 +28753,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1738",
+      "source_location": "L1741",
       "weight": 1.0,
       "_src": "app_sessionviewstate",
       "_tgt": "app_sessionviewstate_approval_status",
@@ -29613,7 +29701,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1785",
+      "source_location": "L1788",
       "weight": 1.0,
       "_src": "app_minimal_approval_prompt",
       "_tgt": "app_app_new",
@@ -29625,7 +29713,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1901",
+      "source_location": "L1904",
       "weight": 1.0,
       "_src": "app_render_help_overlay",
       "_tgt": "app_app_new",
@@ -29637,7 +29725,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2012",
+      "source_location": "L2015",
       "weight": 1.0,
       "_src": "app_default_config_path",
       "_tgt": "app_app_new",
@@ -29649,7 +29737,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2016",
+      "source_location": "L2019",
       "weight": 1.0,
       "_src": "app_workspace_name_from_input",
       "_tgt": "app_app_new",
@@ -29661,7 +29749,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2029",
+      "source_location": "L2032",
       "weight": 1.0,
       "_src": "app_collect_sandbox_files",
       "_tgt": "app_app_new",
@@ -29673,7 +29761,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2067",
+      "source_location": "L2070",
       "weight": 1.0,
       "_src": "app_run_tui_with_options",
       "_tgt": "app_app_new",
@@ -29685,7 +29773,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2129",
+      "source_location": "L2132",
       "weight": 1.0,
       "_src": "app_test_app",
       "_tgt": "app_app_new",
@@ -29697,7 +29785,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2223",
+      "source_location": "L2226",
       "weight": 1.0,
       "_src": "app_rendering_smoke_test_does_not_panic",
       "_tgt": "app_app_new",
@@ -29709,7 +29797,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2239",
+      "source_location": "L2242",
       "weight": 1.0,
       "_src": "app_diff_overlay_renders_for_file_write_approval",
       "_tgt": "app_app_new",
@@ -29721,7 +29809,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2280",
+      "source_location": "L2283",
       "weight": 1.0,
       "_src": "app_switching_back_to_live_session_reloads_pending_approval_from_history",
       "_tgt": "app_app_new",
@@ -29733,7 +29821,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2351",
+      "source_location": "L2385",
       "weight": 1.0,
       "_src": "app_slash_completion_and_sidebar_toggle_modes_are_reachable",
       "_tgt": "app_app_new",
@@ -29745,7 +29833,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2369",
+      "source_location": "L2403",
       "weight": 1.0,
       "_src": "app_memory_and_settings_overlays_change_app_mode",
       "_tgt": "app_app_new",
@@ -29757,7 +29845,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2376",
+      "source_location": "L2410",
       "weight": 1.0,
       "_src": "app_settings_persist_to_disk_and_reload",
       "_tgt": "app_app_new",
@@ -29769,7 +29857,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2393",
+      "source_location": "L2427",
       "weight": 1.0,
       "_src": "app_file_completion_prefers_frecency_and_replaces_active_token",
       "_tgt": "app_app_new",
@@ -29841,7 +29929,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2086",
+      "source_location": "L2089",
       "weight": 1.0,
       "_src": "app_run_tui_with_options",
       "_tgt": "app_app_from_runtime",
@@ -29853,7 +29941,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2106",
+      "source_location": "L2109",
       "weight": 1.0,
       "_src": "app_run_event_loop",
       "_tgt": "app_app_should_exit",
@@ -29877,7 +29965,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2103",
+      "source_location": "L2106",
       "weight": 1.0,
       "_src": "app_run_event_loop",
       "_tgt": "app_app_refresh_sessions_if_due",
@@ -29901,7 +29989,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2102",
+      "source_location": "L2105",
       "weight": 1.0,
       "_src": "app_run_event_loop",
       "_tgt": "app_app_drain_runtime_events",
@@ -30429,7 +30517,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2113",
+      "source_location": "L2116",
       "weight": 1.0,
       "_src": "app_run_event_loop",
       "_tgt": "app_app_handle_key_event",
@@ -30513,7 +30601,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2104",
+      "source_location": "L2107",
       "weight": 1.0,
       "_src": "app_run_event_loop",
       "_tgt": "app_app_draw",
@@ -30525,7 +30613,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2234",
+      "source_location": "L2237",
       "weight": 1.0,
       "_src": "app_rendering_smoke_test_does_not_panic",
       "_tgt": "app_app_draw",
@@ -30537,7 +30625,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2275",
+      "source_location": "L2278",
       "weight": 1.0,
       "_src": "app_diff_overlay_renders_for_file_write_approval",
       "_tgt": "app_app_draw",
@@ -30825,7 +30913,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2327",
+      "source_location": "L2349",
       "weight": 1.0,
       "_src": "app_switching_back_to_live_session_reloads_pending_approval_from_history",
       "_tgt": "app_app_refresh_session_list",
@@ -30861,7 +30949,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2290",
+      "source_location": "L2293",
       "weight": 1.0,
       "_src": "app_switching_back_to_live_session_reloads_pending_approval_from_history",
       "_tgt": "app_app_create_new_session",
@@ -30957,7 +31045,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2328",
+      "source_location": "L2350",
       "weight": 1.0,
       "_src": "app_switching_back_to_live_session_reloads_pending_approval_from_history",
       "_tgt": "app_app_switch_to_session",
@@ -31377,7 +31465,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2272",
+      "source_location": "L2275",
       "weight": 1.0,
       "_src": "app_diff_overlay_renders_for_file_write_approval",
       "_tgt": "app_app_open_diff_view",
@@ -31773,7 +31861,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2185",
+      "source_location": "L2188",
       "weight": 1.0,
       "_src": "app_test_app",
       "_tgt": "app_app_sync_mode_with_state",
@@ -31785,7 +31873,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2196",
+      "source_location": "L2199",
       "weight": 1.0,
       "_src": "app_app_state_transitions_follow_idle_composing_running_waiting_idle",
       "_tgt": "app_app_sync_mode_with_state",
@@ -31797,7 +31885,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2357",
+      "source_location": "L2391",
       "weight": 1.0,
       "_src": "app_slash_completion_and_sidebar_toggle_modes_are_reachable",
       "_tgt": "app_app_sync_mode_with_state",
@@ -31809,7 +31897,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2365",
+      "source_location": "L2399",
       "weight": 1.0,
       "_src": "app_memory_and_settings_overlays_change_app_mode",
       "_tgt": "app_app_sync_mode_with_state",
@@ -31821,7 +31909,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2199",
+      "source_location": "L2202",
       "weight": 1.0,
       "_src": "app_app_state_transitions_follow_idle_composing_running_waiting_idle",
       "_tgt": "app_app_update_session_status",
@@ -31833,7 +31921,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2333",
+      "source_location": "L2355",
       "weight": 1.0,
       "_src": "app_switching_back_to_live_session_reloads_pending_approval_from_history",
       "_tgt": "app_app_active_view",
@@ -31857,7 +31945,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2203",
+      "source_location": "L2206",
       "weight": 1.0,
       "_src": "app_app_state_transitions_follow_idle_composing_running_waiting_idle",
       "_tgt": "app_app_session_view_mut",
@@ -31869,7 +31957,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2227",
+      "source_location": "L2230",
       "weight": 1.0,
       "_src": "app_rendering_smoke_test_does_not_panic",
       "_tgt": "app_app_session_view_mut",
@@ -31881,7 +31969,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2269",
+      "source_location": "L2272",
       "weight": 1.0,
       "_src": "app_diff_overlay_renders_for_file_write_approval",
       "_tgt": "app_app_session_view_mut",
@@ -31917,7 +32005,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2353",
+      "source_location": "L2387",
       "weight": 1.0,
       "_src": "app_slash_completion_and_sidebar_toggle_modes_are_reachable",
       "_tgt": "app_app_refresh_prompt_completion",
@@ -31929,7 +32017,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2403",
+      "source_location": "L2437",
       "weight": 1.0,
       "_src": "app_file_completion_prefers_frecency_and_replaces_active_token",
       "_tgt": "app_app_refresh_prompt_completion",
@@ -31977,7 +32065,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2416",
+      "source_location": "L2450",
       "weight": 1.0,
       "_src": "app_file_completion_prefers_frecency_and_replaces_active_token",
       "_tgt": "app_app_accept_prompt_completion",
@@ -32097,7 +32185,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2383",
+      "source_location": "L2417",
       "weight": 1.0,
       "_src": "app_settings_persist_to_disk_and_reload",
       "_tgt": "app_app_persist_config",
@@ -32145,7 +32233,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1619",
+      "source_location": "L1622",
       "weight": 1.0,
       "_src": "app_sessionviewstate_from_history",
       "_tgt": "app_minimal_approval_prompt",
@@ -32157,7 +32245,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1629",
+      "source_location": "L1632",
       "weight": 1.0,
       "_src": "app_sessionviewstate_from_history",
       "_tgt": "app_sessionviewstate_upsert_approval_card",
@@ -32169,7 +32257,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1637",
+      "source_location": "L1640",
       "weight": 1.0,
       "_src": "app_sessionviewstate_from_history",
       "_tgt": "app_approval_status_and_note",
@@ -32181,7 +32269,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1638",
+      "source_location": "L1641",
       "weight": 1.0,
       "_src": "app_sessionviewstate_from_history",
       "_tgt": "app_sessionviewstate_update_approval_entry",
@@ -32193,7 +32281,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1672",
+      "source_location": "L1675",
       "weight": 1.0,
       "_src": "app_sessionviewstate_handle_tool_update",
       "_tgt": "app_sessionviewstate_approval_status",
@@ -32205,7 +32293,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1677",
+      "source_location": "L1680",
       "weight": 1.0,
       "_src": "app_sessionviewstate_handle_tool_update",
       "_tgt": "app_sessionviewstate_upsert_tool_card",
@@ -32217,7 +32305,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2271",
+      "source_location": "L2274",
       "weight": 1.0,
       "_src": "app_diff_overlay_renders_for_file_write_approval",
       "_tgt": "app_sessionviewstate_upsert_approval_card",
@@ -32229,7 +32317,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2204",
+      "source_location": "L2207",
       "weight": 1.0,
       "_src": "app_app_state_transitions_follow_idle_composing_running_waiting_idle",
       "_tgt": "app_minimal_approval_prompt",
@@ -32241,7 +32329,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L1928",
+      "source_location": "L1931",
       "weight": 1.0,
       "_src": "app_completion_for_prompt",
       "_tgt": "app_slash_commands",
@@ -32253,7 +32341,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2059",
+      "source_location": "L2062",
       "weight": 1.0,
       "_src": "app_run_tui",
       "_tgt": "app_run_tui_with_options",
@@ -32265,7 +32353,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2088",
+      "source_location": "L2091",
       "weight": 1.0,
       "_src": "app_run_tui_with_options",
       "_tgt": "app_run_event_loop",
@@ -32277,7 +32365,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2192",
+      "source_location": "L2195",
       "weight": 1.0,
       "_src": "app_app_state_transitions_follow_idle_composing_running_waiting_idle",
       "_tgt": "app_test_app",
@@ -32289,7 +32377,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2225",
+      "source_location": "L2228",
       "weight": 1.0,
       "_src": "app_rendering_smoke_test_does_not_panic",
       "_tgt": "app_test_app",
@@ -32301,7 +32389,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2241",
+      "source_location": "L2244",
       "weight": 1.0,
       "_src": "app_diff_overlay_renders_for_file_write_approval",
       "_tgt": "app_test_app",
@@ -32313,7 +32401,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2349",
+      "source_location": "L2383",
       "weight": 1.0,
       "_src": "app_slash_completion_and_sidebar_toggle_modes_are_reachable",
       "_tgt": "app_test_app",
@@ -32325,7 +32413,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2363",
+      "source_location": "L2397",
       "weight": 1.0,
       "_src": "app_memory_and_settings_overlays_change_app_mode",
       "_tgt": "app_test_app",
@@ -32337,7 +32425,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2378",
+      "source_location": "L2412",
       "weight": 1.0,
       "_src": "app_settings_persist_to_disk_and_reload",
       "_tgt": "app_test_app",
@@ -32349,7 +32437,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-tui/src/app.rs",
-      "source_location": "L2394",
+      "source_location": "L2428",
       "weight": 1.0,
       "_src": "app_file_completion_prefers_frecency_and_replaces_active_token",
       "_tgt": "app_test_app",
@@ -45753,7 +45841,19 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L337",
+      "source_location": "L338",
+      "weight": 1.0,
+      "_src": "local_orchestrator",
+      "_tgt": "local_orchestrator_filewriteapprovalprovider",
+      "source": "local_orchestrator",
+      "target": "local_orchestrator_filewriteapprovalprovider",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L404",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_start_session",
@@ -45765,7 +45865,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L351",
+      "source_location": "L418",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_wait_for_status",
@@ -45777,7 +45877,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L372",
+      "source_location": "L439",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_wait_for_approval_request",
@@ -45789,7 +45889,19 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L397",
+      "source_location": "L464",
+      "weight": 1.0,
+      "_src": "local_orchestrator",
+      "_tgt": "local_orchestrator_wait_for_approval_event",
+      "source": "local_orchestrator",
+      "target": "local_orchestrator_wait_for_approval_event",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L489",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_brain_response_texts",
@@ -45801,7 +45913,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L408",
+      "source_location": "L500",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_starts_two_sessions_and_processes_both",
@@ -45813,7 +45925,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L466",
+      "source_location": "L558",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_soft_cancel_marks_session_cancelled",
@@ -45825,7 +45937,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L489",
+      "source_location": "L581",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_soft_cancel_stops_after_current_tool_call",
@@ -45837,7 +45949,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L549",
+      "source_location": "L641",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_queued_message_is_processed_after_current_turn",
@@ -45849,7 +45961,19 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L597",
+      "source_location": "L689",
+      "weight": 1.0,
+      "_src": "local_orchestrator",
+      "_tgt": "local_orchestrator_approval_requested_event_persists_full_prompt_details",
+      "source": "local_orchestrator",
+      "target": "local_orchestrator_approval_requested_event_persists_full_prompt_details",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L737",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_queued_follow_up_request_ends_with_user_message",
@@ -45861,7 +45985,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L651",
+      "source_location": "L791",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_multiple_queued_messages_are_processed_fifo_one_turn_at_a_time",
@@ -45873,7 +45997,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L717",
+      "source_location": "L857",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_queued_message_waiting_for_approval_runs_after_allowed_turn",
@@ -45885,7 +46009,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L788",
+      "source_location": "L928",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_denied_tool_preserves_queued_follow_up",
@@ -45897,7 +46021,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L854",
+      "source_location": "L994",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_resume_cancelled_session_waits_for_new_input",
@@ -45909,7 +46033,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L940",
+      "source_location": "L1080",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_observe_stream_receives_events_in_order",
@@ -45921,7 +46045,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L977",
+      "source_location": "L1117",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_list_sessions_includes_active_session",
@@ -45933,7 +46057,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L990",
+      "source_location": "L1130",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_memory_maintenance_runs_due_workspace_consolidation",
@@ -45945,7 +46069,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L1055",
+      "source_location": "L1195",
       "weight": 1.0,
       "_src": "local_orchestrator",
       "_tgt": "local_orchestrator_memory_maintenance_skips_when_threshold_or_cooldown_not_met",
@@ -46041,7 +46165,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L409",
+      "source_location": "L501",
       "weight": 1.0,
       "_src": "local_orchestrator_starts_two_sessions_and_processes_both",
       "_tgt": "local_orchestrator_test_orchestrator",
@@ -46053,7 +46177,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L941",
+      "source_location": "L1081",
       "weight": 1.0,
       "_src": "local_orchestrator_observe_stream_receives_events_in_order",
       "_tgt": "local_orchestrator_test_orchestrator",
@@ -46065,7 +46189,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L978",
+      "source_location": "L1118",
       "weight": 1.0,
       "_src": "local_orchestrator_list_sessions_includes_active_session",
       "_tgt": "local_orchestrator_test_orchestrator",
@@ -46077,7 +46201,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L991",
+      "source_location": "L1131",
       "weight": 1.0,
       "_src": "local_orchestrator_memory_maintenance_runs_due_workspace_consolidation",
       "_tgt": "local_orchestrator_test_orchestrator",
@@ -46089,7 +46213,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L1056",
+      "source_location": "L1196",
       "weight": 1.0,
       "_src": "local_orchestrator_memory_maintenance_skips_when_threshold_or_cooldown_not_met",
       "_tgt": "local_orchestrator_test_orchestrator",
@@ -46113,7 +46237,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L467",
+      "source_location": "L559",
       "weight": 1.0,
       "_src": "local_orchestrator_soft_cancel_marks_session_cancelled",
       "_tgt": "local_orchestrator_test_orchestrator_with_delay",
@@ -46125,7 +46249,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L550",
+      "source_location": "L642",
       "weight": 1.0,
       "_src": "local_orchestrator_queued_message_is_processed_after_current_turn",
       "_tgt": "local_orchestrator_test_orchestrator_with_delay",
@@ -46137,7 +46261,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L496",
+      "source_location": "L588",
       "weight": 1.0,
       "_src": "local_orchestrator_soft_cancel_stops_after_current_tool_call",
       "_tgt": "local_orchestrator_test_orchestrator_with_provider",
@@ -46149,7 +46273,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L605",
+      "source_location": "L693",
+      "weight": 1.0,
+      "_src": "local_orchestrator_approval_requested_event_persists_full_prompt_details",
+      "_tgt": "local_orchestrator_test_orchestrator_with_provider",
+      "source": "local_orchestrator_test_orchestrator_with_provider",
+      "target": "local_orchestrator_approval_requested_event_persists_full_prompt_details",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L745",
       "weight": 1.0,
       "_src": "local_orchestrator_queued_follow_up_request_ends_with_user_message",
       "_tgt": "local_orchestrator_test_orchestrator_with_provider",
@@ -46161,7 +46297,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L659",
+      "source_location": "L799",
       "weight": 1.0,
       "_src": "local_orchestrator_multiple_queued_messages_are_processed_fifo_one_turn_at_a_time",
       "_tgt": "local_orchestrator_test_orchestrator_with_provider",
@@ -46173,7 +46309,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L725",
+      "source_location": "L865",
       "weight": 1.0,
       "_src": "local_orchestrator_queued_message_waiting_for_approval_runs_after_allowed_turn",
       "_tgt": "local_orchestrator_test_orchestrator_with_provider",
@@ -46185,7 +46321,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L796",
+      "source_location": "L936",
       "weight": 1.0,
       "_src": "local_orchestrator_denied_tool_preserves_queued_follow_up",
       "_tgt": "local_orchestrator_test_orchestrator_with_provider",
@@ -46197,7 +46333,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L863",
+      "source_location": "L1003",
       "weight": 1.0,
       "_src": "local_orchestrator_resume_cancelled_session_waits_for_new_input",
       "_tgt": "local_orchestrator_test_orchestrator_with_provider",
@@ -46314,10 +46450,46 @@
       "confidence_score": 1.0
     },
     {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L345",
+      "weight": 1.0,
+      "_src": "local_orchestrator_filewriteapprovalprovider",
+      "_tgt": "local_orchestrator_filewriteapprovalprovider_name",
+      "source": "local_orchestrator_filewriteapprovalprovider",
+      "target": "local_orchestrator_filewriteapprovalprovider_name",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L349",
+      "weight": 1.0,
+      "_src": "local_orchestrator_filewriteapprovalprovider",
+      "_tgt": "local_orchestrator_filewriteapprovalprovider_capabilities",
+      "source": "local_orchestrator_filewriteapprovalprovider",
+      "target": "local_orchestrator_filewriteapprovalprovider_capabilities",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L367",
+      "weight": 1.0,
+      "_src": "local_orchestrator_filewriteapprovalprovider",
+      "_tgt": "local_orchestrator_filewriteapprovalprovider_complete",
+      "source": "local_orchestrator_filewriteapprovalprovider",
+      "target": "local_orchestrator_filewriteapprovalprovider_complete",
+      "confidence_score": 1.0
+    },
+    {
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L410",
+      "source_location": "L502",
       "weight": 1.0,
       "_src": "local_orchestrator_starts_two_sessions_and_processes_both",
       "_tgt": "local_orchestrator_start_session",
@@ -46329,7 +46501,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L468",
+      "source_location": "L560",
       "weight": 1.0,
       "_src": "local_orchestrator_soft_cancel_marks_session_cancelled",
       "_tgt": "local_orchestrator_start_session",
@@ -46341,7 +46513,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L497",
+      "source_location": "L589",
       "weight": 1.0,
       "_src": "local_orchestrator_soft_cancel_stops_after_current_tool_call",
       "_tgt": "local_orchestrator_start_session",
@@ -46353,7 +46525,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L551",
+      "source_location": "L643",
       "weight": 1.0,
       "_src": "local_orchestrator_queued_message_is_processed_after_current_turn",
       "_tgt": "local_orchestrator_start_session",
@@ -46365,7 +46537,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L606",
+      "source_location": "L694",
+      "weight": 1.0,
+      "_src": "local_orchestrator_approval_requested_event_persists_full_prompt_details",
+      "_tgt": "local_orchestrator_start_session",
+      "source": "local_orchestrator_start_session",
+      "target": "local_orchestrator_approval_requested_event_persists_full_prompt_details",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L746",
       "weight": 1.0,
       "_src": "local_orchestrator_queued_follow_up_request_ends_with_user_message",
       "_tgt": "local_orchestrator_start_session",
@@ -46377,7 +46561,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L660",
+      "source_location": "L800",
       "weight": 1.0,
       "_src": "local_orchestrator_multiple_queued_messages_are_processed_fifo_one_turn_at_a_time",
       "_tgt": "local_orchestrator_start_session",
@@ -46389,7 +46573,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L726",
+      "source_location": "L866",
       "weight": 1.0,
       "_src": "local_orchestrator_queued_message_waiting_for_approval_runs_after_allowed_turn",
       "_tgt": "local_orchestrator_start_session",
@@ -46401,7 +46585,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L797",
+      "source_location": "L937",
       "weight": 1.0,
       "_src": "local_orchestrator_denied_tool_preserves_queued_follow_up",
       "_tgt": "local_orchestrator_start_session",
@@ -46413,7 +46597,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L864",
+      "source_location": "L1004",
       "weight": 1.0,
       "_src": "local_orchestrator_resume_cancelled_session_waits_for_new_input",
       "_tgt": "local_orchestrator_start_session",
@@ -46425,7 +46609,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L942",
+      "source_location": "L1082",
       "weight": 1.0,
       "_src": "local_orchestrator_observe_stream_receives_events_in_order",
       "_tgt": "local_orchestrator_start_session",
@@ -46437,7 +46621,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L979",
+      "source_location": "L1119",
       "weight": 1.0,
       "_src": "local_orchestrator_list_sessions_includes_active_session",
       "_tgt": "local_orchestrator_start_session",
@@ -46449,7 +46633,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L432",
+      "source_location": "L524",
       "weight": 1.0,
       "_src": "local_orchestrator_starts_two_sessions_and_processes_both",
       "_tgt": "local_orchestrator_wait_for_status",
@@ -46461,7 +46645,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L484",
+      "source_location": "L576",
       "weight": 1.0,
       "_src": "local_orchestrator_soft_cancel_marks_session_cancelled",
       "_tgt": "local_orchestrator_wait_for_status",
@@ -46473,7 +46657,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L524",
+      "source_location": "L616",
       "weight": 1.0,
       "_src": "local_orchestrator_soft_cancel_stops_after_current_tool_call",
       "_tgt": "local_orchestrator_wait_for_status",
@@ -46485,7 +46669,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L573",
+      "source_location": "L665",
       "weight": 1.0,
       "_src": "local_orchestrator_queued_message_is_processed_after_current_turn",
       "_tgt": "local_orchestrator_wait_for_status",
@@ -46497,7 +46681,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L628",
+      "source_location": "L768",
       "weight": 1.0,
       "_src": "local_orchestrator_queued_follow_up_request_ends_with_user_message",
       "_tgt": "local_orchestrator_wait_for_status",
@@ -46509,7 +46693,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L691",
+      "source_location": "L831",
       "weight": 1.0,
       "_src": "local_orchestrator_multiple_queued_messages_are_processed_fifo_one_turn_at_a_time",
       "_tgt": "local_orchestrator_wait_for_status",
@@ -46521,7 +46705,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L758",
+      "source_location": "L898",
       "weight": 1.0,
       "_src": "local_orchestrator_queued_message_waiting_for_approval_runs_after_allowed_turn",
       "_tgt": "local_orchestrator_wait_for_status",
@@ -46533,7 +46717,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L829",
+      "source_location": "L969",
       "weight": 1.0,
       "_src": "local_orchestrator_denied_tool_preserves_queued_follow_up",
       "_tgt": "local_orchestrator_wait_for_status",
@@ -46545,7 +46729,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L891",
+      "source_location": "L1031",
       "weight": 1.0,
       "_src": "local_orchestrator_resume_cancelled_session_waits_for_new_input",
       "_tgt": "local_orchestrator_wait_for_status",
@@ -46557,7 +46741,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L509",
+      "source_location": "L601",
       "weight": 1.0,
       "_src": "local_orchestrator_soft_cancel_stops_after_current_tool_call",
       "_tgt": "local_orchestrator_wait_for_approval_request",
@@ -46569,7 +46753,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L738",
+      "source_location": "L878",
       "weight": 1.0,
       "_src": "local_orchestrator_queued_message_waiting_for_approval_runs_after_allowed_turn",
       "_tgt": "local_orchestrator_wait_for_approval_request",
@@ -46581,7 +46765,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L809",
+      "source_location": "L949",
       "weight": 1.0,
       "_src": "local_orchestrator_denied_tool_preserves_queued_follow_up",
       "_tgt": "local_orchestrator_wait_for_approval_request",
@@ -46593,12 +46777,24 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
-      "source_location": "L876",
+      "source_location": "L1016",
       "weight": 1.0,
       "_src": "local_orchestrator_resume_cancelled_session_waits_for_new_input",
       "_tgt": "local_orchestrator_wait_for_approval_request",
       "source": "local_orchestrator_wait_for_approval_request",
       "target": "local_orchestrator_resume_cancelled_session_waits_for_new_input",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "moa-orchestrator/tests/local_orchestrator.rs",
+      "source_location": "L706",
+      "weight": 1.0,
+      "_src": "local_orchestrator_approval_requested_event_persists_full_prompt_details",
+      "_tgt": "local_orchestrator_wait_for_approval_event",
+      "source": "local_orchestrator_wait_for_approval_event",
+      "target": "local_orchestrator_approval_requested_event_persists_full_prompt_details",
       "confidence_score": 1.0
     },
     {
@@ -48009,7 +48205,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L948",
+      "source_location": "L950",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_wait_for_signal_approval",
@@ -48021,7 +48217,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1073",
+      "source_location": "L1075",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_process_resolved_approval",
@@ -48033,7 +48229,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1196",
+      "source_location": "L1198",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_wait_for_approval",
@@ -48045,7 +48241,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1343",
+      "source_location": "L1345",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_drain_signal_queue",
@@ -48057,7 +48253,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1378",
+      "source_location": "L1380",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_execute_tool",
@@ -48069,7 +48265,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1452",
+      "source_location": "L1454",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_accept_user_message",
@@ -48081,7 +48277,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1474",
+      "source_location": "L1476",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_buffer_queued_message",
@@ -48093,7 +48289,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1478",
+      "source_location": "L1480",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_flush_queued_messages",
@@ -48105,7 +48301,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1491",
+      "source_location": "L1493",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_flush_next_queued_message",
@@ -48117,7 +48313,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1506",
+      "source_location": "L1508",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_update_status",
@@ -48129,7 +48325,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1519",
+      "source_location": "L1521",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_append_event",
@@ -48141,7 +48337,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1544",
+      "source_location": "L1546",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_session_requires_processing",
@@ -48153,7 +48349,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1568",
+      "source_location": "L1570",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_summarize_tool_completion",
@@ -48165,7 +48361,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1583",
+      "source_location": "L1585",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_format_tool_output",
@@ -48177,7 +48373,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1587",
+      "source_location": "L1589",
       "weight": 1.0,
       "_src": "local",
       "_tgt": "local_parse_tool_id",
@@ -48561,7 +48757,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1128",
+      "source_location": "L1130",
       "weight": 1.0,
       "_src": "local_process_resolved_approval",
       "_tgt": "local_localorchestrator_new",
@@ -48933,7 +49129,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L904",
+      "source_location": "L911",
       "weight": 1.0,
       "_src": "local_handle_tool_call",
       "_tgt": "local_update_status",
@@ -48945,7 +49141,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L922",
+      "source_location": "L924",
       "weight": 1.0,
       "_src": "local_handle_tool_call",
       "_tgt": "local_wait_for_signal_approval",
@@ -48957,7 +49153,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L967",
+      "source_location": "L969",
       "weight": 1.0,
       "_src": "local_wait_for_signal_approval",
       "_tgt": "local_append_event",
@@ -48969,7 +49165,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L979",
+      "source_location": "L981",
       "weight": 1.0,
       "_src": "local_wait_for_signal_approval",
       "_tgt": "local_update_status",
@@ -48981,7 +49177,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L993",
+      "source_location": "L995",
       "weight": 1.0,
       "_src": "local_wait_for_signal_approval",
       "_tgt": "local_execute_tool",
@@ -48993,7 +49189,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1045",
+      "source_location": "L1047",
       "weight": 1.0,
       "_src": "local_wait_for_signal_approval",
       "_tgt": "local_buffer_queued_message",
@@ -49005,7 +49201,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1106",
+      "source_location": "L1108",
       "weight": 1.0,
       "_src": "local_process_resolved_approval",
       "_tgt": "local_execute_tool",
@@ -49017,7 +49213,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1159",
+      "source_location": "L1161",
       "weight": 1.0,
       "_src": "local_process_resolved_approval",
       "_tgt": "local_append_event",
@@ -49029,7 +49225,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1182",
+      "source_location": "L1184",
       "weight": 1.0,
       "_src": "local_process_resolved_approval",
       "_tgt": "local_drain_signal_queue",
@@ -49041,7 +49237,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1242",
+      "source_location": "L1244",
       "weight": 1.0,
       "_src": "local_wait_for_approval",
       "_tgt": "local_append_event",
@@ -49053,7 +49249,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1263",
+      "source_location": "L1265",
       "weight": 1.0,
       "_src": "local_wait_for_approval",
       "_tgt": "local_execute_tool",
@@ -49065,7 +49261,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1322",
+      "source_location": "L1324",
       "weight": 1.0,
       "_src": "local_wait_for_approval",
       "_tgt": "local_buffer_queued_message",
@@ -49077,7 +49273,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1355",
+      "source_location": "L1357",
       "weight": 1.0,
       "_src": "local_drain_signal_queue",
       "_tgt": "local_buffer_queued_message",
@@ -49089,7 +49285,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1390",
+      "source_location": "L1392",
       "weight": 1.0,
       "_src": "local_execute_tool",
       "_tgt": "local_append_event",
@@ -49101,7 +49297,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1423",
+      "source_location": "L1425",
       "weight": 1.0,
       "_src": "local_execute_tool",
       "_tgt": "local_summarize_tool_completion",
@@ -49113,7 +49309,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1424",
+      "source_location": "L1426",
       "weight": 1.0,
       "_src": "local_execute_tool",
       "_tgt": "local_format_tool_output",
@@ -49125,7 +49321,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1470",
+      "source_location": "L1472",
       "weight": 1.0,
       "_src": "local_accept_user_message",
       "_tgt": "local_append_event",
@@ -49137,7 +49333,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1485",
+      "source_location": "L1487",
       "weight": 1.0,
       "_src": "local_flush_queued_messages",
       "_tgt": "local_accept_user_message",
@@ -49149,7 +49345,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-orchestrator/src/local.rs",
-      "source_location": "L1502",
+      "source_location": "L1504",
       "weight": 1.0,
       "_src": "local_flush_next_queued_message",
       "_tgt": "local_accept_user_message",
@@ -57753,7 +57949,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-brain/src/turn.rs",
-      "source_location": "L190",
+      "source_location": "L191",
       "weight": 1.0,
       "_src": "turn",
       "_tgt": "turn_find_pending_tool_approval",
@@ -57765,7 +57961,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-brain/src/turn.rs",
-      "source_location": "L241",
+      "source_location": "L242",
       "weight": 1.0,
       "_src": "turn",
       "_tgt": "turn_find_resolved_pending_tool_approval",
@@ -57861,7 +58057,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L365",
+      "source_location": "L372",
       "weight": 1.0,
       "_src": "harness",
       "_tgt": "harness_format_tool_output",
@@ -57873,7 +58069,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L369",
+      "source_location": "L376",
       "weight": 1.0,
       "_src": "harness",
       "_tgt": "harness_process_resolved_approval",
@@ -57885,7 +58081,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L417",
+      "source_location": "L424",
       "weight": 1.0,
       "_src": "harness",
       "_tgt": "harness_execute_pending_tool",
@@ -57897,7 +58093,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L472",
+      "source_location": "L479",
       "weight": 1.0,
       "_src": "harness",
       "_tgt": "harness_securedtooloutput",
@@ -57909,7 +58105,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L476",
+      "source_location": "L483",
       "weight": 1.0,
       "_src": "harness",
       "_tgt": "harness_secure_tool_output",
@@ -57921,7 +58117,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L488",
+      "source_location": "L495",
       "weight": 1.0,
       "_src": "harness",
       "_tgt": "harness_emit_tool_output_warning",
@@ -58005,7 +58201,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L480",
+      "source_location": "L487",
       "weight": 1.0,
       "_src": "harness_secure_tool_output",
       "_tgt": "harness_format_tool_output",
@@ -58017,7 +58213,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L382",
+      "source_location": "L389",
       "weight": 1.0,
       "_src": "harness_process_resolved_approval",
       "_tgt": "harness_execute_pending_tool",
@@ -58029,7 +58225,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L434",
+      "source_location": "L441",
       "weight": 1.0,
       "_src": "harness_execute_pending_tool",
       "_tgt": "harness_secure_tool_output",
@@ -58041,7 +58237,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "moa-brain/src/harness.rs",
-      "source_location": "L435",
+      "source_location": "L442",
       "weight": 1.0,
       "_src": "harness_execute_pending_tool",
       "_tgt": "harness_emit_tool_output_warning",
