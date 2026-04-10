@@ -232,6 +232,16 @@ pub trait BuiltInTool: Send + Sync {
     /// Returns the policy and approval metadata for the tool.
     fn policy_spec(&self) -> crate::types::ToolPolicySpec;
 
+    /// Returns the canonical shared tool definition for this built-in tool.
+    fn definition(&self) -> crate::types::ToolDefinition {
+        crate::types::ToolDefinition {
+            name: self.name().to_string(),
+            description: self.description().to_string(),
+            schema: self.input_schema(),
+            policy: self.policy_spec(),
+        }
+    }
+
     /// Executes the built-in tool.
     async fn execute(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<ToolOutput>;
 }

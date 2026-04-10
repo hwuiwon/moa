@@ -107,7 +107,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(ctx.metadata["tool_schemas"][0]["name"], "bash");
+        assert_eq!(ctx.tools()[0]["name"], "bash");
         assert_eq!(output.items_included, vec!["bash".to_string()]);
         assert!(output.tokens_added > 0);
     }

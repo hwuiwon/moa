@@ -1991,8 +1991,10 @@ pub struct WorkingContext {
     pub workspace_id: WorkspaceId,
     /// Cache breakpoint indexes within `messages`.
     pub cache_breakpoints: Vec<usize>,
+    /// Active tool schemas compiled for the request.
+    tool_schemas: Vec<Value>,
     /// Arbitrary processor metadata.
-    pub metadata: HashMap<String, Value>,
+    metadata: HashMap<String, Value>,
 }
 
 impl WorkingContext {
@@ -2009,6 +2011,7 @@ impl WorkingContext {
             user_id: session.user_id.clone(),
             workspace_id: session.workspace_id.clone(),
             cache_breakpoints: Vec::new(),
+            tool_schemas: Vec::new(),
             metadata: HashMap::new(),
         }
     }
@@ -2036,8 +2039,32 @@ impl WorkingContext {
 
     /// Stores the active tool schemas for the request.
     pub fn set_tools(&mut self, tools: Vec<Value>) {
-        self.metadata
-            .insert("tool_schemas".to_string(), Value::Array(tools));
+        self.tool_schemas = tools;
+    }
+
+    /// Returns the active tool schemas for the request.
+    pub fn tools(&self) -> &[Value] {
+        &self.tool_schemas
+    }
+
+    /// Returns mutable access to the active tool schemas for the request.
+    pub fn tools_mut(&mut self) -> &mut Vec<Value> {
+        &mut self.tool_schemas
+    }
+
+    /// Returns the auxiliary metadata map shared across stages.
+    pub fn metadata(&self) -> &HashMap<String, Value> {
+        &self.metadata
+    }
+
+    /// Returns mutable auxiliary metadata shared across stages.
+    pub fn metadata_mut(&mut self) -> &mut HashMap<String, Value> {
+        &mut self.metadata
+    }
+
+    /// Inserts one auxiliary metadata value for cross-stage coordination.
+    pub fn insert_metadata(&mut self, key: impl Into<String>, value: Value) {
+        self.metadata.insert(key.into(), value);
     }
 
     /// Marks the current message index as a cache breakpoint.
@@ -2064,17 +2091,10 @@ impl WorkingContext {
 
     /// Converts the compiled context into an LLM completion request.
     pub fn into_request(self) -> CompletionRequest {
-        let tools = self
-            .metadata
-            .get("tool_schemas")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-
         CompletionRequest {
             model: Some(self.model_capabilities.model_id.clone()),
             messages: self.messages,
-            tools,
+            tools: self.tool_schemas,
             max_output_tokens: Some(self.model_capabilities.max_output),
             temperature: None,
             metadata: self.metadata,
