@@ -20,7 +20,7 @@ mod temporal_helper {
     use moa_hands::ToolRouter;
     use moa_memory::FileMemoryStore;
     use moa_orchestrator::TemporalOrchestrator;
-    use moa_session::TursoSessionStore;
+    use moa_session::create_session_store;
     use tokio::time::sleep;
 
     #[derive(Clone)]
@@ -87,7 +87,7 @@ mod temporal_helper {
 
     fn helper_config(root: &std::path::Path, port: u16, task_queue: &str) -> MoaConfig {
         let mut config = MoaConfig::default();
-        config.local.session_db = root.join("sessions.db").display().to_string();
+        config.database.url = root.join("sessions.db").display().to_string();
         config.local.memory_dir = root.join("memory").display().to_string();
         config.local.sandbox_dir = root.join("sandbox").display().to_string();
         config.cloud.enabled = true;
@@ -149,7 +149,7 @@ mod temporal_helper {
             delay: Duration::from_millis(delay_ms),
         });
         eprintln!("temporal helper: opening stores");
-        let session_store = Arc::new(TursoSessionStore::from_config(&config).await?);
+        let session_store = create_session_store(&config).await?;
         let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
         let tool_router = Arc::new(
             ToolRouter::from_config(&config, memory_store.clone())

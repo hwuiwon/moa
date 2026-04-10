@@ -10,9 +10,9 @@ pub mod types;
 
 pub use config::{
     CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, DaemonConfig,
-    GatewayConfig, GeneralConfig, LocalConfig, McpCredentialConfig, McpServerConfig,
-    McpTransportConfig, MoaConfig, ObservabilityConfig, PermissionsConfig,
-    ProviderCredentialConfig, ProvidersConfig, TuiConfig,
+    DatabaseBackend, DatabaseConfig, GatewayConfig, GeneralConfig, LocalConfig,
+    McpCredentialConfig, McpServerConfig, McpTransportConfig, MoaConfig, ObservabilityConfig,
+    PermissionsConfig, ProviderCredentialConfig, ProvidersConfig, TuiConfig,
 };
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
 pub use error::{MoaError, Result};

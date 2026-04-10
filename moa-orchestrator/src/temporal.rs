@@ -20,7 +20,7 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_providers::build_provider_from_config;
-use moa_session::TursoSessionStore;
+use moa_session::{SessionDatabase, create_session_store};
 use moa_skills::maybe_distill_skill;
 use serde::{Deserialize, Serialize};
 use temporalio_client::{
@@ -53,7 +53,7 @@ const DEFAULT_OBSERVE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Durable Temporal orchestrator for cloud session execution.
 #[derive(Clone)]
 pub struct TemporalOrchestrator {
-    session_store: Arc<TursoSessionStore>,
+    session_store: Arc<SessionDatabase>,
     scheduler: Arc<JobScheduler>,
     runtime: Arc<TemporalRuntime>,
 }
@@ -67,7 +67,7 @@ struct TemporalRuntime {
 #[derive(Clone)]
 struct TemporalActivities {
     config: MoaConfig,
-    session_store: Arc<TursoSessionStore>,
+    session_store: Arc<SessionDatabase>,
     memory_store: Arc<FileMemoryStore>,
     llm_provider: Arc<dyn LLMProvider>,
     tool_router: Arc<ToolRouter>,
@@ -469,7 +469,7 @@ impl TemporalOrchestrator {
     /// Creates a Temporal orchestrator from explicit local dependencies and cloud config.
     pub async fn new(
         config: MoaConfig,
-        session_store: Arc<TursoSessionStore>,
+        session_store: Arc<SessionDatabase>,
         memory_store: Arc<FileMemoryStore>,
         llm_provider: Arc<dyn LLMProvider>,
         tool_router: Arc<ToolRouter>,
@@ -503,7 +503,7 @@ impl TemporalOrchestrator {
 
     /// Creates a Temporal orchestrator from config using the configured LLM provider.
     pub async fn from_config(config: MoaConfig) -> MoaResult<Self> {
-        let session_store = Arc::new(TursoSessionStore::from_config(&config).await?);
+        let session_store = create_session_store(&config).await?;
         let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
         let tool_router = Arc::new(
             ToolRouter::from_config(&config, memory_store.clone())
@@ -604,7 +604,7 @@ impl TemporalRuntime {
     /// Connects a Temporal client and starts an in-process worker for the configured task queue.
     async fn connect(
         config: &MoaConfig,
-        session_store: Arc<TursoSessionStore>,
+        session_store: Arc<SessionDatabase>,
         memory_store: Arc<FileMemoryStore>,
         llm_provider: Arc<dyn LLMProvider>,
         tool_router: Arc<ToolRouter>,

@@ -19,7 +19,7 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::{ConsolidationReport, FileMemoryStore};
 use moa_providers::{build_provider_from_config, resolve_provider_selection};
-use moa_session::TursoSessionStore;
+use moa_session::{SessionDatabase, create_session_store};
 use moa_skills::maybe_distill_skill;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 pub struct LocalOrchestrator {
     config: MoaConfig,
-    session_store: Arc<TursoSessionStore>,
+    session_store: Arc<SessionDatabase>,
     memory_store: Arc<FileMemoryStore>,
     llm_provider: Arc<dyn LLMProvider>,
     tool_router: Arc<ToolRouter>,
@@ -49,7 +49,7 @@ struct LocalBrainHandle {
 #[derive(Clone)]
 struct SessionTaskContext {
     config: MoaConfig,
-    session_store: Arc<TursoSessionStore>,
+    session_store: Arc<SessionDatabase>,
     memory_store: Arc<FileMemoryStore>,
     llm_provider: Arc<dyn LLMProvider>,
     tool_router: Arc<ToolRouter>,
@@ -60,7 +60,7 @@ impl LocalOrchestrator {
     /// Creates a local orchestrator from explicit component instances.
     pub async fn new(
         config: MoaConfig,
-        session_store: Arc<TursoSessionStore>,
+        session_store: Arc<SessionDatabase>,
         memory_store: Arc<FileMemoryStore>,
         llm_provider: Arc<dyn LLMProvider>,
         tool_router: Arc<ToolRouter>,
@@ -100,7 +100,7 @@ impl LocalOrchestrator {
         config.general.default_provider = selection.provider_name;
         config.general.default_model = selection.model_id;
 
-        let session_store = Arc::new(TursoSessionStore::from_config(&config).await?);
+        let session_store = create_session_store(&config).await?;
         let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
         let tool_router = Arc::new(
             ToolRouter::from_config(&config, memory_store.clone())
@@ -119,7 +119,7 @@ impl LocalOrchestrator {
     }
 
     /// Returns the underlying local session store.
-    pub fn session_store(&self) -> Arc<TursoSessionStore> {
+    pub fn session_store(&self) -> Arc<SessionDatabase> {
         self.session_store.clone()
     }
 
@@ -688,7 +688,7 @@ async fn run_session_task(
 }
 
 async fn accept_user_message(
-    session_store: &Arc<TursoSessionStore>,
+    session_store: &Arc<SessionDatabase>,
     event_tx: &broadcast::Sender<EventRecord>,
     session_id: &SessionId,
     message: UserMessage,
@@ -710,7 +710,7 @@ async fn accept_user_message(
 }
 
 async fn flush_queued_messages(
-    session_store: &Arc<TursoSessionStore>,
+    session_store: &Arc<SessionDatabase>,
     event_tx: &broadcast::Sender<EventRecord>,
     session_id: &SessionId,
     queued_messages: &mut Vec<UserMessage>,
@@ -723,7 +723,7 @@ async fn flush_queued_messages(
 }
 
 async fn flush_next_queued_message(
-    session_store: &Arc<TursoSessionStore>,
+    session_store: &Arc<SessionDatabase>,
     event_tx: &broadcast::Sender<EventRecord>,
     session_id: &SessionId,
     queued_messages: &mut Vec<UserMessage>,
@@ -738,7 +738,7 @@ async fn flush_next_queued_message(
 }
 
 async fn flush_pending_signal(
-    session_store: &Arc<TursoSessionStore>,
+    session_store: &Arc<SessionDatabase>,
     event_tx: &broadcast::Sender<EventRecord>,
     session_id: &SessionId,
     message: UserMessage,
@@ -756,7 +756,7 @@ async fn flush_pending_signal(
 }
 
 async fn resolve_matching_pending_signal(
-    session_store: &Arc<TursoSessionStore>,
+    session_store: &Arc<SessionDatabase>,
     session_id: &SessionId,
     message: &UserMessage,
 ) -> Result<Option<moa_core::PendingSignalId>> {
@@ -772,7 +772,7 @@ async fn resolve_matching_pending_signal(
 }
 
 async fn update_status(
-    session_store: &Arc<TursoSessionStore>,
+    session_store: &Arc<SessionDatabase>,
     event_tx: &broadcast::Sender<EventRecord>,
     status: &Arc<RwLock<SessionStatus>>,
     session_id: SessionId,
@@ -800,7 +800,7 @@ async fn update_status(
 }
 
 async fn append_event(
-    session_store: &Arc<TursoSessionStore>,
+    session_store: &Arc<SessionDatabase>,
     event_tx: &broadcast::Sender<EventRecord>,
     session_id: SessionId,
     event: Event,

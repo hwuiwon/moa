@@ -15,6 +15,8 @@ pub struct MoaConfig {
     pub general: GeneralConfig,
     /// Provider settings.
     pub providers: ProvidersConfig,
+    /// Session database settings.
+    pub database: DatabaseConfig,
     /// Local runtime settings.
     pub local: LocalConfig,
     /// Cloud runtime settings.
@@ -75,9 +77,25 @@ impl MoaConfig {
                 "providers.openrouter.api_key_env",
                 Self::default().providers.openrouter.api_key_env,
             )?
+            .set_default(
+                "database.backend",
+                Self::default().database.backend.as_str(),
+            )?
+            .set_default("database.url", Self::default().database.url)?
+            .set_default(
+                "database.pool_min",
+                Self::default().database.pool_min as i64,
+            )?
+            .set_default(
+                "database.pool_max",
+                Self::default().database.pool_max as i64,
+            )?
+            .set_default(
+                "database.connect_timeout_secs",
+                Self::default().database.connect_timeout_secs as i64,
+            )?
             .set_default("local.docker_enabled", Self::default().local.docker_enabled)?
             .set_default("local.sandbox_dir", Self::default().local.sandbox_dir)?
-            .set_default("local.session_db", Self::default().local.session_db)?
             .set_default("local.memory_dir", Self::default().local.memory_dir)?
             .set_default("daemon.socket_path", Self::default().daemon.socket_path)?
             .set_default("daemon.pid_file", Self::default().daemon.pid_file)?
@@ -285,7 +303,9 @@ impl MoaConfig {
             .add_source(File::from(path).required(false))
             .add_source(Environment::with_prefix("MOA").separator("__"));
 
-        Ok(builder.build()?.try_deserialize()?)
+        let mut config: Self = builder.build()?.try_deserialize()?;
+        config.normalize_legacy_database_config();
+        Ok(config)
     }
 
     /// Persists this config to the default MOA config path.
@@ -303,6 +323,18 @@ impl MoaConfig {
             .map_err(|error| MoaError::ConfigError(error.to_string()))?;
         std::fs::write(path, content)?;
         Ok(())
+    }
+}
+
+impl MoaConfig {
+    fn normalize_legacy_database_config(&mut self) {
+        if self.local.session_db.is_empty() {
+            return;
+        }
+
+        if self.database.url == DatabaseConfig::default().url {
+            self.database.url = self.local.session_db.clone();
+        }
     }
 }
 
@@ -379,6 +411,55 @@ impl Default for ProvidersConfig {
     }
 }
 
+/// Supported session database backends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseBackend {
+    /// SQLite/libSQL/Turso backend.
+    #[default]
+    Turso,
+    /// PostgreSQL backend.
+    Postgres,
+}
+
+impl DatabaseBackend {
+    /// Returns the serialized config string for this backend.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Turso => "turso",
+            Self::Postgres => "postgres",
+        }
+    }
+}
+
+/// Session database configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DatabaseConfig {
+    /// Selected database backend.
+    pub backend: DatabaseBackend,
+    /// Database URL or local file path.
+    pub url: String,
+    /// Minimum pool size for pooled backends.
+    pub pool_min: u32,
+    /// Maximum pool size for pooled backends.
+    pub pool_max: u32,
+    /// Connection timeout in seconds.
+    pub connect_timeout_secs: u64,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            backend: DatabaseBackend::Turso,
+            url: "~/.moa/sessions.db".to_string(),
+            pool_min: 1,
+            pool_max: 5,
+            connect_timeout_secs: 10,
+        }
+    }
+}
+
 /// Local runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -387,7 +468,8 @@ pub struct LocalConfig {
     pub docker_enabled: bool,
     /// Sandbox working directory.
     pub sandbox_dir: String,
-    /// Session database path.
+    /// Legacy session database path alias. New configs should use `database.url`.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub session_db: String,
     /// Memory root directory.
     pub memory_dir: String,
@@ -398,7 +480,7 @@ impl Default for LocalConfig {
         Self {
             docker_enabled: true,
             sandbox_dir: "~/.moa/sandbox".to_string(),
-            session_db: "~/.moa/sessions.db".to_string(),
+            session_db: String::new(),
             memory_dir: "~/.moa/memory".to_string(),
         }
     }

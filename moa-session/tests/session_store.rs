@@ -1,184 +1,64 @@
-use moa_core::{
-    Event, EventFilter, EventRange, EventType, MoaConfig, PendingSignal, PendingSignalType,
-    SessionFilter, SessionMeta, SessionStatus, SessionStore, UserMessage,
-};
+#![cfg(feature = "turso")]
+
+mod shared;
+
+use moa_core::{Event, MoaConfig, PendingSignal, SessionMeta, SessionStore, UserMessage};
 use moa_session::TursoSessionStore;
-use serde_json::json;
 use tempfile::tempdir;
+
+async fn new_local_store() -> TursoSessionStore {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.keep().join("test.db");
+    TursoSessionStore::new_local(&db_path)
+        .await
+        .expect("local store")
+}
 
 #[tokio::test]
 async fn create_session_and_emit_events() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test.db");
-    let store = TursoSessionStore::new_local(&db_path).await.unwrap();
-
-    let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: "ws1".into(),
-            user_id: "u1".into(),
-            model: "test-model".into(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-
-    let seq1 = store
-        .emit_event(
-            session_id.clone(),
-            Event::UserMessage {
-                text: "Hello".into(),
-                attachments: vec![],
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(seq1, 0);
-
-    let seq2 = store
-        .emit_event(
-            session_id.clone(),
-            Event::BrainResponse {
-                text: "Hi there".into(),
-                model: "test".into(),
-                input_tokens: 10,
-                output_tokens: 5,
-                cost_cents: 1,
-                duration_ms: 100,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(seq2, 1);
-
-    let events = store
-        .get_events(session_id.clone(), EventRange::all())
-        .await
-        .unwrap();
-    assert_eq!(events.len(), 2);
-
-    let session = store.get_session(session_id).await.unwrap();
-    assert_eq!(session.event_count, 2);
-    assert_eq!(session.total_input_tokens, 10);
-    assert_eq!(session.total_cost_cents, 1);
+    let store = new_local_store().await;
+    shared::test_create_and_get_session(&store).await;
 }
 
 #[tokio::test]
 async fn get_events_with_range_filter() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test.db");
-    let store = TursoSessionStore::new_local(&db_path).await.unwrap();
-    let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: "ws1".into(),
-            user_id: "u1".into(),
-            model: "test-model".into(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-
-    for index in 0..10 {
-        store
-            .emit_event(
-                session_id.clone(),
-                Event::UserMessage {
-                    text: format!("message {index}"),
-                    attachments: vec![],
-                },
-            )
-            .await
-            .unwrap();
-    }
-
-    let events = store
-        .get_events(
-            session_id,
-            EventRange {
-                from_seq: Some(3),
-                to_seq: Some(7),
-                event_types: None,
-                limit: None,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(events.len(), 5);
-    assert_eq!(events[0].sequence_num, 3);
-    assert_eq!(events[4].sequence_num, 7);
+    let store = new_local_store().await;
+    shared::test_emit_and_get_events(&store).await;
 }
 
 #[tokio::test]
-async fn get_events_filtered_by_type() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test.db");
-    let store = TursoSessionStore::new_local(&db_path).await.unwrap();
-    let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: "ws1".into(),
-            user_id: "u1".into(),
-            model: "test-model".into(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+async fn pending_signal_round_trip_and_resolution() {
+    let store = new_local_store().await;
+    shared::test_pending_signals(&store).await;
+}
 
-    store
-        .emit_event(
-            session_id.clone(),
-            Event::UserMessage {
-                text: "hello".into(),
-                attachments: vec![],
-            },
-        )
-        .await
-        .unwrap();
-    store
-        .emit_event(
-            session_id.clone(),
-            Event::BrainResponse {
-                text: "hi".into(),
-                model: "test".into(),
-                input_tokens: 1,
-                output_tokens: 1,
-                cost_cents: 1,
-                duration_ms: 1,
-            },
-        )
-        .await
-        .unwrap();
-    store
-        .emit_event(
-            session_id.clone(),
-            Event::UserMessage {
-                text: "bye".into(),
-                attachments: vec![],
-            },
-        )
-        .await
-        .unwrap();
+#[tokio::test]
+async fn fts_search_finds_events() {
+    let store = new_local_store().await;
+    shared::test_event_search(&store).await;
+}
 
-    let events = store
-        .get_events(
-            session_id,
-            EventRange {
-                event_types: Some(vec![EventType::UserMessage]),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+#[tokio::test]
+async fn list_sessions_filters_by_workspace() {
+    let store = new_local_store().await;
+    shared::test_list_sessions_with_filter(&store).await;
+}
 
-    assert_eq!(events.len(), 2);
-    for event in events {
-        assert_eq!(event.event_type, EventType::UserMessage);
-    }
+#[tokio::test]
+async fn update_status_persists_changes() {
+    let store = new_local_store().await;
+    shared::test_session_status_update(&store).await;
+}
+
+#[tokio::test]
+async fn approval_rules_round_trip() {
+    let store = new_local_store().await;
+    shared::test_approval_rules(&store).await;
 }
 
 #[tokio::test]
 async fn wake_finds_checkpoint_and_recent_events() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test.db");
-    let store = TursoSessionStore::new_local(&db_path).await.unwrap();
+    let store = new_local_store().await;
     let session_id = store
         .create_session(SessionMeta {
             workspace_id: "ws1".into(),
@@ -187,7 +67,7 @@ async fn wake_finds_checkpoint_and_recent_events() {
             ..Default::default()
         })
         .await
-        .unwrap();
+        .expect("create session");
 
     for index in 0..5 {
         store
@@ -199,7 +79,7 @@ async fn wake_finds_checkpoint_and_recent_events() {
                 },
             )
             .await
-            .unwrap();
+            .expect("emit pre-checkpoint event");
     }
 
     store
@@ -212,7 +92,7 @@ async fn wake_finds_checkpoint_and_recent_events() {
             },
         )
         .await
-        .unwrap();
+        .expect("emit checkpoint");
 
     for index in 0..3 {
         store
@@ -224,10 +104,10 @@ async fn wake_finds_checkpoint_and_recent_events() {
                 },
             )
             .await
-            .unwrap();
+            .expect("emit post-checkpoint event");
     }
 
-    let wake_ctx = store.wake(session_id).await.unwrap();
+    let wake_ctx = store.wake(session_id).await.expect("wake");
     assert_eq!(
         wake_ctx.checkpoint_summary.as_deref(),
         Some("checkpoint summary")
@@ -237,9 +117,7 @@ async fn wake_finds_checkpoint_and_recent_events() {
 
 #[tokio::test]
 async fn wake_without_checkpoint_returns_all_events() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test.db");
-    let store = TursoSessionStore::new_local(&db_path).await.unwrap();
+    let store = new_local_store().await;
     let session_id = store
         .create_session(SessionMeta {
             workspace_id: "ws1".into(),
@@ -248,7 +126,7 @@ async fn wake_without_checkpoint_returns_all_events() {
             ..Default::default()
         })
         .await
-        .unwrap();
+        .expect("create session");
 
     for index in 0..5 {
         store
@@ -260,62 +138,17 @@ async fn wake_without_checkpoint_returns_all_events() {
                 },
             )
             .await
-            .unwrap();
+            .expect("emit event");
     }
 
-    let wake_ctx = store.wake(session_id).await.unwrap();
+    let wake_ctx = store.wake(session_id).await.expect("wake");
     assert!(wake_ctx.checkpoint_summary.is_none());
     assert_eq!(wake_ctx.recent_events.len(), 5);
 }
 
 #[tokio::test]
-async fn pending_signal_round_trip_and_resolution() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test.db");
-    let store = TursoSessionStore::new_local(&db_path).await.unwrap();
-    let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: "ws1".into(),
-            user_id: "u1".into(),
-            model: "test-model".into(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-
-    let signal = PendingSignal::queue_message(
-        session_id.clone(),
-        UserMessage {
-            text: "queued follow-up".into(),
-            attachments: vec![],
-        },
-    )
-    .unwrap();
-
-    let signal_id = store
-        .store_pending_signal(session_id.clone(), signal.clone())
-        .await
-        .unwrap();
-    assert_eq!(signal_id, signal.id);
-
-    let pending = store.get_pending_signals(session_id.clone()).await.unwrap();
-    assert_eq!(pending, vec![signal.clone()]);
-    assert_eq!(pending[0].signal_type, PendingSignalType::QueueMessage);
-    assert_eq!(
-        pending[0].payload,
-        json!({"text":"queued follow-up","attachments":[]})
-    );
-
-    store.resolve_pending_signal(signal_id).await.unwrap();
-    let pending = store.get_pending_signals(session_id).await.unwrap();
-    assert!(pending.is_empty());
-}
-
-#[tokio::test]
 async fn wake_returns_unresolved_pending_signals() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test.db");
-    let store = TursoSessionStore::new_local(&db_path).await.unwrap();
+    let store = new_local_store().await;
     let session_id = store
         .create_session(SessionMeta {
             workspace_id: "ws1".into(),
@@ -324,7 +157,7 @@ async fn wake_returns_unresolved_pending_signals() {
             ..Default::default()
         })
         .await
-        .unwrap();
+        .expect("create session");
 
     let unresolved = PendingSignal::queue_message(
         session_id.clone(),
@@ -333,7 +166,7 @@ async fn wake_returns_unresolved_pending_signals() {
             attachments: vec![],
         },
     )
-    .unwrap();
+    .expect("build unresolved");
     let resolved = PendingSignal::queue_message(
         session_id.clone(),
         UserMessage {
@@ -341,158 +174,57 @@ async fn wake_returns_unresolved_pending_signals() {
             attachments: vec![],
         },
     )
-    .unwrap();
+    .expect("build resolved");
 
     store
         .store_pending_signal(session_id.clone(), unresolved.clone())
         .await
-        .unwrap();
+        .expect("store unresolved");
     let resolved_id = store
         .store_pending_signal(session_id.clone(), resolved)
         .await
-        .unwrap();
-    store.resolve_pending_signal(resolved_id).await.unwrap();
+        .expect("store resolved");
+    store
+        .resolve_pending_signal(resolved_id)
+        .await
+        .expect("resolve signal");
 
-    let wake_ctx = store.wake(session_id).await.unwrap();
+    let wake_ctx = store.wake(session_id).await.expect("wake");
     assert_eq!(wake_ctx.pending_signals, vec![unresolved]);
 }
 
 #[tokio::test]
-async fn fts_search_finds_events() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test.db");
-    let store = TursoSessionStore::new_local(&db_path).await.unwrap();
-    let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: "ws1".into(),
-            user_id: "u1".into(),
-            model: "test-model".into(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-
-    store
-        .emit_event(
-            session_id,
-            Event::UserMessage {
-                text: "Fix the OAuth refresh token bug".into(),
-                attachments: vec![],
-            },
-        )
-        .await
-        .unwrap();
-
-    let results = store
-        .search_events("OAuth refresh", EventFilter::default())
-        .await
-        .unwrap();
-    assert!(!results.is_empty());
-    assert!(matches!(
-        &results[0].event,
-        Event::UserMessage { text, .. } if text.contains("OAuth")
-    ));
-}
-
-#[tokio::test]
-async fn fts_search_handles_hyphenated_queries() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test.db");
-    let store = TursoSessionStore::new_local(&db_path).await.unwrap();
-    let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: "ws1".into(),
-            user_id: "u1".into(),
-            model: "test-model".into(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-
-    store
-        .emit_event(
-            session_id,
-            Event::UserMessage {
-                text: "Debug the refresh-token rotation failure".into(),
-                attachments: vec![],
-            },
-        )
-        .await
-        .unwrap();
-
-    let results = store
-        .search_events("refresh-token", EventFilter::default())
-        .await
-        .unwrap();
-    assert_eq!(results.len(), 1);
-    assert!(matches!(
-        &results[0].event,
-        Event::UserMessage { text, .. } if text.contains("refresh-token")
-    ));
-}
-
-#[tokio::test]
-async fn list_sessions_filters_by_workspace() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test.db");
-    let store = TursoSessionStore::new_local(&db_path).await.unwrap();
-
-    store
-        .create_session(SessionMeta {
-            workspace_id: "ws1".into(),
-            user_id: "u1".into(),
-            model: "test-model".into(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    store
-        .create_session(SessionMeta {
-            workspace_id: "ws2".into(),
-            user_id: "u1".into(),
-            model: "test-model".into(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-
-    let ws1_sessions = store
-        .list_sessions(SessionFilter {
-            workspace_id: Some("ws1".into()),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    assert_eq!(ws1_sessions.len(), 1);
-    assert_eq!(ws1_sessions[0].workspace_id, "ws1".into());
-}
-
-#[tokio::test]
 async fn schema_is_idempotent() {
-    let dir = tempdir().unwrap();
+    let dir = tempdir().expect("tempdir");
     let db_path = dir.path().join("test.db");
-    let _store1 = TursoSessionStore::new_local(&db_path).await.unwrap();
-    let _store2 = TursoSessionStore::new_local(&db_path).await.unwrap();
+    let _store1 = TursoSessionStore::new_local(&db_path)
+        .await
+        .expect("first store");
+    let _store2 = TursoSessionStore::new_local(&db_path)
+        .await
+        .expect("second store");
 }
 
 #[tokio::test]
 async fn from_config_uses_local_store_when_cloud_sync_is_disabled() {
-    let dir = tempdir().unwrap();
+    let dir = tempdir().expect("tempdir");
     let mut config = MoaConfig::default();
-    config.local.session_db = dir.path().join("sessions.db").display().to_string();
+    config.database.url = dir.path().join("sessions.db").display().to_string();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     config.cloud.enabled = false;
     config.cloud.turso_url = Some("libsql://example.turso.io".to_string());
 
-    let store = TursoSessionStore::from_config(&config).await.unwrap();
+    let store = TursoSessionStore::from_config(&config)
+        .await
+        .expect("store from config");
     assert!(!store.cloud_sync_enabled());
 }
 
 #[tokio::test]
 async fn cloud_sync_requires_file_backed_session_db() {
     let mut config = MoaConfig::default();
-    config.local.session_db = ":memory:".to_string();
+    config.database.url = ":memory:".to_string();
     config.cloud.enabled = true;
     config.cloud.turso_url = Some("libsql://example.turso.io".to_string());
     unsafe {
@@ -507,26 +239,19 @@ async fn cloud_sync_requires_file_backed_session_db() {
 }
 
 #[tokio::test]
-async fn update_status_persists_changes() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test.db");
-    let store = TursoSessionStore::new_local(&db_path).await.unwrap();
-    let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: "ws1".into(),
-            user_id: "u1".into(),
-            model: "test-model".into(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+async fn legacy_local_session_db_alias_is_resolved_into_database_url() {
+    let dir = tempdir().expect("tempdir");
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "[local]\nsession_db = \"{}\"\n",
+            dir.path().join("legacy.db").display()
+        ),
+    )
+    .expect("write config");
 
-    store
-        .update_status(session_id.clone(), SessionStatus::Completed)
-        .await
-        .unwrap();
-
-    let session = store.get_session(session_id).await.unwrap();
-    assert_eq!(session.status, SessionStatus::Completed);
-    assert!(session.completed_at.is_some());
+    let config = MoaConfig::load_from_path(&config_path).expect("load config");
+    assert!(config.local.session_db.ends_with("legacy.db"));
+    assert!(config.database.url.ends_with("legacy.db"));
 }

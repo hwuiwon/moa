@@ -26,7 +26,7 @@ use moa_memory::FileMemoryStore;
 use moa_providers::build_provider_from_config;
 use moa_providers::resolve_provider_selection;
 #[cfg(test)]
-use moa_session::TursoSessionStore;
+use moa_session::create_session_store;
 
 /// Stateful local chat runtime that owns the active session selection.
 #[derive(Clone)]
@@ -1341,11 +1341,11 @@ impl ChatRuntime {
         tokio::fs::create_dir_all(&base).await?;
 
         let mut config = MoaConfig::default();
-        config.local.session_db = base.join("sessions.db").display().to_string();
+        config.database.url = base.join("sessions.db").display().to_string();
         config.local.memory_dir = base.join("memory").display().to_string();
         config.local.sandbox_dir = base.join("sandbox").display().to_string();
 
-        let session_store = Arc::new(TursoSessionStore::from_config(&config).await?);
+        let session_store = create_session_store(&config).await?;
         let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
         let tool_router = Arc::new(
             ToolRouter::from_config(&config, memory_store.clone())
