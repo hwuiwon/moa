@@ -1,26 +1,31 @@
 //! Stage 5: memory retrieval and prompt injection.
 
-use moa_core::{ContextProcessor, Event, EventRecord, ProcessorOutput, Result, WorkingContext};
-use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
-pub(crate) const MEMORY_STAGE_DATA_METADATA_KEY: &str = "moa.pipeline.memory_stage_data";
+use async_trait::async_trait;
+use moa_core::{
+    ContextProcessor, Event, EventRange, EventRecord, MemoryScope, MemoryStore, ProcessorOutput,
+    Result, SessionStore, WorkingContext,
+};
+
 const MEMORY_BUDGET_DIVISOR: usize = 5;
+const MEMORY_RESULTS_PER_SCOPE: usize = 2;
 const MIN_PAGE_EXCERPT_TOKENS: usize = 96;
 
-/// Preloaded memory data fetched asynchronously before the stage runs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub(crate) struct PreloadedMemoryStageData {
+/// In-memory stage data fetched during processing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct MemoryStageData {
     /// Truncated user-scoped `MEMORY.md`.
-    pub user_index: String,
+    user_index: String,
     /// Truncated workspace-scoped `MEMORY.md`.
-    pub workspace_index: String,
+    workspace_index: String,
     /// Relevant retrieved pages for the current turn.
-    pub relevant_pages: Vec<RelevantMemoryPage>,
+    relevant_pages: Vec<RelevantMemoryPage>,
 }
 
 /// Single retrieved page snippet prepared for Stage 5 formatting.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RelevantMemoryPage {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RelevantMemoryPage {
     /// Scope label used in prompt formatting.
     pub scope_label: String,
     /// Logical page path.
@@ -32,9 +37,74 @@ pub(crate) struct RelevantMemoryPage {
 }
 
 /// Injects scoped memory indexes and relevant page snippets.
-#[derive(Debug, Default)]
-pub struct MemoryRetriever;
+pub struct MemoryRetriever {
+    memory_store: Arc<dyn MemoryStore>,
+    session_store: Arc<dyn SessionStore>,
+}
 
+impl MemoryRetriever {
+    /// Creates a memory retriever backed by memory and session stores.
+    pub fn new(memory_store: Arc<dyn MemoryStore>, session_store: Arc<dyn SessionStore>) -> Self {
+        Self {
+            memory_store,
+            session_store,
+        }
+    }
+
+    async fn load_stage_data(&self, ctx: &WorkingContext) -> Result<MemoryStageData> {
+        let user_scope = MemoryScope::User(ctx.user_id.clone());
+        let workspace_scope = MemoryScope::Workspace(ctx.workspace_id.clone());
+        let user_index = self.memory_store.get_index(user_scope.clone()).await?;
+        let workspace_index = self.memory_store.get_index(workspace_scope.clone()).await?;
+        let events = self
+            .session_store
+            .get_events(ctx.session_id.clone(), EventRange::all())
+            .await?;
+        let mut relevant_pages = Vec::new();
+
+        if let Some(query) = extract_search_query(&events) {
+            for scope in [user_scope, workspace_scope] {
+                let results = self
+                    .memory_store
+                    .search(&query, scope, MEMORY_RESULTS_PER_SCOPE)
+                    .await?;
+                for result in results {
+                    let result_scope = result.scope.clone();
+                    let excerpt = match self
+                        .memory_store
+                        .read_page(result_scope.clone(), &result.path)
+                        .await
+                    {
+                        Ok(page) => page.content,
+                        Err(error) => {
+                            tracing::debug!(
+                                path = %result.path,
+                                scope = %scope_label_for(&result_scope),
+                                error = %error,
+                                "falling back to memory search snippet after read failure"
+                            );
+                            result.snippet.clone()
+                        }
+                    };
+                    relevant_pages.push(RelevantMemoryPage {
+                        scope_label: scope_label_for(&result_scope),
+                        path: result.path.to_string(),
+                        title: result.title,
+                        excerpt,
+                    });
+                }
+            }
+        }
+
+        Ok(MemoryStageData {
+            user_index,
+            workspace_index,
+            relevant_pages,
+        })
+    }
+}
+
+#[async_trait]
 impl ContextProcessor for MemoryRetriever {
     fn name(&self) -> &str {
         "memory"
@@ -44,8 +114,8 @@ impl ContextProcessor for MemoryRetriever {
         5
     }
 
-    fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
-        let data = load_preloaded_memory(ctx)?;
+    async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+        let data = self.load_stage_data(ctx).await?;
         let tokens_before = ctx.token_count;
         let mut items_included = Vec::new();
 
@@ -134,13 +204,6 @@ pub(crate) fn extract_search_keywords(text: &str) -> Vec<String> {
     keywords
 }
 
-pub(crate) fn load_preloaded_memory(ctx: &WorkingContext) -> Result<PreloadedMemoryStageData> {
-    match ctx.metadata.get(MEMORY_STAGE_DATA_METADATA_KEY) {
-        Some(value) => serde_json::from_value(value.clone()).map_err(Into::into),
-        None => Ok(PreloadedMemoryStageData::default()),
-    }
-}
-
 fn truncate_excerpt(excerpt: &str, max_tokens: usize) -> String {
     let max_chars = max_tokens.saturating_mul(4);
     if excerpt.chars().count() <= max_chars {
@@ -152,20 +215,162 @@ fn truncate_excerpt(excerpt: &str, max_tokens: usize) -> String {
     truncated
 }
 
+fn scope_label_for(scope: &MemoryScope) -> String {
+    match scope {
+        MemoryScope::User(_) => "user".to_string(),
+        MemoryScope::Workspace(_) => "workspace".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use chrono::Utc;
     use moa_core::{
-        ContextProcessor, ModelCapabilities, Platform, SessionId, SessionMeta, TokenPricing,
-        ToolCallFormat, UserId, WorkspaceId,
+        ContextProcessor, Event, EventFilter, EventRange, EventRecord, MemoryPath, MemoryScope,
+        MemorySearchResult, MemoryStore, ModelCapabilities, PageSummary, PageType, Platform,
+        Result, SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
+        SessionSummary, TokenPricing, ToolCallFormat, UserId, WikiPage, WorkspaceId,
     };
+    use tokio::sync::Mutex;
 
-    use super::{
-        MEMORY_STAGE_DATA_METADATA_KEY, MemoryRetriever, PreloadedMemoryStageData,
-        RelevantMemoryPage, extract_search_keywords,
-    };
+    use super::{MemoryRetriever, extract_search_keywords};
 
-    #[test]
-    fn memory_retriever_loads_preloaded_indexes_and_results() {
+    #[derive(Clone)]
+    struct StubSessionStore {
+        session: Arc<Mutex<SessionMeta>>,
+        events: Arc<Mutex<Vec<EventRecord>>>,
+    }
+
+    impl StubSessionStore {
+        fn new(session: SessionMeta, events: Vec<EventRecord>) -> Self {
+            Self {
+                session: Arc::new(Mutex::new(session)),
+                events: Arc::new(Mutex::new(events)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SessionStore for StubSessionStore {
+        async fn create_session(&self, meta: SessionMeta) -> Result<SessionId> {
+            let id = meta.id.clone();
+            *self.session.lock().await = meta;
+            Ok(id)
+        }
+
+        async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<SequenceNum> {
+            let mut events = self.events.lock().await;
+            let sequence_num = events.len() as SequenceNum;
+            events.push(EventRecord {
+                id: uuid::Uuid::new_v4(),
+                session_id,
+                sequence_num,
+                event_type: event.event_type(),
+                event,
+                timestamp: Utc::now(),
+                brain_id: None,
+                hand_id: None,
+                token_count: None,
+            });
+            Ok(sequence_num)
+        }
+
+        async fn get_events(
+            &self,
+            _session_id: SessionId,
+            _range: EventRange,
+        ) -> Result<Vec<EventRecord>> {
+            Ok(self.events.lock().await.clone())
+        }
+
+        async fn get_session(&self, _session_id: SessionId) -> Result<SessionMeta> {
+            Ok(self.session.lock().await.clone())
+        }
+
+        async fn update_status(&self, _session_id: SessionId, status: SessionStatus) -> Result<()> {
+            self.session.lock().await.status = status;
+            Ok(())
+        }
+
+        async fn search_events(
+            &self,
+            _query: &str,
+            _filter: EventFilter,
+        ) -> Result<Vec<EventRecord>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_sessions(&self, _filter: SessionFilter) -> Result<Vec<SessionSummary>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Clone)]
+    struct StubMemoryStore {
+        page_by_scope: HashMap<(String, String), WikiPage>,
+        user_results: Vec<MemorySearchResult>,
+        workspace_results: Vec<MemorySearchResult>,
+    }
+
+    #[async_trait]
+    impl MemoryStore for StubMemoryStore {
+        async fn search(
+            &self,
+            _query: &str,
+            scope: MemoryScope,
+            _limit: usize,
+        ) -> Result<Vec<MemorySearchResult>> {
+            Ok(match scope {
+                MemoryScope::User(_) => self.user_results.clone(),
+                MemoryScope::Workspace(_) => self.workspace_results.clone(),
+            })
+        }
+
+        async fn read_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
+            self.page_by_scope
+                .get(&(super::scope_label_for(&scope), path.as_str().to_string()))
+                .cloned()
+                .ok_or_else(|| {
+                    moa_core::MoaError::StorageError(format!("mock page not found: {}", path))
+                })
+        }
+
+        async fn write_page(
+            &self,
+            _scope: MemoryScope,
+            _path: &MemoryPath,
+            _page: WikiPage,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list_pages(
+            &self,
+            _scope: MemoryScope,
+            _filter: Option<PageType>,
+        ) -> Result<Vec<PageSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_index(&self, scope: MemoryScope) -> Result<String> {
+            Ok(format!("{} memory", super::scope_label_for(&scope)))
+        }
+
+        async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_retriever_loads_indexes_and_results_directly() {
         let session = SessionMeta {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
@@ -190,22 +395,61 @@ mod tests {
             },
         };
         let mut ctx = moa_core::WorkingContext::new(&session, capabilities);
-        ctx.metadata.insert(
-            MEMORY_STAGE_DATA_METADATA_KEY.to_string(),
-            serde_json::to_value(PreloadedMemoryStageData {
-                user_index: "User prefers concise responses.".to_string(),
-                workspace_index: "Workspace uses Rust and libsql.".to_string(),
-                relevant_pages: vec![RelevantMemoryPage {
-                    scope_label: "workspace".to_string(),
-                    path: "topics/storage.md".to_string(),
+        let shared_path = MemoryPath::new("topics/storage.md");
+        let memory_store = StubMemoryStore {
+            page_by_scope: HashMap::from([(
+                ("workspace".to_string(), shared_path.as_str().to_string()),
+                WikiPage {
+                    path: Some(shared_path.clone()),
                     title: "Storage".to_string(),
-                    excerpt: "Use libsql for durable session state.".to_string(),
-                }],
-            })
-            .unwrap(),
+                    page_type: PageType::Topic,
+                    content: "Use libsql for durable session state.".to_string(),
+                    created: Utc::now(),
+                    updated: Utc::now(),
+                    confidence: moa_core::ConfidenceLevel::High,
+                    related: Vec::new(),
+                    sources: Vec::new(),
+                    tags: Vec::new(),
+                    auto_generated: false,
+                    last_referenced: Utc::now(),
+                    reference_count: 0,
+                    metadata: HashMap::new(),
+                },
+            )]),
+            user_results: Vec::new(),
+            workspace_results: vec![MemorySearchResult {
+                scope: MemoryScope::Workspace(session.workspace_id.clone()),
+                path: shared_path,
+                title: "Storage".to_string(),
+                page_type: PageType::Topic,
+                snippet: "storage snippet".to_string(),
+                confidence: moa_core::ConfidenceLevel::High,
+                updated: Utc::now(),
+                reference_count: 0,
+            }],
+        };
+        let session_store = StubSessionStore::new(
+            session.clone(),
+            vec![EventRecord {
+                id: uuid::Uuid::new_v4(),
+                session_id: session.id.clone(),
+                sequence_num: 0,
+                event_type: moa_core::EventType::UserMessage,
+                event: Event::UserMessage {
+                    text: "How do we store durable session state?".to_string(),
+                    attachments: Vec::new(),
+                },
+                timestamp: Utc::now(),
+                brain_id: None,
+                hand_id: None,
+                token_count: None,
+            }],
         );
 
-        let output = MemoryRetriever.process(&mut ctx).unwrap();
+        let output = MemoryRetriever::new(Arc::new(memory_store), Arc::new(session_store))
+            .process(&mut ctx)
+            .await
+            .unwrap();
 
         assert_eq!(ctx.messages.len(), 3);
         assert!(ctx.messages[0].content.contains("<user_memory>"));

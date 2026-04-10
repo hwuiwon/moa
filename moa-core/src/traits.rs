@@ -161,6 +161,7 @@ pub trait MemoryStore: Send + Sync {
 }
 
 /// Single stage in the context compilation pipeline.
+#[async_trait]
 pub trait ContextProcessor: Send + Sync {
     /// Returns the processor name.
     fn name(&self) -> &str;
@@ -169,7 +170,7 @@ pub trait ContextProcessor: Send + Sync {
     fn stage(&self) -> u8;
 
     /// Processes and mutates the working context.
-    fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput>;
+    async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput>;
 }
 
 /// Secure credential storage abstraction.

@@ -1,5 +1,6 @@
 //! Stage 3: serializes the fixed tool loadout for the session.
 
+use async_trait::async_trait;
 use moa_core::{ContextProcessor, ProcessorOutput, Result, WorkingContext};
 use serde_json::Value;
 
@@ -18,6 +19,7 @@ impl ToolDefinitionProcessor {
     }
 }
 
+#[async_trait]
 impl ContextProcessor for ToolDefinitionProcessor {
     fn name(&self) -> &str {
         "tools"
@@ -27,7 +29,7 @@ impl ContextProcessor for ToolDefinitionProcessor {
         3
     }
 
-    fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+    async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
         let mut tool_schemas = self.tool_schemas.clone();
         for schema in &mut tool_schemas {
             sort_json_keys(schema);
@@ -64,8 +66,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn tool_processor_serializes_tool_schemas() {
+    #[tokio::test]
+    async fn tool_processor_serializes_tool_schemas() {
         let session = SessionMeta {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
@@ -102,6 +104,7 @@ mod tests {
             }
         })])
         .process(&mut ctx)
+        .await
         .unwrap();
 
         assert_eq!(ctx.metadata["tool_schemas"][0]["name"], "bash");
