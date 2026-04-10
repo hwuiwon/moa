@@ -5,6 +5,7 @@ mod common;
 mod factory;
 pub mod openai;
 pub mod openrouter;
+mod schema;
 
 pub use anthropic::AnthropicProvider;
 pub use factory::{

@@ -9,22 +9,25 @@ use async_openai::config::OpenAIConfig;
 use async_openai::error::OpenAIError;
 use async_openai::types::responses::ReasoningEffort;
 use async_openai::types::responses::{
-    CreateResponse, EasyInputContent, EasyInputMessage, FunctionTool, FunctionToolCall, InputItem,
-    InputParam, OutputItem, OutputMessageContent, Reasoning, Response, ResponseStream,
-    ResponseStreamEvent, Role as OpenAiRole, Status as OpenAiStatus, Tool, ToolChoiceOptions,
-    ToolChoiceParam,
+    CreateResponse, EasyInputContent, EasyInputMessage, FunctionCallOutput,
+    FunctionCallOutputItemParam, FunctionTool, FunctionToolCall, InputContent, InputItem,
+    InputParam, InputTextContent, Item, OutputItem, OutputMessageContent, Reasoning, Response,
+    ResponseStream, ResponseStreamEvent, Role as OpenAiRole, Status as OpenAiStatus, Tool,
+    ToolChoiceOptions, ToolChoiceParam,
 };
 use eventsource_stream::Event as SseEvent;
 use futures_util::StreamExt;
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, MessageRole,
-    StopReason, ToolInvocation,
+    StopReason, ToolContent, ToolInvocation,
 };
 use moa_core::{MoaError, Result};
 use reqwest::{Client, RequestBuilder, Response as HttpResponse, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::mpsc;
+
+use crate::schema::compile_for_openai_strict;
 
 const INITIAL_RETRY_DELAY_MS: u64 = 250;
 const OPENAI_METADATA_VALUE_LIMIT: usize = 512;
@@ -126,6 +129,33 @@ pub(crate) fn build_responses_request(
     for message in &request.messages {
         if message.role == MessageRole::System {
             instructions.push(message.content.clone());
+            continue;
+        }
+
+        if let Some(invocation) = message.tool_invocation.as_ref() {
+            input_items.push(InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                arguments: serde_json::to_string(&invocation.input).map_err(MoaError::from)?,
+                call_id: invocation
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| "unknown_tool_call".to_string()),
+                namespace: None,
+                name: invocation.name.clone(),
+                id: invocation.id.clone(),
+                status: None,
+            })));
+            continue;
+        }
+
+        if let Some(call_id) = message.tool_use_id.as_ref() {
+            input_items.push(InputItem::Item(Item::FunctionCallOutput(
+                FunctionCallOutputItemParam {
+                    call_id: call_id.clone(),
+                    output: openai_tool_result_output(message),
+                    id: None,
+                    status: None,
+                },
+            )));
             continue;
         }
 
@@ -484,20 +514,24 @@ fn responses_role(message: &ContextMessage) -> OpenAiRole {
 }
 
 fn openai_tool_from_schema(schema: &Value) -> Result<Tool> {
-    if let Some(function) = schema.get("function").and_then(Value::as_object) {
+    let compiled = compile_for_openai_strict(schema);
+
+    if let Some(function) = compiled.get("function").and_then(Value::as_object) {
         return build_function_tool(
             function.get("name"),
             function.get("description"),
             function.get("parameters"),
+            true,
         );
     }
 
     build_function_tool(
-        schema.get("name"),
-        schema.get("description"),
-        schema
+        compiled.get("name"),
+        compiled.get("description"),
+        compiled
             .get("parameters")
-            .or_else(|| schema.get("input_schema")),
+            .or_else(|| compiled.get("input_schema")),
+        true,
     )
 }
 
@@ -505,6 +539,7 @@ fn build_function_tool(
     name: Option<&Value>,
     description: Option<&Value>,
     parameters: Option<&Value>,
+    strict: bool,
 ) -> Result<Tool> {
     let name = name
         .and_then(Value::as_str)
@@ -521,10 +556,29 @@ fn build_function_tool(
                 .cloned()
                 .unwrap_or_else(|| Value::Object(Default::default())),
         ),
-        strict: Some(false),
+        strict: Some(strict),
         description,
         defer_loading: None,
     }))
+}
+
+fn openai_tool_result_output(message: &ContextMessage) -> FunctionCallOutput {
+    match message.content_blocks.as_ref() {
+        Some(blocks) if !blocks.is_empty() => FunctionCallOutput::Content(
+            blocks
+                .iter()
+                .map(|block| {
+                    InputContent::InputText(InputTextContent {
+                        text: match block {
+                            ToolContent::Text { text } => text.clone(),
+                            ToolContent::Json { data } => data.to_string(),
+                        },
+                    })
+                })
+                .collect(),
+        ),
+        _ => FunctionCallOutput::Text(message.content.clone()),
+    }
 }
 
 fn parse_tool_arguments(arguments: &str) -> Result<Value> {

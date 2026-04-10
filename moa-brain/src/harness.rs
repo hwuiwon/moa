@@ -545,6 +545,7 @@ async fn handle_tool_call(
             session_id,
             Event::ToolCall {
                 tool_id,
+                provider_tool_use_id: call.id.clone(),
                 tool_name: call.name.clone(),
                 input: call.input.clone(),
                 hand_id: None,
@@ -589,6 +590,7 @@ async fn handle_tool_call(
                 session_id.clone(),
                 Event::ToolCall {
                     tool_id,
+                    provider_tool_use_id: call.id.clone(),
                     tool_name: call.name.clone(),
                     input: call.input.clone(),
                     hand_id: None,
@@ -623,6 +625,7 @@ async fn handle_tool_call(
                 session_id.clone(),
                 Event::ToolCall {
                     tool_id,
+                    provider_tool_use_id: call.id.clone(),
                     tool_name: call.name.clone(),
                     input: call.input.clone(),
                     hand_id: None,
@@ -1194,6 +1197,7 @@ async fn execute_tool(
                     session_id.clone(),
                     Event::ToolCall {
                         tool_id,
+                        provider_tool_use_id: call.id.clone(),
                         tool_name: call.name.clone(),
                         input: call.input.clone(),
                         hand_id: resolved_hand_id,
@@ -1217,6 +1221,7 @@ async fn execute_tool(
                 session_id,
                 Event::ToolResult {
                     tool_id,
+                    provider_tool_use_id: call.id.clone(),
                     output: output.clone(),
                     success: !output.is_error,
                     duration_ms: output.duration.as_millis() as u64,

@@ -1864,7 +1864,17 @@ pub struct ContextMessage {
     /// Text content.
     pub content: String,
     /// Optional attached tool schema payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Value>,
+    /// Structured content blocks for providers that support them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_blocks: Option<Vec<ToolContent>>,
+    /// Structured assistant tool call for providers that support native tool-use history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_invocation: Option<ToolInvocation>,
+    /// Provider-specific tool use identifier for tool result messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
 }
 
 impl ContextMessage {
@@ -1874,6 +1884,9 @@ impl ContextMessage {
             role: MessageRole::System,
             content: content.into(),
             tools: None,
+            content_blocks: None,
+            tool_invocation: None,
+            tool_use_id: None,
         }
     }
 
@@ -1883,6 +1896,9 @@ impl ContextMessage {
             role: MessageRole::User,
             content: content.into(),
             tools: None,
+            content_blocks: None,
+            tool_invocation: None,
+            tool_use_id: None,
         }
     }
 
@@ -1892,6 +1908,9 @@ impl ContextMessage {
             role: MessageRole::Assistant,
             content: content.into(),
             tools: None,
+            content_blocks: None,
+            tool_invocation: None,
+            tool_use_id: None,
         }
     }
 
@@ -1901,6 +1920,37 @@ impl ContextMessage {
             role: MessageRole::Tool,
             content: content.into(),
             tools: None,
+            content_blocks: None,
+            tool_invocation: None,
+            tool_use_id: None,
+        }
+    }
+
+    /// Creates an assistant tool-call message with both text fallback and structured invocation.
+    pub fn assistant_tool_call(invocation: ToolInvocation, content: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::Assistant,
+            content: content.into(),
+            tools: None,
+            content_blocks: None,
+            tool_invocation: Some(invocation),
+            tool_use_id: None,
+        }
+    }
+
+    /// Creates a tool result message with both text fallback and structured blocks.
+    pub fn tool_result(
+        tool_use_id: impl Into<String>,
+        content: impl Into<String>,
+        content_blocks: Option<Vec<ToolContent>>,
+    ) -> Self {
+        Self {
+            role: MessageRole::Tool,
+            content: content.into(),
+            tools: None,
+            content_blocks,
+            tool_invocation: None,
+            tool_use_id: Some(tool_use_id.into()),
         }
     }
 }
@@ -2150,6 +2200,56 @@ mod tests {
 
         assert!(output.is_error);
         assert_eq!(output.to_text(), "failed");
+    }
+
+    #[test]
+    fn context_message_tool_result_preserves_text_and_blocks() {
+        let message = ContextMessage::tool_result(
+            "toolu_123",
+            "<untrusted_tool_output>\nhello\n</untrusted_tool_output>",
+            Some(vec![ToolContent::Text {
+                text: "hello".to_string(),
+            }]),
+        );
+
+        assert_eq!(message.role, MessageRole::Tool);
+        assert_eq!(message.tool_use_id.as_deref(), Some("toolu_123"));
+        assert_eq!(
+            message.content_blocks,
+            Some(vec![ToolContent::Text {
+                text: "hello".to_string()
+            }])
+        );
+        assert!(message.content.contains("<untrusted_tool_output>"));
+    }
+
+    #[test]
+    fn context_message_tool_still_defaults_to_text_only() {
+        let message = ContextMessage::tool("plain text");
+
+        assert_eq!(message.role, MessageRole::Tool);
+        assert_eq!(message.content, "plain text");
+        assert!(message.content_blocks.is_none());
+        assert!(message.tool_invocation.is_none());
+        assert!(message.tool_use_id.is_none());
+    }
+
+    #[test]
+    fn context_message_assistant_tool_call_preserves_invocation() {
+        let invocation = ToolInvocation {
+            id: Some("toolu_123".to_string()),
+            name: "bash".to_string(),
+            input: serde_json::json!({ "cmd": "pwd" }),
+        };
+        let message = ContextMessage::assistant_tool_call(
+            invocation.clone(),
+            "<tool_call name=\"bash\">{\"cmd\":\"pwd\"}</tool_call>",
+        );
+
+        assert_eq!(message.role, MessageRole::Assistant);
+        assert_eq!(message.tool_invocation, Some(invocation));
+        assert!(message.content_blocks.is_none());
+        assert!(message.tool_use_id.is_none());
     }
 
     #[test]

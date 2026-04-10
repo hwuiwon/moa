@@ -130,13 +130,26 @@ fn event_to_context_message(record: &EventRecord) -> Option<Result<ContextMessag
         Event::QueuedMessage { text, .. } => Some(Ok(ContextMessage::user(text.clone()))),
         Event::BrainResponse { text, .. } => Some(Ok(ContextMessage::assistant(text.clone()))),
         Event::ToolCall {
-            tool_name, input, ..
+            tool_id,
+            provider_tool_use_id,
+            tool_name,
+            input,
+            ..
         } => Some(
             serde_json::to_string(input)
                 .map(|serialized| {
-                    ContextMessage::assistant(format!(
-                        "<tool_call name=\"{tool_name}\">{serialized}</tool_call>"
-                    ))
+                    ContextMessage::assistant_tool_call(
+                        moa_core::ToolInvocation {
+                            id: Some(
+                                provider_tool_use_id
+                                    .clone()
+                                    .unwrap_or_else(|| tool_id.to_string()),
+                            ),
+                            name: tool_name.clone(),
+                            input: input.clone(),
+                        },
+                        format!("<tool_call name=\"{tool_name}\">{serialized}</tool_call>"),
+                    )
                 })
                 .map_err(Into::into),
         ),
@@ -144,11 +157,18 @@ fn event_to_context_message(record: &EventRecord) -> Option<Result<ContextMessag
             output,
             success,
             tool_id,
+            provider_tool_use_id,
             ..
-        } => Some(Ok(ContextMessage::tool(format!(
-            "<tool_result id=\"{tool_id}\" success=\"{success}\">\n{}\n</tool_result>",
-            wrap_untrusted_tool_output(&output.to_text())
-        )))),
+        } => Some(Ok(ContextMessage::tool_result(
+            provider_tool_use_id
+                .clone()
+                .unwrap_or_else(|| tool_id.to_string()),
+            format!(
+                "<tool_result id=\"{tool_id}\" success=\"{success}\">\n{}\n</tool_result>",
+                wrap_untrusted_tool_output(&output.to_text())
+            ),
+            Some(output.content.clone()),
+        ))),
         Event::ToolError { error, tool_id, .. } => Some(Ok(ContextMessage::tool(format!(
             "<tool_error id=\"{tool_id}\">{error}</tool_error>"
         )))),
@@ -343,6 +363,92 @@ mod tests {
         assert_eq!(messages[1].role, moa_core::MessageRole::Assistant);
         assert_eq!(messages[1].content, "Hi there");
         assert!(tokens_added > 0);
+    }
+
+    #[test]
+    fn history_compiler_preserves_structured_tool_result_blocks() {
+        let session = SessionMeta {
+            id: SessionId::new(),
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Tui,
+            model: "claude-sonnet-4-6".to_string(),
+            ..SessionMeta::default()
+        };
+        let tool_id = uuid::Uuid::new_v4();
+        let events = vec![event_record(
+            &session.id,
+            0,
+            Event::ToolResult {
+                tool_id,
+                provider_tool_use_id: Some("toolu_history".to_string()),
+                output: moa_core::ToolOutput::json(
+                    "1 result",
+                    serde_json::json!({ "matches": ["notes/today.md"] }),
+                    std::time::Duration::from_millis(7),
+                ),
+                success: true,
+                duration_ms: 7,
+            },
+        )];
+        let compiler = HistoryCompiler::new(Arc::new(MockSessionStore::new(
+            session.clone(),
+            events.clone(),
+        )));
+
+        let (messages, _) = compiler.compile_messages(&events, 1_000).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tool_use_id.as_deref(), Some("toolu_history"));
+        assert!(messages[0].content.contains("<tool_result"));
+        assert_eq!(messages[0].content_blocks.as_ref().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn history_compiler_preserves_structured_tool_call_invocation() {
+        let session = SessionMeta {
+            id: SessionId::new(),
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Tui,
+            model: "claude-sonnet-4-6".to_string(),
+            ..SessionMeta::default()
+        };
+        let tool_id = uuid::Uuid::new_v4();
+        let events = vec![event_record(
+            &session.id,
+            0,
+            Event::ToolCall {
+                tool_id,
+                provider_tool_use_id: Some("toolu_history_call".to_string()),
+                tool_name: "bash".to_string(),
+                input: serde_json::json!({ "cmd": "pwd" }),
+                hand_id: None,
+            },
+        )];
+        let compiler = HistoryCompiler::new(Arc::new(MockSessionStore::new(
+            session.clone(),
+            events.clone(),
+        )));
+
+        let (messages, _) = compiler.compile_messages(&events, 1_000).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0]
+                .tool_invocation
+                .as_ref()
+                .and_then(|invocation| invocation.id.as_deref()),
+            Some("toolu_history_call")
+        );
+        assert_eq!(
+            messages[0]
+                .tool_invocation
+                .as_ref()
+                .map(|invocation| invocation.name.as_str()),
+            Some("bash")
+        );
+        assert!(messages[0].content.contains("<tool_call"));
     }
 
     #[tokio::test]
