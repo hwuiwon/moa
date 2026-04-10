@@ -1,0 +1,16 @@
+.git
+.github
+.claude
+.omc
+.direnv
+.agents
+.codex
+target
+graphify-out
+sequence
+scripts
+tmp
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/.DS_Store

@@ -2291,7 +2291,7 @@ mod tests {
             let second_session_id = app.active_session_id.clone();
             assert_ne!(first_session_id, second_session_id);
 
-            let store = moa_session::TursoSessionStore::new(&config.local.session_db)
+            let store = moa_session::TursoSessionStore::from_config(&config)
                 .await
                 .expect("session store");
             let request_id = Uuid::new_v4();

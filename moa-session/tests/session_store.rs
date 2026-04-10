@@ -1,6 +1,6 @@
 use moa_core::{
-    Event, EventFilter, EventRange, EventType, SessionFilter, SessionMeta, SessionStatus,
-    SessionStore,
+    Event, EventFilter, EventRange, EventType, MoaConfig, SessionFilter, SessionMeta,
+    SessionStatus, SessionStore,
 };
 use moa_session::TursoSessionStore;
 use tempfile::tempdir;
@@ -305,6 +305,43 @@ async fn fts_search_finds_events() {
 }
 
 #[tokio::test]
+async fn fts_search_handles_hyphenated_queries() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let store = TursoSessionStore::new_local(&db_path).await.unwrap();
+    let session_id = store
+        .create_session(SessionMeta {
+            workspace_id: "ws1".into(),
+            user_id: "u1".into(),
+            model: "test-model".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    store
+        .emit_event(
+            session_id,
+            Event::UserMessage {
+                text: "Debug the refresh-token rotation failure".into(),
+                attachments: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+    let results = store
+        .search_events("refresh-token", EventFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(matches!(
+        &results[0].event,
+        Event::UserMessage { text, .. } if text.contains("refresh-token")
+    ));
+}
+
+#[tokio::test]
 async fn list_sessions_filters_by_workspace() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test.db");
@@ -346,6 +383,37 @@ async fn schema_is_idempotent() {
     let db_path = dir.path().join("test.db");
     let _store1 = TursoSessionStore::new_local(&db_path).await.unwrap();
     let _store2 = TursoSessionStore::new_local(&db_path).await.unwrap();
+}
+
+#[tokio::test]
+async fn from_config_uses_local_store_when_cloud_sync_is_disabled() {
+    let dir = tempdir().unwrap();
+    let mut config = MoaConfig::default();
+    config.local.session_db = dir.path().join("sessions.db").display().to_string();
+    config.local.memory_dir = dir.path().join("memory").display().to_string();
+    config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+    config.cloud.enabled = false;
+    config.cloud.turso_url = Some("libsql://example.turso.io".to_string());
+
+    let store = TursoSessionStore::from_config(&config).await.unwrap();
+    assert!(!store.cloud_sync_enabled());
+}
+
+#[tokio::test]
+async fn cloud_sync_requires_file_backed_session_db() {
+    let mut config = MoaConfig::default();
+    config.local.session_db = ":memory:".to_string();
+    config.cloud.enabled = true;
+    config.cloud.turso_url = Some("libsql://example.turso.io".to_string());
+    unsafe {
+        std::env::set_var("TURSO_AUTH_TOKEN", "test-token");
+    }
+
+    let error = match TursoSessionStore::from_config(&config).await {
+        Ok(_) => panic!("cloud sync should reject in-memory databases"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("file-backed"));
 }
 
 #[tokio::test]

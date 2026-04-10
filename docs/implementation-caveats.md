@@ -1475,3 +1475,75 @@ Remaining caveat:
 
 - Rich local debug logging now requires an explicit code or config change instead of appearing by default on stderr.
 - If we want operator-friendly local debug mode later, it should be an explicit CLI/config switch rather than the default interactive behavior.
+
+### 23.1 Cloud deploy currently runs the local runtime shape with cloud-backed storage
+
+Current state:
+
+- `moa-cli/src/daemon.rs` now exposes a cloud-friendly daemon entrypoint with an HTTP `/health` endpoint and graceful shutdown handling.
+- `Dockerfile`, `fly.toml`, and `.github/workflows/deploy.yml` now build and launch `moa` with the `cloud` feature set and Fly health-check wiring.
+- `moa-session/src/turso.rs` now supports libSQL embedded replicas when `cloud.turso_url` is configured, so local disk remains readable while remote sync is enabled.
+
+Consequence:
+
+- The Step 23 deployment path is now viable for Fly Machines using the existing MOA daemon/runtime.
+- Session persistence can be cloud-backed without changing the higher-level local runtime API.
+
+Remaining caveat:
+
+- This is still the local daemon/runtime shape running in a cloud container, not a dedicated Temporal worker/service topology.
+- A Fly deployment today is effectively "local orchestrator plus cloud-backed session storage" rather than the final independently scaled cloud-brain architecture described in the docs.
+- If we want true cloud-native scaling semantics, the daemon entrypoint should eventually bifurcate into explicit local and cloud worker roles instead of reusing one runtime path for both.
+
+### 23.2 Memory "sync" is currently a configurable shared path, not a distributed file sync layer
+
+Current state:
+
+- `moa-memory/src/lib.rs` now prefers `cloud.memory_dir` when cloud mode is enabled.
+- `moa init` and the deployment assets create/use that cloud memory root when configured.
+
+Consequence:
+
+- A cloud deployment can keep wiki memory on a mounted volume or another shared filesystem path instead of always writing to the local default.
+- The step is unblocked for single-machine or shared-volume Fly deployments.
+
+Remaining caveat:
+
+- There is still no true bidirectional memory sync protocol, object-store replication layer, or Turso-backed file abstraction for wiki content.
+- `moa sync enable` currently upgrades the session/event store into Turso sync, but memory remains dependent on whatever filesystem/storage layer the deployment provides.
+- If multi-machine memory convergence matters, memory sync still needs a real replication design instead of a path switch.
+
+### 23.3 `moa sync enable` validates the session-store path, not the full cloud stack
+
+Current state:
+
+- `moa-cli/src/main.rs` now exposes `moa sync enable`.
+- The command writes cloud sync config only after it can open the embedded replica and perform an initial database sync.
+
+Consequence:
+
+- Local installs can be migrated into Turso-backed session sync without hand-editing config.
+- Misconfiguration around the session database path, Turso URL, or auth token is caught before the config is persisted.
+
+Remaining caveat:
+
+- The command only validates the session-store sync path; it does not validate Fly deployment readiness, memory storage readiness, or platform gateway credentials.
+- On this machine, Temporal/cloud-feature builds require `PROTOC=/opt/homebrew/bin/protoc` because the earlier `~/.local/bin/protoc` in `PATH` is not executable.
+
+### 23.4 Fly deployment requires explicit cloud-hand and provider boot configuration
+
+Current state:
+
+- `Dockerfile` now installs `libprotobuf-dev` in addition to `protobuf-compiler`, which is required for the `cloud` build because `prost-wkt-types` needs the standard Google protobuf include files.
+- `Dockerfile` and `fly.toml` now set `MOA__CLOUD__HANDS__DEFAULT_PROVIDER=local`, so the cloud image can boot without the optional `daytona` or `e2b` features enabled.
+- A live Fly deployment to `moa-brains.fly.dev` succeeded after staging `OPENAI_API_KEY`, `MOA__CLOUD__TURSO_URL`, and `TURSO_AUTH_TOKEN` as Fly secrets.
+
+Consequence:
+
+- The packaged Fly image now builds and starts in the same configuration that passed local Docker validation.
+- The deployed app serves `GET /health` successfully and runs with the mounted Fly volume plus Turso-backed session sync configuration.
+
+Remaining caveat:
+
+- The daemon still constructs the default LLM provider during boot, so health-only startup currently requires a valid provider API key secret even before the first user request.
+- In live validation, a manually stopped machine took roughly 6 seconds to answer the next `/health` request, while a suspended machine resumed in about 1.29 seconds. That is close to, but not consistently below, the sub-second resume target from the step spec.

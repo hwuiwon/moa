@@ -96,10 +96,16 @@ impl MoaConfig {
                 Self::default().observability.otlp_endpoint,
             )?
             .set_default("cloud.enabled", Self::default().cloud.enabled)?
+            .set_default("cloud.turso_url", Self::default().cloud.turso_url.clone())?
             .set_default(
                 "cloud.turso_auth_token_env",
                 Self::default().cloud.turso_auth_token_env.clone(),
             )?
+            .set_default(
+                "cloud.turso_sync_interval_secs",
+                Self::default().cloud.turso_sync_interval_secs as i64,
+            )?
+            .set_default("cloud.memory_dir", Self::default().cloud.memory_dir.clone())?
             .set_default(
                 "cloud.temporal.address",
                 Self::default()
@@ -155,6 +161,30 @@ impl MoaConfig {
                     .flyio
                     .as_ref()
                     .map(|config| config.region.clone()),
+            )?
+            .set_default(
+                "cloud.flyio.internal_port",
+                Self::default()
+                    .cloud
+                    .flyio
+                    .as_ref()
+                    .map(|config| config.internal_port as i64),
+            )?
+            .set_default(
+                "cloud.flyio.health_bind",
+                Self::default()
+                    .cloud
+                    .flyio
+                    .as_ref()
+                    .map(|config| config.health_bind.clone()),
+            )?
+            .set_default(
+                "cloud.flyio.graceful_shutdown_timeout_secs",
+                Self::default()
+                    .cloud
+                    .flyio
+                    .as_ref()
+                    .map(|config| config.graceful_shutdown_timeout_secs as i64),
             )?
             .set_default(
                 "cloud.hands.default_provider",
@@ -431,6 +461,10 @@ pub struct CloudConfig {
     pub turso_url: Option<String>,
     /// Environment variable containing the Turso auth token.
     pub turso_auth_token_env: Option<String>,
+    /// Background embedded-replica sync cadence in seconds.
+    pub turso_sync_interval_secs: u64,
+    /// Optional alternate memory root for cloud deployments.
+    pub memory_dir: Option<String>,
     /// Optional Temporal configuration.
     pub temporal: Option<CloudTemporalConfig>,
     /// Optional Fly.io configuration.
@@ -445,6 +479,8 @@ impl Default for CloudConfig {
             enabled: false,
             turso_url: None,
             turso_auth_token_env: Some("TURSO_AUTH_TOKEN".to_string()),
+            turso_sync_interval_secs: 2,
+            memory_dir: None,
             temporal: Some(CloudTemporalConfig::default()),
             flyio: Some(CloudFlyioConfig::default()),
             hands: Some(CloudHandsConfig::default()),
@@ -487,6 +523,12 @@ pub struct CloudFlyioConfig {
     pub app_name: Option<String>,
     /// Primary region.
     pub region: String,
+    /// Internal HTTP port used for Fly health checks.
+    pub internal_port: u16,
+    /// Interface used by the cloud health endpoint.
+    pub health_bind: String,
+    /// Grace period for active turns to complete after SIGTERM.
+    pub graceful_shutdown_timeout_secs: u64,
 }
 
 impl Default for CloudFlyioConfig {
@@ -495,6 +537,9 @@ impl Default for CloudFlyioConfig {
             api_token_env: Some("FLY_API_TOKEN".to_string()),
             app_name: None,
             region: "iad".to_string(),
+            internal_port: 8080,
+            health_bind: "0.0.0.0".to_string(),
+            graceful_shutdown_timeout_secs: 30,
         }
     }
 }

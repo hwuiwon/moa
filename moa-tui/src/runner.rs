@@ -1335,7 +1335,7 @@ impl ChatRuntime {
         config.local.memory_dir = base.join("memory").display().to_string();
         config.local.sandbox_dir = base.join("sandbox").display().to_string();
 
-        let session_store = Arc::new(TursoSessionStore::new(&config.local.session_db).await?);
+        let session_store = Arc::new(TursoSessionStore::from_config(&config).await?);
         let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
         let tool_router = Arc::new(
             ToolRouter::from_config(&config, memory_store.clone())

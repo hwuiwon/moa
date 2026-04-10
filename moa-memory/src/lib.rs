@@ -50,7 +50,16 @@ impl FileMemoryStore {
 
     /// Creates a file-backed memory store from the local memory config.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
-        let memory_dir = expand_local_path(&config.local.memory_dir)?;
+        let configured_memory_dir = if config.cloud.enabled {
+            config
+                .cloud
+                .memory_dir
+                .as_deref()
+                .unwrap_or(&config.local.memory_dir)
+        } else {
+            &config.local.memory_dir
+        };
+        let memory_dir = expand_local_path(configured_memory_dir)?;
         let base_dir = memory_dir.parent().map(Path::to_path_buf).ok_or_else(|| {
             MoaError::ConfigError("local.memory_dir must have a parent".to_string())
         })?;

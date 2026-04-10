@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+cloud = ["temporal"]
+temporal = ["dep:moa-orchestrator", "moa-orchestrator/temporal"]
+
 [[bin]]
 name = "moa"
 path = "src/main.rs"
@@ -15,6 +20,7 @@ clap.workspace = true
 libc = "0.2"
 moa-core = { path = "../moa-core" }
 moa-memory = { path = "../moa-memory" }
+moa-orchestrator = { path = "../moa-orchestrator", optional = true }
 moa-session = { path = "../moa-session" }
 moa-tui = { path = "../moa-tui" }
 serde_json.workspace = true
