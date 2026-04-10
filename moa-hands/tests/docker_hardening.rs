@@ -42,16 +42,16 @@ async fn docker_container_runs_with_hardening() {
             .await
             .unwrap();
 
-        assert!(output.stdout.contains("NoNewPrivs:\t1"));
-        assert!(output.stdout.contains("Seccomp:\t2"));
-        let mounts = output
-            .stdout
+        let rendered = output.to_text();
+        assert!(rendered.contains("NoNewPrivs:\t1"));
+        assert!(rendered.contains("Seccomp:\t2"));
+        let mounts = rendered
             .split("---MOUNTS---")
             .nth(1)
             .and_then(|section| section.split("---NET---").next())
             .unwrap_or_default();
         assert!(mounts.contains("ro"));
-        assert!(output.stdout.contains("metadata=blocked"));
+        assert!(rendered.contains("metadata=blocked"));
 
         provider.pause(&handle).await.unwrap();
         provider.resume(&handle).await.unwrap();

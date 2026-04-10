@@ -151,20 +151,20 @@ impl DaytonaHandProvider {
                 MoaError::ProviderError(format!("failed to execute Daytona command: {error}"))
             })?;
         let value = expect_success_json(response).await?;
-        Ok(ToolOutput {
-            stdout: value
+        Ok(ToolOutput::from_process(
+            value
                 .get("result")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
-            stderr: String::new(),
-            exit_code: value
+            String::new(),
+            value
                 .get("exitCode")
                 .or_else(|| value.get("code"))
                 .and_then(Value::as_i64)
                 .unwrap_or_default() as i32,
-            duration: started_at.elapsed(),
-        })
+            started_at.elapsed(),
+        ))
     }
 
     async fn read_file(&self, workspace_id: &str, path: &str) -> Result<ToolOutput> {
@@ -179,14 +179,12 @@ impl DaytonaHandProvider {
         if !response.status().is_success() {
             return Err(http_error(response).await);
         }
-        Ok(ToolOutput {
-            stdout: response.text().await.map_err(|error| {
+        Ok(ToolOutput::text(
+            response.text().await.map_err(|error| {
                 MoaError::ProviderError(format!("failed to decode Daytona file response: {error}"))
             })?,
-            stderr: String::new(),
-            exit_code: 0,
-            duration: started_at.elapsed(),
-        })
+            started_at.elapsed(),
+        ))
     }
 
     async fn write_file(
@@ -219,12 +217,10 @@ impl DaytonaHandProvider {
                 MoaError::ProviderError(format!("failed to write Daytona file: {error}"))
             })?;
         expect_success(response).await?;
-        Ok(ToolOutput {
-            stdout: format!("wrote {path}"),
-            stderr: String::new(),
-            exit_code: 0,
-            duration: started_at.elapsed(),
-        })
+        Ok(ToolOutput::text(
+            format!("wrote {path}"),
+            started_at.elapsed(),
+        ))
     }
 
     async fn search_files(&self, workspace_id: &str, pattern: &str) -> Result<ToolOutput> {
@@ -237,12 +233,11 @@ impl DaytonaHandProvider {
             MoaError::ProviderError(format!("failed to search Daytona files: {error}"))
         })?;
         let value = expect_success_json(response).await?;
-        Ok(ToolOutput {
-            stdout: serde_json::to_string_pretty(&value)?,
-            stderr: String::new(),
-            exit_code: 0,
-            duration: started_at.elapsed(),
-        })
+        Ok(ToolOutput::json(
+            serde_json::to_string_pretty(&value)?,
+            value,
+            started_at.elapsed(),
+        ))
     }
 }
 
@@ -560,7 +555,7 @@ mod tests {
             .execute(&handle, "bash", r#"{"cmd":"echo hello"}"#)
             .await
             .unwrap();
-        assert_eq!(output.stdout, "hello\n");
+        assert_eq!(output.process_stdout().as_deref(), Some("hello\n"));
 
         provider.destroy(&handle).await.unwrap();
 

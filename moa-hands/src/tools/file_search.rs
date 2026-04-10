@@ -18,12 +18,19 @@ pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     collect_matches(sandbox_dir, sandbox_dir, &matcher, &mut matches).await?;
     matches.sort();
 
-    Ok(ToolOutput {
-        stdout: matches.join("\n"),
-        stderr: String::new(),
-        exit_code: 0,
-        duration: Duration::default(),
-    })
+    let data = serde_json::Value::Array(
+        matches
+            .iter()
+            .map(|path| serde_json::json!({ "path": path }))
+            .collect(),
+    );
+    let summary = if matches.is_empty() {
+        "No matching files found.".to_string()
+    } else {
+        matches.join("\n")
+    };
+
+    Ok(ToolOutput::json(summary, data, Duration::default()))
 }
 
 async fn collect_matches(

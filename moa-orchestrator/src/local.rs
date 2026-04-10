@@ -1406,8 +1406,8 @@ async fn execute_tool(
                 context.session_id.clone(),
                 Event::ToolResult {
                     tool_id,
-                    output: format_tool_output(&output),
-                    success: output.exit_code == 0,
+                    output: output.clone(),
+                    success: !output.is_error,
                     duration_ms: output.duration.as_millis() as u64,
                 },
             )
@@ -1415,10 +1415,10 @@ async fn execute_tool(
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
                 tool_id,
                 tool_name: call.name.clone(),
-                status: if output.exit_code == 0 {
-                    ToolCardStatus::Succeeded
-                } else {
+                status: if output.is_error {
                     ToolCardStatus::Failed
+                } else {
+                    ToolCardStatus::Succeeded
                 },
                 summary: summarize_tool_completion(call, &output),
                 detail: Some(format_tool_output(&output)),
@@ -1566,30 +1566,22 @@ fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) ->
 }
 
 fn summarize_tool_completion(call: &ToolInvocation, output: &moa_core::ToolOutput) -> String {
-    if output.exit_code == 0 {
+    if !output.is_error {
         format!(
             "{} completed in {} ms",
             call.name,
             output.duration.as_millis()
         )
     } else {
-        format!("{} exited with code {}", call.name, output.exit_code)
+        match output.process_exit_code() {
+            Some(exit_code) => format!("{} exited with code {}", call.name, exit_code),
+            None => format!("{} failed", call.name),
+        }
     }
 }
 
 fn format_tool_output(output: &moa_core::ToolOutput) -> String {
-    let mut sections = Vec::new();
-    if !output.stdout.trim().is_empty() {
-        sections.push(output.stdout.trim_end().to_string());
-    }
-    if !output.stderr.trim().is_empty() {
-        sections.push(format!("stderr:\n{}", output.stderr.trim_end()));
-    }
-    if sections.is_empty() {
-        format!("exit_code: {}", output.exit_code)
-    } else {
-        sections.join("\n\n")
-    }
+    output.to_text()
 }
 
 fn parse_tool_id(call: &ToolInvocation) -> Uuid {

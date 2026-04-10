@@ -18,15 +18,13 @@ pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     }
     fs::write(&path, params.content).await?;
 
-    Ok(ToolOutput {
-        stdout: format!(
+    Ok(ToolOutput::text(
+        format!(
             "wrote {}",
             path.strip_prefix(sandbox_dir).unwrap_or(&path).display()
         ),
-        stderr: String::new(),
-        exit_code: 0,
-        duration: Duration::default(),
-    })
+        Duration::default(),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

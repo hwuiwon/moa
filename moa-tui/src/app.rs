@@ -1596,7 +1596,7 @@ impl SessionViewState {
                             ToolCardStatus::Failed
                         },
                         summary: format!("completed in {duration_ms} ms"),
-                        detail: Some(truncate_detail(output)),
+                        detail: Some(truncate_detail(&output.to_text())),
                     });
                 }
                 Event::ToolError { tool_id, error, .. } => {

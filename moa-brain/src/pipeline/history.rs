@@ -7,6 +7,7 @@ use moa_core::{
     ContextMessage, ContextProcessor, Event, EventRange, EventRecord, ProcessorOutput, Result,
     SessionStore, WorkingContext,
 };
+use moa_security::wrap_untrusted_tool_output;
 
 use super::estimate_tokens;
 
@@ -145,7 +146,8 @@ fn event_to_context_message(record: &EventRecord) -> Option<Result<ContextMessag
             tool_id,
             ..
         } => Some(Ok(ContextMessage::tool(format!(
-            "<tool_result id=\"{tool_id}\" success=\"{success}\">\n{output}\n</tool_result>"
+            "<tool_result id=\"{tool_id}\" success=\"{success}\">\n{}\n</tool_result>",
+            wrap_untrusted_tool_output(&output.to_text())
         )))),
         Event::ToolError { error, tool_id, .. } => Some(Ok(ContextMessage::tool(format!(
             "<tool_error id=\"{tool_id}\">{error}</tool_error>"

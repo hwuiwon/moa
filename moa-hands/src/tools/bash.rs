@@ -34,12 +34,12 @@ pub async fn execute_local(
             ))
         })??;
 
-    Ok(ToolOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        exit_code: output.status.code().unwrap_or(-1),
-        duration: started_at.elapsed(),
-    })
+    Ok(ToolOutput::from_process(
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.code().unwrap_or(-1),
+        started_at.elapsed(),
+    ))
 }
 
 /// Executes the `bash` tool inside an existing Docker sandbox.
@@ -67,12 +67,12 @@ pub async fn execute_docker(
             ))
         })??;
 
-    Ok(ToolOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        exit_code: output.status.code().unwrap_or(-1),
-        duration: started_at.elapsed(),
-    })
+    Ok(ToolOutput::from_process(
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.code().unwrap_or(-1),
+        started_at.elapsed(),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

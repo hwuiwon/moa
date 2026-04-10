@@ -5,7 +5,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use moa_core::{McpServerConfig, McpTransportConfig, MoaError, Result, ToolOutput};
+use moa_core::{McpServerConfig, McpTransportConfig, MoaError, Result, ToolContent, ToolOutput};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -398,28 +398,27 @@ fn flatten_call_result(result: Value) -> Result<ToolOutput> {
         .get("isError")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let mut chunks = Vec::new();
+    let mut content_blocks = Vec::new();
     if let Some(content) = result.get("content").and_then(Value::as_array) {
         for item in content {
             if let Some(text) = item.get("text").and_then(Value::as_str) {
-                chunks.push(text.to_string());
+                content_blocks.push(ToolContent::Text {
+                    text: text.to_string(),
+                });
                 continue;
             }
-            chunks.push(serde_json::to_string_pretty(item)?);
+            content_blocks.push(ToolContent::Json { data: item.clone() });
         }
     } else if result != Value::Null {
-        chunks.push(serde_json::to_string_pretty(&result)?);
+        content_blocks.push(ToolContent::Json {
+            data: result.clone(),
+        });
     }
 
-    let stdout = chunks.join("\n\n");
     Ok(ToolOutput {
-        stdout: if is_error {
-            String::new()
-        } else {
-            stdout.clone()
-        },
-        stderr: if is_error { stdout } else { String::new() },
-        exit_code: if is_error { 1 } else { 0 },
+        content: content_blocks,
+        is_error,
+        structured: result.get("structuredContent").cloned(),
         duration: Duration::default(),
     })
 }
@@ -458,8 +457,8 @@ mod tests {
             ]
         }))
         .unwrap();
-        assert_eq!(output.stdout, "hello\n\nworld");
-        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.to_text(), "hello\n\nworld");
+        assert!(!output.is_error);
     }
 
     #[tokio::test]
@@ -484,7 +483,7 @@ mod tests {
             .call_tool("echo", json!({ "text": "hello" }), HashMap::new())
             .await
             .unwrap();
-        assert_eq!(output.stdout, "hello");
+        assert_eq!(output.to_text(), "hello");
     }
 
     #[tokio::test]
@@ -537,6 +536,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(output.stdout, "pong");
+        assert_eq!(output.to_text(), "pong");
     }
 }
