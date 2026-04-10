@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-04-09)
 
 ## Corpus Check
-- 83 files · ~61,289 words
+- 85 files · ~63,537 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1242 nodes · 2105 edges · 57 communities detected
+- 1289 nodes · 2210 edges · 58 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -17,9 +17,9 @@
 5. `LocalOrchestrator` - 19 edges
 6. `TursoSessionStore` - 16 edges
 7. `LocalHandProvider` - 16 edges
-8. `ToolRouter` - 14 edges
-9. `TelegramAdapter` - 13 edges
-10. `SlackAdapter` - 13 edges
+8. `DiscordAdapter` - 14 edges
+9. `ToolRouter` - 14 edges
+10. `TelegramAdapter` - 13 edges
 
 ## Surprising Connections (you probably didn't know these)
 - None detected - all connections are within the same source files.
@@ -55,8 +55,8 @@ Cohesion: 0.09
 Nodes (26): accept_user_message(), append_event(), buffer_queued_message(), DockerSandbox, drain_signal_queue(), drive_turn(), execute_tool(), flush_next_queued_message() (+18 more)
 
 ### Community 7 - "Telegram Renderer"
-Cohesion: 0.08
-Nodes (22): append_piece(), callback_data_roundtrips(), render_approval_request(), render_diff(), render_tool_card(), renderer_keeps_buttons_on_last_chunk_only(), renderer_splits_long_text_at_telegram_limit(), slack_approval_buttons() (+14 more)
+Cohesion: 0.09
+Nodes (23): append_piece(), discord_renderer_attaches_buttons_to_last_chunk_only(), discord_renderer_uses_embed_limit_for_long_text(), DiscordRenderChunk, DiscordRenderer, render_approval_request(), render_diff(), render_tool_card() (+15 more)
 
 ### Community 8 - "Turso Session Store"
 Cohesion: 0.08
@@ -74,188 +74,192 @@ Nodes (24): denied_tool_preserves_queued_follow_up(), last_user_message(), list_
 Cohesion: 0.1
 Nodes (25): build_diff_file_view(), default_mode_for_width(), diff_line_style(), DiffFileView, DiffMode, DiffViewState, highlighted_spans(), pad_or_truncate() (+17 more)
 
-### Community 12 - "Slack Adapter"
+### Community 12 - "Discord Adapter"
 Cohesion: 0.12
+Nodes (18): approval_callback_maps_to_control_message(), attachments_from_message(), context_from_component(), discord_button(), discord_create_message(), discord_create_message_includes_buttons_for_last_chunk(), discord_edit_message(), discord_embed() (+10 more)
+
+### Community 13 - "Slack Adapter"
+Cohesion: 0.13
 Nodes (19): handle_interaction_event(), handle_push_event(), inbound_from_app_mention(), inbound_from_interaction_event(), inbound_from_message_event(), inbound_from_push_event(), interaction_origin(), parses_approval_callback_into_control_message() (+11 more)
 
-### Community 13 - "Context Pipeline"
+### Community 14 - "Context Pipeline"
 Cohesion: 0.1
 Nodes (11): build_default_pipeline(), build_default_pipeline_with_tools(), ContextPipeline, estimate_tokens(), load_history_events(), MockMemoryStore, MockSessionStore, pipeline_runner_executes_stages_in_order() (+3 more)
 
-### Community 14 - "Config & Errors"
+### Community 15 - "Config & Errors"
 Cohesion: 0.08
 Nodes (15): CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, config_loads_from_file(), default_config_is_valid(), GatewayConfig, GeneralConfig (+7 more)
 
-### Community 15 - "Wiki & Branching Markdown"
+### Community 16 - "Wiki & Branching Markdown"
 Cohesion: 0.12
 Nodes (28): append_change_manifest(), branch_dir(), branch_file_path(), branch_root(), ChangeOperation, ChangeRecord, list_branches(), merge_markdown() (+20 more)
 
-### Community 16 - "TUI Chat Runtime"
+### Community 17 - "TUI Chat Runtime"
 Cohesion: 0.1
 Nodes (8): ChatRuntime, last_session_message(), local_user_id(), relay_runtime_events(), relay_session_runtime_events(), SessionPreview, SessionRuntimeEvent, start_empty_session()
 
-### Community 17 - "Telegram Adapter"
-Cohesion: 0.15
+### Community 18 - "Telegram Adapter"
+Cohesion: 0.16
 Nodes (13): channel_from_chat_and_reply(), handle_callback_query(), handle_message(), inbound_from_callback_query(), inbound_from_message(), inline_keyboard(), parse_message_id(), parses_approval_callback_into_control_message() (+5 more)
 
-### Community 18 - "Memory Index & Log"
+### Community 19 - "Memory Index & Log"
 Cohesion: 0.13
 Nodes (21): append_log_entry(), append_only_log_keeps_prior_entries(), compile_index(), compiled_index_stays_within_line_budget(), load_index_file(), load_log_file(), LogChange, LogEntry (+13 more)
 
-### Community 19 - "Memory Tools"
+### Community 20 - "Memory Tools"
 Cohesion: 0.08
 Nodes (7): MemoryReadInput, MemoryReadTool, MemorySearchInput, MemorySearchScope, MemorySearchTool, MemoryWriteInput, MemoryWriteTool
 
-### Community 20 - "Memory Consolidation"
+### Community 21 - "Approval Card Widget"
+Cohesion: 0.13
+Nodes (15): approval_buttons(), approval_request(), ApprovalCallbackAction, border_line(), callback_data_roundtrips(), content_line(), prepare_outbound_message(), prepare_outbound_message_adds_inline_buttons_when_supported() (+7 more)
+
+### Community 22 - "Memory Consolidation"
 Cohesion: 0.19
 Nodes (19): canonical_port_claims(), confidence_rank(), consolidation_due_for_scope(), consolidation_resolves_dates_prunes_and_refreshes_index(), ConsolidationReport, decay_confidence(), extract_port_claims(), inbound_reference_counts() (+11 more)
 
-### Community 21 - "FTS5 Search Index"
+### Community 23 - "FTS5 Search Index"
 Cohesion: 0.19
 Nodes (10): build_fts_query(), delete_page_entries(), FtsIndex, insert_page(), migrate(), parse_confidence(), parse_page_type(), parse_scope_key() (+2 more)
 
-### Community 22 - "Session Picker View"
+### Community 24 - "Session Picker View"
 Cohesion: 0.18
 Nodes (8): centered_rect(), filtered_sessions(), fuzzy_search_matches_title_and_last_message(), picker_haystack(), picker_selection_wraps_and_clamps(), preview(), render_session_picker(), SessionPickerState
 
-### Community 23 - "Tool Approval Policies"
+### Community 25 - "Tool Approval Policies"
 Cohesion: 0.22
 Nodes (12): ApprovalRuleStore, glob_match(), parse_and_match_bash(), persistent_rule_matching_uses_glob_patterns(), PolicyCheck, read_tools_are_auto_approved_and_bash_requires_approval(), rule_matches(), rule_visible_to_workspace() (+4 more)
 
-### Community 24 - "Skill Injector"
+### Community 26 - "Skill Injector"
 Cohesion: 0.16
 Nodes (9): distills_skill_after_tool_heavy_session(), improves_existing_skill_when_better_flow_is_found(), load_skills(), MockLlm, session(), skill_injector_marks_breakpoint_without_skills(), skill_injector_marks_cache_breakpoint_and_formats_metadata(), SkillInjector (+1 more)
 
-### Community 25 - "Skill Improver & Distiller"
+### Community 27 - "Skill Improver & Distiller"
 Cohesion: 0.21
 Nodes (15): build_distillation_prompt(), count_tool_calls(), extract_task_summary(), find_similar_skill(), maybe_distill_skill(), normalize_new_skill(), similarity_score(), tokenize() (+7 more)
 
-### Community 26 - "Local Tool Tests"
+### Community 28 - "Local Tool Tests"
 Cohesion: 0.17
 Nodes (9): bash_captures_stdout_and_stderr(), bash_respects_timeout(), EmptyMemoryStore, file_operations_reject_path_traversal(), file_read_reads_written_content(), file_search_finds_files_by_glob(), memory_read_returns_page_contents(), memory_search_returns_indexed_results() (+1 more)
 
-### Community 27 - "Local Hand Provider"
+### Community 29 - "Local Hand Provider"
 Cohesion: 0.19
 Nodes (2): detect_docker(), LocalHandProvider
 
-### Community 28 - "Memory Maintenance Tests"
+### Community 30 - "Memory Maintenance Tests"
 Cohesion: 0.29
 Nodes (12): branch_reconciliation_merges_conflicting_writes(), consolidation_decays_confidence_once_and_is_stable_on_repeat_runs(), consolidation_normalizes_dates_and_resolves_conflicts(), ingest_source_creates_summary_and_updates_related_pages(), maintenance_operations_append_log_and_keep_results_searchable(), manual_seeded_memory_fuzz_preserves_core_invariants(), manual_stress_ingest_reconcile_and_consolidate_preserves_invariants(), reconciliation_merges_multiple_branches_and_cleans_branch_directory() (+4 more)
 
-### Community 29 - "Event Types"
+### Community 31 - "Event Types"
 Cohesion: 0.18
 Nodes (1): Event
 
-### Community 30 - "Approval Card Widget"
-Cohesion: 0.27
-Nodes (6): border_line(), content_line(), render_approval_card(), risk_border_style(), truncate_to_width(), wrap_text()
-
-### Community 31 - "Toolbar Widget"
+### Community 32 - "Toolbar Widget"
 Cohesion: 0.27
 Nodes (6): build_tab_spans(), render_toolbar(), short_session_id(), tab_title(), toolbar_labels_include_status_icons_and_tab_limit(), visible_window()
 
-### Community 32 - "History Compilation Stage"
+### Community 33 - "History Compilation Stage"
 Cohesion: 0.25
 Nodes (4): capabilities(), history_compiler_formats_user_and_assistant_turns(), history_processor_uses_preloaded_events(), HistoryCompiler
 
-### Community 33 - "TUI Keybindings"
+### Community 34 - "TUI Keybindings"
 Cohesion: 0.2
 Nodes (1): KeyAction
 
-### Community 34 - "Prompt Widget"
+### Community 35 - "Prompt Widget"
 Cohesion: 0.31
 Nodes (2): build_textarea(), PromptWidget
 
-### Community 35 - "Session Store Tests"
+### Community 36 - "Session Store Tests"
 Cohesion: 0.2
 Nodes (0): 
 
-### Community 36 - "Tool Card Widget"
+### Community 37 - "Tool Card Widget"
 Cohesion: 0.42
 Nodes (7): border_line(), content_line(), render_tool_card(), status_label(), status_style(), truncate_to_width(), wrap_text()
 
-### Community 37 - "Memory Store Tests"
+### Community 38 - "Memory Store Tests"
 Cohesion: 0.43
 Nodes (6): create_read_update_and_delete_wiki_pages(), fts_search_finds_ranked_results(), fts_search_handles_hyphenated_queries(), rebuild_search_index_from_files_restores_results(), sample_page(), user_and_workspace_scopes_are_separate()
 
-### Community 38 - "CLI Entry Point"
+### Community 39 - "CLI Entry Point"
 Cohesion: 0.29
 Nodes (4): Cli, Command, doctor_report(), doctor_report_includes_model_and_paths()
 
-### Community 39 - "Instruction Stage"
+### Community 40 - "Instruction Stage"
 Cohesion: 0.38
 Nodes (2): instruction_processor_appends_config_backed_sections(), InstructionProcessor
 
-### Community 40 - "Skill Registry"
+### Community 41 - "Skill Registry"
 Cohesion: 0.48
 Nodes (1): SkillRegistry
 
-### Community 41 - "Chat View"
+### Community 42 - "Chat View"
 Cohesion: 0.6
 Nodes (5): max_scroll(), render_chat(), transcript_lines(), wrap_line(), wrap_prefixed()
 
-### Community 42 - "Cache Optimizer Stage"
+### Community 43 - "Cache Optimizer Stage"
 Cohesion: 0.4
 Nodes (2): cache_optimizer_validates_cache_breakpoint(), CacheOptimizer
 
-### Community 43 - "Identity Stage"
+### Community 44 - "Identity Stage"
 Cohesion: 0.4
 Nodes (2): identity_processor_appends_system_prompt(), IdentityProcessor
 
-### Community 44 - "CLI Exec Mode"
+### Community 45 - "CLI Exec Mode"
 Cohesion: 0.6
 Nodes (4): exec_mode_formats_tool_updates_compactly(), format_tool_update(), resolve_exec_approval(), run_exec()
 
-### Community 45 - "Bash Tool"
+### Community 46 - "Bash Tool"
 Cohesion: 0.6
 Nodes (3): BashToolInput, execute_docker(), execute_local()
 
-### Community 46 - "Memory Preload Stage"
+### Community 47 - "Memory Preload Stage"
 Cohesion: 0.5
 Nodes (5): load_preloaded_memory, MemoryRetriever (Stage 5), MEMORY_STAGE_DATA_METADATA_KEY, PreloadedMemoryStageData, truncate_excerpt
 
-### Community 47 - "File Search Tool"
+### Community 48 - "File Search Tool"
 Cohesion: 0.67
 Nodes (3): collect_matches(), execute(), FileSearchInput
 
-### Community 48 - "File Read Tool"
+### Community 49 - "File Read Tool"
 Cohesion: 0.67
 Nodes (3): execute(), FileReadInput, resolve_sandbox_path()
 
-### Community 49 - "Chat Harness Example"
+### Community 50 - "Chat Harness Example"
 Cohesion: 0.83
 Nodes (3): main(), resolve_session_db_path(), run_prompt()
 
-### Community 50 - "Anthropic Provider Tests"
+### Community 51 - "Anthropic Provider Tests"
 Cohesion: 0.67
 Nodes (0): 
 
-### Community 51 - "File Write Tool"
+### Community 52 - "File Write Tool"
 Cohesion: 0.67
 Nodes (1): FileWriteInput
 
-### Community 52 - "Anthropic Live Test"
+### Community 53 - "Anthropic Live Test"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 53 - "Compaction"
+### Community 54 - "Compaction"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 54 - "Search Query Extraction"
+### Community 55 - "Search Query Extraction"
 Cohesion: 1.0
 Nodes (2): extract_search_keywords (stopword filter), extract_search_query
 
-### Community 55 - "Live Brain Turn Test"
+### Community 56 - "Live Brain Turn Test"
 Cohesion: 1.0
 Nodes (1): live_brain_turn_returns_brain_response test
 
-### Community 56 - "Relevant Memory Page"
+### Community 57 - "Relevant Memory Page"
 Cohesion: 1.0
 Nodes (1): RelevantMemoryPage
 
 ## Knowledge Gaps
-- **142 isolated node(s):** `LogChange`, `LogEntry`, `IngestReport`, `PageFrontmatter`, `ChangeOperation` (+137 more)
+- **146 isolated node(s):** `LogChange`, `LogEntry`, `IngestReport`, `PageFrontmatter`, `ChangeOperation` (+141 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **Thin community `Anthropic Live Test`** (2 nodes): `anthropic_live.rs`, `anthropic_live_completion_returns_expected_answer()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -272,7 +276,7 @@ Nodes (1): RelevantMemoryPage
 _Questions this graph is uniquely positioned to answer:_
 
 - **What connects `LogChange`, `LogEntry`, `IngestReport` to the rest of the system?**
-  _142 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _146 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Core Domain IDs` be split into smaller, more focused modules?**
   _Cohesion score 0.02 - nodes in this community are weakly interconnected._
 - **Should `TUI App State` be split into smaller, more focused modules?**

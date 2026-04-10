@@ -30,10 +30,12 @@
   "moa-tui/src/widgets/approval.rs": 1775771629.835606,
   "moa-tui/src/widgets/tool_card.rs": 1775773153.4608974,
   "moa-tui/src/widgets/toolbar.rs": 1775776304.6258142,
-  "moa-gateway/src/telegram.rs": 1775786129.3350134,
-  "moa-gateway/src/renderer.rs": 1775786751.645575,
-  "moa-gateway/src/lib.rs": 1775786945.565965,
-  "moa-gateway/src/slack.rs": 1775786896.7521076,
+  "moa-gateway/src/telegram.rs": 1775787769.3724163,
+  "moa-gateway/src/renderer.rs": 1775788044.1921496,
+  "moa-gateway/src/discord.rs": 1775787962.3643749,
+  "moa-gateway/src/lib.rs": 1775787962.3645678,
+  "moa-gateway/src/slack.rs": 1775787779.763647,
+  "moa-gateway/src/approval.rs": 1775787667.6175797,
   "moa-session/tests/session_store.rs": 1775761348.1776211,
   "moa-session/src/turso.rs": 1775768635.367824,
   "moa-session/src/lib.rs": 1775761302.4706347,
@@ -95,51 +97,52 @@
     "9": "Brain Turn Tests",
     "10": "Local Orchestrator Tests",
     "11": "Diff View",
-    "12": "Slack Adapter",
-    "13": "Context Pipeline",
-    "14": "Config & Errors",
-    "15": "Wiki & Branching Markdown",
-    "16": "TUI Chat Runtime",
-    "17": "Telegram Adapter",
-    "18": "Memory Index & Log",
-    "19": "Memory Tools",
-    "20": "Memory Consolidation",
-    "21": "FTS5 Search Index",
-    "22": "Session Picker View",
-    "23": "Tool Approval Policies",
-    "24": "Skill Injector",
-    "25": "Skill Improver & Distiller",
-    "26": "Local Tool Tests",
-    "27": "Local Hand Provider",
-    "28": "Memory Maintenance Tests",
-    "29": "Event Types",
-    "30": "Approval Card Widget",
-    "31": "Toolbar Widget",
-    "32": "History Compilation Stage",
-    "33": "TUI Keybindings",
-    "34": "Prompt Widget",
-    "35": "Session Store Tests",
-    "36": "Tool Card Widget",
-    "37": "Memory Store Tests",
-    "38": "CLI Entry Point",
-    "39": "Instruction Stage",
-    "40": "Skill Registry",
-    "41": "Chat View",
-    "42": "Cache Optimizer Stage",
-    "43": "Identity Stage",
-    "44": "CLI Exec Mode",
-    "45": "Bash Tool",
-    "46": "Memory Preload Stage",
-    "47": "File Search Tool",
-    "48": "File Read Tool",
-    "49": "Chat Harness Example",
-    "50": "Anthropic Provider Tests",
-    "51": "File Write Tool",
-    "52": "Anthropic Live Test",
-    "53": "Compaction",
-    "54": "Search Query Extraction",
-    "55": "Live Brain Turn Test",
-    "56": "Relevant Memory Page"
+    "12": "Discord Adapter",
+    "13": "Slack Adapter",
+    "14": "Context Pipeline",
+    "15": "Config & Errors",
+    "16": "Wiki & Branching Markdown",
+    "17": "TUI Chat Runtime",
+    "18": "Telegram Adapter",
+    "19": "Memory Index & Log",
+    "20": "Memory Tools",
+    "21": "Approval Card Widget",
+    "22": "Memory Consolidation",
+    "23": "FTS5 Search Index",
+    "24": "Session Picker View",
+    "25": "Tool Approval Policies",
+    "26": "Skill Injector",
+    "27": "Skill Improver & Distiller",
+    "28": "Local Tool Tests",
+    "29": "Local Hand Provider",
+    "30": "Memory Maintenance Tests",
+    "31": "Event Types",
+    "32": "Toolbar Widget",
+    "33": "History Compilation Stage",
+    "34": "TUI Keybindings",
+    "35": "Prompt Widget",
+    "36": "Session Store Tests",
+    "37": "Tool Card Widget",
+    "38": "Memory Store Tests",
+    "39": "CLI Entry Point",
+    "40": "Instruction Stage",
+    "41": "Skill Registry",
+    "42": "Chat View",
+    "43": "Cache Optimizer Stage",
+    "44": "Identity Stage",
+    "45": "CLI Exec Mode",
+    "46": "Bash Tool",
+    "47": "Memory Preload Stage",
+    "48": "File Search Tool",
+    "49": "File Read Tool",
+    "50": "Chat Harness Example",
+    "51": "Anthropic Provider Tests",
+    "52": "File Write Tool",
+    "53": "Anthropic Live Test",
+    "54": "Compaction",
+    "55": "Search Query Extraction",
+    "56": "Live Brain Turn Test",
+    "57": "Relevant Memory Page"
   },
   "community_signatures": {
     "0": [
@@ -634,24 +637,27 @@
     "7": [
       "renderer",
       "renderer_append_piece",
-      "renderer_callback_data_roundtrips",
+      "renderer_discord_renderer_attaches_buttons_to_last_chunk_only",
+      "renderer_discord_renderer_uses_embed_limit_for_long_text",
+      "renderer_discordrenderchunk",
+      "renderer_discordrenderer",
+      "renderer_discordrenderer_capabilities",
+      "renderer_discordrenderer_new",
+      "renderer_discordrenderer_platform",
+      "renderer_discordrenderer_render",
       "renderer_render_approval_request",
       "renderer_render_diff",
       "renderer_render_tool_card",
       "renderer_renderer_keeps_buttons_on_last_chunk_only",
       "renderer_renderer_splits_long_text_at_telegram_limit",
+      "renderer_risk_color",
       "renderer_risk_icon",
+      "renderer_session_status_color",
       "renderer_session_status_icon",
-      "renderer_slack_approval_buttons",
       "renderer_slack_blocks_for_chunk",
       "renderer_slack_button",
-      "renderer_slack_callback_data_roundtrips",
       "renderer_slack_renderer_attaches_buttons_to_last_chunk_only",
       "renderer_slack_renderer_splits_long_text_at_slack_limit",
-      "renderer_slackcallbackaction",
-      "renderer_slackcallbackaction_decode",
-      "renderer_slackcallbackaction_encode",
-      "renderer_slackcallbackaction_inbound_command",
       "renderer_slackrenderchunk",
       "renderer_slackrenderer",
       "renderer_slackrenderer_capabilities",
@@ -661,17 +667,13 @@
       "renderer_split_fenced_block",
       "renderer_split_hard",
       "renderer_split_plain_text",
-      "renderer_telegram_approval_buttons",
-      "renderer_telegramcallbackaction",
-      "renderer_telegramcallbackaction_decode",
-      "renderer_telegramcallbackaction_encode",
-      "renderer_telegramcallbackaction_inbound_command",
       "renderer_telegramrenderchunk",
       "renderer_telegramrenderer",
       "renderer_telegramrenderer_capabilities",
       "renderer_telegramrenderer_new",
       "renderer_telegramrenderer_platform",
       "renderer_telegramrenderer_render",
+      "renderer_tool_status_color",
       "renderer_tool_status_icon"
     ],
     "8": [
@@ -836,6 +838,43 @@
       "diff_unifiedline"
     ],
     "12": [
+      "discord",
+      "discord_approval_callback_maps_to_control_message",
+      "discord_attachments_from_message",
+      "discord_context_from_component",
+      "discord_discord_button",
+      "discord_discord_create_message",
+      "discord_discord_create_message_includes_buttons_for_last_chunk",
+      "discord_discord_edit_message",
+      "discord_discord_embed",
+      "discord_discord_user_name",
+      "discord_discordadapter",
+      "discord_discordadapter_capabilities",
+      "discord_discordadapter_delete",
+      "discord_discordadapter_edit",
+      "discord_discordadapter_ensure_target_channel",
+      "discord_discordadapter_from_config",
+      "discord_discordadapter_new",
+      "discord_discordadapter_platform",
+      "discord_discordadapter_resolve_target",
+      "discord_discordadapter_send",
+      "discord_discordadapter_send_chunk",
+      "discord_discordadapter_start",
+      "discord_discordadapter_update_chunk",
+      "discord_discordadapter_wait_for_edit_window",
+      "discord_discordeventhandlerstate",
+      "discord_discordgatewayhandler",
+      "discord_discordgatewayhandler_interaction_create",
+      "discord_discordgatewayhandler_message",
+      "discord_discordinboundcontext",
+      "discord_discordinboundcontext_channel_ref",
+      "discord_discordmessageref",
+      "discord_discordtarget",
+      "discord_inbound_from_component_interaction",
+      "discord_inbound_from_message",
+      "discord_is_thread_kind"
+    ],
+    "13": [
       "slack",
       "slack_handle_interaction_event",
       "slack_handle_push_event",
@@ -871,7 +910,7 @@
       "slack_slackmessageref_thread_anchor",
       "slack_slacktarget"
     ],
-    "13": [
+    "14": [
       "mod",
       "mod_build_default_pipeline",
       "mod_build_default_pipeline_with_tools",
@@ -907,7 +946,7 @@
       "mod_teststage_process",
       "mod_teststage_stage"
     ],
-    "14": [
+    "15": [
       "config",
       "config_cloudconfig",
       "config_cloudconfig_default",
@@ -941,7 +980,7 @@
       "error",
       "error_moaerror"
     ],
-    "15": [
+    "16": [
       "branching",
       "branching_append_change_manifest",
       "branching_branch_dir",
@@ -974,7 +1013,7 @@
       "wiki_wiki_page_roundtrip",
       "wiki_yaml_to_json_value"
     ],
-    "16": [
+    "17": [
       "runner",
       "runner_chatruntime",
       "runner_chatruntime_cancel_active_generation",
@@ -1005,7 +1044,7 @@
       "runner_sessionruntimeevent",
       "runner_start_empty_session"
     ],
-    "17": [
+    "18": [
       "telegram",
       "telegram_channel_from_chat_and_reply",
       "telegram_handle_callback_query",
@@ -1034,7 +1073,7 @@
       "telegram_telegrammessageref_from_message",
       "telegram_telegramtarget"
     ],
-    "18": [
+    "19": [
       "index",
       "index_append_log_entry",
       "index_append_only_log_keeps_prior_entries",
@@ -1062,7 +1101,7 @@
       "ingest_split_inline_items",
       "ingest_upsert_derived_page"
     ],
-    "19": [
+    "20": [
       "memory",
       "memory_memoryreadinput",
       "memory_memoryreadtool",
@@ -1089,7 +1128,33 @@
       "memory_memorywritetool_policy_spec",
       "memory_parse_page_type"
     ],
-    "20": [
+    "21": [
+      "approval",
+      "approval_approval_buttons",
+      "approval_approval_card_uses_expected_border_color_for_each_risk_level",
+      "approval_approval_icon",
+      "approval_approval_label",
+      "approval_approval_request",
+      "approval_approvalcallbackaction",
+      "approval_approvalcallbackaction_decode",
+      "approval_approvalcallbackaction_encode",
+      "approval_approvalcallbackaction_inbound_command",
+      "approval_border_line",
+      "approval_callback_data_roundtrips",
+      "approval_content_line",
+      "approval_prepare_outbound_message",
+      "approval_prepare_outbound_message_adds_inline_buttons_when_supported",
+      "approval_prepare_outbound_message_degrades_to_text_prompt_without_buttons",
+      "approval_render_approval_card",
+      "approval_renderer_builds_platform_approval_buttons",
+      "approval_risk_border_style",
+      "approval_risk_icon",
+      "approval_status_style",
+      "approval_text_fallback",
+      "approval_truncate_to_width",
+      "approval_wrap_text"
+    ],
+    "22": [
       "consolidation",
       "consolidation_canonical_port_claims",
       "consolidation_confidence_rank",
@@ -1112,7 +1177,7 @@
       "consolidation_should_decay_confidence",
       "consolidation_should_prune_page"
     ],
-    "21": [
+    "23": [
       "fts",
       "fts_build_fts_query",
       "fts_confidence_to_db",
@@ -1133,7 +1198,7 @@
       "fts_parse_timestamp",
       "fts_scope_key"
     ],
-    "22": [
+    "24": [
       "sessions",
       "sessions_centered_rect",
       "sessions_filtered_sessions",
@@ -1154,7 +1219,7 @@
       "sessions_sessionpickerstate_selected_session_id",
       "sessions_status_icon"
     ],
-    "23": [
+    "25": [
       "policies",
       "policies_approvalrulestore",
       "policies_glob_match",
@@ -1174,7 +1239,7 @@
       "policies_toolpolicycontext",
       "policies_toolpolicycontext_from_session"
     ],
-    "24": [
+    "26": [
       "skills",
       "skills_distills_skill_after_tool_heavy_session",
       "skills_improves_existing_skill_when_better_flow_is_found",
@@ -1194,7 +1259,7 @@
       "skills_skillinjector_stage",
       "skills_tool_rich_events"
     ],
-    "25": [
+    "27": [
       "distiller",
       "distiller_build_distillation_prompt",
       "distiller_count_tool_calls",
@@ -1214,7 +1279,7 @@
       "improver_record_successful_use",
       "improver_record_successful_use_with_baseline"
     ],
-    "26": [
+    "28": [
       "local_tools",
       "local_tools_bash_captures_stdout_and_stderr",
       "local_tools_bash_respects_timeout",
@@ -1233,7 +1298,7 @@
       "local_tools_memory_search_returns_indexed_results",
       "local_tools_session"
     ],
-    "27": [
+    "29": [
       "local_detect_docker",
       "local_localhandprovider",
       "local_localhandprovider_create_sandbox_dir",
@@ -1252,7 +1317,7 @@
       "local_localhandprovider_status",
       "local_localhandprovider_with_command_timeout"
     ],
-    "28": [
+    "30": [
       "maintenance",
       "maintenance_branch_reconciliation_merges_conflicting_writes",
       "maintenance_consolidation_decays_confidence_once_and_is_stable_on_repeat_runs",
@@ -1270,7 +1335,7 @@
       "maintenance_seededrng_next_usize",
       "maintenance_validate_memory_invariants"
     ],
-    "29": [
+    "31": [
       "events",
       "events_all_event_types_serialize",
       "events_brain_response_event_has_cost_fields",
@@ -1283,20 +1348,7 @@
       "events_event_token_count",
       "events_event_type_name"
     ],
-    "30": [
-      "approval",
-      "approval_approval_card_uses_expected_border_color_for_each_risk_level",
-      "approval_approval_icon",
-      "approval_approval_label",
-      "approval_border_line",
-      "approval_content_line",
-      "approval_render_approval_card",
-      "approval_risk_border_style",
-      "approval_status_style",
-      "approval_truncate_to_width",
-      "approval_wrap_text"
-    ],
-    "31": [
+    "32": [
       "toolbar",
       "toolbar_build_tab_spans",
       "toolbar_preview",
@@ -1309,7 +1361,7 @@
       "toolbar_visible_window",
       "toolbar_visible_window_caps_tabs_to_requested_limit"
     ],
-    "32": [
+    "33": [
       "history",
       "history_capabilities",
       "history_event_record",
@@ -1322,7 +1374,7 @@
       "history_historycompiler_process",
       "history_historycompiler_stage"
     ],
-    "33": [
+    "34": [
       "keybindings",
       "keybindings_approval_shortcuts_only_activate_while_waiting",
       "keybindings_ctrl_c_and_escape_cancel",
@@ -1334,7 +1386,7 @@
       "keybindings_session_picker_keys_are_scoped_to_picker_mode",
       "keybindings_tab_and_session_shortcuts_map_correctly"
     ],
-    "34": [
+    "35": [
       "prompt",
       "prompt_build_textarea",
       "prompt_promptwidget",
@@ -1346,7 +1398,7 @@
       "prompt_promptwidget_render",
       "prompt_promptwidget_text"
     ],
-    "35": [
+    "36": [
       "session_store",
       "session_store_create_session_and_emit_events",
       "session_store_fts_search_finds_events",
@@ -1358,7 +1410,7 @@
       "session_store_wake_finds_checkpoint_and_recent_events",
       "session_store_wake_without_checkpoint_returns_all_events"
     ],
-    "36": [
+    "37": [
       "tool_card",
       "tool_card_border_line",
       "tool_card_content_line",
@@ -1369,7 +1421,7 @@
       "tool_card_truncate_to_width",
       "tool_card_wrap_text"
     ],
-    "37": [
+    "38": [
       "memory_store",
       "memory_store_create_read_update_and_delete_wiki_pages",
       "memory_store_fts_search_finds_ranked_results",
@@ -1379,7 +1431,7 @@
       "memory_store_sample_page",
       "memory_store_user_and_workspace_scopes_are_separate"
     ],
-    "38": [
+    "39": [
       "main",
       "main_cli",
       "main_command",
@@ -1389,7 +1441,7 @@
       "main_version_command_uses_package_version",
       "main_version_text"
     ],
-    "39": [
+    "40": [
       "instructions",
       "instructions_instruction_processor_appends_config_backed_sections",
       "instructions_instructionprocessor",
@@ -1398,7 +1450,7 @@
       "instructions_instructionprocessor_process",
       "instructions_instructionprocessor_stage"
     ],
-    "40": [
+    "41": [
       "registry",
       "registry_skillregistry",
       "registry_skillregistry_ensure_loaded",
@@ -1407,7 +1459,7 @@
       "registry_skillregistry_load_full",
       "registry_skillregistry_new"
     ],
-    "41": [
+    "42": [
       "chat",
       "chat_max_scroll",
       "chat_render_chat",
@@ -1415,7 +1467,7 @@
       "chat_wrap_line",
       "chat_wrap_prefixed"
     ],
-    "42": [
+    "43": [
       "cache",
       "cache_cache_optimizer_validates_cache_breakpoint",
       "cache_cacheoptimizer",
@@ -1423,7 +1475,7 @@
       "cache_cacheoptimizer_process",
       "cache_cacheoptimizer_stage"
     ],
-    "43": [
+    "44": [
       "identity",
       "identity_identity_processor_appends_system_prompt",
       "identity_identityprocessor",
@@ -1431,71 +1483,71 @@
       "identity_identityprocessor_process",
       "identity_identityprocessor_stage"
     ],
-    "44": [
+    "45": [
       "exec",
       "exec_exec_mode_formats_tool_updates_compactly",
       "exec_format_tool_update",
       "exec_resolve_exec_approval",
       "exec_run_exec"
     ],
-    "45": [
+    "46": [
       "bash",
       "bash_bashtoolinput",
       "bash_bashtoolinput_timeout",
       "bash_execute_docker",
       "bash_execute_local"
     ],
-    "46": [
+    "47": [
       "pipeline_load_preloaded_memory",
       "pipeline_memory_retriever",
       "pipeline_memory_stage_metadata_key",
       "pipeline_preloaded_memory_data",
       "pipeline_truncate_excerpt"
     ],
-    "47": [
+    "48": [
       "file_search",
       "file_search_collect_matches",
       "file_search_execute",
       "file_search_filesearchinput"
     ],
-    "48": [
+    "49": [
       "file_read",
       "file_read_execute",
       "file_read_filereadinput",
       "file_read_resolve_sandbox_path"
     ],
-    "49": [
+    "50": [
       "chat_harness",
       "chat_harness_main",
       "chat_harness_resolve_session_db_path",
       "chat_harness_run_prompt"
     ],
-    "50": [
+    "51": [
       "anthropic_provider",
       "anthropic_provider_provider_retries_after_rate_limit",
       "anthropic_provider_provider_streams_tokens_incrementally"
     ],
-    "51": [
+    "52": [
       "file_write",
       "file_write_execute",
       "file_write_filewriteinput"
     ],
-    "52": [
+    "53": [
       "anthropic_live",
       "anthropic_live_anthropic_live_completion_returns_expected_answer"
     ],
-    "53": [
+    "54": [
       "compaction",
       "compaction_maybe_compact"
     ],
-    "54": [
+    "55": [
       "pipeline_extract_search_keywords",
       "pipeline_extract_search_query"
     ],
-    "55": [
+    "56": [
       "live_harness_brain_turn_test"
     ],
-    "56": [
+    "57": [
       "pipeline_relevant_memory_page"
     ]
   }
