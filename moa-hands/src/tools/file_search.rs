@@ -7,6 +7,7 @@ use globset::{Glob, GlobMatcher};
 use moa_core::{Result, ToolOutput};
 use serde::Deserialize;
 use tokio::fs;
+use tokio_util::sync::CancellationToken;
 
 use crate::tools::docker_file::docker_file_search;
 
@@ -41,10 +42,17 @@ pub async fn execute_docker(
     workspace_root: &str,
     input: &str,
     timeout: Duration,
+    hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<ToolOutput> {
     let params: FileSearchInput = serde_json::from_str(input)?;
-    let matches =
-        docker_file_search(container_id, &params.pattern, workspace_root, timeout).await?;
+    let matches = docker_file_search(
+        container_id,
+        &params.pattern,
+        workspace_root,
+        timeout,
+        hard_cancel_token,
+    )
+    .await?;
     let data = serde_json::Value::Array(
         matches
             .iter()

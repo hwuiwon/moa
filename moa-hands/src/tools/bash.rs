@@ -6,12 +6,14 @@ use std::time::{Duration, Instant};
 use moa_core::{MoaError, Result, ToolOutput};
 use serde::Deserialize;
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 /// Executes the `bash` tool in a local sandbox directory.
 pub async fn execute_local(
     sandbox_dir: &Path,
     input: &str,
     default_timeout: Duration,
+    hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<ToolOutput> {
     let params: BashToolInput = serde_json::from_str(input)?;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
@@ -25,14 +27,32 @@ pub async fn execute_local(
         .current_dir(sandbox_dir)
         .kill_on_drop(true);
 
-    let output = tokio::time::timeout(timeout, command.output())
-        .await
-        .map_err(|_| {
-            MoaError::ToolError(format!(
-                "bash command timed out after {}s",
-                timeout.as_secs()
-            ))
-        })??;
+    let output = if let Some(hard_cancel_token) = hard_cancel_token {
+        let output = command.output();
+        tokio::pin!(output);
+        tokio::select! {
+            result = tokio::time::timeout(timeout, &mut output) => {
+                result.map_err(|_| {
+                    MoaError::ToolError(format!(
+                        "bash command timed out after {}s",
+                        timeout.as_secs()
+                    ))
+                })??
+            }
+            _ = hard_cancel_token.cancelled() => {
+                return Err(MoaError::Cancelled);
+            }
+        }
+    } else {
+        tokio::time::timeout(timeout, command.output())
+            .await
+            .map_err(|_| {
+                MoaError::ToolError(format!(
+                    "bash command timed out after {}s",
+                    timeout.as_secs()
+                ))
+            })??
+    };
 
     Ok(ToolOutput::from_process(
         String::from_utf8_lossy(&output.stdout).to_string(),
@@ -48,6 +68,7 @@ pub async fn execute_docker(
     workspace_root: &str,
     input: &str,
     default_timeout: Duration,
+    hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<ToolOutput> {
     let params: BashToolInput = serde_json::from_str(input)?;
     let timeout = params.timeout(default_timeout);
@@ -59,14 +80,33 @@ pub async fn execute_docker(
         .arg(&params.cmd)
         .kill_on_drop(true);
 
-    let output = tokio::time::timeout(timeout, command.output())
-        .await
-        .map_err(|_| {
-            MoaError::ToolError(format!(
-                "docker bash command timed out after {}s",
-                timeout.as_secs()
-            ))
-        })??;
+    let output = if let Some(hard_cancel_token) = hard_cancel_token {
+        let output = command.output();
+        tokio::pin!(output);
+        tokio::select! {
+            result = tokio::time::timeout(timeout, &mut output) => {
+                result.map_err(|_| {
+                    MoaError::ToolError(format!(
+                        "docker bash command timed out after {}s",
+                        timeout.as_secs()
+                    ))
+                })??
+            }
+            _ = hard_cancel_token.cancelled() => {
+                let _ = stop_container(container_id).await;
+                return Err(MoaError::Cancelled);
+            }
+        }
+    } else {
+        tokio::time::timeout(timeout, command.output())
+            .await
+            .map_err(|_| {
+                MoaError::ToolError(format!(
+                    "docker bash command timed out after {}s",
+                    timeout.as_secs()
+                ))
+            })??
+    };
 
     Ok(ToolOutput::from_process(
         String::from_utf8_lossy(&output.stdout).to_string(),
@@ -89,4 +129,20 @@ impl BashToolInput {
             .map(Duration::from_secs)
             .unwrap_or(default_timeout)
     }
+}
+
+async fn stop_container(container_id: &str) -> Result<()> {
+    let output = Command::new("docker")
+        .args(["stop", "-t", "2", container_id])
+        .output()
+        .await?;
+    if output.status.success()
+        || String::from_utf8_lossy(&output.stderr).contains("No such container")
+    {
+        return Ok(());
+    }
+    Err(MoaError::ProviderError(format!(
+        "failed to stop docker sandbox during cancellation: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
 }

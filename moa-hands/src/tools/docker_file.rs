@@ -8,6 +8,7 @@ use globset::Glob;
 use moa_core::{MoaError, Result};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 /// Resolves a user-provided path inside a container workspace mount.
 pub(crate) fn resolve_container_workspace_path(
@@ -102,8 +103,16 @@ pub(crate) async fn docker_file_read(
     container_id: &str,
     path: &str,
     timeout: Duration,
+    hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<String> {
-    let output = run_docker_command(docker_read_args(container_id, path), None, timeout).await?;
+    let output = run_docker_command(
+        container_id,
+        docker_read_args(container_id, path),
+        None,
+        timeout,
+        hard_cancel_token,
+    )
+    .await?;
     if !output.status.success() {
         return Err(MoaError::ToolError(format!(
             "docker file_read failed: {}",
@@ -120,11 +129,14 @@ pub(crate) async fn docker_file_write(
     path: &str,
     content: &str,
     timeout: Duration,
+    hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<()> {
     let output = run_docker_command(
+        container_id,
         docker_write_args(container_id, path),
         Some(content.as_bytes()),
         timeout,
+        hard_cancel_token,
     )
     .await?;
     if !output.status.success() {
@@ -143,11 +155,19 @@ pub(crate) async fn docker_file_search(
     pattern: &str,
     root: &str,
     timeout: Duration,
+    hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<Vec<String>> {
     let matcher = Glob::new(pattern)
         .map_err(|error| MoaError::ValidationError(error.to_string()))?
         .compile_matcher();
-    let output = run_docker_command(docker_find_args(container_id, root), None, timeout).await?;
+    let output = run_docker_command(
+        container_id,
+        docker_find_args(container_id, root),
+        None,
+        timeout,
+        hard_cancel_token,
+    )
+    .await?;
     if !output.status.success() {
         return Err(MoaError::ToolError(format!(
             "docker file_search failed: {}",
@@ -173,9 +193,11 @@ pub(crate) async fn docker_file_search(
 }
 
 async fn run_docker_command(
+    container_id: &str,
     args: Vec<String>,
     stdin: Option<&[u8]>,
     timeout: Duration,
+    hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<std::process::Output> {
     let mut command = Command::new("docker");
     command.args(&args).kill_on_drop(true);
@@ -198,17 +220,41 @@ async fn run_docker_command(
         })?;
     }
 
-    tokio::time::timeout(timeout, child.wait_with_output())
-        .await
-        .map_err(|_| {
-            MoaError::ProviderError(format!(
-                "docker exec command timed out after {}s",
-                timeout.as_secs()
-            ))
-        })?
-        .map_err(|error| {
-            MoaError::ProviderError(format!("failed to wait for docker exec command: {error}"))
-        })
+    let wait_output = child.wait_with_output();
+    tokio::pin!(wait_output);
+
+    if let Some(hard_cancel_token) = hard_cancel_token {
+        tokio::select! {
+            result = tokio::time::timeout(timeout, &mut wait_output) => {
+                result
+                    .map_err(|_| {
+                        MoaError::ProviderError(format!(
+                            "docker exec command timed out after {}s",
+                            timeout.as_secs()
+                        ))
+                    })?
+                    .map_err(|error| {
+                        MoaError::ProviderError(format!("failed to wait for docker exec command: {error}"))
+                    })
+            }
+            _ = hard_cancel_token.cancelled() => {
+                let _ = stop_container(container_id).await;
+                Err(MoaError::Cancelled)
+            }
+        }
+    } else {
+        tokio::time::timeout(timeout, wait_output)
+            .await
+            .map_err(|_| {
+                MoaError::ProviderError(format!(
+                    "docker exec command timed out after {}s",
+                    timeout.as_secs()
+                ))
+            })?
+            .map_err(|error| {
+                MoaError::ProviderError(format!("failed to wait for docker exec command: {error}"))
+            })
+    }
 }
 
 fn stderr_or_status(output: &std::process::Output) -> String {
@@ -218,6 +264,22 @@ fn stderr_or_status(output: &std::process::Output) -> String {
     } else {
         stderr
     }
+}
+
+async fn stop_container(container_id: &str) -> Result<()> {
+    let output = Command::new("docker")
+        .args(["stop", "-t", "2", container_id])
+        .output()
+        .await?;
+    if output.status.success()
+        || String::from_utf8_lossy(&output.stderr).contains("No such container")
+    {
+        return Ok(());
+    }
+    Err(MoaError::ProviderError(format!(
+        "failed to stop docker sandbox during cancellation: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
 }
 
 #[cfg(test)]

@@ -23,6 +23,13 @@ struct MockProvider {
     first_turn_delay: Duration,
 }
 
+#[derive(Clone)]
+struct SlowStreamingProvider {
+    model: String,
+    text: String,
+    delay: Duration,
+}
+
 #[async_trait]
 impl LLMProvider for MockProvider {
     fn name(&self) -> &str {
@@ -73,6 +80,64 @@ impl LLMProvider for MockProvider {
                 .send(Ok(CompletionContent::Text(response.text.clone())))
                 .await;
             Ok(response)
+        });
+        Ok(CompletionStream::new(rx, completion))
+    }
+}
+
+#[async_trait]
+impl LLMProvider for SlowStreamingProvider {
+    fn name(&self) -> &str {
+        "slow-stream"
+    }
+
+    fn capabilities(&self) -> moa_core::ModelCapabilities {
+        moa_core::ModelCapabilities {
+            model_id: self.model.clone(),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: false,
+            supports_vision: false,
+            supports_prefix_caching: false,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 0.0,
+                output_per_mtok: 0.0,
+                cached_input_per_mtok: None,
+            },
+        }
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
+        let text = self.text.clone();
+        let model = self.model.clone();
+        let delay = self.delay;
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let completion = tokio::spawn(async move {
+            for ch in text.chars() {
+                sleep(delay).await;
+                if tx
+                    .send(Ok(CompletionContent::Text(ch.to_string())))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(CompletionResponse {
+                text: text.clone(),
+                content: text
+                    .chars()
+                    .map(|ch| CompletionContent::Text(ch.to_string()))
+                    .collect(),
+                stop_reason: moa_core::StopReason::EndTurn,
+                model,
+                input_tokens: 4,
+                output_tokens: text.len(),
+                cached_input_tokens: 0,
+                duration_ms: (delay.as_millis() as usize * text.len()) as u64,
+            })
         });
         Ok(CompletionStream::new(rx, completion))
     }
@@ -604,7 +669,118 @@ async fn soft_cancel_marks_session_cancelled() -> Result<()> {
         .signal(session.session_id.clone(), SessionSignal::SoftCancel)
         .await?;
 
-    wait_for_status(&orchestrator, session.session_id, SessionStatus::Cancelled).await?;
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::Cancelled,
+    )
+    .await?;
+    let events = orchestrator
+        .session_store()
+        .get_events(session.session_id, EventRange::all())
+        .await?;
+    assert!(events.iter().any(|record| matches!(
+        record.event,
+        Event::SessionStatusChanged {
+            from: SessionStatus::Running,
+            to: SessionStatus::Cancelled,
+        }
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|record| matches!(record.event, Event::Error { .. }))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn hard_cancel_aborts_stream_and_emits_cancelled_status() -> Result<()> {
+    let provider: Arc<dyn LLMProvider> = Arc::new(SlowStreamingProvider {
+        model: MoaConfig::default().general.default_model,
+        text: "streaming response that should be interrupted".to_string(),
+        delay: Duration::from_millis(40),
+    });
+    let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
+    let session = start_session(&orchestrator).await?;
+    let mut runtime = orchestrator
+        .observe_runtime(session.session_id.clone())
+        .await?
+        .expect("local runtime stream should exist");
+
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::QueueMessage(UserMessage {
+                text: "interrupt me".to_string(),
+                attachments: Vec::new(),
+            }),
+        )
+        .await?;
+
+    let mut delta_text = String::new();
+    let cancel_deadline = Instant::now() + Duration::from_secs(2);
+    while delta_text.len() < 3 && Instant::now() < cancel_deadline {
+        if let Ok(Ok(event)) =
+            tokio::time::timeout(Duration::from_millis(250), runtime.recv()).await
+            && let RuntimeEvent::AssistantDelta(ch) = event
+        {
+            delta_text.push(ch);
+        }
+    }
+    assert!(
+        delta_text.len() >= 3,
+        "expected to receive streamed deltas before cancelling"
+    );
+
+    orchestrator
+        .signal(session.session_id.clone(), SessionSignal::HardCancel)
+        .await?;
+
+    let finish_deadline = Instant::now() + Duration::from_secs(2);
+    let mut saw_turn_completed = false;
+    while Instant::now() < finish_deadline {
+        match tokio::time::timeout(Duration::from_millis(250), runtime.recv()).await {
+            Ok(Ok(RuntimeEvent::AssistantDelta(ch))) => delta_text.push(ch),
+            Ok(Ok(RuntimeEvent::TurnCompleted)) => {
+                saw_turn_completed = true;
+                break;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::Cancelled,
+    )
+    .await?;
+    assert!(saw_turn_completed);
+    assert!(delta_text.len() < "streaming response that should be interrupted".len());
+
+    let events = orchestrator
+        .session_store()
+        .get_events(session.session_id, EventRange::all())
+        .await?;
+    assert!(events.iter().any(|record| matches!(
+        record.event,
+        Event::SessionStatusChanged {
+            from: SessionStatus::Running,
+            to: SessionStatus::Cancelled,
+        }
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|record| matches!(record.event, Event::Error { .. }))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|record| matches!(record.event, Event::BrainResponse { .. }))
+    );
     Ok(())
 }
 
@@ -1325,13 +1501,18 @@ async fn observe_stream_receives_events_in_order() -> Result<()> {
     let third = stream.next().await.transpose()?.ok_or_else(|| {
         moa_core::MoaError::ProviderError("missing third observed event".to_string())
     })?;
+    let fourth = stream.next().await.transpose()?.ok_or_else(|| {
+        moa_core::MoaError::ProviderError("missing fourth observed event".to_string())
+    })?;
 
     assert_eq!(first.sequence_num, 0);
     assert_eq!(first.event_type, EventType::SessionCreated);
     assert_eq!(second.sequence_num, 1);
     assert_eq!(second.event_type, EventType::UserMessage);
     assert_eq!(third.sequence_num, 2);
-    assert_eq!(third.event_type, EventType::BrainResponse);
+    assert_eq!(third.event_type, EventType::SessionStatusChanged);
+    assert_eq!(fourth.sequence_num, 3);
+    assert_eq!(fourth.event_type, EventType::BrainResponse);
     Ok(())
 }
 

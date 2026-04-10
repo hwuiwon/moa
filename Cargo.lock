@@ -2974,6 +2974,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -3016,6 +3017,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml 0.8.23",
  "tracing",
  "tracing-opentelemetry",
@@ -3059,6 +3061,7 @@ dependencies = [
  "shell-words",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -3106,6 +3109,7 @@ dependencies = [
  "temporalio-sdk-core",
  "tokio",
  "tokio-cron-scheduler",
+ "tokio-util",
  "tracing",
  "url",
  "uuid",

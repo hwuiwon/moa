@@ -6,6 +6,7 @@ use std::time::Duration;
 use moa_core::{MoaError, Result, ToolOutput};
 use serde::Deserialize;
 use tokio::fs;
+use tokio_util::sync::CancellationToken;
 
 use crate::tools::docker_file::{docker_file_read, resolve_container_workspace_path};
 
@@ -24,10 +25,11 @@ pub async fn execute_docker(
     workspace_root: &str,
     input: &str,
     timeout: Duration,
+    hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<ToolOutput> {
     let params: FileReadInput = serde_json::from_str(input)?;
     let path = resolve_container_workspace_path(workspace_root, &params.path)?;
-    let content = docker_file_read(container_id, &path, timeout).await?;
+    let content = docker_file_read(container_id, &path, timeout, hard_cancel_token).await?;
     Ok(ToolOutput::text(content, Duration::default()))
 }
 

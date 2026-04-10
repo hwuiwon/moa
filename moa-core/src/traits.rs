@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
 use crate::events::Event;
@@ -175,6 +176,8 @@ pub struct ToolContext<'a> {
     pub session: &'a SessionMeta,
     /// Shared memory store.
     pub memory_store: &'a dyn MemoryStore,
+    /// Cooperative cancellation token for the current session, when available.
+    pub cancel_token: Option<&'a CancellationToken>,
 }
 
 /// Async built-in tool handler.

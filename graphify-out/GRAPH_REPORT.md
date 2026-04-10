@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-04-10)
 
 ## Corpus Check
-- 117 files · ~105,865 words
+- 117 files · ~107,447 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 2134 nodes · 3768 edges · 78 communities detected
+- 2150 nodes · 3798 edges · 78 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -28,7 +28,7 @@
 
 ### Community 0 - "Core Domain Types"
 Cohesion: 0.02
-Nodes (88): ActionButton, ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, ApprovalRule, Attachment (+80 more)
+Nodes (89): ActionButton, ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, ApprovalRule, Attachment (+81 more)
 
 ### Community 1 - "TUI Chat Runtime"
 Cohesion: 0.03
@@ -44,7 +44,7 @@ Nodes (34): centered_rect(), extract_search_keywords(), extract_search_query(), 
 
 ### Community 4 - "File Memory Store"
 Cohesion: 0.05
-Nodes (33): MoaError, canary_detection_works(), check_canary(), classifier_flags_known_attack_patterns(), classify_input(), contains_canary_tokens(), inject_canary(), InputClassification (+25 more)
+Nodes (36): MoaError, build_provider_from_config(), build_provider_from_selection(), explicit_provider_prefix_overrides_inference(), infer_provider_name(), infers_anthropic_for_claude_models(), infers_openai_for_gpt_models(), infers_openrouter_for_vendor_prefixed_models() (+28 more)
 
 ### Community 5 - "Brain Turn Tests"
 Cohesion: 0.05
@@ -54,21 +54,21 @@ Nodes (18): always_allow_rule_persists_and_skips_next_approval(), canary_leaks_i
 Cohesion: 0.07
 Nodes (22): build_skill_path(), confidence_for_skill(), defaults_missing_moa_metadata(), estimate_skill_tokens(), format_timestamp(), humanize_skill_name(), is_valid_skill_name(), metadata_csv() (+14 more)
 
-### Community 7 - "Provider Common Layer"
+### Community 7 - "Local Orchestrator"
+Cohesion: 0.06
+Nodes (17): accept_user_message(), append_event(), detect_docker(), docker_status(), DockerSandbox, flush_next_queued_message(), flush_queued_messages(), LocalBrainHandle (+9 more)
+
+### Community 8 - "Provider Common Layer"
 Cohesion: 0.06
 Nodes (30): build_function_tool(), build_http_client(), build_responses_request(), consume_responses_stream_once(), is_rate_limit_error(), is_rate_limit_message(), map_openai_error(), metadata_as_strings() (+22 more)
-
-### Community 8 - "Local Orchestrator"
-Cohesion: 0.06
-Nodes (16): accept_user_message(), append_event(), detect_docker(), DockerSandbox, flush_next_queued_message(), flush_queued_messages(), LocalBrainHandle, LocalHandProvider (+8 more)
 
 ### Community 9 - "Temporal Orchestrator"
 Cohesion: 0.06
 Nodes (25): activity_options(), apply_approval_decision(), ApprovalDecisionActivityInput, ApprovalSignalInput, brain_turn_activity_options(), CancelMode, connect_temporal_client(), flush_all_queued_messages() (+17 more)
 
 ### Community 10 - "Local Orchestrator Tests"
-Cohesion: 0.09
-Nodes (31): approval_requested_event_persists_full_prompt_details(), collect_runtime_events_until(), denied_tool_preserves_queued_follow_up(), FileWriteApprovalProvider, last_user_message(), list_sessions_includes_active_session(), memory_maintenance_runs_due_workspace_consolidation(), memory_maintenance_skips_when_threshold_or_cooldown_not_met() (+23 more)
+Cohesion: 0.08
+Nodes (33): approval_requested_event_persists_full_prompt_details(), collect_runtime_events_until(), denied_tool_preserves_queued_follow_up(), FileWriteApprovalProvider, hard_cancel_aborts_stream_and_emits_cancelled_status(), last_user_message(), list_sessions_includes_active_session(), memory_maintenance_runs_due_workspace_consolidation() (+25 more)
 
 ### Community 11 - "Memory Consolidation"
 Cohesion: 0.08
@@ -78,13 +78,13 @@ Nodes (40): canonical_port_claims(), confidence_rank(), consolidation_due_for_sc
 Cohesion: 0.07
 Nodes (15): event_record_from_row(), event_type_from_db(), optional_i64(), optional_text(), parse_timestamp(), platform_from_db(), session_meta_from_row(), session_status_from_db() (+7 more)
 
-### Community 13 - "Anthropic Provider"
+### Community 13 - "Tool Router & Policies"
+Cohesion: 0.09
+Nodes (19): approval_diffs_for(), approval_fields_for(), approval_pattern_for(), default_cloud_provider(), execute_tool_policy(), expand_local_path(), hand_id(), language_hint_for_path() (+11 more)
+
+### Community 14 - "Anthropic Provider"
 Cohesion: 0.08
 Nodes (25): anthropic_message(), AnthropicProvider, AnthropicStreamState, BlockAccumulator, build_request_body(), canonical_model_id(), capabilities_for_model(), completion_request_serializes_to_anthropic_format() (+17 more)
-
-### Community 14 - "Tool Router & Policies"
-Cohesion: 0.1
-Nodes (19): approval_diffs_for(), approval_fields_for(), approval_pattern_for(), default_cloud_provider(), execute_tool_policy(), expand_local_path(), hand_id(), language_hint_for_path() (+11 more)
 
 ### Community 15 - "Config & Errors"
 Cohesion: 0.06
@@ -146,25 +146,25 @@ Nodes (10): build_url(), DaytonaHandProvider, default_headers(), derive_toolbox_
 Cohesion: 0.16
 Nodes (13): channel_from_chat_and_reply(), handle_callback_query(), handle_message(), inbound_from_callback_query(), inbound_from_message(), inline_keyboard(), parse_message_id(), parses_approval_callback_into_control_message() (+5 more)
 
-### Community 30 - "Skill Injection Stage"
-Cohesion: 0.11
-Nodes (9): distills_skill_after_tool_heavy_session(), improves_existing_skill_when_better_flow_is_found(), MockLlm, session(), skill_injector_marks_breakpoint_without_skills(), skill_injector_marks_cache_breakpoint_and_formats_metadata(), SkillInjector, StubSkillMemoryStore (+1 more)
+### Community 30 - "Local Tool Tests"
+Cohesion: 0.14
+Nodes (16): bash_captures_stdout_and_stderr(), bash_respects_timeout(), EmptyMemoryStore, file_operations_reject_path_traversal(), file_read_reads_written_content(), file_search_finds_files_by_glob(), local_bash_hard_cancel_kills_running_process(), memory_read_returns_page_contents() (+8 more)
 
-### Community 31 - "Settings View"
-Cohesion: 0.15
-Nodes (13): category_label(), centered_rect(), cycle_string(), cycling_provider_updates_default_model(), fields_for(), model_options(), mutate_setting(), provider_default_model() (+5 more)
-
-### Community 32 - "Docker File Operations"
+### Community 31 - "Docker File Operations"
 Cohesion: 0.11
 Nodes (15): container_path_validation_accepts_workspace_absolute_paths(), container_path_validation_rejects_absolute_paths_outside_workspace(), container_path_validation_rejects_traversal(), docker_file_read(), docker_file_search(), docker_file_write(), docker_find_args(), docker_read_args() (+7 more)
 
-### Community 33 - "Approval Card Widget"
+### Community 32 - "Skill Injection Stage"
+Cohesion: 0.11
+Nodes (9): distills_skill_after_tool_heavy_session(), improves_existing_skill_when_better_flow_is_found(), MockLlm, session(), skill_injector_marks_breakpoint_without_skills(), skill_injector_marks_cache_breakpoint_and_formats_metadata(), SkillInjector, StubSkillMemoryStore (+1 more)
+
+### Community 33 - "Settings View"
+Cohesion: 0.15
+Nodes (13): category_label(), centered_rect(), cycle_string(), cycling_provider_updates_default_model(), fields_for(), model_options(), mutate_setting(), provider_default_model() (+5 more)
+
+### Community 34 - "Approval Card Widget"
 Cohesion: 0.13
 Nodes (15): approval_buttons(), approval_request(), ApprovalCallbackAction, border_line(), callback_data_roundtrips(), content_line(), prepare_outbound_message(), prepare_outbound_message_adds_inline_buttons_when_supported() (+7 more)
-
-### Community 34 - "Local Tool Tests"
-Cohesion: 0.16
-Nodes (15): bash_captures_stdout_and_stderr(), bash_respects_timeout(), EmptyMemoryStore, file_operations_reject_path_traversal(), file_read_reads_written_content(), file_search_finds_files_by_glob(), memory_read_returns_page_contents(), memory_read_with_explicit_scope_reads_only_that_scope() (+7 more)
 
 ### Community 35 - "History Compilation Stage"
 Cohesion: 0.14
@@ -194,45 +194,45 @@ Nodes (9): daytona_live_provider_handles_roundtrip_and_lifecycle(), daytona_live
 Cohesion: 0.29
 Nodes (12): branch_reconciliation_merges_conflicting_writes(), consolidation_decays_confidence_once_and_is_stable_on_repeat_runs(), consolidation_normalizes_dates_and_resolves_conflicts(), ingest_source_creates_summary_and_updates_related_pages(), maintenance_operations_append_log_and_keep_results_searchable(), manual_seeded_memory_fuzz_preserves_core_invariants(), manual_stress_ingest_reconcile_and_consolidate_preserves_invariants(), reconciliation_merges_multiple_branches_and_cleans_branch_directory() (+4 more)
 
-### Community 42 - "Provider Factory"
-Cohesion: 0.25
-Nodes (15): build_provider_from_config(), build_provider_from_selection(), explicit_provider_prefix_overrides_inference(), infer_provider_name(), infers_anthropic_for_claude_models(), infers_openai_for_gpt_models(), infers_openrouter_for_vendor_prefixed_models(), is_openai_model() (+7 more)
-
-### Community 43 - "E2B Live Tests"
+### Community 42 - "E2B Live Tests"
 Cohesion: 0.17
 Nodes (8): destroy_and_wait(), e2b_live_provider_handles_roundtrip_and_lifecycle(), e2b_live_router_lazy_provisions_reuses_and_isolates_sessions(), EmptyMemoryStore, live_config(), live_provider(), session(), wait_for_destroyed()
 
-### Community 44 - "OpenAI Provider Tests"
+### Community 43 - "OpenAI Provider Tests"
 Cohesion: 0.25
 Nodes (13): openai_provider_does_not_retry_after_partial_stream_output(), openai_provider_drops_oversized_metadata_values(), openai_provider_retries_after_rate_limit(), openai_provider_streams_parallel_tool_calls_in_order(), openai_provider_streams_tool_calls_from_responses_events(), openai_provider_translates_requests_to_responses_api(), openrouter_provider_normalizes_bare_claude_models(), openrouter_provider_sets_attribution_headers() (+5 more)
 
-### Community 45 - "Encrypted Secret Vault"
+### Community 44 - "Encrypted Secret Vault"
 Cohesion: 0.3
 Nodes (4): decrypt_bytes(), encrypt_bytes(), file_vault_encrypts_and_decrypts_roundtrip(), FileVault
 
-### Community 46 - "Context Pipeline Core"
+### Community 45 - "Context Pipeline Core"
 Cohesion: 0.22
 Nodes (7): build_default_pipeline(), build_default_pipeline_with_tools(), ContextPipeline, estimate_tokens(), pipeline_runner_executes_stages_in_order(), PipelineStageReport, TestStage
 
-### Community 47 - "Command Palette"
+### Community 46 - "Command Palette"
 Cohesion: 0.22
 Nodes (6): centered_rect(), filtered_actions(), palette_fuzzy_search_prefers_matching_actions(), PaletteAction, PaletteState, render_palette()
 
-### Community 48 - "Prompt Widget"
+### Community 47 - "Prompt Widget"
 Cohesion: 0.23
 Nodes (5): build_textarea(), PromptCompletionKind, PromptCompletionState, PromptWidget, render_completion_menu()
 
-### Community 49 - "MCP Router Tests"
+### Community 48 - "MCP Router Tests"
 Cohesion: 0.19
 Nodes (6): EmptyMemoryStore, router_calls_http_mcp_server_and_surfaces_jsonrpc_errors(), router_discovers_and_calls_streamable_http_tools_with_sse_responses(), router_discovers_stdio_mcp_tools_from_config(), router_injects_mcp_credentials_via_proxy(), session()
 
-### Community 50 - "Core Event Model"
+### Community 49 - "Core Event Model"
 Cohesion: 0.15
 Nodes (1): Event
 
-### Community 51 - "Session Store Tests"
+### Community 50 - "Session Store Tests"
 Cohesion: 0.15
 Nodes (0): 
+
+### Community 51 - "Injection Detection"
+Cohesion: 0.26
+Nodes (12): canary_detection_works(), check_canary(), classifier_flags_known_attack_patterns(), classify_input(), contains_canary_tokens(), inject_canary(), InputClassification, InputInspection (+4 more)
 
 ### Community 52 - "TUI Keybindings"
 Cohesion: 0.17
@@ -274,33 +274,33 @@ Nodes (2): instruction_processor_appends_config_backed_sections(), InstructionPr
 Cohesion: 0.6
 Nodes (5): max_scroll(), render_chat(), transcript_lines(), wrap_line(), wrap_prefixed()
 
-### Community 62 - "Cache Optimizer Stage"
+### Community 62 - "Bash Tool"
+Cohesion: 0.47
+Nodes (3): BashToolInput, execute_docker(), execute_local()
+
+### Community 63 - "Cache Optimizer Stage"
 Cohesion: 0.4
 Nodes (2): cache_optimizer_validates_cache_breakpoint(), CacheOptimizer
 
-### Community 63 - "Identity Stage"
+### Community 64 - "Identity Stage"
 Cohesion: 0.4
 Nodes (2): identity_processor_appends_system_prompt(), IdentityProcessor
 
-### Community 64 - "CLI Exec Mode"
+### Community 65 - "CLI Exec Mode"
 Cohesion: 0.6
 Nodes (4): exec_mode_formats_tool_updates_compactly(), format_tool_update(), resolve_exec_approval(), run_exec()
 
-### Community 65 - "Sidebar Widget"
+### Community 66 - "Sidebar Widget"
 Cohesion: 0.5
 Nodes (2): render_sidebar(), section_title()
 
-### Community 66 - "Anthropic Provider Tests"
+### Community 67 - "Anthropic Provider Tests"
 Cohesion: 0.4
 Nodes (0): 
 
-### Community 67 - "File Search Tool"
+### Community 68 - "File Search Tool"
 Cohesion: 0.5
 Nodes (3): collect_matches(), execute(), FileSearchInput
-
-### Community 68 - "Bash Tool"
-Cohesion: 0.6
-Nodes (3): BashToolInput, execute_docker(), execute_local()
 
 ### Community 69 - "Chat Harness Example"
 Cohesion: 0.83
