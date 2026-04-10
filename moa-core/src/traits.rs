@@ -11,9 +11,10 @@ use crate::types::{
     CompletionRequest, CompletionStream, Credential, CronHandle, CronSpec, EventFilter, EventRange,
     EventRecord, EventStream, HandHandle, HandSpec, HandStatus, InboundMessage, MemoryPath,
     MemoryScope, MemorySearchResult, MessageId, ModelCapabilities, ObserveLevel, OutboundMessage,
-    PageSummary, PageType, Platform, PlatformCapabilities, ProcessorOutput, RuntimeEvent,
-    SequenceNum, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
-    SessionStatus, SessionSummary, StartSessionRequest, ToolOutput, WikiPage, WorkingContext,
+    PageSummary, PageType, PendingSignal, PendingSignalId, Platform, PlatformCapabilities,
+    ProcessorOutput, RuntimeEvent, SequenceNum, SessionFilter, SessionHandle, SessionId,
+    SessionMeta, SessionSignal, SessionStatus, SessionSummary, StartSessionRequest, ToolOutput,
+    WikiPage, WorkingContext,
 };
 
 /// Orchestrates session lifecycle and observation.
@@ -67,6 +68,19 @@ pub trait SessionStore: Send + Sync {
 
     /// Updates the status of an existing session.
     async fn update_status(&self, session_id: SessionId, status: SessionStatus) -> Result<()>;
+
+    /// Stores a durable pending signal that should be resolved later.
+    async fn store_pending_signal(
+        &self,
+        session_id: SessionId,
+        signal: PendingSignal,
+    ) -> Result<PendingSignalId>;
+
+    /// Returns unresolved pending signals for the session in creation order.
+    async fn get_pending_signals(&self, session_id: SessionId) -> Result<Vec<PendingSignal>>;
+
+    /// Marks a previously stored pending signal as resolved.
+    async fn resolve_pending_signal(&self, signal_id: PendingSignalId) -> Result<()>;
 
     /// Searches events across sessions.
     async fn search_events(&self, query: &str, filter: EventFilter) -> Result<Vec<EventRecord>>;

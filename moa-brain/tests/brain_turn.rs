@@ -10,10 +10,10 @@ use moa_brain::{
 use moa_core::{
     ApprovalDecision, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
     Event, EventFilter, EventRange, EventRecord, EventType, LLMProvider, MemoryPath, MemoryScope,
-    MemorySearchResult, MemoryStore, MoaConfig, ModelCapabilities, PageSummary, PageType, Result,
-    RuntimeEvent, SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
-    SessionSummary, StopReason, TokenPricing, ToolCallFormat, ToolInvocation, UserId, WikiPage,
-    WorkspaceId,
+    MemorySearchResult, MemoryStore, MoaConfig, ModelCapabilities, PageSummary, PageType,
+    PendingSignal, PendingSignalId, Result, RuntimeEvent, SequenceNum, SessionFilter, SessionId,
+    SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason, TokenPricing,
+    ToolCallFormat, ToolInvocation, UserId, WikiPage, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
@@ -96,6 +96,22 @@ impl SessionStore for MockSessionStore {
 
     async fn update_status(&self, _session_id: SessionId, status: SessionStatus) -> Result<()> {
         self.session.lock().await.status = status;
+        Ok(())
+    }
+
+    async fn store_pending_signal(
+        &self,
+        _session_id: SessionId,
+        signal: PendingSignal,
+    ) -> Result<PendingSignalId> {
+        Ok(signal.id)
+    }
+
+    async fn get_pending_signals(&self, _session_id: SessionId) -> Result<Vec<PendingSignal>> {
+        Ok(Vec::new())
+    }
+
+    async fn resolve_pending_signal(&self, _signal_id: PendingSignalId) -> Result<()> {
         Ok(())
     }
 

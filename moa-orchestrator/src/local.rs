@@ -12,9 +12,9 @@ use moa_brain::{
 };
 use moa_core::{
     BrainOrchestrator, CronHandle, CronSpec, Event, EventRange, EventRecord, EventStream,
-    LLMProvider, MoaConfig, MoaError, ObserveLevel, Result, RuntimeEvent, SessionFilter,
-    SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore,
-    SessionSummary, StartSessionRequest, UserMessage,
+    LLMProvider, MoaConfig, MoaError, ObserveLevel, PendingSignal, Result, RuntimeEvent,
+    SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
+    SessionStore, SessionSummary, StartSessionRequest, UserMessage,
 };
 use moa_hands::ToolRouter;
 use moa_memory::{ConsolidationReport, FileMemoryStore};
@@ -184,6 +184,7 @@ impl LocalOrchestrator {
         &self,
         session_id: SessionId,
         initial_turn_requested: bool,
+        initial_queued_messages: Vec<UserMessage>,
     ) -> Result<()> {
         let (signal_tx, signal_rx) = mpsc::channel(64);
         let (event_tx, _) = broadcast::channel(256);
@@ -220,6 +221,7 @@ impl LocalOrchestrator {
                 task_runtime_tx,
                 task_status,
                 initial_turn_requested,
+                initial_queued_messages,
                 task_cancel_token,
                 task_hard_cancel_token,
             )
@@ -315,8 +317,12 @@ impl BrainOrchestrator for LocalOrchestrator {
             )
             .await?;
         }
-        self.spawn_session(session_id.clone(), req.initial_message.is_some())
-            .await?;
+        self.spawn_session(
+            session_id.clone(),
+            req.initial_message.is_some(),
+            Vec::new(),
+        )
+        .await?;
         Ok(SessionHandle { session_id })
     }
 
@@ -327,16 +333,38 @@ impl BrainOrchestrator for LocalOrchestrator {
         }
 
         let wake = self.session_store.wake(session_id.clone()).await?;
+        let initial_queued_messages = wake
+            .pending_signals
+            .into_iter()
+            .map(|signal| signal.user_message())
+            .collect::<Result<Vec<_>>>()?;
         let initial_turn_requested =
-            session_requires_processing(&wake.session, &wake.recent_events);
-        self.spawn_session(session_id.clone(), initial_turn_requested)
-            .await?;
+            session_requires_processing(&wake.session, &wake.recent_events)
+                || !initial_queued_messages.is_empty();
+        self.spawn_session(
+            session_id.clone(),
+            initial_turn_requested,
+            initial_queued_messages,
+        )
+        .await?;
         Ok(SessionHandle { session_id })
     }
 
     /// Sends a signal to a running local session.
     async fn signal(&self, session_id: SessionId, signal: SessionSignal) -> Result<()> {
         self.ensure_session_running(session_id.clone()).await?;
+        if let SessionSignal::QueueMessage(message) = &signal {
+            let session = self.session_store.get_session(session_id.clone()).await?;
+            if matches!(
+                session.status,
+                SessionStatus::Running | SessionStatus::WaitingApproval
+            ) {
+                let pending = PendingSignal::queue_message(session_id.clone(), message.clone())?;
+                self.session_store
+                    .store_pending_signal(session_id.clone(), pending)
+                    .await?;
+            }
+        }
         let sessions = self.sessions.read().await;
         let handle = sessions
             .get(&session_id)
@@ -425,6 +453,7 @@ async fn run_session_task(
     runtime_tx: broadcast::Sender<RuntimeEvent>,
     status: Arc<RwLock<SessionStatus>>,
     mut turn_requested: bool,
+    mut queued_messages: Vec<UserMessage>,
     cancel_token: CancellationToken,
     hard_cancel_token: CancellationToken,
 ) -> Result<()> {
@@ -434,8 +463,6 @@ async fn run_session_task(
         context.memory_store.clone(),
         context.tool_router.tool_schemas(),
     );
-    let mut queued_messages = Vec::new();
-
     loop {
         if !turn_requested {
             match signal_rx.recv().await {
@@ -444,8 +471,14 @@ async fn run_session_task(
                         &context.session_store,
                         &event_tx,
                         &context.session_id,
-                        message,
+                        message.clone(),
                         false,
+                    )
+                    .await?;
+                    let _ = resolve_matching_pending_signal(
+                        &context.session_store,
+                        &context.session_id,
+                        &message,
                     )
                     .await?;
                     update_status(
@@ -493,6 +526,28 @@ async fn run_session_task(
                 }
                 None => return Ok(()),
             }
+            continue;
+        }
+
+        let session = context
+            .session_store
+            .get_session(context.session_id.clone())
+            .await?;
+        let events = context
+            .session_store
+            .get_events(context.session_id.clone(), EventRange::all())
+            .await?;
+        if !session_requires_processing(&session, &events)
+            && !queued_messages.is_empty()
+            && flush_next_queued_message(
+                &context.session_store,
+                &event_tx,
+                &context.session_id,
+                &mut queued_messages,
+            )
+            .await?
+        {
+            turn_requested = true;
             continue;
         }
 
@@ -661,7 +716,7 @@ async fn flush_queued_messages(
     queued_messages: &mut Vec<UserMessage>,
 ) -> Result<()> {
     for message in queued_messages.drain(..) {
-        accept_user_message(session_store, event_tx, session_id, message, true).await?;
+        flush_pending_signal(session_store, event_tx, session_id, message).await?;
     }
 
     Ok(())
@@ -678,8 +733,42 @@ async fn flush_next_queued_message(
     }
 
     let message = queued_messages.remove(0);
-    accept_user_message(session_store, event_tx, session_id, message, true).await?;
+    flush_pending_signal(session_store, event_tx, session_id, message).await?;
     Ok(true)
+}
+
+async fn flush_pending_signal(
+    session_store: &Arc<TursoSessionStore>,
+    event_tx: &broadcast::Sender<EventRecord>,
+    session_id: &SessionId,
+    message: UserMessage,
+) -> Result<()> {
+    accept_user_message(session_store, event_tx, session_id, message.clone(), true).await?;
+    let signal_id = resolve_matching_pending_signal(session_store, session_id, &message)
+        .await?
+        .ok_or_else(|| {
+            MoaError::StorageError(
+                "queued message did not have a matching durable pending signal".to_string(),
+            )
+        })?;
+    session_store.resolve_pending_signal(signal_id).await?;
+    Ok(())
+}
+
+async fn resolve_matching_pending_signal(
+    session_store: &Arc<TursoSessionStore>,
+    session_id: &SessionId,
+    message: &UserMessage,
+) -> Result<Option<moa_core::PendingSignalId>> {
+    let pending = session_store
+        .get_pending_signals(session_id.clone())
+        .await?;
+    for signal in pending {
+        if signal.user_message()? == *message {
+            return Ok(Some(signal.id));
+        }
+    }
+    Ok(None)
 }
 
 async fn update_status(
