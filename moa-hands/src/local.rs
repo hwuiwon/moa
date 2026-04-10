@@ -1,6 +1,8 @@
 //! Local hand provider with direct host execution and optional Docker sandboxes.
 
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +20,7 @@ use crate::tools::{bash, file_read, file_search, file_write};
 
 const DEFAULT_DOCKER_IMAGE: &str = "alpine:3.20";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
+const DOCKER_TMPFS_OPTIONS: &str = "rw,nosuid,nodev,size=64m";
 
 #[derive(Debug, Clone)]
 struct DockerSandbox {
@@ -61,6 +64,8 @@ impl LocalHandProvider {
     async fn create_sandbox_dir(&self) -> Result<PathBuf> {
         let sandbox_dir = self.work_dir.join(format!("sandbox-{}", Uuid::new_v4()));
         fs::create_dir_all(&sandbox_dir).await?;
+        #[cfg(unix)]
+        fs::set_permissions(&sandbox_dir, std::fs::Permissions::from_mode(0o777)).await?;
         Ok(sandbox_dir)
     }
 
@@ -70,22 +75,39 @@ impl LocalHandProvider {
             .clone()
             .unwrap_or_else(|| DEFAULT_DOCKER_IMAGE.to_string());
         let mount = format!("{}:/workspace", sandbox_dir.display());
-        let output = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--rm",
-                "-w",
-                "/workspace",
-                "-v",
-                &mount,
-                &image,
-                "sh",
-                "-lc",
-                "trap : TERM INT; while sleep 3600; do :; done",
-            ])
-            .output()
-            .await?;
+        let mut args = vec![
+            "run".to_string(),
+            "-d".to_string(),
+            "--rm".to_string(),
+            "--read-only".to_string(),
+            "--workdir".to_string(),
+            "/workspace".to_string(),
+            "--tmpfs".to_string(),
+            format!("/tmp:{DOCKER_TMPFS_OPTIONS}"),
+            "--tmpfs".to_string(),
+            format!("/run:{DOCKER_TMPFS_OPTIONS}"),
+            "--cap-drop".to_string(),
+            "ALL".to_string(),
+            "--security-opt".to_string(),
+            "no-new-privileges:true".to_string(),
+            "--network".to_string(),
+            "none".to_string(),
+            "--pids-limit".to_string(),
+            "256".to_string(),
+            "-v".to_string(),
+            mount,
+        ];
+        if let Ok(profile) = std::env::var("MOA_DOCKER_SECCOMP_PROFILE") {
+            args.push("--security-opt".to_string());
+            args.push(format!("seccomp={profile}"));
+        }
+        args.extend([
+            image,
+            "sh".to_string(),
+            "-lc".to_string(),
+            "trap : TERM INT; while sleep 3600; do :; done".to_string(),
+        ]);
+        let output = Command::new("docker").args(&args).output().await?;
         if !output.status.success() {
             return Err(MoaError::ProviderError(format!(
                 "failed to start docker sandbox: {}",
@@ -281,7 +303,9 @@ impl HandProvider for LocalHandProvider {
                     .args(["rm", "-f", container_id])
                     .output()
                     .await?;
-                if !output.status.success() {
+                if !output.status.success()
+                    && !String::from_utf8_lossy(&output.stderr).contains("No such container")
+                {
                     return Err(MoaError::ProviderError(format!(
                         "failed to destroy docker sandbox: {}",
                         String::from_utf8_lossy(&output.stderr).trim()

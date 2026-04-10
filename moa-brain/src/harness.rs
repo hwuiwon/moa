@@ -7,6 +7,10 @@ use moa_core::{
     SessionId, SessionStore, StopReason, WorkingContext,
 };
 use moa_hands::ToolRouter;
+use moa_security::{
+    InputClassification, check_canary, contains_canary_tokens, inject_canary, inspect_input,
+    wrap_untrusted_tool_output,
+};
 use uuid::Uuid;
 
 use crate::pipeline::ContextPipeline;
@@ -132,6 +136,7 @@ async fn run_brain_turn_with_tools_mode(
         let mut ctx = WorkingContext::new(&session, llm_provider.capabilities());
 
         let stage_reports = pipeline.run(&mut ctx).await?;
+        let active_canary = tool_router.as_ref().map(|_| inject_canary(&mut ctx));
         tracing::info!(
             session_id = %session_id,
             compiled_messages = ctx.messages.len(),
@@ -179,6 +184,40 @@ async fn run_brain_turn_with_tools_mode(
                     .as_deref()
                     .and_then(|value| Uuid::parse_str(value).ok())
                     .unwrap_or_else(Uuid::new_v4);
+                let serialized_input = serde_json::to_string(&call.input)?;
+
+                if contains_canary_tokens(&serialized_input)
+                    || active_canary
+                        .as_deref()
+                        .map(|canary| check_canary(canary, &serialized_input))
+                        .unwrap_or(false)
+                {
+                    session_store
+                        .emit_event(
+                            session_id.clone(),
+                            Event::Warning {
+                                message: format!(
+                                    "blocked tool {} because the active canary leaked into tool input",
+                                    call.name
+                                ),
+                            },
+                        )
+                        .await?;
+                    session_store
+                        .emit_event(
+                            session_id.clone(),
+                            Event::ToolError {
+                                tool_id,
+                                error: format!(
+                                    "tool {} blocked because it leaked a protected canary token",
+                                    call.name
+                                ),
+                                retryable: false,
+                            },
+                        )
+                        .await?;
+                    continue;
+                }
 
                 if let Some(router) = &tool_router {
                     let prepared = router.prepare_invocation(&session, call).await?;
@@ -197,12 +236,22 @@ async fn run_brain_turn_with_tools_mode(
                                     },
                                 )
                                 .await?;
+                            let secured_output =
+                                secure_tool_output(&output, active_canary.as_deref());
+                            emit_tool_output_warning(
+                                session_id.clone(),
+                                &session_store,
+                                tool_id,
+                                &call.name,
+                                &secured_output,
+                            )
+                            .await?;
                             session_store
                                 .emit_event(
                                     session_id.clone(),
                                     Event::ToolResult {
                                         tool_id,
-                                        output: format_tool_output(&output),
+                                        output: secured_output.rendered,
                                         success: output.exit_code == 0,
                                         duration_ms: output.duration.as_millis() as u64,
                                     },
@@ -394,12 +443,21 @@ async fn execute_pending_tool(
             if let Some(hand_id) = resolved_hand_id {
                 tracing::debug!(session_id = %session_id, hand_id, "executed approved tool call");
             }
+            let secured_output = secure_tool_output(&output, None);
+            emit_tool_output_warning(
+                session_id.clone(),
+                &session_store,
+                pending.tool_id,
+                &pending.tool_name,
+                &secured_output,
+            )
+            .await?;
             session_store
                 .emit_event(
                     session_id,
                     Event::ToolResult {
                         tool_id: pending.tool_id,
-                        output: format_tool_output(&output),
+                        output: secured_output.rendered,
                         success: output.exit_code == 0,
                         duration_ms: output.duration.as_millis() as u64,
                     },
@@ -418,6 +476,54 @@ async fn execute_pending_tool(
                 )
                 .await?;
         }
+    }
+
+    Ok(())
+}
+
+struct SecuredToolOutput {
+    rendered: String,
+    inspection: moa_security::InputInspection,
+}
+
+fn secure_tool_output(
+    output: &moa_core::ToolOutput,
+    active_canary: Option<&str>,
+) -> SecuredToolOutput {
+    let formatted = format_tool_output(output);
+    let canaries = active_canary
+        .map(|canary| vec![canary.to_string()])
+        .unwrap_or_default();
+    let inspection = inspect_input(&formatted, &canaries);
+    SecuredToolOutput {
+        rendered: wrap_untrusted_tool_output(&formatted),
+        inspection,
+    }
+}
+
+async fn emit_tool_output_warning(
+    session_id: SessionId,
+    session_store: &Arc<dyn SessionStore>,
+    tool_id: Uuid,
+    tool_name: &str,
+    secured_output: &SecuredToolOutput,
+) -> Result<()> {
+    if matches!(
+        secured_output.inspection.classification,
+        InputClassification::MediumRisk | InputClassification::HighRisk
+    ) {
+        session_store
+            .emit_event(
+                session_id,
+                Event::Warning {
+                    message: format!(
+                        "tool output for {tool_name} ({tool_id}) classified as {:?} with signals: {}",
+                        secured_output.inspection.classification,
+                        secured_output.inspection.signals.join(", ")
+                    ),
+                },
+            )
+            .await?;
     }
 
     Ok(())
