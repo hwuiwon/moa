@@ -1287,3 +1287,63 @@ Remaining caveat:
 
 - The live API rejected explicit sandbox resource fields on the current create path with `Cannot specify Sandbox resources when using a snapshot`, so `moa-hands/src/daytona.rs` currently relies on Daytona's default sandbox class instead of honoring requested CPU/memory overrides.
 - The published docs mix `/toolbox/{sandboxId}/toolbox/...` reference paths with curl examples that omit the second `/toolbox`; the real proxy accepted the shorter form during validation.
+
+### 20.1 Local encrypted vault currently uses a generated local passphrase file
+
+Current state:
+
+- `moa-security/src/vault.rs` stores credentials in `vault.enc` as an age-encrypted JSON document.
+- The local passphrase is generated automatically on first use and stored beside the vault as `vault.key` with `0600` permissions on Unix.
+- This keeps credentials encrypted at rest and gives MOA a concrete local `CredentialVault` implementation without requiring user setup before the first run.
+
+Consequence:
+
+- Step 19 now has a working encrypted local vault with async `get/set/delete/list` operations and test coverage.
+- Existing local components can move off env-only credential handling when the runtime is wired to use `FileVault`.
+
+Remaining caveat:
+
+- This is stronger than plaintext-at-rest, but weaker than OS keychain or external secret-manager storage because the decryption material still lives on the same machine.
+- If we later want stricter local secret handling, the swap point is the `CredentialVault` trait, not the rest of the security pipeline.
+
+### 20.2 Local Docker hardening currently disables container network access entirely
+
+Current state:
+
+- `moa-hands/src/local.rs` now starts Docker sandboxes with:
+  - read-only root filesystem
+  - tmpfs scratch mounts
+  - `cap-drop=ALL`
+  - `no-new-privileges:true`
+  - `pids-limit=256`
+  - Docker seccomp active (daemon default unless `MOA_DOCKER_SECCOMP_PROFILE` is set)
+- The implementation uses `--network none` as the concrete way to block the cloud metadata endpoint from local Docker sandboxes.
+
+Consequence:
+
+- The new Docker hardening integration test can verify `Seccomp: 2`, `NoNewPrivs: 1`, a read-only root mount, and that `169.254.169.254` is unreachable.
+- The local hand now has a real hardened container posture instead of a soft long-lived shell.
+
+Remaining caveat:
+
+- This is stricter than the original spec in one dimension: local Docker sandboxes are offline, not just metadata-blocked.
+- If we later need outbound network for local containerized tools, we will need a narrower metadata-blocking mechanism than `--network none`.
+
+### 20.3 Tool-result trust boundaries are explicit, but repeated malicious tool loops are still model-driven
+
+Current state:
+
+- `moa-brain/src/harness.rs` now injects a per-turn canary into tool-enabled requests.
+- Tool invocations are blocked if they leak either the exact active canary or any `moa_canary_*` marker.
+- Tool outputs are always wrapped in `<untrusted_tool_output>...</untrusted_tool_output>` plus an explicit instruction not to follow embedded instructions.
+- Suspicious tool output produces `Warning` events instead of being silently fed back into history.
+
+Consequence:
+
+- The instruction hierarchy is now materially stronger: tool results re-enter Stage 6 as low-authority, explicitly untrusted content.
+- Step 19 regression tests now cover both canary leakage and malicious tool-output containment.
+
+Remaining caveat:
+
+- If a model keeps emitting fresh malicious tool calls after seeing the resulting `ToolError`/`Warning`, the retry behavior is still governed by the surrounding turn loop rather than a dedicated security circuit breaker.
+- If that becomes a real failure mode, the next seam to tighten is the orchestrator/harness retry policy, not the classifier itself.
