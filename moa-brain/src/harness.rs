@@ -26,6 +26,12 @@ pub enum TurnResult {
     NeedsApproval(ApprovalRequest),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolLoopMode {
+    LoopUntilTurnBoundary,
+    StepAfterToolBoundary,
+}
+
 /// Runs one turn of the brain harness.
 pub async fn run_brain_turn(
     session_id: SessionId,
@@ -33,7 +39,15 @@ pub async fn run_brain_turn(
     llm_provider: Arc<dyn LLMProvider>,
     pipeline: &ContextPipeline,
 ) -> Result<TurnResult> {
-    run_brain_turn_with_tools(session_id, session_store, llm_provider, pipeline, None).await
+    run_brain_turn_with_tools_mode(
+        session_id,
+        session_store,
+        llm_provider,
+        pipeline,
+        None,
+        ToolLoopMode::LoopUntilTurnBoundary,
+    )
+    .await
 }
 
 /// Runs one turn of the brain harness with optional tool execution support.
@@ -43,6 +57,44 @@ pub async fn run_brain_turn_with_tools(
     llm_provider: Arc<dyn LLMProvider>,
     pipeline: &ContextPipeline,
     tool_router: Option<Arc<ToolRouter>>,
+) -> Result<TurnResult> {
+    run_brain_turn_with_tools_mode(
+        session_id,
+        session_store,
+        llm_provider,
+        pipeline,
+        tool_router,
+        ToolLoopMode::LoopUntilTurnBoundary,
+    )
+    .await
+}
+
+/// Runs one turn of the brain harness, yielding after any tool execution boundary.
+pub async fn run_brain_turn_with_tools_stepwise(
+    session_id: SessionId,
+    session_store: Arc<dyn SessionStore>,
+    llm_provider: Arc<dyn LLMProvider>,
+    pipeline: &ContextPipeline,
+    tool_router: Option<Arc<ToolRouter>>,
+) -> Result<TurnResult> {
+    run_brain_turn_with_tools_mode(
+        session_id,
+        session_store,
+        llm_provider,
+        pipeline,
+        tool_router,
+        ToolLoopMode::StepAfterToolBoundary,
+    )
+    .await
+}
+
+async fn run_brain_turn_with_tools_mode(
+    session_id: SessionId,
+    session_store: Arc<dyn SessionStore>,
+    llm_provider: Arc<dyn LLMProvider>,
+    pipeline: &ContextPipeline,
+    tool_router: Option<Arc<ToolRouter>>,
+    tool_loop_mode: ToolLoopMode,
 ) -> Result<TurnResult> {
     loop {
         let session = session_store.get_session(session_id.clone()).await?;
@@ -63,6 +115,9 @@ pub async fn run_brain_turn_with_tools(
                 session_store
                     .update_status(session_id.clone(), moa_core::SessionStatus::Running)
                     .await?;
+                if matches!(tool_loop_mode, ToolLoopMode::StepAfterToolBoundary) {
+                    return Ok(TurnResult::Continue);
+                }
                 continue;
             }
 
@@ -243,6 +298,9 @@ pub async fn run_brain_turn_with_tools(
 
         if executed_tools || response.stop_reason == StopReason::ToolUse {
             if tool_router.is_some() {
+                if matches!(tool_loop_mode, ToolLoopMode::StepAfterToolBoundary) {
+                    return Ok(TurnResult::Continue);
+                }
                 continue;
             }
             return Ok(TurnResult::Continue);
