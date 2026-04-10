@@ -8,13 +8,13 @@ use tokio_util::sync::CancellationToken;
 use crate::error::Result;
 use crate::events::Event;
 use crate::types::{
-    CompletionRequest, CompletionStream, Credential, CronHandle, CronSpec, EventFilter, EventRange,
-    EventRecord, EventStream, HandHandle, HandSpec, HandStatus, InboundMessage, MemoryPath,
-    MemoryScope, MemorySearchResult, MessageId, ModelCapabilities, ObserveLevel, OutboundMessage,
-    PageSummary, PageType, PendingSignal, PendingSignalId, Platform, PlatformCapabilities,
-    ProcessorOutput, RuntimeEvent, SequenceNum, SessionFilter, SessionHandle, SessionId,
-    SessionMeta, SessionSignal, SessionStatus, SessionSummary, StartSessionRequest, ToolOutput,
-    WikiPage, WorkingContext,
+    CheckpointHandle, CheckpointInfo, CompletionRequest, CompletionStream, Credential, CronHandle,
+    CronSpec, EventFilter, EventRange, EventRecord, EventStream, HandHandle, HandSpec, HandStatus,
+    InboundMessage, MemoryPath, MemoryScope, MemorySearchResult, MessageId, ModelCapabilities,
+    ObserveLevel, OutboundMessage, PageSummary, PageType, PendingSignal, PendingSignalId, Platform,
+    PlatformCapabilities, ProcessorOutput, RuntimeEvent, SequenceNum, SessionFilter, SessionHandle,
+    SessionId, SessionMeta, SessionSignal, SessionStatus, SessionSummary, StartSessionRequest,
+    ToolOutput, WikiPage, WorkingContext,
 };
 
 /// Orchestrates session lifecycle and observation.
@@ -87,6 +87,29 @@ pub trait SessionStore: Send + Sync {
 
     /// Lists sessions matching the provided filter.
     async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>>;
+}
+
+/// Optional database-level state checkpointing.
+#[async_trait]
+pub trait BranchManager: Send + Sync {
+    /// Creates a checkpoint branch for later rollback or inspection.
+    async fn create_checkpoint(
+        &self,
+        label: &str,
+        session_id: Option<SessionId>,
+    ) -> Result<CheckpointHandle>;
+
+    /// Switches execution to a previously created checkpoint branch.
+    async fn rollback_to(&self, handle: &CheckpointHandle) -> Result<()>;
+
+    /// Discards a previously created checkpoint branch.
+    async fn discard_checkpoint(&self, handle: &CheckpointHandle) -> Result<()>;
+
+    /// Lists active checkpoint branches managed by MOA.
+    async fn list_checkpoints(&self) -> Result<Vec<CheckpointInfo>>;
+
+    /// Deletes expired checkpoint branches and returns the number removed.
+    async fn cleanup_expired(&self) -> Result<u32>;
 }
 
 /// Provisions and manages tool execution hands.

@@ -10,11 +10,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use moa_core::{
-    DatabaseBackend, MemoryPath, MemoryScope, MemoryStore, MoaConfig, SessionFilter, SessionId,
-    SessionStatus, SessionStore, WorkspaceId, init_observability,
+    BranchManager, DatabaseBackend, MemoryPath, MemoryScope, MemoryStore, MoaConfig, SessionFilter,
+    SessionId, SessionStatus, SessionStore, WorkspaceId, init_observability,
 };
 use moa_memory::FileMemoryStore;
-use moa_session::{SessionDatabase, create_session_store};
+use moa_session::{NeonBranchManager, SessionDatabase, create_session_store};
 use moa_tui::{RunTuiOptions, run_tui, run_tui_with_options};
 use tokio::fs;
 use tokio::process::Command;
@@ -76,6 +76,11 @@ enum CommandKind {
     Sync {
         #[command(subcommand)]
         command: SyncCommand,
+    },
+    /// Manages Neon checkpoint branches.
+    Checkpoint {
+        #[command(subcommand)]
+        command: CheckpointCommand,
     },
 }
 
@@ -146,6 +151,25 @@ enum SyncCommand {
         /// Turso database URL. Falls back to `TURSO_DATABASE_URL`.
         turso_url: Option<String>,
     },
+}
+
+/// Checkpoint CLI commands.
+#[derive(Debug, Subcommand)]
+enum CheckpointCommand {
+    /// Creates a named checkpoint branch.
+    Create {
+        /// Human-readable checkpoint label.
+        label: String,
+    },
+    /// Lists active MOA checkpoint branches.
+    List,
+    /// Switches the configured database URL to a checkpoint branch.
+    Rollback {
+        /// Neon checkpoint branch identifier.
+        id: String,
+    },
+    /// Deletes expired checkpoint branches.
+    Cleanup,
 }
 
 /// Runs the `moa` CLI binary.
@@ -251,6 +275,20 @@ async fn main() -> Result<()> {
         Some(CommandKind::Sync { command }) => match command {
             SyncCommand::Enable { turso_url } => {
                 print!("{}", sync_enable_report(config, turso_url).await?);
+            }
+        },
+        Some(CommandKind::Checkpoint { command }) => match command {
+            CheckpointCommand::Create { label } => {
+                print!("{}", checkpoint_create_report(&config, &label).await?);
+            }
+            CheckpointCommand::List => {
+                print!("{}", checkpoint_list_report(&config).await?);
+            }
+            CheckpointCommand::Rollback { id } => {
+                print!("{}", checkpoint_rollback_report(config, &id).await?);
+            }
+            CheckpointCommand::Cleanup => {
+                print!("{}", checkpoint_cleanup_report(&config).await?);
             }
         },
     }
@@ -442,6 +480,10 @@ async fn load_session_store(config: &MoaConfig) -> Result<Arc<SessionDatabase>> 
         .context("opening session store")
 }
 
+async fn load_branch_manager(config: &MoaConfig) -> Result<NeonBranchManager> {
+    NeonBranchManager::from_config(config).context("opening Neon branch manager")
+}
+
 fn parse_session_id(value: &str) -> Result<SessionId> {
     Ok(SessionId(
         Uuid::parse_str(value).context("invalid session id")?,
@@ -559,6 +601,7 @@ fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result
         "local.docker_enabled" => config.local.docker_enabled = parse_bool(value)?,
         "local.sandbox_dir" => config.local.sandbox_dir = value.to_string(),
         "local.session_db" | "database.url" => config.database.url = value.to_string(),
+        "database.admin_url" => config.database.admin_url = Some(value.to_string()),
         "database.backend" => {
             config.database.backend = parse_database_backend(value)?;
         }
@@ -571,6 +614,26 @@ fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result
         "database.connect_timeout_secs" => {
             config.database.connect_timeout_secs =
                 value.parse().context("expected integer timeout")?
+        }
+        "database.neon.enabled" => config.database.neon.enabled = parse_bool(value)?,
+        "database.neon.api_key_env" => config.database.neon.api_key_env = value.to_string(),
+        "database.neon.project_id" => config.database.neon.project_id = value.to_string(),
+        "database.neon.parent_branch_id" => {
+            config.database.neon.parent_branch_id = value.to_string()
+        }
+        "database.neon.max_checkpoints" => {
+            config.database.neon.max_checkpoints =
+                value.parse().context("expected integer checkpoint count")?
+        }
+        "database.neon.checkpoint_ttl_hours" => {
+            config.database.neon.checkpoint_ttl_hours = value
+                .parse()
+                .context("expected integer checkpoint ttl hours")?
+        }
+        "database.neon.pooled" => config.database.neon.pooled = parse_bool(value)?,
+        "database.neon.suspend_timeout_seconds" => {
+            config.database.neon.suspend_timeout_seconds =
+                value.parse().context("expected integer suspend timeout")?
         }
         "local.memory_dir" => config.local.memory_dir = value.to_string(),
         "daemon.auto_connect" => config.daemon.auto_connect = parse_bool(value)?,
@@ -644,6 +707,87 @@ async fn sync_enable_report(mut config: MoaConfig, turso_url: Option<String>) ->
         "cloud sync enabled\nurl: {}\nlocal_db: {}\nsync_interval_secs: {}\n",
         sync_url, config.database.url, config.cloud.turso_sync_interval_secs
     ))
+}
+
+async fn checkpoint_create_report(config: &MoaConfig, label: &str) -> Result<String> {
+    let manager = load_branch_manager(config).await?;
+    let handle = manager
+        .create_checkpoint(label, None)
+        .await
+        .context("creating Neon checkpoint")?;
+    Ok(format!(
+        "created checkpoint\nid: {}\nlabel: {}\ncreated_at: {}\nconnection_url: {}\n",
+        handle.id, handle.label, handle.created_at, handle.connection_url
+    ))
+}
+
+async fn checkpoint_list_report(config: &MoaConfig) -> Result<String> {
+    let manager = load_branch_manager(config).await?;
+    let checkpoints = manager
+        .list_checkpoints()
+        .await
+        .context("listing Neon checkpoints")?;
+    if checkpoints.is_empty() {
+        return Ok("no active checkpoints\n".to_string());
+    }
+
+    let mut lines = Vec::with_capacity(checkpoints.len() + 1);
+    lines.push("active checkpoints:".to_string());
+    for checkpoint in checkpoints {
+        let age = format_checkpoint_age(checkpoint.handle.created_at);
+        lines.push(format!(
+            "- {}  {}  age={} parent={} size_bytes={}",
+            checkpoint.handle.id,
+            checkpoint.handle.label,
+            age,
+            checkpoint.parent_branch,
+            checkpoint
+                .size_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+    Ok(format!("{}\n", lines.join("\n")))
+}
+
+async fn checkpoint_rollback_report(mut config: MoaConfig, id: &str) -> Result<String> {
+    let manager = load_branch_manager(&config).await?;
+    let checkpoint = manager
+        .get_checkpoint(id)
+        .await
+        .context("loading checkpoint metadata")?
+        .with_context(|| format!("checkpoint {id} not found"))?;
+    manager
+        .rollback_to(&checkpoint.handle)
+        .await
+        .context("preparing checkpoint rollback")?;
+    config.database.backend = DatabaseBackend::Postgres;
+    config.database.url = checkpoint.handle.connection_url.clone();
+    config.save().context("saving config")?;
+    Ok(format!(
+        "rolled back to checkpoint\nid: {}\nlabel: {}\ndatabase_url: {}\n",
+        checkpoint.handle.id, checkpoint.handle.label, checkpoint.handle.connection_url
+    ))
+}
+
+async fn checkpoint_cleanup_report(config: &MoaConfig) -> Result<String> {
+    let manager = load_branch_manager(config).await?;
+    let deleted = manager
+        .cleanup_expired()
+        .await
+        .context("cleaning up expired checkpoints")?;
+    Ok(format!("deleted_expired_checkpoints: {deleted}\n"))
+}
+
+fn format_checkpoint_age(created_at: chrono::DateTime<chrono::Utc>) -> String {
+    let age = chrono::Utc::now() - created_at;
+    if age.num_hours() >= 1 {
+        return format!("{}h", age.num_hours());
+    }
+    if age.num_minutes() >= 1 {
+        return format!("{}m", age.num_minutes());
+    }
+    format!("{}s", age.num_seconds().max(0))
 }
 
 #[cfg(test)]

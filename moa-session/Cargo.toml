@@ -15,6 +15,8 @@ chrono.workspace = true
 libsql = { version = "0.9.30", optional = true, default-features = false, features = ["core", "remote", "replication", "sync", "tls"] }
 moa-core = { path = "../moa-core" }
 moa-security = { path = "../moa-security" }
+reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sqlx = { version = "0.8", optional = true, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "json", "uuid", "chrono"] }
 tokio.workspace = true
@@ -22,4 +24,5 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+axum = "0.8"
 tempfile = "3"

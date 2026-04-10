@@ -374,6 +374,32 @@ pub enum PendingSignalType {
     QueueMessage,
 }
 
+/// Handle returned for a database checkpoint branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointHandle {
+    /// Neon branch identifier.
+    pub id: String,
+    /// Human-readable label for the checkpoint.
+    pub label: String,
+    /// Connection string for the checkpoint branch.
+    pub connection_url: String,
+    /// Creation timestamp of the checkpoint.
+    pub created_at: DateTime<Utc>,
+    /// Session associated with the checkpoint, if any.
+    pub session_id: Option<SessionId>,
+}
+
+/// Metadata about an active checkpoint branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointInfo {
+    /// Primary checkpoint handle.
+    pub handle: CheckpointHandle,
+    /// Approximate logical size of the branch in bytes, when available.
+    pub size_bytes: Option<u64>,
+    /// Parent branch identifier for this checkpoint.
+    pub parent_branch: String,
+}
+
 /// Request for starting a new session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartSessionRequest {

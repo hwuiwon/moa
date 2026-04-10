@@ -82,6 +82,7 @@ impl MoaConfig {
                 Self::default().database.backend.as_str(),
             )?
             .set_default("database.url", Self::default().database.url)?
+            .set_default("database.admin_url", Self::default().database.admin_url)?
             .set_default(
                 "database.pool_min",
                 Self::default().database.pool_min as i64,
@@ -93,6 +94,35 @@ impl MoaConfig {
             .set_default(
                 "database.connect_timeout_secs",
                 Self::default().database.connect_timeout_secs as i64,
+            )?
+            .set_default(
+                "database.neon.enabled",
+                Self::default().database.neon.enabled,
+            )?
+            .set_default(
+                "database.neon.api_key_env",
+                Self::default().database.neon.api_key_env,
+            )?
+            .set_default(
+                "database.neon.project_id",
+                Self::default().database.neon.project_id,
+            )?
+            .set_default(
+                "database.neon.parent_branch_id",
+                Self::default().database.neon.parent_branch_id,
+            )?
+            .set_default(
+                "database.neon.max_checkpoints",
+                Self::default().database.neon.max_checkpoints as i64,
+            )?
+            .set_default(
+                "database.neon.checkpoint_ttl_hours",
+                Self::default().database.neon.checkpoint_ttl_hours as i64,
+            )?
+            .set_default("database.neon.pooled", Self::default().database.neon.pooled)?
+            .set_default(
+                "database.neon.suspend_timeout_seconds",
+                Self::default().database.neon.suspend_timeout_seconds as i64,
             )?
             .set_default("local.docker_enabled", Self::default().local.docker_enabled)?
             .set_default("local.sandbox_dir", Self::default().local.sandbox_dir)?
@@ -305,6 +335,7 @@ impl MoaConfig {
 
         let mut config: Self = builder.build()?.try_deserialize()?;
         config.normalize_legacy_database_config();
+        config.validate()?;
         Ok(config)
     }
 
@@ -335,6 +366,17 @@ impl MoaConfig {
         if self.database.url == DatabaseConfig::default().url {
             self.database.url = self.local.session_db.clone();
         }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.database.neon.enabled && self.database.neon.max_checkpoints == 0 {
+            return Err(MoaError::ConfigError(
+                "database.neon.max_checkpoints must be greater than zero when Neon checkpointing is enabled"
+                    .to_string(),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -440,12 +482,16 @@ pub struct DatabaseConfig {
     pub backend: DatabaseBackend,
     /// Database URL or local file path.
     pub url: String,
+    /// Optional direct/admin database URL for migrations and other session-sensitive flows.
+    pub admin_url: Option<String>,
     /// Minimum pool size for pooled backends.
     pub pool_min: u32,
     /// Maximum pool size for pooled backends.
     pub pool_max: u32,
     /// Connection timeout in seconds.
     pub connect_timeout_secs: u64,
+    /// Optional Neon branching configuration for ephemeral checkpoints.
+    pub neon: DatabaseNeonConfig,
 }
 
 impl Default for DatabaseConfig {
@@ -453,9 +499,60 @@ impl Default for DatabaseConfig {
         Self {
             backend: DatabaseBackend::Turso,
             url: "~/.moa/sessions.db".to_string(),
+            admin_url: None,
             pool_min: 1,
             pool_max: 5,
             connect_timeout_secs: 10,
+            neon: DatabaseNeonConfig::default(),
+        }
+    }
+}
+
+impl DatabaseConfig {
+    /// Returns the configured runtime database URL.
+    pub fn runtime_url(&self) -> &str {
+        &self.url
+    }
+
+    /// Returns the direct/admin database URL, falling back to the runtime URL when unset.
+    pub fn admin_url(&self) -> &str {
+        self.admin_url.as_deref().unwrap_or(&self.url)
+    }
+}
+
+/// Optional Neon branching configuration for ephemeral database checkpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DatabaseNeonConfig {
+    /// Whether Neon checkpoint management is enabled.
+    pub enabled: bool,
+    /// Environment variable containing the Neon API key.
+    pub api_key_env: String,
+    /// Neon project identifier used for branch management.
+    pub project_id: String,
+    /// Parent branch name or id used for checkpoint creation.
+    pub parent_branch_id: String,
+    /// Maximum number of active MOA checkpoint branches.
+    pub max_checkpoints: usize,
+    /// TTL for automatic checkpoint cleanup, in hours.
+    pub checkpoint_ttl_hours: u64,
+    /// Whether pooled connection URIs should be requested for checkpoint branches.
+    pub pooled: bool,
+    /// Auto-suspend timeout in seconds for checkpoint endpoints.
+    pub suspend_timeout_seconds: u64,
+}
+
+impl Default for DatabaseNeonConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key_env: "NEON_API_KEY".to_string(),
+            project_id: String::new(),
+            parent_branch_id: "main".to_string(),
+            max_checkpoints: 5,
+            checkpoint_ttl_hours: 24,
+            pooled: true,
+            suspend_timeout_seconds: 300,
         }
     }
 }
@@ -818,12 +915,16 @@ mod tests {
             default_model = "gpt-4o"
             reasoning_effort = "high"
 
+            [database]
+            admin_url = "postgres://direct.example/moa"
+
             [local]
             docker_enabled = false
         "#;
         let config: MoaConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.general.default_provider, "openai");
         assert!(!config.local.docker_enabled);
+        assert_eq!(config.database.admin_url(), "postgres://direct.example/moa");
     }
 
     #[test]
@@ -861,5 +962,32 @@ mod tests {
         let config = MoaConfig::load_from_path(file.path()).unwrap();
         assert_eq!(config.general.default_provider, "openai");
         assert_eq!(config.tui.tab_limit, 8);
+    }
+
+    #[test]
+    fn config_rejects_zero_neon_checkpoint_limit_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            br#"
+                [database]
+                backend = "postgres"
+                url = "postgres://postgres:postgres@localhost/moa"
+
+                [database.neon]
+                enabled = true
+                project_id = "project-1"
+                max_checkpoints = 0
+            "#,
+        )
+        .unwrap();
+
+        let error = MoaConfig::load_from_path(&path).expect_err("invalid config");
+        assert!(
+            error
+                .to_string()
+                .contains("database.neon.max_checkpoints must be greater than zero")
+        );
     }
 }

@@ -498,6 +498,7 @@ api_key_env = "OPENROUTER_API_KEY"
 [database]
 backend = "turso"
 url = "~/.moa/sessions.db"
+# admin_url = "postgresql://..." # optional direct URL for migrations/admin tasks
 pool_min = 1
 pool_max = 5
 connect_timeout_secs = 10

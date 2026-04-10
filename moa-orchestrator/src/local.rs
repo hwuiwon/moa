@@ -11,15 +11,15 @@ use moa_brain::{
     find_resolved_pending_tool_approval, run_streamed_turn_with_signals,
 };
 use moa_core::{
-    BrainOrchestrator, CronHandle, CronSpec, Event, EventRange, EventRecord, EventStream,
-    LLMProvider, MoaConfig, MoaError, ObserveLevel, PendingSignal, Result, RuntimeEvent,
-    SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
-    SessionStore, SessionSummary, StartSessionRequest, UserMessage,
+    BrainOrchestrator, BranchManager, CronHandle, CronSpec, Event, EventRange, EventRecord,
+    EventStream, LLMProvider, MoaConfig, MoaError, ObserveLevel, PendingSignal, Result,
+    RuntimeEvent, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
+    SessionStatus, SessionStore, SessionSummary, StartSessionRequest, UserMessage,
 };
 use moa_hands::ToolRouter;
 use moa_memory::{ConsolidationReport, FileMemoryStore};
 use moa_providers::{build_provider_from_config, resolve_provider_selection};
-use moa_session::{SessionDatabase, create_session_store};
+use moa_session::{NeonBranchManager, SessionDatabase, create_session_store};
 use moa_skills::maybe_distill_skill;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -34,6 +34,7 @@ pub struct LocalOrchestrator {
     llm_provider: Arc<dyn LLMProvider>,
     tool_router: Arc<ToolRouter>,
     scheduler: Arc<JobScheduler>,
+    branch_manager: Option<Arc<NeonBranchManager>>,
     sessions: Arc<RwLock<HashMap<SessionId, LocalBrainHandle>>>,
 }
 
@@ -73,6 +74,7 @@ impl LocalOrchestrator {
             .await
             .map_err(|error| MoaError::ProviderError(error.to_string()))?;
 
+        let branch_manager = NeonBranchManager::maybe_from_config(&config)?.map(Arc::new);
         let orchestrator = Self {
             config,
             session_store,
@@ -80,9 +82,11 @@ impl LocalOrchestrator {
             llm_provider,
             tool_router,
             scheduler: Arc::new(scheduler),
+            branch_manager,
             sessions: Arc::new(RwLock::new(HashMap::new())),
         };
         orchestrator.register_memory_maintenance_job().await?;
+        orchestrator.register_neon_checkpoint_cleanup_job().await?;
         Ok(orchestrator)
     }
 
@@ -260,6 +264,34 @@ impl LocalOrchestrator {
                     Err(error) => tracing::error!(
                         error = %error,
                         "hourly memory maintenance check failed"
+                    ),
+                }
+            })
+        })
+        .map_err(|error| MoaError::ProviderError(error.to_string()))?;
+        self.scheduler
+            .add(job)
+            .await
+            .map_err(|error| MoaError::ProviderError(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn register_neon_checkpoint_cleanup_job(&self) -> Result<()> {
+        let Some(branch_manager) = self.branch_manager.clone() else {
+            return Ok(());
+        };
+
+        let job = Job::new_async("0 0 */6 * * *", move |_id, _lock| {
+            let branch_manager = branch_manager.clone();
+            Box::pin(async move {
+                match branch_manager.cleanup_expired().await {
+                    Ok(count) if count > 0 => {
+                        tracing::info!(count, "cleaned up expired Neon checkpoint branches")
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(
+                        error = %error,
+                        "Neon checkpoint cleanup job failed"
                     ),
                 }
             })
