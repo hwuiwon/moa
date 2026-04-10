@@ -1,11 +1,13 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
-    MemoryPath, MemoryScope, MemorySearchResult, MemoryStore, PageSummary, PageType, Result,
-    SessionMeta, ToolInvocation, UserId, WikiPage, WorkspaceId,
+    HandProvider, HandResources, HandSpec, MemoryPath, MemoryScope, MemorySearchResult,
+    MemoryStore, PageSummary, PageType, Result, SandboxTier, SessionMeta, ToolInvocation, UserId,
+    WikiPage, WorkspaceId,
 };
-use moa_hands::ToolRouter;
+use moa_hands::{LocalHandProvider, ToolRouter};
 use moa_memory::FileMemoryStore;
 use serde_json::json;
 use tempfile::tempdir;
@@ -567,4 +569,78 @@ async fn memory_read_with_explicit_scope_reads_only_that_scope() {
     let rendered = output.to_text();
     assert!(rendered.contains("User page."));
     assert!(!rendered.contains("Workspace page."));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn docker_file_tools_roundtrip_inside_container_workspace() {
+    let dir = tempdir().unwrap();
+    let provider = LocalHandProvider::new(dir.path()).await.unwrap();
+    if !provider.docker_available() {
+        return;
+    }
+
+    let handle = provider
+        .provision(HandSpec {
+            sandbox_tier: SandboxTier::Container,
+            image: None,
+            resources: HandResources::default(),
+            env: std::collections::HashMap::new(),
+            workspace_mount: None,
+            idle_timeout: Duration::from_secs(300),
+            max_lifetime: Duration::from_secs(300),
+        })
+        .await
+        .unwrap();
+
+    if !matches!(handle, moa_core::HandHandle::Docker { .. }) {
+        return;
+    }
+
+    let result = async {
+        let write = provider
+            .execute(
+                &handle,
+                "file_write",
+                &json!({ "path": "nested/demo.txt", "content": "hello from docker file tool" })
+                    .to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(write.to_text(), "wrote nested/demo.txt");
+
+        let read = provider
+            .execute(
+                &handle,
+                "file_read",
+                &json!({ "path": "nested/demo.txt" }).to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.to_text(), "hello from docker file tool");
+
+        let search = provider
+            .execute(
+                &handle,
+                "file_search",
+                &json!({ "pattern": "**/*.txt" }).to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(search.to_text().contains("nested/demo.txt"));
+
+        let bash = provider
+            .execute(
+                &handle,
+                "bash",
+                &json!({ "cmd": "cat /workspace/nested/demo.txt" }).to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(bash.to_text().contains("hello from docker file tool"));
+    }
+    .await;
+
+    let _ = provider.destroy(&handle).await;
+    result
 }

@@ -21,10 +21,12 @@ use crate::tools::{bash, file_read, file_search, file_write};
 const DEFAULT_DOCKER_IMAGE: &str = "alpine:3.20";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const DOCKER_TMPFS_OPTIONS: &str = "rw,nosuid,nodev,size=64m";
+const DEFAULT_DOCKER_WORKSPACE: &str = "/workspace";
 
 #[derive(Debug, Clone)]
 struct DockerSandbox {
     sandbox_dir: PathBuf,
+    workspace_mount: String,
 }
 
 /// Local zero-setup hand provider used by TUI and test harnesses.
@@ -74,14 +76,18 @@ impl LocalHandProvider {
             .image
             .clone()
             .unwrap_or_else(|| DEFAULT_DOCKER_IMAGE.to_string());
-        let mount = format!("{}:/workspace", sandbox_dir.display());
+        let workspace_mount = spec
+            .workspace_mount
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_DOCKER_WORKSPACE));
+        let mount = format!("{}:{}", sandbox_dir.display(), workspace_mount.display());
         let mut args = vec![
             "run".to_string(),
             "-d".to_string(),
             "--rm".to_string(),
             "--read-only".to_string(),
             "--workdir".to_string(),
-            "/workspace".to_string(),
+            workspace_mount.display().to_string(),
             "--tmpfs".to_string(),
             format!("/tmp:{DOCKER_TMPFS_OPTIONS}"),
             "--tmpfs".to_string(),
@@ -120,6 +126,7 @@ impl LocalHandProvider {
             container_id.clone(),
             DockerSandbox {
                 sandbox_dir: sandbox_dir.to_path_buf(),
+                workspace_mount: workspace_mount.to_string_lossy().into_owned(),
             },
         );
         Ok(HandHandle::docker(container_id))
@@ -159,16 +166,61 @@ impl LocalHandProvider {
             })?;
 
         if tool == "bash" {
-            return bash::execute_docker(container_id, input, self.command_timeout).await;
+            return bash::execute_docker(
+                container_id,
+                &sandbox.workspace_mount,
+                input,
+                self.command_timeout,
+            )
+            .await;
         }
 
-        tracing::debug!(
-            tool,
-            container_id,
-            "executing file-oriented tool against mounted docker sandbox on host"
-        );
-        self.execute_local_tool(&sandbox.sandbox_dir, tool, input)
-            .await
+        let docker_result = match tool {
+            "file_read" => {
+                file_read::execute_docker(
+                    container_id,
+                    &sandbox.workspace_mount,
+                    input,
+                    self.command_timeout,
+                )
+                .await
+            }
+            "file_write" => {
+                file_write::execute_docker(
+                    container_id,
+                    &sandbox.workspace_mount,
+                    input,
+                    self.command_timeout,
+                )
+                .await
+            }
+            "file_search" => {
+                file_search::execute_docker(
+                    container_id,
+                    &sandbox.workspace_mount,
+                    input,
+                    self.command_timeout,
+                )
+                .await
+            }
+            other => Err(MoaError::ToolError(format!(
+                "tool {other} not supported in Docker mode"
+            ))),
+        };
+
+        if should_fallback_to_host(&docker_result) {
+            tracing::warn!(
+                tool,
+                container_id,
+                error = ?docker_result.as_ref().err(),
+                "docker-backed file tool failed due to docker transport issue, falling back to host-mounted sandbox"
+            );
+            return self
+                .execute_local_tool(&sandbox.sandbox_dir, tool, input)
+                .await;
+        }
+
+        docker_result
     }
 
     async fn destroy_local_sandbox(&self, sandbox_dir: &Path) -> Result<()> {
@@ -335,4 +387,18 @@ async fn detect_docker() -> bool {
         "checked docker availability for local hand provider"
     );
     available
+}
+
+fn should_fallback_to_host(result: &Result<ToolOutput>) -> bool {
+    match result {
+        Err(MoaError::ProviderError(_)) => true,
+        Err(MoaError::ToolError(message)) => {
+            let lowered = message.to_ascii_lowercase();
+            lowered.contains("no such container")
+                || lowered.contains("cannot connect to the docker daemon")
+                || lowered.contains("error during connect")
+                || lowered.contains("is not running")
+        }
+        _ => false,
+    }
 }
