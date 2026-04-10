@@ -17,7 +17,7 @@ pub use config::{
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
 pub use error::{MoaError, Result};
 pub use events::Event;
-pub use telemetry::{TelemetryGuard, init_observability};
+pub use telemetry::{TelemetryConfig, TelemetryGuard, default_log_path, init_observability};
 pub use traits::{
     BrainOrchestrator, BranchManager, BuiltInTool, ContextProcessor, CredentialVault, HandProvider,
     LLMProvider, MemoryStore, PlatformAdapter, SessionStore, ToolContext,

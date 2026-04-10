@@ -7,7 +7,7 @@ license.workspace = true
 [features]
 default = []
 cloud = ["temporal"]
-temporal = ["dep:moa-orchestrator", "moa-orchestrator/temporal"]
+temporal = ["moa-orchestrator/temporal"]
 
 [[bin]]
 name = "moa"
@@ -15,12 +15,15 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+async-stream = "0.3"
+axum = "0.8"
 chrono.workspace = true
 clap.workspace = true
+futures-util.workspace = true
 libc = "0.2"
 moa-core = { path = "../moa-core" }
 moa-memory = { path = "../moa-memory" }
-moa-orchestrator = { path = "../moa-orchestrator", optional = true }
+moa-orchestrator = { path = "../moa-orchestrator" }
 moa-session = { path = "../moa-session" }
 moa-tui = { path = "../moa-tui" }
 serde_json.workspace = true
@@ -31,5 +34,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 expectrl = "0.7"
+reqwest.workspace = true
 tempfile = "3"

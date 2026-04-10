@@ -467,7 +467,16 @@ impl DaemonChatRuntime {
 
     /// Creates a fresh empty daemon session without switching the runtime's default session.
     async fn create_session(&self) -> Result<SessionId> {
-        match daemon_request(&self.socket_path, &DaemonCommand::CreateSession).await? {
+        let request = StartSessionRequest {
+            workspace_id: self.workspace_id.clone(),
+            user_id: self.user_id.clone(),
+            platform: Platform::Tui,
+            model: self.model.clone(),
+            initial_message: None,
+            title: None,
+            parent_session_id: None,
+        };
+        match daemon_request(&self.socket_path, &DaemonCommand::CreateSession { request }).await? {
             DaemonReply::SessionId(session_id) => Ok(session_id),
             DaemonReply::Error(message) => Err(MoaError::ProviderError(message)),
             other => Err(unexpected_daemon_reply("session_id", &other)),
@@ -476,13 +485,6 @@ impl DaemonChatRuntime {
 
     /// Switches the runtime to a different workspace and starts a fresh session there.
     async fn set_workspace(&mut self, workspace_id: WorkspaceId) -> Result<SessionId> {
-        daemon_expect_ack(
-            &self.socket_path,
-            &DaemonCommand::SetWorkspace {
-                workspace_id: workspace_id.clone(),
-            },
-        )
-        .await?;
         self.workspace_id = workspace_id;
         self.reset_session().await
     }
@@ -497,13 +499,6 @@ impl DaemonChatRuntime {
     async fn set_model(&mut self, model: impl Into<String>) -> Result<SessionId> {
         let requested_model = model.into();
         let selection = resolve_provider_selection(&self.config, Some(requested_model.as_str()))?;
-        daemon_expect_ack(
-            &self.socket_path,
-            &DaemonCommand::SetModel {
-                model: selection.model_id.clone(),
-            },
-        )
-        .await?;
         self.model = selection.model_id.clone();
         self.config.general.default_model = selection.model_id;
         self.config.general.default_provider = selection.provider_name;
@@ -560,7 +555,18 @@ impl DaemonChatRuntime {
 
     /// Lists sessions with a compact last-message preview for the session picker.
     async fn list_session_previews(&self) -> Result<Vec<SessionPreview>> {
-        match daemon_request(&self.socket_path, &DaemonCommand::ListSessionPreviews).await? {
+        match daemon_request(
+            &self.socket_path,
+            &DaemonCommand::ListSessionPreviews {
+                filter: SessionFilter {
+                    workspace_id: Some(self.workspace_id.clone()),
+                    user_id: Some(self.user_id.clone()),
+                    ..SessionFilter::default()
+                },
+            },
+        )
+        .await?
+        {
             DaemonReply::SessionPreviews(previews) => {
                 Ok(previews.into_iter().map(SessionPreview::from).collect())
             }
@@ -583,6 +589,7 @@ impl DaemonChatRuntime {
         let mut pages = match daemon_request(
             &self.socket_path,
             &DaemonCommand::RecentMemoryEntries {
+                workspace_id: self.workspace_id.clone(),
                 limit: usize::MAX / 4,
             },
         )
@@ -603,7 +610,10 @@ impl DaemonChatRuntime {
     async fn recent_memory_entries(&self, limit: usize) -> Result<Vec<PageSummary>> {
         match daemon_request(
             &self.socket_path,
-            &DaemonCommand::RecentMemoryEntries { limit },
+            &DaemonCommand::RecentMemoryEntries {
+                workspace_id: self.workspace_id.clone(),
+                limit,
+            },
         )
         .await?
         {
@@ -618,6 +628,7 @@ impl DaemonChatRuntime {
         match daemon_request(
             &self.socket_path,
             &DaemonCommand::SearchMemory {
+                workspace_id: self.workspace_id.clone(),
                 query: query.to_string(),
                 limit,
             },
@@ -634,7 +645,10 @@ impl DaemonChatRuntime {
     async fn read_memory_page(&self, path: &MemoryPath) -> Result<WikiPage> {
         match daemon_request(
             &self.socket_path,
-            &DaemonCommand::ReadMemoryPage { path: path.clone() },
+            &DaemonCommand::ReadMemoryPage {
+                workspace_id: self.workspace_id.clone(),
+                path: path.clone(),
+            },
         )
         .await?
         {
@@ -646,7 +660,14 @@ impl DaemonChatRuntime {
 
     /// Returns the current workspace memory index document.
     async fn memory_index(&self) -> Result<String> {
-        match daemon_request(&self.socket_path, &DaemonCommand::MemoryIndex).await? {
+        match daemon_request(
+            &self.socket_path,
+            &DaemonCommand::MemoryIndex {
+                workspace_id: self.workspace_id.clone(),
+            },
+        )
+        .await?
+        {
             DaemonReply::MemoryIndex(index) => Ok(index),
             DaemonReply::Error(message) => Err(MoaError::ProviderError(message)),
             other => Err(unexpected_daemon_reply("memory_index", &other)),

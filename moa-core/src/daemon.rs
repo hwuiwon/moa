@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::types::{
     ApprovalDecision, EventRecord, MemoryPath, MemorySearchResult, PageSummary, RuntimeEvent,
-    SessionFilter, SessionId, SessionMeta, SessionSummary, WikiPage, WorkspaceId,
+    SessionFilter, SessionId, SessionMeta, SessionSummary, StartSessionRequest, WikiPage,
+    WorkspaceId,
 };
 
 /// Compact session preview returned by the daemon for session-picker UIs.
@@ -43,14 +44,17 @@ pub enum DaemonCommand {
     Ping,
     /// Stop the daemon cleanly.
     Shutdown,
-    /// Create a fresh empty session in the daemon runtime.
-    CreateSession,
-    /// Switch the daemon runtime to a different workspace.
+    /// Create a fresh empty session using the provided client-scoped defaults.
+    CreateSession {
+        /// Explicit session creation request from the client.
+        request: StartSessionRequest,
+    },
+    /// Update the calling client's preferred workspace for future sessions.
     SetWorkspace {
         /// New workspace identifier.
         workspace_id: WorkspaceId,
     },
-    /// Switch the daemon runtime to a different default model for new sessions.
+    /// Update the calling client's preferred model for future sessions.
     SetModel {
         /// Requested model identifier.
         model: String,
@@ -60,8 +64,11 @@ pub enum DaemonCommand {
         /// Session filter applied server-side.
         filter: SessionFilter,
     },
-    /// Return session-picker previews.
-    ListSessionPreviews,
+    /// Return session-picker previews for a filtered client view.
+    ListSessionPreviews {
+        /// Session filter applied server-side.
+        filter: SessionFilter,
+    },
     /// Fetch one session metadata row.
     GetSession {
         /// Session identifier to load.
@@ -74,11 +81,15 @@ pub enum DaemonCommand {
     },
     /// List recent memory entries for the active workspace.
     RecentMemoryEntries {
+        /// Workspace to query.
+        workspace_id: WorkspaceId,
         /// Maximum number of entries to return.
         limit: usize,
     },
     /// Search workspace memory.
     SearchMemory {
+        /// Workspace to query.
+        workspace_id: WorkspaceId,
         /// Search query.
         query: String,
         /// Maximum number of hits to return.
@@ -86,11 +97,16 @@ pub enum DaemonCommand {
     },
     /// Load one workspace memory page.
     ReadMemoryPage {
+        /// Workspace to query.
+        workspace_id: WorkspaceId,
         /// Logical memory path to read.
         path: MemoryPath,
     },
     /// Load the current workspace index document.
-    MemoryIndex,
+    MemoryIndex {
+        /// Workspace to query.
+        workspace_id: WorkspaceId,
+    },
     /// Return the registered tool names.
     ToolNames,
     /// Queue a prompt into one session.

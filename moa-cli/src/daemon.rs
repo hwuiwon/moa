@@ -8,23 +8,26 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use moa_core::{
-    DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent, EventRange,
-    MoaConfig, Platform, SessionFilter, SessionStatus, SessionStore,
+    BrainOrchestrator, DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview,
+    DaemonStreamEvent, EventRange, MemoryScope, MemoryStore, MoaConfig, RuntimeEvent,
+    SessionFilter, SessionStatus, SessionStore,
 };
-use moa_session::{SessionDatabase, create_session_store};
-use moa_tui::runner::ChatRuntime;
+use moa_orchestrator::LocalOrchestrator;
+use moa_session::SessionDatabase;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use tokio::fs;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
+
+use crate::api::start_api_server;
 
 /// Shared daemon server state.
 #[derive(Clone)]
 struct DaemonState {
-    runtime: Arc<Mutex<ChatRuntime>>,
+    orchestrator: Arc<LocalOrchestrator>,
     session_store: Arc<SessionDatabase>,
     info: Arc<DaemonInfo>,
 }
@@ -133,8 +136,9 @@ pub async fn run_daemon_server(config: MoaConfig) -> Result<()> {
         fs::remove_file(&socket_path).await.ok();
     }
 
-    let runtime = ChatRuntime::from_local_config(config.clone(), Platform::Tui).await?;
-    let session_store = create_session_store(&config).await?;
+    let orchestrator: Arc<LocalOrchestrator> =
+        Arc::new(LocalOrchestrator::from_config(config.clone()).await?);
+    let session_store = orchestrator.session_store();
     let listener = UnixListener::bind(&socket_path)?;
     let info = Arc::new(DaemonInfo {
         pid: std::process::id(),
@@ -145,7 +149,7 @@ pub async fn run_daemon_server(config: MoaConfig) -> Result<()> {
         active_session_count: 0,
     });
     let state = DaemonState {
-        runtime: Arc::new(Mutex::new(runtime)),
+        orchestrator: orchestrator.clone(),
         session_store,
         info,
     };
@@ -153,7 +157,7 @@ pub async fn run_daemon_server(config: MoaConfig) -> Result<()> {
     fs::write(&pid_path, format!("{}\n", std::process::id())).await?;
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let signal_task = spawn_signal_listener(shutdown_tx.clone());
-    let health_task = spawn_health_server(&config, shutdown_tx.subscribe()).await?;
+    let api_task = spawn_api_server(&config, orchestrator, shutdown_tx.subscribe()).await?;
 
     loop {
         tokio::select! {
@@ -178,7 +182,7 @@ pub async fn run_daemon_server(config: MoaConfig) -> Result<()> {
     let shutdown_grace = graceful_shutdown_timeout(&config);
     wait_for_active_turns(state.session_store.as_ref(), shutdown_grace).await?;
     signal_task.abort();
-    if let Some(task) = health_task {
+    if let Some(task) = api_task {
         task.abort();
         let _ = task.await;
     }
@@ -213,25 +217,34 @@ async fn handle_connection(
     match command {
         DaemonCommand::ObserveSession { session_id } => {
             write_stream_event(reader.get_mut(), &DaemonStreamEvent::Ready).await?;
-            let runtime = { state.runtime.lock().await.clone() };
-            let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-            tokio::spawn(async move {
-                if let Err(error) = runtime.observe_session(session_id, event_tx).await {
-                    tracing::error!(error = %error, "daemon observation relay failed");
-                }
-            });
-            while let Some(envelope) = event_rx.recv().await {
-                write_stream_event(
-                    reader.get_mut(),
-                    &DaemonStreamEvent::Runtime(envelope.event),
-                )
-                .await?;
-            }
+            let receiver: tokio::sync::broadcast::Receiver<RuntimeEvent> = state
+                .orchestrator
+                .observe_runtime(session_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("runtime observation is unavailable"))?;
+            relay_runtime_stream(reader.get_mut(), receiver).await?;
             Ok(())
         }
         other => {
             let reply = handle_unary_command(state, shutdown_tx, other).await;
             write_reply(reader.get_mut(), &reply).await
+        }
+    }
+}
+
+async fn relay_runtime_stream(
+    stream: &mut UnixStream,
+    mut receiver: tokio::sync::broadcast::Receiver<RuntimeEvent>,
+) -> Result<()> {
+    loop {
+        match receiver.recv().await {
+            Ok(event) => {
+                write_stream_event(stream, &DaemonStreamEvent::Runtime(event)).await?;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::warn!(skipped, "daemon observation receiver lagged");
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
         }
     }
 }
@@ -278,37 +291,21 @@ async fn handle_unary_command_inner(
             let _ = shutdown_tx.send(true);
             Ok(DaemonReply::Ack)
         }
-        DaemonCommand::CreateSession => {
-            let runtime = state.runtime.lock().await;
-            Ok(DaemonReply::SessionId(runtime.create_session().await?))
+        DaemonCommand::CreateSession { request } => {
+            let handle = state.orchestrator.start_session(request).await?;
+            Ok(DaemonReply::SessionId(handle.session_id))
         }
-        DaemonCommand::SetWorkspace { workspace_id } => {
-            let mut runtime = state.runtime.lock().await;
-            runtime.set_workspace(workspace_id).await?;
-            Ok(DaemonReply::Ack)
-        }
-        DaemonCommand::SetModel { model } => {
-            let mut runtime = state.runtime.lock().await;
-            runtime.set_model(model).await?;
-            Ok(DaemonReply::Ack)
-        }
+        DaemonCommand::SetWorkspace { .. } => Ok(DaemonReply::Ack),
+        DaemonCommand::SetModel { .. } => Ok(DaemonReply::Ack),
         DaemonCommand::ListSessions { filter } => Ok(DaemonReply::Sessions(
             state.session_store.list_sessions(filter).await?,
         )),
-        DaemonCommand::ListSessionPreviews => {
-            let runtime = state.runtime.lock().await.clone();
-            Ok(DaemonReply::SessionPreviews(
-                runtime
-                    .list_session_previews()
-                    .await?
-                    .into_iter()
-                    .map(|preview| DaemonSessionPreview {
-                        summary: preview.summary,
-                        last_message: preview.last_message,
-                    })
-                    .collect(),
-            ))
-        }
+        DaemonCommand::ListSessionPreviews { filter } => Ok(DaemonReply::SessionPreviews(
+            list_session_previews(state.session_store.as_ref(), filter)
+                .await?
+                .into_iter()
+                .collect(),
+        )),
         DaemonCommand::GetSession { session_id } => Ok(DaemonReply::Session(
             state.session_store.get_session(session_id).await?,
         )),
@@ -318,45 +315,70 @@ async fn handle_unary_command_inner(
                 .get_events(session_id, EventRange::all())
                 .await?,
         )),
-        DaemonCommand::RecentMemoryEntries { limit } => {
-            let runtime = state.runtime.lock().await.clone();
-            Ok(DaemonReply::MemoryEntries(
-                runtime.recent_memory_entries(limit).await?,
-            ))
+        DaemonCommand::RecentMemoryEntries {
+            workspace_id,
+            limit,
+        } => {
+            let mut pages: Vec<moa_core::PageSummary> = state
+                .orchestrator
+                .memory_store()
+                .list_pages(MemoryScope::Workspace(workspace_id), None)
+                .await?;
+            pages.sort_by(|left, right| right.updated.cmp(&left.updated));
+            pages.truncate(limit);
+            Ok(DaemonReply::MemoryEntries(pages))
         }
-        DaemonCommand::SearchMemory { query, limit } => {
-            let runtime = state.runtime.lock().await.clone();
-            Ok(DaemonReply::MemorySearchResults(
-                runtime.search_memory(&query, limit).await?,
-            ))
-        }
-        DaemonCommand::ReadMemoryPage { path } => {
-            let runtime = state.runtime.lock().await.clone();
-            Ok(DaemonReply::MemoryPage(
-                runtime.read_memory_page(&path).await?,
-            ))
-        }
-        DaemonCommand::MemoryIndex => {
-            let runtime = state.runtime.lock().await.clone();
-            Ok(DaemonReply::MemoryIndex(runtime.memory_index().await?))
-        }
-        DaemonCommand::ToolNames => {
-            let runtime = state.runtime.lock().await.clone();
-            Ok(DaemonReply::ToolNames(runtime.tool_names_async().await?))
-        }
+        DaemonCommand::SearchMemory {
+            workspace_id,
+            query,
+            limit,
+        } => Ok(DaemonReply::MemorySearchResults(
+            state
+                .orchestrator
+                .memory_store()
+                .search(&query, MemoryScope::Workspace(workspace_id), limit)
+                .await?,
+        )),
+        DaemonCommand::ReadMemoryPage { workspace_id, path } => Ok(DaemonReply::MemoryPage(
+            state
+                .orchestrator
+                .memory_store()
+                .read_page(MemoryScope::Workspace(workspace_id), &path)
+                .await?,
+        )),
+        DaemonCommand::MemoryIndex { workspace_id } => Ok(DaemonReply::MemoryIndex(
+            state
+                .orchestrator
+                .memory_store()
+                .get_index(MemoryScope::Workspace(workspace_id))
+                .await?,
+        )),
+        DaemonCommand::ToolNames => Ok(DaemonReply::ToolNames(state.orchestrator.tool_names())),
         DaemonCommand::QueueMessage { session_id, prompt } => {
-            let runtime = state.runtime.lock().await.clone();
-            runtime.queue_message(session_id, prompt).await?;
+            state
+                .orchestrator
+                .signal(
+                    session_id,
+                    moa_core::SessionSignal::QueueMessage(moa_core::UserMessage {
+                        text: prompt,
+                        attachments: Vec::new(),
+                    }),
+                )
+                .await?;
             Ok(DaemonReply::Ack)
         }
         DaemonCommand::SoftCancel { session_id } => {
-            let runtime = state.runtime.lock().await.clone();
-            runtime.soft_cancel_session(session_id).await?;
+            state
+                .orchestrator
+                .signal(session_id, moa_core::SessionSignal::SoftCancel)
+                .await?;
             Ok(DaemonReply::Ack)
         }
         DaemonCommand::HardCancel { session_id } => {
-            let runtime = state.runtime.lock().await.clone();
-            runtime.hard_cancel_session(session_id).await?;
+            state
+                .orchestrator
+                .signal(session_id, moa_core::SessionSignal::HardCancel)
+                .await?;
             Ok(DaemonReply::Ack)
         }
         DaemonCommand::RespondToApproval {
@@ -364,14 +386,48 @@ async fn handle_unary_command_inner(
             request_id,
             decision,
         } => {
-            let runtime = state.runtime.lock().await.clone();
-            runtime
-                .respond_to_session_approval(session_id, request_id, decision)
+            state
+                .orchestrator
+                .signal(
+                    session_id,
+                    moa_core::SessionSignal::ApprovalDecided {
+                        request_id,
+                        decision,
+                    },
+                )
                 .await?;
             Ok(DaemonReply::Ack)
         }
         DaemonCommand::ObserveSession { .. } => bail!("observe is handled separately"),
     }
+}
+
+async fn list_session_previews(
+    session_store: &SessionDatabase,
+    filter: SessionFilter,
+) -> Result<Vec<DaemonSessionPreview>> {
+    let mut previews = Vec::new();
+    for summary in session_store.list_sessions(filter).await? {
+        let events = session_store
+            .get_events(summary.session_id.clone(), EventRange::recent(16))
+            .await?;
+        previews.push(DaemonSessionPreview {
+            summary,
+            last_message: last_session_message(&events),
+        });
+    }
+
+    Ok(previews)
+}
+
+fn last_session_message(events: &[moa_core::EventRecord]) -> Option<String> {
+    events.iter().rev().find_map(|record| match &record.event {
+        moa_core::Event::BrainResponse { text, .. } | moa_core::Event::UserMessage { text, .. } => {
+            Some(text.trim().to_string())
+        }
+        moa_core::Event::QueuedMessage { text, .. } => Some(format!("Queued: {}", text.trim())),
+        _ => None,
+    })
 }
 
 async fn send_command(
@@ -447,9 +503,10 @@ async fn wait_for_process_signal() -> Result<&'static str> {
     Ok("SIGINT")
 }
 
-async fn spawn_health_server(
+async fn spawn_api_server(
     config: &MoaConfig,
-    mut shutdown_rx: watch::Receiver<bool>,
+    orchestrator: Arc<LocalOrchestrator>,
+    shutdown_rx: watch::Receiver<bool>,
 ) -> Result<Option<JoinHandle<Result<()>>>> {
     if !config.cloud.enabled {
         return Ok(None);
@@ -460,54 +517,9 @@ async fn spawn_health_server(
         .map(|config| config.health_bind.as_str())
         .unwrap_or("0.0.0.0");
     let port = fly.map(|config| config.internal_port).unwrap_or(8080);
-    let listener = TcpListener::bind((bind_host, port))
-        .await
-        .with_context(|| format!("binding cloud health listener on {bind_host}:{port}"))?;
-
-    Ok(Some(tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                changed = shutdown_rx.changed() => {
-                    if changed.is_ok() && *shutdown_rx.borrow() {
-                        break;
-                    }
-                }
-                accept = listener.accept() => {
-                    let (stream, _) = accept?;
-                    tokio::spawn(async move {
-                        if let Err(error) = handle_health_connection(stream).await {
-                            tracing::warn!(error = %error, "health request failed");
-                        }
-                    });
-                }
-            }
-        }
-
-        Ok(())
-    })))
-}
-
-async fn handle_health_connection(mut stream: TcpStream) -> Result<()> {
-    let mut buffer = [0_u8; 1024];
-    let bytes = stream.read(&mut buffer).await?;
-    let request = String::from_utf8_lossy(&buffer[..bytes]);
-    let path = request
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .unwrap_or("/");
-    let (status_line, body) = if path == "/health" {
-        ("HTTP/1.1 200 OK", "{\"status\":\"ok\"}\n")
-    } else {
-        ("HTTP/1.1 404 Not Found", "{\"status\":\"not_found\"}\n")
-    };
-    let response = format!(
-        "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream.write_all(response.as_bytes()).await?;
-    stream.shutdown().await?;
-    Ok(())
+    Ok(Some(
+        start_api_server(orchestrator, bind_host, port, shutdown_rx).await?,
+    ))
 }
 
 fn graceful_shutdown_timeout(config: &MoaConfig) -> Duration {
@@ -593,7 +605,10 @@ mod tests {
     use tokio::net::TcpStream;
 
     use super::{daemon_info, request, run_daemon_server, stop_daemon, wait_for_daemon};
-    use moa_core::{DaemonCommand, DaemonReply, MoaConfig, SessionId};
+    use moa_core::{
+        DaemonCommand, DaemonReply, MoaConfig, Platform, SessionFilter, SessionId,
+        StartSessionRequest, UserId, WorkspaceId,
+    };
 
     fn test_config() -> Option<MoaConfig> {
         let dir = tempdir().ok()?;
@@ -643,7 +658,22 @@ mod tests {
         let info = daemon_info(&config).await?;
         assert!(info.pid > 0);
 
-        let session_id = match request(&config, &DaemonCommand::CreateSession).await? {
+        let session_id = match request(
+            &config,
+            &DaemonCommand::CreateSession {
+                request: StartSessionRequest {
+                    workspace_id: WorkspaceId::new("default"),
+                    user_id: UserId::new("tester"),
+                    platform: Platform::Cli,
+                    model: config.general.default_model.clone(),
+                    initial_message: None,
+                    title: None,
+                    parent_session_id: None,
+                },
+            },
+        )
+        .await?
+        {
             DaemonReply::SessionId(session_id) => session_id,
             other => panic!("unexpected create-session reply: {other:?}"),
         };
@@ -662,12 +692,112 @@ mod tests {
         let server = tokio::spawn(run_daemon_server(config.clone()));
         wait_for_daemon(&config, std::time::Duration::from_secs(5)).await?;
 
-        let _ = request(&config, &DaemonCommand::CreateSession).await?;
-        let previews = match request(&config, &DaemonCommand::ListSessionPreviews).await? {
+        let empty_previews = match request(
+            &config,
+            &DaemonCommand::ListSessionPreviews {
+                filter: SessionFilter::default(),
+            },
+        )
+        .await?
+        {
+            DaemonReply::SessionPreviews(previews) => previews,
+            other => panic!("unexpected preview reply: {other:?}"),
+        };
+        assert!(empty_previews.is_empty());
+
+        let _ = request(
+            &config,
+            &DaemonCommand::CreateSession {
+                request: StartSessionRequest {
+                    workspace_id: WorkspaceId::new("default"),
+                    user_id: UserId::new("tester"),
+                    platform: Platform::Cli,
+                    model: config.general.default_model.clone(),
+                    initial_message: None,
+                    title: None,
+                    parent_session_id: None,
+                },
+            },
+        )
+        .await?;
+        let previews = match request(
+            &config,
+            &DaemonCommand::ListSessionPreviews {
+                filter: SessionFilter::default(),
+            },
+        )
+        .await?
+        {
             DaemonReply::SessionPreviews(previews) => previews,
             other => panic!("unexpected preview reply: {other:?}"),
         };
         assert!(!previews.is_empty());
+
+        stop_daemon(&config).await?;
+        server.await.expect("daemon task join")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn daemon_create_session_uses_explicit_client_scope() -> Result<()> {
+        let Some(config) = test_config() else {
+            return Ok(());
+        };
+        let server = tokio::spawn(run_daemon_server(config.clone()));
+        wait_for_daemon(&config, std::time::Duration::from_secs(5)).await?;
+
+        for workspace in ["alpha", "beta"] {
+            let reply = request(
+                &config,
+                &DaemonCommand::CreateSession {
+                    request: StartSessionRequest {
+                        workspace_id: WorkspaceId::new(workspace),
+                        user_id: UserId::new("tester"),
+                        platform: Platform::Cli,
+                        model: config.general.default_model.clone(),
+                        initial_message: None,
+                        title: None,
+                        parent_session_id: None,
+                    },
+                },
+            )
+            .await?;
+            assert!(matches!(reply, DaemonReply::SessionId(_)));
+        }
+
+        let alpha_sessions = match request(
+            &config,
+            &DaemonCommand::ListSessions {
+                filter: SessionFilter {
+                    workspace_id: Some(WorkspaceId::new("alpha")),
+                    ..SessionFilter::default()
+                },
+            },
+        )
+        .await?
+        {
+            DaemonReply::Sessions(sessions) => sessions,
+            other => panic!("unexpected sessions reply: {other:?}"),
+        };
+        let beta_sessions = match request(
+            &config,
+            &DaemonCommand::ListSessions {
+                filter: SessionFilter {
+                    workspace_id: Some(WorkspaceId::new("beta")),
+                    ..SessionFilter::default()
+                },
+            },
+        )
+        .await?
+        {
+            DaemonReply::Sessions(sessions) => sessions,
+            other => panic!("unexpected sessions reply: {other:?}"),
+        };
+
+        assert_eq!(alpha_sessions.len(), 1);
+        assert_eq!(beta_sessions.len(), 1);
+        assert_eq!(alpha_sessions[0].workspace_id, WorkspaceId::new("alpha"));
+        assert_eq!(beta_sessions[0].workspace_id, WorkspaceId::new("beta"));
 
         stop_daemon(&config).await?;
         server.await.expect("daemon task join")?;
