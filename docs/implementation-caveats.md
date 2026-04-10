@@ -1397,3 +1397,21 @@ Remaining note:
 
 - The current fallback behavior still drops back to host-path file access when `docker exec` fails due to Docker transport issues such as a lost container or daemon connectivity failure.
 - That matches the local provider's existing graceful-degradation posture, but it also means a broken Docker hand can temporarily lose the strict isolation guarantee instead of hard-failing immediately.
+
+### 29.1 Approval replay now comes from durable `ApprovalPrompt` data
+
+Current state:
+
+- `Event::ApprovalRequested` now stores the full `ApprovalPrompt` alongside the top-level `request_id`, `tool_name`, `input_summary`, and `risk_level` fields.
+- The orchestrator and buffered brain harness both persist the same rich prompt data that the runtime sends to the TUI, including parsed parameters, allow patterns, and file diffs.
+- TUI session rehydration now prefers the persisted prompt directly and only falls back to a minimal placeholder card when replaying older logs that predate this field.
+
+Consequence:
+
+- Switching tabs, resuming from disk, and future non-TUI clients can reconstruct the same approval card fidelity that a live runtime session sees.
+- Approval diffs and parameter summaries are no longer runtime-only state that disappears once the broadcast channel is gone.
+
+Remaining note:
+
+- Old session logs still deserialize because `prompt` is optional, but those historical approvals necessarily rehydrate as the older minimal card shape with no diffs or parsed parameters.
+- The current local SQLite event log stores file diffs inline; if approval payloads become very large in cloud mode, the next optimization should be a claim-check pattern instead of embedding arbitrarily large diffs in every event row.

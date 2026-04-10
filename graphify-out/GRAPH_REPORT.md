@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-04-10)
 
 ## Corpus Check
-- 117 files · ~104,368 words
+- 117 files · ~104,944 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 2118 nodes · 3745 edges · 78 communities detected
+- 2126 nodes · 3756 edges · 78 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -82,21 +82,21 @@ Nodes (15): event_record_from_row(), event_type_from_db(), optional_i64(), optio
 Cohesion: 0.08
 Nodes (25): anthropic_message(), AnthropicProvider, AnthropicStreamState, BlockAccumulator, build_request_body(), canonical_model_id(), capabilities_for_model(), completion_request_serializes_to_anthropic_format() (+17 more)
 
-### Community 14 - "Config & Errors"
+### Community 14 - "Local Orchestrator Tests"
+Cohesion: 0.09
+Nodes (27): approval_requested_event_persists_full_prompt_details(), denied_tool_preserves_queued_follow_up(), FileWriteApprovalProvider, last_user_message(), list_sessions_includes_active_session(), memory_maintenance_runs_due_workspace_consolidation(), memory_maintenance_skips_when_threshold_or_cooldown_not_met(), MockProvider (+19 more)
+
+### Community 15 - "Config & Errors"
 Cohesion: 0.06
 Nodes (19): CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, config_loads_from_file(), DaemonConfig, default_config_is_valid(), GatewayConfig (+11 more)
 
-### Community 15 - "Message Renderer"
+### Community 16 - "Message Renderer"
 Cohesion: 0.09
 Nodes (23): append_piece(), discord_renderer_attaches_buttons_to_last_chunk_only(), discord_renderer_uses_embed_limit_for_long_text(), DiscordRenderChunk, DiscordRenderer, render_approval_request(), render_diff(), render_tool_card() (+15 more)
 
-### Community 16 - "Temporal Orchestrator Tests"
+### Community 17 - "Temporal Orchestrator Tests"
 Cohesion: 0.11
 Nodes (28): build_temporal_helper_binary(), delayed_text_stream(), last_user_message(), mock_capabilities(), spawn_temporal_helper(), temporal_helper_binary(), temporal_orchestrator_live_anthropic_smoke(), temporal_orchestrator_processes_multiple_queued_messages_fifo() (+20 more)
-
-### Community 17 - "Local Orchestrator Tests"
-Cohesion: 0.11
-Nodes (24): denied_tool_preserves_queued_follow_up(), last_user_message(), list_sessions_includes_active_session(), memory_maintenance_runs_due_workspace_consolidation(), memory_maintenance_skips_when_threshold_or_cooldown_not_met(), MockProvider, multiple_queued_messages_are_processed_fifo_one_turn_at_a_time(), observe_stream_receives_events_in_order() (+16 more)
 
 ### Community 18 - "Daemon Service"
 Cohesion: 0.12
@@ -222,29 +222,29 @@ Nodes (5): build_textarea(), PromptCompletionKind, PromptCompletionState, Prompt
 Cohesion: 0.19
 Nodes (6): EmptyMemoryStore, router_calls_http_mcp_server_and_surfaces_jsonrpc_errors(), router_discovers_and_calls_streamable_http_tools_with_sse_responses(), router_discovers_stdio_mcp_tools_from_config(), router_injects_mcp_credentials_via_proxy(), session()
 
-### Community 49 - "Session Store Tests"
+### Community 49 - "Core Event Model"
+Cohesion: 0.15
+Nodes (1): Event
+
+### Community 50 - "Session Store Tests"
 Cohesion: 0.15
 Nodes (0): 
 
-### Community 50 - "Injection Detection"
+### Community 51 - "Injection Detection"
 Cohesion: 0.26
 Nodes (12): canary_detection_works(), check_canary(), classifier_flags_known_attack_patterns(), classify_input(), contains_canary_tokens(), inject_canary(), InputClassification, InputInspection (+4 more)
 
-### Community 51 - "TUI Keybindings"
+### Community 52 - "TUI Keybindings"
 Cohesion: 0.17
 Nodes (1): KeyAction
 
-### Community 52 - "Toolbar Widget"
+### Community 53 - "Toolbar Widget"
 Cohesion: 0.24
 Nodes (7): build_tab_spans(), render_toolbar(), short_session_id(), tab_title(), toolbar_labels_include_status_icons_and_tab_limit(), ToolbarMetrics, visible_window()
 
-### Community 53 - "Live Provider Roundtrip Tests"
+### Community 54 - "Live Provider Roundtrip Tests"
 Cohesion: 0.3
 Nodes (8): available_live_providers(), live_orchestrator_with_provider(), live_providers_complete_tool_approval_roundtrip_when_available(), LiveProvider, wait_for_approval_request(), wait_for_file(), wait_for_final_response(), wait_for_status()
-
-### Community 54 - "Core Event Model"
-Cohesion: 0.18
-Nodes (1): Event
 
 ### Community 55 - "Memory Store Tests"
 Cohesion: 0.36

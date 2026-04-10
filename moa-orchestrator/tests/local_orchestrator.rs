@@ -334,6 +334,73 @@ impl LLMProvider for ToolThenEchoProvider {
     }
 }
 
+#[derive(Clone)]
+struct FileWriteApprovalProvider {
+    model: String,
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl LLMProvider for FileWriteApprovalProvider {
+    fn name(&self) -> &str {
+        "file-write-approval"
+    }
+
+    fn capabilities(&self) -> moa_core::ModelCapabilities {
+        moa_core::ModelCapabilities {
+            model_id: self.model.clone(),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: false,
+            supports_prefix_caching: false,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 0.0,
+                output_per_mtok: 0.0,
+                cached_input_per_mtok: None,
+            },
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let mut requests = self.requests.lock().expect("request log lock poisoned");
+        let response = if requests.is_empty() {
+            CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(moa_core::ToolInvocation {
+                    id: Some("cccccccc-cccc-cccc-cccc-cccccccccccc".to_string()),
+                    name: "file_write".to_string(),
+                    input: serde_json::json!({
+                        "path": "docs/approval-check.md",
+                        "content": "approved via orchestrator\n",
+                    }),
+                })],
+                stop_reason: moa_core::StopReason::ToolUse,
+                model: self.model.clone(),
+                input_tokens: 8,
+                output_tokens: 4,
+                cached_input_tokens: 0,
+                duration_ms: 10,
+            }
+        } else {
+            CompletionResponse {
+                text: "done".to_string(),
+                content: vec![CompletionContent::Text("done".to_string())],
+                stop_reason: moa_core::StopReason::EndTurn,
+                model: self.model.clone(),
+                input_tokens: 8,
+                output_tokens: 4,
+                cached_input_tokens: 0,
+                duration_ms: 10,
+            }
+        };
+        requests.push(request);
+        Ok(CompletionStream::from_response(response))
+    }
+}
+
 async fn start_session(orchestrator: &LocalOrchestrator) -> Result<SessionHandle> {
     orchestrator
         .start_session(StartSessionRequest {
@@ -388,6 +455,31 @@ async fn wait_for_approval_request(
         if Instant::now() >= deadline {
             return Err(MoaError::ProviderError(
                 "timed out waiting for approval request".to_string(),
+            ));
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_for_approval_event(
+    orchestrator: &LocalOrchestrator,
+    session_id: SessionId,
+) -> Result<Event> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let events = orchestrator
+            .session_store()
+            .get_events(session_id.clone(), EventRange::all())
+            .await?;
+        if let Some(event) = events.iter().find_map(|record| match &record.event {
+            Event::ApprovalRequested { .. } => Some(record.event.clone()),
+            _ => None,
+        }) {
+            return Ok(event);
+        }
+        if Instant::now() >= deadline {
+            return Err(MoaError::ProviderError(
+                "timed out waiting for approval event".to_string(),
             ));
         }
         sleep(Duration::from_millis(20)).await;
@@ -590,6 +682,54 @@ async fn queued_message_is_processed_after_current_turn() -> Result<()> {
         .filter(|record| record.event_type == EventType::BrainResponse)
         .count();
     assert!(responses >= 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn approval_requested_event_persists_full_prompt_details() -> Result<()> {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let model = MoaConfig::default().general.default_model;
+    let provider: Arc<dyn LLMProvider> = Arc::new(FileWriteApprovalProvider { model, requests });
+    let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
+    let session = start_session(&orchestrator).await?;
+
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::QueueMessage(UserMessage {
+                text: "write approval test".to_string(),
+                attachments: Vec::new(),
+            }),
+        )
+        .await?;
+
+    let event = wait_for_approval_event(&orchestrator, session.session_id.clone()).await?;
+    match event {
+        Event::ApprovalRequested {
+            tool_name,
+            input_summary,
+            risk_level,
+            prompt,
+            ..
+        } => {
+            assert_eq!(tool_name, "file_write");
+            assert!(input_summary.contains("docs/approval-check.md"));
+            assert_eq!(risk_level, moa_core::RiskLevel::Medium);
+            let prompt = prompt.expect("rich approval prompt should be persisted");
+            assert_eq!(prompt.request.tool_name, "file_write");
+            assert_eq!(prompt.parameters.len(), 2);
+            assert_eq!(prompt.file_diffs.len(), 1);
+            assert_eq!(prompt.file_diffs[0].path, "docs/approval-check.md");
+            assert_eq!(prompt.file_diffs[0].before, "");
+            assert_eq!(
+                prompt.file_diffs[0].after,
+                "approved via orchestrator\n".to_string()
+            );
+            assert!(prompt.pattern.contains("docs/approval-check.md"));
+        }
+        other => panic!("expected approval requested event, got {other:?}"),
+    }
+
     Ok(())
 }
 
