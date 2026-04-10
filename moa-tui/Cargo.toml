@@ -16,6 +16,7 @@ moa-orchestrator = { path = "../moa-orchestrator" }
 moa-providers = { path = "../moa-providers" }
 moa-session = { path = "../moa-session" }
 nucleo.workspace = true
+pulldown-cmark = "0.12"
 ratatui.workspace = true
 serde_json.workspace = true
 shell-words = "1.1"

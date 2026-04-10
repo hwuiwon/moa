@@ -102,6 +102,13 @@ pub enum DaemonCommand {
         /// Logical memory path to read.
         path: MemoryPath,
     },
+    /// Delete one workspace memory page.
+    DeleteMemoryPage {
+        /// Workspace to modify.
+        workspace_id: WorkspaceId,
+        /// Logical memory path to delete.
+        path: MemoryPath,
+    },
     /// Load the current workspace index document.
     MemoryIndex {
         /// Workspace to query.

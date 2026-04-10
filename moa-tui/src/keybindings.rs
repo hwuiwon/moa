@@ -125,6 +125,8 @@ pub enum KeyAction {
     SettingsApply,
     /// Reverse the selected settings change.
     SettingsReverse,
+    /// Begin editing or apply the selected setting.
+    SettingsEdit,
     /// Forward the key into the prompt widget.
     PromptInput,
     /// Ignore the key press.
@@ -187,7 +189,7 @@ pub fn map_key_event(mode: AppMode, key: KeyEvent) -> KeyAction {
             KeyCode::Right => KeyAction::SettingsApply,
             KeyCode::Char('h') | KeyCode::Char('H') => KeyAction::SettingsCategoryLeft,
             KeyCode::Char('l') | KeyCode::Char('L') => KeyAction::SettingsCategoryRight,
-            KeyCode::Enter => KeyAction::SettingsApply,
+            KeyCode::Enter => KeyAction::SettingsEdit,
             _ => KeyAction::Noop,
         };
     }
@@ -445,6 +447,10 @@ mod tests {
         assert_eq!(
             map_key_event(AppMode::Settings, key(KeyCode::Right, KeyModifiers::NONE)),
             KeyAction::SettingsApply
+        );
+        assert_eq!(
+            map_key_event(AppMode::Settings, key(KeyCode::Enter, KeyModifiers::NONE)),
+            KeyAction::SettingsEdit
         );
     }
 

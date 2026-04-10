@@ -142,24 +142,6 @@ The Temporal integration works for the current prototype but is not yet producti
 
 ---
 
-## TUI feature gaps
-
-The TUI surfaces are functional but intentionally shallow. These caveats share a root in the TUI being a thin consumer layer that defers richer interactions to later passes.
-
-### Memory/settings surfaces are functional but shallow
-
-- `moa-tui/src/app.rs` exposes shells for sidebar, memory browser, settings, help, command palette, slash completion, and `@file` completion.
-- The memory browser in `moa-tui/src/views/memory.rs` supports page browsing, FTS-backed search, wikilink following, and back/forward history.
-- The settings panel in `moa-tui/src/views/settings.rs` persists a focused subset of config values and hot-reloads the provider/model path.
-- The memory browser does not yet implement destructive delete or external-editor open. Markdown rendering is lightweight text, not full `pulldown-cmark` rich formatting. The settings panel intentionally edits a small subset of config rather than every field in `MoaConfig`.
-
-### Prompt completion is intentionally simple
-
-- Slash completion and `@file` completion render above the prompt and accept via `Tab`. File completion is ranked by a small in-memory frecency map plus path order.
-- Completion is prompt-text based, not true cursor-position aware editing inside arbitrary multiline input. `@file` completion only rewrites the trailing token, so paths with embedded spaces are not handled. File-frecency is process-local and not persisted across TUI restarts.
-
----
-
 ## Deployment and boot configuration
 
 These caveats relate to the gap between "cloud build succeeds" and "cloud deployment is fully self-service."

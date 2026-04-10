@@ -1,6 +1,7 @@
 //! Two-pane memory browser with search and wikilink navigation.
 
 use moa_core::{MemoryPath, MemorySearchResult, PageSummary, WikiPage};
+use pulldown_cmark::{Event as MarkdownEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -165,6 +166,19 @@ impl MemoryViewState {
             .map(MemoryNavItem::path)
     }
 
+    /// Returns the logical path of the currently opened page, when available.
+    pub(crate) fn current_path(&self) -> Option<MemoryPath> {
+        self.current_page
+            .as_ref()
+            .and_then(|page| page.path.as_ref())
+            .cloned()
+    }
+
+    /// Clears the currently opened page.
+    pub(crate) fn clear_current_page(&mut self) {
+        self.current_page = None;
+    }
+
     /// Returns the number of visible navigation rows.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
@@ -313,16 +327,7 @@ fn render_page_text(page: Option<&WikiPage>) -> Text<'static> {
         Style::default().add_modifier(Modifier::ITALIC),
     )]));
     lines.push(Line::raw(String::new()));
-    for raw_line in page.content.lines() {
-        if raw_line.starts_with('#') {
-            lines.push(Line::from(vec![Span::styled(
-                raw_line.to_string(),
-                Style::default().add_modifier(Modifier::BOLD),
-            )]));
-        } else {
-            lines.push(Line::raw(raw_line.to_string()));
-        }
-    }
+    lines.extend(render_markdown_lines(&page.content));
     let links = wikilinks_from_page(Some(page));
     if !links.is_empty() {
         lines.push(Line::raw(String::new()));
@@ -336,6 +341,173 @@ fn render_page_text(page: Option<&WikiPage>) -> Text<'static> {
     }
 
     Text::from(lines)
+}
+
+fn render_markdown_lines(markdown: &str) -> Vec<Line<'static>> {
+    let parser = Parser::new_ext(markdown, Options::all());
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut heading_prefix: Option<String> = None;
+    let mut list_depth = 0usize;
+    let mut blockquote_depth = 0usize;
+
+    for event in parser {
+        match event {
+            MarkdownEvent::Start(Tag::Heading { level, .. }) => {
+                heading_prefix = Some(format!("{} ", heading_marker(level)));
+            }
+            MarkdownEvent::End(TagEnd::Heading(_)) => {
+                push_styled_line(
+                    &mut lines,
+                    &mut current,
+                    Style::default().add_modifier(Modifier::BOLD),
+                );
+                heading_prefix = None;
+            }
+            MarkdownEvent::Start(Tag::Paragraph) => {
+                ensure_prefix(
+                    &mut current,
+                    heading_prefix.as_deref(),
+                    list_depth,
+                    blockquote_depth,
+                );
+            }
+            MarkdownEvent::End(TagEnd::Paragraph) => push_line(&mut lines, &mut current),
+            MarkdownEvent::Start(Tag::List(_)) => {
+                list_depth += 1;
+            }
+            MarkdownEvent::End(TagEnd::List(_)) => {
+                list_depth = list_depth.saturating_sub(1);
+                push_line(&mut lines, &mut current);
+            }
+            MarkdownEvent::Start(Tag::Item) => {
+                push_line(&mut lines, &mut current);
+                current.push_str(&"  ".repeat(list_depth.saturating_sub(1)));
+                current.push_str("• ");
+            }
+            MarkdownEvent::End(TagEnd::Item) => push_line(&mut lines, &mut current),
+            MarkdownEvent::Start(Tag::BlockQuote(_)) => {
+                blockquote_depth += 1;
+            }
+            MarkdownEvent::End(TagEnd::BlockQuote(_)) => {
+                blockquote_depth = blockquote_depth.saturating_sub(1);
+                push_line(&mut lines, &mut current);
+            }
+            MarkdownEvent::Start(Tag::CodeBlock(_)) => {
+                push_line(&mut lines, &mut current);
+                current.push_str("```");
+                push_line(&mut lines, &mut current);
+            }
+            MarkdownEvent::End(TagEnd::CodeBlock) => {
+                lines.push(Line::raw("```".to_string()));
+            }
+            MarkdownEvent::Text(text)
+            | MarkdownEvent::Html(text)
+            | MarkdownEvent::InlineHtml(text) => {
+                ensure_prefix(
+                    &mut current,
+                    heading_prefix.as_deref(),
+                    list_depth,
+                    blockquote_depth,
+                );
+                current.push_str(text.as_ref());
+            }
+            MarkdownEvent::Code(text)
+            | MarkdownEvent::InlineMath(text)
+            | MarkdownEvent::DisplayMath(text) => {
+                ensure_prefix(
+                    &mut current,
+                    heading_prefix.as_deref(),
+                    list_depth,
+                    blockquote_depth,
+                );
+                current.push('`');
+                current.push_str(text.as_ref());
+                current.push('`');
+            }
+            MarkdownEvent::SoftBreak | MarkdownEvent::HardBreak => {
+                push_line(&mut lines, &mut current)
+            }
+            MarkdownEvent::Rule => {
+                push_line(&mut lines, &mut current);
+                lines.push(Line::raw("─".repeat(32)));
+            }
+            MarkdownEvent::TaskListMarker(checked) => {
+                ensure_prefix(
+                    &mut current,
+                    heading_prefix.as_deref(),
+                    list_depth,
+                    blockquote_depth,
+                );
+                current.push_str(if checked { "[x] " } else { "[ ] " });
+            }
+            MarkdownEvent::FootnoteReference(name) => {
+                ensure_prefix(
+                    &mut current,
+                    heading_prefix.as_deref(),
+                    list_depth,
+                    blockquote_depth,
+                );
+                current.push_str(&format!("[^{name}]"));
+            }
+            MarkdownEvent::Start(Tag::Link { dest_url, .. }) => {
+                ensure_prefix(
+                    &mut current,
+                    heading_prefix.as_deref(),
+                    list_depth,
+                    blockquote_depth,
+                );
+                current.push('[');
+                current.push_str(dest_url.as_ref());
+                current.push_str("] ");
+            }
+            MarkdownEvent::Start(_) | MarkdownEvent::End(_) => {}
+        }
+    }
+
+    if !current.is_empty() {
+        push_line(&mut lines, &mut current);
+    }
+    lines
+}
+
+fn ensure_prefix(
+    current: &mut String,
+    heading_prefix: Option<&str>,
+    list_depth: usize,
+    blockquote_depth: usize,
+) {
+    if !current.is_empty() {
+        return;
+    }
+    if let Some(prefix) = heading_prefix {
+        current.push_str(prefix);
+    }
+    if blockquote_depth > 0 {
+        current.push_str(&"> ".repeat(blockquote_depth));
+    }
+    if list_depth > 0 && heading_prefix.is_none() {
+        current.push_str(&"  ".repeat(list_depth.saturating_sub(1)));
+    }
+}
+
+fn push_line(lines: &mut Vec<Line<'static>>, current: &mut String) {
+    lines.push(Line::raw(std::mem::take(current)));
+}
+
+fn push_styled_line(lines: &mut Vec<Line<'static>>, current: &mut String, style: Style) {
+    lines.push(Line::from(Span::styled(std::mem::take(current), style)));
+}
+
+fn heading_marker(level: HeadingLevel) -> &'static str {
+    match level {
+        HeadingLevel::H1 => "#",
+        HeadingLevel::H2 => "##",
+        HeadingLevel::H3 => "###",
+        HeadingLevel::H4 => "####",
+        HeadingLevel::H5 => "#####",
+        HeadingLevel::H6 => "######",
+    }
 }
 
 fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {

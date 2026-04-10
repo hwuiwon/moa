@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -17,6 +18,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use tokio::fs;
+use tokio::process::Command;
 use tokio::{sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
 
@@ -35,7 +37,7 @@ use crate::{
         memory::{self, MemoryViewState},
         palette::{self, PaletteAction, PaletteState},
         sessions::{self, SessionPickerState},
-        settings::{self, SettingsMutation, SettingsViewState},
+        settings::{self, SettingsViewState},
     },
     widgets::{
         prompt::{
@@ -146,6 +148,7 @@ pub struct App {
     recent_memory: Vec<PageSummary>,
     tool_names: Vec<String>,
     file_frecency: HashMap<String, u32>,
+    frecency_path: PathBuf,
     known_files: Vec<String>,
     active_session_id: SessionId,
     viewport_width: u16,
@@ -184,6 +187,7 @@ impl App {
         options: RunTuiOptions,
     ) -> Result<Self> {
         let config_path = default_config_path()?;
+        let frecency_path = default_frecency_path()?;
         let active_session_id = options
             .attach_session_id
             .clone()
@@ -193,6 +197,7 @@ impl App {
         let known_files = collect_sandbox_files(&runtime.sandbox_root())
             .await
             .unwrap_or_default();
+        let file_frecency = load_file_frecency(&frecency_path).await?;
         let (runtime_event_tx, runtime_event_rx) = mpsc::unbounded_channel();
         let mut app = Self {
             config,
@@ -211,7 +216,8 @@ impl App {
             show_help: false,
             recent_memory,
             tool_names,
-            file_frecency: HashMap::new(),
+            file_frecency,
+            frecency_path,
             known_files,
             active_session_id: active_session_id.clone(),
             viewport_width: 0,
@@ -261,6 +267,15 @@ impl App {
 
     /// Handles a single key press from the terminal loop.
     pub async fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
+        if self
+            .settings_view
+            .as_ref()
+            .is_some_and(SettingsViewState::is_editing)
+        {
+            self.handle_settings_edit_key(key).await?;
+            return Ok(());
+        }
+
         if self.handle_pending_chord(key).await? {
             return Ok(());
         }
@@ -379,6 +394,7 @@ impl App {
             KeyAction::SettingsCategoryRight => self.move_settings_category(true),
             KeyAction::SettingsApply => self.apply_settings_change(true).await?,
             KeyAction::SettingsReverse => self.apply_settings_change(false).await?,
+            KeyAction::SettingsEdit => self.begin_settings_edit().await?,
             KeyAction::CycleVerbosity => {
                 self.push_status_line(
                     self.active_session_id.clone(),
@@ -1211,8 +1227,12 @@ impl App {
     }
 
     async fn refresh_prompt_completion(&mut self) -> Result<()> {
-        self.prompt_completion =
-            completion_for_prompt(&self.prompt.text(), &self.known_files, &self.file_frecency);
+        self.prompt_completion = completion_for_prompt(
+            &self.prompt.text(),
+            self.prompt.cursor_offset(),
+            &self.known_files,
+            &self.file_frecency,
+        );
         Ok(())
     }
 
@@ -1224,16 +1244,26 @@ impl App {
             return Ok(());
         };
         let prompt = self.prompt.text();
+        let replace_range = completion.replace_range.clone();
+        let needs_trailing_space = prompt
+            .get(replace_range.end..)
+            .and_then(|suffix| suffix.chars().next())
+            .is_none_or(|ch| !ch.is_whitespace());
         let replaced = match completion.kind {
-            PromptCompletionKind::Slash => complete_slash_command(&prompt, &item),
+            PromptCompletionKind::Slash => complete_slash_command(&item, needs_trailing_space),
             PromptCompletionKind::File => {
                 *self.file_frecency.entry(item.clone()).or_insert(0) += 1;
-                complete_file_reference(&prompt, &item)
+                self.persist_file_frecency().await?;
+                complete_file_reference(&item, needs_trailing_space)
             }
         };
-        self.prompt.replace_text(replaced);
-        self.prompt_completion =
-            completion_for_prompt(&self.prompt.text(), &self.known_files, &self.file_frecency);
+        self.prompt.replace_range(replace_range, &replaced);
+        self.prompt_completion = completion_for_prompt(
+            &self.prompt.text(),
+            self.prompt.cursor_offset(),
+            &self.known_files,
+            &self.file_frecency,
+        );
         self.sync_mode_with_state();
         Ok(())
     }
@@ -1452,18 +1482,53 @@ impl App {
     }
 
     async fn open_memory_page_in_editor(&mut self) -> Result<()> {
+        let Some(path) = self
+            .memory_view
+            .as_ref()
+            .and_then(MemoryViewState::selected_path)
+        else {
+            return Ok(());
+        };
+        let file_path =
+            workspace_memory_file_path(&self.config, self.runtime.workspace_id(), &path)?;
+        open_external_path(&file_path).await?;
         self.push_status_line(
             self.active_session_id.clone(),
-            "Opening memory pages in an external editor is not implemented yet.".to_string(),
+            format!("Opened {} in the system editor.", path.as_str()),
         );
         self.sync_mode_with_state();
         Ok(())
     }
 
     async fn delete_memory_page(&mut self) -> Result<()> {
+        let Some(path) = self
+            .memory_view
+            .as_ref()
+            .and_then(MemoryViewState::selected_path)
+        else {
+            return Ok(());
+        };
+        let deleted_current = self
+            .memory_view
+            .as_ref()
+            .and_then(MemoryViewState::current_path)
+            .is_some_and(|current| current == path);
+        self.runtime.delete_memory_page(&path).await?;
+        self.refresh_sidebar_data().await?;
+        self.refresh_memory_search_results().await?;
+        if let Some(memory_view) = &mut self.memory_view
+            && deleted_current
+        {
+            memory_view.clear_current_page();
+            if let Some(next_path) = memory_view.selected_path()
+                && let Ok(page) = self.runtime.read_memory_page(&next_path).await
+            {
+                memory_view.set_current_page(page);
+            }
+        }
         self.push_status_line(
             self.active_session_id.clone(),
-            "Deleting memory pages from the TUI is not implemented yet.".to_string(),
+            format!("Deleted memory page {}.", path.as_str()),
         );
         self.sync_mode_with_state();
         Ok(())
@@ -1503,6 +1568,16 @@ impl App {
         self.sync_mode_with_state();
     }
 
+    async fn begin_settings_edit(&mut self) -> Result<()> {
+        if let Some(settings_view) = &mut self.settings_view
+            && settings_view.begin_edit(&self.config)
+        {
+            self.sync_mode_with_state();
+            return Ok(());
+        }
+        self.apply_settings_change(true).await
+    }
+
     async fn apply_settings_change(&mut self, forward: bool) -> Result<()> {
         let Some(settings_view) = &self.settings_view else {
             return Ok(());
@@ -1513,13 +1588,16 @@ impl App {
             settings_view.step_backward(&mut self.config)
         };
         self.persist_config().await?;
-        if mutation == SettingsMutation::ModelChanged {
+        if mutation.reload_model_path {
             let session_id = self
                 .runtime
                 .set_model(self.config.general.default_model.clone())
                 .await?;
             self.refresh_session_list().await?;
             self.switch_to_session(session_id).await?;
+        }
+        if let Some(notice) = mutation.notice {
+            self.push_status_line(self.active_session_id.clone(), notice);
         }
         self.sync_mode_with_state();
         Ok(())
@@ -1532,6 +1610,50 @@ impl App {
         let content = toml::to_string_pretty(&self.config)
             .map_err(|error| moa_core::MoaError::ConfigError(error.to_string()))?;
         fs::write(&self.config_path, content).await?;
+        Ok(())
+    }
+
+    async fn persist_file_frecency(&self) -> Result<()> {
+        if let Some(parent) = self.frecency_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let content = serde_json::to_string_pretty(&self.file_frecency)
+            .map_err(|error| moa_core::MoaError::SerializationError(error.to_string()))?;
+        fs::write(&self.frecency_path, content).await?;
+        Ok(())
+    }
+
+    async fn handle_settings_edit_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(settings_view) = &mut self.settings_view else {
+            return Ok(());
+        };
+        match key.code {
+            KeyCode::Esc => settings_view.cancel_edit(),
+            KeyCode::Enter => {
+                let mutation = settings_view.commit_edit(&mut self.config);
+                self.persist_config().await?;
+                if mutation.reload_model_path {
+                    let session_id = self
+                        .runtime
+                        .set_model(self.config.general.default_model.clone())
+                        .await?;
+                    self.refresh_session_list().await?;
+                    self.switch_to_session(session_id).await?;
+                }
+                if let Some(notice) = mutation.notice {
+                    self.push_status_line(self.active_session_id.clone(), notice);
+                }
+            }
+            KeyCode::Backspace => settings_view.backspace_edit(),
+            KeyCode::Char(ch)
+                if key.modifiers.is_empty()
+                    || key.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+            {
+                settings_view.push_edit_char(ch)
+            }
+            _ => {}
+        }
+        self.sync_mode_with_state();
         Ok(())
     }
 }
@@ -1868,15 +1990,14 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
 
 fn completion_for_prompt(
     prompt: &str,
+    cursor_offset: usize,
     known_files: &[String],
     file_frecency: &HashMap<String, u32>,
 ) -> Option<PromptCompletionState> {
-    let trimmed = prompt.trim_start();
-    if trimmed.starts_with('/') && !trimmed.contains(char::is_whitespace) {
-        let prefix = trimmed.trim_start_matches('/');
+    if let Some(target) = slash_completion_target(prompt, cursor_offset) {
         let mut items = slash_commands()
             .into_iter()
-            .filter(|command| command.trim_start_matches('/').starts_with(prefix))
+            .filter(|command| command.trim_start_matches('/').starts_with(&target.prefix))
             .map(str::to_string)
             .collect::<Vec<_>>();
         if items.is_empty() {
@@ -1887,17 +2008,14 @@ fn completion_for_prompt(
             kind: PromptCompletionKind::Slash,
             items,
             selected: 0,
+            replace_range: target.replace_range,
         });
     }
 
-    let token = prompt
-        .split_whitespace()
-        .last()
-        .filter(|token| token.starts_with('@'))?;
-    let prefix = token.trim_start_matches('@');
+    let target = file_completion_target(prompt, cursor_offset)?;
     let mut items = known_files
         .iter()
-        .filter(|path| path.starts_with(prefix))
+        .filter(|path| path.starts_with(&target.prefix))
         .cloned()
         .collect::<Vec<_>>();
     if items.is_empty() {
@@ -1914,24 +2032,29 @@ fn completion_for_prompt(
         kind: PromptCompletionKind::File,
         items,
         selected: 0,
+        replace_range: target.replace_range,
     })
 }
 
-fn complete_slash_command(prompt: &str, command: &str) -> String {
-    let _ = prompt;
-    format!("{command} ")
+fn complete_slash_command(command: &str, needs_trailing_space: bool) -> String {
+    if needs_trailing_space {
+        format!("{command} ")
+    } else {
+        command.to_string()
+    }
 }
 
-fn complete_file_reference(prompt: &str, path: &str) -> String {
-    let token = prompt.split_whitespace().last().unwrap_or_default();
-    if !token.starts_with('@') {
-        return prompt.to_string();
+fn complete_file_reference(path: &str, needs_trailing_space: bool) -> String {
+    let reference = if path.contains(char::is_whitespace) {
+        format!("@\"{path}\"")
+    } else {
+        format!("@{path}")
+    };
+    if needs_trailing_space {
+        format!("{reference} ")
+    } else {
+        reference
     }
-
-    let replacement = format!("@{path}");
-    let trimmed = prompt.trim_end();
-    let prefix = trimmed.strip_suffix(token).unwrap_or(trimmed).to_string();
-    format!("{prefix}{replacement} ")
 }
 
 fn slash_commands() -> Vec<&'static str> {
@@ -1959,6 +2082,21 @@ fn slash_commands() -> Vec<&'static str> {
 fn default_config_path() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").ok_or(moa_core::MoaError::HomeDirectoryNotFound)?;
     Ok(Path::new(&home).join(".moa").join("config.toml"))
+}
+
+fn default_frecency_path() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or(moa_core::MoaError::HomeDirectoryNotFound)?;
+    Ok(Path::new(&home).join(".moa").join("tui-frecency.json"))
+}
+
+fn expand_local_path(path: &str) -> PathBuf {
+    if let Some(relative) = path.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return Path::new(&home).join(relative);
+    }
+
+    PathBuf::from(path)
 }
 
 fn workspace_name_from_input(input: &str) -> WorkspaceId {
@@ -2001,6 +2139,187 @@ async fn collect_sandbox_files(root: &Path) -> Result<Vec<String>> {
     }
     results.sort();
     Ok(results)
+}
+
+async fn load_file_frecency(path: &Path) -> Result<HashMap<String, u32>> {
+    if !fs::try_exists(path).await? {
+        return Ok(HashMap::new());
+    }
+    let content = fs::read_to_string(path).await?;
+    serde_json::from_str(&content)
+        .map_err(|error| moa_core::MoaError::SerializationError(error.to_string()))
+}
+
+fn configured_memory_root(config: &MoaConfig, workspace_id: &WorkspaceId) -> Result<PathBuf> {
+    let configured_memory_dir = if config.cloud.enabled {
+        config
+            .cloud
+            .memory_dir
+            .as_deref()
+            .unwrap_or(&config.local.memory_dir)
+    } else {
+        &config.local.memory_dir
+    };
+    let memory_dir = expand_local_path(configured_memory_dir);
+    let base_dir = memory_dir.parent().map(Path::to_path_buf).ok_or_else(|| {
+        moa_core::MoaError::ConfigError("local.memory_dir must have a parent".to_string())
+    })?;
+    Ok(base_dir
+        .join("workspaces")
+        .join(workspace_id.as_str())
+        .join("memory"))
+}
+
+fn workspace_memory_file_path(
+    config: &MoaConfig,
+    workspace_id: &WorkspaceId,
+    path: &MemoryPath,
+) -> Result<PathBuf> {
+    let logical_path = Path::new(path.as_str());
+    if logical_path.is_absolute()
+        || logical_path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(moa_core::MoaError::ValidationError(format!(
+            "memory paths must stay within the workspace root: {}",
+            path.as_str()
+        )));
+    }
+    Ok(configured_memory_root(config, workspace_id)?.join(logical_path))
+}
+
+async fn open_external_path(path: &Path) -> Result<()> {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(path);
+        command
+    } else if cfg!(windows) {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", ""]).arg(path);
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompletionTarget {
+    prefix: String,
+    replace_range: std::ops::Range<usize>,
+}
+
+fn slash_completion_target(prompt: &str, cursor_offset: usize) -> Option<CompletionTarget> {
+    let cursor = cursor_offset.min(prompt.len());
+    let line_start = prompt[..cursor].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = prompt[cursor..]
+        .find('\n')
+        .map_or(prompt.len(), |index| cursor + index);
+    let line = &prompt[line_start..line_end];
+    let trimmed_start = line
+        .char_indices()
+        .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index))
+        .unwrap_or(line.len());
+    if !line[trimmed_start..].starts_with('/') {
+        return None;
+    }
+    let token_start = line_start + trimmed_start;
+    let token_end = prompt[token_start..]
+        .find(char::is_whitespace)
+        .map_or(line_end, |index| token_start + index);
+    if cursor < token_start || cursor > token_end {
+        return None;
+    }
+    let prefix_start = token_start + 1;
+    let prefix_end = cursor.min(token_end);
+    Some(CompletionTarget {
+        prefix: if prefix_end < prefix_start {
+            String::new()
+        } else {
+            prompt[prefix_start..prefix_end].to_string()
+        },
+        replace_range: token_start..token_end,
+    })
+}
+
+fn file_completion_target(prompt: &str, cursor_offset: usize) -> Option<CompletionTarget> {
+    let cursor = cursor_offset.min(prompt.len());
+    let line_start = prompt[..cursor].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = prompt[cursor..]
+        .find('\n')
+        .map_or(prompt.len(), |index| cursor + index);
+    let line = &prompt[line_start..line_end];
+    let bytes = line.as_bytes();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] != b'@' {
+            index += 1;
+            continue;
+        }
+        if index + 1 < bytes.len() && bytes[index + 1] == b'"' {
+            let content_start = index + 2;
+            let content_end = line[content_start..]
+                .find('"')
+                .map_or(bytes.len(), |offset| content_start + offset);
+            let full_end = if content_end < bytes.len() {
+                content_end + 1
+            } else {
+                content_end
+            };
+            let absolute_start = line_start + index;
+            let absolute_end = line_start + full_end;
+            if cursor >= absolute_start && cursor <= absolute_end {
+                let prefix_start = line_start + content_start;
+                let prefix_end = cursor.min(line_start + content_end);
+                return Some(CompletionTarget {
+                    prefix: if prefix_end < prefix_start {
+                        String::new()
+                    } else {
+                        prompt[prefix_start..prefix_end].to_string()
+                    },
+                    replace_range: absolute_start..absolute_end,
+                });
+            }
+            index = full_end;
+            continue;
+        }
+
+        let content_start = index + 1;
+        let content_end = line[content_start..]
+            .find(char::is_whitespace)
+            .map_or(bytes.len(), |offset| content_start + offset);
+        let absolute_start = line_start + index;
+        let absolute_end = line_start + content_end;
+        if cursor >= absolute_start && cursor <= absolute_end {
+            let prefix_start = line_start + content_start;
+            let prefix_end = cursor.min(line_start + content_end);
+            return Some(CompletionTarget {
+                prefix: if prefix_end < prefix_start {
+                    String::new()
+                } else {
+                    prompt[prefix_start..prefix_end].to_string()
+                },
+                replace_range: absolute_start..absolute_end,
+            });
+        }
+        index = content_end;
+    }
+
+    None
 }
 
 /// Runs the full-screen TUI until the user exits.
@@ -2069,8 +2388,8 @@ mod tests {
     use chrono::Utc;
     use crossterm::event::KeyCode;
     use moa_core::{
-        ApprovalField, ApprovalFileDiff, ApprovalRequest, Platform, RiskLevel, SessionStore,
-        SessionSummary, UserId, WorkspaceId,
+        ApprovalField, ApprovalFileDiff, ApprovalRequest, MemoryStore, Platform, RiskLevel,
+        SessionStore, SessionSummary, UserId, WorkspaceId,
     };
     use ratatui::{Terminal, backend::TestBackend};
     use tokio::runtime::Runtime;
@@ -2084,6 +2403,8 @@ mod tests {
             let config = runtime.config().clone();
             let config_path =
                 std::env::temp_dir().join(format!("moa-config-{}.toml", Uuid::new_v4()));
+            let frecency_path =
+                std::env::temp_dir().join(format!("moa-frecency-{}.json", Uuid::new_v4()));
             let (runtime_event_tx, runtime_event_rx) = mpsc::unbounded_channel();
             let mut app = App {
                 config,
@@ -2118,6 +2439,7 @@ mod tests {
                 recent_memory: Vec::new(),
                 tool_names: vec!["bash".to_string(), "file_read".to_string()],
                 file_frecency: HashMap::new(),
+                frecency_path,
                 known_files: vec![
                     "src/main.rs".to_string(),
                     "src/lib.rs".to_string(),
@@ -2397,7 +2719,9 @@ mod tests {
     #[test]
     fn file_completion_prefers_frecency_and_replaces_active_token() {
         let runtime = Runtime::new().expect("runtime");
+        let dir = tempfile::tempdir().expect("tempdir");
         let mut app = test_app();
+        app.frecency_path = dir.path().join("frecency.json");
         app.known_files = vec![
             "src/main.rs".to_string(),
             "src/lib.rs".to_string(),
@@ -2424,5 +2748,93 @@ mod tests {
                 .expect("accept completion");
         });
         assert_eq!(app.prompt.text(), "@src/lib.rs ");
+        let persisted = std::fs::read_to_string(&app.frecency_path).expect("frecency file");
+        assert!(persisted.contains("src/lib.rs"));
+    }
+
+    #[test]
+    fn file_completion_replaces_token_at_cursor_and_quotes_spaced_paths() {
+        let runtime = Runtime::new().expect("runtime");
+        let mut app = test_app();
+        app.known_files = vec![
+            "docs/Team Notes.md".to_string(),
+            "docs/guide.md".to_string(),
+        ];
+        app.prompt
+            .replace_text_with_cursor("Before @\"docs/Te\" after", "Before @\"docs/Te".len());
+        runtime.block_on(async {
+            app.refresh_prompt_completion()
+                .await
+                .expect("refresh completion");
+            app.accept_prompt_completion()
+                .await
+                .expect("accept completion");
+        });
+
+        assert_eq!(app.prompt.text(), "Before @\"docs/Team Notes.md\" after");
+    }
+
+    #[test]
+    fn deleting_memory_page_removes_it_from_workspace() {
+        let runtime = Runtime::new().expect("runtime");
+        let mut app = test_app();
+        let config = app.runtime.config().clone();
+        let path = MemoryPath::new("notes/delete-me.md");
+        runtime.block_on(async {
+            let store = moa_memory::FileMemoryStore::from_config(&config)
+                .await
+                .expect("memory store");
+            let now = Utc::now();
+            store
+                .write_page(
+                    moa_core::MemoryScope::Workspace(app.runtime.workspace_id().clone()),
+                    &path,
+                    moa_core::WikiPage {
+                        path: Some(path.clone()),
+                        title: "Delete Me".to_string(),
+                        page_type: moa_core::PageType::Topic,
+                        content: "# Delete Me\n\nTemporary page.".to_string(),
+                        created: now,
+                        updated: now,
+                        confidence: moa_core::ConfidenceLevel::High,
+                        related: Vec::new(),
+                        sources: Vec::new(),
+                        tags: Vec::new(),
+                        auto_generated: false,
+                        last_referenced: now,
+                        reference_count: 0,
+                        metadata: HashMap::new(),
+                    },
+                )
+                .await
+                .expect("write page");
+
+            app.open_memory_browser().await.expect("open memory");
+            if let Some(memory_view) = &mut app.memory_view {
+                memory_view.set_current_page(
+                    app.runtime
+                        .read_memory_page(&path)
+                        .await
+                        .expect("read page"),
+                );
+                memory_view.set_search_results(vec![moa_core::MemorySearchResult {
+                    scope: moa_core::MemoryScope::Workspace(app.runtime.workspace_id().clone()),
+                    path: path.clone(),
+                    title: "Delete Me".to_string(),
+                    page_type: moa_core::PageType::Topic,
+                    snippet: "Temporary page.".to_string(),
+                    confidence: moa_core::ConfidenceLevel::High,
+                    updated: now,
+                    reference_count: 0,
+                }]);
+                memory_view.start_search();
+                memory_view.push_query_char('d');
+            }
+
+            app.delete_memory_page().await.expect("delete memory page");
+
+            let exists = app.runtime.read_memory_page(&path).await;
+            assert!(exists.is_err());
+        });
     }
 }
