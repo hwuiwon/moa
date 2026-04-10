@@ -889,6 +889,12 @@ async fn handle_tool_call(
                 input_summary: summary.clone(),
                 risk_level: prepared.policy_input.risk_level.clone(),
             };
+            let prompt = ApprovalPrompt {
+                request: request.clone(),
+                pattern: prepared.always_allow_pattern.clone(),
+                parameters: prepared.approval_fields.clone(),
+                file_diffs: prepared.approval_diffs.clone(),
+            };
             append_event(
                 &context.session_store,
                 event_tx,
@@ -898,6 +904,7 @@ async fn handle_tool_call(
                     tool_name: request.tool_name.clone(),
                     input_summary: request.input_summary.clone(),
                     risk_level: request.risk_level.clone(),
+                    prompt: Some(prompt.clone()),
                 },
             )
             .await?;
@@ -912,12 +919,7 @@ async fn handle_tool_call(
                 summary: summary.clone(),
                 detail: Some("Press y to allow once, a to always allow, n to deny".to_string()),
             }));
-            let _ = runtime_tx.send(RuntimeEvent::ApprovalRequested(ApprovalPrompt {
-                request,
-                pattern: prepared.always_allow_pattern,
-                parameters: prepared.approval_fields,
-                file_diffs: prepared.approval_diffs,
-            }));
+            let _ = runtime_tx.send(RuntimeEvent::ApprovalRequested(prompt));
 
             if wait_for_signal_approval(
                 context,

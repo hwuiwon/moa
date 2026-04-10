@@ -1613,8 +1613,11 @@ impl SessionViewState {
                     tool_name,
                     input_summary,
                     risk_level,
+                    prompt,
                 } => {
-                    let prompt = if cached_request_id == Some(*request_id) {
+                    let prompt = if let Some(prompt) = prompt.clone() {
+                        prompt
+                    } else if cached_request_id == Some(*request_id) {
                         cached_prompt.clone().unwrap_or_else(|| {
                             minimal_approval_prompt(
                                 *request_id,
@@ -2315,6 +2318,25 @@ mod tests {
                         tool_name: "bash".to_string(),
                         input_summary: "pwd".to_string(),
                         risk_level: RiskLevel::High,
+                        prompt: Some(ApprovalPrompt {
+                            request: ApprovalRequest {
+                                request_id,
+                                tool_name: "bash".to_string(),
+                                input_summary: "pwd".to_string(),
+                                risk_level: RiskLevel::High,
+                            },
+                            pattern: "pwd".to_string(),
+                            parameters: vec![ApprovalField {
+                                label: "Command".to_string(),
+                                value: "pwd".to_string(),
+                            }],
+                            file_diffs: vec![ApprovalFileDiff {
+                                path: "scratch.txt".to_string(),
+                                before: String::new(),
+                                after: "pwd\n".to_string(),
+                                language_hint: Some("txt".to_string()),
+                            }],
+                        }),
                     },
                 )
                 .await
@@ -2336,6 +2358,18 @@ mod tests {
                     .as_ref()
                     .map(|prompt| prompt.request.request_id),
                 Some(request_id)
+            );
+            assert_eq!(
+                view.pending_approval
+                    .as_ref()
+                    .map(|prompt| prompt.parameters[0].value.clone()),
+                Some("pwd".to_string())
+            );
+            assert_eq!(
+                view.pending_approval
+                    .as_ref()
+                    .map(|prompt| prompt.file_diffs.len()),
+                Some(1)
             );
             assert!(view.entries.iter().any(|entry| matches!(
                 entry,

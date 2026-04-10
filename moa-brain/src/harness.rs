@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use moa_core::{
-    ApprovalRequest, CompletionContent, Event, EventRange, LLMProvider, PolicyAction, Result,
-    SessionId, SessionStore, StopReason, WorkingContext,
+    ApprovalPrompt, ApprovalRequest, CompletionContent, Event, EventRange, LLMProvider,
+    PolicyAction, Result, SessionId, SessionStore, StopReason, WorkingContext,
 };
 use moa_hands::ToolRouter;
 use moa_security::{
@@ -299,6 +299,12 @@ async fn run_brain_turn_with_tools_mode(
                                 input_summary: prepared.policy_input.input_summary,
                                 risk_level: prepared.policy_input.risk_level,
                             };
+                            let prompt = ApprovalPrompt {
+                                request: request.clone(),
+                                pattern: prepared.always_allow_pattern,
+                                parameters: prepared.approval_fields,
+                                file_diffs: prepared.approval_diffs,
+                            };
                             session_store
                                 .emit_event(
                                     session_id.clone(),
@@ -307,6 +313,7 @@ async fn run_brain_turn_with_tools_mode(
                                         tool_name: request.tool_name.clone(),
                                         input_summary: request.input_summary.clone(),
                                         risk_level: request.risk_level.clone(),
+                                        prompt: Some(prompt),
                                     },
                                 )
                                 .await?;

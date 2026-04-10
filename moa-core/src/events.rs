@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::types::{ApprovalDecision, Attachment, EventType, RiskLevel, SessionStatus, ToolOutput};
+use crate::types::{
+    ApprovalDecision, ApprovalPrompt, Attachment, EventType, RiskLevel, SessionStatus, ToolOutput,
+};
 
 /// Append-only session event payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,6 +113,11 @@ pub enum Event {
         input_summary: String,
         /// Assigned risk level.
         risk_level: RiskLevel,
+        /// Full approval prompt with parsed parameters, diffs, and allow pattern.
+        ///
+        /// TODO: Use a claim-check pattern for large diffs in cloud mode.
+        #[serde(default)]
+        prompt: Option<ApprovalPrompt>,
     },
     /// An approval request was decided.
     ApprovalDecided {
@@ -335,6 +342,7 @@ mod tests {
                 tool_name: "bash".into(),
                 input_summary: "ls".into(),
                 risk_level: RiskLevel::Low,
+                prompt: None,
             },
             Event::Checkpoint {
                 summary: "test".into(),
@@ -349,6 +357,73 @@ mod tests {
         for event in events {
             let json = serde_json::to_string(&event);
             assert!(json.is_ok(), "Failed to serialize: {:?}", event);
+        }
+    }
+
+    #[test]
+    fn approval_requested_event_round_trips_full_prompt() {
+        let request_id = Uuid::new_v4();
+        let event = Event::ApprovalRequested {
+            request_id,
+            tool_name: "file_write".to_string(),
+            input_summary: "notes/today.md".to_string(),
+            risk_level: RiskLevel::Medium,
+            prompt: Some(ApprovalPrompt {
+                request: crate::types::ApprovalRequest {
+                    request_id,
+                    tool_name: "file_write".to_string(),
+                    input_summary: "notes/today.md".to_string(),
+                    risk_level: RiskLevel::Medium,
+                },
+                pattern: "notes/today.md".to_string(),
+                parameters: vec![crate::types::ApprovalField {
+                    label: "Path".to_string(),
+                    value: "notes/today.md".to_string(),
+                }],
+                file_diffs: vec![crate::types::ApprovalFileDiff {
+                    path: "notes/today.md".to_string(),
+                    before: String::new(),
+                    after: "hello\n".to_string(),
+                    language_hint: Some("md".to_string()),
+                }],
+            }),
+        };
+
+        let json = serde_json::to_string(&event).expect("serialize approval request");
+        let decoded: Event = serde_json::from_str(&json).expect("deserialize approval request");
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn approval_requested_event_deserializes_without_prompt() {
+        let request_id = Uuid::new_v4();
+        let json = serde_json::json!({
+            "type": "ApprovalRequested",
+            "data": {
+                "request_id": request_id,
+                "tool_name": "bash",
+                "input_summary": "pwd",
+                "risk_level": "high"
+            }
+        });
+
+        let decoded: Event =
+            serde_json::from_value(json).expect("deserialize legacy approval request");
+        match decoded {
+            Event::ApprovalRequested {
+                request_id: decoded_id,
+                tool_name,
+                input_summary,
+                risk_level,
+                prompt,
+            } => {
+                assert_eq!(decoded_id, request_id);
+                assert_eq!(tool_name, "bash");
+                assert_eq!(input_summary, "pwd");
+                assert_eq!(risk_level, RiskLevel::High);
+                assert!(prompt.is_none());
+            }
+            other => panic!("expected approval request event, got {other:?}"),
         }
     }
 }

@@ -158,6 +158,7 @@ pub fn find_pending_approval_request(events: &[EventRecord]) -> Option<ApprovalR
                 tool_name,
                 input_summary,
                 risk_level,
+                ..
             } => {
                 requests.push((
                     record.sequence_num,
