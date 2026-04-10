@@ -1,0 +1,39 @@
+app = "moa-brains"
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  MOA__CLOUD__ENABLED = "true"
+  MOA__CLOUD__HANDS__DEFAULT_PROVIDER = "local"
+  MOA__LOCAL__SESSION_DB = "/data/sessions.db"
+  MOA__LOCAL__MEMORY_DIR = "/data/memory"
+  MOA__LOCAL__SANDBOX_DIR = "/data/sandbox"
+  MOA__CLOUD__MEMORY_DIR = "/data/memory"
+  MOA__CLOUD__FLYIO__INTERNAL_PORT = "8080"
+  MOA__CLOUD__FLYIO__HEALTH_BIND = "0.0.0.0"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+[[mounts]]
+  source = "moa_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

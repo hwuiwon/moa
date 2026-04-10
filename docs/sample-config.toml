@@ -22,6 +22,8 @@ memory_dir = "~/.moa/memory"
 enabled = false
 turso_url = ""
 turso_auth_token_env = "TURSO_AUTH_TOKEN"
+turso_sync_interval_secs = 2
+# memory_dir = "/data/memory"
 
 [cloud.temporal]
 address = ""
@@ -33,6 +35,9 @@ api_key_env = "TEMPORAL_API_KEY"
 api_token_env = "FLY_API_TOKEN"
 app_name = ""
 region = "iad"
+internal_port = 8080
+health_bind = "0.0.0.0"
+graceful_shutdown_timeout_secs = 30
 
 [cloud.hands]
 default_provider = "daytona"

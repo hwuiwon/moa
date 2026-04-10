@@ -1,14 +1,16 @@
 //! Turso/libSQL-backed `SessionStore` implementation.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use libsql::{Builder, Connection, TransactionBehavior, Value, params};
+use libsql::{Builder, Connection, Database, TransactionBehavior, Value, params};
 use moa_core::{
-    ApprovalRule, Event, EventFilter, EventRange, EventRecord, MoaError, PolicyAction, PolicyScope,
-    Result, SessionFilter, SessionMeta, SessionStatus, SessionStore, SessionSummary, WakeContext,
-    WorkspaceId,
+    ApprovalRule, Event, EventFilter, EventRange, EventRecord, MoaConfig, MoaError, PolicyAction,
+    PolicyScope, Result, SessionFilter, SessionMeta, SessionStatus, SessionStore, SessionSummary,
+    WakeContext, WorkspaceId,
 };
 use moa_security::ApprovalRuleStore;
 use uuid::Uuid;
@@ -23,7 +25,9 @@ use crate::schema;
 /// SQLite/Turso-backed implementation of `SessionStore`.
 #[derive(Clone)]
 pub struct TursoSessionStore {
+    database: Arc<Database>,
     connection: Connection,
+    cloud_sync_enabled: bool,
 }
 
 impl TursoSessionStore {
@@ -34,6 +38,27 @@ impl TursoSessionStore {
         }
 
         Self::new_local(Path::new(url)).await
+    }
+
+    /// Creates a session store from config, enabling embedded Turso sync when configured.
+    pub async fn from_config(config: &MoaConfig) -> Result<Self> {
+        if config.cloud.enabled
+            && let Some(sync_url) = config.cloud.turso_url.as_deref()
+        {
+            let local_path = expand_local_path(Path::new(&config.local.session_db))?;
+            if local_path == Path::new(":memory:") {
+                return Err(MoaError::ConfigError(
+                    "cloud.turso_url requires a file-backed local.session_db path".to_string(),
+                ));
+            }
+
+            let auth_token = resolve_turso_auth_token(config)?;
+            let sync_interval = Duration::from_secs(config.cloud.turso_sync_interval_secs.max(1));
+            return Self::new_remote_replica(&local_path, sync_url, &auth_token, sync_interval)
+                .await;
+        }
+
+        Self::new(&config.local.session_db).await
     }
 
     /// Creates a session store backed by a local SQLite database file.
@@ -53,7 +78,11 @@ impl TursoSessionStore {
         let connection = database.connect().map_err(map_db_error)?;
         schema::migrate(&connection).await?;
 
-        Ok(Self { connection })
+        Ok(Self {
+            database: Arc::new(database),
+            connection,
+            cloud_sync_enabled: false,
+        })
     }
 
     /// Reconstructs the session state needed to resume a brain.
@@ -119,7 +148,56 @@ impl TursoSessionStore {
         let connection = database.connect().map_err(map_db_error)?;
         schema::migrate(&connection).await?;
 
-        Ok(Self { connection })
+        Ok(Self {
+            database: Arc::new(database),
+            connection,
+            cloud_sync_enabled: false,
+        })
+    }
+
+    /// Creates a session store backed by a local embedded replica that syncs with Turso Cloud.
+    pub async fn new_remote_replica(
+        local_path: &Path,
+        sync_url: &str,
+        auth_token: &str,
+        sync_interval: Duration,
+    ) -> Result<Self> {
+        let expanded = expand_local_path(local_path)?;
+        if let Some(parent) = expanded.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let database =
+            Builder::new_remote_replica(&expanded, sync_url.to_string(), auth_token.to_string())
+                .sync_interval(sync_interval)
+                .build()
+                .await
+                .map_err(map_db_error)?;
+        let _ = database.sync().await.map_err(map_db_error)?;
+        let connection = database.connect().map_err(map_db_error)?;
+        schema::migrate(&connection).await?;
+
+        Ok(Self {
+            database: Arc::new(database),
+            connection,
+            cloud_sync_enabled: true,
+        })
+    }
+
+    /// Returns whether this session store is using cloud-backed embedded replica sync.
+    pub fn cloud_sync_enabled(&self) -> bool {
+        self.cloud_sync_enabled
+    }
+
+    /// Forces an immediate sync against the remote Turso primary when cloud sync is enabled.
+    pub async fn sync_now(&self) -> Result<()> {
+        if self.cloud_sync_enabled {
+            let _ = self.database.sync().await.map_err(map_db_error)?;
+        }
+
+        Ok(())
     }
 
     async fn next_sequence(
@@ -234,6 +312,19 @@ impl TursoSessionStore {
 
         Ok(())
     }
+}
+
+fn resolve_turso_auth_token(config: &MoaConfig) -> Result<String> {
+    let env_key = config
+        .cloud
+        .turso_auth_token_env
+        .as_deref()
+        .unwrap_or("TURSO_AUTH_TOKEN");
+    std::env::var(env_key).map_err(|_| {
+        MoaError::ConfigError(format!(
+            "{env_key} is required when cloud.turso_url is configured"
+        ))
+    })
 }
 
 #[async_trait]
@@ -460,13 +551,18 @@ impl SessionStore for TursoSessionStore {
         query_text: &str,
         filter: EventFilter,
     ) -> Result<Vec<EventRecord>> {
+        let fts_query = build_event_fts_query(query_text);
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let mut query = "SELECT e.id, e.session_id, e.sequence_num, e.event_type, e.payload, \
              e.timestamp, e.brain_id, e.hand_id, e.token_count FROM events_fts \
              JOIN events e ON e.rowid = events_fts.rowid \
              JOIN sessions s ON s.id = e.session_id \
              WHERE events_fts MATCH ?"
             .to_string();
-        let mut params = vec![Value::from(query_text.to_string())];
+        let mut params = vec![Value::from(fts_query)];
 
         if let Some(session_id) = filter.session_id {
             query.push_str(" AND e.session_id = ?");
@@ -597,6 +693,16 @@ fn is_remote_url(url: &str) -> bool {
 
 fn map_db_error(error: libsql::Error) -> MoaError {
     MoaError::StorageError(error.to_string())
+}
+
+fn build_event_fts_query(query: &str) -> String {
+    query
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(|token| format!("\"{token}\""))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn policy_action_to_db(action: &PolicyAction) -> &'static str {

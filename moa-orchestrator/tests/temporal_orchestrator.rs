@@ -249,7 +249,7 @@ async fn temporal_test_orchestrator_with_provider(
         .api_key_env = None;
 
     let session_store = Arc::new(
-        TursoSessionStore::new(&config.local.session_db)
+        TursoSessionStore::from_config(&config)
             .await
             .expect("session store"),
     );

@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
-libsql = { version = "0.9.30", default-features = false, features = ["core", "remote", "tls"] }
+libsql = { version = "0.9.30", default-features = false, features = ["core", "remote", "replication", "sync", "tls"] }
 moa-core = { path = "../moa-core" }
 moa-security = { path = "../moa-security" }
 serde_json.workspace = true

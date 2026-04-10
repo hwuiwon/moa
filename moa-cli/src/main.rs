@@ -71,6 +71,11 @@ enum CommandKind {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    /// Enables or inspects cloud sync configuration.
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
 }
 
 /// One-shot exec arguments.
@@ -130,6 +135,16 @@ enum DaemonCommand {
     /// Runs the daemon server in the foreground.
     #[command(hide = true)]
     Serve,
+}
+
+/// Sync CLI commands.
+#[derive(Debug, Subcommand)]
+enum SyncCommand {
+    /// Enables Turso-backed cloud sync using an embedded replica.
+    Enable {
+        /// Turso database URL. Falls back to `TURSO_DATABASE_URL`.
+        turso_url: Option<String>,
+    },
 }
 
 /// Runs the `moa` CLI binary.
@@ -231,6 +246,11 @@ async fn main() -> Result<()> {
             DaemonCommand::Status => print!("{}", daemon_status_report(&config).await?),
             DaemonCommand::Logs => print!("{}", daemon::daemon_logs(&config).await?),
             DaemonCommand::Serve => daemon::run_daemon_server(config).await?,
+        },
+        Some(CommandKind::Sync { command }) => match command {
+            SyncCommand::Enable { turso_url } => {
+                print!("{}", sync_enable_report(config, turso_url).await?);
+            }
         },
     }
 
@@ -349,6 +369,7 @@ async fn doctor_report(config: &MoaConfig) -> Result<String> {
         format!("docker: {}", docker_status().await),
         format!("disk: {}", disk_status(config).await),
         format!("session_db: {}", session_db_status(config).await),
+        format!("cloud_sync: {}", cloud_sync_status(config).await),
         format!("memory_index: {}", memory_index_status(config).await),
     ];
 
@@ -391,6 +412,11 @@ async fn init_workspace(config: &MoaConfig) -> Result<()> {
         .join("memory");
     fs::create_dir_all(workspace_memory).await?;
     fs::create_dir_all(expand_tilde(&config.local.sandbox_dir)).await?;
+    if config.cloud.enabled
+        && let Some(memory_dir) = config.cloud.memory_dir.as_deref()
+    {
+        fs::create_dir_all(expand_tilde(memory_dir)).await?;
+    }
     Ok(())
 }
 
@@ -410,7 +436,7 @@ async fn most_recent_session_id(config: &MoaConfig) -> Result<SessionId> {
 }
 
 async fn load_session_store(config: &MoaConfig) -> Result<TursoSessionStore> {
-    TursoSessionStore::new(&config.local.session_db)
+    TursoSessionStore::from_config(config)
         .await
         .context("opening session store")
 }
@@ -487,6 +513,23 @@ async fn session_db_status(config: &MoaConfig) -> String {
     }
 }
 
+async fn cloud_sync_status(config: &MoaConfig) -> String {
+    if !(config.cloud.enabled && config.cloud.turso_url.is_some()) {
+        return "disabled".to_string();
+    }
+
+    match load_session_store(config).await {
+        Ok(store) => {
+            if let Err(error) = store.sync_now().await {
+                format!("unhealthy ({error})")
+            } else {
+                "enabled".to_string()
+            }
+        }
+        Err(error) => format!("unhealthy ({error})"),
+    }
+}
+
 async fn memory_index_status(config: &MoaConfig) -> String {
     match FileMemoryStore::from_config(config).await {
         Ok(store) => match store
@@ -505,6 +548,13 @@ fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result
         "general.default_provider" => config.general.default_provider = value.to_string(),
         "general.default_model" => config.general.default_model = value.to_string(),
         "general.reasoning_effort" => config.general.reasoning_effort = value.to_string(),
+        "cloud.enabled" => config.cloud.enabled = parse_bool(value)?,
+        "cloud.turso_url" => config.cloud.turso_url = Some(value.to_string()),
+        "cloud.memory_dir" => config.cloud.memory_dir = Some(value.to_string()),
+        "cloud.turso_sync_interval_secs" => {
+            config.cloud.turso_sync_interval_secs =
+                value.parse().context("expected integer sync interval")?
+        }
         "local.docker_enabled" => config.local.docker_enabled = parse_bool(value)?,
         "local.sandbox_dir" => config.local.sandbox_dir = value.to_string(),
         "local.session_db" => config.local.session_db = value.to_string(),
@@ -538,6 +588,41 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+async fn sync_enable_report(mut config: MoaConfig, turso_url: Option<String>) -> Result<String> {
+    let sync_url = match turso_url {
+        Some(url) => url,
+        None => env::var("TURSO_DATABASE_URL")
+            .context("missing Turso database URL; pass one explicitly or set TURSO_DATABASE_URL")?,
+    };
+    let token_env = config
+        .cloud
+        .turso_auth_token_env
+        .clone()
+        .unwrap_or_else(|| "TURSO_AUTH_TOKEN".to_string());
+    if env::var(&token_env).is_err() {
+        bail!(
+            "missing Turso auth token; set {} before enabling sync",
+            token_env
+        );
+    }
+
+    config.cloud.enabled = true;
+    config.cloud.turso_url = Some(sync_url.clone());
+    let store = TursoSessionStore::from_config(&config)
+        .await
+        .context("opening cloud-synced session store")?;
+    store
+        .sync_now()
+        .await
+        .context("performing initial Turso sync")?;
+    config.save()?;
+
+    Ok(format!(
+        "cloud sync enabled\nurl: {}\nlocal_db: {}\nsync_interval_secs: {}\n",
+        sync_url, config.local.session_db, config.cloud.turso_sync_interval_secs
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{apply_config_update, parse_bool, version_text};
@@ -554,6 +639,9 @@ mod tests {
         apply_config_update(&mut config, "general.default_model", "claude-sonnet-4-6")
             .expect("update config");
         assert_eq!(config.general.default_model, "claude-sonnet-4-6");
+        apply_config_update(&mut config, "cloud.turso_sync_interval_secs", "5")
+            .expect("update sync interval");
+        assert_eq!(config.cloud.turso_sync_interval_secs, 5);
     }
 
     #[test]

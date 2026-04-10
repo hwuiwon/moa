@@ -149,7 +149,7 @@ mod temporal_helper {
             delay: Duration::from_millis(delay_ms),
         });
         eprintln!("temporal helper: opening stores");
-        let session_store = Arc::new(TursoSessionStore::new(&config.local.session_db).await?);
+        let session_store = Arc::new(TursoSessionStore::from_config(&config).await?);
         let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
         let tool_router = Arc::new(
             ToolRouter::from_config(&config, memory_store.clone())

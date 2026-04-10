@@ -503,7 +503,7 @@ impl TemporalOrchestrator {
 
     /// Creates a Temporal orchestrator from config using the configured LLM provider.
     pub async fn from_config(config: MoaConfig) -> MoaResult<Self> {
-        let session_store = Arc::new(TursoSessionStore::new(&config.local.session_db).await?);
+        let session_store = Arc::new(TursoSessionStore::from_config(&config).await?);
         let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
         let tool_router = Arc::new(
             ToolRouter::from_config(&config, memory_store.clone())
