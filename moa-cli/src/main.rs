@@ -67,6 +67,18 @@ fn doctor_report(config: &MoaConfig) -> String {
     } else {
         "missing"
     };
+    let openai_env = &config.providers.openai.api_key_env;
+    let openai_status = if env::var(openai_env).is_ok() {
+        "present"
+    } else {
+        "missing"
+    };
+    let openrouter_env = &config.providers.openrouter.api_key_env;
+    let openrouter_status = if env::var(openrouter_env).is_ok() {
+        "present"
+    } else {
+        "missing"
+    };
 
     format!(
         concat!(
@@ -74,6 +86,8 @@ fn doctor_report(config: &MoaConfig) -> String {
             "provider: {}\n",
             "model: {}\n",
             "anthropic_key: {} ({})\n",
+            "openai_key: {} ({})\n",
+            "openrouter_key: {} ({})\n",
             "session_db: {}\n",
             "memory_dir: {}\n",
             "sandbox_dir: {}\n"
@@ -82,6 +96,10 @@ fn doctor_report(config: &MoaConfig) -> String {
         config.general.default_model,
         anthropic_status,
         anthropic_env,
+        openai_status,
+        openai_env,
+        openrouter_status,
+        openrouter_env,
         config.local.session_db,
         config.local.memory_dir,
         config.local.sandbox_dir,
@@ -101,7 +119,7 @@ mod tests {
     #[test]
     fn doctor_report_includes_model_and_paths() {
         let report = doctor_report(&MoaConfig::default());
-        assert!(report.contains("model: claude-sonnet-4-6"));
+        assert!(report.contains("model: gpt-5.4"));
         assert!(report.contains("session_db:"));
         assert!(report.contains("memory_dir:"));
     }

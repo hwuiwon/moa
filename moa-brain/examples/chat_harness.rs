@@ -6,11 +6,12 @@ use std::sync::Arc;
 
 use moa_brain::{build_default_pipeline_with_tools, run_brain_turn_with_tools};
 use moa_core::{
-    Event, EventRange, MoaConfig, Result, SessionMeta, SessionStore, UserId, WorkspaceId,
+    Event, EventRange, LLMProvider, MoaConfig, Result, SessionMeta, SessionStore, UserId,
+    WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
-use moa_providers::AnthropicProvider;
+use moa_providers::build_provider_from_config;
 use moa_session::TursoSessionStore;
 use tempfile::TempDir;
 
@@ -21,7 +22,7 @@ async fn main() -> Result<()> {
     let (session_db_path, _session_db_guard) = resolve_session_db_path();
     let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
     let store = Arc::new(TursoSessionStore::new_local(Path::new(&session_db_path)).await?);
-    let provider = Arc::new(AnthropicProvider::from_config(&config)?);
+    let provider = build_provider_from_config(&config)?;
     let tool_router = Arc::new(ToolRouter::from_config(&config, memory_store.clone()).await?);
     let session_id = store
         .create_session(SessionMeta {
@@ -108,7 +109,7 @@ fn resolve_session_db_path() -> (PathBuf, Option<TempDir>) {
 async fn run_prompt(
     session_id: moa_core::SessionId,
     store: Arc<TursoSessionStore>,
-    provider: Arc<AnthropicProvider>,
+    provider: Arc<dyn LLMProvider>,
     pipeline: &moa_brain::ContextPipeline,
     tool_router: Arc<ToolRouter>,
     prompt: &str,

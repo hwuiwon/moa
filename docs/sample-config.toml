@@ -1,6 +1,6 @@
 [general]
-default_provider = "anthropic"
-default_model = "claude-sonnet-4-6"
+default_provider = "openai"
+default_model = "gpt-5.4"
 reasoning_effort = "medium"
 
 [providers.anthropic]

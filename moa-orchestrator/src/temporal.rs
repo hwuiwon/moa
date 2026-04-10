@@ -19,7 +19,7 @@ use moa_core::{
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
-use moa_providers::AnthropicProvider;
+use moa_providers::build_provider_from_config;
 use moa_session::TursoSessionStore;
 use moa_skills::maybe_distill_skill;
 use serde::{Deserialize, Serialize};
@@ -482,7 +482,7 @@ impl TemporalOrchestrator {
         Ok(orchestrator)
     }
 
-    /// Creates a Temporal orchestrator from config using the default Anthropic provider.
+    /// Creates a Temporal orchestrator from config using the configured LLM provider.
     pub async fn from_config(config: MoaConfig) -> MoaResult<Self> {
         let session_store = Arc::new(TursoSessionStore::new(&config.local.session_db).await?);
         let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
@@ -491,7 +491,7 @@ impl TemporalOrchestrator {
                 .await?
                 .with_rule_store(session_store.clone()),
         );
-        let llm_provider: Arc<dyn LLMProvider> = Arc::new(AnthropicProvider::from_config(&config)?);
+        let llm_provider = build_provider_from_config(&config)?;
         Self::new(
             config,
             session_store,

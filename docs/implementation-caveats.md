@@ -1347,3 +1347,56 @@ Remaining caveat:
 
 - If a model keeps emitting fresh malicious tool calls after seeing the resulting `ToolError`/`Warning`, the retry behavior is still governed by the surrounding turn loop rather than a dedicated security circuit breaker.
 - If that becomes a real failure mode, the next seam to tighten is the orchestrator/harness retry policy, not the classifier itself.
+
+### 20.4 OpenAI/OpenRouter now use the Responses API, but MOA tool schemas are still translated provider-side
+
+Current state:
+
+- `moa-providers/src/openai.rs` and `moa-providers/src/openrouter.rs` both call the OpenAI-compatible `/responses` API.
+- MOA still stores tool schemas in the existing internal format used across the rest of the repo.
+- `moa-providers/src/common.rs` translates those schemas into Responses function tools at request time.
+- The translation currently sends `strict: false` because the current MOA schemas include optional properties that are not yet normalized into OpenAI's stricter function-schema shape.
+
+Consequence:
+
+- The default local runtime can now use `openai / gpt-5.4` successfully, including streaming and tool use.
+- OpenRouter rides the same Responses-compatible translation layer instead of a separate request shape.
+
+Remaining caveat:
+
+- The provider layer is still compensating for schema mismatches that really belong in the shared tool-definition surface.
+- If we later want fully strict OpenAI function schemas, the right fix is to normalize tool schemas once in the registry/core model, not to keep adding provider-specific exceptions.
+
+### 20.5 OpenAI metadata forwarding is intentionally lossy
+
+Current state:
+
+- `moa-providers/src/common.rs` forwards request metadata to the Responses API only when each value fits within OpenAI's metadata size limits.
+- Oversized internal metadata values such as serialized `tool_schemas` are now dropped before the request is sent.
+
+Consequence:
+
+- The live `moa exec` path now works with the default OpenAI provider instead of failing with `metadata.* string too long`.
+- Provider requests still preserve small diagnostic metadata values when they are useful.
+
+Remaining caveat:
+
+- OpenAI/OpenRouter requests no longer carry the full MOA metadata bag verbatim.
+- If any downstream debugging or analytics later depends on large metadata fields, those fields will need a different transport than provider metadata.
+
+### 20.6 Capability coverage is precise for default models and best-effort elsewhere
+
+Current state:
+
+- `moa-providers/src/openai.rs` has explicit capabilities and pricing for the supported GPT-5 family used by MOA defaults.
+- `moa-providers/src/openrouter.rs` reuses those mappings for OpenAI-family models and has explicit fallbacks for the currently supported Anthropic families routed through OpenRouter.
+
+Consequence:
+
+- `gpt-5.4` is now the repo default model and reports concrete capabilities.
+- Known OpenRouter model families report useful capability data instead of a generic placeholder.
+
+Remaining caveat:
+
+- Coverage is still selective, not exhaustive across every OpenAI/OpenRouter model id.
+- Adding new default models should include an explicit capability/pricing update rather than relying on the generic fallback.

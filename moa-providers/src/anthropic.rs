@@ -54,11 +54,19 @@ impl AnthropicProvider {
 
     /// Creates a provider from the configured Anthropic environment variable.
     pub fn from_config(config: &MoaConfig) -> Result<Self> {
+        Self::from_config_with_model(config, config.general.default_model.clone())
+    }
+
+    /// Creates a provider from config with an explicit default model override.
+    pub fn from_config_with_model(
+        config: &MoaConfig,
+        default_model: impl Into<String>,
+    ) -> Result<Self> {
         let api_key_env = config.providers.anthropic.api_key_env.clone();
         let api_key = env::var(&api_key_env)
             .map_err(|_| MoaError::MissingEnvironmentVariable(api_key_env.clone()))?;
 
-        Self::new(api_key, config.general.default_model.clone())
+        Self::new(api_key, default_model)
     }
 
     /// Creates a provider from the `ANTHROPIC_API_KEY` environment variable.

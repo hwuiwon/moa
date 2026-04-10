@@ -254,8 +254,8 @@ pub struct GeneralConfig {
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
-            default_provider: "anthropic".to_string(),
-            default_model: "claude-sonnet-4-6".to_string(),
+            default_provider: "openai".to_string(),
+            default_model: "gpt-5.4".to_string(),
             reasoning_effort: "medium".to_string(),
             workspace_instructions: None,
             user_instructions: None,
@@ -591,7 +591,8 @@ mod tests {
     #[test]
     fn default_config_is_valid() {
         let config = MoaConfig::default();
-        assert_eq!(config.general.default_provider, "anthropic");
+        assert_eq!(config.general.default_provider, "openai");
+        assert_eq!(config.general.default_model, "gpt-5.4");
     }
 
     #[test]
@@ -643,7 +644,7 @@ mod tests {
             .unwrap();
 
         let config = MoaConfig::load_from_path(file.path()).unwrap();
-        assert_eq!(config.general.default_provider, "anthropic");
+        assert_eq!(config.general.default_provider, "openai");
         assert_eq!(config.tui.tab_limit, 8);
     }
 }
