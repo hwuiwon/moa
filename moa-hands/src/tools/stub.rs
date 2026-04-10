@@ -1,9 +1,9 @@
 //! Placeholder built-in tools that reserve names for future implementations.
 
 use async_trait::async_trait;
-use moa_core::{MoaError, Result, RiskLevel, ToolOutput};
+use moa_core::{MoaError, PolicyAction, Result, RiskLevel, ToolOutput};
 
-use crate::router::{BuiltInTool, ToolContext};
+use crate::router::{BuiltInTool, ToolContext, ToolDiffStrategy, ToolInputShape, ToolPolicySpec};
 
 /// Stub built-in tool that reports the feature is not implemented yet.
 pub struct StubTool {
@@ -44,8 +44,17 @@ impl BuiltInTool for StubTool {
         })
     }
 
-    fn risk_level(&self) -> RiskLevel {
-        self.risk_level.clone()
+    fn policy_spec(&self) -> ToolPolicySpec {
+        ToolPolicySpec {
+            risk_level: self.risk_level.clone(),
+            default_action: PolicyAction::RequireApproval,
+            input_shape: match self.name {
+                "web_fetch" => ToolInputShape::Url,
+                "web_search" => ToolInputShape::Query,
+                _ => ToolInputShape::Json,
+            },
+            diff_strategy: ToolDiffStrategy::None,
+        }
     }
 
     async fn execute(

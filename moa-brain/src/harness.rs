@@ -1,16 +1,19 @@
 //! Single-turn brain harness execution.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use moa_core::{
-    ApprovalDecision, ApprovalRequest, CompletionContent, Event, EventRange, LLMProvider,
-    PolicyAction, Result, SessionId, SessionStore, StopReason, WorkingContext,
+    ApprovalRequest, CompletionContent, Event, EventRange, LLMProvider, PolicyAction, Result,
+    SessionId, SessionStore, StopReason, WorkingContext,
 };
 use moa_hands::ToolRouter;
 use uuid::Uuid;
 
 use crate::pipeline::ContextPipeline;
+use crate::turn::{
+    PendingToolApproval, StoredApprovalDecision, StreamSignalDisposition,
+    find_pending_approval_request, find_resolved_pending_tool_approval, stream_completion_response,
+};
 
 /// Outcome of a single brain turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +66,7 @@ pub async fn run_brain_turn_with_tools(
                 continue;
             }
 
-            if let Some(request) = find_pending_approval(&events)? {
+            if let Some(request) = find_pending_approval_request(&events) {
                 session_store
                     .update_status(session_id.clone(), moa_core::SessionStatus::WaitingApproval)
                     .await?;
@@ -82,11 +85,19 @@ pub async fn run_brain_turn_with_tools(
             "compiled context for brain turn"
         );
 
-        let response = llm_provider
-            .complete(ctx.into_request())
-            .await?
-            .collect()
-            .await?;
+        let streamed = stream_completion_response(
+            llm_provider.clone(),
+            ctx.into_request(),
+            None,
+            |_| {},
+            |_| StreamSignalDisposition::Continue,
+        )
+        .await?;
+        let response = streamed.response.ok_or_else(|| {
+            moa_core::MoaError::ProviderError(
+                "buffered brain turn was cancelled unexpectedly".to_string(),
+            )
+        })?;
         let mut emitted_tool_calls = 0usize;
 
         if !response.text.trim().is_empty() {
@@ -115,8 +126,8 @@ pub async fn run_brain_turn_with_tools(
                     .unwrap_or_else(Uuid::new_v4);
 
                 if let Some(router) = &tool_router {
-                    let policy = router.check_policy(&session, call).await?;
-                    match policy.action {
+                    let prepared = router.prepare_invocation(&session, call).await?;
+                    match prepared.policy.action {
                         PolicyAction::Allow => {
                             let (resolved_hand_id, output) =
                                 router.execute_authorized(&session, call).await?;
@@ -182,8 +193,8 @@ pub async fn run_brain_turn_with_tools(
                             let request = ApprovalRequest {
                                 request_id: tool_id,
                                 tool_name: call.name.clone(),
-                                input_summary: policy.input_summary,
-                                risk_level: policy.risk_level,
+                                input_summary: prepared.policy_input.input_summary,
+                                risk_level: prepared.policy_input.risk_level,
                             };
                             session_store
                                 .emit_event(
@@ -267,7 +278,7 @@ async fn process_resolved_approval(
     tool_router: &ToolRouter,
     events: &[moa_core::EventRecord],
 ) -> Result<bool> {
-    let Some(pending) = find_resolved_pending_tool(events)? else {
+    let Some(pending) = find_resolved_pending_tool_approval(events) else {
         return Ok(false);
     };
 
@@ -352,136 +363,4 @@ async fn execute_pending_tool(
     }
 
     Ok(())
-}
-
-fn find_pending_approval(events: &[moa_core::EventRecord]) -> Result<Option<ApprovalRequest>> {
-    let mut requests = Vec::new();
-    let mut decisions = HashSet::new();
-    let mut completed = HashSet::new();
-
-    for record in events {
-        match &record.event {
-            Event::ApprovalRequested {
-                request_id,
-                tool_name,
-                input_summary,
-                risk_level,
-            } => {
-                requests.push((
-                    record.sequence_num,
-                    ApprovalRequest {
-                        request_id: *request_id,
-                        tool_name: tool_name.clone(),
-                        input_summary: input_summary.clone(),
-                        risk_level: risk_level.clone(),
-                    },
-                ));
-            }
-            Event::ApprovalDecided { request_id, .. } => {
-                decisions.insert(*request_id);
-            }
-            Event::ToolResult { tool_id, .. } | Event::ToolError { tool_id, .. } => {
-                completed.insert(*tool_id);
-            }
-            _ => {}
-        }
-    }
-
-    requests.sort_by_key(|(sequence_num, _)| *sequence_num);
-    for (_, request) in requests {
-        if !decisions.contains(&request.request_id) && !completed.contains(&request.request_id) {
-            return Ok(Some(request));
-        }
-    }
-
-    Ok(None)
-}
-
-fn find_resolved_pending_tool(
-    events: &[moa_core::EventRecord],
-) -> Result<Option<PendingToolApproval>> {
-    let mut tool_calls = HashMap::new();
-    let mut decisions = HashMap::new();
-    let mut completed = HashSet::new();
-    let mut requested = HashSet::new();
-
-    for record in events {
-        match &record.event {
-            Event::ToolCall {
-                tool_id,
-                tool_name,
-                input,
-                ..
-            } => {
-                tool_calls.insert(
-                    *tool_id,
-                    PendingToolApproval {
-                        tool_id: *tool_id,
-                        tool_name: tool_name.clone(),
-                        input: input.clone(),
-                        decision: StoredApprovalDecision::AllowOnce,
-                        sequence_num: record.sequence_num,
-                    },
-                );
-            }
-            Event::ApprovalRequested { request_id, .. } => {
-                requested.insert(*request_id);
-            }
-            Event::ApprovalDecided {
-                request_id,
-                decision,
-                decided_by,
-                ..
-            } => {
-                let stored = match decision {
-                    ApprovalDecision::AllowOnce => StoredApprovalDecision::AllowOnce,
-                    ApprovalDecision::AlwaysAllow { pattern } => {
-                        StoredApprovalDecision::AlwaysAllow {
-                            pattern: pattern.clone(),
-                            decided_by: decided_by.clone(),
-                        }
-                    }
-                    ApprovalDecision::Deny { reason } => StoredApprovalDecision::Deny {
-                        reason: reason.clone(),
-                    },
-                };
-                decisions.insert(*request_id, stored);
-            }
-            Event::ToolResult { tool_id, .. } | Event::ToolError { tool_id, .. } => {
-                completed.insert(*tool_id);
-            }
-            _ => {}
-        }
-    }
-
-    let mut pending = tool_calls
-        .into_values()
-        .filter_map(|mut pending| {
-            if completed.contains(&pending.tool_id) || !requested.contains(&pending.tool_id) {
-                return None;
-            }
-            let decision = decisions.get(&pending.tool_id)?.clone();
-            pending.decision = decision;
-            Some(pending)
-        })
-        .collect::<Vec<_>>();
-    pending.sort_by_key(|item| item.sequence_num);
-
-    Ok(pending.into_iter().next())
-}
-
-#[derive(Debug, Clone)]
-struct PendingToolApproval {
-    tool_id: Uuid,
-    tool_name: String,
-    input: serde_json::Value,
-    decision: StoredApprovalDecision,
-    sequence_num: u64,
-}
-
-#[derive(Debug, Clone)]
-enum StoredApprovalDecision {
-    AllowOnce,
-    AlwaysAllow { pattern: String, decided_by: String },
-    Deny { reason: Option<String> },
 }

@@ -29,12 +29,12 @@ If one of these skills is clearly relevant and you need the exact workflow, call
             );
             for skill in &skills {
                 section.push_str(&format!(
-                    "- {name}: {one_liner} | path: {path} | tags: {tags} | tools: {tools} | est_tokens: {estimated_tokens} | uses: {use_count} | success_rate: {success_rate:.2}\n",
+                    "- {name}: {description} | path: {path} | tags: {tags} | tools: {tools} | est_tokens: {estimated_tokens} | uses: {use_count} | success_rate: {success_rate:.2}\n",
                     name = skill.name,
-                    one_liner = skill.one_liner,
+                    description = skill.description,
                     path = skill.path,
                     tags = skill.tags.join(", "),
-                    tools = skill.tools_required.join(", "),
+                    tools = skill.allowed_tools.join(", "),
                     estimated_tokens = skill.estimated_tokens,
                     use_count = skill.use_count,
                     success_rate = skill.success_rate,
@@ -102,10 +102,9 @@ mod tests {
             serde_json::to_value(vec![SkillMetadata {
                 path: "skills/debug-oauth/SKILL.md".into(),
                 name: "debug-oauth".to_string(),
-                version: "1.0".to_string(),
-                one_liner: "OAuth refresh-token debugging workflow".to_string(),
+                description: "OAuth refresh-token debugging workflow".to_string(),
                 tags: vec!["oauth".to_string(), "auth".to_string()],
-                tools_required: vec!["bash".to_string(), "file_read".to_string()],
+                allowed_tools: vec!["bash".to_string(), "file_read".to_string()],
                 estimated_tokens: 900,
                 use_count: 3,
                 success_rate: 0.9,

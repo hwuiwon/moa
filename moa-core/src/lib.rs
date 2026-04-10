@@ -28,6 +28,6 @@ pub use types::{
     PolicyAction, PolicyScope, ProcessorOutput, RiskLevel, RuntimeEvent, SandboxTier, SequenceNum,
     SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
     SessionSummary, SkillMetadata, StartSessionRequest, StopReason, TokenPricing, ToolCallFormat,
-    ToolCardStatus, ToolInvocation, ToolOutput, ToolStatus, ToolUpdate, UserId, UserMessage,
-    WakeContext, WikiPage, WorkingContext, WorkspaceId,
+    ToolCardStatus, ToolInvocation, ToolOutput, ToolPolicyInput, ToolStatus, ToolUpdate, UserId,
+    UserMessage, WakeContext, WikiPage, WorkingContext, WorkspaceId,
 };

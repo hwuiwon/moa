@@ -82,7 +82,7 @@ Run `scripts/deploy.sh` for the full automated flow. Do NOT read the script into
 
 | Tier | Content | Token cost | Loaded when |
 |---|---|---|---|
-| Metadata | name, one_liner, tags | ~100 tokens/skill | Always (Stage 4 of pipeline) |
+| Metadata | name, description, tags | ~100 tokens/skill | Always (Stage 4 of pipeline) |
 | Instructions | Full SKILL.md body | ~1,000-5,000 tokens | When skill is activated for a task |
 | Resources | scripts/, references/, assets/ | Varies | When executing the skill |
 
@@ -148,7 +148,7 @@ async fn maybe_distill_skill(
     ).await?;
     
     // Update MEMORY.md
-    update_index_with_skill(memory, &skill_name, &skill.one_liner).await?;
+    update_index_with_skill(memory, &skill_name, &skill.description).await?;
     
     Ok(Some(skill_name))
 }
@@ -255,10 +255,9 @@ impl SkillRegistry {
 
 pub struct SkillMetadata {
     pub name: String,
-    pub version: String,
-    pub one_liner: String,
+    pub description: String,
     pub tags: Vec<String>,
-    pub tools_required: Vec<String>, // derived from allowed-tools
+    pub allowed_tools: Vec<String>,
     pub estimated_tokens: usize,
     pub use_count: u32,
     pub success_rate: f32,

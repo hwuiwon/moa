@@ -875,3 +875,65 @@ Recommended review:
 
 - Keep the runtime strict on the external format unless there is a concrete migration need later.
 - If a migration path is ever needed, add an explicit one-shot converter rather than reintroducing dual-format parsing in the hot path.
+
+## 13. Simplification pass
+
+### 13.1 Tool approval metadata now has one source of truth in `ToolRouter`
+
+Current state:
+
+- Tool normalization, approval summaries, default policy actions, always-allow patterns, and file diff previews now come from the tool definition metadata in `moa-hands/src/router.rs`.
+- `moa-security` now evaluates policy decisions against a normalized `ToolPolicyInput` prepared by the router instead of re-deriving fields from raw JSON input.
+- `moa-orchestrator` and `moa-brain` both consume the router-prepared invocation metadata.
+
+Consequence:
+
+- The earlier drift risk between `moa-security/src/policies.rs` and `moa-orchestrator/src/local.rs` is removed.
+- Adding a new tool now requires updating one metadata definition instead of several parallel helper tables.
+
+Remaining caveat:
+
+- Any future non-router execution path must also use `ToolRouter::prepare_invocation()` before applying policy or rendering approval UI. Bypassing the router would reintroduce drift immediately.
+
+### 13.2 The buffered harness now rides on the same streamed completion path as the orchestrator
+
+Current state:
+
+- Shared streamed-turn helpers now live in `moa-brain/src/turn.rs`.
+- `stream_completion_response()` is used by both the buffered brain harness and the local orchestrator.
+- Approval replay scanning (`find_pending_tool_approval`, `find_pending_approval_request`, `find_resolved_pending_tool_approval`) is also centralized there.
+
+Consequence:
+
+- The buffered `run_brain_turn_with_tools()` path no longer has its own separate provider-drain implementation.
+- Streaming behavior, cancellation semantics, and approval replay now share one lower-level implementation.
+
+Remaining caveat:
+
+- The local orchestrator still owns queueing, approval waiting, tool-card runtime updates, and stop semantics because those are session-actor concerns rather than pure turn-stream concerns.
+- The turn engine is substantially slimmer, but not fully actor-agnostic yet.
+
+### 13.3 The in-memory skills model now matches the on-disk Agent Skills shape
+
+Current state:
+
+- `SkillFrontmatter` now stores only the spec-shaped fields:
+  - `name`
+  - `description`
+  - optional `license`
+  - optional `compatibility`
+  - optional `allowed-tools`
+  - optional `metadata`
+- MOA bookkeeping is derived lazily from `metadata` through helper accessors instead of being stored twice.
+- `tools_required` is gone as a stored field; callers now use `allowed_tools`.
+
+Consequence:
+
+- The old normalization layer in `moa-skills/src/format.rs` is much smaller.
+- The in-memory and on-disk skill representations now line up directly.
+- Round-tripping `SKILL.md` is less surprising because the runtime preserves the same top-level shape it parses.
+
+Remaining caveat:
+
+- MOA-specific behavior still depends on `metadata` keys such as `moa-version`, `moa-one-liner`, and `moa-estimated-tokens`.
+- Any code outside `moa-skills` that reaches into raw `metadata` directly is now more fragile than code that goes through the helpers in `format.rs`.

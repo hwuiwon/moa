@@ -1,31 +1,29 @@
 //! Tokio-task local orchestrator for multi-session MOA execution.
 
-use std::collections::{HashMap, HashSet};
-use std::env;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_brain::build_default_pipeline_with_tools;
+use moa_brain::{
+    PendingToolApproval, StoredApprovalDecision, StreamSignalDisposition,
+    build_default_pipeline_with_tools, find_pending_tool_approval,
+    find_resolved_pending_tool_approval, stream_completion_response,
+};
 use moa_core::{
-    ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest,
-    BrainOrchestrator, CompletionContent, CronHandle, CronSpec, Event, EventRange, EventRecord,
-    EventStream, LLMProvider, MoaConfig, MoaError, ObserveLevel, PolicyAction, Result,
-    RuntimeEvent, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
-    SessionStatus, SessionStore, SessionSummary, StartSessionRequest, StopReason, ToolCardStatus,
-    ToolInvocation, ToolUpdate, UserId, UserMessage,
+    ApprovalDecision, ApprovalPrompt, ApprovalRequest, BrainOrchestrator, CompletionContent,
+    CronHandle, CronSpec, Event, EventRange, EventRecord, EventStream, LLMProvider, MoaConfig,
+    MoaError, ObserveLevel, PolicyAction, Result, RuntimeEvent, SessionFilter, SessionHandle,
+    SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, SessionSummary,
+    StartSessionRequest, StopReason, ToolCardStatus, ToolInvocation, ToolUpdate, UserId,
+    UserMessage,
 };
 use moa_hands::ToolRouter;
-use moa_hands::tools::file_read::resolve_sandbox_path;
 use moa_memory::FileMemoryStore;
 use moa_providers::AnthropicProvider;
 use moa_session::TursoSessionStore;
 use moa_skills::maybe_distill_skill;
-use serde_json::Value;
-use tokio::fs;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::task::AbortHandle;
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -65,22 +63,6 @@ struct SessionTaskContext {
 enum TurnDisposition {
     Completed,
     Cancelled,
-}
-
-#[derive(Debug, Clone)]
-struct PendingToolApproval {
-    tool_id: Uuid,
-    tool_name: String,
-    input: Value,
-    decision: StoredApprovalDecision,
-    sequence_num: u64,
-}
-
-#[derive(Debug, Clone)]
-enum StoredApprovalDecision {
-    AllowOnce,
-    AlwaysAllow { pattern: String, decided_by: String },
-    Deny { reason: Option<String> },
 }
 
 impl LocalOrchestrator {
@@ -635,63 +617,49 @@ async fn drive_turn(
 
         let mut ctx = moa_core::WorkingContext::new(&session, context.llm_provider.capabilities());
         let _stage_reports = pipeline.run(&mut ctx).await?;
-        let mut stream = context.llm_provider.complete(ctx.into_request()).await?;
-        let mut streamed_text = String::new();
-        let mut started_assistant = false;
-
-        loop {
-            tokio::select! {
-                block = stream.next() => {
-                    let Some(block) = block else {
-                        break;
-                    };
-                    match block? {
-                        CompletionContent::Text(delta) => {
-                            if !started_assistant {
-                                let _ = runtime_tx.send(RuntimeEvent::AssistantStarted);
-                                started_assistant = true;
-                            }
-                            streamed_text.push_str(&delta);
-                            for ch in delta.chars() {
-                                let _ = runtime_tx.send(RuntimeEvent::AssistantDelta(ch));
-                            }
-                        }
-                        CompletionContent::ToolCall(_) => {}
-                    }
+        let streamed = stream_completion_response(
+            context.llm_provider.clone(),
+            ctx.into_request(),
+            Some(signal_rx),
+            |event| {
+                let _ = runtime_tx.send(event);
+            },
+            |signal| match signal {
+                SessionSignal::QueueMessage(message) => {
+                    buffer_queued_message(queued_messages, message);
+                    *turn_requested = true;
+                    let _ = runtime_tx.send(RuntimeEvent::Notice(
+                        "Message queued. Will process after current turn.".to_string(),
+                    ));
+                    StreamSignalDisposition::Continue
                 }
-                signal = signal_rx.recv() => {
-                    match signal {
-                        Some(SessionSignal::QueueMessage(message)) => {
-                            buffer_queued_message(queued_messages, message);
-                            *turn_requested = true;
-                            let _ = runtime_tx.send(RuntimeEvent::Notice(
-                                "Message queued. Will process after current turn.".to_string(),
-                            ));
-                        }
-                        Some(SessionSignal::SoftCancel) => {
-                            soft_cancel_requested = true;
-                            let _ = runtime_tx.send(RuntimeEvent::Notice(
-                                "Stop requested. MOA will stop after the current step.".to_string(),
-                            ));
-                        }
-                        Some(SessionSignal::HardCancel) => {
-                            return Ok(TurnDisposition::Cancelled);
-                        }
-                        Some(SessionSignal::ApprovalDecided { .. }) => {}
-                        None => return Ok(TurnDisposition::Cancelled),
-                    }
+                SessionSignal::SoftCancel => {
+                    soft_cancel_requested = true;
+                    let _ = runtime_tx.send(RuntimeEvent::Notice(
+                        "Stop requested. MOA will stop after the current step.".to_string(),
+                    ));
+                    StreamSignalDisposition::Continue
                 }
-            }
+                SessionSignal::HardCancel => StreamSignalDisposition::CancelImmediately,
+                SessionSignal::ApprovalDecided { .. } => StreamSignalDisposition::Continue,
+            },
+        )
+        .await?;
+        if streamed.cancelled {
+            return Ok(TurnDisposition::Cancelled);
         }
-
-        let response = stream.into_response().await?;
-        if !streamed_text.trim().is_empty() {
+        let response = streamed.response.ok_or_else(|| {
+            MoaError::ProviderError(
+                "streamed turn finished without a provider response".to_string(),
+            )
+        })?;
+        if !streamed.streamed_text.trim().is_empty() {
             append_event(
                 &context.session_store,
                 event_tx,
                 context.session_id.clone(),
                 Event::BrainResponse {
-                    text: streamed_text.clone(),
+                    text: streamed.streamed_text.clone(),
                     model: response.model.clone(),
                     input_tokens: response.input_tokens,
                     output_tokens: response.output_tokens,
@@ -701,7 +669,7 @@ async fn drive_turn(
             )
             .await?;
             let _ = runtime_tx.send(RuntimeEvent::AssistantFinished {
-                text: streamed_text,
+                text: streamed.streamed_text,
             });
         }
 
@@ -781,11 +749,13 @@ async fn handle_tool_call(
     soft_cancel_requested: &mut bool,
 ) -> Result<ToolCallOutcome> {
     let tool_id = parse_tool_id(call);
-    let policy = context.tool_router.check_policy(session, call).await?;
-    let summary = policy.input_summary.clone();
-    let pattern = always_allow_pattern(&call.name, &policy.normalized_input);
+    let prepared = context
+        .tool_router
+        .prepare_invocation(session, call)
+        .await?;
+    let summary = prepared.policy_input.input_summary.clone();
 
-    match policy.action {
+    match prepared.policy.action {
         PolicyAction::Allow => {
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
                 tool_id,
@@ -855,7 +825,7 @@ async fn handle_tool_call(
                 request_id: tool_id,
                 tool_name: call.name.clone(),
                 input_summary: summary.clone(),
-                risk_level: policy.risk_level,
+                risk_level: prepared.policy_input.risk_level.clone(),
             };
             append_event(
                 &context.session_store,
@@ -882,9 +852,9 @@ async fn handle_tool_call(
             }));
             let _ = runtime_tx.send(RuntimeEvent::ApprovalRequested(ApprovalPrompt {
                 request,
-                pattern,
-                parameters: approval_fields_for_call(&context.config, call),
-                file_diffs: approval_diffs_for_call(&context.config, call).await?,
+                pattern: prepared.always_allow_pattern,
+                parameters: prepared.approval_fields,
+                file_diffs: prepared.approval_diffs,
             }));
 
             if wait_for_signal_approval(
@@ -1049,7 +1019,7 @@ async fn process_resolved_approval(
     events: &[EventRecord],
     soft_cancel_requested: &mut bool,
 ) -> Result<bool> {
-    let Some(pending) = find_resolved_pending_tool(events) else {
+    let Some(pending) = find_resolved_pending_tool_approval(events) else {
         return Ok(false);
     };
 
@@ -1060,11 +1030,15 @@ async fn process_resolved_approval(
                 name: pending.tool_name.clone(),
                 input: pending.input.clone(),
             };
+            let prepared = context
+                .tool_router
+                .prepare_invocation(session, &invocation)
+                .await?;
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
                 tool_id: pending.tool_id,
                 tool_name: pending.tool_name.clone(),
                 status: ToolCardStatus::Running,
-                summary: summarize_call_for_runtime(&pending.tool_name, &pending.input),
+                summary: prepared.policy_input.input_summary.clone(),
                 detail: None,
             }));
             execute_tool(
@@ -1097,6 +1071,17 @@ async fn process_resolved_approval(
                 name: pending.tool_name.clone(),
                 input: pending.input.clone(),
             };
+            let prepared = context
+                .tool_router
+                .prepare_invocation(session, &invocation)
+                .await?;
+            let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
+                tool_id: pending.tool_id,
+                tool_name: pending.tool_name.clone(),
+                status: ToolCardStatus::Running,
+                summary: prepared.policy_input.input_summary.clone(),
+                detail: Some(format!("Always allow rule stored: {pattern}")),
+            }));
             execute_tool(
                 context,
                 session,
@@ -1162,26 +1147,27 @@ async fn wait_for_approval(
         name: pending.tool_name.clone(),
         input: pending.input.clone(),
     };
+    let prepared = context
+        .tool_router
+        .prepare_invocation(session, &invocation)
+        .await?;
     let prompt = ApprovalPrompt {
         request: ApprovalRequest {
             request_id: pending.tool_id,
             tool_name: pending.tool_name.clone(),
-            input_summary: summarize_call_for_runtime(&pending.tool_name, &pending.input),
-            risk_level: risk_level_for_tool(&pending.tool_name),
+            input_summary: prepared.policy_input.input_summary.clone(),
+            risk_level: prepared.policy_input.risk_level.clone(),
         },
-        pattern: always_allow_pattern(
-            &pending.tool_name,
-            &normalized_input_for_runtime(&pending.tool_name, &pending.input),
-        ),
-        parameters: approval_fields_for_call(&context.config, &invocation),
-        file_diffs: approval_diffs_for_call(&context.config, &invocation).await?,
+        pattern: prepared.always_allow_pattern.clone(),
+        parameters: prepared.approval_fields.clone(),
+        file_diffs: prepared.approval_diffs.clone(),
     };
     let _ = runtime_tx.send(RuntimeEvent::ApprovalRequested(prompt));
     let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
         tool_id: pending.tool_id,
         tool_name: pending.tool_name.clone(),
         status: ToolCardStatus::WaitingApproval,
-        summary: summarize_call_for_runtime(&pending.tool_name, &pending.input),
+        summary: prepared.policy_input.input_summary.clone(),
         detail: Some("Press y to allow once, a to always allow, n to deny".to_string()),
     }));
 
@@ -1209,7 +1195,7 @@ async fn wait_for_approval(
                             tool_id: pending.tool_id,
                             tool_name: pending.tool_name.clone(),
                             status: ToolCardStatus::Running,
-                            summary: summarize_call_for_runtime(&pending.tool_name, &pending.input),
+                            summary: prepared.policy_input.input_summary.clone(),
                             detail: None,
                         }));
                         execute_tool(
@@ -1498,7 +1484,8 @@ fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) ->
         return false;
     }
 
-    if find_pending_tool_approval(events).is_some() || find_resolved_pending_tool(events).is_some()
+    if find_pending_tool_approval(events).is_some()
+        || find_resolved_pending_tool_approval(events).is_some()
     {
         return true;
     }
@@ -1514,126 +1501,6 @@ fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) ->
                 | Event::ToolCall { .. }
         )
     })
-}
-
-fn find_pending_tool_approval(events: &[EventRecord]) -> Option<PendingToolApproval> {
-    let mut tool_calls = HashMap::new();
-    let mut decisions = HashSet::new();
-    let mut completed = HashSet::new();
-    let mut requested = HashSet::new();
-
-    for record in events {
-        match &record.event {
-            Event::ToolCall {
-                tool_id,
-                tool_name,
-                input,
-                ..
-            } => {
-                tool_calls.insert(
-                    *tool_id,
-                    PendingToolApproval {
-                        tool_id: *tool_id,
-                        tool_name: tool_name.clone(),
-                        input: input.clone(),
-                        decision: StoredApprovalDecision::AllowOnce,
-                        sequence_num: record.sequence_num,
-                    },
-                );
-            }
-            Event::ApprovalRequested { request_id, .. } => {
-                requested.insert(*request_id);
-            }
-            Event::ApprovalDecided { request_id, .. } => {
-                decisions.insert(*request_id);
-            }
-            Event::ToolResult { tool_id, .. } | Event::ToolError { tool_id, .. } => {
-                completed.insert(*tool_id);
-            }
-            _ => {}
-        }
-    }
-
-    let mut pending = tool_calls
-        .into_values()
-        .filter(|pending| {
-            requested.contains(&pending.tool_id)
-                && !decisions.contains(&pending.tool_id)
-                && !completed.contains(&pending.tool_id)
-        })
-        .collect::<Vec<_>>();
-    pending.sort_by_key(|item| item.sequence_num);
-    pending.into_iter().next()
-}
-
-fn find_resolved_pending_tool(events: &[EventRecord]) -> Option<PendingToolApproval> {
-    let mut tool_calls = HashMap::new();
-    let mut decisions = HashMap::new();
-    let mut completed = HashSet::new();
-    let mut requested = HashSet::new();
-
-    for record in events {
-        match &record.event {
-            Event::ToolCall {
-                tool_id,
-                tool_name,
-                input,
-                ..
-            } => {
-                tool_calls.insert(
-                    *tool_id,
-                    PendingToolApproval {
-                        tool_id: *tool_id,
-                        tool_name: tool_name.clone(),
-                        input: input.clone(),
-                        decision: StoredApprovalDecision::AllowOnce,
-                        sequence_num: record.sequence_num,
-                    },
-                );
-            }
-            Event::ApprovalRequested { request_id, .. } => {
-                requested.insert(*request_id);
-            }
-            Event::ApprovalDecided {
-                request_id,
-                decision,
-                decided_by,
-                ..
-            } => {
-                let stored = match decision {
-                    ApprovalDecision::AllowOnce => StoredApprovalDecision::AllowOnce,
-                    ApprovalDecision::AlwaysAllow { pattern } => {
-                        StoredApprovalDecision::AlwaysAllow {
-                            pattern: pattern.clone(),
-                            decided_by: decided_by.clone(),
-                        }
-                    }
-                    ApprovalDecision::Deny { reason } => StoredApprovalDecision::Deny {
-                        reason: reason.clone(),
-                    },
-                };
-                decisions.insert(*request_id, stored);
-            }
-            Event::ToolResult { tool_id, .. } | Event::ToolError { tool_id, .. } => {
-                completed.insert(*tool_id);
-            }
-            _ => {}
-        }
-    }
-
-    let mut pending = tool_calls
-        .into_values()
-        .filter_map(|mut pending| {
-            if completed.contains(&pending.tool_id) || !requested.contains(&pending.tool_id) {
-                return None;
-            }
-            let decision = decisions.get(&pending.tool_id)?.clone();
-            pending.decision = decision;
-            Some(pending)
-        })
-        .collect::<Vec<_>>();
-    pending.sort_by_key(|item| item.sequence_num);
-    pending.into_iter().next()
 }
 
 fn summarize_tool_completion(call: &ToolInvocation, output: &moa_core::ToolOutput) -> String {
@@ -1668,215 +1535,4 @@ fn parse_tool_id(call: &ToolInvocation) -> Uuid {
         .as_deref()
         .and_then(|value| Uuid::parse_str(value).ok())
         .unwrap_or_else(Uuid::new_v4)
-}
-
-fn always_allow_pattern(tool_name: &str, normalized_input: &str) -> String {
-    if tool_name == "bash" {
-        let tokens = shell_words::split(normalized_input).unwrap_or_default();
-        if let Some(command) = tokens.first() {
-            return if tokens.len() == 1 {
-                command.clone()
-            } else {
-                format!("{command} *")
-            };
-        }
-    }
-
-    normalized_input.to_string()
-}
-
-fn approval_fields_for_call(config: &MoaConfig, call: &ToolInvocation) -> Vec<ApprovalField> {
-    match call.name.as_str() {
-        "bash" => {
-            let command = call
-                .input
-                .get("cmd")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let working_dir = expand_local_path(&config.local.sandbox_dir)
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|_| config.local.sandbox_dir.clone());
-            vec![
-                ApprovalField {
-                    label: "Command".to_string(),
-                    value: command,
-                },
-                ApprovalField {
-                    label: "Working dir".to_string(),
-                    value: working_dir,
-                },
-            ]
-        }
-        "file_write" => {
-            let path = call
-                .input
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let content_len = call
-                .input
-                .get("content")
-                .and_then(Value::as_str)
-                .map(|content| content.chars().count())
-                .unwrap_or_default();
-            vec![
-                ApprovalField {
-                    label: "Path".to_string(),
-                    value: path,
-                },
-                ApprovalField {
-                    label: "Content".to_string(),
-                    value: format!("{content_len} chars"),
-                },
-            ]
-        }
-        "file_read" | "memory_read" => single_approval_field("Path", &call.input, "path"),
-        "file_search" => single_approval_field("Pattern", &call.input, "pattern"),
-        "memory_search" | "web_search" => single_approval_field("Query", &call.input, "query"),
-        "memory_write" => single_approval_field("Path", &call.input, "path"),
-        "web_fetch" => single_approval_field("URL", &call.input, "url"),
-        _ => serde_json::to_string_pretty(&call.input)
-            .map(|value| {
-                vec![ApprovalField {
-                    label: "Input".to_string(),
-                    value,
-                }]
-            })
-            .unwrap_or_default(),
-    }
-}
-
-fn single_approval_field(label: &str, input: &Value, field: &str) -> Vec<ApprovalField> {
-    let value = input
-        .get(field)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    vec![ApprovalField {
-        label: label.to_string(),
-        value,
-    }]
-}
-
-async fn approval_diffs_for_call(
-    config: &MoaConfig,
-    call: &ToolInvocation,
-) -> Result<Vec<ApprovalFileDiff>> {
-    if call.name != "file_write" {
-        return Ok(Vec::new());
-    }
-
-    let Some(path) = call.input.get("path").and_then(Value::as_str) else {
-        return Ok(Vec::new());
-    };
-    let Some(content) = call.input.get("content").and_then(Value::as_str) else {
-        return Ok(Vec::new());
-    };
-
-    let sandbox_root = expand_local_path(&config.local.sandbox_dir)?;
-    let file_path = resolve_sandbox_path(&sandbox_root, path)?;
-    let before = read_existing_text_file(&file_path).await?;
-
-    Ok(vec![ApprovalFileDiff {
-        path: path.to_string(),
-        before,
-        after: content.to_string(),
-        language_hint: language_hint_for_path(path),
-    }])
-}
-
-fn summarize_call_for_runtime(tool_name: &str, input: &Value) -> String {
-    match tool_name {
-        "bash" => input
-            .get("cmd")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        "file_write" | "file_read" | "memory_read" | "memory_write" => input
-            .get("path")
-            .and_then(Value::as_str)
-            .map(|path| format!("Path: {path}"))
-            .unwrap_or_else(|| tool_name.to_string()),
-        "file_search" => input
-            .get("pattern")
-            .and_then(Value::as_str)
-            .map(|pattern| format!("Pattern: {pattern}"))
-            .unwrap_or_else(|| tool_name.to_string()),
-        "memory_search" | "web_search" => input
-            .get("query")
-            .and_then(Value::as_str)
-            .map(|query| format!("Query: {query}"))
-            .unwrap_or_else(|| tool_name.to_string()),
-        _ => tool_name.to_string(),
-    }
-}
-
-fn normalized_input_for_runtime(tool_name: &str, input: &Value) -> String {
-    match tool_name {
-        "bash" => input
-            .get("cmd")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string(),
-        "file_write" | "file_read" | "memory_read" | "memory_write" => input
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string(),
-        "file_search" => input
-            .get("pattern")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string(),
-        "memory_search" | "web_search" => input
-            .get("query")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string(),
-        "web_fetch" => input
-            .get("url")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string(),
-        _ => serde_json::to_string(input).unwrap_or_default(),
-    }
-}
-
-fn risk_level_for_tool(tool_name: &str) -> moa_core::RiskLevel {
-    match tool_name {
-        "file_read" | "file_search" | "memory_read" | "memory_search" => moa_core::RiskLevel::Low,
-        "file_write" | "memory_write" => moa_core::RiskLevel::Medium,
-        _ => moa_core::RiskLevel::High,
-    }
-}
-
-fn expand_local_path(path: &str) -> Result<PathBuf> {
-    if let Some(relative) = path.strip_prefix("~/") {
-        let home = env::var("HOME").map_err(|_| MoaError::HomeDirectoryNotFound)?;
-        return Ok(PathBuf::from(home).join(relative));
-    }
-
-    Ok(PathBuf::from(path))
-}
-
-async fn read_existing_text_file(path: &Path) -> Result<String> {
-    match fs::read(path).await {
-        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(String::new()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn language_hint_for_path(path: &str) -> Option<String> {
-    Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(ToOwned::to_owned)
 }

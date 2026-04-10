@@ -1,25 +1,25 @@
 # Graph Report - .  (2026-04-09)
 
 ## Corpus Check
-- 75 files · ~50,905 words
+- 76 files · ~50,807 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1035 nodes · 1703 edges · 53 communities detected
+- 1052 nodes · 1742 edges · 53 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS · INFERRED: 1 edges (avg confidence: 0.75)
 - Token cost: 0 input · 0 output
 
 ## God Nodes (most connected - your core abstractions)
 1. `App` - 42 edges
-2. `ChatRuntime` - 21 edges
-3. `FileMemoryStore` - 18 edges
-4. `LocalOrchestrator` - 17 edges
-5. `TursoSessionStore` - 16 edges
-6. `LocalHandProvider` - 16 edges
-7. `start_session()` - 12 edges
-8. `ToolRouter` - 12 edges
-9. `canonicalize_frontmatter()` - 12 edges
-10. `wait_for_approval()` - 11 edges
+2. `SkillFrontmatter` - 30 edges
+3. `ChatRuntime` - 21 edges
+4. `FileMemoryStore` - 18 edges
+5. `LocalOrchestrator` - 17 edges
+6. `TursoSessionStore` - 16 edges
+7. `LocalHandProvider` - 16 edges
+8. `ToolRouter` - 14 edges
+9. `start_session()` - 12 edges
+10. `wiki_page_from_skill()` - 12 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `truncate_index_content` --shares_data_with--> `MemoryRetriever (Stage 5)`  [INFERRED]
@@ -29,47 +29,47 @@
 
 ### Community 0 - "Core Domain Types"
 Cohesion: 0.02
-Nodes (76): ActionButton, ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, ApprovalRule, Attachment (+68 more)
+Nodes (77): ActionButton, ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, ApprovalRule, Attachment (+69 more)
 
 ### Community 1 - "TUI App State"
 Cohesion: 0.09
 Nodes (20): App, app_state_transitions_follow_idle_composing_running_waiting_idle(), AppMode, approval_status_and_note(), ApprovalCardStatus, ApprovalEntry, ChatEntry, diff_overlay_renders_for_file_write_approval() (+12 more)
 
-### Community 2 - "Local Orchestrator"
-Cohesion: 0.09
-Nodes (38): accept_user_message(), always_allow_pattern(), append_event(), approval_diffs_for_call(), approval_fields_for_call(), buffer_queued_message(), DockerSandbox, drain_signal_queue() (+30 more)
+### Community 2 - "Skill Markdown Format"
+Cohesion: 0.08
+Nodes (21): build_skill_path(), confidence_for_skill(), defaults_missing_moa_metadata(), estimate_skill_tokens(), format_timestamp(), humanize_skill_name(), is_valid_skill_name(), metadata_csv() (+13 more)
 
-### Community 3 - "Anthropic Provider"
+### Community 3 - "Tool Registry & Router"
+Cohesion: 0.07
+Nodes (26): approval_diffs_for(), approval_fields_for(), approval_pattern_for(), BuiltInTool, execute_tool_policy(), expand_local_path(), hand_id(), language_hint_for_path() (+18 more)
+
+### Community 4 - "Anthropic Provider"
 Cohesion: 0.07
 Nodes (30): anthropic_message(), AnthropicProvider, AnthropicStreamState, BlockAccumulator, build_request_body(), canonical_model_id(), capabilities_for_model(), completion_request_serializes_to_anthropic_format() (+22 more)
 
-### Community 4 - "Tool Registry & Router"
+### Community 5 - "File Memory Store"
 Cohesion: 0.07
-Nodes (12): BuiltInTool, expand_local_path(), hand_id(), session_provider_key(), ToolContext, ToolDefinition, ToolExecution, ToolRegistry (+4 more)
+Nodes (22): execute_pending_tool(), format_tool_output(), process_resolved_approval(), run_brain_turn(), run_brain_turn_with_tools(), TurnResult, collect_markdown_files(), expand_local_path() (+14 more)
 
-### Community 5 - "Skill Markdown Format"
-Cohesion: 0.1
-Nodes (34): build_skill_path(), canonicalize_frontmatter(), confidence_for_skill(), defaults_missing_moa_metadata(), estimate_skill_tokens(), humanize_skill_name(), insert_metadata(), insert_optional_metadata() (+26 more)
+### Community 6 - "Local Orchestrator"
+Cohesion: 0.12
+Nodes (24): accept_user_message(), append_event(), buffer_queued_message(), DockerSandbox, drain_signal_queue(), drive_turn(), execute_tool(), flush_next_queued_message() (+16 more)
 
-### Community 6 - "Brain Turn Tests"
+### Community 7 - "Brain Turn Tests"
 Cohesion: 0.07
 Nodes (10): always_allow_rule_persists_and_skips_next_approval(), CapturingTextLlmProvider, MockLlmProvider, MockMemoryStore, MockSessionStore, pipeline_stage_four_injects_workspace_skill_metadata(), RepeatingToolLlmProvider, run_brain_turn_emits_brain_response_event() (+2 more)
 
-### Community 7 - "Local Orchestrator Tests"
+### Community 8 - "Local Orchestrator Tests"
 Cohesion: 0.12
 Nodes (22): denied_tool_preserves_queued_follow_up(), last_user_message(), list_sessions_includes_active_session(), MockProvider, multiple_queued_messages_are_processed_fifo_one_turn_at_a_time(), observe_stream_receives_events_in_order(), queued_follow_up_request_ends_with_user_message(), queued_message_is_processed_after_current_turn() (+14 more)
 
-### Community 8 - "Diff View"
+### Community 9 - "Diff View"
 Cohesion: 0.1
 Nodes (25): build_diff_file_view(), default_mode_for_width(), diff_line_style(), DiffFileView, DiffMode, DiffViewState, highlighted_spans(), pad_or_truncate() (+17 more)
 
-### Community 9 - "Context Pipeline"
+### Community 10 - "Context Pipeline"
 Cohesion: 0.1
 Nodes (11): build_default_pipeline(), build_default_pipeline_with_tools(), ContextPipeline, estimate_tokens(), load_history_events(), MockMemoryStore, MockSessionStore, pipeline_runner_executes_stages_in_order() (+3 more)
-
-### Community 10 - "File Memory Store"
-Cohesion: 0.12
-Nodes (12): collect_markdown_files(), expand_local_path(), FileMemoryStore, try_exists(), BrainOrchestrator, ContextProcessor, CredentialVault, HandProvider (+4 more)
 
 ### Community 11 - "Config & Errors"
 Cohesion: 0.08
@@ -87,17 +87,17 @@ Nodes (4): is_remote_url(), policy_action_from_db(), policy_scope_from_db(), Tur
 Cohesion: 0.08
 Nodes (7): MemoryReadInput, MemoryReadTool, MemorySearchInput, MemorySearchScope, MemorySearchTool, MemoryWriteInput, MemoryWriteTool
 
-### Community 15 - "Tool Approval Policies"
-Cohesion: 0.16
-Nodes (18): ApprovalRuleStore, categorize_tool(), glob_match(), normalize_tool_input(), parse_and_match_bash(), persistent_rule_matching_uses_glob_patterns(), PolicyCheck, read_tools_are_auto_approved_and_bash_requires_approval() (+10 more)
-
-### Community 16 - "FTS5 Search Index"
+### Community 15 - "FTS5 Search Index"
 Cohesion: 0.19
 Nodes (10): build_fts_query(), delete_page_entries(), FtsIndex, insert_page(), migrate(), parse_confidence(), parse_page_type(), parse_scope_key() (+2 more)
 
-### Community 17 - "Session Picker View"
+### Community 16 - "Session Picker View"
 Cohesion: 0.18
 Nodes (8): centered_rect(), filtered_sessions(), fuzzy_search_matches_title_and_last_message(), picker_haystack(), picker_selection_wraps_and_clamps(), preview(), render_session_picker(), SessionPickerState
+
+### Community 17 - "Tool Approval Policies"
+Cohesion: 0.22
+Nodes (12): ApprovalRuleStore, glob_match(), parse_and_match_bash(), persistent_rule_matching_uses_glob_patterns(), PolicyCheck, read_tools_are_auto_approved_and_bash_requires_approval(), rule_matches(), rule_visible_to_workspace() (+4 more)
 
 ### Community 18 - "Skill Injector"
 Cohesion: 0.16
@@ -135,45 +135,45 @@ Nodes (6): border_line(), content_line(), render_approval_card(), risk_border_st
 Cohesion: 0.27
 Nodes (6): build_tab_spans(), render_toolbar(), short_session_id(), tab_title(), toolbar_labels_include_status_icons_and_tab_limit(), visible_window()
 
-### Community 27 - "Brain Turn Harness"
-Cohesion: 0.31
-Nodes (10): execute_pending_tool(), find_pending_approval(), find_resolved_pending_tool(), format_tool_output(), PendingToolApproval, process_resolved_approval(), run_brain_turn(), run_brain_turn_with_tools() (+2 more)
-
-### Community 28 - "History Compilation Stage"
+### Community 27 - "History Compilation Stage"
 Cohesion: 0.25
 Nodes (4): capabilities(), history_compiler_formats_user_and_assistant_turns(), history_processor_uses_preloaded_events(), HistoryCompiler
 
-### Community 29 - "TUI Keybindings"
+### Community 28 - "TUI Keybindings"
 Cohesion: 0.2
 Nodes (1): KeyAction
 
-### Community 30 - "Prompt Widget"
+### Community 29 - "Prompt Widget"
 Cohesion: 0.31
 Nodes (2): build_textarea(), PromptWidget
 
-### Community 31 - "Session Store Tests"
+### Community 30 - "Session Store Tests"
 Cohesion: 0.2
 Nodes (0): 
 
-### Community 32 - "Tool Card Widget"
+### Community 31 - "Tool Card Widget"
 Cohesion: 0.42
 Nodes (7): border_line(), content_line(), render_tool_card(), status_label(), status_style(), truncate_to_width(), wrap_text()
 
-### Community 33 - "Memory Preload Stage"
+### Community 32 - "Memory Preload Stage"
 Cohesion: 0.25
 Nodes (9): load_index_file, MAX_INDEX_BYTES constant (25000), MAX_INDEX_LINES constant (200), truncate_index_content, load_preloaded_memory, MemoryRetriever (Stage 5), MEMORY_STAGE_DATA_METADATA_KEY, PreloadedMemoryStageData (+1 more)
 
-### Community 34 - "Memory Store Tests"
+### Community 33 - "Memory Store Tests"
 Cohesion: 0.43
 Nodes (6): create_read_update_and_delete_wiki_pages(), fts_search_finds_ranked_results(), fts_search_handles_hyphenated_queries(), rebuild_search_index_from_files_restores_results(), sample_page(), user_and_workspace_scopes_are_separate()
 
-### Community 35 - "CLI Entry Point"
+### Community 34 - "CLI Entry Point"
 Cohesion: 0.29
 Nodes (4): Cli, Command, doctor_report(), doctor_report_includes_model_and_paths()
 
-### Community 36 - "Instruction Stage"
+### Community 35 - "Instruction Stage"
 Cohesion: 0.38
 Nodes (2): instruction_processor_appends_config_backed_sections(), InstructionProcessor
+
+### Community 36 - "Tool Definition Stage"
+Cohesion: 0.38
+Nodes (2): tool_processor_serializes_tool_schemas(), ToolDefinitionProcessor
 
 ### Community 37 - "Skill Registry"
 Cohesion: 0.48
@@ -256,17 +256,17 @@ Nodes (1): RelevantMemoryPage
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `LocalHandProvider` connect `Local Hand Provider` to `Local Orchestrator`?**
-  _High betweenness centrality (0.016) - this node is a cross-community bridge._
 - **What connects `load_index_file`, `MAX_INDEX_LINES constant (200)`, `MAX_INDEX_BYTES constant (25000)` to the rest of the system?**
   _135 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Core Domain Types` be split into smaller, more focused modules?**
   _Cohesion score 0.02 - nodes in this community are weakly interconnected._
 - **Should `TUI App State` be split into smaller, more focused modules?**
   _Cohesion score 0.09 - nodes in this community are weakly interconnected._
-- **Should `Local Orchestrator` be split into smaller, more focused modules?**
-  _Cohesion score 0.09 - nodes in this community are weakly interconnected._
+- **Should `Skill Markdown Format` be split into smaller, more focused modules?**
+  _Cohesion score 0.08 - nodes in this community are weakly interconnected._
+- **Should `Tool Registry & Router` be split into smaller, more focused modules?**
+  _Cohesion score 0.07 - nodes in this community are weakly interconnected._
 - **Should `Anthropic Provider` be split into smaller, more focused modules?**
   _Cohesion score 0.07 - nodes in this community are weakly interconnected._
-- **Should `Tool Registry & Router` be split into smaller, more focused modules?**
+- **Should `File Memory Store` be split into smaller, more focused modules?**
   _Cohesion score 0.07 - nodes in this community are weakly interconnected._

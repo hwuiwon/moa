@@ -3,10 +3,9 @@
 use async_trait::async_trait;
 use globset::Glob;
 use moa_core::{
-    ApprovalRule, MoaConfig, MoaError, PolicyAction, PolicyScope, Result, RiskLevel, SessionMeta,
+    ApprovalRule, MoaConfig, PolicyAction, PolicyScope, Result, SessionMeta, ToolPolicyInput,
     UserId, WorkspaceId,
 };
-use serde_json::Value;
 
 /// Persistent approval rule storage used by policy-aware tool routing.
 #[async_trait]
@@ -50,12 +49,6 @@ impl ToolPolicyContext {
 pub struct PolicyCheck {
     /// Action to take for this invocation.
     pub action: PolicyAction,
-    /// Risk level displayed to the user when approval is needed.
-    pub risk_level: RiskLevel,
-    /// Concise input summary for approval prompts.
-    pub input_summary: String,
-    /// Normalized input string used for rule matching.
-    pub normalized_input: String,
     /// Rule that matched, if any.
     pub matched_rule: Option<ApprovalRule>,
 }
@@ -81,73 +74,57 @@ impl ToolPolicies {
     /// Evaluates a tool invocation using persistent rules, config defaults, and tool category.
     pub fn check(
         &self,
-        tool: &str,
-        input: &Value,
+        input: &ToolPolicyInput,
         ctx: &ToolPolicyContext,
         rules: &[ApprovalRule],
     ) -> Result<PolicyCheck> {
-        let risk_level = risk_level_for_tool(tool);
-        let normalized_input = normalize_tool_input(tool, input)?;
-        let input_summary = summarize_tool_input(tool, input, &normalized_input);
-
         for rule in rules {
             if !rule_visible_to_workspace(rule, &ctx.workspace_id) {
                 continue;
             }
-            if rule.tool != tool {
+            if rule.tool != input.tool_name {
                 continue;
             }
-            if rule_matches(rule, tool, &normalized_input) {
+            if rule_matches(rule, &input.tool_name, &input.normalized_input) {
                 return Ok(PolicyCheck {
                     action: rule.action.clone(),
-                    risk_level,
-                    input_summary,
-                    normalized_input,
                     matched_rule: Some(rule.clone()),
                 });
             }
         }
 
-        if self.always_deny.iter().any(|candidate| candidate == tool) {
+        if self
+            .always_deny
+            .iter()
+            .any(|candidate| candidate == &input.tool_name)
+        {
             return Ok(PolicyCheck {
                 action: PolicyAction::Deny,
-                risk_level,
-                input_summary,
-                normalized_input,
                 matched_rule: None,
             });
         }
 
-        if self.auto_approve.iter().any(|candidate| candidate == tool) {
+        if self
+            .auto_approve
+            .iter()
+            .any(|candidate| candidate == &input.tool_name)
+        {
             return Ok(PolicyCheck {
                 action: PolicyAction::Allow,
-                risk_level,
-                input_summary,
-                normalized_input,
                 matched_rule: None,
             });
         }
 
-        let action = match categorize_tool(tool) {
-            ToolCategory::Read => PolicyAction::Allow,
-            ToolCategory::Write | ToolCategory::Execute | ToolCategory::Network => {
-                PolicyAction::RequireApproval
-            }
-        };
-
         let action = if self.default_posture.eq_ignore_ascii_case("deny")
-            && matches!(action, PolicyAction::RequireApproval)
+            && matches!(input.default_action, PolicyAction::RequireApproval)
         {
             PolicyAction::Deny
         } else {
-            action
+            input.default_action.clone()
         };
 
         Ok(PolicyCheck {
             action,
-            risk_level,
-            input_summary,
-            normalized_input,
             matched_rule: None,
         })
     }
@@ -222,86 +199,12 @@ fn rule_matches(rule: &ApprovalRule, tool: &str, normalized_input: &str) -> bool
     glob_match(&rule.pattern, normalized_input)
 }
 
-fn normalize_tool_input(tool: &str, input: &Value) -> Result<String> {
-    let value = match tool {
-        "bash" => required_string_field(input, "cmd")?,
-        "file_read" | "file_write" | "memory_read" | "memory_write" => {
-            required_string_field(input, "path")?
-        }
-        "file_search" => required_string_field(input, "pattern")?,
-        "memory_search" | "web_search" => required_string_field(input, "query")?,
-        "web_fetch" => required_string_field(input, "url")?,
-        _ => serde_json::to_string(input)?,
-    };
-
-    Ok(value.trim().to_string())
-}
-
-fn summarize_tool_input(tool: &str, input: &Value, normalized_input: &str) -> String {
-    let summary = match tool {
-        "bash" => format!("Command: {normalized_input}"),
-        "file_read" | "file_write" => format!("Path: {normalized_input}"),
-        "file_search" => format!("Pattern: {normalized_input}"),
-        "memory_read" => format!("Path: {normalized_input}"),
-        "memory_search" => format!("Query: {normalized_input}"),
-        "memory_write" => format!("Path: {normalized_input}"),
-        "web_search" => format!("Query: {normalized_input}"),
-        "web_fetch" => format!("URL: {normalized_input}"),
-        _ => normalized_input.to_string(),
-    };
-
-    if let Some(content) = input.get("content").and_then(Value::as_str)
-        && tool == "memory_write"
-    {
-        return format!("{summary} | {} chars", content.chars().count());
-    }
-
-    summary
-}
-
-fn required_string_field(input: &Value, field: &str) -> Result<String> {
-    input
-        .get(field)
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .ok_or_else(|| {
-            MoaError::ValidationError(format!(
-                "tool input is missing required string field `{field}`"
-            ))
-        })
-}
-
-fn risk_level_for_tool(tool: &str) -> RiskLevel {
-    match categorize_tool(tool) {
-        ToolCategory::Read => RiskLevel::Low,
-        ToolCategory::Write => RiskLevel::Medium,
-        ToolCategory::Execute | ToolCategory::Network => RiskLevel::High,
-    }
-}
-
-fn categorize_tool(tool: &str) -> ToolCategory {
-    match tool {
-        "file_read" | "file_search" | "memory_read" | "memory_search" => ToolCategory::Read,
-        "file_write" | "memory_write" => ToolCategory::Write,
-        "web_search" | "web_fetch" => ToolCategory::Network,
-        "bash" => ToolCategory::Execute,
-        _ => ToolCategory::Execute,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolCategory {
-    Read,
-    Write,
-    Execute,
-    Network,
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{PolicyAction, PolicyScope, SessionMeta, UserId, WorkspaceId};
-    use serde_json::json;
+    use moa_core::{
+        PolicyAction, PolicyScope, RiskLevel, SessionMeta, ToolPolicyInput, UserId, WorkspaceId,
+    };
     use uuid::Uuid;
 
     use super::{ToolPolicies, ToolPolicyContext, parse_and_match_bash, split_shell_chain};
@@ -321,10 +224,30 @@ mod tests {
         let ctx = ToolPolicyContext::from_session(&session());
 
         let read = policies
-            .check("file_read", &json!({ "path": "src/lib.rs" }), &ctx, &[])
+            .check(
+                &ToolPolicyInput {
+                    tool_name: "file_read".to_string(),
+                    normalized_input: "src/lib.rs".to_string(),
+                    input_summary: "Path: src/lib.rs".to_string(),
+                    risk_level: RiskLevel::Low,
+                    default_action: PolicyAction::Allow,
+                },
+                &ctx,
+                &[],
+            )
             .unwrap();
         let bash = policies
-            .check("bash", &json!({ "cmd": "npm test" }), &ctx, &[])
+            .check(
+                &ToolPolicyInput {
+                    tool_name: "bash".to_string(),
+                    normalized_input: "npm test".to_string(),
+                    input_summary: "Command: npm test".to_string(),
+                    risk_level: RiskLevel::High,
+                    default_action: PolicyAction::RequireApproval,
+                },
+                &ctx,
+                &[],
+            )
             .unwrap();
 
         assert_eq!(read.action, PolicyAction::Allow);
@@ -347,7 +270,17 @@ mod tests {
         }];
 
         let check = policies
-            .check("file_write", &json!({ "path": "src/lib.rs" }), &ctx, &rules)
+            .check(
+                &ToolPolicyInput {
+                    tool_name: "file_write".to_string(),
+                    normalized_input: "src/lib.rs".to_string(),
+                    input_summary: "Path: src/lib.rs".to_string(),
+                    risk_level: RiskLevel::Medium,
+                    default_action: PolicyAction::RequireApproval,
+                },
+                &ctx,
+                &rules,
+            )
             .unwrap();
 
         assert_eq!(check.action, PolicyAction::Allow);
