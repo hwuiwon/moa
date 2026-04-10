@@ -19,8 +19,8 @@ pub use error::{MoaError, Result};
 pub use events::Event;
 pub use telemetry::{TelemetryGuard, init_observability};
 pub use traits::{
-    BrainOrchestrator, ContextProcessor, CredentialVault, HandProvider, LLMProvider, MemoryStore,
-    PlatformAdapter, SessionStore,
+    BrainOrchestrator, BuiltInTool, ContextProcessor, CredentialVault, HandProvider, LLMProvider,
+    MemoryStore, PlatformAdapter, SessionStore, ToolContext,
 };
 pub use types::{
     ActionButton, ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt,
@@ -33,6 +33,7 @@ pub use types::{
     PolicyAction, PolicyScope, ProcessorOutput, RiskLevel, RuntimeEvent, SandboxTier, SequenceNum,
     SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
     SessionSummary, SkillMetadata, StartSessionRequest, StopReason, TokenPricing, ToolCallFormat,
-    ToolCardStatus, ToolContent, ToolInvocation, ToolOutput, ToolPolicyInput, ToolStatus,
-    ToolUpdate, UserId, UserMessage, WakeContext, WikiPage, WorkingContext, WorkspaceId,
+    ToolCardStatus, ToolContent, ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolInvocation,
+    ToolOutput, ToolPolicyInput, ToolPolicySpec, ToolStatus, ToolUpdate, UserId, UserMessage,
+    WakeContext, WikiPage, WorkingContext, WorkspaceId, read_tool_policy, write_tool_policy,
 };

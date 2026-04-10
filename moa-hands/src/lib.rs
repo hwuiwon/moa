@@ -15,6 +15,8 @@ pub use daytona::DaytonaHandProvider;
 pub use e2b::E2BHandProvider;
 pub use local::LocalHandProvider;
 pub use mcp::{MCPClient, McpDiscoveredTool};
-pub use router::{
-    BuiltInTool, ToolContext, ToolDefinition, ToolExecution, ToolRegistry, ToolRouter,
+pub use moa_core::{
+    BuiltInTool, ToolContext, ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolPolicySpec,
+    read_tool_policy, write_tool_policy,
 };
+pub use router::{ToolExecution, ToolRegistry, ToolRouter};

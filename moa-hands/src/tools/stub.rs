@@ -1,9 +1,10 @@
 //! Placeholder built-in tools that reserve names for future implementations.
 
 use async_trait::async_trait;
-use moa_core::{MoaError, PolicyAction, Result, RiskLevel, ToolOutput};
-
-use crate::router::{BuiltInTool, ToolContext, ToolDiffStrategy, ToolInputShape, ToolPolicySpec};
+use moa_core::{
+    BuiltInTool, MoaError, PolicyAction, Result, RiskLevel, ToolContext, ToolDiffStrategy,
+    ToolInputShape, ToolOutput, ToolPolicySpec,
+};
 
 /// Stub built-in tool that reports the feature is not implemented yet.
 pub struct StubTool {
