@@ -1515,6 +1515,23 @@ pub enum RuntimeEvent {
     Error(String),
 }
 
+impl RuntimeEvent {
+    /// Returns the stable SSE event name for this runtime update.
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::AssistantStarted => "assistant_started",
+            Self::AssistantDelta(_) => "assistant_delta",
+            Self::AssistantFinished { .. } => "assistant_finished",
+            Self::ToolUpdate(_) => "tool_update",
+            Self::ApprovalRequested(_) => "approval_requested",
+            Self::UsageUpdated { .. } => "usage_updated",
+            Self::Notice(_) => "notice",
+            Self::TurnCompleted => "turn_completed",
+            Self::Error(_) => "error",
+        }
+    }
+}
+
 /// Persistent approval rule action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2264,6 +2281,26 @@ mod tests {
         let decoded: ToolOutput = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, output);
+    }
+
+    #[test]
+    fn runtime_event_type_uses_stable_sse_names() {
+        assert_eq!(
+            RuntimeEvent::AssistantStarted.event_type(),
+            "assistant_started"
+        );
+        assert_eq!(
+            RuntimeEvent::ToolUpdate(ToolUpdate {
+                tool_id: Uuid::new_v4(),
+                tool_name: "bash".to_string(),
+                status: ToolCardStatus::Pending,
+                summary: "pending".to_string(),
+                detail: None,
+            })
+            .event_type(),
+            "tool_update"
+        );
+        assert_eq!(RuntimeEvent::TurnCompleted.event_type(), "turn_completed");
     }
 
     #[test]

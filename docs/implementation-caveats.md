@@ -142,31 +142,6 @@ The Temporal integration works for the current prototype but is not yet producti
 
 ---
 
-## Single-process runtime boundaries
-
-Several caveats share a root cause: the current runtime assumes a single local process with in-memory broadcast channels. Remote observers, multi-client daemons, and quiet logging are all consequences of that boundary.
-
-### Turn execution has one streamed source of truth
-
-- The shared streamed turn engine lives in `moa-brain/src/harness.rs`, with lower-level stream helpers in `moa-brain/src/turn.rs`. `run_brain_turn_with_tools()` is a buffered wrapper around that engine.
-- `LocalOrchestrator` calls the same streamed engine for live sessions. `BrainOrchestrator` exposes `observe_runtime()`, and the local TUI is only a stream consumer. `moa exec` and the local TUI both observe the same runtime event stream.
-- `TemporalOrchestrator::observe_runtime()` still returns `None`; cloud/runtime observation needs an explicit transport such as SSE or WebSocket. Remote observers need a bridging layer if they cannot subscribe to an in-process broadcast channel.
-
-### The local daemon owns one mutable runtime, not one per client
-
-- `moa-cli/src/daemon.rs` runs a single `ChatRuntime` behind a Unix socket and exposes control-plane commands plus per-session observation streams.
-- TUI clients can attach to persisted sessions through that daemon, and sessions continue running after the TUI exits.
-- Workspace/model changes mutate shared daemon runtime state, so they are global to the daemon process rather than scoped per connected client.
-- The daemon starts with one default active session because `ChatRuntime` always owns a current session. A truly idle daemon with zero sessions until first use would require lazy session creation.
-
-### Default terminal logging is quiet to avoid corrupting the TUI
-
-- `moa-core/src/telemetry.rs` initializes the human-readable tracing layer at `WARN` by default while still wiring OTLP export when configured.
-- Interactive `moa`, `moa resume`, and `moa attach` no longer print routine runtime logs into the terminal before the TUI renders.
-- Rich local debug logging now requires an explicit code or config change. If we want operator-friendly local debug mode later, it should be an explicit CLI/config switch.
-
----
-
 ## Architectural drift risks
 
 These caveats are not bugs today but mark places where a future change could silently reintroduce the coupling or duplication that was just cleaned up.

@@ -1,5 +1,6 @@
 //! CLI entry point for MOA subcommands, daemon management, and the TUI.
 
+mod api;
 mod daemon;
 mod exec;
 
@@ -11,7 +12,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use moa_core::{
     BranchManager, DatabaseBackend, MemoryPath, MemoryScope, MemoryStore, MoaConfig, SessionFilter,
-    SessionId, SessionStatus, SessionStore, WorkspaceId, init_observability,
+    SessionId, SessionStatus, SessionStore, TelemetryConfig, WorkspaceId, default_log_path,
+    init_observability,
 };
 use moa_memory::FileMemoryStore;
 use moa_session::{NeonBranchManager, SessionDatabase, create_session_store};
@@ -24,6 +26,14 @@ use uuid::Uuid;
 #[derive(Debug, Parser)]
 #[command(name = "moa", about = "MOA local terminal agent", version)]
 struct Cli {
+    /// Enable debug logging to a file instead of the terminal.
+    #[arg(long)]
+    debug: bool,
+
+    /// Override the debug log file path.
+    #[arg(long, value_name = "PATH")]
+    log_file: Option<PathBuf>,
+
     /// Launch the TUI with a prompt already submitted.
     #[arg(value_name = "PROMPT")]
     prompt: Option<String>,
@@ -177,7 +187,13 @@ enum CheckpointCommand {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = MoaConfig::load()?;
-    let _telemetry = init_observability(&config)?;
+    let _telemetry = init_observability(
+        &config,
+        &TelemetryConfig {
+            debug: cli.debug,
+            log_file: cli.log_file.clone(),
+        },
+    )?;
 
     match cli.command {
         None => {
@@ -263,7 +279,8 @@ async fn main() -> Result<()> {
             println!("{}", version_text());
         }
         Some(CommandKind::Doctor) => {
-            print!("{}", doctor_report(&config).await?);
+            let log_path = cli.log_file.clone().unwrap_or_else(default_log_path);
+            print!("{}", doctor_report(&config, &log_path).await?);
         }
         Some(CommandKind::Daemon { command }) => match command {
             DaemonCommand::Start => daemon::start_daemon(&config).await?,
@@ -385,7 +402,7 @@ async fn memory_show_report(config: &MoaConfig, path: &str) -> Result<String> {
     Ok(format!("---\n{}---\n{}", rendered, page.content))
 }
 
-async fn doctor_report(config: &MoaConfig) -> Result<String> {
+async fn doctor_report(config: &MoaConfig, log_path: &Path) -> Result<String> {
     let mut lines = vec![
         "MOA doctor".to_string(),
         format!("provider: {}", config.general.default_provider),
@@ -410,6 +427,15 @@ async fn doctor_report(config: &MoaConfig) -> Result<String> {
         format!("session_db: {}", session_db_status(config).await),
         format!("cloud_sync: {}", cloud_sync_status(config).await),
         format!("memory_index: {}", memory_index_status(config).await),
+        format!(
+            "log_file: {}{}",
+            log_path.display(),
+            if cfg!(debug_assertions) || std::env::var_os("RUST_LOG").is_some() {
+                " (set via --debug/--log-file or RUST_LOG)"
+            } else {
+                " (--debug to enable)"
+            }
+        ),
     ];
 
     if let Ok(info) = daemon::daemon_info(config).await {
@@ -792,8 +818,12 @@ fn format_checkpoint_age(created_at: chrono::DateTime<chrono::Utc>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_config_update, parse_bool, parse_database_backend, version_text};
+    use super::{
+        apply_config_update, default_log_path, doctor_report, parse_bool, parse_database_backend,
+        version_text,
+    };
     use moa_core::{DatabaseBackend, MoaConfig};
+    use tempfile::tempdir;
 
     #[test]
     fn version_command_uses_package_version() {
@@ -827,5 +857,48 @@ mod tests {
             parse_database_backend("postgres").expect("backend"),
             DatabaseBackend::Postgres
         );
+    }
+
+    #[tokio::test]
+    async fn doctor_report_includes_log_file_path() {
+        let dir = tempdir().expect("temp dir");
+        let base = dir.keep();
+        let mut config = MoaConfig::default();
+        config.database.url = base.join("sessions.db").display().to_string();
+        config.local.memory_dir = base.join("memory").display().to_string();
+        config.local.sandbox_dir = base.join("sandbox").display().to_string();
+        config.daemon.socket_path = base.join("daemon.sock").display().to_string();
+        config.daemon.pid_file = base.join("daemon.pid").display().to_string();
+        config.daemon.log_file = base.join("daemon.log").display().to_string();
+        config.daemon.auto_connect = false;
+
+        let report = doctor_report(&config, &default_log_path())
+            .await
+            .expect("doctor report");
+        assert!(report.contains("log_file: "));
+        assert!(
+            report.contains("--debug to enable")
+                || report.contains("set via --debug/--log-file or RUST_LOG")
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_report_uses_custom_log_file_path() {
+        let dir = tempdir().expect("temp dir");
+        let base = dir.keep();
+        let mut config = MoaConfig::default();
+        config.database.url = base.join("sessions.db").display().to_string();
+        config.local.memory_dir = base.join("memory").display().to_string();
+        config.local.sandbox_dir = base.join("sandbox").display().to_string();
+        config.daemon.socket_path = base.join("daemon.sock").display().to_string();
+        config.daemon.pid_file = base.join("daemon.pid").display().to_string();
+        config.daemon.log_file = base.join("daemon.log").display().to_string();
+        config.daemon.auto_connect = false;
+
+        let custom_log = base.join("custom.log");
+        let report = doctor_report(&config, &custom_log)
+            .await
+            .expect("doctor report");
+        assert!(report.contains(&format!("log_file: {}", custom_log.display())));
     }
 }

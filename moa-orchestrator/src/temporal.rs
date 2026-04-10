@@ -13,9 +13,9 @@ use moa_brain::{
 };
 use moa_core::{
     BrainOrchestrator, CronHandle, CronSpec, Event, EventRange, EventRecord, EventStream,
-    LLMProvider, MoaConfig, MoaError, ObserveLevel, Result as MoaResult, SessionFilter,
-    SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore,
-    SessionSummary, StartSessionRequest, UserMessage,
+    LLMProvider, MoaConfig, MoaError, ObserveLevel, Result as MoaResult, RuntimeEvent,
+    SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
+    SessionStore, SessionSummary, StartSessionRequest, ToolCardStatus, ToolUpdate, UserMessage,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
@@ -886,13 +886,58 @@ impl BrainOrchestrator for TemporalOrchestrator {
         Ok(EventStream::from_history_and_broadcast(history, receiver))
     }
 
-    /// Returns no live runtime stream for Temporal-backed sessions yet.
+    /// Returns a polling runtime stream synthesized from persisted session events.
     async fn observe_runtime(
         &self,
-        _session_id: SessionId,
-    ) -> MoaResult<Option<broadcast::Receiver<moa_core::RuntimeEvent>>> {
-        // TODO: Expose Temporal runtime observation through SSE or WebSocket transport.
-        Ok(None)
+        session_id: SessionId,
+    ) -> MoaResult<Option<broadcast::Receiver<RuntimeEvent>>> {
+        self.session_store.get_session(session_id.clone()).await?;
+        let (tx, rx) = broadcast::channel(256);
+        let session_store = self.session_store.clone();
+        tokio::spawn(async move {
+            let mut last_seq = 0_u64;
+            loop {
+                tokio::time::sleep(DEFAULT_OBSERVE_POLL_INTERVAL).await;
+                let events = session_store
+                    .get_events(
+                        session_id.clone(),
+                        EventRange {
+                            from_seq: Some(last_seq + 1),
+                            ..EventRange::all()
+                        },
+                    )
+                    .await;
+                let new_events = match events {
+                    Ok(events) => events,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "Temporal runtime polling failed");
+                        return;
+                    }
+                };
+
+                for record in &new_events {
+                    last_seq = record.sequence_num;
+                    if let Some(event) = event_to_runtime_event(record)
+                        && tx.send(event).is_err()
+                    {
+                        return;
+                    }
+                }
+
+                match session_store.get_session(session_id.clone()).await {
+                    Ok(session) if session_is_terminal(&session.status) => {
+                        let _ = tx.send(RuntimeEvent::TurnCompleted);
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(error = %error, "Temporal runtime session lookup failed");
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(Some(rx))
     }
 
     /// Registers a Temporal-cloud cron hook using the existing local scheduler wrapper.
@@ -989,6 +1034,65 @@ fn activity_options() -> ActivityOptions {
         }),
         ..ActivityOptions::default()
     }
+}
+
+fn event_to_runtime_event(record: &EventRecord) -> Option<RuntimeEvent> {
+    match &record.event {
+        Event::BrainResponse { text, .. } => {
+            Some(RuntimeEvent::AssistantFinished { text: text.clone() })
+        }
+        Event::ApprovalRequested {
+            prompt: Some(prompt),
+            ..
+        } => Some(RuntimeEvent::ApprovalRequested(prompt.clone())),
+        Event::ToolCall {
+            tool_id, tool_name, ..
+        } => Some(RuntimeEvent::ToolUpdate(ToolUpdate {
+            tool_id: *tool_id,
+            tool_name: tool_name.clone(),
+            status: ToolCardStatus::Pending,
+            summary: format!("Queued {}", tool_name),
+            detail: None,
+        })),
+        Event::ToolResult {
+            tool_id,
+            success,
+            output,
+            ..
+        } => Some(RuntimeEvent::ToolUpdate(ToolUpdate {
+            tool_id: *tool_id,
+            tool_name: "tool".to_string(),
+            status: if *success {
+                ToolCardStatus::Succeeded
+            } else {
+                ToolCardStatus::Failed
+            },
+            summary: output
+                .to_text()
+                .lines()
+                .next()
+                .unwrap_or("tool completed")
+                .to_string(),
+            detail: None,
+        })),
+        Event::ToolError { tool_id, error, .. } => Some(RuntimeEvent::ToolUpdate(ToolUpdate {
+            tool_id: *tool_id,
+            tool_name: "tool".to_string(),
+            status: ToolCardStatus::Failed,
+            summary: "Tool failed".to_string(),
+            detail: Some(error.clone()),
+        })),
+        Event::Warning { message } => Some(RuntimeEvent::Notice(message.clone())),
+        Event::Error { message, .. } => Some(RuntimeEvent::Error(message.clone())),
+        _ => None,
+    }
+}
+
+fn session_is_terminal(status: &SessionStatus) -> bool {
+    matches!(
+        status,
+        SessionStatus::Completed | SessionStatus::Cancelled | SessionStatus::Failed
+    )
 }
 
 fn brain_turn_activity_options() -> ActivityOptions {
