@@ -1586,6 +1586,7 @@ impl SessionViewState {
                     output,
                     success,
                     duration_ms,
+                    ..
                 } => {
                     view.upsert_tool_card(ToolUpdate {
                         tool_id: *tool_id,
@@ -2303,6 +2304,7 @@ mod tests {
                     first_session_id.clone(),
                     Event::ToolCall {
                         tool_id: request_id,
+                        provider_tool_use_id: Some("toolu_waiting".to_string()),
                         tool_name: "bash".to_string(),
                         input: serde_json::json!({ "cmd": "pwd" }),
                         hand_id: None,

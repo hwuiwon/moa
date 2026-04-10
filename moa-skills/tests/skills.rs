@@ -145,6 +145,7 @@ fn tool_rich_events() -> Vec<EventRecord> {
             } else {
                 Event::ToolCall {
                     tool_id: Uuid::new_v4(),
+                    provider_tool_use_id: None,
                     tool_name: if index % 2 == 0 {
                         "bash".to_string()
                     } else {

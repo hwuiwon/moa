@@ -76,6 +76,9 @@ pub enum Event {
     ToolCall {
         /// Unique tool call identifier.
         tool_id: Uuid,
+        /// Provider-specific tool-use identifier, when available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_tool_use_id: Option<String>,
         /// Tool name.
         tool_name: String,
         /// Full tool input.
@@ -87,6 +90,9 @@ pub enum Event {
     ToolResult {
         /// Matching tool call identifier.
         tool_id: Uuid,
+        /// Provider-specific tool-use identifier, when available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_tool_use_id: Option<String>,
         /// Full tool output.
         output: ToolOutput,
         /// Whether execution succeeded.
@@ -333,6 +339,7 @@ mod tests {
             },
             Event::ToolCall {
                 tool_id: Uuid::new_v4(),
+                provider_tool_use_id: Some("toolu_123".into()),
                 tool_name: "bash".into(),
                 input: json!({}),
                 hand_id: None,
@@ -392,6 +399,51 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serialize approval request");
         let decoded: Event = serde_json::from_str(&json).expect("deserialize approval request");
         assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn tool_result_event_deserializes_without_provider_tool_use_id() {
+        let tool_id = Uuid::new_v4();
+        let json = serde_json::json!({
+            "type": "ToolResult",
+            "data": {
+                "tool_id": tool_id,
+                "output": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "ok"
+                        }
+                    ],
+                    "is_error": false,
+                    "structured": null,
+                    "duration": {
+                        "secs": 0,
+                        "nanos": 0
+                    }
+                },
+                "success": true,
+                "duration_ms": 5
+            }
+        });
+
+        let decoded: Event = serde_json::from_value(json).expect("deserialize legacy tool result");
+        match decoded {
+            Event::ToolResult {
+                tool_id: decoded_id,
+                provider_tool_use_id,
+                output,
+                success,
+                duration_ms,
+            } => {
+                assert_eq!(decoded_id, tool_id);
+                assert_eq!(provider_tool_use_id, None);
+                assert_eq!(output.to_text(), "ok");
+                assert!(success);
+                assert_eq!(duration_ms, 5);
+            }
+            other => panic!("expected tool result event, got {other:?}"),
+        }
     }
 
     #[test]

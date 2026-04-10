@@ -8,7 +8,7 @@ use futures_util::{Stream, StreamExt, pin_mut};
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
     LLMProvider, MessageRole, MoaConfig, MoaError, ModelCapabilities, Result, StopReason,
-    TokenPricing, ToolCallFormat, ToolInvocation,
+    TokenPricing, ToolCallFormat, ToolContent, ToolInvocation,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::Deserialize;
@@ -238,22 +238,122 @@ fn build_request_body(
     }
 
     if !request.tools.is_empty() {
-        body.insert("tools".to_string(), Value::Array(request.tools.clone()));
+        body.insert(
+            "tools".to_string(),
+            Value::Array(
+                request
+                    .tools
+                    .iter()
+                    .map(anthropic_tool_from_schema)
+                    .collect::<Vec<_>>(),
+            ),
+        );
     }
 
     Ok(Value::Object(body))
 }
 
 fn anthropic_message(message: &ContextMessage) -> Value {
+    if let Some(invocation) = message.tool_invocation.as_ref() {
+        return json!({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": invocation
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| "unknown_tool_use".to_string()),
+                "name": invocation.name,
+                "input": invocation.input,
+            }]
+        });
+    }
+
+    if message.role == MessageRole::Tool {
+        let content = if let Some(blocks) = &message.content_blocks {
+            anthropic_content_blocks(blocks)
+        } else {
+            json!(message.content)
+        };
+
+        return json!({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": message
+                    .tool_use_id
+                    .clone()
+                    .unwrap_or_else(|| "unknown_tool_use".to_string()),
+                "content": content,
+            }]
+        });
+    }
+
     let role = match message.role {
-        MessageRole::User | MessageRole::Tool => "user",
+        MessageRole::User => "user",
         MessageRole::Assistant => "assistant",
         MessageRole::System => unreachable!("system messages are handled separately"),
+        MessageRole::Tool => unreachable!("tool messages are handled above"),
     };
 
     json!({
         "role": role,
         "content": message.content,
+    })
+}
+
+fn anthropic_content_blocks(blocks: &[ToolContent]) -> Value {
+    let mut rendered = Vec::with_capacity(blocks.len() + 2);
+    rendered.push(json!({
+        "type": "text",
+        "text": "<untrusted_tool_output>",
+    }));
+
+    for block in blocks {
+        match block {
+            ToolContent::Text { text } => {
+                rendered.push(json!({
+                    "type": "text",
+                    "text": text,
+                }));
+            }
+            ToolContent::Json { data } => {
+                rendered.push(json!({
+                    "type": "text",
+                    "text": data.to_string(),
+                }));
+            }
+        }
+    }
+
+    rendered.push(json!({
+        "type": "text",
+        "text": "</untrusted_tool_output>",
+    }));
+
+    Value::Array(rendered)
+}
+
+fn anthropic_tool_from_schema(schema: &Value) -> Value {
+    if let Some(function) = schema.get("function") {
+        return json!({
+            "name": function.get("name").cloned().unwrap_or(Value::Null),
+            "description": function.get("description").cloned().unwrap_or(Value::Null),
+            "input_schema": function
+                .get("parameters")
+                .cloned()
+                .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+        });
+    }
+
+    json!({
+        "name": schema.get("name").cloned().unwrap_or(Value::Null),
+        "description": schema.get("description").cloned().unwrap_or(Value::Null),
+        "input_schema": schema
+            .get("parameters")
+            .or_else(|| schema.get("input_schema"))
+            .cloned()
+            .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
     })
 }
 
@@ -654,13 +754,16 @@ mod tests {
 
     use eventsource_stream::Eventsource;
     use futures_util::stream;
-    use moa_core::{CompletionContent, CompletionRequest, ContextMessage, LLMProvider, StopReason};
+    use moa_core::{
+        CompletionContent, CompletionRequest, ContextMessage, LLMProvider, StopReason, ToolContent,
+    };
     use serde_json::json;
     use tokio::sync::mpsc;
 
     use super::{
-        AnthropicProvider, MODEL_OPUS_4_6, MODEL_SONNET_4_6, build_request_body,
-        canonical_model_id, capabilities_for_model, consume_sse_events,
+        AnthropicProvider, MODEL_OPUS_4_6, MODEL_SONNET_4_6, anthropic_content_blocks,
+        anthropic_message, anthropic_tool_from_schema, build_request_body, canonical_model_id,
+        capabilities_for_model, consume_sse_events,
     };
 
     #[test]
@@ -702,7 +805,78 @@ mod tests {
         assert_eq!(body["messages"][0]["content"], "Hello");
         assert_eq!(body["messages"][1]["role"], "assistant");
         assert_eq!(body["tools"][0]["name"], "bash");
+        assert_eq!(body["tools"][0]["input_schema"]["required"], json!(["cmd"]));
         assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn anthropic_content_blocks_render_text_and_json_as_text_blocks() {
+        let blocks = anthropic_content_blocks(&[
+            ToolContent::Text {
+                text: "summary".to_string(),
+            },
+            ToolContent::Json {
+                data: json!({"path": "notes/today.md"}),
+            },
+        ]);
+
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "<untrusted_tool_output>");
+        assert_eq!(blocks[1]["text"], "summary");
+        assert_eq!(blocks[2]["text"], "{\"path\":\"notes/today.md\"}");
+        assert_eq!(blocks[3]["text"], "</untrusted_tool_output>");
+    }
+
+    #[test]
+    fn anthropic_message_wraps_tool_results_with_tool_use_id() {
+        let message = anthropic_message(&ContextMessage::tool_result(
+            "toolu_123",
+            "fallback",
+            Some(vec![ToolContent::Text {
+                text: "hello".to_string(),
+            }]),
+        ));
+
+        assert_eq!(message["role"], "user");
+        assert_eq!(message["content"][0]["type"], "tool_result");
+        assert_eq!(message["content"][0]["tool_use_id"], "toolu_123");
+        assert_eq!(message["content"][0]["content"][1]["text"], "hello");
+    }
+
+    #[test]
+    fn anthropic_message_wraps_assistant_tool_calls_as_tool_use_blocks() {
+        let message = anthropic_message(&ContextMessage::assistant_tool_call(
+            moa_core::ToolInvocation {
+                id: Some("toolu_234".to_string()),
+                name: "file_write".to_string(),
+                input: json!({ "path": "live/anthropic.txt" }),
+            },
+            "<tool_call name=\"file_write\">{\"path\":\"live/anthropic.txt\"}</tool_call>",
+        ));
+
+        assert_eq!(message["role"], "assistant");
+        assert_eq!(message["content"][0]["type"], "tool_use");
+        assert_eq!(message["content"][0]["id"], "toolu_234");
+        assert_eq!(message["content"][0]["name"], "file_write");
+        assert_eq!(message["content"][0]["input"]["path"], "live/anthropic.txt");
+    }
+
+    #[test]
+    fn anthropic_tool_from_schema_moves_parameters_into_input_schema() {
+        let tool = anthropic_tool_from_schema(&json!({
+            "name": "memory_search",
+            "description": "Search memory",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                },
+                "required": ["query"]
+            }
+        }));
+
+        assert_eq!(tool["name"], "memory_search");
+        assert_eq!(tool["input_schema"]["required"], json!(["query"]));
     }
 
     #[tokio::test]

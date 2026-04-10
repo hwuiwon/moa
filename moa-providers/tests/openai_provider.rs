@@ -5,7 +5,9 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use moa_core::{CompletionContent, CompletionRequest, ContextMessage, LLMProvider, StopReason};
+use moa_core::{
+    CompletionContent, CompletionRequest, ContextMessage, LLMProvider, StopReason, ToolContent,
+};
 use moa_providers::{OpenAIProvider, OpenRouterProvider};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -30,7 +32,14 @@ async fn openai_provider_translates_requests_to_responses_api() {
         assert!(request.contains("\"content\":\"hello\""));
         assert!(request.contains("\"type\":\"function\""));
         assert!(request.contains("\"name\":\"file_read\""));
-        assert!(request.contains("\"strict\":false"));
+        assert!(request.contains("\"strict\":true"));
+        assert!(
+            request.contains("\"required\":[\"path\",\"encoding\"]")
+                || request.contains("\"required\":[\"encoding\",\"path\"]")
+        );
+        assert!(request.contains("\"encoding\":{\"type\":[\"string\",\"null\"]}"));
+        assert!(request.contains("\"additionalProperties\":false"));
+        assert!(!request.contains("\"minLength\""));
         assert!(
             request.contains("\"tool_choice\":\"auto\"")
                 || request.contains("\"tool_choice\":{\"mode\":\"auto\"")
@@ -60,11 +69,126 @@ async fn openai_provider_translates_requests_to_responses_api() {
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" }
+                    "path": { "type": "string", "minLength": 1 },
+                    "encoding": { "type": "string" }
                 },
                 "required": ["path"]
             }
         })],
+        max_output_tokens: Some(128),
+        temperature: Some(0.2),
+        metadata: Default::default(),
+    };
+
+    let response = provider
+        .complete(request)
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(response.text, "ok");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn openai_provider_serializes_tool_result_messages_as_function_call_output() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = vec![0_u8; 8192];
+        let read = socket.read(&mut buffer).await.unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+
+        assert!(request.contains("\"type\":\"function_call_output\""));
+        assert!(request.contains("\"call_id\":\"fc_123\""));
+        assert!(request.contains("\"text\":\"summary\""));
+        assert!(request.contains("\"text\":\"{\\\"path\\\":\\\"notes/today.md\\\"}\""));
+
+        socket
+            .write_all(simple_text_stream("ok", MODEL, 8, 2, 1).as_bytes())
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+    });
+
+    let provider = OpenAIProvider::new("test-key", MODEL)
+        .unwrap()
+        .with_api_base(format!("http://{address}/v1"))
+        .unwrap()
+        .with_max_retries(0);
+    let request = CompletionRequest {
+        model: None,
+        messages: vec![ContextMessage::tool_result(
+            "fc_123",
+            "fallback",
+            Some(vec![
+                ToolContent::Text {
+                    text: "summary".to_string(),
+                },
+                ToolContent::Json {
+                    data: serde_json::json!({ "path": "notes/today.md" }),
+                },
+            ]),
+        )],
+        tools: Vec::new(),
+        max_output_tokens: Some(128),
+        temperature: Some(0.2),
+        metadata: Default::default(),
+    };
+
+    let response = provider
+        .complete(request)
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(response.text, "ok");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn openai_provider_serializes_assistant_tool_calls_as_function_call_items() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = vec![0_u8; 8192];
+        let read = socket.read(&mut buffer).await.unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+
+        assert!(request.contains("\"type\":\"function_call\""));
+        assert!(request.contains("\"call_id\":\"fc_history_1\""));
+        assert!(request.contains("\"name\":\"file_write\""));
+        assert!(request.contains("\"arguments\":\"{\\\"path\\\":\\\"live/openai.txt\\\"}\""));
+
+        socket
+            .write_all(simple_text_stream("ok", MODEL, 8, 2, 1).as_bytes())
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+    });
+
+    let provider = OpenAIProvider::new("test-key", MODEL)
+        .unwrap()
+        .with_api_base(format!("http://{address}/v1"))
+        .unwrap()
+        .with_max_retries(0);
+    let request = CompletionRequest {
+        model: None,
+        messages: vec![ContextMessage::assistant_tool_call(
+            moa_core::ToolInvocation {
+                id: Some("fc_history_1".to_string()),
+                name: "file_write".to_string(),
+                input: serde_json::json!({ "path": "live/openai.txt" }),
+            },
+            "<tool_call name=\"file_write\">{\"path\":\"live/openai.txt\"}</tool_call>",
+        )],
+        tools: Vec::new(),
         max_output_tokens: Some(128),
         temperature: Some(0.2),
         metadata: Default::default(),

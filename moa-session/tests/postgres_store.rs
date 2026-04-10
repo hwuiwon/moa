@@ -122,6 +122,7 @@ async fn postgres_event_payloads_round_trip_as_jsonb() {
             session_id,
             Event::ToolResult {
                 tool_id,
+                provider_tool_use_id: Some("toolu_jsonb".to_string()),
                 output: output.clone(),
                 success: true,
                 duration_ms: 25,
