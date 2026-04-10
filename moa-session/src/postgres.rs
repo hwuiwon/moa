@@ -10,7 +10,7 @@ use moa_core::{
     SessionSummary, WakeContext, WorkspaceId,
 };
 use moa_security::ApprovalRuleStore;
-use sqlx::{Executor, PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -26,6 +26,7 @@ use crate::schema_postgres;
 #[derive(Clone)]
 pub struct PostgresSessionStore {
     pool: PgPool,
+    schema_name: Option<String>,
 }
 
 impl PostgresSessionStore {
@@ -37,7 +38,18 @@ impl PostgresSessionStore {
     /// Creates a session store from config using the configured PostgreSQL pool settings.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
         Self::new_with_options(
-            &config.database.url,
+            config.database.runtime_url(),
+            config.database.pool_min,
+            config.database.pool_max,
+            config.database.connect_timeout_secs,
+        )
+        .await
+    }
+
+    /// Creates a session store from config using the direct/admin PostgreSQL URL when present.
+    pub async fn from_admin_config(config: &MoaConfig) -> Result<Self> {
+        Self::new_with_options(
+            config.database.admin_url(),
             config.database.pool_min,
             config.database.pool_max,
             config.database.connect_timeout_secs,
@@ -57,10 +69,11 @@ impl PostgresSessionStore {
     /// Reconstructs the session state needed to resume a brain.
     pub async fn wake(&self, session_id: moa_core::SessionId) -> Result<WakeContext> {
         let session = self.get_session(session_id.clone()).await?;
+        let events = self.table_name("events");
 
         let last_checkpoint = {
             let query = format!(
-                "SELECT {EVENT_COLUMNS} FROM events \
+                "SELECT {EVENT_COLUMNS} FROM {events} \
                  WHERE session_id = $1 AND event_type = 'Checkpoint' \
                  ORDER BY sequence_num DESC LIMIT 1"
             );
@@ -138,17 +151,14 @@ impl PostgresSessionStore {
         connect_timeout_secs: u64,
         schema_name: Option<&str>,
     ) -> Result<Self> {
-        let pool = Self::connect_with_retry(
-            database_url,
-            pool_min,
-            pool_max,
-            connect_timeout_secs,
-            3,
-            schema_name,
-        )
-        .await?;
-        schema_postgres::migrate(&pool).await?;
-        Ok(Self { pool })
+        let pool =
+            Self::connect_with_retry(database_url, pool_min, pool_max, connect_timeout_secs, 3)
+                .await?;
+        schema_postgres::migrate(&pool, schema_name).await?;
+        Ok(Self {
+            pool,
+            schema_name: schema_name.map(ToOwned::to_owned),
+        })
     }
 
     async fn connect_with_retry(
@@ -157,28 +167,12 @@ impl PostgresSessionStore {
         pool_max: u32,
         connect_timeout_secs: u64,
         max_retries: u32,
-        schema_name: Option<&str>,
     ) -> Result<PgPool> {
-        let search_path_statement =
-            schema_name.map(|schema| format!("SET search_path TO {}", quote_identifier(schema)));
-
         for attempt in 1..=max_retries {
             let options = PgPoolOptions::new()
                 .min_connections(pool_min)
                 .max_connections(pool_max)
                 .acquire_timeout(Duration::from_secs(connect_timeout_secs));
-            let options = if let Some(statement) = search_path_statement.clone() {
-                options.after_connect(move |connection, _meta| {
-                    let statement = statement.clone();
-                    Box::pin(async move {
-                        connection.execute(statement.as_str()).await?;
-                        Ok(())
-                    })
-                })
-            } else {
-                options
-            };
-
             match options.connect(database_url).await {
                 Ok(pool) => return Ok(pool),
                 Err(error) if attempt < max_retries => {
@@ -223,16 +217,24 @@ impl PostgresSessionStore {
         Ok(())
     }
 
+    fn table_name(&self, table_name: &str) -> String {
+        match &self.schema_name {
+            Some(schema_name) => qualified_name(schema_name, table_name),
+            None => table_name.to_string(),
+        }
+    }
+
     /// Lists approval rules visible to the provided workspace.
     pub async fn list_approval_rules(
         &self,
         workspace_id: &WorkspaceId,
     ) -> Result<Vec<ApprovalRule>> {
-        let rows = sqlx::query(
+        let approval_rules = self.table_name("approval_rules");
+        let rows = sqlx::query(&format!(
             "SELECT id, workspace_id, tool, pattern, action, scope, created_by, created_at \
-             FROM approval_rules WHERE workspace_id = $1 OR scope = 'global' \
-             ORDER BY created_at ASC",
-        )
+             FROM {approval_rules} WHERE workspace_id = $1 OR scope = 'global' \
+             ORDER BY created_at ASC"
+        ))
         .bind(workspace_id.to_string())
         .fetch_all(&self.pool)
         .await
@@ -243,15 +245,16 @@ impl PostgresSessionStore {
 
     /// Creates or updates an approval rule.
     pub async fn upsert_approval_rule(&self, rule: ApprovalRule) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO approval_rules (id, workspace_id, tool, pattern, action, scope, created_by, created_at) \
+        let approval_rules = self.table_name("approval_rules");
+        sqlx::query(&format!(
+            "INSERT INTO {approval_rules} (id, workspace_id, tool, pattern, action, scope, created_by, created_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
              ON CONFLICT (workspace_id, tool, pattern) DO UPDATE SET \
                  action = EXCLUDED.action, \
                  scope = EXCLUDED.scope, \
                  created_by = EXCLUDED.created_by, \
-                 created_at = EXCLUDED.created_at",
-        )
+                 created_at = EXCLUDED.created_at"
+        ))
         .bind(rule.id)
         .bind(rule.workspace_id.to_string())
         .bind(rule.tool)
@@ -274,9 +277,10 @@ impl PostgresSessionStore {
         tool: &str,
         pattern: &str,
     ) -> Result<()> {
-        sqlx::query(
-            "DELETE FROM approval_rules WHERE workspace_id = $1 AND tool = $2 AND pattern = $3",
-        )
+        let approval_rules = self.table_name("approval_rules");
+        sqlx::query(&format!(
+            "DELETE FROM {approval_rules} WHERE workspace_id = $1 AND tool = $2 AND pattern = $3"
+        ))
         .bind(workspace_id.to_string())
         .bind(tool)
         .bind(pattern)
@@ -293,8 +297,9 @@ impl SessionStore for PostgresSessionStore {
     /// Creates a new session record.
     async fn create_session(&self, meta: SessionMeta) -> Result<moa_core::SessionId> {
         let session_id = meta.id.clone();
+        let sessions = self.table_name("sessions");
         sqlx::query(&format!(
-            "INSERT INTO sessions ({SESSION_COLUMNS}) VALUES \
+            "INSERT INTO {sessions} ({SESSION_COLUMNS}) VALUES \
              ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"
         ))
         .bind(session_id.0)
@@ -327,14 +332,17 @@ impl SessionStore for PostgresSessionStore {
         let event_id = Uuid::new_v4();
         let payload = serde_json::to_value(&event)?;
         let now = Utc::now();
+        let sessions = self.table_name("sessions");
+        let events = self.table_name("events");
 
-        let locked_session =
-            sqlx::query("SELECT event_count FROM sessions WHERE id = $1 FOR UPDATE")
-                .bind(session_id.0)
-                .fetch_optional(&mut *transaction)
-                .await
-                .map_err(map_sqlx_error)?
-                .ok_or_else(|| MoaError::SessionNotFound(session_id.clone()))?;
+        let locked_session = sqlx::query(&format!(
+            "SELECT event_count FROM {sessions} WHERE id = $1 FOR UPDATE"
+        ))
+        .bind(session_id.0)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?
+        .ok_or_else(|| MoaError::SessionNotFound(session_id.clone()))?;
         let sequence_num = locked_session
             .try_get::<i64, _>("event_count")
             .map_err(map_sqlx_error)? as u64;
@@ -344,11 +352,11 @@ impl SessionStore for PostgresSessionStore {
             None
         };
 
-        sqlx::query(
-            "INSERT INTO events \
+        sqlx::query(&format!(
+            "INSERT INTO {events} \
              (id, session_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+        ))
         .bind(event_id)
         .bind(session_id.0)
         .bind(sequence_num as i64)
@@ -362,14 +370,14 @@ impl SessionStore for PostgresSessionStore {
         .await
         .map_err(map_sqlx_error)?;
 
-        sqlx::query(
-            "UPDATE sessions SET updated_at = $1, event_count = event_count + 1, \
+        sqlx::query(&format!(
+            "UPDATE {sessions} SET updated_at = $1, event_count = event_count + 1, \
              total_input_tokens = total_input_tokens + $2, \
              total_output_tokens = total_output_tokens + $3, \
              total_cost_cents = total_cost_cents + $4, \
              last_checkpoint_seq = COALESCE($5, last_checkpoint_seq) \
-             WHERE id = $6",
-        )
+             WHERE id = $6"
+        ))
         .bind(now)
         .bind(event.input_tokens() as i64)
         .bind(event.output_tokens() as i64)
@@ -393,9 +401,10 @@ impl SessionStore for PostgresSessionStore {
         if matches!(range.event_types, Some(ref types) if types.is_empty()) {
             return Ok(Vec::new());
         }
+        let events = self.table_name("events");
 
         let mut query = QueryBuilder::<Postgres>::new(format!(
-            "SELECT {EVENT_COLUMNS} FROM events WHERE session_id = "
+            "SELECT {EVENT_COLUMNS} FROM {events} WHERE session_id = "
         ));
         query.push_bind(session_id.0);
 
@@ -432,7 +441,8 @@ impl SessionStore for PostgresSessionStore {
 
     /// Loads a persisted session metadata record.
     async fn get_session(&self, session_id: moa_core::SessionId) -> Result<SessionMeta> {
-        let query = format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = $1 LIMIT 1");
+        let sessions = self.table_name("sessions");
+        let query = format!("SELECT {SESSION_COLUMNS} FROM {sessions} WHERE id = $1 LIMIT 1");
         let row = sqlx::query(&query)
             .bind(session_id.0)
             .fetch_optional(&self.pool)
@@ -449,6 +459,7 @@ impl SessionStore for PostgresSessionStore {
         status: SessionStatus,
     ) -> Result<()> {
         let now = Utc::now();
+        let sessions = self.table_name("sessions");
         let completed_at = if matches!(
             status,
             SessionStatus::Completed | SessionStatus::Cancelled | SessionStatus::Failed
@@ -458,9 +469,9 @@ impl SessionStore for PostgresSessionStore {
             None
         };
 
-        let affected = sqlx::query(
-            "UPDATE sessions SET status = $1, updated_at = $2, completed_at = $3 WHERE id = $4",
-        )
+        let affected = sqlx::query(&format!(
+            "UPDATE {sessions} SET status = $1, updated_at = $2, completed_at = $3 WHERE id = $4"
+        ))
         .bind(session_status_to_db(&status))
         .bind(now)
         .bind(completed_at)
@@ -489,11 +500,12 @@ impl SessionStore for PostgresSessionStore {
             ));
         }
 
-        sqlx::query(
-            "INSERT INTO pending_signals \
+        let pending_signals = self.table_name("pending_signals");
+        sqlx::query(&format!(
+            "INSERT INTO {pending_signals} \
              (id, session_id, signal_type, payload, created_at, resolved_at) \
-             VALUES ($1, $2, $3, $4, $5, NULL)",
-        )
+             VALUES ($1, $2, $3, $4, $5, NULL)"
+        ))
         .bind(signal.id.0)
         .bind(session_id.0)
         .bind(pending_signal_type_to_db(signal.signal_type))
@@ -511,12 +523,13 @@ impl SessionStore for PostgresSessionStore {
         &self,
         session_id: moa_core::SessionId,
     ) -> Result<Vec<PendingSignal>> {
-        let rows = sqlx::query(
+        let pending_signals = self.table_name("pending_signals");
+        let rows = sqlx::query(&format!(
             "SELECT id, session_id, signal_type, payload, created_at \
-             FROM pending_signals \
+             FROM {pending_signals} \
              WHERE session_id = $1 AND resolved_at IS NULL \
-             ORDER BY created_at ASC, id ASC",
-        )
+             ORDER BY created_at ASC, id ASC"
+        ))
         .bind(session_id.0)
         .fetch_all(&self.pool)
         .await
@@ -527,9 +540,10 @@ impl SessionStore for PostgresSessionStore {
 
     /// Marks a stored pending signal as resolved.
     async fn resolve_pending_signal(&self, signal_id: PendingSignalId) -> Result<()> {
-        let affected = sqlx::query(
-            "UPDATE pending_signals SET resolved_at = $1 WHERE id = $2 AND resolved_at IS NULL",
-        )
+        let pending_signals = self.table_name("pending_signals");
+        let affected = sqlx::query(&format!(
+            "UPDATE {pending_signals} SET resolved_at = $1 WHERE id = $2 AND resolved_at IS NULL"
+        ))
         .bind(Utc::now())
         .bind(signal_id.0)
         .execute(&self.pool)
@@ -559,18 +573,21 @@ impl SessionStore for PostgresSessionStore {
         if matches!(filter.event_types, Some(ref types) if types.is_empty()) {
             return Ok(Vec::new());
         }
+        let events = self.table_name("events");
+        let sessions = self.table_name("sessions");
 
         let mut query = QueryBuilder::<Postgres>::new(
             "SELECT e.id, e.session_id, e.sequence_num, e.event_type, e.payload, \
              e.timestamp, e.brain_id, e.hand_id, e.token_count, \
-             ts_rank(e.search_vector, plainto_tsquery('english', ",
+             ts_rank(e.search_vector, plainto_tsquery('english', "
+                .to_string(),
         );
         query.push_bind(normalized_query.clone());
-        query.push(
+        query.push(format!(
             ")) AS rank \
-             FROM events e JOIN sessions s ON s.id = e.session_id \
-             WHERE e.search_vector @@ plainto_tsquery('english', ",
-        );
+             FROM {events} e JOIN {sessions} s ON s.id = e.session_id \
+             WHERE e.search_vector @@ plainto_tsquery('english', "
+        ));
         query.push_bind(normalized_query);
         query.push(")");
 
@@ -619,8 +636,9 @@ impl SessionStore for PostgresSessionStore {
 
     /// Lists sessions filtered by workspace, user, status, or platform.
     async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>> {
+        let sessions = self.table_name("sessions");
         let mut query = QueryBuilder::<Postgres>::new(format!(
-            "SELECT {SESSION_SUMMARY_COLUMNS} FROM sessions WHERE TRUE"
+            "SELECT {SESSION_SUMMARY_COLUMNS} FROM {sessions} WHERE TRUE"
         ));
 
         if let Some(workspace_id) = filter.workspace_id {
@@ -699,6 +717,14 @@ fn normalize_event_search_query(query: &str) -> String {
 
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn qualified_name(schema_name: &str, table_name: &str) -> String {
+    format!(
+        "{}.{}",
+        quote_identifier(schema_name),
+        quote_identifier(table_name)
+    )
 }
 
 #[cfg(test)]
