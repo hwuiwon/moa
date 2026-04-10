@@ -8,8 +8,8 @@ pub mod types;
 
 pub use config::{
     CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, GatewayConfig,
-    GeneralConfig, LocalConfig, MoaConfig, PermissionsConfig, ProviderCredentialConfig,
-    ProvidersConfig, TuiConfig,
+    GeneralConfig, LocalConfig, McpCredentialConfig, McpServerConfig, McpTransportConfig,
+    MoaConfig, PermissionsConfig, ProviderCredentialConfig, ProvidersConfig, TuiConfig,
 };
 pub use error::{MoaError, Result};
 pub use events::Event;

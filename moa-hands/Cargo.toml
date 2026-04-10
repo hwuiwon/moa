@@ -4,12 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+daytona = []
+e2b = []
+
 [dependencies]
 async-trait.workspace = true
+base64 = "0.22"
 chrono.workspace = true
+eventsource-stream.workspace = true
+futures-util.workspace = true
 globset = "0.4"
 moa-core = { path = "../moa-core" }
 moa-security = { path = "../moa-security" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shell-words = "1.1"

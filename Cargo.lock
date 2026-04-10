@@ -2406,11 +2406,15 @@ name = "moa-hands"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
+ "eventsource-stream",
+ "futures-util",
  "globset",
  "moa-core",
  "moa-memory",
  "moa-security",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "shell-words",
@@ -2493,6 +2497,8 @@ dependencies = [
  "moa-core",
  "serde_json",
  "shell-words",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -3630,6 +3636,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
