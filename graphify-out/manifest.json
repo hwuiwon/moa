@@ -9,22 +9,22 @@
   "moa-memory/src/wiki.rs": 1775778606.150986,
   "moa-memory/src/branching.rs": 1775839600.85727,
   "moa-core/src/telemetry.rs": 1775833772.1335301,
-  "moa-core/src/types.rs": 1775846541.1992457,
+  "moa-core/src/types.rs": 1775847138.154128,
   "moa-core/src/events.rs": 1775843028.6884203,
   "moa-core/src/error.rs": 1775845995.6183972,
-  "moa-core/src/config.rs": 1775837415.0828447,
-  "moa-core/src/lib.rs": 1775846827.2031493,
+  "moa-core/src/config.rs": 1775848332.510604,
+  "moa-core/src/lib.rs": 1775848200.2308633,
   "moa-core/src/daemon.rs": 1775833772.1297586,
-  "moa-core/src/traits.rs": 1775846217.7164357,
+  "moa-core/src/traits.rs": 1775847138.1539118,
   "moa-cli/tests/tui_workflows.rs": 1775831762.6463964,
   "moa-cli/src/exec.rs": 1775773153.4586587,
-  "moa-cli/src/daemon.rs": 1775837415.0824168,
-  "moa-cli/src/main.rs": 1775839600.8557239,
+  "moa-cli/src/daemon.rs": 1775848200.2180505,
+  "moa-cli/src/main.rs": 1775847705.007583,
   "moa-tui/src/keybindings.rs": 1775831762.650265,
   "moa-tui/src/lib.rs": 1775833772.138463,
-  "moa-tui/src/runner.rs": 1775844658.8197691,
+  "moa-tui/src/runner.rs": 1775847728.6106958,
   "moa-tui/src/main.rs": 1775770714.3246653,
-  "moa-tui/src/app.rs": 1775843028.6890967,
+  "moa-tui/src/app.rs": 1775847734.014086,
   "moa-tui/src/views/palette.rs": 1775831762.651187,
   "moa-tui/src/views/memory.rs": 1775831762.6507206,
   "moa-tui/src/views/sessions.rs": 1775776304.625459,
@@ -45,11 +45,17 @@
   "moa-gateway/src/slack.rs": 1775789259.255336,
   "moa-gateway/src/approval.rs": 1775789259.2542539,
   "moa-session/tests/turso_live.rs": 1775837415.0851872,
-  "moa-session/tests/session_store.rs": 1775846827.311244,
-  "moa-session/src/turso.rs": 1775846827.3094819,
-  "moa-session/src/lib.rs": 1775761302.4706347,
-  "moa-session/src/schema.rs": 1775846229.5031562,
-  "moa-session/src/queries.rs": 1775761383.3480675,
+  "moa-session/tests/session_store.rs": 1775848902.2216911,
+  "moa-session/tests/postgres_store.rs": 1775849322.296319,
+  "moa-session/tests/shared/mod.rs": 1775848200.4238071,
+  "moa-session/src/queries_postgres.rs": 1775849156.5310183,
+  "moa-session/src/turso.rs": 1775848705.0930114,
+  "moa-session/src/backend.rs": 1775849156.5276048,
+  "moa-session/src/lib.rs": 1775849156.5278149,
+  "moa-session/src/schema_turso.rs": 1775848597.0093234,
+  "moa-session/src/queries_turso.rs": 1775848597.010947,
+  "moa-session/src/postgres.rs": 1775849156.5299263,
+  "moa-session/src/schema_postgres.rs": 1775848710.3289886,
   "moa-providers/tests/openai_live.rs": 1775825706.3722425,
   "moa-providers/tests/openrouter_live.rs": 1775825706.37248,
   "moa-providers/tests/live_provider_matrix.rs": 1775831762.6491277,
@@ -67,13 +73,13 @@
   "moa-security/src/policies.rs": 1775782880.294261,
   "moa-security/src/mcp_proxy.rs": 1775795277.6863828,
   "moa-security/src/vault.rs": 1775797129.577303,
-  "moa-orchestrator/tests/local_orchestrator.rs": 1775846526.745086,
-  "moa-orchestrator/tests/live_provider_roundtrip.rs": 1775837415.083932,
-  "moa-orchestrator/tests/temporal_orchestrator.rs": 1775837415.0843418,
-  "moa-orchestrator/examples/temporal_worker_helper.rs": 1775837415.0832772,
-  "moa-orchestrator/src/local.rs": 1775846853.3271601,
+  "moa-orchestrator/tests/local_orchestrator.rs": 1775847763.0535433,
+  "moa-orchestrator/tests/live_provider_roundtrip.rs": 1775847802.969384,
+  "moa-orchestrator/tests/temporal_orchestrator.rs": 1775847808.7772007,
+  "moa-orchestrator/examples/temporal_worker_helper.rs": 1775847737.6558075,
+  "moa-orchestrator/src/local.rs": 1775847825.5404494,
   "moa-orchestrator/src/lib.rs": 1775791482.8528197,
-  "moa-orchestrator/src/temporal.rs": 1775844658.8158836,
+  "moa-orchestrator/src/temporal.rs": 1775847723.9880018,
   "moa-hands/tests/e2b_live.rs": 1775841119.2257247,
   "moa-hands/tests/mcp_router.rs": 1775841119.2260213,
   "moa-hands/tests/local_tools.rs": 1775845995.620185,
@@ -95,7 +101,7 @@
   "moa-hands/src/tools/mod.rs": 1775842406.852314,
   "moa-hands/src/tools/file_read.rs": 1775845995.6197526,
   "moa-brain/tests/live_harness.rs": 1775825706.3703468,
-  "moa-brain/tests/brain_turn.rs": 1775846430.0964582,
+  "moa-brain/tests/brain_turn.rs": 1775847138.153587,
   "moa-brain/examples/chat_harness.rs": 1775825706.3702106,
   "moa-brain/src/lib.rs": 1775844658.8046792,
   "moa-brain/src/turn.rs": 1775846684.6534336,
@@ -104,11 +110,11 @@
   "moa-brain/src/pipeline/cache.rs": 1775840261.5983925,
   "moa-brain/src/pipeline/instructions.rs": 1775840261.5993755,
   "moa-brain/src/pipeline/tools.rs": 1775840261.6002264,
-  "moa-brain/src/pipeline/memory.rs": 1775846422.0912962,
+  "moa-brain/src/pipeline/memory.rs": 1775847138.1533923,
   "moa-brain/src/pipeline/skills.rs": 1775840261.6000698,
   "moa-brain/src/pipeline/identity.rs": 1775840261.5991344,
   "moa-brain/src/pipeline/mod.rs": 1775840261.5998604,
-  "moa-brain/src/pipeline/history.rs": 1775846400.7426298,
+  "moa-brain/src/pipeline/history.rs": 1775847138.1531405,
   "moa-skills/tests/skills.rs": 1775782880.295359,
   "moa-skills/src/format.rs": 1775782880.294755,
   "moa-skills/src/registry.rs": 1775839600.8586621,
@@ -121,81 +127,84 @@
     "1": "TUI Chat Runtime",
     "2": "TUI App State",
     "3": "Memory Browser View",
-    "4": "Brain Turn Tests",
-    "5": "Skill Document Format",
-    "6": "Provider Common Layer",
-    "7": "Local Orchestrator Tests",
-    "8": "Temporal Orchestrator",
-    "9": "Local Orchestrator",
-    "10": "File Memory Store",
-    "11": "Turso Session Store",
-    "12": "Tool Router & Policies",
-    "13": "Memory Consolidation",
-    "14": "Anthropic Provider",
+    "4": "File Memory Store",
+    "5": "Brain Turn Tests",
+    "6": "Skill Document Format",
+    "7": "Provider Common Layer",
+    "8": "Local Orchestrator Tests",
+    "9": "Temporal Orchestrator",
+    "10": "Local Orchestrator",
+    "11": "Tool Router & Policies",
+    "12": "Turso Session Store",
+    "13": "Postgres Session Store",
+    "14": "Memory Consolidation",
     "15": "Config & Errors",
-    "16": "Message Renderer",
-    "17": "Temporal Orchestrator Tests",
-    "18": "Daemon Service",
-    "19": "Brain Turn Execution",
-    "20": "CLI Entry Point",
-    "21": "Diff View",
-    "22": "Discord Adapter",
-    "23": "E2B Hand Provider",
-    "24": "Slack Adapter",
-    "25": "Wiki & Branching Markdown",
-    "26": "MCP Client",
-    "27": "MCP Credential Proxy",
-    "28": "Daytona Hand Provider",
-    "29": "Telegram Adapter",
-    "30": "Local Tool Tests",
-    "31": "Docker File Operations",
-    "32": "Skill Injection Stage",
-    "33": "Settings View",
-    "34": "Approval Card Widget",
-    "35": "History Compilation Stage",
-    "36": "FTS5 Search Index",
-    "37": "Session Picker View",
-    "38": "Tool Approval Policies",
-    "39": "Skill Improver & Distiller",
-    "40": "Daytona Live Tests",
-    "41": "Memory Maintenance Tests",
-    "42": "Provider Factory",
-    "43": "E2B Live Tests",
-    "44": "Session Store Tests",
-    "45": "OpenAI Provider Tests",
-    "46": "Encrypted Secret Vault",
-    "47": "Context Pipeline Core",
-    "48": "Command Palette",
-    "49": "Prompt Widget",
-    "50": "MCP Router Tests",
-    "51": "Core Event Model",
-    "52": "Injection Detection",
-    "53": "TUI Keybindings",
-    "54": "Toolbar Widget",
-    "55": "Live Provider Roundtrip Tests",
-    "56": "Memory Store Tests",
-    "57": "Tool Card Widget",
-    "58": "Live Provider Matrix Tests",
-    "59": "Temporal Worker Helper",
-    "60": "Stub Tool Definition",
-    "61": "Instruction Stage",
-    "62": "Chat View",
-    "63": "Bash Tool",
-    "64": "Cache Optimizer Stage",
-    "65": "Identity Stage",
-    "66": "CLI Exec Mode",
-    "67": "Sidebar Widget",
-    "68": "Anthropic Provider Tests",
-    "69": "File Search Tool",
-    "70": "Chat Harness Example",
-    "71": "Mock MCP Server",
-    "72": "TUI Workflow Tests",
-    "73": "OpenAI Live Test",
-    "74": "OpenRouter Live Test",
-    "75": "Anthropic Live Test",
-    "76": "Docker Hardening Test",
-    "77": "Brain Live Harness Test",
-    "78": "Compaction"
+    "16": "Anthropic Provider",
+    "17": "Message Renderer",
+    "18": "Temporal Orchestrator Tests",
+    "19": "CLI Entry Point",
+    "20": "Daemon Service",
+    "21": "Brain Turn Execution",
+    "22": "Diff View",
+    "23": "Discord Adapter",
+    "24": "E2B Hand Provider",
+    "25": "Slack Adapter",
+    "26": "Wiki & Branching Markdown",
+    "27": "MCP Client",
+    "28": "MCP Credential Proxy",
+    "29": "Daytona Hand Provider",
+    "30": "Telegram Adapter",
+    "31": "Local Tool Tests",
+    "32": "Docker File Operations",
+    "33": "Skill Injection Stage",
+    "34": "Settings View",
+    "35": "Approval Card Widget",
+    "36": "History Compilation Stage",
+    "37": "Context Pipeline Core",
+    "38": "Session Database Backend",
+    "39": "FTS5 Search Index",
+    "40": "Session Picker View",
+    "41": "Tool Approval Policies",
+    "42": "Skill Improver & Distiller",
+    "43": "Daytona Live Tests",
+    "44": "Memory Maintenance Tests",
+    "45": "Session Store Tests",
+    "46": "E2B Live Tests",
+    "47": "OpenAI Provider Tests",
+    "48": "Encrypted Secret Vault",
+    "49": "Command Palette",
+    "50": "Prompt Widget",
+    "51": "MCP Router Tests",
+    "52": "Core Event Model",
+    "53": "Injection Detection",
+    "54": "TUI Keybindings",
+    "55": "Toolbar Widget",
+    "56": "Live Provider Roundtrip Tests",
+    "57": "Memory Store Tests",
+    "58": "Postgres Store Tests",
+    "59": "Tool Card Widget",
+    "60": "Live Provider Matrix Tests",
+    "61": "Temporal Worker Helper",
+    "62": "Stub Tool Definition",
+    "63": "Instruction Stage",
+    "64": "Chat View",
+    "65": "Bash Tool",
+    "66": "Cache Optimizer Stage",
+    "67": "Identity Stage",
+    "68": "CLI Exec Mode",
+    "69": "Sidebar Widget",
+    "70": "Anthropic Provider Tests",
+    "71": "File Search Tool",
+    "72": "Chat Harness Example",
+    "73": "Mock MCP Server",
+    "74": "TUI Workflow Tests",
+    "75": "Turso Schema Migration",
+    "76": "OpenAI Live Test",
+    "77": "OpenRouter Live Test",
+    "78": "Anthropic Live Test",
+    "79": "Docker Hardening Test",
+    "80": "Brain Live Harness Test",
+    "81": "Compaction"
   },
   "community_signatures": {
     "0": [
@@ -703,6 +712,77 @@
       "memory_wikilinks_from_page"
     ],
     "4": [
+      "error",
+      "error_moaerror",
+      "factory",
+      "factory_build_provider_from_config",
+      "factory_build_provider_from_selection",
+      "factory_explicit_provider_prefix_overrides_inference",
+      "factory_infer_provider_name",
+      "factory_infers_anthropic_for_claude_models",
+      "factory_infers_openai_for_gpt_models",
+      "factory_infers_openrouter_for_vendor_prefixed_models",
+      "factory_is_openai_model",
+      "factory_matches_provider_name",
+      "factory_normalize_model_for_provider",
+      "factory_normalize_openrouter_model",
+      "factory_providerselection",
+      "factory_resolve_provider_selection",
+      "factory_split_explicit_provider",
+      "factory_validate_provider_name",
+      "lib",
+      "lib_collect_markdown_files",
+      "lib_expand_local_path",
+      "lib_filememorystore",
+      "lib_filememorystore_append_scope_log",
+      "lib_filememorystore_base_dir",
+      "lib_filememorystore_delete_page",
+      "lib_filememorystore_delete_page_in_scope",
+      "lib_filememorystore_file_path",
+      "lib_filememorystore_from_config",
+      "lib_filememorystore_get_index",
+      "lib_filememorystore_ingest_source",
+      "lib_filememorystore_list_pages",
+      "lib_filememorystore_list_scope_files",
+      "lib_filememorystore_load_scope_log",
+      "lib_filememorystore_new",
+      "lib_filememorystore_read_page",
+      "lib_filememorystore_read_page_in_scope",
+      "lib_filememorystore_rebuild_search_index",
+      "lib_filememorystore_reconcile_branches",
+      "lib_filememorystore_refresh_scope_index",
+      "lib_filememorystore_run_consolidation",
+      "lib_filememorystore_run_due_consolidations",
+      "lib_filememorystore_scope_root",
+      "lib_filememorystore_search",
+      "lib_filememorystore_write_page",
+      "lib_filememorystore_write_page_branched",
+      "lib_filememorystore_write_page_in_scope",
+      "lib_memory_error",
+      "lib_try_exists",
+      "telemetry",
+      "telemetry_init_observability",
+      "telemetry_telemetryguard",
+      "telemetry_telemetryguard_disabled",
+      "telemetry_telemetryguard_drop",
+      "traits",
+      "traits_brainorchestrator",
+      "traits_builtintool",
+      "traits_contextprocessor",
+      "traits_credentialvault",
+      "traits_handprovider",
+      "traits_llmprovider",
+      "traits_memorystore",
+      "traits_platformadapter",
+      "traits_sessionstore",
+      "traits_toolcontext",
+      "turso_live",
+      "turso_live_cleanup_remote_sessions",
+      "turso_live_embedded_replica_roundtrips_local_and_remote_writes",
+      "turso_live_embedded_replica_sync_preserves_checkpoint_wake",
+      "turso_live_live_turso_env"
+    ],
+    "5": [
       "brain_turn",
       "brain_turn_always_allow_rule_persists_and_skips_next_approval",
       "brain_turn_canary_leaks_in_tool_input_are_detected_and_blocked",
@@ -771,7 +851,7 @@
       "brain_turn_toolloopllmprovider_complete",
       "brain_turn_toolloopllmprovider_name"
     ],
-    "5": [
+    "6": [
       "format",
       "format_build_skill_path",
       "format_confidence_for_skill",
@@ -836,7 +916,7 @@
       "registry_skillregistry_load_full",
       "registry_skillregistry_new"
     ],
-    "6": [
+    "7": [
       "common",
       "common_build_function_tool",
       "common_build_http_client",
@@ -895,7 +975,7 @@
       "openrouter_openrouterprovider_with_api_base",
       "openrouter_openrouterprovider_with_max_retries"
     ],
-    "7": [
+    "8": [
       "local_orchestrator",
       "local_orchestrator_approval_requested_event_persists_full_prompt_details",
       "local_orchestrator_brain_response_texts",
@@ -952,7 +1032,7 @@
       "local_orchestrator_wait_for_pending_signal_count",
       "local_orchestrator_wait_for_status"
     ],
-    "8": [
+    "9": [
       "temporal",
       "temporal_activity_options",
       "temporal_apply_approval_decision",
@@ -1009,7 +1089,7 @@
       "temporal_workflow_id_for_session",
       "temporal_workflow_ids_are_stable_and_prefixed"
     ],
-    "9": [
+    "10": [
       "local",
       "local_accept_user_message",
       "local_append_event",
@@ -1065,117 +1145,7 @@
       "local_should_fallback_to_host",
       "local_update_status"
     ],
-    "10": [
-      "error",
-      "error_moaerror",
-      "lib",
-      "lib_collect_markdown_files",
-      "lib_expand_local_path",
-      "lib_filememorystore",
-      "lib_filememorystore_append_scope_log",
-      "lib_filememorystore_base_dir",
-      "lib_filememorystore_delete_page",
-      "lib_filememorystore_delete_page_in_scope",
-      "lib_filememorystore_file_path",
-      "lib_filememorystore_from_config",
-      "lib_filememorystore_get_index",
-      "lib_filememorystore_ingest_source",
-      "lib_filememorystore_list_pages",
-      "lib_filememorystore_list_scope_files",
-      "lib_filememorystore_load_scope_log",
-      "lib_filememorystore_new",
-      "lib_filememorystore_read_page",
-      "lib_filememorystore_read_page_in_scope",
-      "lib_filememorystore_rebuild_search_index",
-      "lib_filememorystore_reconcile_branches",
-      "lib_filememorystore_refresh_scope_index",
-      "lib_filememorystore_run_consolidation",
-      "lib_filememorystore_run_due_consolidations",
-      "lib_filememorystore_scope_root",
-      "lib_filememorystore_search",
-      "lib_filememorystore_write_page",
-      "lib_filememorystore_write_page_branched",
-      "lib_filememorystore_write_page_in_scope",
-      "lib_memory_error",
-      "lib_try_exists",
-      "telemetry",
-      "telemetry_init_observability",
-      "telemetry_telemetryguard",
-      "telemetry_telemetryguard_disabled",
-      "telemetry_telemetryguard_drop",
-      "traits",
-      "traits_brainorchestrator",
-      "traits_builtintool",
-      "traits_contextprocessor",
-      "traits_credentialvault",
-      "traits_handprovider",
-      "traits_llmprovider",
-      "traits_memorystore",
-      "traits_platformadapter",
-      "traits_sessionstore",
-      "traits_toolcontext",
-      "turso_live",
-      "turso_live_cleanup_remote_sessions",
-      "turso_live_embedded_replica_roundtrips_local_and_remote_writes",
-      "turso_live_embedded_replica_sync_preserves_checkpoint_wake",
-      "turso_live_live_turso_env"
-    ],
     "11": [
-      "queries",
-      "queries_event_record_from_row",
-      "queries_event_type_from_db",
-      "queries_event_type_to_db",
-      "queries_expand_local_path",
-      "queries_optional_i64",
-      "queries_optional_text",
-      "queries_parse_timestamp",
-      "queries_platform_from_db",
-      "queries_platform_to_db",
-      "queries_session_meta_from_row",
-      "queries_session_status_from_db",
-      "queries_session_status_to_db",
-      "queries_session_summary_from_row",
-      "schema",
-      "schema_migrate",
-      "turso",
-      "turso_build_event_fts_query",
-      "turso_event_hand_id",
-      "turso_is_remote_url",
-      "turso_map_db_error",
-      "turso_parse_rfc3339_timestamp",
-      "turso_pending_signal_from_row",
-      "turso_pending_signal_type_from_db",
-      "turso_pending_signal_type_to_db",
-      "turso_policy_action_from_db",
-      "turso_policy_action_to_db",
-      "turso_policy_scope_from_db",
-      "turso_policy_scope_to_db",
-      "turso_resolve_turso_auth_token",
-      "turso_tursosessionstore",
-      "turso_tursosessionstore_cloud_sync_enabled",
-      "turso_tursosessionstore_create_session",
-      "turso_tursosessionstore_delete_approval_rule",
-      "turso_tursosessionstore_emit_event",
-      "turso_tursosessionstore_from_config",
-      "turso_tursosessionstore_get_events",
-      "turso_tursosessionstore_get_pending_signals",
-      "turso_tursosessionstore_get_session",
-      "turso_tursosessionstore_list_approval_rules",
-      "turso_tursosessionstore_list_sessions",
-      "turso_tursosessionstore_new",
-      "turso_tursosessionstore_new_local",
-      "turso_tursosessionstore_new_remote",
-      "turso_tursosessionstore_new_remote_replica",
-      "turso_tursosessionstore_next_sequence",
-      "turso_tursosessionstore_resolve_pending_signal",
-      "turso_tursosessionstore_search_events",
-      "turso_tursosessionstore_store_pending_signal",
-      "turso_tursosessionstore_sync_now",
-      "turso_tursosessionstore_update_status",
-      "turso_tursosessionstore_upsert_approval_rule",
-      "turso_tursosessionstore_wake"
-    ],
-    "12": [
       "router",
       "router_approval_diffs_for",
       "router_approval_fields_for",
@@ -1230,7 +1200,112 @@
       "tools_tooldefinitionprocessor_process",
       "tools_tooldefinitionprocessor_stage"
     ],
+    "12": [
+      "queries_turso",
+      "queries_turso_event_record_from_row",
+      "queries_turso_event_type_from_db",
+      "queries_turso_event_type_to_db",
+      "queries_turso_expand_local_path",
+      "queries_turso_optional_i64",
+      "queries_turso_optional_text",
+      "queries_turso_parse_timestamp",
+      "queries_turso_platform_from_db",
+      "queries_turso_platform_to_db",
+      "queries_turso_session_meta_from_row",
+      "queries_turso_session_status_from_db",
+      "queries_turso_session_status_to_db",
+      "queries_turso_session_summary_from_row",
+      "turso",
+      "turso_build_event_fts_query",
+      "turso_event_hand_id",
+      "turso_is_remote_url",
+      "turso_map_db_error",
+      "turso_parse_rfc3339_timestamp",
+      "turso_pending_signal_from_row",
+      "turso_pending_signal_type_from_db",
+      "turso_pending_signal_type_to_db",
+      "turso_policy_action_from_db",
+      "turso_policy_action_to_db",
+      "turso_policy_scope_from_db",
+      "turso_policy_scope_to_db",
+      "turso_resolve_turso_auth_token",
+      "turso_tursosessionstore",
+      "turso_tursosessionstore_cloud_sync_enabled",
+      "turso_tursosessionstore_create_session",
+      "turso_tursosessionstore_delete_approval_rule",
+      "turso_tursosessionstore_emit_event",
+      "turso_tursosessionstore_from_config",
+      "turso_tursosessionstore_get_events",
+      "turso_tursosessionstore_get_pending_signals",
+      "turso_tursosessionstore_get_session",
+      "turso_tursosessionstore_list_approval_rules",
+      "turso_tursosessionstore_list_sessions",
+      "turso_tursosessionstore_new",
+      "turso_tursosessionstore_new_local",
+      "turso_tursosessionstore_new_remote",
+      "turso_tursosessionstore_new_remote_replica",
+      "turso_tursosessionstore_next_sequence",
+      "turso_tursosessionstore_resolve_pending_signal",
+      "turso_tursosessionstore_search_events",
+      "turso_tursosessionstore_store_pending_signal",
+      "turso_tursosessionstore_sync_now",
+      "turso_tursosessionstore_update_status",
+      "turso_tursosessionstore_upsert_approval_rule",
+      "turso_tursosessionstore_wake"
+    ],
     "13": [
+      "postgres",
+      "postgres_event_hand_id",
+      "postgres_normalize_event_search_query",
+      "postgres_normalize_event_search_query_drops_punctuation",
+      "postgres_postgressessionstore",
+      "postgres_postgressessionstore_cloud_sync_enabled",
+      "postgres_postgressessionstore_connect_with_retry",
+      "postgres_postgressessionstore_create_session",
+      "postgres_postgressessionstore_delete_approval_rule",
+      "postgres_postgressessionstore_emit_event",
+      "postgres_postgressessionstore_ensure_schema_exists",
+      "postgres_postgressessionstore_from_config",
+      "postgres_postgressessionstore_get_events",
+      "postgres_postgressessionstore_get_pending_signals",
+      "postgres_postgressessionstore_get_session",
+      "postgres_postgressessionstore_list_approval_rules",
+      "postgres_postgressessionstore_list_sessions",
+      "postgres_postgressessionstore_new",
+      "postgres_postgressessionstore_new_in_schema",
+      "postgres_postgressessionstore_new_with_options",
+      "postgres_postgressessionstore_new_with_options_and_schema",
+      "postgres_postgressessionstore_resolve_pending_signal",
+      "postgres_postgressessionstore_search_events",
+      "postgres_postgressessionstore_store_pending_signal",
+      "postgres_postgressessionstore_sync_now",
+      "postgres_postgressessionstore_update_status",
+      "postgres_postgressessionstore_upsert_approval_rule",
+      "postgres_postgressessionstore_wake",
+      "postgres_quote_identifier",
+      "queries_postgres",
+      "queries_postgres_approval_rule_from_row",
+      "queries_postgres_event_record_from_row",
+      "queries_postgres_event_type_from_db",
+      "queries_postgres_event_type_to_db",
+      "queries_postgres_map_sqlx_error",
+      "queries_postgres_pending_signal_from_row",
+      "queries_postgres_pending_signal_type_from_db",
+      "queries_postgres_pending_signal_type_to_db",
+      "queries_postgres_platform_from_db",
+      "queries_postgres_platform_to_db",
+      "queries_postgres_policy_action_from_db",
+      "queries_postgres_policy_action_to_db",
+      "queries_postgres_policy_scope_from_db",
+      "queries_postgres_policy_scope_to_db",
+      "queries_postgres_session_meta_from_row",
+      "queries_postgres_session_status_from_db",
+      "queries_postgres_session_status_to_db",
+      "queries_postgres_session_summary_from_row",
+      "schema_postgres",
+      "schema_postgres_migrate"
+    ],
+    "14": [
       "consolidation",
       "consolidation_canonical_port_claims",
       "consolidation_confidence_rank",
@@ -1279,7 +1354,55 @@
       "ingest_split_inline_items",
       "ingest_upsert_derived_page"
     ],
-    "14": [
+    "15": [
+      "config",
+      "config_cloudconfig",
+      "config_cloudconfig_default",
+      "config_cloudflyioconfig",
+      "config_cloudflyioconfig_default",
+      "config_cloudhandsconfig",
+      "config_cloudhandsconfig_default",
+      "config_cloudtemporalconfig",
+      "config_cloudtemporalconfig_default",
+      "config_config_loads_from_file",
+      "config_config_loads_from_toml_string",
+      "config_config_loads_mcp_server_configuration",
+      "config_daemonconfig",
+      "config_daemonconfig_default",
+      "config_databasebackend",
+      "config_databasebackend_as_str",
+      "config_databaseconfig",
+      "config_databaseconfig_default",
+      "config_default_config_is_valid",
+      "config_gatewayconfig",
+      "config_gatewayconfig_default",
+      "config_generalconfig",
+      "config_generalconfig_default",
+      "config_localconfig",
+      "config_localconfig_default",
+      "config_mcpcredentialconfig",
+      "config_mcpserverconfig",
+      "config_mcptransportconfig",
+      "config_moaconfig",
+      "config_moaconfig_default_path",
+      "config_moaconfig_load",
+      "config_moaconfig_load_from_path",
+      "config_moaconfig_normalize_legacy_database_config",
+      "config_moaconfig_save",
+      "config_moaconfig_save_to_path",
+      "config_observabilityconfig",
+      "config_observabilityconfig_default",
+      "config_permissionsconfig",
+      "config_permissionsconfig_default",
+      "config_providercredentialconfig",
+      "config_providercredentialconfig_default",
+      "config_providercredentialconfig_new",
+      "config_providersconfig",
+      "config_providersconfig_default",
+      "config_tuiconfig",
+      "config_tuiconfig_default"
+    ],
+    "16": [
       "anthropic",
       "anthropic_anthropic_message",
       "anthropic_anthropicprovider",
@@ -1326,50 +1449,7 @@
       "anthropic_supported_models_return_expected_capabilities",
       "anthropic_usage"
     ],
-    "15": [
-      "config",
-      "config_cloudconfig",
-      "config_cloudconfig_default",
-      "config_cloudflyioconfig",
-      "config_cloudflyioconfig_default",
-      "config_cloudhandsconfig",
-      "config_cloudhandsconfig_default",
-      "config_cloudtemporalconfig",
-      "config_cloudtemporalconfig_default",
-      "config_config_loads_from_file",
-      "config_config_loads_from_toml_string",
-      "config_config_loads_mcp_server_configuration",
-      "config_daemonconfig",
-      "config_daemonconfig_default",
-      "config_default_config_is_valid",
-      "config_gatewayconfig",
-      "config_gatewayconfig_default",
-      "config_generalconfig",
-      "config_generalconfig_default",
-      "config_localconfig",
-      "config_localconfig_default",
-      "config_mcpcredentialconfig",
-      "config_mcpserverconfig",
-      "config_mcptransportconfig",
-      "config_moaconfig",
-      "config_moaconfig_default_path",
-      "config_moaconfig_load",
-      "config_moaconfig_load_from_path",
-      "config_moaconfig_save",
-      "config_moaconfig_save_to_path",
-      "config_observabilityconfig",
-      "config_observabilityconfig_default",
-      "config_permissionsconfig",
-      "config_permissionsconfig_default",
-      "config_providercredentialconfig",
-      "config_providercredentialconfig_default",
-      "config_providercredentialconfig_new",
-      "config_providersconfig",
-      "config_providersconfig_default",
-      "config_tuiconfig",
-      "config_tuiconfig_default"
-    ],
-    "16": [
+    "17": [
       "renderer",
       "renderer_append_piece",
       "renderer_discord_renderer_attaches_buttons_to_last_chunk_only",
@@ -1411,7 +1491,7 @@
       "renderer_tool_status_color",
       "renderer_tool_status_icon"
     ],
-    "17": [
+    "18": [
       "temporal_orchestrator",
       "temporal_orchestrator_brain_response_texts",
       "temporal_orchestrator_build_temporal_helper_binary",
@@ -1452,7 +1532,47 @@
       "temporal_orchestrator_wait_for_store_status",
       "temporal_orchestrator_wait_for_tool_result"
     ],
-    "18": [
+    "19": [
+      "main",
+      "main_apply_config_update",
+      "main_cli",
+      "main_cloud_sync_status",
+      "main_commandkind",
+      "main_config_updates_known_keys",
+      "main_configcommand",
+      "main_current_workspace_id",
+      "main_daemon_status_report",
+      "main_daemoncommand",
+      "main_disk_status",
+      "main_docker_status",
+      "main_doctor_report",
+      "main_env_presence",
+      "main_execargs",
+      "main_expand_tilde",
+      "main_init_workspace",
+      "main_load_session_store",
+      "main_main",
+      "main_memory_index_status",
+      "main_memory_search_report",
+      "main_memory_show_report",
+      "main_memorycommand",
+      "main_most_recent_session_id",
+      "main_parse_bool",
+      "main_parse_bool_accepts_common_values",
+      "main_parse_database_backend",
+      "main_parse_database_backend_accepts_supported_values",
+      "main_parse_session_id",
+      "main_resolve_workspace_arg",
+      "main_session_db_status",
+      "main_sessions_report",
+      "main_sessionsargs",
+      "main_status_report",
+      "main_sync_enable_report",
+      "main_synccommand",
+      "main_version_command_uses_package_version",
+      "main_version_text"
+    ],
+    "20": [
       "daemon",
       "daemon_daemon_health_endpoint_responds_when_cloud_enabled",
       "daemon_daemon_info",
@@ -1491,7 +1611,7 @@
       "daemon_write_reply",
       "daemon_write_stream_event"
     ],
-    "19": [
+    "21": [
       "harness",
       "harness_append_event",
       "harness_buffer_queued_message",
@@ -1530,45 +1650,7 @@
       "turn_streamedcompletion",
       "turn_streamsignaldisposition"
     ],
-    "20": [
-      "main",
-      "main_apply_config_update",
-      "main_cli",
-      "main_cloud_sync_status",
-      "main_commandkind",
-      "main_config_updates_known_keys",
-      "main_configcommand",
-      "main_current_workspace_id",
-      "main_daemon_status_report",
-      "main_daemoncommand",
-      "main_disk_status",
-      "main_docker_status",
-      "main_doctor_report",
-      "main_env_presence",
-      "main_execargs",
-      "main_expand_tilde",
-      "main_init_workspace",
-      "main_load_session_store",
-      "main_main",
-      "main_memory_index_status",
-      "main_memory_search_report",
-      "main_memory_show_report",
-      "main_memorycommand",
-      "main_most_recent_session_id",
-      "main_parse_bool",
-      "main_parse_bool_accepts_common_values",
-      "main_parse_session_id",
-      "main_resolve_workspace_arg",
-      "main_session_db_status",
-      "main_sessions_report",
-      "main_sessionsargs",
-      "main_status_report",
-      "main_sync_enable_report",
-      "main_synccommand",
-      "main_version_command_uses_package_version",
-      "main_version_text"
-    ],
-    "21": [
+    "22": [
       "diff",
       "diff_build_diff_file_view",
       "diff_default_mode_for_width",
@@ -1605,7 +1687,7 @@
       "diff_truncate_to_width",
       "diff_unifiedline"
     ],
-    "22": [
+    "23": [
       "discord",
       "discord_approval_callback_maps_to_control_message",
       "discord_attachments_from_message",
@@ -1642,7 +1724,7 @@
       "discord_inbound_from_message",
       "discord_is_thread_kind"
     ],
-    "23": [
+    "24": [
       "e2b",
       "e2b_build_url",
       "e2b_connectedsandbox",
@@ -1679,7 +1761,7 @@
       "e2b_required_string_field",
       "e2b_shell_escape"
     ],
-    "24": [
+    "25": [
       "slack",
       "slack_handle_interaction_event",
       "slack_handle_push_event",
@@ -1715,7 +1797,7 @@
       "slack_slackmessageref_thread_anchor",
       "slack_slacktarget"
     ],
-    "25": [
+    "26": [
       "branching",
       "branching_append_change_manifest",
       "branching_branch_dir",
@@ -1748,7 +1830,7 @@
       "wiki_wiki_page_roundtrip",
       "wiki_yaml_to_json_value"
     ],
-    "26": [
+    "27": [
       "mcp",
       "mcp_flatten_call_result",
       "mcp_flatten_tool_result_aggregates_text_items",
@@ -1780,7 +1862,7 @@
       "mcp_toolslistresponse",
       "mcp_write_framed_message"
     ],
-    "27": [
+    "28": [
       "mcp_proxy",
       "mcp_proxy_credential_from_env",
       "mcp_proxy_default_scope_for",
@@ -1811,7 +1893,7 @@
       "mcp_proxy_proxy_creates_tokens_and_injects_headers",
       "mcp_proxy_proxygrant"
     ],
-    "28": [
+    "29": [
       "daytona",
       "daytona_build_url",
       "daytona_daytonahandprovider",
@@ -1841,7 +1923,7 @@
       "daytona_provisions_executes_and_destroys_workspace",
       "daytona_required_string_field"
     ],
-    "29": [
+    "30": [
       "telegram",
       "telegram_channel_from_chat_and_reply",
       "telegram_handle_callback_query",
@@ -1870,7 +1952,7 @@
       "telegram_telegrammessageref_from_message",
       "telegram_telegramtarget"
     ],
-    "30": [
+    "31": [
       "local_tools",
       "local_tools_bash_captures_stdout_and_stderr",
       "local_tools_bash_respects_timeout",
@@ -1898,7 +1980,7 @@
       "local_tools_sample_page",
       "local_tools_session"
     ],
-    "31": [
+    "32": [
       "docker_file",
       "docker_file_container_path_validation_accepts_workspace_absolute_paths",
       "docker_file_container_path_validation_rejects_absolute_paths_outside_workspace",
@@ -1926,7 +2008,7 @@
       "file_write_execute_docker",
       "file_write_filewriteinput"
     ],
-    "32": [
+    "33": [
       "skills",
       "skills_distills_skill_after_tool_heavy_session",
       "skills_improves_existing_skill_when_better_flow_is_found",
@@ -1954,7 +2036,7 @@
       "skills_stubskillmemorystore_write_page",
       "skills_tool_rich_events"
     ],
-    "33": [
+    "34": [
       "settings",
       "settings_category_label",
       "settings_centered_rect",
@@ -1981,7 +2063,7 @@
       "settings_settingsviewstate_step_backward",
       "settings_settingsviewstate_step_forward"
     ],
-    "34": [
+    "35": [
       "approval",
       "approval_approval_buttons",
       "approval_approval_card_uses_expected_border_color_for_each_risk_level",
@@ -2007,7 +2089,7 @@
       "approval_truncate_to_width",
       "approval_wrap_text"
     ],
-    "35": [
+    "36": [
       "history",
       "history_capabilities",
       "history_event_record",
@@ -2033,7 +2115,55 @@
       "history_mocksessionstore_store_pending_signal",
       "history_mocksessionstore_update_status"
     ],
-    "36": [
+    "37": [
+      "mod",
+      "mod_build_default_pipeline",
+      "mod_build_default_pipeline_with_tools",
+      "mod_contextpipeline",
+      "mod_contextpipeline_new",
+      "mod_contextpipeline_run",
+      "mod_estimate_tokens",
+      "mod_pipeline_runner_executes_stages_in_order",
+      "mod_pipelinestagereport",
+      "mod_sort_json_keys",
+      "mod_test_approval_rules",
+      "mod_test_create_and_get_session",
+      "mod_test_emit_and_get_events",
+      "mod_test_event_search",
+      "mod_test_list_sessions_with_filter",
+      "mod_test_pending_signals",
+      "mod_test_session_meta",
+      "mod_test_session_status_update",
+      "mod_teststage",
+      "mod_teststage_name",
+      "mod_teststage_new",
+      "mod_teststage_process",
+      "mod_teststage_stage"
+    ],
+    "38": [
+      "backend",
+      "backend_create_session_store",
+      "backend_sessiondatabase",
+      "backend_sessiondatabase_backend",
+      "backend_sessiondatabase_cloud_sync_enabled",
+      "backend_sessiondatabase_create_session",
+      "backend_sessiondatabase_delete_approval_rule",
+      "backend_sessiondatabase_emit_event",
+      "backend_sessiondatabase_from_config",
+      "backend_sessiondatabase_get_events",
+      "backend_sessiondatabase_get_pending_signals",
+      "backend_sessiondatabase_get_session",
+      "backend_sessiondatabase_list_approval_rules",
+      "backend_sessiondatabase_list_sessions",
+      "backend_sessiondatabase_resolve_pending_signal",
+      "backend_sessiondatabase_search_events",
+      "backend_sessiondatabase_store_pending_signal",
+      "backend_sessiondatabase_sync_now",
+      "backend_sessiondatabase_update_status",
+      "backend_sessiondatabase_upsert_approval_rule",
+      "backend_sessiondatabase_wake"
+    ],
+    "39": [
       "fts",
       "fts_build_fts_query",
       "fts_confidence_to_db",
@@ -2054,7 +2184,7 @@
       "fts_parse_timestamp",
       "fts_scope_key"
     ],
-    "37": [
+    "40": [
       "sessions",
       "sessions_centered_rect",
       "sessions_filtered_sessions",
@@ -2075,7 +2205,7 @@
       "sessions_sessionpickerstate_selected_session_id",
       "sessions_status_icon"
     ],
-    "38": [
+    "41": [
       "policies",
       "policies_approvalrulestore",
       "policies_glob_match",
@@ -2095,7 +2225,7 @@
       "policies_toolpolicycontext",
       "policies_toolpolicycontext_from_session"
     ],
-    "39": [
+    "42": [
       "distiller",
       "distiller_build_distillation_prompt",
       "distiller_count_tool_calls",
@@ -2115,7 +2245,7 @@
       "improver_record_successful_use",
       "improver_record_successful_use_with_baseline"
     ],
-    "40": [
+    "43": [
       "daytona_live",
       "daytona_live_daytona_live_provider_handles_roundtrip_and_lifecycle",
       "daytona_live_daytona_live_router_lazy_provisions_reuses_and_isolates_sessions",
@@ -2134,7 +2264,7 @@
       "daytona_live_wait_for_destroyed",
       "daytona_live_wait_for_status"
     ],
-    "41": [
+    "44": [
       "maintenance",
       "maintenance_branch_reconciliation_merges_conflicting_writes",
       "maintenance_consolidation_decays_confidence_once_and_is_stable_on_repeat_runs",
@@ -2152,25 +2282,25 @@
       "maintenance_seededrng_next_usize",
       "maintenance_validate_memory_invariants"
     ],
-    "42": [
-      "factory",
-      "factory_build_provider_from_config",
-      "factory_build_provider_from_selection",
-      "factory_explicit_provider_prefix_overrides_inference",
-      "factory_infer_provider_name",
-      "factory_infers_anthropic_for_claude_models",
-      "factory_infers_openai_for_gpt_models",
-      "factory_infers_openrouter_for_vendor_prefixed_models",
-      "factory_is_openai_model",
-      "factory_matches_provider_name",
-      "factory_normalize_model_for_provider",
-      "factory_normalize_openrouter_model",
-      "factory_providerselection",
-      "factory_resolve_provider_selection",
-      "factory_split_explicit_provider",
-      "factory_validate_provider_name"
+    "45": [
+      "session_store",
+      "session_store_approval_rules_round_trip",
+      "session_store_cloud_sync_requires_file_backed_session_db",
+      "session_store_create_session_and_emit_events",
+      "session_store_from_config_uses_local_store_when_cloud_sync_is_disabled",
+      "session_store_fts_search_finds_events",
+      "session_store_get_events_with_range_filter",
+      "session_store_legacy_local_session_db_alias_is_resolved_into_database_url",
+      "session_store_list_sessions_filters_by_workspace",
+      "session_store_new_local_store",
+      "session_store_pending_signal_round_trip_and_resolution",
+      "session_store_schema_is_idempotent",
+      "session_store_update_status_persists_changes",
+      "session_store_wake_finds_checkpoint_and_recent_events",
+      "session_store_wake_returns_unresolved_pending_signals",
+      "session_store_wake_without_checkpoint_returns_all_events"
     ],
-    "43": [
+    "46": [
       "e2b_live",
       "e2b_live_destroy_and_wait",
       "e2b_live_e2b_live_provider_handles_roundtrip_and_lifecycle",
@@ -2188,24 +2318,7 @@
       "e2b_live_session",
       "e2b_live_wait_for_destroyed"
     ],
-    "44": [
-      "session_store",
-      "session_store_cloud_sync_requires_file_backed_session_db",
-      "session_store_create_session_and_emit_events",
-      "session_store_from_config_uses_local_store_when_cloud_sync_is_disabled",
-      "session_store_fts_search_finds_events",
-      "session_store_fts_search_handles_hyphenated_queries",
-      "session_store_get_events_filtered_by_type",
-      "session_store_get_events_with_range_filter",
-      "session_store_list_sessions_filters_by_workspace",
-      "session_store_pending_signal_round_trip_and_resolution",
-      "session_store_schema_is_idempotent",
-      "session_store_update_status_persists_changes",
-      "session_store_wake_finds_checkpoint_and_recent_events",
-      "session_store_wake_returns_unresolved_pending_signals",
-      "session_store_wake_without_checkpoint_returns_all_events"
-    ],
-    "45": [
+    "47": [
       "openai_provider",
       "openai_provider_openai_provider_does_not_retry_after_partial_stream_output",
       "openai_provider_openai_provider_drops_oversized_metadata_values",
@@ -2222,7 +2335,7 @@
       "openai_provider_sse_response",
       "openai_provider_tool_call_stream"
     ],
-    "46": [
+    "48": [
       "vault",
       "vault_decrypt_bytes",
       "vault_encrypt_bytes",
@@ -2239,24 +2352,7 @@
       "vault_filevault_persist_store",
       "vault_filevault_set"
     ],
-    "47": [
-      "mod",
-      "mod_build_default_pipeline",
-      "mod_build_default_pipeline_with_tools",
-      "mod_contextpipeline",
-      "mod_contextpipeline_new",
-      "mod_contextpipeline_run",
-      "mod_estimate_tokens",
-      "mod_pipeline_runner_executes_stages_in_order",
-      "mod_pipelinestagereport",
-      "mod_sort_json_keys",
-      "mod_teststage",
-      "mod_teststage_name",
-      "mod_teststage_new",
-      "mod_teststage_process",
-      "mod_teststage_stage"
-    ],
-    "48": [
+    "49": [
       "palette",
       "palette_centered_rect",
       "palette_filtered_actions",
@@ -2272,7 +2368,7 @@
       "palette_palettestate_selected_action",
       "palette_render_palette"
     ],
-    "49": [
+    "50": [
       "prompt",
       "prompt_build_textarea",
       "prompt_promptcompletionkind",
@@ -2288,7 +2384,7 @@
       "prompt_promptwidget_text",
       "prompt_render_completion_menu"
     ],
-    "50": [
+    "51": [
       "mcp_router",
       "mcp_router_emptymemorystore",
       "mcp_router_emptymemorystore_delete_page",
@@ -2304,7 +2400,7 @@
       "mcp_router_router_injects_mcp_credentials_via_proxy",
       "mcp_router_session"
     ],
-    "51": [
+    "52": [
       "events",
       "events_all_event_types_serialize",
       "events_approval_requested_event_deserializes_without_prompt",
@@ -2319,7 +2415,7 @@
       "events_event_token_count",
       "events_event_type_name"
     ],
-    "52": [
+    "53": [
       "injection",
       "injection_canary_detection_works",
       "injection_check_canary",
@@ -2334,7 +2430,7 @@
       "injection_working_context",
       "injection_wrap_untrusted_tool_output"
     ],
-    "53": [
+    "54": [
       "keybindings",
       "keybindings_approval_shortcuts_only_activate_while_waiting",
       "keybindings_command_palette_memory_and_settings_have_dedicated_maps",
@@ -2348,7 +2444,7 @@
       "keybindings_tab_accepts_completion_in_chat_mode",
       "keybindings_tab_and_session_shortcuts_map_correctly"
     ],
-    "54": [
+    "55": [
       "toolbar",
       "toolbar_build_tab_spans",
       "toolbar_preview",
@@ -2362,7 +2458,7 @@
       "toolbar_visible_window",
       "toolbar_visible_window_caps_tabs_to_requested_limit"
     ],
-    "55": [
+    "56": [
       "live_provider_roundtrip",
       "live_provider_roundtrip_available_live_providers",
       "live_provider_roundtrip_live_orchestrator_with_provider",
@@ -2376,7 +2472,7 @@
       "live_provider_roundtrip_wait_for_final_response",
       "live_provider_roundtrip_wait_for_status"
     ],
-    "56": [
+    "57": [
       "memory_store",
       "memory_store_create_read_update_and_delete_wiki_pages",
       "memory_store_delete_page_removes_only_the_requested_scope",
@@ -2388,7 +2484,19 @@
       "memory_store_user_and_workspace_scopes_are_separate",
       "memory_store_write_page_creates_and_reads_pages_in_explicit_scopes"
     ],
-    "57": [
+    "58": [
+      "postgres_store",
+      "postgres_store_cleanup_schema",
+      "postgres_store_create_test_store",
+      "postgres_store_postgres_connection_retry_surfaces_final_failure",
+      "postgres_store_postgres_event_payloads_round_trip_as_jsonb",
+      "postgres_store_postgres_session_ids_are_native_uuid_and_concurrent_emits_are_serialized",
+      "postgres_store_postgres_shared_session_store_contract",
+      "postgres_store_qualified",
+      "postgres_store_quote_identifier",
+      "postgres_store_with_test_store"
+    ],
+    "59": [
       "tool_card",
       "tool_card_border_line",
       "tool_card_content_line",
@@ -2399,7 +2507,7 @@
       "tool_card_truncate_to_width",
       "tool_card_wrap_text"
     ],
-    "58": [
+    "60": [
       "live_provider_matrix",
       "live_provider_matrix_available_live_providers",
       "live_provider_matrix_emit_token_tool",
@@ -2409,7 +2517,7 @@
       "live_provider_matrix_liveprovider_complete",
       "live_provider_matrix_liveprovider_label"
     ],
-    "59": [
+    "61": [
       "temporal_worker_helper",
       "temporal_worker_helper_helper_config",
       "temporal_worker_helper_helperprovider",
@@ -2419,7 +2527,7 @@
       "temporal_worker_helper_main",
       "temporal_worker_helper_main_impl"
     ],
-    "60": [
+    "62": [
       "stub",
       "stub_stubtool",
       "stub_stubtool_description",
@@ -2429,7 +2537,7 @@
       "stub_stubtool_new",
       "stub_stubtool_policy_spec"
     ],
-    "61": [
+    "63": [
       "instructions",
       "instructions_instruction_processor_appends_config_backed_sections",
       "instructions_instructionprocessor",
@@ -2438,7 +2546,7 @@
       "instructions_instructionprocessor_process",
       "instructions_instructionprocessor_stage"
     ],
-    "62": [
+    "64": [
       "chat",
       "chat_max_scroll",
       "chat_render_chat",
@@ -2446,7 +2554,7 @@
       "chat_wrap_line",
       "chat_wrap_prefixed"
     ],
-    "63": [
+    "65": [
       "bash",
       "bash_bashtoolinput",
       "bash_bashtoolinput_timeout",
@@ -2454,7 +2562,7 @@
       "bash_execute_local",
       "bash_stop_container"
     ],
-    "64": [
+    "66": [
       "cache",
       "cache_cache_optimizer_validates_cache_breakpoint",
       "cache_cacheoptimizer",
@@ -2462,7 +2570,7 @@
       "cache_cacheoptimizer_process",
       "cache_cacheoptimizer_stage"
     ],
-    "65": [
+    "67": [
       "identity",
       "identity_identity_processor_appends_system_prompt",
       "identity_identityprocessor",
@@ -2470,70 +2578,74 @@
       "identity_identityprocessor_process",
       "identity_identityprocessor_stage"
     ],
-    "66": [
+    "68": [
       "exec",
       "exec_exec_mode_formats_tool_updates_compactly",
       "exec_format_tool_update",
       "exec_resolve_exec_approval",
       "exec_run_exec"
     ],
-    "67": [
+    "69": [
       "sidebar",
       "sidebar_render_sidebar",
       "sidebar_section_title",
       "sidebar_should_show_sidebar",
       "sidebar_sidebar_visibility_respects_width_and_override"
     ],
-    "68": [
+    "70": [
       "anthropic_provider",
       "anthropic_provider_provider_retries_after_rate_limit",
       "anthropic_provider_provider_returns_error_after_partial_output_without_retrying",
       "anthropic_provider_provider_streams_tokens_incrementally",
       "anthropic_provider_provider_streams_tool_use_blocks"
     ],
-    "69": [
+    "71": [
       "file_search",
       "file_search_collect_matches",
       "file_search_execute",
       "file_search_execute_docker",
       "file_search_filesearchinput"
     ],
-    "70": [
+    "72": [
       "chat_harness",
       "chat_harness_main",
       "chat_harness_resolve_session_db_path",
       "chat_harness_run_prompt"
     ],
-    "71": [
+    "73": [
       "mock_mcp_stdio_server",
       "mock_mcp_stdio_server_read_message",
       "mock_mcp_stdio_server_write_message"
     ],
-    "72": [
+    "74": [
       "tui_workflows",
       "tui_workflows_tui_manual_workflow_opens_memory_settings_and_palette"
     ],
-    "73": [
+    "75": [
+      "schema_turso",
+      "schema_turso_migrate"
+    ],
+    "76": [
       "openai_live",
       "openai_live_openai_live_completion_returns_expected_answer"
     ],
-    "74": [
+    "77": [
       "openrouter_live",
       "openrouter_live_openrouter_live_completion_returns_expected_answer"
     ],
-    "75": [
+    "78": [
       "anthropic_live",
       "anthropic_live_anthropic_live_completion_returns_expected_answer"
     ],
-    "76": [
+    "79": [
       "docker_hardening",
       "docker_hardening_docker_container_runs_with_hardening"
     ],
-    "77": [
+    "80": [
       "live_harness",
       "live_harness_live_brain_turn_returns_brain_response"
     ],
-    "78": [
+    "81": [
       "compaction",
       "compaction_maybe_compact"
     ]
