@@ -37,11 +37,9 @@ async fn create_read_update_and_delete_wiki_pages() -> Result<()> {
         PageType::Topic,
         "# Authentication Architecture\n\nThe auth system uses JWT.\n",
     );
-    store
-        .write_page_in_scope(&scope, &path, page.clone())
-        .await?;
+    store.write_page(scope.clone(), &path, page.clone()).await?;
 
-    let loaded = store.read_page_in_scope(&scope, &path).await?;
+    let loaded = store.read_page(scope.clone(), &path).await?;
     assert_eq!(loaded.title, page.title);
     assert_eq!(loaded.page_type, PageType::Topic);
     assert!(loaded.content.contains("JWT"));
@@ -51,14 +49,14 @@ async fn create_read_update_and_delete_wiki_pages() -> Result<()> {
         .content
         .push_str("\nRefresh tokens rotate on every use.\n");
     store
-        .write_page_in_scope(&scope, &path, updated.clone())
+        .write_page(scope.clone(), &path, updated.clone())
         .await?;
 
-    let reloaded = store.read_page_in_scope(&scope, &path).await?;
+    let reloaded = store.read_page(scope.clone(), &path).await?;
     assert!(reloaded.content.contains("rotate on every use"));
 
-    store.delete_page_in_scope(&scope, &path).await?;
-    assert!(store.read_page_in_scope(&scope, &path).await.is_err());
+    store.delete_page(scope.clone(), &path).await?;
+    assert!(store.read_page(scope, &path).await.is_err());
 
     Ok(())
 }
@@ -178,8 +176,8 @@ async fn user_and_workspace_scopes_are_separate() -> Result<()> {
         )
         .await?;
 
-    let user_page = store.read_page_in_scope(&user_scope, &path).await?;
-    let workspace_page = store.read_page_in_scope(&workspace_scope, &path).await?;
+    let user_page = store.read_page(user_scope.clone(), &path).await?;
+    let workspace_page = store.read_page(workspace_scope.clone(), &path).await?;
     assert!(user_page.content.contains("concise"));
     assert!(workspace_page.content.contains("release notes"));
 
@@ -214,6 +212,74 @@ async fn get_index_truncates_memory_md_to_200_lines() -> Result<()> {
     assert_eq!(loaded.lines().count(), 200);
     assert!(loaded.contains("line 199"));
     assert!(!loaded.contains("line 200"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn write_page_creates_and_reads_pages_in_explicit_scopes() -> Result<()> {
+    let dir = tempdir()?;
+    let store = FileMemoryStore::new(dir.path()).await?;
+    let user_scope = MemoryScope::User("u1".into());
+    let workspace_scope = MemoryScope::Workspace("ws1".into());
+    let path = "topics/shared.md".into();
+
+    store
+        .write_page(
+            user_scope.clone(),
+            &path,
+            sample_page("Shared", PageType::Topic, "# Shared\n\nUser scope.\n"),
+        )
+        .await?;
+    store
+        .write_page(
+            workspace_scope.clone(),
+            &path,
+            sample_page("Shared", PageType::Topic, "# Shared\n\nWorkspace scope.\n"),
+        )
+        .await?;
+
+    let user_page = store.read_page(user_scope, &path).await?;
+    let workspace_page = store.read_page(workspace_scope, &path).await?;
+    assert!(user_page.content.contains("User scope."));
+    assert!(workspace_page.content.contains("Workspace scope."));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn delete_page_removes_only_the_requested_scope() -> Result<()> {
+    let dir = tempdir()?;
+    let store = FileMemoryStore::new(dir.path()).await?;
+    let user_scope = MemoryScope::User("u1".into());
+    let workspace_scope = MemoryScope::Workspace("ws1".into());
+    let path = "topics/shared.md".into();
+
+    store
+        .write_page(
+            user_scope.clone(),
+            &path,
+            sample_page("Shared", PageType::Topic, "# Shared\n\nUser scope.\n"),
+        )
+        .await?;
+    store
+        .write_page(
+            workspace_scope.clone(),
+            &path,
+            sample_page("Shared", PageType::Topic, "# Shared\n\nWorkspace scope.\n"),
+        )
+        .await?;
+
+    store.delete_page(user_scope.clone(), &path).await?;
+
+    assert!(store.read_page(user_scope, &path).await.is_err());
+    assert!(
+        store
+            .read_page(workspace_scope, &path)
+            .await?
+            .content
+            .contains("Workspace scope.")
+    );
 
     Ok(())
 }

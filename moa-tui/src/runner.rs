@@ -284,7 +284,7 @@ impl LocalChatRuntime {
     pub async fn read_memory_page(&self, path: &MemoryPath) -> Result<WikiPage> {
         self.orchestrator
             .memory_store()
-            .read_page_in_scope(&MemoryScope::Workspace(self.workspace_id.clone()), path)
+            .read_page(MemoryScope::Workspace(self.workspace_id.clone()), path)
             .await
     }
 

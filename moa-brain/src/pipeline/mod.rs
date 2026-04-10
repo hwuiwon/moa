@@ -222,20 +222,21 @@ async fn preload_memory_stage_data(
     let mut relevant_pages = Vec::new();
 
     if let Some(query) = extract_search_query(events) {
-        for (scope_label, scope) in [
-            ("user", user_scope.clone()),
-            ("workspace", workspace_scope.clone()),
-        ] {
+        for scope in [user_scope.clone(), workspace_scope.clone()] {
             let results = memory_store
                 .search(&query, scope, MEMORY_RESULTS_PER_SCOPE)
                 .await?;
             for result in results {
-                let excerpt = match memory_store.read_page(&result.path).await {
+                let result_scope = result.scope.clone();
+                let excerpt = match memory_store
+                    .read_page(result_scope.clone(), &result.path)
+                    .await
+                {
                     Ok(page) => page.content,
                     Err(error) => {
                         tracing::debug!(
                             path = %result.path,
-                            scope = scope_label,
+                            scope = %scope_label_for(&result_scope),
                             error = %error,
                             "falling back to memory search snippet after read failure"
                         );
@@ -243,7 +244,7 @@ async fn preload_memory_stage_data(
                     }
                 };
                 relevant_pages.push(RelevantMemoryPage {
-                    scope_label: scope_label.to_string(),
+                    scope_label: scope_label_for(&result_scope),
                     path: result.path.to_string(),
                     title: result.title,
                     excerpt,
@@ -259,8 +260,16 @@ async fn preload_memory_stage_data(
     })
 }
 
+fn scope_label_for(scope: &MemoryScope) -> String {
+    match scope {
+        MemoryScope::User(_) => "user".to_string(),
+        MemoryScope::Workspace(_) => "workspace".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -351,6 +360,12 @@ mod tests {
     #[derive(Default)]
     struct MockMemoryStore;
 
+    struct SearchResultMemoryStore {
+        page_by_scope: HashMap<(String, String), WikiPage>,
+        user_results: Vec<MemorySearchResult>,
+        workspace_results: Vec<MemorySearchResult>,
+    }
+
     #[async_trait]
     impl MemoryStore for MockMemoryStore {
         async fn search(
@@ -362,18 +377,23 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn read_page(&self, path: &MemoryPath) -> Result<WikiPage> {
+        async fn read_page(&self, _scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
             Err(MoaError::StorageError(format!(
                 "mock page not found: {}",
                 path.as_str()
             )))
         }
 
-        async fn write_page(&self, _path: &MemoryPath, _page: WikiPage) -> Result<()> {
+        async fn write_page(
+            &self,
+            _scope: MemoryScope,
+            _path: &MemoryPath,
+            _page: WikiPage,
+        ) -> Result<()> {
             Ok(())
         }
 
-        async fn delete_page(&self, _path: &MemoryPath) -> Result<()> {
+        async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
             Ok(())
         }
 
@@ -390,6 +410,59 @@ mod tests {
                 MemoryScope::User(_) => "user memory".to_string(),
                 MemoryScope::Workspace(_) => "workspace memory".to_string(),
             })
+        }
+
+        async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl MemoryStore for SearchResultMemoryStore {
+        async fn search(
+            &self,
+            _query: &str,
+            scope: MemoryScope,
+            _limit: usize,
+        ) -> Result<Vec<MemorySearchResult>> {
+            Ok(match scope {
+                MemoryScope::User(_) => self.user_results.clone(),
+                MemoryScope::Workspace(_) => self.workspace_results.clone(),
+            })
+        }
+
+        async fn read_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
+            self.page_by_scope
+                .get(&(super::scope_label_for(&scope), path.as_str().to_string()))
+                .cloned()
+                .ok_or_else(|| {
+                    MoaError::StorageError(format!("mock page not found: {}", path.as_str()))
+                })
+        }
+
+        async fn write_page(
+            &self,
+            _scope: MemoryScope,
+            _path: &MemoryPath,
+            _page: WikiPage,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list_pages(
+            &self,
+            _scope: MemoryScope,
+            _filter: Option<PageType>,
+        ) -> Result<Vec<PageSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_index(&self, scope: MemoryScope) -> Result<String> {
+            Ok(format!("{} memory", super::scope_label_for(&scope)))
         }
 
         async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
@@ -488,6 +561,111 @@ mod tests {
         assert_eq!(
             ctx.metadata["stage_order"],
             json!(["identity", "instructions", "tools"])
+        );
+    }
+
+    #[tokio::test]
+    async fn preload_memory_stage_data_reads_pages_from_result_scope() {
+        let session = SessionMeta {
+            id: SessionId::new(),
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Tui,
+            model: "claude-sonnet-4-6".to_string(),
+            ..SessionMeta::default()
+        };
+        let capabilities = ModelCapabilities {
+            model_id: "claude-sonnet-4-6".to_string(),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+            },
+        };
+        let shared_path = MemoryPath::new("topics/preferences.md");
+        let mut page_by_scope = HashMap::new();
+        for (scope_label, content) in [("workspace", "Workspace copy"), ("user", "User copy")] {
+            page_by_scope.insert(
+                (scope_label.to_string(), shared_path.as_str().to_string()),
+                WikiPage {
+                    path: Some(shared_path.clone()),
+                    title: "Preferences".to_string(),
+                    page_type: PageType::Topic,
+                    content: content.to_string(),
+                    created: Utc::now(),
+                    updated: Utc::now(),
+                    confidence: moa_core::ConfidenceLevel::High,
+                    related: Vec::new(),
+                    sources: Vec::new(),
+                    tags: Vec::new(),
+                    auto_generated: false,
+                    last_referenced: Utc::now(),
+                    reference_count: 0,
+                    metadata: HashMap::new(),
+                },
+            );
+        }
+        let store = SearchResultMemoryStore {
+            page_by_scope,
+            user_results: vec![MemorySearchResult {
+                scope: MemoryScope::User(session.user_id.clone()),
+                path: shared_path.clone(),
+                title: "Preferences".to_string(),
+                page_type: PageType::Topic,
+                snippet: "User snippet".to_string(),
+                confidence: moa_core::ConfidenceLevel::High,
+                updated: Utc::now(),
+                reference_count: 0,
+            }],
+            workspace_results: vec![MemorySearchResult {
+                scope: MemoryScope::Workspace(session.workspace_id.clone()),
+                path: shared_path.clone(),
+                title: "Preferences".to_string(),
+                page_type: PageType::Topic,
+                snippet: "Workspace snippet".to_string(),
+                confidence: moa_core::ConfidenceLevel::High,
+                updated: Utc::now(),
+                reference_count: 0,
+            }],
+        };
+        let ctx = WorkingContext::new(&session, capabilities);
+        let events = vec![EventRecord {
+            id: uuid::Uuid::new_v4(),
+            session_id: session.id.clone(),
+            sequence_num: 0,
+            event_type: moa_core::EventType::UserMessage,
+            event: Event::UserMessage {
+                text: "Find preferences".to_string(),
+                attachments: Vec::new(),
+            },
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        }];
+
+        let memory_data = super::preload_memory_stage_data(&store, &ctx, &events)
+            .await
+            .unwrap();
+
+        assert!(
+            memory_data
+                .relevant_pages
+                .iter()
+                .any(|page| page.scope_label == "workspace" && page.excerpt == "Workspace copy")
+        );
+        assert!(
+            memory_data
+                .relevant_pages
+                .iter()
+                .any(|page| page.scope_label == "user" && page.excerpt == "User copy")
         );
     }
 }

@@ -121,15 +121,20 @@ impl MemoryStore for MockMemoryStore {
         Ok(Vec::new())
     }
 
-    async fn read_page(&self, _path: &MemoryPath) -> Result<WikiPage> {
+    async fn read_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
         panic!("brain turn test does not expect memory reads")
     }
 
-    async fn write_page(&self, _path: &MemoryPath, _page: WikiPage) -> Result<()> {
+    async fn write_page(
+        &self,
+        _scope: MemoryScope,
+        _path: &MemoryPath,
+        _page: WikiPage,
+    ) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_page(&self, _path: &MemoryPath) -> Result<()> {
+    async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
         Ok(())
     }
 
@@ -167,7 +172,7 @@ impl MemoryStore for FixedPageMemoryStore {
         Ok(Vec::new())
     }
 
-    async fn read_page(&self, path: &MemoryPath) -> Result<WikiPage> {
+    async fn read_page(&self, _scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
         if path == &self.path {
             Ok(self.page.clone())
         } else {
@@ -175,11 +180,16 @@ impl MemoryStore for FixedPageMemoryStore {
         }
     }
 
-    async fn write_page(&self, _path: &MemoryPath, _page: WikiPage) -> Result<()> {
+    async fn write_page(
+        &self,
+        _scope: MemoryScope,
+        _path: &MemoryPath,
+        _page: WikiPage,
+    ) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_page(&self, _path: &MemoryPath) -> Result<()> {
+    async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
         Ok(())
     }
 
@@ -337,6 +347,81 @@ impl LLMProvider for ToolLoopLlmProvider {
                 text: "Tool said hello from tool".to_string(),
                 content: vec![CompletionContent::Text(
                     "Tool said hello from tool".to_string(),
+                )],
+                stop_reason: StopReason::EndTurn,
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 20,
+                output_tokens: 7,
+                cached_input_tokens: 0,
+                duration_ms: 12,
+            }
+        };
+        requests.push(request);
+        Ok(CompletionStream::from_response(response))
+    }
+}
+
+#[derive(Default)]
+struct MemoryWriteLoopLlmProvider {
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl LLMProvider for MemoryWriteLoopLlmProvider {
+    fn name(&self) -> &str {
+        "mock-memory-write-loop"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: "claude-sonnet-4-6".to_string(),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+            },
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let mut requests = self.requests.lock().await;
+        let response = if requests.is_empty() {
+            CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(ToolInvocation {
+                    id: Some("22222222-2222-2222-2222-222222222222".to_string()),
+                    name: "memory_write".to_string(),
+                    input: json!({
+                        "path": "topics/generated.md",
+                        "scope": "workspace",
+                        "title": "Generated",
+                        "content": "# Generated\nCreated by the tool."
+                    }),
+                })],
+                stop_reason: StopReason::ToolUse,
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 12,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+                duration_ms: 10,
+            }
+        } else {
+            assert!(request.messages.iter().any(|message| {
+                message
+                    .content
+                    .contains("Wrote memory page topics/generated.md")
+            }));
+            CompletionResponse {
+                text: "Saved the workspace page.".to_string(),
+                content: vec![CompletionContent::Text(
+                    "Saved the workspace page.".to_string(),
                 )],
                 stop_reason: StopReason::EndTurn,
                 model: "claude-sonnet-4-6".to_string(),
@@ -717,6 +802,99 @@ async fn run_brain_turn_pauses_for_approval_then_executes_tool() {
     assert!(events.iter().any(|record| matches!(
         &record.event,
         Event::BrainResponse { text, .. } if text == "Tool said hello from tool"
+    )));
+}
+
+#[tokio::test]
+async fn run_brain_turn_memory_write_creates_workspace_page_after_approval() {
+    let session = SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: "claude-sonnet-4-6".to_string(),
+        ..SessionMeta::default()
+    };
+    let initial_events = vec![make_event_record(
+        &session.id,
+        0,
+        Event::UserMessage {
+            text: "Create a workspace note".to_string(),
+            attachments: Vec::new(),
+        },
+    )];
+    let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
+    let memory_root = tempdir().unwrap();
+    let memory_store = Arc::new(FileMemoryStore::new(memory_root.path()).await.unwrap());
+    let memory_store_trait: Arc<dyn MemoryStore> = memory_store.clone();
+    let sandbox_dir = tempdir().unwrap();
+    let tool_router = Arc::new(
+        ToolRouter::new_local(memory_store_trait.clone(), sandbox_dir.path())
+            .await
+            .unwrap(),
+    );
+    let pipeline = build_default_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        memory_store_trait,
+        tool_router.tool_schemas(),
+    );
+    let llm = Arc::new(MemoryWriteLoopLlmProvider::default());
+
+    let result = run_brain_turn_with_tools(
+        session.id.clone(),
+        store.clone(),
+        llm.clone(),
+        &pipeline,
+        Some(tool_router.clone()),
+    )
+    .await
+    .unwrap();
+
+    let request = match result {
+        TurnResult::NeedsApproval(request) => request,
+        other => panic!("expected pending approval, got {other:?}"),
+    };
+    store
+        .emit_event(
+            session.id.clone(),
+            Event::ApprovalDecided {
+                request_id: request.request_id,
+                decision: ApprovalDecision::AllowOnce,
+                decided_by: "user".to_string(),
+                decided_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let resumed = run_brain_turn_with_tools(
+        session.id.clone(),
+        store.clone(),
+        llm,
+        &pipeline,
+        Some(tool_router),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(resumed, TurnResult::Complete);
+    let page = memory_store
+        .read_page(
+            MemoryScope::Workspace(session.workspace_id.clone()),
+            &MemoryPath::new("topics/generated.md"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.title, "Generated");
+    assert!(page.content.contains("Created by the tool."));
+    let events = store.events.lock().await.clone();
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::ToolCall { tool_name, .. } if tool_name == "memory_write"
+    )));
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::BrainResponse { text, .. } if text == "Saved the workspace page."
     )));
 }
 

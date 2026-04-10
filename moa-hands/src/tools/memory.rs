@@ -22,14 +22,15 @@ impl BuiltInTool for MemoryReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a memory wiki page by logical path."
+        "Read a memory wiki page by logical path. Optionally specify `scope` as `workspace` or `user`; otherwise MOA checks workspace first and then user scope."
     }
 
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Logical wiki path such as skills/deploy/SKILL.md." }
+                "path": { "type": "string", "description": "Logical wiki path such as skills/deploy/SKILL.md." },
+                "scope": { "type": "string", "enum": ["user", "workspace"], "description": "Optional explicit scope. Defaults to workspace and falls back to user when omitted." }
             },
             "required": ["path"],
             "additionalProperties": false
@@ -48,7 +49,13 @@ impl BuiltInTool for MemoryReadTool {
         let params: MemoryReadInput = serde_json::from_value(input.clone())?;
         let started_at = Instant::now();
         let path = MemoryPath::new(params.path);
-        let page = ctx.memory_store.read_page(&path).await?;
+        let page = match params.scope.as_deref() {
+            Some(scope) => {
+                let resolved_scope = parse_scope(scope, ctx.session)?;
+                ctx.memory_store.read_page(resolved_scope, &path).await?
+            }
+            None => read_page_with_fallback(ctx.memory_store, ctx.session, &path).await?,
+        };
 
         Ok(ToolOutput {
             stdout: format!(
@@ -162,7 +169,7 @@ impl BuiltInTool for MemoryWriteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Update an existing memory wiki page."
+        "Create or update a memory wiki page. Provide `scope` when creating a new page; without `scope`, MOA updates an existing page by checking workspace scope first and then user scope."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -195,45 +202,60 @@ impl BuiltInTool for MemoryWriteTool {
         let params: MemoryWriteInput = serde_json::from_value(input.clone())?;
         let started_at = Instant::now();
         let path = MemoryPath::new(params.path);
-        let existing_page = ctx.memory_store.read_page(&path).await.map_err(|error| {
-            MoaError::ToolError(format!(
-                "memory_write currently requires an existing uniquely scoped page: {error}"
-            ))
-        })?;
         let now = Utc::now();
-        if params.scope.is_some() {
-            tracing::debug!(
-                path = path.as_str(),
-                requested_scope = ?params.scope,
-                "memory_write received a scope hint that cannot be enforced through the current MemoryStore trait"
-            );
-        }
-
-        let page = WikiPage {
-            path: Some(path.clone()),
-            title: params.title.unwrap_or(existing_page.title),
-            page_type: params
-                .page_type
-                .as_deref()
-                .map(parse_page_type)
-                .transpose()?
-                .unwrap_or(existing_page.page_type),
-            content: params.content,
-            created: existing_page.created,
-            updated: now,
-            confidence: existing_page.confidence,
-            related: params.related.unwrap_or(existing_page.related),
-            sources: params.sources.unwrap_or(existing_page.sources),
-            tags: params.tags.unwrap_or(existing_page.tags),
-            auto_generated: existing_page.auto_generated,
-            last_referenced: existing_page.last_referenced,
-            reference_count: existing_page.reference_count,
-            metadata: existing_page.metadata,
+        let (scope, existing_page) = match params.scope.as_deref() {
+            Some(scope) => (parse_scope(scope, ctx.session)?, None),
+            None => resolve_existing_scope(ctx.memory_store, ctx.session, &path).await?,
         };
-        ctx.memory_store.write_page(&path, page).await?;
+
+        let page = match existing_page {
+            Some(existing_page) => WikiPage {
+                path: Some(path.clone()),
+                title: params.title.unwrap_or(existing_page.title),
+                page_type: params
+                    .page_type
+                    .as_deref()
+                    .map(parse_page_type)
+                    .transpose()?
+                    .unwrap_or(existing_page.page_type),
+                content: params.content,
+                created: existing_page.created,
+                updated: now,
+                confidence: existing_page.confidence,
+                related: params.related.unwrap_or(existing_page.related),
+                sources: params.sources.unwrap_or(existing_page.sources),
+                tags: params.tags.unwrap_or(existing_page.tags),
+                auto_generated: existing_page.auto_generated,
+                last_referenced: existing_page.last_referenced,
+                reference_count: existing_page.reference_count,
+                metadata: existing_page.metadata,
+            },
+            None => WikiPage {
+                path: Some(path.clone()),
+                title: params.title.unwrap_or_else(|| infer_page_title(&path)),
+                page_type: params
+                    .page_type
+                    .as_deref()
+                    .map(parse_page_type)
+                    .transpose()?
+                    .unwrap_or_else(|| infer_page_type(&path)),
+                content: params.content,
+                created: now,
+                updated: now,
+                confidence: moa_core::ConfidenceLevel::Medium,
+                related: params.related.unwrap_or_default(),
+                sources: params.sources.unwrap_or_default(),
+                tags: params.tags.unwrap_or_default(),
+                auto_generated: false,
+                last_referenced: now,
+                reference_count: 0,
+                metadata: std::collections::HashMap::new(),
+            },
+        };
+        ctx.memory_store.write_page(scope, &path, page).await?;
 
         Ok(ToolOutput {
-            stdout: format!("Updated memory page {}", path.as_str()),
+            stdout: format!("Wrote memory page {}", path.as_str()),
             stderr: String::new(),
             exit_code: 0,
             duration: started_at.elapsed(),
@@ -255,6 +277,8 @@ struct MemorySearchInput {
 #[derive(Debug, Deserialize)]
 struct MemoryReadInput {
     path: String,
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -311,4 +335,103 @@ fn parse_page_type(value: &str) -> Result<PageType> {
             "unsupported memory page type: {other}"
         ))),
     }
+}
+
+async fn read_page_with_fallback(
+    memory_store: &dyn moa_core::MemoryStore,
+    session: &moa_core::SessionMeta,
+    path: &MemoryPath,
+) -> Result<WikiPage> {
+    match memory_store
+        .read_page(MemoryScope::Workspace(session.workspace_id.clone()), path)
+        .await
+    {
+        Ok(page) => Ok(page),
+        Err(error) if is_memory_not_found(&error) => memory_store
+            .read_page(MemoryScope::User(session.user_id.clone()), path)
+            .await
+            .map_err(|fallback_error| {
+                if is_memory_not_found(&fallback_error) {
+                    MoaError::ToolError(format!(
+                        "memory page not found in workspace or user scope: {}",
+                        path.as_str()
+                    ))
+                } else {
+                    fallback_error
+                }
+            }),
+        Err(error) => Err(error),
+    }
+}
+
+async fn resolve_existing_scope(
+    memory_store: &dyn moa_core::MemoryStore,
+    session: &moa_core::SessionMeta,
+    path: &MemoryPath,
+) -> Result<(MemoryScope, Option<WikiPage>)> {
+    let workspace_scope = MemoryScope::Workspace(session.workspace_id.clone());
+    match memory_store.read_page(workspace_scope.clone(), path).await {
+        Ok(page) => return Ok((workspace_scope, Some(page))),
+        Err(error) if !is_memory_not_found(&error) => return Err(error),
+        Err(_) => {}
+    }
+
+    let user_scope = MemoryScope::User(session.user_id.clone());
+    match memory_store.read_page(user_scope.clone(), path).await {
+        Ok(page) => Ok((user_scope, Some(page))),
+        Err(error) if !is_memory_not_found(&error) => Err(error),
+        Err(_) => Err(MoaError::ToolError(format!(
+            "memory page {} does not exist in workspace or user scope; specify `scope` as `workspace` or `user` to create it",
+            path.as_str()
+        ))),
+    }
+}
+
+fn parse_scope(value: &str, session: &moa_core::SessionMeta) -> Result<MemoryScope> {
+    match value {
+        "user" => Ok(MemoryScope::User(session.user_id.clone())),
+        "workspace" => Ok(MemoryScope::Workspace(session.workspace_id.clone())),
+        other => Err(MoaError::ValidationError(format!(
+            "unsupported memory scope: {other}"
+        ))),
+    }
+}
+
+fn infer_page_type(path: &MemoryPath) -> PageType {
+    match path.as_str().split('/').next() {
+        Some("skills") => PageType::Skill,
+        Some("entities") => PageType::Entity,
+        Some("decisions") => PageType::Decision,
+        Some("sources") => PageType::Source,
+        Some("schemas") => PageType::Schema,
+        Some("logs") => PageType::Log,
+        Some("topics") => PageType::Topic,
+        _ if path.as_str() == "MEMORY.md" => PageType::Index,
+        _ if path.as_str() == "_log.md" => PageType::Log,
+        _ => PageType::Topic,
+    }
+}
+
+fn infer_page_title(path: &MemoryPath) -> String {
+    let leaf = path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .unwrap_or(path.as_str())
+        .trim_end_matches(".md");
+    leaf.split(['-', '_'])
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_memory_not_found(error: &MoaError) -> bool {
+    matches!(error, MoaError::StorageError(message) if message.starts_with("memory page not found:"))
 }

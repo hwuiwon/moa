@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use chrono::Utc;
-use moa_core::{ConfidenceLevel, MemoryPath, MemoryScope, PageType, Result, WikiPage};
+use moa_core::{ConfidenceLevel, MemoryPath, MemoryScope, MemoryStore, PageType, Result, WikiPage};
 
 use crate::FileMemoryStore;
 use crate::index::{LogChange, LogEntry};
@@ -51,7 +51,7 @@ pub async fn ingest_source(
         metadata: std::collections::HashMap::new(),
     };
     store
-        .write_page_in_scope(scope, &source_path, source_page)
+        .write_page(scope.clone(), &source_path, source_page)
         .await?;
 
     for entity in extract_section_items(source, "entities") {
@@ -149,7 +149,7 @@ async fn upsert_derived_page(
         source_path.as_str()
     );
 
-    let mut page = match store.read_page_in_scope(scope, path).await {
+    let mut page = match store.read_page(scope.clone(), path).await {
         Ok(mut existing) => {
             if !existing.content.contains(update_block.trim()) {
                 if !existing.content.trim().is_empty() {
@@ -190,7 +190,7 @@ async fn upsert_derived_page(
     };
 
     page.path = Some(path.clone());
-    store.write_page_in_scope(scope, path, page).await
+    store.write_page(scope.clone(), path, page).await
 }
 
 fn build_source_page(source_name: &str, source: &str) -> String {

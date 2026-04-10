@@ -1386,6 +1386,8 @@ pub enum PageType {
 /// Result row returned from memory search.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemorySearchResult {
+    /// Scope that produced this search result.
+    pub scope: MemoryScope,
     /// Logical page path.
     pub path: MemoryPath,
     /// Page title.

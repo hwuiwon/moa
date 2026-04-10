@@ -128,7 +128,7 @@ pub async fn reconcile_branches(
             match change.operation {
                 ChangeOperation::Write => {
                     let branch_page = read_branch_page(store, scope, &branch, &change.path).await?;
-                    match store.read_page_in_scope(scope, &change.path).await {
+                    match store.read_page(scope.clone(), &change.path).await {
                         Ok(main_page)
                             if main_page.updated > branch_page.updated
                                 || (main_page.updated == branch_page.updated
@@ -136,30 +136,26 @@ pub async fn reconcile_branches(
                         {
                             let merged = merge_pages(&main_page, &branch_page);
                             store
-                                .write_page_in_scope(scope, &change.path, merged)
+                                .write_page(scope.clone(), &change.path, merged)
                                 .await?;
                             report.conflicts_resolved += 1;
                         }
                         Ok(_) => {
                             store
-                                .write_page_in_scope(scope, &change.path, branch_page)
+                                .write_page(scope.clone(), &change.path, branch_page)
                                 .await?;
                             report.pages_merged += 1;
                         }
                         Err(_) => {
                             store
-                                .write_page_in_scope(scope, &change.path, branch_page)
+                                .write_page(scope.clone(), &change.path, branch_page)
                                 .await?;
                             report.pages_created += 1;
                         }
                     }
                 }
                 ChangeOperation::Delete => {
-                    if store
-                        .delete_page_in_scope(scope, &change.path)
-                        .await
-                        .is_ok()
-                    {
+                    if store.delete_page(scope.clone(), &change.path).await.is_ok() {
                         report.pages_merged += 1;
                     }
                 }

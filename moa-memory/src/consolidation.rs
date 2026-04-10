@@ -73,7 +73,7 @@ pub async fn run_consolidation(
 
     let mut pages = Vec::with_capacity(page_paths.len());
     for path in &page_paths {
-        pages.push((path.clone(), store.read_page_in_scope(scope, path).await?));
+        pages.push((path.clone(), store.read_page(scope.clone(), path).await?));
     }
 
     let canonical_ports = canonical_port_claims(&pages);
@@ -83,7 +83,7 @@ pub async fn run_consolidation(
     for (path, mut page) in pages {
         let mut modified = false;
         if should_prune_page(&page) {
-            store.delete_page_in_scope(scope, &path).await?;
+            store.delete_page(scope.clone(), &path).await?;
             report.pages_deleted += 1;
             log_changes.push(LogChange {
                 action: "Pruned".to_string(),
@@ -122,7 +122,7 @@ pub async fn run_consolidation(
         }
 
         if modified {
-            store.write_page_in_scope(scope, &path, page).await?;
+            store.write_page(scope.clone(), &path, page).await?;
             report.pages_updated += 1;
             log_changes.push(LogChange {
                 action: "Updated".to_string(),

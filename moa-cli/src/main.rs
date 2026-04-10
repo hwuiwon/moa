@@ -340,7 +340,7 @@ async fn memory_show_report(config: &MoaConfig, path: &str) -> Result<String> {
     let store = FileMemoryStore::from_config(config).await?;
     let path = MemoryPath::new(path);
     let page = store
-        .read_page_in_scope(&MemoryScope::Workspace(current_workspace_id()), &path)
+        .read_page(MemoryScope::Workspace(current_workspace_id()), &path)
         .await?;
     let rendered = toml::to_string(&page.metadata).unwrap_or_default();
     Ok(format!("---\n{}---\n{}", rendered, page.content))

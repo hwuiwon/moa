@@ -185,6 +185,7 @@ LIMIT ?
         while let Some(row) = rows.next().await.map_err(memory_error)? {
             let updated_raw: String = row.get(5).map_err(memory_error)?;
             results.push(MemorySearchResult {
+                scope: scope.clone(),
                 path: MemoryPath::new(row.get::<String>(0).map_err(memory_error)?),
                 title: row.get(1).map_err(memory_error)?,
                 page_type: parse_page_type(&row.get::<String>(2).map_err(memory_error)?)?,

@@ -200,9 +200,9 @@ pub struct PlatformCapabilities {
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
     async fn search(&self, query: &str, scope: MemoryScope, limit: usize) -> Result<Vec<MemorySearchResult>>;
-    async fn read_page(&self, path: &MemoryPath) -> Result<WikiPage>;
-    async fn write_page(&self, path: &MemoryPath, page: WikiPage) -> Result<()>;
-    async fn delete_page(&self, path: &MemoryPath) -> Result<()>;
+    async fn read_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage>;
+    async fn write_page(&self, scope: MemoryScope, path: &MemoryPath, page: WikiPage) -> Result<()>;
+    async fn delete_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<()>;
     async fn list_pages(&self, scope: MemoryScope, filter: Option<PageType>) -> Result<Vec<PageSummary>>;
     async fn get_index(&self, scope: MemoryScope) -> Result<String>;
     async fn rebuild_search_index(&self, scope: MemoryScope) -> Result<()>;
