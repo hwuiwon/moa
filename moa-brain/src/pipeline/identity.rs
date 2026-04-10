@@ -1,5 +1,6 @@
 //! Stage 1: injects the static MOA identity prompt.
 
+use async_trait::async_trait;
 use moa_core::{ContextProcessor, ProcessorOutput, Result, WorkingContext};
 
 use super::estimate_tokens;
@@ -16,6 +17,7 @@ errors, preserve them in context so they are not repeated.";
 #[derive(Debug, Default)]
 pub struct IdentityProcessor;
 
+#[async_trait]
 impl ContextProcessor for IdentityProcessor {
     fn name(&self) -> &str {
         "identity"
@@ -25,7 +27,7 @@ impl ContextProcessor for IdentityProcessor {
         1
     }
 
-    fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+    async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
         ctx.append_system(IDENTITY_PROMPT);
         Ok(ProcessorOutput {
             tokens_added: estimate_tokens(IDENTITY_PROMPT),
@@ -44,8 +46,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn identity_processor_appends_system_prompt() {
+    #[tokio::test]
+    async fn identity_processor_appends_system_prompt() {
         let session = SessionMeta {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
@@ -71,7 +73,7 @@ mod tests {
         };
         let mut ctx = WorkingContext::new(&session, capabilities);
 
-        let output = IdentityProcessor.process(&mut ctx).unwrap();
+        let output = IdentityProcessor.process(&mut ctx).await.unwrap();
 
         assert_eq!(ctx.messages.len(), 1);
         assert_eq!(ctx.messages[0].role, moa_core::MessageRole::System);

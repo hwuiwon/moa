@@ -1,18 +1,28 @@
 //! Stage 6: compiles session history into context messages.
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use moa_core::{
-    ContextMessage, ContextProcessor, Event, EventRecord, ProcessorOutput, Result, WorkingContext,
+    ContextMessage, ContextProcessor, Event, EventRange, EventRecord, ProcessorOutput, Result,
+    SessionStore, WorkingContext,
 };
 
-use super::{estimate_tokens, load_history_events};
+use super::estimate_tokens;
 
 const RECENT_MESSAGE_LIMIT: usize = 10;
 
 /// Compiles session events into conversational context.
-#[derive(Debug, Default)]
-pub struct HistoryCompiler;
+pub struct HistoryCompiler {
+    session_store: Arc<dyn SessionStore>,
+}
 
 impl HistoryCompiler {
+    /// Creates a history compiler backed by the shared session store.
+    pub fn new(session_store: Arc<dyn SessionStore>) -> Self {
+        Self { session_store }
+    }
+
     /// Converts event records into context messages subject to the available budget.
     pub fn compile_messages(
         &self,
@@ -81,6 +91,7 @@ impl HistoryCompiler {
     }
 }
 
+#[async_trait]
 impl ContextProcessor for HistoryCompiler {
     fn name(&self) -> &str {
         "history"
@@ -90,9 +101,12 @@ impl ContextProcessor for HistoryCompiler {
         6
     }
 
-    fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+    async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
         let remaining_budget = ctx.token_budget.saturating_sub(ctx.token_count);
-        let events = load_history_events(ctx)?;
+        let events = self
+            .session_store
+            .get_events(ctx.session_id.clone(), EventRange::all())
+            .await?;
         let (messages, tokens_added) = self.compile_messages(&events, remaining_budget)?;
         let items_included = messages
             .iter()
@@ -151,13 +165,88 @@ fn event_to_context_message(record: &EventRecord) -> Option<Result<ContextMessag
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
     use chrono::Utc;
     use moa_core::{
-        BrainId, EventRecord, Platform, SessionId, SessionMeta, TokenPricing, ToolCallFormat,
+        BrainId, EventFilter, EventRecord, Platform, SequenceNum, SessionFilter, SessionId,
+        SessionMeta, SessionStatus, SessionStore, SessionSummary, TokenPricing, ToolCallFormat,
         UserId, WorkspaceId,
     };
+    use tokio::sync::Mutex;
 
     use super::*;
+
+    #[derive(Clone)]
+    struct MockSessionStore {
+        session: Arc<Mutex<SessionMeta>>,
+        events: Arc<Mutex<Vec<EventRecord>>>,
+    }
+
+    impl MockSessionStore {
+        fn new(session: SessionMeta, events: Vec<EventRecord>) -> Self {
+            Self {
+                session: Arc::new(Mutex::new(session)),
+                events: Arc::new(Mutex::new(events)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SessionStore for MockSessionStore {
+        async fn create_session(&self, meta: SessionMeta) -> Result<SessionId> {
+            let id = meta.id.clone();
+            *self.session.lock().await = meta;
+            Ok(id)
+        }
+
+        async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<SequenceNum> {
+            let mut events = self.events.lock().await;
+            let sequence_num = events.len() as SequenceNum;
+            events.push(EventRecord {
+                id: uuid::Uuid::new_v4(),
+                session_id,
+                sequence_num,
+                event_type: event.event_type(),
+                event,
+                timestamp: Utc::now(),
+                brain_id: None,
+                hand_id: None,
+                token_count: None,
+            });
+            Ok(sequence_num)
+        }
+
+        async fn get_events(
+            &self,
+            _session_id: SessionId,
+            _range: EventRange,
+        ) -> Result<Vec<EventRecord>> {
+            Ok(self.events.lock().await.clone())
+        }
+
+        async fn get_session(&self, _session_id: SessionId) -> Result<SessionMeta> {
+            Ok(self.session.lock().await.clone())
+        }
+
+        async fn update_status(&self, _session_id: SessionId, status: SessionStatus) -> Result<()> {
+            self.session.lock().await.status = status;
+            Ok(())
+        }
+
+        async fn search_events(
+            &self,
+            _query: &str,
+            _filter: EventFilter,
+        ) -> Result<Vec<EventRecord>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_sessions(&self, _filter: SessionFilter) -> Result<Vec<SessionSummary>> {
+            Ok(Vec::new())
+        }
+    }
 
     fn capabilities() -> moa_core::ModelCapabilities {
         moa_core::ModelCapabilities {
@@ -223,7 +312,10 @@ mod tests {
                 },
             ),
         ];
-        let compiler = HistoryCompiler;
+        let compiler = HistoryCompiler::new(Arc::new(MockSessionStore::new(
+            session.clone(),
+            events.clone(),
+        )));
 
         let (messages, tokens_added) = compiler.compile_messages(&events, 1_000).unwrap();
 
@@ -235,8 +327,8 @@ mod tests {
         assert!(tokens_added > 0);
     }
 
-    #[test]
-    fn history_processor_uses_preloaded_events() {
+    #[tokio::test]
+    async fn history_processor_loads_events_directly_from_session_store() {
         let session = SessionMeta {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
@@ -254,12 +346,10 @@ mod tests {
             },
         )];
         let mut ctx = WorkingContext::new(&session, capabilities());
-        ctx.metadata.insert(
-            super::super::HISTORY_EVENTS_METADATA_KEY.to_string(),
-            serde_json::to_value(&events).unwrap(),
-        );
+        let compiler =
+            HistoryCompiler::new(Arc::new(MockSessionStore::new(session.clone(), events)));
 
-        let output = HistoryCompiler.process(&mut ctx).unwrap();
+        let output = compiler.process(&mut ctx).await.unwrap();
 
         assert_eq!(ctx.messages.len(), 1);
         assert_eq!(ctx.messages[0].content, "Hello");

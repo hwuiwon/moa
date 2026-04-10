@@ -1325,3 +1325,21 @@ Current state:
 Remaining note:
 
 - `FileMemoryStore::{read,write,delete}_page_in_scope` still exist as compatibility shims for concrete callers, but the trait surface is now the primary API and new code should prefer it directly.
+
+### 25.1 Context stages now own their async I/O directly
+
+Current state:
+
+- `ContextProcessor::process()` is now async across `moa-core` and `moa-brain`.
+- Stage 4 (`SkillInjector`), Stage 5 (`MemoryRetriever`), and Stage 6 (`HistoryCompiler`) now receive their dependencies through constructor injection and do their own I/O inside `process()`.
+- The pipeline runner no longer preloads stage inputs into `WorkingContext.metadata` via stringly-typed JSON keys before invoking those stages.
+
+Consequence:
+
+- The pipeline runner is simpler and stage logic is no longer split between `pipeline/mod.rs` and stage-local formatting code.
+- The earlier metadata preload indirection for skills, memory, and history is gone, so the main async brain path is easier to follow and less fragile under refactors.
+
+Remaining note:
+
+- `WorkingContext.metadata` still exists for legitimate shared request state such as tool schemas and future cross-stage metrics.
+- If that map starts accumulating new stage-specific payload contracts again, the repo will drift back toward the same coupling problem that this step removed.

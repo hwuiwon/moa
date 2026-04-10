@@ -1,13 +1,24 @@
 //! Stage 4: injects skill metadata and marks the cache breakpoint.
 
-use moa_core::{ContextProcessor, ProcessorOutput, Result, SkillMetadata, WorkingContext};
+use std::sync::Arc;
 
-pub(crate) const SKILLS_STAGE_DATA_METADATA_KEY: &str = "moa.pipeline.skills_stage_data";
+use async_trait::async_trait;
+use moa_core::{ContextProcessor, ProcessorOutput, Result, WorkingContext};
+use moa_skills::SkillRegistry;
 
 /// Injects workspace skill metadata into the stable prompt prefix.
-#[derive(Debug, Default)]
-pub struct SkillInjector;
+pub struct SkillInjector {
+    skill_registry: Arc<SkillRegistry>,
+}
 
+impl SkillInjector {
+    /// Creates a skill injector backed by the shared skill registry.
+    pub fn new(skill_registry: Arc<SkillRegistry>) -> Self {
+        Self { skill_registry }
+    }
+}
+
+#[async_trait]
 impl ContextProcessor for SkillInjector {
     fn name(&self) -> &str {
         "skills"
@@ -17,8 +28,11 @@ impl ContextProcessor for SkillInjector {
         4
     }
 
-    fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
-        let skills = load_skills(ctx)?;
+    async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+        let skills = self
+            .skill_registry
+            .list_for_pipeline(&ctx.workspace_id)
+            .await?;
         let tokens_before = ctx.token_count;
         let mut items_included = Vec::new();
 
@@ -55,24 +69,77 @@ If one of these skills is clearly relevant and you need the exact workflow, call
     }
 }
 
-fn load_skills(ctx: &WorkingContext) -> Result<Vec<SkillMetadata>> {
-    match ctx.metadata.get(SKILLS_STAGE_DATA_METADATA_KEY) {
-        Some(value) => serde_json::from_value(value.clone()).map_err(Into::into),
-        None => Ok(Vec::new()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
     use moa_core::{
-        ContextProcessor, ModelCapabilities, Platform, SessionId, SessionMeta, SkillMetadata,
-        TokenPricing, ToolCallFormat, UserId, WorkspaceId,
+        ContextProcessor, MemoryPath, MemoryScope, MemoryStore, ModelCapabilities, PageSummary,
+        PageType, Platform, Result, SessionId, SessionMeta, TokenPricing, ToolCallFormat, UserId,
+        WikiPage, WorkspaceId,
     };
+    use moa_skills::SkillRegistry;
 
-    use super::{SKILLS_STAGE_DATA_METADATA_KEY, SkillInjector};
+    use super::SkillInjector;
 
-    #[test]
-    fn skill_injector_marks_cache_breakpoint_and_formats_metadata() {
+    #[derive(Clone)]
+    struct StubSkillMemoryStore {
+        pages: HashMap<MemoryPath, WikiPage>,
+        summaries: Vec<PageSummary>,
+    }
+
+    #[async_trait]
+    impl MemoryStore for StubSkillMemoryStore {
+        async fn search(
+            &self,
+            _query: &str,
+            _scope: MemoryScope,
+            _limit: usize,
+        ) -> Result<Vec<moa_core::MemorySearchResult>> {
+            Ok(Vec::new())
+        }
+
+        async fn read_page(&self, _scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
+            self.pages
+                .get(path)
+                .cloned()
+                .ok_or_else(|| moa_core::MoaError::StorageError("skill page not found".to_string()))
+        }
+
+        async fn write_page(
+            &self,
+            _scope: MemoryScope,
+            _path: &MemoryPath,
+            _page: WikiPage,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list_pages(
+            &self,
+            _scope: MemoryScope,
+            _filter: Option<PageType>,
+        ) -> Result<Vec<PageSummary>> {
+            Ok(self.summaries.clone())
+        }
+
+        async fn get_index(&self, _scope: MemoryScope) -> Result<String> {
+            Ok(String::new())
+        }
+
+        async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_injector_marks_cache_breakpoint_and_formats_metadata() {
         let session = SessionMeta {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
@@ -97,23 +164,60 @@ mod tests {
             },
         };
         let mut ctx = moa_core::WorkingContext::new(&session, capabilities);
-        ctx.metadata.insert(
-            SKILLS_STAGE_DATA_METADATA_KEY.to_string(),
-            serde_json::to_value(vec![SkillMetadata {
-                path: "skills/debug-oauth/SKILL.md".into(),
-                name: "debug-oauth".to_string(),
-                description: "OAuth refresh-token debugging workflow".to_string(),
-                tags: vec!["oauth".to_string(), "auth".to_string()],
-                allowed_tools: vec!["bash".to_string(), "file_read".to_string()],
-                estimated_tokens: 900,
-                use_count: 3,
-                success_rate: 0.9,
-                auto_generated: true,
-            }])
-            .unwrap(),
-        );
+        let skill_path = MemoryPath::new("skills/debug-oauth/SKILL.md");
+        let store = StubSkillMemoryStore {
+            pages: HashMap::from([(
+                skill_path.clone(),
+                WikiPage {
+                    path: Some(skill_path.clone()),
+                    title: "debug-oauth".to_string(),
+                    page_type: PageType::Skill,
+                    content: "## When to use\nUse it for OAuth refresh token issues.".to_string(),
+                    created: chrono::Utc::now(),
+                    updated: chrono::Utc::now(),
+                    confidence: moa_core::ConfidenceLevel::High,
+                    related: Vec::new(),
+                    sources: Vec::new(),
+                    tags: vec!["oauth".to_string(), "auth".to_string()],
+                    auto_generated: true,
+                    last_referenced: chrono::Utc::now(),
+                    reference_count: 3,
+                    metadata: HashMap::from([
+                        ("name".to_string(), serde_json::json!("debug-oauth")),
+                        (
+                            "description".to_string(),
+                            serde_json::json!("OAuth refresh-token debugging workflow"),
+                        ),
+                        (
+                            "allowed-tools".to_string(),
+                            serde_json::json!("bash file_read"),
+                        ),
+                        (
+                            "metadata".to_string(),
+                            serde_json::json!({
+                                "moa-estimated-tokens": "900",
+                                "moa-use-count": "3",
+                                "moa-success-rate": "0.9",
+                                "moa-tags": "oauth, auth",
+                            }),
+                        ),
+                    ]),
+                },
+            )]),
+            summaries: vec![PageSummary {
+                path: skill_path,
+                title: "debug-oauth".to_string(),
+                page_type: PageType::Skill,
+                updated: chrono::Utc::now(),
+                confidence: moa_core::ConfidenceLevel::High,
+            }],
+        };
+        let registry = Arc::new(SkillRegistry::new(Arc::new(store)));
 
-        let output = SkillInjector.process(&mut ctx).unwrap();
+        let output = SkillInjector::new(registry)
+            .process(&mut ctx)
+            .await
+            .unwrap();
 
         assert_eq!(ctx.cache_breakpoints, vec![1]);
         assert!(ctx.messages[0].content.contains("<available_skills>"));
@@ -131,8 +235,8 @@ mod tests {
         assert_eq!(output.items_included, vec!["debug-oauth"]);
     }
 
-    #[test]
-    fn skill_injector_marks_breakpoint_without_skills() {
+    #[tokio::test]
+    async fn skill_injector_marks_breakpoint_without_skills() {
         let session = SessionMeta {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
@@ -157,8 +261,15 @@ mod tests {
             },
         };
         let mut ctx = moa_core::WorkingContext::new(&session, capabilities);
+        let store = StubSkillMemoryStore {
+            pages: HashMap::new(),
+            summaries: Vec::new(),
+        };
 
-        let output = SkillInjector.process(&mut ctx).unwrap();
+        let output = SkillInjector::new(Arc::new(SkillRegistry::new(Arc::new(store))))
+            .process(&mut ctx)
+            .await
+            .unwrap();
 
         assert!(ctx.messages.is_empty());
         assert_eq!(ctx.cache_breakpoints, vec![0]);

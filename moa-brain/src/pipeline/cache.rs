@@ -1,5 +1,6 @@
 //! Stage 7: validates cache breakpoint ordering and reports cache efficiency.
 
+use async_trait::async_trait;
 use moa_core::{ContextProcessor, MoaError, ProcessorOutput, Result, WorkingContext};
 use serde_json::Value;
 
@@ -9,6 +10,7 @@ use super::{estimate_tokens, sort_json_keys};
 #[derive(Debug, Default)]
 pub struct CacheOptimizer;
 
+#[async_trait]
 impl ContextProcessor for CacheOptimizer {
     fn name(&self) -> &str {
         "cache"
@@ -18,7 +20,7 @@ impl ContextProcessor for CacheOptimizer {
         7
     }
 
-    fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+    async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
         let Some(cache_breakpoint) = ctx.cache_breakpoints.last().copied() else {
             return Err(MoaError::ValidationError(
                 "cache breakpoint must be set before the cache optimizer runs".to_string(),
@@ -70,8 +72,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn cache_optimizer_validates_cache_breakpoint() {
+    #[tokio::test]
+    async fn cache_optimizer_validates_cache_breakpoint() {
         let session = SessionMeta {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
@@ -102,7 +104,7 @@ mod tests {
         ]);
         ctx.mark_cache_breakpoint();
 
-        let output = CacheOptimizer.process(&mut ctx).unwrap();
+        let output = CacheOptimizer.process(&mut ctx).await.unwrap();
 
         assert_eq!(output.tokens_added, 0);
         assert_eq!(ctx.cache_breakpoints, vec![2]);

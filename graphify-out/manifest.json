@@ -1,28 +1,28 @@
 {
-  "moa-memory/tests/memory_store.rs": 1775839392.7850678,
+  "moa-memory/tests/memory_store.rs": 1775839600.8581736,
   "moa-memory/tests/maintenance.rs": 1775784449.2453663,
-  "moa-memory/src/consolidation.rs": 1775838976.664444,
-  "moa-memory/src/lib.rs": 1775839392.7803938,
+  "moa-memory/src/consolidation.rs": 1775839600.8574722,
+  "moa-memory/src/lib.rs": 1775839600.858015,
   "moa-memory/src/index.rs": 1775784449.2447882,
-  "moa-memory/src/fts.rs": 1775838873.6972156,
-  "moa-memory/src/ingest.rs": 1775839104.574458,
+  "moa-memory/src/fts.rs": 1775839600.8576663,
+  "moa-memory/src/ingest.rs": 1775839600.8578587,
   "moa-memory/src/wiki.rs": 1775778606.150986,
-  "moa-memory/src/branching.rs": 1775839392.7742734,
+  "moa-memory/src/branching.rs": 1775839600.85727,
   "moa-core/src/telemetry.rs": 1775833772.1335301,
-  "moa-core/src/types.rs": 1775838870.381442,
+  "moa-core/src/types.rs": 1775839600.8562145,
   "moa-core/src/events.rs": 1775762242.9524,
   "moa-core/src/error.rs": 1775762025.755317,
   "moa-core/src/config.rs": 1775837415.0828447,
   "moa-core/src/lib.rs": 1775833772.131527,
   "moa-core/src/daemon.rs": 1775833772.1297586,
-  "moa-core/src/traits.rs": 1775839392.724933,
+  "moa-core/src/traits.rs": 1775839695.3829026,
   "moa-cli/tests/tui_workflows.rs": 1775831762.6463964,
   "moa-cli/src/exec.rs": 1775773153.4586587,
   "moa-cli/src/daemon.rs": 1775837415.0824168,
-  "moa-cli/src/main.rs": 1775838998.1570966,
+  "moa-cli/src/main.rs": 1775839600.8557239,
   "moa-tui/src/keybindings.rs": 1775831762.650265,
   "moa-tui/src/lib.rs": 1775833772.138463,
-  "moa-tui/src/runner.rs": 1775839009.1429758,
+  "moa-tui/src/runner.rs": 1775839600.8588428,
   "moa-tui/src/main.rs": 1775770714.3246653,
   "moa-tui/src/app.rs": 1775837415.0854917,
   "moa-tui/src/views/palette.rs": 1775831762.651187,
@@ -74,10 +74,10 @@
   "moa-orchestrator/src/local.rs": 1775837415.083505,
   "moa-orchestrator/src/lib.rs": 1775791482.8528197,
   "moa-orchestrator/src/temporal.rs": 1775837415.0837166,
-  "moa-hands/tests/e2b_live.rs": 1775839060.113203,
-  "moa-hands/tests/mcp_router.rs": 1775839041.6757479,
-  "moa-hands/tests/local_tools.rs": 1775839392.7682157,
-  "moa-hands/tests/daytona_live.rs": 1775839055.0721018,
+  "moa-hands/tests/e2b_live.rs": 1775839600.8567338,
+  "moa-hands/tests/mcp_router.rs": 1775839600.8571155,
+  "moa-hands/tests/local_tools.rs": 1775839600.8568788,
+  "moa-hands/tests/daytona_live.rs": 1775839600.8565722,
   "moa-hands/tests/docker_hardening.rs": 1775797129.5765004,
   "moa-hands/tests/fixtures/mock_mcp_stdio_server.py": 1775795277.685833,
   "moa-hands/src/e2b.rs": 1775795277.6847546,
@@ -88,99 +88,99 @@
   "moa-hands/src/mcp.rs": 1775831762.6466196,
   "moa-hands/src/tools/file_search.rs": 1775767100.917999,
   "moa-hands/src/tools/bash.rs": 1775767100.917769,
-  "moa-hands/src/tools/memory.rs": 1775839392.7599924,
+  "moa-hands/src/tools/memory.rs": 1775839600.8563914,
   "moa-hands/src/tools/file_write.rs": 1775767100.9181075,
   "moa-hands/src/tools/stub.rs": 1775782880.2936897,
   "moa-hands/src/tools/mod.rs": 1775767100.9184022,
   "moa-hands/src/tools/file_read.rs": 1775767100.9178853,
   "moa-brain/tests/live_harness.rs": 1775825706.3703468,
-  "moa-brain/tests/brain_turn.rs": 1775839392.7099733,
+  "moa-brain/tests/brain_turn.rs": 1775839600.8555403,
   "moa-brain/examples/chat_harness.rs": 1775825706.3702106,
   "moa-brain/src/lib.rs": 1775791482.8523946,
   "moa-brain/src/turn.rs": 1775782880.2924695,
   "moa-brain/src/harness.rs": 1775797129.5754018,
   "moa-brain/src/compaction.rs": 1775764277.0657463,
-  "moa-brain/src/pipeline/cache.rs": 1775764277.0664277,
-  "moa-brain/src/pipeline/instructions.rs": 1775764277.0670547,
-  "moa-brain/src/pipeline/tools.rs": 1775764277.0680518,
-  "moa-brain/src/pipeline/memory.rs": 1775766103.954092,
-  "moa-brain/src/pipeline/skills.rs": 1775782880.292279,
-  "moa-brain/src/pipeline/identity.rs": 1775764277.0667717,
-  "moa-brain/src/pipeline/mod.rs": 1775839392.701658,
-  "moa-brain/src/pipeline/history.rs": 1775764277.0666103,
+  "moa-brain/src/pipeline/cache.rs": 1775839812.7887115,
+  "moa-brain/src/pipeline/instructions.rs": 1775839801.9450138,
+  "moa-brain/src/pipeline/tools.rs": 1775839808.5943363,
+  "moa-brain/src/pipeline/memory.rs": 1775839955.9349644,
+  "moa-brain/src/pipeline/skills.rs": 1775840012.7834847,
+  "moa-brain/src/pipeline/identity.rs": 1775839797.7783062,
+  "moa-brain/src/pipeline/mod.rs": 1775840012.782547,
+  "moa-brain/src/pipeline/history.rs": 1775840012.7801719,
   "moa-skills/tests/skills.rs": 1775782880.295359,
   "moa-skills/src/format.rs": 1775782880.294755,
-  "moa-skills/src/registry.rs": 1775838964.5868378,
+  "moa-skills/src/registry.rs": 1775839600.8586621,
   "moa-skills/src/lib.rs": 1775782880.2951527,
-  "moa-skills/src/improver.rs": 1775839392.8424287,
-  "moa-skills/src/distiller.rs": 1775838990.2810733,
+  "moa-skills/src/improver.rs": 1775839600.8585231,
+  "moa-skills/src/distiller.rs": 1775839600.8583405,
   "src/lib.rs": 1775759171.819735,
   "community_labels": {
     "0": "Core Domain IDs",
     "1": "TUI Chat Runtime",
     "2": "TUI App State",
-    "3": "File Memory Store",
-    "4": "Tool Router & Policies",
-    "5": "Brain Turn Tests",
-    "6": "Skill Document Format",
-    "7": "Memory Browser View",
+    "3": "Memory Browser View",
+    "4": "File Memory Store",
+    "5": "Tool Router & Policies",
+    "6": "Brain Turn Tests",
+    "7": "Skill Document Format",
     "8": "Local Orchestrator",
-    "9": "Context Pipeline",
-    "10": "Provider Common Layer",
-    "11": "Temporal Orchestrator",
-    "12": "Memory Consolidation",
-    "13": "Turso Session Store",
-    "14": "Anthropic Provider",
-    "15": "Config & Errors",
-    "16": "Message Renderer",
-    "17": "Temporal Orchestrator Tests",
-    "18": "Local Orchestrator Tests",
-    "19": "Daemon Service",
-    "20": "CLI Entry Point",
-    "21": "Diff View",
-    "22": "Discord Adapter",
-    "23": "E2B Hand Provider",
-    "24": "Slack Adapter",
-    "25": "Wiki & Branching Markdown",
-    "26": "MCP Client",
-    "27": "MCP Credential Proxy",
-    "28": "Daytona Hand Provider",
-    "29": "Telegram Adapter",
+    "9": "Provider Common Layer",
+    "10": "Temporal Orchestrator",
+    "11": "Memory Consolidation",
+    "12": "Turso Session Store",
+    "13": "Anthropic Provider",
+    "14": "Config & Errors",
+    "15": "Message Renderer",
+    "16": "Temporal Orchestrator Tests",
+    "17": "Local Orchestrator Tests",
+    "18": "Daemon Service",
+    "19": "CLI Entry Point",
+    "20": "Diff View",
+    "21": "Discord Adapter",
+    "22": "E2B Hand Provider",
+    "23": "Slack Adapter",
+    "24": "Wiki & Branching Markdown",
+    "25": "MCP Client",
+    "26": "MCP Credential Proxy",
+    "27": "Daytona Hand Provider",
+    "28": "Telegram Adapter",
+    "29": "Skill Injection Stage",
     "30": "Settings View",
     "31": "Approval Card Widget",
     "32": "Local Tool Tests",
-    "33": "FTS5 Search Index",
-    "34": "Session Picker View",
-    "35": "Tool Approval Policies",
-    "36": "Skill Improver & Distiller",
-    "37": "Daytona Live Tests",
-    "38": "Memory Maintenance Tests",
-    "39": "Provider Factory",
-    "40": "E2B Live Tests",
-    "41": "OpenAI Provider Tests",
-    "42": "Encrypted Secret Vault",
-    "43": "Command Palette",
-    "44": "Prompt Widget",
-    "45": "MCP Router Tests",
-    "46": "Session Store Tests",
-    "47": "Injection Detection",
-    "48": "TUI Keybindings",
-    "49": "Toolbar Widget",
-    "50": "Live Provider Roundtrip Tests",
-    "51": "History Compilation Stage",
-    "52": "Memory Store Tests",
-    "53": "Tool Card Widget",
-    "54": "Live Provider Matrix Tests",
-    "55": "Temporal Worker Helper",
-    "56": "Instruction Stage",
-    "57": "Chat View",
-    "58": "Cache Optimizer Stage",
-    "59": "Identity Stage",
-    "60": "CLI Exec Mode",
-    "61": "Sidebar Widget",
-    "62": "Anthropic Provider Tests",
-    "63": "Bash Tool",
-    "64": "Memory Preload Stage",
+    "33": "History Compilation Stage",
+    "34": "FTS5 Search Index",
+    "35": "Session Picker View",
+    "36": "Tool Approval Policies",
+    "37": "Skill Improver & Distiller",
+    "38": "Daytona Live Tests",
+    "39": "Memory Maintenance Tests",
+    "40": "Provider Factory",
+    "41": "E2B Live Tests",
+    "42": "Context Pipeline Core",
+    "43": "OpenAI Provider Tests",
+    "44": "Encrypted Secret Vault",
+    "45": "Command Palette",
+    "46": "Prompt Widget",
+    "47": "MCP Router Tests",
+    "48": "Session Store Tests",
+    "49": "Injection Detection",
+    "50": "TUI Keybindings",
+    "51": "Toolbar Widget",
+    "52": "Live Provider Roundtrip Tests",
+    "53": "Memory Store Tests",
+    "54": "Tool Card Widget",
+    "55": "Live Provider Matrix Tests",
+    "56": "Temporal Worker Helper",
+    "57": "Instruction Stage",
+    "58": "Chat View",
+    "59": "Cache Optimizer Stage",
+    "60": "Identity Stage",
+    "61": "CLI Exec Mode",
+    "62": "Sidebar Widget",
+    "63": "Anthropic Provider Tests",
+    "64": "Bash Tool",
     "65": "File Search Tool",
     "66": "File Read Tool",
     "67": "Chat Harness Example",
@@ -192,9 +192,7 @@
     "73": "Anthropic Live Test",
     "74": "Docker Hardening Test",
     "75": "Brain Live Harness Test",
-    "76": "Compaction",
-    "77": "Search Query Extraction",
-    "78": "Relevant Memory Page"
+    "76": "Compaction"
   },
   "community_signatures": {
     "0": [
@@ -580,6 +578,101 @@
       "app_workspace_name_from_input"
     ],
     "3": [
+      "memory",
+      "memory_centered_rect",
+      "memory_extract_search_keywords",
+      "memory_extract_search_query",
+      "memory_filter_pages",
+      "memory_fuzzy_filter_matches_titles",
+      "memory_infer_page_title",
+      "memory_infer_page_type",
+      "memory_is_memory_not_found",
+      "memory_keyword_extraction_filters_stopwords_and_duplicates",
+      "memory_memory_retriever_loads_indexes_and_results_directly",
+      "memory_memory_view_surfaces_wikilinks_before_page_list",
+      "memory_memorynavitem",
+      "memory_memorynavitem_path",
+      "memory_memorynavitem_render_label",
+      "memory_memoryreadinput",
+      "memory_memoryreadtool",
+      "memory_memoryreadtool_description",
+      "memory_memoryreadtool_execute",
+      "memory_memoryreadtool_input_schema",
+      "memory_memoryreadtool_name",
+      "memory_memoryreadtool_policy_spec",
+      "memory_memoryretriever",
+      "memory_memoryretriever_load_stage_data",
+      "memory_memoryretriever_name",
+      "memory_memoryretriever_new",
+      "memory_memoryretriever_process",
+      "memory_memoryretriever_stage",
+      "memory_memorysearchinput",
+      "memory_memorysearchscope",
+      "memory_memorysearchscope_scopes",
+      "memory_memorysearchtool",
+      "memory_memorysearchtool_description",
+      "memory_memorysearchtool_execute",
+      "memory_memorysearchtool_input_schema",
+      "memory_memorysearchtool_name",
+      "memory_memorysearchtool_policy_spec",
+      "memory_memorystagedata",
+      "memory_memoryviewstate",
+      "memory_memoryviewstate_backspace_query",
+      "memory_memoryviewstate_clamp_selection",
+      "memory_memoryviewstate_go_back",
+      "memory_memoryviewstate_go_forward",
+      "memory_memoryviewstate_len",
+      "memory_memoryviewstate_move_down",
+      "memory_memoryviewstate_move_up",
+      "memory_memoryviewstate_new",
+      "memory_memoryviewstate_push_query_char",
+      "memory_memoryviewstate_query",
+      "memory_memoryviewstate_record_open",
+      "memory_memoryviewstate_search_mode",
+      "memory_memoryviewstate_selected_path",
+      "memory_memoryviewstate_set_current_page",
+      "memory_memoryviewstate_set_pages",
+      "memory_memoryviewstate_set_search_results",
+      "memory_memoryviewstate_start_search",
+      "memory_memoryviewstate_stop_search",
+      "memory_memoryviewstate_visible_items",
+      "memory_memorywriteinput",
+      "memory_memorywritetool",
+      "memory_memorywritetool_description",
+      "memory_memorywritetool_execute",
+      "memory_memorywritetool_input_schema",
+      "memory_memorywritetool_name",
+      "memory_memorywritetool_policy_spec",
+      "memory_page",
+      "memory_parse_page_type",
+      "memory_parse_scope",
+      "memory_read_page_with_fallback",
+      "memory_relevantmemorypage",
+      "memory_render_memory_view",
+      "memory_render_page_text",
+      "memory_resolve_existing_scope",
+      "memory_scope_label_for",
+      "memory_stubmemorystore",
+      "memory_stubmemorystore_delete_page",
+      "memory_stubmemorystore_get_index",
+      "memory_stubmemorystore_list_pages",
+      "memory_stubmemorystore_read_page",
+      "memory_stubmemorystore_rebuild_search_index",
+      "memory_stubmemorystore_search",
+      "memory_stubmemorystore_write_page",
+      "memory_stubsessionstore",
+      "memory_stubsessionstore_create_session",
+      "memory_stubsessionstore_emit_event",
+      "memory_stubsessionstore_get_events",
+      "memory_stubsessionstore_get_session",
+      "memory_stubsessionstore_list_sessions",
+      "memory_stubsessionstore_new",
+      "memory_stubsessionstore_search_events",
+      "memory_stubsessionstore_update_status",
+      "memory_truncate_excerpt",
+      "memory_wikilinks_from_page"
+    ],
+    "4": [
       "error",
       "error_moaerror",
       "harness",
@@ -654,7 +747,7 @@
       "turso_live_embedded_replica_sync_preserves_checkpoint_wake",
       "turso_live_live_turso_env"
     ],
-    "4": [
+    "5": [
       "router",
       "router_approval_diffs_for",
       "router_approval_fields_for",
@@ -724,7 +817,7 @@
       "tools_tooldefinitionprocessor_process",
       "tools_tooldefinitionprocessor_stage"
     ],
-    "5": [
+    "6": [
       "brain_turn",
       "brain_turn_always_allow_rule_persists_and_skips_next_approval",
       "brain_turn_canary_leaks_in_tool_input_are_detected_and_blocked",
@@ -789,7 +882,7 @@
       "brain_turn_toolloopllmprovider_complete",
       "brain_turn_toolloopllmprovider_name"
     ],
-    "6": [
+    "7": [
       "format",
       "format_build_skill_path",
       "format_confidence_for_skill",
@@ -853,70 +946,6 @@
       "registry_skillregistry_load",
       "registry_skillregistry_load_full",
       "registry_skillregistry_new"
-    ],
-    "7": [
-      "memory",
-      "memory_centered_rect",
-      "memory_filter_pages",
-      "memory_fuzzy_filter_matches_titles",
-      "memory_infer_page_title",
-      "memory_infer_page_type",
-      "memory_is_memory_not_found",
-      "memory_memory_view_surfaces_wikilinks_before_page_list",
-      "memory_memorynavitem",
-      "memory_memorynavitem_path",
-      "memory_memorynavitem_render_label",
-      "memory_memoryreadinput",
-      "memory_memoryreadtool",
-      "memory_memoryreadtool_description",
-      "memory_memoryreadtool_execute",
-      "memory_memoryreadtool_input_schema",
-      "memory_memoryreadtool_name",
-      "memory_memoryreadtool_policy_spec",
-      "memory_memorysearchinput",
-      "memory_memorysearchscope",
-      "memory_memorysearchscope_scopes",
-      "memory_memorysearchtool",
-      "memory_memorysearchtool_description",
-      "memory_memorysearchtool_execute",
-      "memory_memorysearchtool_input_schema",
-      "memory_memorysearchtool_name",
-      "memory_memorysearchtool_policy_spec",
-      "memory_memoryviewstate",
-      "memory_memoryviewstate_backspace_query",
-      "memory_memoryviewstate_clamp_selection",
-      "memory_memoryviewstate_go_back",
-      "memory_memoryviewstate_go_forward",
-      "memory_memoryviewstate_len",
-      "memory_memoryviewstate_move_down",
-      "memory_memoryviewstate_move_up",
-      "memory_memoryviewstate_new",
-      "memory_memoryviewstate_push_query_char",
-      "memory_memoryviewstate_query",
-      "memory_memoryviewstate_record_open",
-      "memory_memoryviewstate_search_mode",
-      "memory_memoryviewstate_selected_path",
-      "memory_memoryviewstate_set_current_page",
-      "memory_memoryviewstate_set_pages",
-      "memory_memoryviewstate_set_search_results",
-      "memory_memoryviewstate_start_search",
-      "memory_memoryviewstate_stop_search",
-      "memory_memoryviewstate_visible_items",
-      "memory_memorywriteinput",
-      "memory_memorywritetool",
-      "memory_memorywritetool_description",
-      "memory_memorywritetool_execute",
-      "memory_memorywritetool_input_schema",
-      "memory_memorywritetool_name",
-      "memory_memorywritetool_policy_spec",
-      "memory_page",
-      "memory_parse_page_type",
-      "memory_parse_scope",
-      "memory_read_page_with_fallback",
-      "memory_render_memory_view",
-      "memory_render_page_text",
-      "memory_resolve_existing_scope",
-      "memory_wikilinks_from_page"
     ],
     "8": [
       "local",
@@ -983,70 +1012,6 @@
       "local_wait_for_signal_approval"
     ],
     "9": [
-      "mod",
-      "mod_build_default_pipeline",
-      "mod_build_default_pipeline_with_tools",
-      "mod_contextpipeline",
-      "mod_contextpipeline_new",
-      "mod_contextpipeline_run",
-      "mod_estimate_tokens",
-      "mod_load_history_events",
-      "mod_mockmemorystore",
-      "mod_mockmemorystore_delete_page",
-      "mod_mockmemorystore_get_index",
-      "mod_mockmemorystore_list_pages",
-      "mod_mockmemorystore_read_page",
-      "mod_mockmemorystore_rebuild_search_index",
-      "mod_mockmemorystore_search",
-      "mod_mockmemorystore_write_page",
-      "mod_mocksessionstore",
-      "mod_mocksessionstore_create_session",
-      "mod_mocksessionstore_emit_event",
-      "mod_mocksessionstore_get_events",
-      "mod_mocksessionstore_get_session",
-      "mod_mocksessionstore_list_sessions",
-      "mod_mocksessionstore_new",
-      "mod_mocksessionstore_search_events",
-      "mod_mocksessionstore_update_status",
-      "mod_pipeline_runner_executes_stages_in_order",
-      "mod_pipelinestagereport",
-      "mod_preload_memory_stage_data",
-      "mod_preload_memory_stage_data_reads_pages_from_result_scope",
-      "mod_scope_label_for",
-      "mod_searchresultmemorystore",
-      "mod_searchresultmemorystore_delete_page",
-      "mod_searchresultmemorystore_get_index",
-      "mod_searchresultmemorystore_list_pages",
-      "mod_searchresultmemorystore_read_page",
-      "mod_searchresultmemorystore_rebuild_search_index",
-      "mod_searchresultmemorystore_search",
-      "mod_searchresultmemorystore_write_page",
-      "mod_sort_json_keys",
-      "mod_teststage",
-      "mod_teststage_name",
-      "mod_teststage_new",
-      "mod_teststage_process",
-      "mod_teststage_stage",
-      "skills",
-      "skills_distills_skill_after_tool_heavy_session",
-      "skills_improves_existing_skill_when_better_flow_is_found",
-      "skills_load_skills",
-      "skills_mockllm",
-      "skills_mockllm_capabilities",
-      "skills_mockllm_complete",
-      "skills_mockllm_name",
-      "skills_parses_skill_markdown",
-      "skills_registry_lists_skill_metadata",
-      "skills_session",
-      "skills_skill_injector_marks_breakpoint_without_skills",
-      "skills_skill_injector_marks_cache_breakpoint_and_formats_metadata",
-      "skills_skillinjector",
-      "skills_skillinjector_name",
-      "skills_skillinjector_process",
-      "skills_skillinjector_stage",
-      "skills_tool_rich_events"
-    ],
-    "10": [
       "common",
       "common_build_function_tool",
       "common_build_http_client",
@@ -1105,7 +1070,7 @@
       "openrouter_openrouterprovider_with_api_base",
       "openrouter_openrouterprovider_with_max_retries"
     ],
-    "11": [
+    "10": [
       "temporal",
       "temporal_activity_options",
       "temporal_apply_approval_decision",
@@ -1161,7 +1126,7 @@
       "temporal_workflow_id_for_session",
       "temporal_workflow_ids_are_stable_and_prefixed"
     ],
-    "12": [
+    "11": [
       "consolidation",
       "consolidation_canonical_port_claims",
       "consolidation_confidence_rank",
@@ -1210,7 +1175,7 @@
       "ingest_split_inline_items",
       "ingest_upsert_derived_page"
     ],
-    "13": [
+    "12": [
       "queries",
       "queries_event_record_from_row",
       "queries_event_type_from_db",
@@ -1258,7 +1223,7 @@
       "turso_tursosessionstore_upsert_approval_rule",
       "turso_tursosessionstore_wake"
     ],
-    "14": [
+    "13": [
       "anthropic",
       "anthropic_anthropic_message",
       "anthropic_anthropicprovider",
@@ -1305,7 +1270,7 @@
       "anthropic_supported_models_return_expected_capabilities",
       "anthropic_usage"
     ],
-    "15": [
+    "14": [
       "config",
       "config_cloudconfig",
       "config_cloudconfig_default",
@@ -1348,7 +1313,7 @@
       "config_tuiconfig",
       "config_tuiconfig_default"
     ],
-    "16": [
+    "15": [
       "renderer",
       "renderer_append_piece",
       "renderer_discord_renderer_attaches_buttons_to_last_chunk_only",
@@ -1390,7 +1355,7 @@
       "renderer_tool_status_color",
       "renderer_tool_status_icon"
     ],
-    "17": [
+    "16": [
       "temporal_orchestrator",
       "temporal_orchestrator_brain_response_texts",
       "temporal_orchestrator_build_temporal_helper_binary",
@@ -1431,7 +1396,7 @@
       "temporal_orchestrator_wait_for_store_status",
       "temporal_orchestrator_wait_for_tool_result"
     ],
-    "18": [
+    "17": [
       "local_orchestrator",
       "local_orchestrator_brain_response_texts",
       "local_orchestrator_denied_tool_preserves_queued_follow_up",
@@ -1471,7 +1436,7 @@
       "local_orchestrator_wait_for_approval_request",
       "local_orchestrator_wait_for_status"
     ],
-    "19": [
+    "18": [
       "daemon",
       "daemon_daemon_health_endpoint_responds_when_cloud_enabled",
       "daemon_daemon_info",
@@ -1510,7 +1475,7 @@
       "daemon_write_reply",
       "daemon_write_stream_event"
     ],
-    "20": [
+    "19": [
       "main",
       "main_apply_config_update",
       "main_cli",
@@ -1548,7 +1513,7 @@
       "main_version_command_uses_package_version",
       "main_version_text"
     ],
-    "21": [
+    "20": [
       "diff",
       "diff_build_diff_file_view",
       "diff_default_mode_for_width",
@@ -1585,7 +1550,7 @@
       "diff_truncate_to_width",
       "diff_unifiedline"
     ],
-    "22": [
+    "21": [
       "discord",
       "discord_approval_callback_maps_to_control_message",
       "discord_attachments_from_message",
@@ -1622,7 +1587,7 @@
       "discord_inbound_from_message",
       "discord_is_thread_kind"
     ],
-    "23": [
+    "22": [
       "e2b",
       "e2b_build_url",
       "e2b_connectedsandbox",
@@ -1659,7 +1624,7 @@
       "e2b_required_string_field",
       "e2b_shell_escape"
     ],
-    "24": [
+    "23": [
       "slack",
       "slack_handle_interaction_event",
       "slack_handle_push_event",
@@ -1695,7 +1660,7 @@
       "slack_slackmessageref_thread_anchor",
       "slack_slacktarget"
     ],
-    "25": [
+    "24": [
       "branching",
       "branching_append_change_manifest",
       "branching_branch_dir",
@@ -1728,7 +1693,7 @@
       "wiki_wiki_page_roundtrip",
       "wiki_yaml_to_json_value"
     ],
-    "26": [
+    "25": [
       "mcp",
       "mcp_flatten_call_result",
       "mcp_flatten_tool_result_aggregates_text_items",
@@ -1760,7 +1725,7 @@
       "mcp_toolslistresponse",
       "mcp_write_framed_message"
     ],
-    "27": [
+    "26": [
       "mcp_proxy",
       "mcp_proxy_credential_from_env",
       "mcp_proxy_default_scope_for",
@@ -1791,7 +1756,7 @@
       "mcp_proxy_proxy_creates_tokens_and_injects_headers",
       "mcp_proxy_proxygrant"
     ],
-    "28": [
+    "27": [
       "daytona",
       "daytona_build_url",
       "daytona_daytonahandprovider",
@@ -1821,7 +1786,7 @@
       "daytona_provisions_executes_and_destroys_workspace",
       "daytona_required_string_field"
     ],
-    "29": [
+    "28": [
       "telegram",
       "telegram_channel_from_chat_and_reply",
       "telegram_handle_callback_query",
@@ -1849,6 +1814,34 @@
       "telegram_telegrammessageref",
       "telegram_telegrammessageref_from_message",
       "telegram_telegramtarget"
+    ],
+    "29": [
+      "skills",
+      "skills_distills_skill_after_tool_heavy_session",
+      "skills_improves_existing_skill_when_better_flow_is_found",
+      "skills_mockllm",
+      "skills_mockllm_capabilities",
+      "skills_mockllm_complete",
+      "skills_mockllm_name",
+      "skills_parses_skill_markdown",
+      "skills_registry_lists_skill_metadata",
+      "skills_session",
+      "skills_skill_injector_marks_breakpoint_without_skills",
+      "skills_skill_injector_marks_cache_breakpoint_and_formats_metadata",
+      "skills_skillinjector",
+      "skills_skillinjector_name",
+      "skills_skillinjector_new",
+      "skills_skillinjector_process",
+      "skills_skillinjector_stage",
+      "skills_stubskillmemorystore",
+      "skills_stubskillmemorystore_delete_page",
+      "skills_stubskillmemorystore_get_index",
+      "skills_stubskillmemorystore_list_pages",
+      "skills_stubskillmemorystore_read_page",
+      "skills_stubskillmemorystore_rebuild_search_index",
+      "skills_stubskillmemorystore_search",
+      "skills_stubskillmemorystore_write_page",
+      "skills_tool_rich_events"
     ],
     "30": [
       "settings",
@@ -1929,6 +1922,29 @@
       "local_tools_session"
     ],
     "33": [
+      "history",
+      "history_capabilities",
+      "history_event_record",
+      "history_event_to_context_message",
+      "history_history_compiler_formats_user_and_assistant_turns",
+      "history_history_processor_loads_events_directly_from_session_store",
+      "history_historycompiler",
+      "history_historycompiler_compile_messages",
+      "history_historycompiler_name",
+      "history_historycompiler_new",
+      "history_historycompiler_process",
+      "history_historycompiler_stage",
+      "history_mocksessionstore",
+      "history_mocksessionstore_create_session",
+      "history_mocksessionstore_emit_event",
+      "history_mocksessionstore_get_events",
+      "history_mocksessionstore_get_session",
+      "history_mocksessionstore_list_sessions",
+      "history_mocksessionstore_new",
+      "history_mocksessionstore_search_events",
+      "history_mocksessionstore_update_status"
+    ],
+    "34": [
       "fts",
       "fts_build_fts_query",
       "fts_confidence_to_db",
@@ -1949,7 +1965,7 @@
       "fts_parse_timestamp",
       "fts_scope_key"
     ],
-    "34": [
+    "35": [
       "sessions",
       "sessions_centered_rect",
       "sessions_filtered_sessions",
@@ -1970,7 +1986,7 @@
       "sessions_sessionpickerstate_selected_session_id",
       "sessions_status_icon"
     ],
-    "35": [
+    "36": [
       "policies",
       "policies_approvalrulestore",
       "policies_glob_match",
@@ -1990,7 +2006,7 @@
       "policies_toolpolicycontext",
       "policies_toolpolicycontext_from_session"
     ],
-    "36": [
+    "37": [
       "distiller",
       "distiller_build_distillation_prompt",
       "distiller_count_tool_calls",
@@ -2010,7 +2026,7 @@
       "improver_record_successful_use",
       "improver_record_successful_use_with_baseline"
     ],
-    "37": [
+    "38": [
       "daytona_live",
       "daytona_live_daytona_live_provider_handles_roundtrip_and_lifecycle",
       "daytona_live_daytona_live_router_lazy_provisions_reuses_and_isolates_sessions",
@@ -2029,7 +2045,7 @@
       "daytona_live_wait_for_destroyed",
       "daytona_live_wait_for_status"
     ],
-    "38": [
+    "39": [
       "maintenance",
       "maintenance_branch_reconciliation_merges_conflicting_writes",
       "maintenance_consolidation_decays_confidence_once_and_is_stable_on_repeat_runs",
@@ -2047,7 +2063,7 @@
       "maintenance_seededrng_next_usize",
       "maintenance_validate_memory_invariants"
     ],
-    "39": [
+    "40": [
       "factory",
       "factory_build_provider_from_config",
       "factory_build_provider_from_selection",
@@ -2065,7 +2081,7 @@
       "factory_split_explicit_provider",
       "factory_validate_provider_name"
     ],
-    "40": [
+    "41": [
       "e2b_live",
       "e2b_live_destroy_and_wait",
       "e2b_live_e2b_live_provider_handles_roundtrip_and_lifecycle",
@@ -2083,7 +2099,24 @@
       "e2b_live_session",
       "e2b_live_wait_for_destroyed"
     ],
-    "41": [
+    "42": [
+      "mod",
+      "mod_build_default_pipeline",
+      "mod_build_default_pipeline_with_tools",
+      "mod_contextpipeline",
+      "mod_contextpipeline_new",
+      "mod_contextpipeline_run",
+      "mod_estimate_tokens",
+      "mod_pipeline_runner_executes_stages_in_order",
+      "mod_pipelinestagereport",
+      "mod_sort_json_keys",
+      "mod_teststage",
+      "mod_teststage_name",
+      "mod_teststage_new",
+      "mod_teststage_process",
+      "mod_teststage_stage"
+    ],
+    "43": [
       "openai_provider",
       "openai_provider_openai_provider_does_not_retry_after_partial_stream_output",
       "openai_provider_openai_provider_drops_oversized_metadata_values",
@@ -2100,7 +2133,7 @@
       "openai_provider_sse_response",
       "openai_provider_tool_call_stream"
     ],
-    "42": [
+    "44": [
       "vault",
       "vault_decrypt_bytes",
       "vault_encrypt_bytes",
@@ -2117,7 +2150,7 @@
       "vault_filevault_persist_store",
       "vault_filevault_set"
     ],
-    "43": [
+    "45": [
       "palette",
       "palette_centered_rect",
       "palette_filtered_actions",
@@ -2133,7 +2166,7 @@
       "palette_palettestate_selected_action",
       "palette_render_palette"
     ],
-    "44": [
+    "46": [
       "prompt",
       "prompt_build_textarea",
       "prompt_promptcompletionkind",
@@ -2149,7 +2182,7 @@
       "prompt_promptwidget_text",
       "prompt_render_completion_menu"
     ],
-    "45": [
+    "47": [
       "mcp_router",
       "mcp_router_emptymemorystore",
       "mcp_router_emptymemorystore_delete_page",
@@ -2165,7 +2198,7 @@
       "mcp_router_router_injects_mcp_credentials_via_proxy",
       "mcp_router_session"
     ],
-    "46": [
+    "48": [
       "session_store",
       "session_store_cloud_sync_requires_file_backed_session_db",
       "session_store_create_session_and_emit_events",
@@ -2180,7 +2213,7 @@
       "session_store_wake_finds_checkpoint_and_recent_events",
       "session_store_wake_without_checkpoint_returns_all_events"
     ],
-    "47": [
+    "49": [
       "injection",
       "injection_canary_detection_works",
       "injection_check_canary",
@@ -2195,7 +2228,7 @@
       "injection_working_context",
       "injection_wrap_untrusted_tool_output"
     ],
-    "48": [
+    "50": [
       "keybindings",
       "keybindings_approval_shortcuts_only_activate_while_waiting",
       "keybindings_command_palette_memory_and_settings_have_dedicated_maps",
@@ -2209,7 +2242,7 @@
       "keybindings_tab_accepts_completion_in_chat_mode",
       "keybindings_tab_and_session_shortcuts_map_correctly"
     ],
-    "49": [
+    "51": [
       "toolbar",
       "toolbar_build_tab_spans",
       "toolbar_preview",
@@ -2223,7 +2256,7 @@
       "toolbar_visible_window",
       "toolbar_visible_window_caps_tabs_to_requested_limit"
     ],
-    "50": [
+    "52": [
       "live_provider_roundtrip",
       "live_provider_roundtrip_available_live_providers",
       "live_provider_roundtrip_live_orchestrator_with_provider",
@@ -2237,20 +2270,7 @@
       "live_provider_roundtrip_wait_for_final_response",
       "live_provider_roundtrip_wait_for_status"
     ],
-    "51": [
-      "history",
-      "history_capabilities",
-      "history_event_record",
-      "history_event_to_context_message",
-      "history_history_compiler_formats_user_and_assistant_turns",
-      "history_history_processor_uses_preloaded_events",
-      "history_historycompiler",
-      "history_historycompiler_compile_messages",
-      "history_historycompiler_name",
-      "history_historycompiler_process",
-      "history_historycompiler_stage"
-    ],
-    "52": [
+    "53": [
       "memory_store",
       "memory_store_create_read_update_and_delete_wiki_pages",
       "memory_store_delete_page_removes_only_the_requested_scope",
@@ -2262,7 +2282,7 @@
       "memory_store_user_and_workspace_scopes_are_separate",
       "memory_store_write_page_creates_and_reads_pages_in_explicit_scopes"
     ],
-    "53": [
+    "54": [
       "tool_card",
       "tool_card_border_line",
       "tool_card_content_line",
@@ -2273,7 +2293,7 @@
       "tool_card_truncate_to_width",
       "tool_card_wrap_text"
     ],
-    "54": [
+    "55": [
       "live_provider_matrix",
       "live_provider_matrix_available_live_providers",
       "live_provider_matrix_emit_token_tool",
@@ -2283,7 +2303,7 @@
       "live_provider_matrix_liveprovider_complete",
       "live_provider_matrix_liveprovider_label"
     ],
-    "55": [
+    "56": [
       "temporal_worker_helper",
       "temporal_worker_helper_helper_config",
       "temporal_worker_helper_helperprovider",
@@ -2293,7 +2313,7 @@
       "temporal_worker_helper_main",
       "temporal_worker_helper_main_impl"
     ],
-    "56": [
+    "57": [
       "instructions",
       "instructions_instruction_processor_appends_config_backed_sections",
       "instructions_instructionprocessor",
@@ -2302,7 +2322,7 @@
       "instructions_instructionprocessor_process",
       "instructions_instructionprocessor_stage"
     ],
-    "57": [
+    "58": [
       "chat",
       "chat_max_scroll",
       "chat_render_chat",
@@ -2310,7 +2330,7 @@
       "chat_wrap_line",
       "chat_wrap_prefixed"
     ],
-    "58": [
+    "59": [
       "cache",
       "cache_cache_optimizer_validates_cache_breakpoint",
       "cache_cacheoptimizer",
@@ -2318,7 +2338,7 @@
       "cache_cacheoptimizer_process",
       "cache_cacheoptimizer_stage"
     ],
-    "59": [
+    "60": [
       "identity",
       "identity_identity_processor_appends_system_prompt",
       "identity_identityprocessor",
@@ -2326,40 +2346,33 @@
       "identity_identityprocessor_process",
       "identity_identityprocessor_stage"
     ],
-    "60": [
+    "61": [
       "exec",
       "exec_exec_mode_formats_tool_updates_compactly",
       "exec_format_tool_update",
       "exec_resolve_exec_approval",
       "exec_run_exec"
     ],
-    "61": [
+    "62": [
       "sidebar",
       "sidebar_render_sidebar",
       "sidebar_section_title",
       "sidebar_should_show_sidebar",
       "sidebar_sidebar_visibility_respects_width_and_override"
     ],
-    "62": [
+    "63": [
       "anthropic_provider",
       "anthropic_provider_provider_retries_after_rate_limit",
       "anthropic_provider_provider_returns_error_after_partial_output_without_retrying",
       "anthropic_provider_provider_streams_tokens_incrementally",
       "anthropic_provider_provider_streams_tool_use_blocks"
     ],
-    "63": [
+    "64": [
       "bash",
       "bash_bashtoolinput",
       "bash_bashtoolinput_timeout",
       "bash_execute_docker",
       "bash_execute_local"
-    ],
-    "64": [
-      "pipeline_load_preloaded_memory",
-      "pipeline_memory_retriever",
-      "pipeline_memory_stage_metadata_key",
-      "pipeline_preloaded_memory_data",
-      "pipeline_truncate_excerpt"
     ],
     "65": [
       "file_search",
@@ -2416,13 +2429,6 @@
     "76": [
       "compaction",
       "compaction_maybe_compact"
-    ],
-    "77": [
-      "pipeline_extract_search_keywords",
-      "pipeline_extract_search_query"
-    ],
-    "78": [
-      "pipeline_relevant_memory_page"
     ]
   }
 }

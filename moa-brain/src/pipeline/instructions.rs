@@ -1,5 +1,6 @@
 //! Stage 2: injects workspace and user instructions from configuration.
 
+use async_trait::async_trait;
 use moa_core::{ContextProcessor, MoaConfig, ProcessorOutput, Result, WorkingContext};
 
 use super::estimate_tokens;
@@ -21,6 +22,7 @@ impl InstructionProcessor {
     }
 }
 
+#[async_trait]
 impl ContextProcessor for InstructionProcessor {
     fn name(&self) -> &str {
         "instructions"
@@ -30,7 +32,7 @@ impl ContextProcessor for InstructionProcessor {
         2
     }
 
-    fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+    async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
         let mut sections = Vec::new();
         let mut items_included = Vec::new();
 
@@ -73,8 +75,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn instruction_processor_appends_config_backed_sections() {
+    #[tokio::test]
+    async fn instruction_processor_appends_config_backed_sections() {
         let session = SessionMeta {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
@@ -110,6 +112,7 @@ mod tests {
 
         let output = InstructionProcessor::from_config(&config)
             .process(&mut ctx)
+            .await
             .unwrap();
 
         assert_eq!(ctx.messages.len(), 1);
