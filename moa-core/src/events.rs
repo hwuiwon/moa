@@ -122,8 +122,7 @@ pub enum Event {
         /// Full approval prompt with parsed parameters, diffs, and allow pattern.
         ///
         /// TODO: Use a claim-check pattern for large diffs in cloud mode.
-        #[serde(default)]
-        prompt: Option<ApprovalPrompt>,
+        prompt: ApprovalPrompt,
     },
     /// An approval request was decided.
     ApprovalDecided {
@@ -298,6 +297,33 @@ mod tests {
 
     use super::*;
 
+    fn sample_approval_prompt(
+        request_id: Uuid,
+        tool_name: &str,
+        input_summary: &str,
+        risk_level: RiskLevel,
+    ) -> ApprovalPrompt {
+        ApprovalPrompt {
+            request: crate::types::ApprovalRequest {
+                request_id,
+                tool_name: tool_name.to_string(),
+                input_summary: input_summary.to_string(),
+                risk_level: risk_level.clone(),
+            },
+            pattern: input_summary.to_string(),
+            parameters: vec![crate::types::ApprovalField {
+                label: "Path".to_string(),
+                value: input_summary.to_string(),
+            }],
+            file_diffs: vec![crate::types::ApprovalFileDiff {
+                path: input_summary.to_string(),
+                before: String::new(),
+                after: "hello\n".to_string(),
+                language_hint: Some("md".to_string()),
+            }],
+        }
+    }
+
     #[test]
     fn event_serialization_roundtrip() {
         let event = Event::UserMessage {
@@ -345,11 +371,11 @@ mod tests {
                 hand_id: None,
             },
             Event::ApprovalRequested {
-                request_id: Uuid::new_v4(),
+                request_id: Uuid::nil(),
                 tool_name: "bash".into(),
                 input_summary: "ls".into(),
                 risk_level: RiskLevel::Low,
-                prompt: None,
+                prompt: sample_approval_prompt(Uuid::nil(), "bash", "ls", RiskLevel::Low),
             },
             Event::Checkpoint {
                 summary: "test".into(),
@@ -375,25 +401,12 @@ mod tests {
             tool_name: "file_write".to_string(),
             input_summary: "notes/today.md".to_string(),
             risk_level: RiskLevel::Medium,
-            prompt: Some(ApprovalPrompt {
-                request: crate::types::ApprovalRequest {
-                    request_id,
-                    tool_name: "file_write".to_string(),
-                    input_summary: "notes/today.md".to_string(),
-                    risk_level: RiskLevel::Medium,
-                },
-                pattern: "notes/today.md".to_string(),
-                parameters: vec![crate::types::ApprovalField {
-                    label: "Path".to_string(),
-                    value: "notes/today.md".to_string(),
-                }],
-                file_diffs: vec![crate::types::ApprovalFileDiff {
-                    path: "notes/today.md".to_string(),
-                    before: String::new(),
-                    after: "hello\n".to_string(),
-                    language_hint: Some("md".to_string()),
-                }],
-            }),
+            prompt: sample_approval_prompt(
+                request_id,
+                "file_write",
+                "notes/today.md",
+                RiskLevel::Medium,
+            ),
         };
 
         let json = serde_json::to_string(&event).expect("serialize approval request");
@@ -443,39 +456,6 @@ mod tests {
                 assert_eq!(duration_ms, 5);
             }
             other => panic!("expected tool result event, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn approval_requested_event_deserializes_without_prompt() {
-        let request_id = Uuid::new_v4();
-        let json = serde_json::json!({
-            "type": "ApprovalRequested",
-            "data": {
-                "request_id": request_id,
-                "tool_name": "bash",
-                "input_summary": "pwd",
-                "risk_level": "high"
-            }
-        });
-
-        let decoded: Event =
-            serde_json::from_value(json).expect("deserialize legacy approval request");
-        match decoded {
-            Event::ApprovalRequested {
-                request_id: decoded_id,
-                tool_name,
-                input_summary,
-                risk_level,
-                prompt,
-            } => {
-                assert_eq!(decoded_id, request_id);
-                assert_eq!(tool_name, "bash");
-                assert_eq!(input_summary, "pwd");
-                assert_eq!(risk_level, RiskLevel::High);
-                assert!(prompt.is_none());
-            }
-            other => panic!("expected approval request event, got {other:?}"),
         }
     }
 }

@@ -21,9 +21,9 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
 
 use moa_core::{
-    ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, Event,
-    EventRecord, MemoryPath, MoaConfig, PageSummary, Result, RiskLevel, RuntimeEvent, SessionId,
-    SessionMeta, SessionStatus, ToolCardStatus, ToolUpdate, WorkspaceId,
+    ApprovalDecision, ApprovalPrompt, Event, EventRecord, MemoryPath, MoaConfig, PageSummary,
+    Result, RuntimeEvent, SessionId, SessionMeta, SessionStatus, ToolCardStatus, ToolUpdate,
+    WorkspaceId,
 };
 
 use crate::{
@@ -714,14 +714,8 @@ impl App {
         let events = self.runtime.session_events(session_id.clone()).await?;
         let meta = self.runtime.session_meta_by_id(session_id.clone()).await?;
         self.session_meta.insert(session_id.clone(), meta.clone());
-        let cached_prompt = self
-            .session_views
-            .get(&session_id)
-            .and_then(|view| view.pending_approval.clone());
-        self.session_views.insert(
-            session_id,
-            SessionViewState::from_history(&meta, &events, cached_prompt),
-        );
+        self.session_views
+            .insert(session_id, SessionViewState::from_history(&meta, &events));
         Ok(())
     }
 
@@ -1543,11 +1537,7 @@ impl App {
 }
 
 impl SessionViewState {
-    fn from_history(
-        meta: &SessionMeta,
-        events: &[EventRecord],
-        cached_prompt: Option<ApprovalPrompt>,
-    ) -> Self {
+    fn from_history(meta: &SessionMeta, events: &[EventRecord]) -> Self {
         let mut view = Self {
             entries: Vec::new(),
             total_tokens: meta.total_input_tokens + meta.total_output_tokens,
@@ -1557,9 +1547,6 @@ impl SessionViewState {
             diff_view: None,
             loaded: true,
         };
-        let cached_request_id = cached_prompt
-            .as_ref()
-            .map(|prompt| prompt.request.request_id);
 
         for record in events {
             match &record.event {
@@ -1609,29 +1596,9 @@ impl SessionViewState {
                         detail: Some(error.clone()),
                     });
                 }
-                Event::ApprovalRequested {
-                    request_id,
-                    tool_name,
-                    input_summary,
-                    risk_level,
-                    prompt,
-                } => {
-                    let prompt = if let Some(prompt) = prompt.clone() {
-                        prompt
-                    } else if cached_request_id == Some(*request_id) {
-                        cached_prompt.clone().unwrap_or_else(|| {
-                            minimal_approval_prompt(
-                                *request_id,
-                                tool_name,
-                                input_summary,
-                                risk_level,
-                            )
-                        })
-                    } else {
-                        minimal_approval_prompt(*request_id, tool_name, input_summary, risk_level)
-                    };
+                Event::ApprovalRequested { prompt, .. } => {
                     view.upsert_approval_card(prompt.clone());
-                    view.pending_approval = Some(prompt);
+                    view.pending_approval = Some(prompt.clone());
                 }
                 Event::ApprovalDecided {
                     request_id,
@@ -1766,28 +1733,6 @@ fn truncate_detail(detail: &str) -> String {
         truncated.push('…');
     }
     truncated
-}
-
-fn minimal_approval_prompt(
-    request_id: Uuid,
-    tool_name: &str,
-    input_summary: &str,
-    risk_level: &RiskLevel,
-) -> ApprovalPrompt {
-    ApprovalPrompt {
-        request: ApprovalRequest {
-            request_id,
-            tool_name: tool_name.to_string(),
-            input_summary: input_summary.to_string(),
-            risk_level: risk_level.clone(),
-        },
-        pattern: input_summary.to_string(),
-        parameters: vec![ApprovalField {
-            label: "Request".to_string(),
-            value: input_summary.to_string(),
-        }],
-        file_diffs: Vec::<ApprovalFileDiff>::new(),
-    }
 }
 
 fn session_summary_from_meta(meta: &SessionMeta) -> moa_core::SessionSummary {
@@ -2123,7 +2068,10 @@ async fn run_event_loop(
 mod tests {
     use chrono::Utc;
     use crossterm::event::KeyCode;
-    use moa_core::{Platform, SessionStore, SessionSummary, UserId, WorkspaceId};
+    use moa_core::{
+        ApprovalField, ApprovalFileDiff, ApprovalRequest, Platform, RiskLevel, SessionStore,
+        SessionSummary, UserId, WorkspaceId,
+    };
     use ratatui::{Terminal, backend::TestBackend};
     use tokio::runtime::Runtime;
 
@@ -2191,6 +2139,28 @@ mod tests {
         })
     }
 
+    fn sample_approval_prompt(
+        request_id: Uuid,
+        tool_name: &str,
+        input_summary: &str,
+        risk_level: RiskLevel,
+    ) -> ApprovalPrompt {
+        ApprovalPrompt {
+            request: ApprovalRequest {
+                request_id,
+                tool_name: tool_name.to_string(),
+                input_summary: input_summary.to_string(),
+                risk_level,
+            },
+            pattern: input_summary.to_string(),
+            parameters: vec![ApprovalField {
+                label: "Request".to_string(),
+                value: input_summary.to_string(),
+            }],
+            file_diffs: Vec::new(),
+        }
+    }
+
     #[test]
     fn app_state_transitions_follow_idle_composing_running_waiting_idle() {
         let mut app = test_app();
@@ -2205,11 +2175,11 @@ mod tests {
         assert_eq!(app.mode(), AppMode::Running);
 
         app.session_view_mut(app.active_session_id.clone())
-            .pending_approval = Some(minimal_approval_prompt(
+            .pending_approval = Some(sample_approval_prompt(
             Uuid::new_v4(),
             "bash",
             "pwd",
-            &RiskLevel::High,
+            RiskLevel::High,
         ));
         app.sync_mode_with_state();
         assert_eq!(app.mode(), AppMode::WaitingApproval);
@@ -2320,7 +2290,7 @@ mod tests {
                         tool_name: "bash".to_string(),
                         input_summary: "pwd".to_string(),
                         risk_level: RiskLevel::High,
-                        prompt: Some(ApprovalPrompt {
+                        prompt: ApprovalPrompt {
                             request: ApprovalRequest {
                                 request_id,
                                 tool_name: "bash".to_string(),
@@ -2338,7 +2308,7 @@ mod tests {
                                 after: "pwd\n".to_string(),
                                 language_hint: Some("txt".to_string()),
                             }],
-                        }),
+                        },
                     },
                 )
                 .await

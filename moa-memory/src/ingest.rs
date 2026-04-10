@@ -309,7 +309,7 @@ fn slugify(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{MemoryScope, PageType};
+    use moa_core::{MemoryScope, MemoryStore, PageType};
     use tempfile::tempdir;
 
     use super::{extract_section_items, ingest_source};
@@ -365,13 +365,13 @@ mod tests {
             "sources/rfc-0042-auth-redesign.md"
         );
         let source_page = store
-            .read_page_in_scope(&scope, &report.source_path)
+            .read_page(scope.clone(), &report.source_path)
             .await
             .unwrap();
         assert_eq!(source_page.page_type, PageType::Source);
 
         let entity_page = store
-            .read_page_in_scope(&scope, &"entities/auth-service.md".into())
+            .read_page(scope.clone(), &"entities/auth-service.md".into())
             .await
             .unwrap();
         assert!(entity_page.content.contains("Source update"));

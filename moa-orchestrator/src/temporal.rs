@@ -1041,10 +1041,9 @@ fn event_to_runtime_event(record: &EventRecord) -> Option<RuntimeEvent> {
         Event::BrainResponse { text, .. } => {
             Some(RuntimeEvent::AssistantFinished { text: text.clone() })
         }
-        Event::ApprovalRequested {
-            prompt: Some(prompt),
-            ..
-        } => Some(RuntimeEvent::ApprovalRequested(prompt.clone())),
+        Event::ApprovalRequested { prompt, .. } => {
+            Some(RuntimeEvent::ApprovalRequested(prompt.clone()))
+        }
         Event::ToolCall {
             tool_id, tool_name, ..
         } => Some(RuntimeEvent::ToolUpdate(ToolUpdate {

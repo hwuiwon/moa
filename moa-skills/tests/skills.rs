@@ -193,7 +193,7 @@ async fn registry_lists_skill_metadata() -> Result<()> {
     let skill = parse_skill_markdown(DISTILLED_SKILL)?;
     let path = build_skill_path(&skill.frontmatter.name);
     let page = wiki_page_from_skill(&skill, Some(path.clone()))?;
-    memory.write_page_in_scope(&scope, &path, page).await?;
+    memory.write_page(scope.clone(), &path, page).await?;
 
     let registry_memory: Arc<dyn MemoryStore> = memory.clone();
     let registry = SkillRegistry::new(registry_memory);
@@ -222,8 +222,8 @@ async fn distills_skill_after_tool_heavy_session() -> Result<()> {
     assert!(distilled.is_some());
     let metadata = distilled.unwrap();
     let stored = memory
-        .read_page_in_scope(
-            &moa_core::MemoryScope::Workspace(session.workspace_id.clone()),
+        .read_page(
+            moa_core::MemoryScope::Workspace(session.workspace_id.clone()),
             &metadata.path,
         )
         .await?;
@@ -239,7 +239,7 @@ async fn improves_existing_skill_when_better_flow_is_found() -> Result<()> {
     let original = parse_skill_markdown(DISTILLED_SKILL)?;
     let path = build_skill_path(&original.frontmatter.name);
     let page = wiki_page_from_skill(&original, Some(path.clone()))?;
-    memory.write_page_in_scope(&scope, &path, page).await?;
+    memory.write_page(scope.clone(), &path, page).await?;
 
     let llm: Arc<dyn LLMProvider> = Arc::new(MockLlm {
         response: Arc::new(Mutex::new(IMPROVED_SKILL.to_string())),
@@ -255,7 +255,7 @@ async fn improves_existing_skill_when_better_flow_is_found() -> Result<()> {
     .await?;
 
     assert!(improved.is_some());
-    let updated = memory.read_page_in_scope(&scope, &path).await?;
+    let updated = memory.read_page(scope.clone(), &path).await?;
     assert!(
         updated
             .content
