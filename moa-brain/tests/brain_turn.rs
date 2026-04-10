@@ -1075,8 +1075,8 @@ metadata:
     .unwrap();
     let skill_path = build_skill_path(&skill.frontmatter.name);
     memory_store
-        .write_page_in_scope(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+        .write_page(
+            MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &skill_path,
             wiki_page_from_skill(&skill, Some(skill_path.clone())).unwrap(),
         )

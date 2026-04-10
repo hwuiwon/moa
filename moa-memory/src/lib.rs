@@ -163,36 +163,6 @@ impl FileMemoryStore {
         branching::reconcile_branches(self, scope).await
     }
 
-    /// Reads a page from an explicit memory scope.
-    ///
-    /// Deprecated compatibility shim for older concrete `FileMemoryStore` call sites.
-    pub async fn read_page_in_scope(
-        &self,
-        scope: &MemoryScope,
-        path: &MemoryPath,
-    ) -> Result<WikiPage> {
-        <Self as MemoryStore>::read_page(self, scope.clone(), path).await
-    }
-
-    /// Writes a page into an explicit memory scope.
-    ///
-    /// Deprecated compatibility shim for older concrete `FileMemoryStore` call sites.
-    pub async fn write_page_in_scope(
-        &self,
-        scope: &MemoryScope,
-        path: &MemoryPath,
-        page: WikiPage,
-    ) -> Result<()> {
-        <Self as MemoryStore>::write_page(self, scope.clone(), path, page).await
-    }
-
-    /// Deletes a page from an explicit memory scope.
-    ///
-    /// Deprecated compatibility shim for older concrete `FileMemoryStore` call sites.
-    pub async fn delete_page_in_scope(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<()> {
-        <Self as MemoryStore>::delete_page(self, scope.clone(), path).await
-    }
-
     pub(crate) async fn list_scope_files(&self, scope: &MemoryScope) -> Result<Vec<MemoryPath>> {
         let root = self.scope_root(scope);
         if !try_exists(&root).await? {

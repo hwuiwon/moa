@@ -653,7 +653,7 @@ async fn handle_tool_call(
                     tool_name: request.tool_name.clone(),
                     input_summary: request.input_summary.clone(),
                     risk_level: request.risk_level.clone(),
-                    prompt: Some(prompt.clone()),
+                    prompt: prompt.clone(),
                 },
             )
             .await?;

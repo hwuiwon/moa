@@ -6,9 +6,10 @@ use async_trait::async_trait;
 use moa_core::{
     BrainOrchestrator, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
     ConfidenceLevel, ContextMessage, Event, EventRange, EventType, LLMProvider, MemoryScope,
-    MessageRole, MoaConfig, MoaError, PageType, Platform, Result, RuntimeEvent, SessionFilter,
-    SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore,
-    StartSessionRequest, TokenPricing, ToolCallFormat, UserId, UserMessage, WikiPage, WorkspaceId,
+    MemoryStore, MessageRole, MoaConfig, MoaError, PageType, Platform, Result, RuntimeEvent,
+    SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
+    SessionStore, StartSessionRequest, TokenPricing, ToolCallFormat, UserId, UserMessage, WikiPage,
+    WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
@@ -1037,7 +1038,6 @@ async fn approval_requested_event_persists_full_prompt_details() -> Result<()> {
             assert_eq!(tool_name, "file_write");
             assert!(input_summary.contains("docs/approval-check.md"));
             assert_eq!(risk_level, moa_core::RiskLevel::Medium);
-            let prompt = prompt.expect("rich approval prompt should be persisted");
             assert_eq!(prompt.request.tool_name, "file_write");
             assert_eq!(prompt.parameters.len(), 2);
             assert_eq!(prompt.file_diffs.len(), 1);
@@ -1654,8 +1654,8 @@ async fn memory_maintenance_runs_due_workspace_consolidation() -> Result<()> {
     let now = chrono::Utc::now();
 
     memory_store
-        .write_page_in_scope(
-            &MemoryScope::Workspace(workspace_id.clone()),
+        .write_page(
+            MemoryScope::Workspace(workspace_id.clone()),
             &"topics/architecture.md".into(),
             WikiPage {
                 path: None,
@@ -1699,8 +1699,8 @@ async fn memory_maintenance_runs_due_workspace_consolidation() -> Result<()> {
     assert_eq!(reports.len(), 1);
     assert!(reports[0].relative_dates_normalized >= 1);
     let architecture = memory_store
-        .read_page_in_scope(
-            &MemoryScope::Workspace(workspace_id),
+        .read_page(
+            MemoryScope::Workspace(workspace_id),
             &"topics/architecture.md".into(),
         )
         .await?;
@@ -1720,8 +1720,8 @@ async fn memory_maintenance_skips_when_threshold_or_cooldown_not_met() -> Result
     let scope = MemoryScope::Workspace(workspace_id.clone());
 
     memory_store
-        .write_page_in_scope(
-            &scope,
+        .write_page(
+            scope.clone(),
             &"topics/architecture.md".into(),
             WikiPage {
                 path: None,

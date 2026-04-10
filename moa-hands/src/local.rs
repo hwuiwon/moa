@@ -182,7 +182,7 @@ impl LocalHandProvider {
             .await;
         }
 
-        let docker_result = match tool {
+        match tool {
             "file_read" => {
                 file_read::execute_docker(
                     container_id,
@@ -216,21 +216,7 @@ impl LocalHandProvider {
             other => Err(MoaError::ToolError(format!(
                 "tool {other} not supported in Docker mode"
             ))),
-        };
-
-        if should_fallback_to_host(&docker_result) {
-            tracing::warn!(
-                tool,
-                container_id,
-                error = ?docker_result.as_ref().err(),
-                "docker-backed file tool failed due to docker transport issue, falling back to host-mounted sandbox"
-            );
-            return self
-                .execute_local_tool(&sandbox.sandbox_dir, tool, input, None)
-                .await;
         }
-
-        docker_result
     }
 
     async fn destroy_local_sandbox(&self, sandbox_dir: &Path) -> Result<()> {
@@ -452,19 +438,5 @@ async fn docker_status(container_id: &str) -> Result<HandStatus> {
         other => Err(MoaError::ProviderError(format!(
             "unknown docker sandbox status: {other}"
         ))),
-    }
-}
-
-fn should_fallback_to_host(result: &Result<ToolOutput>) -> bool {
-    match result {
-        Err(MoaError::ProviderError(_)) => true,
-        Err(MoaError::ToolError(message)) => {
-            let lowered = message.to_ascii_lowercase();
-            lowered.contains("no such container")
-                || lowered.contains("cannot connect to the docker daemon")
-                || lowered.contains("error during connect")
-                || lowered.contains("is not running")
-        }
-        _ => false,
     }
 }

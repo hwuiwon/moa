@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use chrono::{Duration, TimeZone, Utc};
-use moa_core::{ConfidenceLevel, MemoryScope, PageType, WikiPage};
+use moa_core::{ConfidenceLevel, MemoryScope, MemoryStore, PageType, WikiPage};
 use moa_memory::FileMemoryStore;
 use tempfile::tempdir;
 
@@ -65,7 +65,11 @@ async fn consolidation_normalizes_dates_and_resolves_conflicts() {
     architecture.updated -= Duration::days(40);
     architecture.reference_count = 0;
     store
-        .write_page_in_scope(&scope, &"topics/architecture.md".into(), architecture)
+        .write_page(
+            scope.clone(),
+            &"topics/architecture.md".into(),
+            architecture,
+        )
         .await
         .unwrap();
 
@@ -76,7 +80,7 @@ async fn consolidation_normalizes_dates_and_resolves_conflicts() {
     );
     deployment.updated -= Duration::days(10);
     store
-        .write_page_in_scope(&scope, &"topics/deployment.md".into(), deployment)
+        .write_page(scope.clone(), &"topics/deployment.md".into(), deployment)
         .await
         .unwrap();
 
@@ -85,7 +89,7 @@ async fn consolidation_normalizes_dates_and_resolves_conflicts() {
         .metadata
         .insert("entity_exists".to_string(), serde_json::Value::Bool(false));
     store
-        .write_page_in_scope(&scope, &"entities/legacy.md".into(), removed)
+        .write_page(scope.clone(), &"entities/legacy.md".into(), removed)
         .await
         .unwrap();
 
@@ -95,18 +99,18 @@ async fn consolidation_normalizes_dates_and_resolves_conflicts() {
     assert_eq!(report.pages_deleted, 1);
 
     let deployment = store
-        .read_page_in_scope(&scope, &"topics/deployment.md".into())
+        .read_page(scope.clone(), &"topics/deployment.md".into())
         .await
         .unwrap();
     assert!(deployment.content.contains("port 4000"));
     let architecture = store
-        .read_page_in_scope(&scope, &"topics/architecture.md".into())
+        .read_page(scope.clone(), &"topics/architecture.md".into())
         .await
         .unwrap();
     assert!(architecture.content.contains("2026-"));
     assert!(
         store
-            .read_page_in_scope(&scope, &"entities/legacy.md".into())
+            .read_page(scope.clone(), &"entities/legacy.md".into())
             .await
             .is_err()
     );
@@ -152,7 +156,7 @@ async fn ingest_source_creates_summary_and_updates_related_pages() {
     );
     assert!(
         store
-            .read_page_in_scope(&scope, &"topics/token-rotation.md".into())
+            .read_page(scope.clone(), &"topics/token-rotation.md".into())
             .await
             .unwrap()
             .content
@@ -173,7 +177,7 @@ async fn branch_reconciliation_merges_conflicting_writes() {
     );
     main_page.updated = Utc.with_ymd_and_hms(2026, 4, 9, 17, 0, 0).unwrap();
     store
-        .write_page_in_scope(&scope, &"topics/architecture.md".into(), main_page)
+        .write_page(scope.clone(), &"topics/architecture.md".into(), main_page)
         .await
         .unwrap();
 
@@ -197,7 +201,7 @@ async fn branch_reconciliation_merges_conflicting_writes() {
     assert_eq!(report.conflicts_resolved, 1);
 
     let merged = store
-        .read_page_in_scope(&scope, &"topics/architecture.md".into())
+        .read_page(scope.clone(), &"topics/architecture.md".into())
         .await
         .unwrap();
     assert!(merged.content.contains("original deployment command"));
@@ -220,14 +224,14 @@ async fn consolidation_decays_confidence_once_and_is_stable_on_repeat_runs() {
     page.reference_count = 0;
     page.confidence = ConfidenceLevel::High;
     store
-        .write_page_in_scope(&scope, &"topics/lonely-topic.md".into(), page)
+        .write_page(scope.clone(), &"topics/lonely-topic.md".into(), page)
         .await
         .unwrap();
 
     let first = store.run_consolidation(&scope).await.unwrap();
     assert_eq!(first.confidence_decayed, 1);
     let first_page = store
-        .read_page_in_scope(&scope, &"topics/lonely-topic.md".into())
+        .read_page(scope.clone(), &"topics/lonely-topic.md".into())
         .await
         .unwrap();
     assert_eq!(first_page.confidence, ConfidenceLevel::Medium);
@@ -235,7 +239,7 @@ async fn consolidation_decays_confidence_once_and_is_stable_on_repeat_runs() {
     let second = store.run_consolidation(&scope).await.unwrap();
     assert_eq!(second.confidence_decayed, 0);
     let second_page = store
-        .read_page_in_scope(&scope, &"topics/lonely-topic.md".into())
+        .read_page(scope.clone(), &"topics/lonely-topic.md".into())
         .await
         .unwrap();
     assert_eq!(second_page.confidence, ConfidenceLevel::Medium);
@@ -266,7 +270,7 @@ async fn repeated_ingest_updates_existing_pages_without_duplicate_links() {
 
     assert_eq!(first.source_path, second.source_path);
     let entity = store
-        .read_page_in_scope(&scope, &"entities/auth-service.md".into())
+        .read_page(scope.clone(), &"entities/auth-service.md".into())
         .await
         .unwrap();
     assert_eq!(
@@ -294,8 +298,8 @@ async fn reconciliation_merges_multiple_branches_and_cleans_branch_directory() {
     let scope = MemoryScope::Workspace("ws1".into());
 
     store
-        .write_page_in_scope(
-            &scope,
+        .write_page(
+            scope.clone(),
             &"topics/architecture.md".into(),
             sample_page(
                 "Architecture",
@@ -338,14 +342,14 @@ async fn reconciliation_merges_multiple_branches_and_cleans_branch_directory() {
     assert_eq!(report.branches_reconciled, 2);
     assert_eq!(report.pages_created, 1);
     let merged = store
-        .read_page_in_scope(&scope, &"topics/architecture.md".into())
+        .read_page(scope.clone(), &"topics/architecture.md".into())
         .await
         .unwrap();
     assert!(merged.content.contains("Base deployment flow"));
     assert!(merged.content.contains("canary validation"));
     assert!(
         store
-            .read_page_in_scope(&scope, &"entities/auth-service.md".into())
+            .read_page(scope.clone(), &"entities/auth-service.md".into())
             .await
             .is_ok()
     );
@@ -427,8 +431,8 @@ async fn manual_stress_ingest_reconcile_and_consolidate_preserves_invariants() {
 
     for index in 0..20 {
         store
-            .write_page_in_scope(
-                &scope,
+            .write_page(
+                scope.clone(),
                 &format!("topics/base-{index}.md").into(),
                 sample_page(
                     &format!("Base {index}"),
@@ -517,8 +521,8 @@ async fn manual_seeded_memory_fuzz_preserves_core_invariants() {
             let term = format!("seed{seed}-base{index}");
             tracked_terms.push(term.clone());
             store
-                .write_page_in_scope(
-                    &scope,
+                .write_page(
+                    scope.clone(),
                     &format!("topics/base-{index}.md").into(),
                     sample_page(
                         &format!("Base {index}"),
@@ -538,12 +542,12 @@ async fn manual_seeded_memory_fuzz_preserves_core_invariants() {
                     tracked_terms.push(term.clone());
                     let path = format!("topics/base-{page_index}.md");
                     let mut page = store
-                        .read_page_in_scope(&scope, &path.clone().into())
+                        .read_page(scope.clone(), &path.clone().into())
                         .await
                         .unwrap();
                     page.content.push_str(&format!("\nDirect update {term}.\n"));
                     store
-                        .write_page_in_scope(&scope, &path.into(), page)
+                        .write_page(scope.clone(), &path.into(), page)
                         .await
                         .unwrap();
                 }
@@ -585,7 +589,10 @@ async fn manual_seeded_memory_fuzz_preserves_core_invariants() {
                 3 => {
                     let page_index = rng.next_usize(10);
                     let mut page = store
-                        .read_page_in_scope(&scope, &format!("topics/base-{page_index}.md").into())
+                        .read_page(
+                            scope.clone(),
+                            &format!("topics/base-{page_index}.md").into(),
+                        )
                         .await
                         .unwrap();
                     page.content.push_str("\nThis was noted today.\n");
@@ -593,8 +600,8 @@ async fn manual_seeded_memory_fuzz_preserves_core_invariants() {
                     page.last_referenced -= Duration::days(35);
                     page.reference_count = 0;
                     store
-                        .write_page_in_scope(
-                            &scope,
+                        .write_page(
+                            scope.clone(),
                             &format!("topics/base-{page_index}.md").into(),
                             page,
                         )
@@ -650,10 +657,7 @@ async fn validate_memory_invariants(
     assert!(!pages.is_empty());
 
     for summary in &pages {
-        let page = store
-            .read_page_in_scope(scope, &summary.path)
-            .await
-            .unwrap();
+        let page = store.read_page(scope.clone(), &summary.path).await.unwrap();
         let related_len = page.related.len();
         let sources_len = page.sources.len();
         let related_set = page.related.iter().collect::<HashSet<_>>();

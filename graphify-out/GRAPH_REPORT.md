@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-04-10)
 
 ## Corpus Check
-- 127 files · ~121,168 words
+- 127 files · ~120,866 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 2414 nodes · 4265 edges · 86 communities detected
+- 2410 nodes · 4259 edges · 86 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -16,8 +16,8 @@
 4. `DaemonChatRuntime` - 30 edges
 5. `SkillFrontmatter` - 30 edges
 6. `PostgresSessionStore` - 26 edges
-7. `FileMemoryStore` - 25 edges
-8. `TursoSessionStore` - 23 edges
+7. `TursoSessionStore` - 23 edges
+8. `FileMemoryStore` - 22 edges
 9. `LocalOrchestrator` - 22 edges
 10. `MemoryViewState` - 20 edges
 
@@ -38,7 +38,7 @@ Nodes (19): ChatRuntime, daemon_connect(), daemon_expect_ack(), daemon_is_availa
 Cohesion: 0.06
 Nodes (35): App, app_state_transitions_follow_idle_composing_running_waiting_idle(), AppMode, approval_status_and_note(), ApprovalCardStatus, ApprovalEntry, ChatEntry, collect_sandbox_files() (+27 more)
 
-### Community 3 - "Memory Browser View"
+### Community 3 - "Memory Pipeline & Views"
 Cohesion: 0.03
 Nodes (34): centered_rect(), extract_search_keywords(), extract_search_query(), filter_pages(), fuzzy_filter_matches_titles(), infer_page_title(), infer_page_type(), is_memory_not_found() (+26 more)
 
@@ -72,7 +72,7 @@ Nodes (35): approval_requested_event_persists_full_prompt_details(), collect_run
 
 ### Community 11 - "Local Orchestrator"
 Cohesion: 0.07
-Nodes (17): accept_user_message(), append_event(), detect_docker(), docker_status(), DockerSandbox, flush_next_queued_message(), flush_pending_signal(), flush_queued_messages() (+9 more)
+Nodes (16): accept_user_message(), append_event(), detect_docker(), docker_status(), DockerSandbox, flush_next_queued_message(), flush_pending_signal(), flush_queued_messages() (+8 more)
 
 ### Community 12 - "Tool Router & Policies"
 Cohesion: 0.08
@@ -126,7 +126,7 @@ Nodes (25): build_diff_file_view(), default_mode_for_width(), diff_line_style(),
 Cohesion: 0.12
 Nodes (18): approval_callback_maps_to_control_message(), attachments_from_message(), context_from_component(), discord_button(), discord_create_message(), discord_create_message_includes_buttons_for_last_chunk(), discord_edit_message(), discord_embed() (+10 more)
 
-### Community 25 - "E2B Hand Provider"
+### Community 25 - "E2B Sandbox Provider"
 Cohesion: 0.14
 Nodes (16): build_url(), ConnectedSandbox, decode_stream_chunk(), default_headers(), E2BHandProvider, encode_connect_request(), encode_test_envelopes(), envd_headers() (+8 more)
 
@@ -146,7 +146,7 @@ Nodes (16): flatten_call_result(), flatten_tool_result_aggregates_text_items(), 
 Cohesion: 0.12
 Nodes (11): credential_from_env(), default_scope_for(), env_var(), environment_vault_loads_from_env_backed_server_config(), EnvironmentCredentialVault, headers_from_credential(), MCPCredentialProxy, McpSessionToken (+3 more)
 
-### Community 30 - "Daytona Hand Provider"
+### Community 30 - "Daytona Workspace Provider"
 Cohesion: 0.17
 Nodes (10): build_url(), DaytonaHandProvider, default_headers(), derive_toolbox_url(), expect_success(), expect_success_json(), extract_workspace_id(), http_error() (+2 more)
 
@@ -155,7 +155,7 @@ Cohesion: 0.16
 Nodes (13): channel_from_chat_and_reply(), handle_callback_query(), handle_message(), inbound_from_callback_query(), inbound_from_message(), inline_keyboard(), parse_message_id(), parses_approval_callback_into_control_message() (+5 more)
 
 ### Community 32 - "Local Tool Tests"
-Cohesion: 0.14
+Cohesion: 0.15
 Nodes (16): bash_captures_stdout_and_stderr(), bash_respects_timeout(), EmptyMemoryStore, file_operations_reject_path_traversal(), file_read_reads_written_content(), file_search_finds_files_by_glob(), local_bash_hard_cancel_kills_running_process(), memory_read_returns_page_contents() (+8 more)
 
 ### Community 33 - "Docker File Operations"
@@ -178,7 +178,7 @@ Nodes (13): category_label(), centered_rect(), cycle_string(), cycling_provider_
 Cohesion: 0.13
 Nodes (15): approval_buttons(), approval_request(), ApprovalCallbackAction, border_line(), callback_data_roundtrips(), content_line(), prepare_outbound_message(), prepare_outbound_message_adds_inline_buttons_when_supported() (+7 more)
 
-### Community 38 - "Context Pipeline Core"
+### Community 38 - "Pipeline & Session Helpers"
 Cohesion: 0.15
 Nodes (14): build_default_pipeline(), build_default_pipeline_with_tools(), ContextPipeline, estimate_tokens(), pipeline_runner_executes_stages_in_order(), PipelineStageReport, test_create_and_get_session(), test_emit_and_get_events() (+6 more)
 
@@ -186,7 +186,7 @@ Nodes (14): build_default_pipeline(), build_default_pipeline_with_tools(), Conte
 Cohesion: 0.1
 Nodes (2): create_session_store(), SessionDatabase
 
-### Community 40 - "FTS5 Search Index"
+### Community 40 - "Full Text Search"
 Cohesion: 0.19
 Nodes (10): build_fts_query(), delete_page_entries(), FtsIndex, insert_page(), migrate(), parse_confidence(), parse_page_type(), parse_scope_key() (+2 more)
 
@@ -231,8 +231,8 @@ Cohesion: 0.3
 Nodes (4): decrypt_bytes(), encrypt_bytes(), file_vault_encrypts_and_decrypts_roundtrip(), FileVault
 
 ### Community 51 - "Core Event Model"
-Cohesion: 0.14
-Nodes (1): Event
+Cohesion: 0.15
+Nodes (3): approval_requested_event_round_trips_full_prompt(), Event, sample_approval_prompt()
 
 ### Community 52 - "Command Palette"
 Cohesion: 0.22
@@ -401,7 +401,7 @@ _Questions this graph is uniquely positioned to answer:_
   _Cohesion score 0.03 - nodes in this community are weakly interconnected._
 - **Should `TUI App State` be split into smaller, more focused modules?**
   _Cohesion score 0.06 - nodes in this community are weakly interconnected._
-- **Should `Memory Browser View` be split into smaller, more focused modules?**
+- **Should `Memory Pipeline & Views` be split into smaller, more focused modules?**
   _Cohesion score 0.03 - nodes in this community are weakly interconnected._
 - **Should `File Memory Store` be split into smaller, more focused modules?**
   _Cohesion score 0.05 - nodes in this community are weakly interconnected._

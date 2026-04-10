@@ -75,8 +75,8 @@ async fn fts_search_finds_ranked_results() -> Result<()> {
             "# Notes\n\nGeneric content unrelated to authentication.\n"
         };
         store
-            .write_page_in_scope(
-                &scope,
+            .write_page(
+                scope.clone(),
                 &format!("topics/page-{index}.md").into(),
                 sample_page(&title, PageType::Topic, content),
             )
@@ -98,8 +98,8 @@ async fn fts_search_handles_hyphenated_queries() -> Result<()> {
     let scope = MemoryScope::Workspace("ws1".into());
 
     store
-        .write_page_in_scope(
-            &scope,
+        .write_page(
+            scope.clone(),
             &"skills/oauth-refresh/SKILL.md".into(),
             sample_page(
                 "OAuth Refresh",
@@ -124,8 +124,8 @@ async fn rebuild_search_index_from_files_restores_results() -> Result<()> {
     let scope = MemoryScope::Workspace("ws1".into());
 
     store
-        .write_page_in_scope(
-            &scope,
+        .write_page(
+            scope.clone(),
             &"entities/auth-service.md".into(),
             sample_page(
                 "Auth Service",
@@ -154,8 +154,8 @@ async fn user_and_workspace_scopes_are_separate() -> Result<()> {
     let path = "topics/preferences.md".into();
 
     store
-        .write_page_in_scope(
-            &user_scope,
+        .write_page(
+            user_scope.clone(),
             &path,
             sample_page(
                 "Preferences",
@@ -165,8 +165,8 @@ async fn user_and_workspace_scopes_are_separate() -> Result<()> {
         )
         .await?;
     store
-        .write_page_in_scope(
-            &workspace_scope,
+        .write_page(
+            workspace_scope.clone(),
             &path,
             sample_page(
                 "Preferences",

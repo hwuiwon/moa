@@ -292,8 +292,8 @@ async fn memory_search_returns_indexed_results() {
     let memory_root = dir.path().join("memory-root");
     let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
     memory_store
-        .write_page_in_scope(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+        .write_page(
+            MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &MemoryPath::new("topics/oauth.md"),
             WikiPage {
                 path: Some(MemoryPath::new("topics/oauth.md")),
@@ -344,8 +344,8 @@ async fn memory_read_returns_page_contents() {
     let memory_root = dir.path().join("memory-root");
     let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
     memory_store
-        .write_page_in_scope(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+        .write_page(
+            MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &MemoryPath::new("skills/oauth-refresh/SKILL.md"),
             WikiPage {
                 path: Some(MemoryPath::new("skills/oauth-refresh/SKILL.md")),

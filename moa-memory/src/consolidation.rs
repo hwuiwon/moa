@@ -399,7 +399,7 @@ fn is_internal_path(path: &MemoryPath) -> bool {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
-    use moa_core::{ConfidenceLevel, MemoryScope, PageType, WikiPage};
+    use moa_core::{ConfidenceLevel, MemoryScope, MemoryStore, PageType, WikiPage};
     use tempfile::tempdir;
 
     use super::{normalize_relative_dates, run_consolidation};
@@ -443,8 +443,8 @@ mod tests {
         let scope = MemoryScope::Workspace("ws1".into());
 
         store
-            .write_page_in_scope(
-                &scope,
+            .write_page(
+                scope.clone(),
                 &"topics/architecture.md".into(),
                 page(
                     "# Architecture\n\nAuth service runs on port 3000 today.",
@@ -460,7 +460,7 @@ mod tests {
         );
         conflicting.reference_count = 1;
         store
-            .write_page_in_scope(&scope, &"topics/deployment.md".into(), conflicting)
+            .write_page(scope.clone(), &"topics/deployment.md".into(), conflicting)
             .await
             .unwrap();
 
@@ -469,7 +469,7 @@ mod tests {
             .metadata
             .insert("entity_exists".to_string(), serde_json::Value::Bool(false));
         store
-            .write_page_in_scope(&scope, &"entities/legacy-service.md".into(), stale)
+            .write_page(scope.clone(), &"entities/legacy-service.md".into(), stale)
             .await
             .unwrap();
 
@@ -479,13 +479,13 @@ mod tests {
         assert!(report.contradictions_resolved >= 1);
         assert_eq!(report.pages_deleted, 1);
         let deployment = store
-            .read_page_in_scope(&scope, &"topics/deployment.md".into())
+            .read_page(scope.clone(), &"topics/deployment.md".into())
             .await
             .unwrap();
         assert!(deployment.content.contains("port 3000"));
         assert!(
             store
-                .read_page_in_scope(&scope, &"entities/legacy-service.md".into())
+                .read_page(scope.clone(), &"entities/legacy-service.md".into())
                 .await
                 .is_err()
         );
