@@ -1112,3 +1112,41 @@ Remaining caveat:
 
 - Slack-specific rich layouts are still conservative.
 - If Slack becomes a primary surface, the next upgrade should add richer per-event thread rendering and more deliberate edit throttling/coalescing.
+
+## 17. Cross-platform approvals and Discord adapter
+
+### 17.1 The unified approval layer still targets inline-button platforms first
+
+Current state:
+
+- `moa-gateway/src/approval.rs` is now the single source of truth for approval callback encoding and default approval buttons.
+- Telegram, Slack, and Discord all consume that same callback format and button set.
+- The fallback path degrades to text commands when inline buttons are unavailable.
+
+Consequence:
+
+- Approval rendering is now consistent across all current messaging adapters.
+- Platform-specific callback parsing no longer drifts between Telegram, Slack, and Discord.
+
+Remaining caveat:
+
+- The generic gateway surface still has no first-class modal representation.
+- `PlatformCapabilities.supports_modals` is informative today, but the unified approval flow still chooses inline buttons when available and text fallback otherwise.
+
+### 17.2 Discord thread mapping is anchored to an inbound message
+
+Current state:
+
+- `moa-gateway/src/discord.rs` auto-creates a thread the first time the adapter responds to a guild message that is not already in a thread.
+- Direct messages stay in the DM channel.
+- Existing Discord threads are reused when the inbound message already arrived inside a thread.
+
+Consequence:
+
+- The documented “one MOA session per Discord thread” model now works for the normal inbound-driven flow.
+- Post-decision edits and follow-up tool/status updates land in the same thread.
+
+Remaining caveat:
+
+- Like Telegram and Slack, the Discord adapter still relies on `reply_to` as its routing anchor.
+- It cannot proactively open a new conversation without an inbound message or prior synthetic gateway message id.

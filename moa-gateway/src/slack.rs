@@ -16,7 +16,10 @@ use tokio::{
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::renderer::{SlackCallbackAction, SlackRenderChunk, SlackRenderer};
+use crate::{
+    approval::{ApprovalCallbackAction, prepare_outbound_message},
+    renderer::{SlackRenderChunk, SlackRenderer},
+};
 
 #[derive(Clone)]
 struct SlackListenerState {
@@ -225,6 +228,7 @@ impl PlatformAdapter for SlackAdapter {
 
     /// Sends a new outbound Slack message, splitting at Slack's length limit.
     async fn send(&self, msg: OutboundMessage) -> Result<MessageId> {
+        let msg = prepare_outbound_message(self.platform(), &self.capabilities(), msg);
         let target = self.resolve_target(msg.reply_to.as_deref()).await?;
         let rendered = self.renderer.render(&msg);
         let synthetic_id = MessageId::new(Uuid::new_v4().to_string());
@@ -243,6 +247,7 @@ impl PlatformAdapter for SlackAdapter {
     /// Edits an existing outbound Slack message in place.
     async fn edit(&self, msg_id: &MessageId, msg: OutboundMessage) -> Result<()> {
         self.wait_for_edit_window(msg_id).await;
+        let msg = prepare_outbound_message(self.platform(), &self.capabilities(), msg);
 
         let existing = self
             .outbound_messages
@@ -436,7 +441,7 @@ async fn inbound_from_interaction_event(
     };
 
     let action = block_actions.actions.as_ref()?.first()?;
-    let callback = SlackCallbackAction::decode(action.value.as_deref()?)?;
+    let callback = ApprovalCallbackAction::decode(action.value.as_deref()?)?;
     let user = block_actions.user.as_ref()?;
     let origin = interaction_origin(block_actions)?;
     let platform_msg_id = format!(
@@ -662,7 +667,7 @@ mod tests {
             "actions": [{
                 "type": "button",
                 "action_id": "allow",
-                "value": SlackCallbackAction::AlwaysAllow { request_id }.encode()
+                "value": ApprovalCallbackAction::AlwaysAllow { request_id }.encode()
             }]
         }))
         .expect("slack interaction should deserialize");
