@@ -1,18 +1,23 @@
 //! Shared MOA types, traits, configuration, and error definitions.
 
 pub mod config;
+pub mod daemon;
 pub mod error;
 pub mod events;
+pub mod telemetry;
 pub mod traits;
 pub mod types;
 
 pub use config::{
-    CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, GatewayConfig,
-    GeneralConfig, LocalConfig, McpCredentialConfig, McpServerConfig, McpTransportConfig,
-    MoaConfig, PermissionsConfig, ProviderCredentialConfig, ProvidersConfig, TuiConfig,
+    CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, DaemonConfig,
+    GatewayConfig, GeneralConfig, LocalConfig, McpCredentialConfig, McpServerConfig,
+    McpTransportConfig, MoaConfig, ObservabilityConfig, PermissionsConfig,
+    ProviderCredentialConfig, ProvidersConfig, TuiConfig,
 };
+pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
 pub use error::{MoaError, Result};
 pub use events::Event;
+pub use telemetry::{TelemetryGuard, init_observability};
 pub use traits::{
     BrainOrchestrator, ContextProcessor, CredentialVault, HandProvider, LLMProvider, MemoryStore,
     PlatformAdapter, SessionStore,

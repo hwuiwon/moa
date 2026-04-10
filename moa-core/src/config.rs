@@ -25,6 +25,10 @@ pub struct MoaConfig {
     pub tui: TuiConfig,
     /// Permission policy settings.
     pub permissions: PermissionsConfig,
+    /// Local daemon settings.
+    pub daemon: DaemonConfig,
+    /// Observability and OTLP export settings.
+    pub observability: ObservabilityConfig,
     /// External MCP server connections.
     pub mcp_servers: Vec<McpServerConfig>,
 }
@@ -32,11 +36,15 @@ pub struct MoaConfig {
 impl MoaConfig {
     /// Loads configuration from `~/.moa/config.toml` and environment variables.
     pub fn load() -> Result<Self> {
+        Self::load_from_path(Self::default_path()?)
+    }
+
+    /// Returns the default MOA config file path.
+    pub fn default_path() -> Result<PathBuf> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or(MoaError::HomeDirectoryNotFound)?;
-        let path = home.join(".moa").join("config.toml");
-        Self::load_from_path(path)
+        Ok(home.join(".moa").join("config.toml"))
     }
 
     /// Loads configuration from an explicit TOML file path and environment variables.
@@ -71,6 +79,22 @@ impl MoaConfig {
             .set_default("local.sandbox_dir", Self::default().local.sandbox_dir)?
             .set_default("local.session_db", Self::default().local.session_db)?
             .set_default("local.memory_dir", Self::default().local.memory_dir)?
+            .set_default("daemon.socket_path", Self::default().daemon.socket_path)?
+            .set_default("daemon.pid_file", Self::default().daemon.pid_file)?
+            .set_default("daemon.log_file", Self::default().daemon.log_file)?
+            .set_default("daemon.auto_connect", Self::default().daemon.auto_connect)?
+            .set_default(
+                "observability.enabled",
+                Self::default().observability.enabled,
+            )?
+            .set_default(
+                "observability.service_name",
+                Self::default().observability.service_name,
+            )?
+            .set_default(
+                "observability.otlp_endpoint",
+                Self::default().observability.otlp_endpoint,
+            )?
             .set_default("cloud.enabled", Self::default().cloud.enabled)?
             .set_default(
                 "cloud.turso_auth_token_env",
@@ -233,6 +257,23 @@ impl MoaConfig {
 
         Ok(builder.build()?.try_deserialize()?)
     }
+
+    /// Persists this config to the default MOA config path.
+    pub fn save(&self) -> Result<()> {
+        self.save_to_path(Self::default_path()?)
+    }
+
+    /// Persists this config to an explicit TOML file path.
+    pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = toml::to_string_pretty(self)
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
 }
 
 /// General runtime settings.
@@ -329,6 +370,53 @@ impl Default for LocalConfig {
             sandbox_dir: "~/.moa/sandbox".to_string(),
             session_db: "~/.moa/sessions.db".to_string(),
             memory_dir: "~/.moa/memory".to_string(),
+        }
+    }
+}
+
+/// Local daemon configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DaemonConfig {
+    /// Unix socket path used by the daemon control plane.
+    pub socket_path: String,
+    /// PID file written by the daemon process.
+    pub pid_file: String,
+    /// Log file written by the daemon process.
+    pub log_file: String,
+    /// Whether interactive clients should auto-connect when the daemon is running.
+    pub auto_connect: bool,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: "~/.moa/daemon/daemon.sock".to_string(),
+            pid_file: "~/.moa/daemon/daemon.pid".to_string(),
+            log_file: "~/.moa/daemon/daemon.log".to_string(),
+            auto_connect: true,
+        }
+    }
+}
+
+/// Observability configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ObservabilityConfig {
+    /// Whether OTLP export is enabled.
+    pub enabled: bool,
+    /// Logical service name for traces.
+    pub service_name: String,
+    /// Optional OTLP endpoint override.
+    pub otlp_endpoint: Option<String>,
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            service_name: "moa".to_string(),
+            otlp_endpoint: None,
         }
     }
 }
