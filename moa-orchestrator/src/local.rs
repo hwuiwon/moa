@@ -22,8 +22,8 @@ use moa_providers::{build_provider_from_config, resolve_provider_selection};
 use moa_session::TursoSessionStore;
 use moa_skills::maybe_distill_skill;
 use tokio::sync::{RwLock, broadcast, mpsc};
-use tokio::task::AbortHandle;
 use tokio_cron_scheduler::{Job, JobScheduler};
+use tokio_util::sync::CancellationToken;
 
 /// Local orchestrator backed by Tokio tasks and broadcast channels.
 #[derive(Clone)]
@@ -41,8 +41,8 @@ struct LocalBrainHandle {
     signal_tx: mpsc::Sender<SessionSignal>,
     event_tx: broadcast::Sender<EventRecord>,
     runtime_tx: broadcast::Sender<RuntimeEvent>,
-    abort_handle: AbortHandle,
-    status: Arc<RwLock<SessionStatus>>,
+    cancel_token: CancellationToken,
+    hard_cancel_token: CancellationToken,
     finished: Arc<AtomicBool>,
 }
 
@@ -188,6 +188,8 @@ impl LocalOrchestrator {
         let (signal_tx, signal_rx) = mpsc::channel(64);
         let (event_tx, _) = broadcast::channel(256);
         let (runtime_tx, _) = broadcast::channel(512);
+        let cancel_token = CancellationToken::new();
+        let hard_cancel_token = CancellationToken::new();
         let status = Arc::new(RwLock::new(
             self.session_store
                 .get_session(session_id.clone())
@@ -208,7 +210,9 @@ impl LocalOrchestrator {
         let task_finished = finished.clone();
         let task_event_tx = event_tx.clone();
         let task_runtime_tx = runtime_tx.clone();
-        let task = tokio::spawn(async move {
+        let task_cancel_token = cancel_token.clone();
+        let task_hard_cancel_token = hard_cancel_token.clone();
+        let _task = tokio::spawn(async move {
             let result = run_session_task(
                 context,
                 signal_rx,
@@ -216,6 +220,8 @@ impl LocalOrchestrator {
                 task_runtime_tx,
                 task_status,
                 initial_turn_requested,
+                task_cancel_token,
+                task_hard_cancel_token,
             )
             .await;
             task_finished.store(true, Ordering::SeqCst);
@@ -226,8 +232,8 @@ impl LocalOrchestrator {
             signal_tx,
             event_tx,
             runtime_tx,
-            abort_handle: task.abort_handle(),
-            status,
+            cancel_token,
+            hard_cancel_token,
             finished,
         };
         self.sessions.write().await.insert(session_id, handle);
@@ -336,18 +342,14 @@ impl BrainOrchestrator for LocalOrchestrator {
             .get(&session_id)
             .ok_or_else(|| MoaError::SessionNotFound(session_id.clone()))?;
 
+        if matches!(
+            signal,
+            SessionSignal::SoftCancel | SessionSignal::HardCancel
+        ) {
+            handle.cancel_token.cancel();
+        }
         if matches!(signal, SessionSignal::HardCancel) {
-            self.session_store
-                .update_status(session_id, SessionStatus::Cancelled)
-                .await?;
-            *handle.status.write().await = SessionStatus::Cancelled;
-            let _ = handle.runtime_tx.send(RuntimeEvent::Notice(
-                "Cancelled current generation.".to_string(),
-            ));
-            let _ = handle.runtime_tx.send(RuntimeEvent::TurnCompleted);
-            handle.finished.store(true, Ordering::SeqCst);
-            handle.abort_handle.abort();
-            return Ok(());
+            handle.hard_cancel_token.cancel();
         }
 
         handle
@@ -415,6 +417,7 @@ impl BrainOrchestrator for LocalOrchestrator {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session_task(
     context: SessionTaskContext,
     mut signal_rx: mpsc::Receiver<SessionSignal>,
@@ -422,6 +425,8 @@ async fn run_session_task(
     runtime_tx: broadcast::Sender<RuntimeEvent>,
     status: Arc<RwLock<SessionStatus>>,
     mut turn_requested: bool,
+    cancel_token: CancellationToken,
+    hard_cancel_token: CancellationToken,
 ) -> Result<()> {
     let pipeline = build_default_pipeline_with_tools(
         &context.config,
@@ -445,6 +450,7 @@ async fn run_session_task(
                     .await?;
                     update_status(
                         &context.session_store,
+                        &event_tx,
                         &status,
                         context.session_id.clone(),
                         SessionStatus::Running,
@@ -455,6 +461,7 @@ async fn run_session_task(
                 Some(SessionSignal::SoftCancel) | Some(SessionSignal::HardCancel) => {
                     update_status(
                         &context.session_store,
+                        &event_tx,
                         &status,
                         context.session_id.clone(),
                         SessionStatus::Cancelled,
@@ -503,6 +510,8 @@ async fn run_session_task(
             &mut turn_requested,
             &mut queued_messages,
             &mut soft_cancel_requested,
+            Some(&cancel_token),
+            Some(&hard_cancel_token),
         )
         .await;
 
@@ -555,6 +564,7 @@ async fn run_session_task(
                 }
                 update_status(
                     &context.session_store,
+                    &event_tx,
                     &status,
                     context.session_id.clone(),
                     SessionStatus::Completed,
@@ -579,6 +589,7 @@ async fn run_session_task(
                 .await?;
                 update_status(
                     &context.session_store,
+                    &event_tx,
                     &status,
                     context.session_id.clone(),
                     SessionStatus::Cancelled,
@@ -607,6 +618,7 @@ async fn run_session_task(
                 .await?;
                 update_status(
                     &context.session_store,
+                    &event_tx,
                     &status,
                     context.session_id.clone(),
                     SessionStatus::Failed,
@@ -672,13 +684,28 @@ async fn flush_next_queued_message(
 
 async fn update_status(
     session_store: &Arc<TursoSessionStore>,
+    event_tx: &broadcast::Sender<EventRecord>,
     status: &Arc<RwLock<SessionStatus>>,
     session_id: SessionId,
     next_status: SessionStatus,
 ) -> Result<()> {
+    let previous_status = status.read().await.clone();
+    if previous_status == next_status {
+        return Ok(());
+    }
     session_store
-        .update_status(session_id, next_status.clone())
+        .update_status(session_id.clone(), next_status.clone())
         .await?;
+    append_event(
+        session_store,
+        event_tx,
+        session_id,
+        Event::SessionStatusChanged {
+            from: previous_status,
+            to: next_status.clone(),
+        },
+    )
+    .await?;
     *status.write().await = next_status;
     Ok(())
 }

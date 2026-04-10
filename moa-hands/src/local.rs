@@ -14,6 +14,7 @@ use moa_core::{
 use tokio::fs;
 use tokio::process::Command;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::tools::{bash, file_read, file_search, file_write};
@@ -137,9 +138,13 @@ impl LocalHandProvider {
         sandbox_dir: &Path,
         tool: &str,
         input: &str,
+        hard_cancel_token: Option<&CancellationToken>,
     ) -> Result<ToolOutput> {
         match tool {
-            "bash" => bash::execute_local(sandbox_dir, input, self.command_timeout).await,
+            "bash" => {
+                bash::execute_local(sandbox_dir, input, self.command_timeout, hard_cancel_token)
+                    .await
+            }
             "file_read" => file_read::execute(sandbox_dir, input).await,
             "file_write" => file_write::execute(sandbox_dir, input).await,
             "file_search" => file_search::execute(sandbox_dir, input).await,
@@ -154,6 +159,7 @@ impl LocalHandProvider {
         container_id: &str,
         tool: &str,
         input: &str,
+        hard_cancel_token: Option<&CancellationToken>,
     ) -> Result<ToolOutput> {
         let sandbox = self
             .docker_sandboxes
@@ -171,6 +177,7 @@ impl LocalHandProvider {
                 &sandbox.workspace_mount,
                 input,
                 self.command_timeout,
+                hard_cancel_token,
             )
             .await;
         }
@@ -182,6 +189,7 @@ impl LocalHandProvider {
                     &sandbox.workspace_mount,
                     input,
                     self.command_timeout,
+                    hard_cancel_token,
                 )
                 .await
             }
@@ -191,6 +199,7 @@ impl LocalHandProvider {
                     &sandbox.workspace_mount,
                     input,
                     self.command_timeout,
+                    hard_cancel_token,
                 )
                 .await
             }
@@ -200,6 +209,7 @@ impl LocalHandProvider {
                     &sandbox.workspace_mount,
                     input,
                     self.command_timeout,
+                    hard_cancel_token,
                 )
                 .await
             }
@@ -216,7 +226,7 @@ impl LocalHandProvider {
                 "docker-backed file tool failed due to docker transport issue, falling back to host-mounted sandbox"
             );
             return self
-                .execute_local_tool(&sandbox.sandbox_dir, tool, input)
+                .execute_local_tool(&sandbox.sandbox_dir, tool, input, None)
                 .await;
         }
 
@@ -228,6 +238,29 @@ impl LocalHandProvider {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Executes a tool with cooperative cancellation support.
+    pub async fn execute_with_cancel(
+        &self,
+        handle: &HandHandle,
+        tool: &str,
+        input: &str,
+        hard_cancel_token: Option<&CancellationToken>,
+    ) -> Result<ToolOutput> {
+        match handle {
+            HandHandle::Local { sandbox_dir } => {
+                self.execute_local_tool(sandbox_dir, tool, input, hard_cancel_token)
+                    .await
+            }
+            HandHandle::Docker { container_id } => {
+                self.execute_docker_tool(container_id, tool, input, hard_cancel_token)
+                    .await
+            }
+            _ => Err(MoaError::Unsupported(
+                "non-local hand handle passed to LocalHandProvider".to_string(),
+            )),
         }
     }
 }
@@ -262,17 +295,7 @@ impl HandProvider for LocalHandProvider {
     }
 
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput> {
-        match handle {
-            HandHandle::Local { sandbox_dir } => {
-                self.execute_local_tool(sandbox_dir, tool, input).await
-            }
-            HandHandle::Docker { container_id } => {
-                self.execute_docker_tool(container_id, tool, input).await
-            }
-            _ => Err(MoaError::Unsupported(
-                "non-local hand handle passed to LocalHandProvider".to_string(),
-            )),
-        }
+        self.execute_with_cancel(handle, tool, input, None).await
     }
 
     async fn status(&self, handle: &HandHandle) -> Result<HandStatus> {
@@ -285,16 +308,15 @@ impl HandProvider for LocalHandProvider {
                 }
             }
             HandHandle::Docker { container_id } => {
-                if self
+                if !self
                     .docker_sandboxes
                     .read()
                     .await
                     .contains_key(container_id)
                 {
-                    Ok(HandStatus::Running)
-                } else {
-                    Ok(HandStatus::Destroyed)
+                    return Ok(HandStatus::Destroyed);
                 }
+                docker_status(container_id).await
             }
             _ => Err(MoaError::Unsupported(
                 "non-local hand handle passed to LocalHandProvider".to_string(),
@@ -327,15 +349,32 @@ impl HandProvider for LocalHandProvider {
     async fn resume(&self, handle: &HandHandle) -> Result<()> {
         match handle {
             HandHandle::Docker { container_id } => {
-                let output = Command::new("docker")
-                    .args(["unpause", container_id])
-                    .output()
-                    .await?;
-                if !output.status.success() {
-                    return Err(MoaError::ProviderError(format!(
-                        "failed to resume docker sandbox: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    )));
+                match docker_status(container_id).await? {
+                    HandStatus::Paused => {
+                        let output = Command::new("docker")
+                            .args(["unpause", container_id])
+                            .output()
+                            .await?;
+                        if !output.status.success() {
+                            return Err(MoaError::ProviderError(format!(
+                                "failed to resume docker sandbox: {}",
+                                String::from_utf8_lossy(&output.stderr).trim()
+                            )));
+                        }
+                    }
+                    HandStatus::Stopped => {
+                        let output = Command::new("docker")
+                            .args(["start", container_id])
+                            .output()
+                            .await?;
+                        if !output.status.success() {
+                            return Err(MoaError::ProviderError(format!(
+                                "failed to start docker sandbox: {}",
+                                String::from_utf8_lossy(&output.stderr).trim()
+                            )));
+                        }
+                    }
+                    _ => {}
                 }
                 Ok(())
             }
@@ -387,6 +426,33 @@ async fn detect_docker() -> bool {
         "checked docker availability for local hand provider"
     );
     available
+}
+
+async fn docker_status(container_id: &str) -> Result<HandStatus> {
+    let output = Command::new("docker")
+        .args(["inspect", "-f", "{{.State.Status}}", container_id])
+        .output()
+        .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("No such object") || stderr.contains("No such container") {
+            return Ok(HandStatus::Destroyed);
+        }
+        return Err(MoaError::ProviderError(format!(
+            "failed to inspect docker sandbox status: {}",
+            stderr.trim()
+        )));
+    }
+
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "running" => Ok(HandStatus::Running),
+        "paused" => Ok(HandStatus::Paused),
+        "exited" | "created" => Ok(HandStatus::Stopped),
+        "dead" | "removing" => Ok(HandStatus::Destroyed),
+        other => Err(MoaError::ProviderError(format!(
+            "unknown docker sandbox status: {other}"
+        ))),
+    }
 }
 
 fn should_fallback_to_host(result: &Result<ToolOutput>) -> bool {

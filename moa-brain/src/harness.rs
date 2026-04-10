@@ -13,6 +13,7 @@ use moa_security::{
     InputClassification, check_canary, contains_canary_tokens, inject_canary, inspect_input,
 };
 use tokio::sync::{broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::pipeline::ContextPipeline;
@@ -109,6 +110,7 @@ pub async fn run_brain_turn_with_tools_stepwise(
 }
 
 /// Runs the shared streamed turn engine without live session signals.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_streamed_turn(
     session_id: SessionId,
     session_store: Arc<dyn SessionStore>,
@@ -117,6 +119,8 @@ pub async fn run_streamed_turn(
     tool_router: Option<Arc<ToolRouter>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
+    cancel_token: Option<&CancellationToken>,
+    hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<StreamedTurnResult> {
     run_streamed_turn_with_tools_mode(
         session_id,
@@ -126,6 +130,8 @@ pub async fn run_streamed_turn(
         tool_router,
         runtime_tx,
         event_tx,
+        cancel_token,
+        hard_cancel_token,
         None,
         None,
         None,
@@ -149,6 +155,8 @@ pub async fn run_streamed_turn_with_signals(
     turn_requested: &mut bool,
     queued_messages: &mut Vec<UserMessage>,
     soft_cancel_requested: &mut bool,
+    cancel_token: Option<&CancellationToken>,
+    hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<StreamedTurnResult> {
     run_streamed_turn_with_tools_mode(
         session_id,
@@ -158,6 +166,8 @@ pub async fn run_streamed_turn_with_signals(
         tool_router,
         runtime_tx,
         event_tx,
+        cancel_token,
+        hard_cancel_token,
         Some(signal_rx),
         Some(turn_requested),
         Some(queued_messages),
@@ -188,6 +198,8 @@ async fn run_brain_turn_with_tools_mode(
         None,
         None,
         None,
+        None,
+        None,
         tool_loop_mode,
     )
     .await?;
@@ -211,6 +223,8 @@ async fn run_streamed_turn_with_tools_mode(
     tool_router: Option<Arc<ToolRouter>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
+    cancel_token: Option<&CancellationToken>,
+    hard_cancel_token: Option<&CancellationToken>,
     mut signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
     turn_requested: Option<&mut bool>,
     queued_messages: Option<&mut Vec<UserMessage>>,
@@ -239,6 +253,8 @@ async fn run_streamed_turn_with_tools_mode(
                 event_tx,
                 runtime_tx,
                 &events,
+                cancel_token,
+                hard_cancel_token,
             )
             .await?
             {
@@ -261,6 +277,8 @@ async fn run_streamed_turn_with_tools_mode(
                         pending,
                         event_tx,
                         runtime_tx,
+                        cancel_token,
+                        hard_cancel_token,
                         receiver,
                         turn_requested,
                         queued_messages,
@@ -313,6 +331,7 @@ async fn run_streamed_turn_with_tools_mode(
             stream_completion_response(
                 llm_provider.clone(),
                 ctx.into_request(),
+                cancel_token,
                 Some(receiver),
                 &mut emit_runtime,
                 |signal| {
@@ -330,6 +349,7 @@ async fn run_streamed_turn_with_tools_mode(
             stream_completion_response(
                 llm_provider.clone(),
                 ctx.into_request(),
+                cancel_token,
                 None,
                 &mut emit_runtime,
                 |_| StreamSignalDisposition::Continue,
@@ -380,6 +400,8 @@ async fn run_streamed_turn_with_tools_mode(
                     active_canary.as_deref(),
                     event_tx,
                     runtime_tx,
+                    cancel_token,
+                    hard_cancel_token,
                     signal_rx.as_deref_mut(),
                     turn_requested,
                     queued_messages,
@@ -463,6 +485,8 @@ async fn handle_tool_call(
     active_canary: Option<&str>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
+    cancel_token: Option<&CancellationToken>,
+    hard_cancel_token: Option<&CancellationToken>,
     signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
     turn_requested: &mut bool,
     queued_messages: &mut Vec<UserMessage>,
@@ -553,6 +577,8 @@ async fn handle_tool_call(
                 active_canary,
                 event_tx,
                 runtime_tx,
+                cancel_token,
+                hard_cancel_token,
             )
             .await
         }
@@ -652,6 +678,8 @@ async fn handle_tool_call(
                     active_canary,
                     event_tx,
                     runtime_tx,
+                    cancel_token,
+                    hard_cancel_token,
                     receiver,
                     turn_requested,
                     queued_messages,
@@ -677,6 +705,8 @@ async fn wait_for_signal_approval(
     active_canary: Option<&str>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
+    cancel_token: Option<&CancellationToken>,
+    hard_cancel_token: Option<&CancellationToken>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
     queued_messages: &mut Vec<UserMessage>,
@@ -724,6 +754,8 @@ async fn wait_for_signal_approval(
                             active_canary,
                             event_tx,
                             runtime_tx,
+                            cancel_token,
+                            hard_cancel_token,
                         )
                         .await
                     }
@@ -755,6 +787,8 @@ async fn wait_for_signal_approval(
                             active_canary,
                             event_tx,
                             runtime_tx,
+                            cancel_token,
+                            hard_cancel_token,
                         )
                         .await
                     }
@@ -822,6 +856,8 @@ async fn process_resolved_approval(
     event_tx: Option<&broadcast::Sender<EventRecord>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     events: &[EventRecord],
+    cancel_token: Option<&CancellationToken>,
+    hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<bool> {
     let Some(pending) = find_resolved_pending_tool_approval(events) else {
         return Ok(false);
@@ -851,6 +887,8 @@ async fn process_resolved_approval(
                 runtime_tx,
                 pending,
                 None,
+                cancel_token,
+                hard_cancel_token,
             )
             .await?;
         }
@@ -889,6 +927,8 @@ async fn process_resolved_approval(
                 runtime_tx,
                 pending,
                 None,
+                cancel_token,
+                hard_cancel_token,
             )
             .await?;
         }
@@ -928,6 +968,8 @@ async fn wait_for_approval(
     pending: PendingToolApproval,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
+    cancel_token: Option<&CancellationToken>,
+    hard_cancel_token: Option<&CancellationToken>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
     queued_messages: &mut Vec<UserMessage>,
@@ -997,6 +1039,8 @@ async fn wait_for_approval(
                             None,
                             event_tx,
                             runtime_tx,
+                            cancel_token,
+                            hard_cancel_token,
                         )
                         .await
                     }
@@ -1028,6 +1072,8 @@ async fn wait_for_approval(
                             None,
                             event_tx,
                             runtime_tx,
+                            cancel_token,
+                            hard_cancel_token,
                         )
                         .await
                     }
@@ -1133,8 +1179,13 @@ async fn execute_tool(
     active_canary: Option<&str>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
+    cancel_token: Option<&CancellationToken>,
+    hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<ToolCallOutcome> {
-    match tool_router.execute_authorized(session, call).await {
+    match tool_router
+        .execute_authorized_with_cancel(session, call, cancel_token, hard_cancel_token)
+        .await
+    {
         Ok((resolved_hand_id, output)) => {
             if emit_call_event {
                 append_event(
@@ -1185,6 +1236,27 @@ async fn execute_tool(
             }));
             Ok(ToolCallOutcome::Executed)
         }
+        Err(MoaError::Cancelled) => {
+            append_event(
+                &session_store,
+                event_tx,
+                session_id,
+                Event::ToolError {
+                    tool_id,
+                    error: "cancelled".to_string(),
+                    retryable: false,
+                },
+            )
+            .await?;
+            let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
+                tool_id,
+                tool_name: call.name.clone(),
+                status: ToolCardStatus::Failed,
+                summary: format!("{} cancelled", call.name),
+                detail: Some("cancelled".to_string()),
+            }));
+            Ok(ToolCallOutcome::Cancelled)
+        }
         Err(error) => {
             append_event(
                 &session_store,
@@ -1219,6 +1291,8 @@ async fn execute_pending_tool(
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     pending: PendingToolApproval,
     active_canary: Option<&str>,
+    cancel_token: Option<&CancellationToken>,
+    hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<()> {
     let invocation = ToolInvocation {
         id: Some(pending.tool_id.to_string()),
@@ -1236,6 +1310,8 @@ async fn execute_pending_tool(
         active_canary,
         event_tx,
         runtime_tx,
+        cancel_token,
+        hard_cancel_token,
     )
     .await?;
     Ok(())

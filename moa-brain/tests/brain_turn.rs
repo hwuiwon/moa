@@ -1317,6 +1317,8 @@ async fn streamed_turn_runtime_matches_buffered_response() {
         None,
         &runtime_tx,
         None,
+        None,
+        None,
     )
     .await
     .unwrap();

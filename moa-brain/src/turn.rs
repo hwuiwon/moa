@@ -8,6 +8,7 @@ use moa_core::{
     Event, EventRecord, LLMProvider, Result, RuntimeEvent, SessionSignal,
 };
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// One previously requested tool call that is waiting on or has received approval.
@@ -68,6 +69,7 @@ pub enum StreamSignalDisposition {
 pub async fn stream_completion_response<F, G>(
     llm_provider: Arc<dyn LLMProvider>,
     request: CompletionRequest,
+    cancel_token: Option<&CancellationToken>,
     mut signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
     mut on_runtime_event: F,
     mut on_signal: G,
@@ -101,6 +103,18 @@ where
                         CompletionContent::ToolCall(_) => {}
                     }
                 }
+                _ = async {
+                    if let Some(cancel_token) = cancel_token {
+                        cancel_token.cancelled().await;
+                    }
+                }, if cancel_token.is_some() => {
+                    stream.abort();
+                    return Ok(StreamedCompletion {
+                        response: None,
+                        streamed_text,
+                        cancelled: true,
+                    });
+                }
                 signal = receiver.recv() => {
                     let Some(signal) = signal else {
                         return Ok(StreamedCompletion {
@@ -119,21 +133,52 @@ where
                 }
             }
         } else {
-            let Some(block) = stream.next().await else {
-                break;
-            };
-            match block? {
-                CompletionContent::Text(delta) => {
-                    if !started_assistant {
-                        on_runtime_event(RuntimeEvent::AssistantStarted);
-                        started_assistant = true;
+            if let Some(cancel_token) = cancel_token {
+                tokio::select! {
+                    block = stream.next() => {
+                        let Some(block) = block else {
+                            break;
+                        };
+                        match block? {
+                            CompletionContent::Text(delta) => {
+                                if !started_assistant {
+                                    on_runtime_event(RuntimeEvent::AssistantStarted);
+                                    started_assistant = true;
+                                }
+                                streamed_text.push_str(&delta);
+                                for ch in delta.chars() {
+                                    on_runtime_event(RuntimeEvent::AssistantDelta(ch));
+                                }
+                            }
+                            CompletionContent::ToolCall(_) => {}
+                        }
                     }
-                    streamed_text.push_str(&delta);
-                    for ch in delta.chars() {
-                        on_runtime_event(RuntimeEvent::AssistantDelta(ch));
+                    _ = cancel_token.cancelled() => {
+                        stream.abort();
+                        return Ok(StreamedCompletion {
+                            response: None,
+                            streamed_text,
+                            cancelled: true,
+                        });
                     }
                 }
-                CompletionContent::ToolCall(_) => {}
+            } else {
+                let Some(block) = stream.next().await else {
+                    break;
+                };
+                match block? {
+                    CompletionContent::Text(delta) => {
+                        if !started_assistant {
+                            on_runtime_event(RuntimeEvent::AssistantStarted);
+                            started_assistant = true;
+                        }
+                        streamed_text.push_str(&delta);
+                        for ch in delta.chars() {
+                            on_runtime_event(RuntimeEvent::AssistantDelta(ch));
+                        }
+                    }
+                    CompletionContent::ToolCall(_) => {}
+                }
             }
         }
     }

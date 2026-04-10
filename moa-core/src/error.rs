@@ -74,6 +74,10 @@ pub enum MoaError {
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
+    /// Operation was cancelled by the user.
+    #[error("operation cancelled by user")]
+    Cancelled,
+
     /// The requested functionality is unsupported in the current mode.
     #[error("unsupported operation: {0}")]
     Unsupported(String),

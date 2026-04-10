@@ -11,6 +11,8 @@ use moa_hands::{LocalHandProvider, ToolRouter};
 use moa_memory::FileMemoryStore;
 use serde_json::json;
 use tempfile::tempdir;
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
 struct EmptyMemoryStore;
@@ -246,6 +248,42 @@ async fn bash_respects_timeout() {
     assert!(
         matches!(error, moa_core::MoaError::ToolError(message) if message.contains("timed out"))
     );
+}
+
+#[tokio::test]
+async fn local_bash_hard_cancel_kills_running_process() {
+    let dir = tempdir().unwrap();
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let router = Arc::new(
+        ToolRouter::new_local(memory_store, dir.path())
+            .await
+            .unwrap(),
+    );
+    let session = session();
+    let cancel_token = CancellationToken::new();
+    let started = Instant::now();
+    let invocation = ToolInvocation {
+        id: None,
+        name: "bash".to_string(),
+        input: json!({ "cmd": "python3 -c 'import time; time.sleep(60)'" }),
+    };
+
+    let task = {
+        let router = router.clone();
+        let cancel_token = cancel_token.clone();
+        tokio::spawn(async move {
+            router
+                .execute_authorized_with_cancel(&session, &invocation, None, Some(&cancel_token))
+                .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancel_token.cancel();
+
+    let error = task.await.unwrap().unwrap_err();
+    assert!(matches!(error, moa_core::MoaError::Cancelled));
+    assert!(started.elapsed() < Duration::from_secs(3));
 }
 
 #[tokio::test]
@@ -643,4 +681,58 @@ async fn docker_file_tools_roundtrip_inside_container_workspace() {
 
     let _ = provider.destroy(&handle).await;
     result
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn docker_bash_hard_cancel_stops_container_exec() {
+    let dir = tempdir().unwrap();
+    let provider = LocalHandProvider::new(dir.path()).await.unwrap();
+    if !provider.docker_available() {
+        return;
+    }
+
+    let handle = provider
+        .provision(HandSpec {
+            sandbox_tier: SandboxTier::Container,
+            image: None,
+            resources: HandResources::default(),
+            env: std::collections::HashMap::new(),
+            workspace_mount: None,
+            idle_timeout: Duration::from_secs(300),
+            max_lifetime: Duration::from_secs(300),
+        })
+        .await
+        .unwrap();
+
+    if !matches!(handle, moa_core::HandHandle::Docker { .. }) {
+        return;
+    }
+
+    let cancel_token = CancellationToken::new();
+    let started = Instant::now();
+    let task = {
+        let provider = provider.clone();
+        let handle = handle.clone();
+        let cancel_token = cancel_token.clone();
+        tokio::spawn(async move {
+            provider
+                .execute_with_cancel(
+                    &handle,
+                    "bash",
+                    &json!({ "cmd": "sleep 60" }).to_string(),
+                    Some(&cancel_token),
+                )
+                .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancel_token.cancel();
+
+    let error = task.await.unwrap().unwrap_err();
+    assert!(matches!(error, moa_core::MoaError::Cancelled));
+    assert!(started.elapsed() < Duration::from_secs(3));
+
+    let _ = provider.destroy(&handle).await;
 }

@@ -21,6 +21,7 @@ use moa_security::{
 use serde_json::{Value, json};
 use tokio::fs;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[cfg(feature = "daytona")]
@@ -282,6 +283,7 @@ pub struct ToolRouter {
     registry: ToolRegistry,
     memory_store: Arc<dyn MemoryStore>,
     providers: HashMap<String, Arc<dyn HandProvider>>,
+    local_provider: Option<Arc<LocalHandProvider>>,
     mcp_clients: HashMap<String, Arc<MCPClient>>,
     mcp_servers: HashMap<String, McpServerConfig>,
     mcp_proxy: Option<Arc<MCPCredentialProxy>>,
@@ -302,6 +304,7 @@ impl ToolRouter {
             registry,
             memory_store,
             providers,
+            local_provider: None,
             mcp_clients: HashMap::new(),
             mcp_servers: HashMap::new(),
             mcp_proxy: None,
@@ -317,16 +320,18 @@ impl ToolRouter {
         memory_store: Arc<dyn MemoryStore>,
         sandbox_root: impl AsRef<Path>,
     ) -> Result<Self> {
-        let provider: Arc<dyn HandProvider> = Arc::new(
+        let local_provider = Arc::new(
             LocalHandProvider::new(sandbox_root.as_ref())
                 .await?
                 .with_command_timeout(DEFAULT_TOOL_TIMEOUT),
         );
+        let provider: Arc<dyn HandProvider> = local_provider.clone();
         let mut providers = HashMap::new();
         providers.insert(DEFAULT_PROVIDER_NAME.to_string(), provider);
 
         Ok(Self {
             sandbox_root: Some(sandbox_root.as_ref().to_path_buf()),
+            local_provider: Some(local_provider),
             ..Self::new(ToolRegistry::default_local(), memory_store, providers)
         })
     }
@@ -337,13 +342,14 @@ impl ToolRouter {
         memory_store: Arc<dyn MemoryStore>,
     ) -> Result<Self> {
         let sandbox_root = expand_local_path(&config.local.sandbox_dir)?;
-        let local_provider: Arc<dyn HandProvider> = Arc::new(
+        let local_provider = Arc::new(
             LocalHandProvider::new(&sandbox_root)
                 .await?
                 .with_command_timeout(DEFAULT_TOOL_TIMEOUT),
         );
+        let local_provider_trait: Arc<dyn HandProvider> = local_provider.clone();
         let mut providers = HashMap::new();
-        providers.insert(DEFAULT_PROVIDER_NAME.to_string(), local_provider);
+        providers.insert(DEFAULT_PROVIDER_NAME.to_string(), local_provider_trait);
 
         #[cfg(feature = "daytona")]
         if config.cloud.enabled
@@ -382,6 +388,7 @@ impl ToolRouter {
 
         let mut router = Self {
             sandbox_root: Some(sandbox_root),
+            local_provider: Some(local_provider),
             ..Self::new(registry, memory_store, providers)
         }
         .with_policies(ToolPolicies::from_config(config));
@@ -561,6 +568,18 @@ impl ToolRouter {
         session: &SessionMeta,
         invocation: &ToolInvocation,
     ) -> Result<(Option<String>, ToolOutput)> {
+        self.execute_authorized_with_cancel(session, invocation, None, None)
+            .await
+    }
+
+    /// Executes a tool invocation after approval has already been granted with cancellation hooks.
+    pub async fn execute_authorized_with_cancel(
+        &self,
+        session: &SessionMeta,
+        invocation: &ToolInvocation,
+        cancel_token: Option<&CancellationToken>,
+        hard_cancel_token: Option<&CancellationToken>,
+    ) -> Result<(Option<String>, ToolOutput)> {
         let registered_tool = self
             .registry
             .tools
@@ -572,6 +591,7 @@ impl ToolRouter {
                 let ctx = ToolContext {
                     session,
                     memory_store: &*self.memory_store,
+                    cancel_token,
                 };
                 let output = tool.execute(&invocation.input, &ctx).await?;
                 Ok((None, output))
@@ -591,9 +611,30 @@ impl ToolRouter {
                     provider_impl.resume(&hand).await?;
                 }
                 let serialized_input = serde_json::to_string(&invocation.input)?;
-                let output = provider_impl
-                    .execute(&hand, &invocation.name, &serialized_input)
-                    .await?;
+                let output = if provider == DEFAULT_PROVIDER_NAME {
+                    let local_provider = self.local_provider.as_ref().ok_or_else(|| {
+                        MoaError::ProviderError(
+                            "local provider missing from tool router".to_string(),
+                        )
+                    })?;
+                    local_provider
+                        .execute_with_cancel(
+                            &hand,
+                            &invocation.name,
+                            &serialized_input,
+                            hard_cancel_token,
+                        )
+                        .await?
+                } else if let Some(hard_cancel_token) = hard_cancel_token {
+                    tokio::select! {
+                        result = provider_impl.execute(&hand, &invocation.name, &serialized_input) => result?,
+                        _ = hard_cancel_token.cancelled() => return Err(MoaError::Cancelled),
+                    }
+                } else {
+                    provider_impl
+                        .execute(&hand, &invocation.name, &serialized_input)
+                        .await?
+                };
                 Ok((Some(hand_id(&hand)), output))
             }
             ToolExecution::Mcp { server_name } => {

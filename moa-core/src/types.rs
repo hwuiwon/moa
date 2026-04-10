@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::error::{MoaError, Result};
@@ -1092,6 +1093,7 @@ pub struct CompletionResponse {
 pub struct CompletionStream {
     receiver: mpsc::Receiver<Result<CompletionContent>>,
     completion: JoinHandle<Result<CompletionResponse>>,
+    cancel_token: Option<CancellationToken>,
 }
 
 impl CompletionStream {
@@ -1103,7 +1105,14 @@ impl CompletionStream {
         Self {
             receiver,
             completion,
+            cancel_token: None,
         }
+    }
+
+    /// Attaches a cooperative cancellation token to the stream.
+    pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
+        self.cancel_token = Some(cancel_token);
+        self
     }
 
     /// Creates a replayable stream from a fully buffered response.
@@ -1141,6 +1150,14 @@ impl CompletionStream {
     /// Waits for the provider task to finish and returns the final aggregated response.
     pub async fn into_response(self) -> Result<CompletionResponse> {
         self.await_completion().await
+    }
+
+    /// Aborts the underlying provider task and signals cooperative cancellation.
+    pub fn abort(&self) {
+        if let Some(cancel_token) = &self.cancel_token {
+            cancel_token.cancel();
+        }
+        self.completion.abort();
     }
 
     async fn await_completion(self) -> Result<CompletionResponse> {
@@ -1929,6 +1946,7 @@ fn estimate_text_tokens(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::time::{Duration as TokioDuration, sleep};
 
     #[test]
     fn session_id_roundtrip() {
@@ -2033,5 +2051,43 @@ mod tests {
         let decoded: ToolOutput = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, output);
+    }
+
+    #[test]
+    fn cancelled_error_is_distinct() {
+        assert_eq!(
+            MoaError::Cancelled.to_string(),
+            "operation cancelled by user"
+        );
+        assert!(!matches!(
+            MoaError::Cancelled,
+            MoaError::ProviderError(_) | MoaError::ToolError(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn completion_stream_abort_stops_completion_task() {
+        let (_tx, rx) = mpsc::channel(1);
+        let completion = tokio::spawn(async move {
+            sleep(TokioDuration::from_secs(30)).await;
+            Ok(CompletionResponse {
+                text: "late".to_string(),
+                content: vec![CompletionContent::Text("late".to_string())],
+                stop_reason: StopReason::EndTurn,
+                model: "test".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                cached_input_tokens: 0,
+                duration_ms: 30_000,
+            })
+        });
+        let stream = CompletionStream::new(rx, completion);
+        stream.abort();
+
+        let error = stream
+            .into_response()
+            .await
+            .expect_err("aborted completion task should not resolve successfully");
+        assert!(matches!(error, MoaError::ProviderError(message) if message.contains("join")));
     }
 }
