@@ -1,114 +1,546 @@
-//! CLI entry point for launching the TUI or one-shot exec mode.
+//! CLI entry point for MOA subcommands, daemon management, and the TUI.
 
+mod daemon;
 mod exec;
 
 use std::env;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-use clap::{Parser, Subcommand};
-use moa_core::MoaConfig;
+use anyhow::{Context, Result, bail};
+use clap::{Args, Parser, Subcommand};
+use moa_core::{
+    MemoryPath, MemoryScope, MemoryStore, MoaConfig, SessionFilter, SessionId, SessionStatus,
+    SessionStore, WorkspaceId, init_observability,
+};
+use moa_memory::FileMemoryStore;
+use moa_session::TursoSessionStore;
+use moa_tui::{RunTuiOptions, run_tui, run_tui_with_options};
+use tokio::fs;
+use tokio::process::Command;
+use uuid::Uuid;
 
 /// Top-level MOA command line interface.
 #[derive(Debug, Parser)]
 #[command(name = "moa", about = "MOA local terminal agent", version)]
 struct Cli {
+    /// Launch the TUI with a prompt already submitted.
+    #[arg(value_name = "PROMPT")]
+    prompt: Option<String>,
+
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Option<CommandKind>,
 }
 
-/// Supported CLI subcommands for the local Step 08 binary.
+/// Supported CLI subcommands.
 #[derive(Debug, Subcommand)]
-enum Command {
+enum CommandKind {
     /// Runs one prompt and prints the final assistant response to stdout.
-    Exec {
-        /// Prompt text to submit to the current model.
-        #[arg(required = true)]
-        prompt: String,
+    Exec(ExecArgs),
+    /// Shows active daemon/session status.
+    Status,
+    /// Lists persisted sessions.
+    Sessions(SessionsArgs),
+    /// Attaches the TUI to a specific session.
+    Attach {
+        /// Session identifier.
+        session_id: String,
     },
+    /// Resumes the most recent session or a specific session in the TUI.
+    Resume {
+        /// Optional explicit session identifier.
+        session_id: Option<String>,
+    },
+    /// Memory-related CLI operations.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
+    /// Reads or updates config values.
+    Config {
+        #[command(subcommand)]
+        command: Option<ConfigCommand>,
+    },
+    /// Initializes MOA directories for the current workspace.
+    Init,
     /// Prints version information.
     Version,
-    /// Prints a basic local environment diagnostic report.
+    /// Prints a local environment diagnostic report.
     Doctor,
+    /// Controls the background daemon.
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+}
+
+/// One-shot exec arguments.
+#[derive(Debug, Args)]
+struct ExecArgs {
+    /// Prompt text to submit.
+    #[arg(required = true)]
+    prompt: String,
+}
+
+/// Session-list filtering arguments.
+#[derive(Debug, Args)]
+struct SessionsArgs {
+    /// Restrict sessions to one workspace id or `.` for the current directory.
+    #[arg(long)]
+    workspace: Option<String>,
+}
+
+/// Memory CLI commands.
+#[derive(Debug, Subcommand)]
+enum MemoryCommand {
+    /// Searches workspace memory.
+    Search {
+        /// Search query.
+        query: String,
+    },
+    /// Displays one memory page.
+    Show {
+        /// Logical memory path.
+        path: String,
+    },
+}
+
+/// Config CLI commands.
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Updates a supported config key.
+    Set {
+        /// Dotted config key name.
+        key: String,
+        /// New value.
+        value: String,
+    },
+}
+
+/// Daemon CLI commands.
+#[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    /// Starts the background daemon.
+    Start,
+    /// Stops the background daemon.
+    Stop,
+    /// Shows daemon status.
+    Status,
+    /// Prints the daemon log tail.
+    Logs,
+    /// Runs the daemon server in the foreground.
+    #[command(hide = true)]
+    Serve,
 }
 
 /// Runs the `moa` CLI binary.
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
     let cli = Cli::parse();
     let config = MoaConfig::load()?;
+    let _telemetry = init_observability(&config)?;
 
     match cli.command {
         None => {
-            moa_tui::run_tui(config).await?;
+            if let Some(prompt) = cli.prompt {
+                run_tui_with_options(
+                    config,
+                    RunTuiOptions {
+                        initial_prompt: Some(prompt),
+                        ..RunTuiOptions::default()
+                    },
+                )
+                .await?;
+            } else {
+                run_tui(config).await?;
+            }
         }
-        Some(Command::Exec { prompt }) => {
-            exec::run_exec(config, prompt).await?;
+        Some(CommandKind::Exec(args)) => {
+            exec::run_exec(config, args.prompt).await?;
         }
-        Some(Command::Version) => {
+        Some(CommandKind::Status) => {
+            print!("{}", status_report(&config).await?);
+        }
+        Some(CommandKind::Sessions(args)) => {
+            print!(
+                "{}",
+                sessions_report(&config, args.workspace.as_deref()).await?
+            );
+        }
+        Some(CommandKind::Attach { session_id }) => {
+            let session_id = parse_session_id(&session_id)?;
+            let use_daemon = daemon::daemon_info(&config).await.is_ok();
+            run_tui_with_options(
+                config,
+                RunTuiOptions {
+                    attach_session_id: Some(session_id),
+                    force_daemon: use_daemon,
+                    ..RunTuiOptions::default()
+                },
+            )
+            .await?;
+        }
+        Some(CommandKind::Resume { session_id }) => {
+            let session_id = match session_id {
+                Some(session_id) => parse_session_id(&session_id)?,
+                None => most_recent_session_id(&config).await?,
+            };
+            let use_daemon = daemon::daemon_info(&config).await.is_ok();
+            run_tui_with_options(
+                config,
+                RunTuiOptions {
+                    attach_session_id: Some(session_id),
+                    force_daemon: use_daemon,
+                    ..RunTuiOptions::default()
+                },
+            )
+            .await?;
+        }
+        Some(CommandKind::Memory { command }) => match command {
+            MemoryCommand::Search { query } => {
+                print!("{}", memory_search_report(&config, &query).await?);
+            }
+            MemoryCommand::Show { path } => {
+                print!("{}", memory_show_report(&config, &path).await?);
+            }
+        },
+        Some(CommandKind::Config { command }) => match command {
+            None => {
+                let rendered = toml::to_string_pretty(&config).context("serializing config")?;
+                print!("{rendered}");
+            }
+            Some(ConfigCommand::Set { key, value }) => {
+                let mut updated = config;
+                apply_config_update(&mut updated, &key, &value)?;
+                updated.save()?;
+                print!("{}", toml::to_string_pretty(&updated)?);
+            }
+        },
+        Some(CommandKind::Init) => {
+            init_workspace(&config).await?;
+            println!("initialized MOA workspace for {}", current_workspace_id());
+        }
+        Some(CommandKind::Version) => {
             println!("{}", version_text());
         }
-        Some(Command::Doctor) => {
-            print!("{}", doctor_report(&config));
+        Some(CommandKind::Doctor) => {
+            print!("{}", doctor_report(&config).await?);
         }
+        Some(CommandKind::Daemon { command }) => match command {
+            DaemonCommand::Start => daemon::start_daemon(&config).await?,
+            DaemonCommand::Stop => daemon::stop_daemon(&config).await?,
+            DaemonCommand::Status => print!("{}", daemon_status_report(&config).await?),
+            DaemonCommand::Logs => print!("{}", daemon::daemon_logs(&config).await?),
+            DaemonCommand::Serve => daemon::run_daemon_server(config).await?,
+        },
     }
 
     Ok(())
 }
 
+/// Returns a plain-text version string.
 fn version_text() -> String {
     format!("moa {}", env!("CARGO_PKG_VERSION"))
 }
 
-fn doctor_report(config: &MoaConfig) -> String {
-    let anthropic_env = &config.providers.anthropic.api_key_env;
-    let anthropic_status = if env::var(anthropic_env).is_ok() {
-        "present"
-    } else {
-        "missing"
-    };
-    let openai_env = &config.providers.openai.api_key_env;
-    let openai_status = if env::var(openai_env).is_ok() {
-        "present"
-    } else {
-        "missing"
-    };
-    let openrouter_env = &config.providers.openrouter.api_key_env;
-    let openrouter_status = if env::var(openrouter_env).is_ok() {
-        "present"
-    } else {
-        "missing"
-    };
+async fn status_report(config: &MoaConfig) -> Result<String> {
+    let mut report = String::new();
+    match daemon::daemon_info(config).await {
+        Ok(info) => {
+            report.push_str(&format!(
+                "daemon: running\npid: {}\nsocket: {}\nsessions: {}\nactive_sessions: {}\n",
+                info.pid, info.socket_path, info.session_count, info.active_session_count
+            ));
+        }
+        Err(_) => report.push_str("daemon: stopped\n"),
+    }
 
-    format!(
-        concat!(
-            "MOA doctor\n",
-            "provider: {}\n",
-            "model: {}\n",
-            "anthropic_key: {} ({})\n",
-            "openai_key: {} ({})\n",
-            "openrouter_key: {} ({})\n",
-            "session_db: {}\n",
-            "memory_dir: {}\n",
-            "sandbox_dir: {}\n"
+    let sessions = load_session_store(config)
+        .await?
+        .list_sessions(SessionFilter::default())
+        .await?;
+    let active = sessions
+        .into_iter()
+        .filter(|session| {
+            matches!(
+                session.status,
+                SessionStatus::Created | SessionStatus::Running | SessionStatus::WaitingApproval
+            )
+        })
+        .collect::<Vec<_>>();
+    if active.is_empty() {
+        report.push_str("active session table: none\n");
+    } else {
+        report.push_str("active session table:\n");
+        for session in active {
+            report.push_str(&format!(
+                "- {} [{:?}] {} {}\n",
+                session.session_id, session.status, session.workspace_id, session.model
+            ));
+        }
+    }
+
+    Ok(report)
+}
+
+async fn sessions_report(config: &MoaConfig, workspace: Option<&str>) -> Result<String> {
+    let workspace_id = workspace.map(resolve_workspace_arg);
+    let sessions = load_session_store(config)
+        .await?
+        .list_sessions(SessionFilter {
+            workspace_id,
+            ..SessionFilter::default()
+        })
+        .await?;
+    let mut report = String::new();
+    for session in sessions {
+        report.push_str(&format!(
+            "{}\t{:?}\t{}\t{}\n",
+            session.session_id, session.status, session.workspace_id, session.model
+        ));
+    }
+    Ok(report)
+}
+
+async fn memory_search_report(config: &MoaConfig, query: &str) -> Result<String> {
+    let store = FileMemoryStore::from_config(config).await?;
+    let results = store
+        .search(query, MemoryScope::Workspace(current_workspace_id()), 20)
+        .await?;
+    let mut report = String::new();
+    for result in results {
+        report.push_str(&format!(
+            "{}\t{}\t{}\n",
+            result.path, result.title, result.snippet
+        ));
+    }
+    Ok(report)
+}
+
+async fn memory_show_report(config: &MoaConfig, path: &str) -> Result<String> {
+    let store = FileMemoryStore::from_config(config).await?;
+    let path = MemoryPath::new(path);
+    let page = store
+        .read_page_in_scope(&MemoryScope::Workspace(current_workspace_id()), &path)
+        .await?;
+    let rendered = toml::to_string(&page.metadata).unwrap_or_default();
+    Ok(format!("---\n{}---\n{}", rendered, page.content))
+}
+
+async fn doctor_report(config: &MoaConfig) -> Result<String> {
+    let mut lines = vec![
+        "MOA doctor".to_string(),
+        format!("provider: {}", config.general.default_provider),
+        format!("model: {}", config.general.default_model),
+        format!(
+            "anthropic_key: {} ({})",
+            env_presence(&config.providers.anthropic.api_key_env),
+            config.providers.anthropic.api_key_env
         ),
-        config.general.default_provider,
-        config.general.default_model,
-        anthropic_status,
-        anthropic_env,
-        openai_status,
-        openai_env,
-        openrouter_status,
-        openrouter_env,
-        config.local.session_db,
-        config.local.memory_dir,
-        config.local.sandbox_dir,
-    )
+        format!(
+            "openai_key: {} ({})",
+            env_presence(&config.providers.openai.api_key_env),
+            config.providers.openai.api_key_env
+        ),
+        format!(
+            "openrouter_key: {} ({})",
+            env_presence(&config.providers.openrouter.api_key_env),
+            config.providers.openrouter.api_key_env
+        ),
+        format!("docker: {}", docker_status().await),
+        format!("disk: {}", disk_status(config).await),
+        format!("session_db: {}", session_db_status(config).await),
+        format!("memory_index: {}", memory_index_status(config).await),
+    ];
+
+    if let Ok(info) = daemon::daemon_info(config).await {
+        lines.push(format!(
+            "daemon: running (pid {}, active {})",
+            info.pid, info.active_session_count
+        ));
+    } else {
+        lines.push("daemon: stopped".to_string());
+    }
+
+    Ok(lines.join("\n") + "\n")
+}
+
+async fn daemon_status_report(config: &MoaConfig) -> Result<String> {
+    let info = daemon::daemon_info(config).await?;
+    Ok(format!(
+        "daemon: running\npid: {}\nsocket: {}\nlog: {}\nstarted_at: {}\nsessions: {}\nactive_sessions: {}\n",
+        info.pid,
+        info.socket_path,
+        info.log_path,
+        info.started_at,
+        info.session_count,
+        info.active_session_count
+    ))
+}
+
+async fn init_workspace(config: &MoaConfig) -> Result<()> {
+    let config_path = MoaConfig::default_path()?;
+    if !config_path.exists() {
+        config.save()?;
+    }
+    let workspace_id = current_workspace_id();
+    let home = std::env::var_os("HOME").context("HOME is not set")?;
+    let workspace_memory = Path::new(&home)
+        .join(".moa")
+        .join("workspaces")
+        .join(workspace_id.as_str())
+        .join("memory");
+    fs::create_dir_all(workspace_memory).await?;
+    fs::create_dir_all(expand_tilde(&config.local.sandbox_dir)).await?;
+    Ok(())
+}
+
+async fn most_recent_session_id(config: &MoaConfig) -> Result<SessionId> {
+    let sessions = load_session_store(config)
+        .await?
+        .list_sessions(SessionFilter {
+            limit: Some(1),
+            ..SessionFilter::default()
+        })
+        .await?;
+    sessions
+        .into_iter()
+        .next()
+        .map(|session| session.session_id)
+        .context("no sessions found")
+}
+
+async fn load_session_store(config: &MoaConfig) -> Result<TursoSessionStore> {
+    TursoSessionStore::new(&config.local.session_db)
+        .await
+        .context("opening session store")
+}
+
+fn parse_session_id(value: &str) -> Result<SessionId> {
+    Ok(SessionId(
+        Uuid::parse_str(value).context("invalid session id")?,
+    ))
+}
+
+fn resolve_workspace_arg(value: &str) -> WorkspaceId {
+    if value == "." {
+        return current_workspace_id();
+    }
+
+    WorkspaceId::new(value)
+}
+
+fn current_workspace_id() -> WorkspaceId {
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let name = cwd
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("default");
+    WorkspaceId::new(name)
+}
+
+fn env_presence(key: &str) -> &'static str {
+    if env::var(key).is_ok() {
+        "present"
+    } else {
+        "missing"
+    }
+}
+
+async fn docker_status() -> String {
+    match Command::new("docker").arg("info").output().await {
+        Ok(output) if output.status.success() => "available".to_string(),
+        Ok(output) => format!("unhealthy (exit {})", output.status),
+        Err(_) => "missing".to_string(),
+    }
+}
+
+async fn disk_status(config: &MoaConfig) -> String {
+    let target = expand_tilde(&config.local.sandbox_dir);
+    match Command::new("df").arg("-k").arg(&target).output().await {
+        Ok(output) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            text.lines()
+                .nth(1)
+                .map(str::trim)
+                .unwrap_or("available")
+                .to_string()
+        }
+        Ok(output) => format!("unhealthy (exit {})", output.status),
+        Err(error) => format!("unavailable ({error})"),
+    }
+}
+
+async fn session_db_status(config: &MoaConfig) -> String {
+    match load_session_store(config).await {
+        Ok(store) => match store
+            .list_sessions(SessionFilter {
+                limit: Some(1),
+                ..SessionFilter::default()
+            })
+            .await
+        {
+            Ok(_) => "healthy".to_string(),
+            Err(error) => format!("unhealthy ({error})"),
+        },
+        Err(error) => format!("unhealthy ({error})"),
+    }
+}
+
+async fn memory_index_status(config: &MoaConfig) -> String {
+    match FileMemoryStore::from_config(config).await {
+        Ok(store) => match store
+            .get_index(MemoryScope::Workspace(current_workspace_id()))
+            .await
+        {
+            Ok(index) => format!("healthy ({} chars)", index.len()),
+            Err(error) => format!("unhealthy ({error})"),
+        },
+        Err(error) => format!("unhealthy ({error})"),
+    }
+}
+
+fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result<()> {
+    match key {
+        "general.default_provider" => config.general.default_provider = value.to_string(),
+        "general.default_model" => config.general.default_model = value.to_string(),
+        "general.reasoning_effort" => config.general.reasoning_effort = value.to_string(),
+        "local.docker_enabled" => config.local.docker_enabled = parse_bool(value)?,
+        "local.sandbox_dir" => config.local.sandbox_dir = value.to_string(),
+        "local.session_db" => config.local.session_db = value.to_string(),
+        "local.memory_dir" => config.local.memory_dir = value.to_string(),
+        "daemon.auto_connect" => config.daemon.auto_connect = parse_bool(value)?,
+        "daemon.socket_path" => config.daemon.socket_path = value.to_string(),
+        "observability.enabled" => config.observability.enabled = parse_bool(value)?,
+        "observability.otlp_endpoint" => {
+            config.observability.otlp_endpoint = Some(value.to_string())
+        }
+        _ => bail!("unsupported config key: {key}"),
+    }
+
+    Ok(())
+}
+
+fn parse_bool(value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => bail!("expected boolean value, got {value}"),
+    }
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(relative) = path.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return Path::new(&home).join(relative);
+    }
+    PathBuf::from(path)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{doctor_report, version_text};
+    use super::{apply_config_update, parse_bool, version_text};
     use moa_core::MoaConfig;
 
     #[test]
@@ -117,10 +549,16 @@ mod tests {
     }
 
     #[test]
-    fn doctor_report_includes_model_and_paths() {
-        let report = doctor_report(&MoaConfig::default());
-        assert!(report.contains("model: gpt-5.4"));
-        assert!(report.contains("session_db:"));
-        assert!(report.contains("memory_dir:"));
+    fn config_updates_known_keys() {
+        let mut config = MoaConfig::default();
+        apply_config_update(&mut config, "general.default_model", "claude-sonnet-4-6")
+            .expect("update config");
+        assert_eq!(config.general.default_model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn parse_bool_accepts_common_values() {
+        assert!(parse_bool("yes").expect("bool"));
+        assert!(!parse_bool("0").expect("bool"));
     }
 }

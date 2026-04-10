@@ -6,5 +6,5 @@ pub mod runner;
 pub mod views;
 pub mod widgets;
 
-pub use app::{App, AppMode, run_tui};
+pub use app::{App, AppMode, RunTuiOptions, run_tui, run_tui_with_options};
 pub use runner::ChatRuntime;

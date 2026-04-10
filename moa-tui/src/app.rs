@@ -159,13 +159,36 @@ pub struct App {
     last_session_refresh: Instant,
 }
 
+/// Options used when launching the full-screen TUI.
+#[derive(Debug, Clone, Default)]
+pub struct RunTuiOptions {
+    /// Session to attach to after startup.
+    pub attach_session_id: Option<SessionId>,
+    /// Prompt to prefill and submit on startup.
+    pub initial_prompt: Option<String>,
+    /// When true, force the runtime to connect through the daemon.
+    pub force_daemon: bool,
+}
+
 impl App {
     /// Creates a new TUI app from the loaded MOA config.
     pub async fn new(config: MoaConfig) -> Result<Self> {
-        let config_path = default_config_path()?;
         let runtime = ChatRuntime::from_config(config.clone(), moa_core::Platform::Tui).await?;
-        let active_session_id = runtime.session_id().clone();
-        let tool_names = runtime.tool_names();
+        Self::from_runtime(config, runtime, RunTuiOptions::default()).await
+    }
+
+    /// Creates a new TUI app from an explicit runtime and launch options.
+    pub async fn from_runtime(
+        config: MoaConfig,
+        runtime: ChatRuntime,
+        options: RunTuiOptions,
+    ) -> Result<Self> {
+        let config_path = default_config_path()?;
+        let active_session_id = options
+            .attach_session_id
+            .clone()
+            .unwrap_or_else(|| runtime.session_id().clone());
+        let tool_names = runtime.tool_names_async().await.unwrap_or_default();
         let recent_memory = runtime.recent_memory_entries(6).await.unwrap_or_default();
         let known_files = collect_sandbox_files(&runtime.sandbox_root())
             .await
@@ -190,7 +213,7 @@ impl App {
             tool_names,
             file_frecency: HashMap::new(),
             known_files,
-            active_session_id,
+            active_session_id: active_session_id.clone(),
             viewport_width: 0,
             should_exit: false,
             pending_chord: None,
@@ -202,7 +225,11 @@ impl App {
             last_session_refresh: Instant::now() - SESSION_REFRESH_INTERVAL,
         };
         app.refresh_sessions_if_due().await?;
-        app.switch_to_session(app.active_session_id.clone()).await?;
+        app.switch_to_session(active_session_id).await?;
+        if let Some(prompt) = options.initial_prompt {
+            app.prompt.replace_text(prompt);
+            app.submit_prompt(false).await?;
+        }
         Ok(app)
     }
 
@@ -1174,7 +1201,7 @@ impl App {
             .recent_memory_entries(6)
             .await
             .unwrap_or_default();
-        self.tool_names = self.runtime.tool_names();
+        self.tool_names = self.runtime.tool_names_async().await.unwrap_or_default();
         self.known_files = collect_sandbox_files(&self.runtime.sandbox_root())
             .await
             .unwrap_or_else(|_| self.known_files.clone());
@@ -2029,12 +2056,34 @@ async fn collect_sandbox_files(root: &Path) -> Result<Vec<String>> {
 
 /// Runs the full-screen TUI until the user exits.
 pub async fn run_tui(config: MoaConfig) -> Result<()> {
+    run_tui_with_options(config, RunTuiOptions::default()).await
+}
+
+/// Runs the full-screen TUI with explicit launch options.
+pub async fn run_tui_with_options(config: MoaConfig, options: RunTuiOptions) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = App::new(config).await?;
+    let runtime = if options.force_daemon {
+        if let Some(session_id) = options.attach_session_id.clone() {
+            ChatRuntime::attach_to_daemon_session(
+                config.clone(),
+                moa_core::Platform::Tui,
+                session_id,
+            )
+            .await?
+        } else {
+            ChatRuntime::from_daemon_config(config.clone(), moa_core::Platform::Tui).await?
+        }
+    } else if let Some(session_id) = options.attach_session_id.clone() {
+        ChatRuntime::attach_to_local_session(config.clone(), moa_core::Platform::Tui, session_id)
+            .await?
+    } else {
+        ChatRuntime::from_config(config.clone(), moa_core::Platform::Tui).await?
+    };
+    let mut app = App::from_runtime(config, runtime, options).await?;
 
     let result = run_event_loop(&mut terminal, &mut app).await;
 

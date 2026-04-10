@@ -1438,3 +1438,40 @@ Remaining caveat:
 - Completion is prompt-text based, not true cursor-position aware editing inside arbitrary multiline input.
 - `@file` completion currently only rewrites the trailing token, so paths with embedded spaces are not handled yet.
 - File-frecency is process-local and is not yet persisted across TUI restarts.
+
+### 22.1 The local daemon currently owns one mutable runtime, not one runtime per client
+
+Current state:
+
+- `moa-cli/src/daemon.rs` runs a single `ChatRuntime` behind a Unix socket and exposes control-plane commands plus per-session observation streams.
+- TUI clients can attach to persisted sessions through that daemon, and sessions continue running after the TUI exits.
+- `status` and `sessions` intentionally read persisted state directly from the local session store instead of forcing everything through daemon RPC.
+
+Consequence:
+
+- The Step 22 daemon flow now works end to end: `moa daemon start`, `moa status`, `moa sessions`, `moa resume`, and `moa daemon stop`.
+- Session persistence is durable even when no TUI is attached.
+
+Remaining caveat:
+
+- Workspace/model changes still mutate shared daemon runtime state, so they are global to the daemon process rather than scoped per connected client.
+- If local multi-client control becomes important, the daemon should promote those settings into per-session state instead of one shared mutable runtime.
+- The daemon currently starts with one default active session because `ChatRuntime` always owns a current session.
+- If we want a truly idle daemon with zero sessions until first use, the runtime boundary should support lazy session creation instead of eager bootstrap.
+
+### 22.2 Default terminal logging is intentionally quiet so it does not corrupt the TUI
+
+Current state:
+
+- `moa-core/src/telemetry.rs` now initializes the human-readable tracing layer at `WARN` by default while still wiring OTLP export when configured.
+- This suppresses noisy info-level runtime logs from libraries such as the cron scheduler when launching the alternate-screen TUI.
+
+Consequence:
+
+- Interactive `moa`, `moa resume`, and `moa attach` no longer print routine runtime logs into the terminal before the TUI renders.
+- The TUI and CLI subcommands remain usable without log noise while observability stays available through OTLP.
+
+Remaining caveat:
+
+- Rich local debug logging now requires an explicit code or config change instead of appearing by default on stderr.
+- If we want operator-friendly local debug mode later, it should be an explicit CLI/config switch rather than the default interactive behavior.
