@@ -45,6 +45,7 @@ pub async fn execute_local(
 /// Executes the `bash` tool inside an existing Docker sandbox.
 pub async fn execute_docker(
     container_id: &str,
+    workspace_root: &str,
     input: &str,
     default_timeout: Duration,
 ) -> Result<ToolOutput> {
@@ -54,7 +55,7 @@ pub async fn execute_docker(
 
     let mut command = Command::new("docker");
     command
-        .args(["exec", "-w", "/workspace", container_id, "sh", "-lc"])
+        .args(["exec", "-w", workspace_root, container_id, "sh", "-lc"])
         .arg(&params.cmd)
         .kill_on_drop(true);
 

@@ -1,6 +1,7 @@
 //! Built-in hand and memory tool implementations.
 
 pub mod bash;
+pub mod docker_file;
 pub mod file_read;
 pub mod file_search;
 pub mod file_write;

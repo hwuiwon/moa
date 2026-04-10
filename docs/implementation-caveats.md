@@ -1379,3 +1379,21 @@ Remaining note:
 
 - `ToolRegistry` still stores execution state separately from the shared `ToolDefinition`, so there are now two closely related internal shapes in `moa-hands`.
 - That is intentional for layering, but if registry metadata starts drifting from the core definition again, the next cleanup step should be to tighten construction helpers around the registry entry type rather than moving routing concerns back into `moa-core`.
+
+### 28.1 Docker-backed local hands now route file tools through `docker exec`
+
+Current state:
+
+- `LocalHandProvider` now routes `file_read`, `file_write`, and `file_search` through `docker exec` when the active hand is Docker-backed.
+- The container workspace mount is recorded at provisioning time and reused for both `bash` and file tools, so all hand-routed filesystem operations target the same in-container path.
+- Host-path file access remains the behavior for pure local hands.
+
+Consequence:
+
+- Docker-backed hands are no longer only partially containerized: shell commands and file tools now run through the same isolation boundary.
+- The ignored Docker roundtrip test now checks that `file_write`, `file_read`, `file_search`, and `bash cat` all observe the same container filesystem.
+
+Remaining note:
+
+- The current fallback behavior still drops back to host-path file access when `docker exec` fails due to Docker transport issues such as a lost container or daemon connectivity failure.
+- That matches the local provider's existing graceful-degradation posture, but it also means a broken Docker hand can temporarily lose the strict isolation guarantee instead of hard-failing immediately.

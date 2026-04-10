@@ -7,12 +7,27 @@ use moa_core::{MoaError, Result, ToolOutput};
 use serde::Deserialize;
 use tokio::fs;
 
+use crate::tools::docker_file::{docker_file_read, resolve_container_workspace_path};
+
 /// Executes the `file_read` tool against a sandbox directory.
 pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     let params: FileReadInput = serde_json::from_str(input)?;
     let path = resolve_sandbox_path(sandbox_dir, &params.path)?;
     let content = fs::read_to_string(path).await?;
 
+    Ok(ToolOutput::text(content, Duration::default()))
+}
+
+/// Executes the `file_read` tool inside an existing Docker sandbox.
+pub async fn execute_docker(
+    container_id: &str,
+    workspace_root: &str,
+    input: &str,
+    timeout: Duration,
+) -> Result<ToolOutput> {
+    let params: FileReadInput = serde_json::from_str(input)?;
+    let path = resolve_container_workspace_path(workspace_root, &params.path)?;
+    let content = docker_file_read(container_id, &path, timeout).await?;
     Ok(ToolOutput::text(content, Duration::default()))
 }
 
