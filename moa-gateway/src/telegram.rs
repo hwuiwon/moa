@@ -19,7 +19,10 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::renderer::{TelegramCallbackAction, TelegramRenderChunk, TelegramRenderer};
+use crate::{
+    approval::{ApprovalCallbackAction, prepare_outbound_message},
+    renderer::{TelegramRenderChunk, TelegramRenderer},
+};
 
 /// Telegram adapter implementing the generic platform abstraction.
 #[derive(Clone)]
@@ -168,6 +171,7 @@ impl PlatformAdapter for TelegramAdapter {
 
     /// Sends a new outbound Telegram message, splitting at Telegram's length limit.
     async fn send(&self, msg: OutboundMessage) -> Result<MessageId> {
+        let msg = prepare_outbound_message(self.platform(), &self.capabilities(), msg);
         let target = self.resolve_target(msg.reply_to.as_deref()).await?;
         let rendered = self.renderer.render(&msg);
         let mut sent_refs = Vec::with_capacity(rendered.len());
@@ -191,6 +195,7 @@ impl PlatformAdapter for TelegramAdapter {
 
     /// Edits an existing outbound Telegram message.
     async fn edit(&self, msg_id: &MessageId, msg: OutboundMessage) -> Result<()> {
+        let msg = prepare_outbound_message(self.platform(), &self.capabilities(), msg);
         let existing = self
             .outbound_messages
             .lock()
@@ -344,7 +349,7 @@ async fn inbound_from_callback_query(
     inbound_contexts: Arc<Mutex<HashMap<String, TelegramMessageRef>>>,
     outbound_messages: Arc<Mutex<HashMap<String, Vec<TelegramMessageRef>>>>,
 ) -> Option<InboundMessage> {
-    let action = TelegramCallbackAction::decode(query.data.as_deref()?)?;
+    let action = ApprovalCallbackAction::decode(query.data.as_deref()?)?;
     let origin = if let Some(message) = query.regular_message() {
         TelegramMessageRef::from_message(message)
     } else {
@@ -513,7 +518,7 @@ mod tests {
                 "username": "alice"
             },
             "chat_instance": "instance-1",
-            "data": TelegramCallbackAction::AlwaysAllow { request_id }.encode(),
+            "data": ApprovalCallbackAction::AlwaysAllow { request_id }.encode(),
             "message": {
                 "message_id": 77,
                 "date": 1712668800,

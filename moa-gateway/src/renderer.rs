@@ -1,11 +1,12 @@
 //! Shared rendering helpers for messaging platform adapters.
 
 use moa_core::{
-    ActionButton, ApprovalRequest, ButtonStyle, MessageContent, OutboundMessage, Platform,
-    SessionStatus, ToolStatus, types::DiffHunk,
+    ActionButton, ApprovalRequest, MessageContent, OutboundMessage, Platform, SessionStatus,
+    ToolStatus, types::DiffHunk,
 };
-use uuid::Uuid;
 
+#[cfg(feature = "slack")]
+use moa_core::ButtonStyle;
 #[cfg(feature = "slack")]
 use slack_morphism::prelude::{
     SlackActionBlockElement, SlackActionId, SlackActionsBlock, SlackBlock, SlackBlockButtonElement,
@@ -18,67 +19,13 @@ pub const TELEGRAM_MAX_MESSAGE_LENGTH: usize = 4096;
 /// Slack's documented hard cap for one message text payload.
 pub const SLACK_MAX_MESSAGE_LENGTH: usize = 40_000;
 
+/// Discord's documented hard cap for plain message text.
+pub const DISCORD_MAX_MESSAGE_LENGTH: usize = 2_000;
+
 #[cfg(feature = "slack")]
 const SLACK_MAX_BLOCK_TEXT_LENGTH: usize = 3_000;
-
-/// One approval callback action encoded into a Telegram inline button payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TelegramCallbackAction {
-    /// Allow this request one time.
-    AllowOnce {
-        /// Approval request identifier.
-        request_id: Uuid,
-    },
-    /// Persist an always-allow rule and approve this request.
-    AlwaysAllow {
-        /// Approval request identifier.
-        request_id: Uuid,
-    },
-    /// Deny this request.
-    Deny {
-        /// Approval request identifier.
-        request_id: Uuid,
-    },
-}
-
-impl TelegramCallbackAction {
-    /// Encodes the callback action into a compact Telegram-safe payload.
-    pub fn encode(&self) -> String {
-        match self {
-            Self::AllowOnce { request_id } => format!("ap:o:{request_id}"),
-            Self::AlwaysAllow { request_id } => format!("ap:a:{request_id}"),
-            Self::Deny { request_id } => format!("ap:d:{request_id}"),
-        }
-    }
-
-    /// Decodes a Telegram callback payload into an action.
-    pub fn decode(value: &str) -> Option<Self> {
-        let mut parts = value.split(':');
-        let prefix = parts.next()?;
-        let action = parts.next()?;
-        let request_id = parts.next()?;
-        if prefix != "ap" || parts.next().is_some() {
-            return None;
-        }
-
-        let request_id = Uuid::parse_str(request_id).ok()?;
-        match action {
-            "o" => Some(Self::AllowOnce { request_id }),
-            "a" => Some(Self::AlwaysAllow { request_id }),
-            "d" => Some(Self::Deny { request_id }),
-            _ => None,
-        }
-    }
-
-    /// Converts the callback action into a normalized command string.
-    pub fn inbound_command(&self) -> String {
-        match self {
-            Self::AllowOnce { request_id } => format!("/approval allow {request_id}"),
-            Self::AlwaysAllow { request_id } => format!("/approval always {request_id}"),
-            Self::Deny { request_id } => format!("/approval deny {request_id}"),
-        }
-    }
-}
+#[cfg(feature = "discord")]
+const DISCORD_MAX_EMBED_DESCRIPTION_LENGTH: usize = 4_096;
 
 /// One Telegram-ready outbound text chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,67 +124,6 @@ impl TelegramRenderer {
     /// Returns the platform handled by this renderer.
     pub fn platform(&self) -> Platform {
         Platform::Telegram
-    }
-}
-
-/// One approval callback action encoded into a Slack button payload.
-#[cfg(feature = "slack")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SlackCallbackAction {
-    /// Allow this request one time.
-    AllowOnce {
-        /// Approval request identifier.
-        request_id: Uuid,
-    },
-    /// Persist an always-allow rule and approve this request.
-    AlwaysAllow {
-        /// Approval request identifier.
-        request_id: Uuid,
-    },
-    /// Deny this request.
-    Deny {
-        /// Approval request identifier.
-        request_id: Uuid,
-    },
-}
-
-#[cfg(feature = "slack")]
-impl SlackCallbackAction {
-    /// Encodes the callback action into a compact Slack-safe payload.
-    pub fn encode(&self) -> String {
-        match self {
-            Self::AllowOnce { request_id } => format!("ap:o:{request_id}"),
-            Self::AlwaysAllow { request_id } => format!("ap:a:{request_id}"),
-            Self::Deny { request_id } => format!("ap:d:{request_id}"),
-        }
-    }
-
-    /// Decodes a Slack callback payload into an action.
-    pub fn decode(value: &str) -> Option<Self> {
-        let mut parts = value.split(':');
-        let prefix = parts.next()?;
-        let action = parts.next()?;
-        let request_id = parts.next()?;
-        if prefix != "ap" || parts.next().is_some() {
-            return None;
-        }
-
-        let request_id = Uuid::parse_str(request_id).ok()?;
-        match action {
-            "o" => Some(Self::AllowOnce { request_id }),
-            "a" => Some(Self::AlwaysAllow { request_id }),
-            "d" => Some(Self::Deny { request_id }),
-            _ => None,
-        }
-    }
-
-    /// Converts the callback action into a normalized command string.
-    pub fn inbound_command(&self) -> String {
-        match self {
-            Self::AllowOnce { request_id } => format!("/approval allow {request_id}"),
-            Self::AlwaysAllow { request_id } => format!("/approval always {request_id}"),
-            Self::Deny { request_id } => format!("/approval deny {request_id}"),
-        }
     }
 }
 
@@ -343,6 +229,132 @@ impl SlackRenderer {
     }
 }
 
+/// One Discord-ready outbound chunk.
+#[cfg(feature = "discord")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscordRenderChunk {
+    /// Optional plain-text content sent alongside the embed.
+    pub content: Option<String>,
+    /// Optional embed title.
+    pub embed_title: Option<String>,
+    /// Optional embed description.
+    pub embed_description: Option<String>,
+    /// Optional embed accent color.
+    pub embed_color: Option<u32>,
+    /// Platform-neutral buttons attached to the last chunk only.
+    pub buttons: Vec<ActionButton>,
+}
+
+/// Platform-adaptive renderer for Discord output.
+#[cfg(feature = "discord")]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DiscordRenderer;
+
+#[cfg(feature = "discord")]
+impl DiscordRenderer {
+    /// Creates a new Discord renderer.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Renders one normalized outbound message into Discord-sized chunks.
+    pub fn render(&self, message: &OutboundMessage) -> Vec<DiscordRenderChunk> {
+        let (title, body, color) = match &message.content {
+            MessageContent::Text(text) | MessageContent::Markdown(text) => {
+                (None, text.clone(), None)
+            }
+            MessageContent::CodeBlock { language, code } => (
+                Some("Code".to_string()),
+                if language.is_empty() {
+                    format!("```\n{code}\n```")
+                } else {
+                    format!("```{language}\n{code}\n```")
+                },
+                None,
+            ),
+            MessageContent::Diff { filename, hunks } => (
+                Some(filename.clone()),
+                format!("```diff\n{}\n```", render_diff(filename, hunks)),
+                Some(0xF59E0B),
+            ),
+            MessageContent::ToolCard {
+                tool,
+                status,
+                summary,
+                detail,
+            } => (
+                Some(format!("{} {tool}", tool_status_icon(status))),
+                render_tool_card(tool, status, summary, detail.as_deref()),
+                Some(tool_status_color(status)),
+            ),
+            MessageContent::ApprovalRequest { request } => (
+                Some(format!(
+                    "{} Approval required: {}",
+                    risk_icon(&request.risk_level),
+                    request.tool_name
+                )),
+                render_approval_request(request),
+                Some(risk_color(&request.risk_level)),
+            ),
+            MessageContent::StatusUpdate {
+                session_id,
+                status,
+                summary,
+            } => (
+                Some(format!(
+                    "{} Session {}",
+                    session_status_icon(status),
+                    session_id
+                )),
+                summary.clone(),
+                Some(session_status_color(status)),
+            ),
+        };
+
+        let mut chunks = split_plain_text(&body, DISCORD_MAX_EMBED_DESCRIPTION_LENGTH);
+        if chunks.is_empty() {
+            chunks.push(String::new());
+        }
+
+        let chunk_count = chunks.len();
+        chunks
+            .into_iter()
+            .enumerate()
+            .map(|(index, embed_description)| DiscordRenderChunk {
+                content: None,
+                embed_title: if index == 0 { title.clone() } else { None },
+                embed_description: Some(embed_description),
+                embed_color: color,
+                buttons: if index + 1 == chunk_count {
+                    message.buttons.clone()
+                } else {
+                    Vec::new()
+                },
+            })
+            .collect()
+    }
+
+    /// Returns Discord's platform capabilities.
+    pub fn capabilities(&self) -> moa_core::PlatformCapabilities {
+        moa_core::PlatformCapabilities {
+            max_message_length: DISCORD_MAX_MESSAGE_LENGTH,
+            supports_inline_buttons: true,
+            supports_modals: true,
+            supports_ephemeral: true,
+            supports_threads: true,
+            supports_code_blocks: true,
+            supports_edit: true,
+            supports_reactions: true,
+            min_edit_interval: std::time::Duration::from_secs(2),
+        }
+    }
+
+    /// Returns the platform handled by this renderer.
+    pub fn platform(&self) -> Platform {
+        Platform::Discord
+    }
+}
+
 fn render_diff(filename: &str, hunks: &[DiffHunk]) -> String {
     let mut rendered = format!("--- a/{filename}\n+++ b/{filename}\n");
     for hunk in hunks {
@@ -396,6 +408,16 @@ fn tool_status_icon(status: &ToolStatus) -> &'static str {
     }
 }
 
+#[cfg(feature = "discord")]
+fn tool_status_color(status: &ToolStatus) -> u32 {
+    match status {
+        ToolStatus::Pending => 0x94A3B8,
+        ToolStatus::Running => 0x2563EB,
+        ToolStatus::Succeeded => 0x16A34A,
+        ToolStatus::Failed => 0xDC2626,
+    }
+}
+
 fn session_status_icon(status: &SessionStatus) -> &'static str {
     match status {
         SessionStatus::Created => "🆕",
@@ -408,11 +430,33 @@ fn session_status_icon(status: &SessionStatus) -> &'static str {
     }
 }
 
+#[cfg(feature = "discord")]
+fn session_status_color(status: &SessionStatus) -> u32 {
+    match status {
+        SessionStatus::Created => 0x6366F1,
+        SessionStatus::Running => 0x2563EB,
+        SessionStatus::Paused => 0x94A3B8,
+        SessionStatus::WaitingApproval => 0xF59E0B,
+        SessionStatus::Completed => 0x16A34A,
+        SessionStatus::Cancelled => 0x6B7280,
+        SessionStatus::Failed => 0xDC2626,
+    }
+}
+
 fn risk_icon(risk_level: &moa_core::RiskLevel) -> &'static str {
     match risk_level {
         moa_core::RiskLevel::Low => "🟢",
         moa_core::RiskLevel::Medium => "🟡",
         moa_core::RiskLevel::High => "🔴",
+    }
+}
+
+#[cfg(feature = "discord")]
+fn risk_color(risk_level: &moa_core::RiskLevel) -> u32 {
+    match risk_level {
+        moa_core::RiskLevel::Low => 0x16A34A,
+        moa_core::RiskLevel::Medium => 0xF59E0B,
+        moa_core::RiskLevel::High => 0xDC2626,
     }
 }
 
@@ -539,73 +583,11 @@ fn slack_button(button: &ActionButton) -> SlackBlockButtonElement {
     }
 }
 
-/// Builds the standard Telegram approval buttons for one request.
-pub fn telegram_approval_buttons(request_id: Uuid) -> Vec<ActionButton> {
-    vec![
-        ActionButton {
-            id: "allow".to_string(),
-            label: "✅ Allow".to_string(),
-            style: ButtonStyle::Primary,
-            callback_data: TelegramCallbackAction::AllowOnce { request_id }.encode(),
-        },
-        ActionButton {
-            id: "always".to_string(),
-            label: "🔁 Always".to_string(),
-            style: ButtonStyle::Secondary,
-            callback_data: TelegramCallbackAction::AlwaysAllow { request_id }.encode(),
-        },
-        ActionButton {
-            id: "deny".to_string(),
-            label: "❌ Deny".to_string(),
-            style: ButtonStyle::Danger,
-            callback_data: TelegramCallbackAction::Deny { request_id }.encode(),
-        },
-    ]
-}
-
-/// Builds the standard Slack approval buttons for one request.
-#[cfg(feature = "slack")]
-pub fn slack_approval_buttons(request_id: Uuid) -> Vec<ActionButton> {
-    vec![
-        ActionButton {
-            id: "allow".to_string(),
-            label: "Allow".to_string(),
-            style: ButtonStyle::Primary,
-            callback_data: SlackCallbackAction::AllowOnce { request_id }.encode(),
-        },
-        ActionButton {
-            id: "always".to_string(),
-            label: "Always".to_string(),
-            style: ButtonStyle::Secondary,
-            callback_data: SlackCallbackAction::AlwaysAllow { request_id }.encode(),
-        },
-        ActionButton {
-            id: "deny".to_string(),
-            label: "Deny".to_string(),
-            style: ButtonStyle::Danger,
-            callback_data: SlackCallbackAction::Deny { request_id }.encode(),
-        },
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_core::{ApprovalRequest, OutboundMessage, RiskLevel};
-
-    #[test]
-    fn callback_data_roundtrips() {
-        let request_id = Uuid::new_v4();
-        for action in [
-            TelegramCallbackAction::AllowOnce { request_id },
-            TelegramCallbackAction::AlwaysAllow { request_id },
-            TelegramCallbackAction::Deny { request_id },
-        ] {
-            let encoded = action.encode();
-            assert!(encoded.len() <= 64);
-            assert_eq!(TelegramCallbackAction::decode(&encoded), Some(action));
-        }
-    }
+    use crate::approval::approval_buttons;
+    use moa_core::RiskLevel;
 
     #[test]
     fn renderer_splits_long_text_at_telegram_limit() {
@@ -635,7 +617,7 @@ mod tests {
 
     #[test]
     fn renderer_keeps_buttons_on_last_chunk_only() {
-        let request_id = Uuid::new_v4();
+        let request_id = uuid::Uuid::new_v4();
         let message = OutboundMessage {
             content: MessageContent::ApprovalRequest {
                 request: ApprovalRequest {
@@ -645,7 +627,7 @@ mod tests {
                     risk_level: RiskLevel::High,
                 },
             },
-            buttons: telegram_approval_buttons(request_id),
+            buttons: approval_buttons(Platform::Telegram, request_id),
             reply_to: Some("42".to_string()),
             ephemeral: false,
         };
@@ -656,20 +638,6 @@ mod tests {
             assert!(chunk.buttons.is_empty());
         }
         assert_eq!(chunks.last().map(|chunk| chunk.buttons.len()), Some(3));
-    }
-
-    #[cfg(feature = "slack")]
-    #[test]
-    fn slack_callback_data_roundtrips() {
-        let request_id = Uuid::new_v4();
-        for action in [
-            SlackCallbackAction::AllowOnce { request_id },
-            SlackCallbackAction::AlwaysAllow { request_id },
-            SlackCallbackAction::Deny { request_id },
-        ] {
-            let encoded = action.encode();
-            assert_eq!(SlackCallbackAction::decode(&encoded), Some(action));
-        }
     }
 
     #[cfg(feature = "slack")]
@@ -702,7 +670,7 @@ mod tests {
     #[cfg(feature = "slack")]
     #[test]
     fn slack_renderer_attaches_buttons_to_last_chunk_only() {
-        let request_id = Uuid::new_v4();
+        let request_id = uuid::Uuid::new_v4();
         let message = OutboundMessage {
             content: MessageContent::ApprovalRequest {
                 request: ApprovalRequest {
@@ -712,7 +680,7 @@ mod tests {
                     risk_level: RiskLevel::High,
                 },
             },
-            buttons: slack_approval_buttons(request_id),
+            buttons: approval_buttons(Platform::Slack, request_id),
             reply_to: Some("123".to_string()),
             ephemeral: false,
         };
@@ -728,5 +696,59 @@ mod tests {
                 .and_then(|chunk| chunk.blocks.as_ref())
                 .is_some()
         );
+    }
+
+    #[cfg(feature = "discord")]
+    #[test]
+    fn discord_renderer_uses_embed_limit_for_long_text() {
+        let text = "a".repeat(DISCORD_MAX_EMBED_DESCRIPTION_LENGTH + 50);
+        let message = OutboundMessage {
+            content: MessageContent::Text(text.clone()),
+            buttons: Vec::new(),
+            reply_to: Some("321".to_string()),
+            ephemeral: false,
+        };
+
+        let chunks = DiscordRenderer::new().render(&message);
+        assert!(chunks.len() >= 2);
+        assert!(chunks.iter().all(|chunk| {
+            chunk
+                .embed_description
+                .as_ref()
+                .is_some_and(|text| text.chars().count() <= DISCORD_MAX_EMBED_DESCRIPTION_LENGTH)
+        }));
+        assert_eq!(
+            chunks
+                .into_iter()
+                .filter_map(|chunk| chunk.embed_description)
+                .collect::<String>(),
+            text
+        );
+    }
+
+    #[cfg(feature = "discord")]
+    #[test]
+    fn discord_renderer_attaches_buttons_to_last_chunk_only() {
+        let request_id = uuid::Uuid::new_v4();
+        let message = OutboundMessage {
+            content: MessageContent::ApprovalRequest {
+                request: ApprovalRequest {
+                    request_id,
+                    tool_name: "file_write".to_string(),
+                    input_summary: "update src/lib.rs".to_string(),
+                    risk_level: RiskLevel::Medium,
+                },
+            },
+            buttons: approval_buttons(Platform::Discord, request_id),
+            reply_to: Some("321".to_string()),
+            ephemeral: false,
+        };
+
+        let chunks = DiscordRenderer::new().render(&message);
+        assert!(!chunks.is_empty());
+        for chunk in &chunks[..chunks.len().saturating_sub(1)] {
+            assert!(chunk.buttons.is_empty());
+        }
+        assert_eq!(chunks.last().map(|chunk| chunk.buttons.len()), Some(3));
     }
 }
