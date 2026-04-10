@@ -43,6 +43,30 @@ impl Display for SessionId {
     }
 }
 
+/// Identifier for a persisted pending session signal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PendingSignalId(pub Uuid);
+
+impl PendingSignalId {
+    /// Creates a new random pending-signal identifier.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for PendingSignalId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Display for PendingSignalId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Identifier for a MOA user.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -305,6 +329,49 @@ pub struct UserMessage {
     pub text: String,
     /// Attached files or images.
     pub attachments: Vec<Attachment>,
+}
+
+/// Durable but unresolved session signal awaiting turn-boundary processing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingSignal {
+    /// Stable identifier for this stored signal.
+    pub id: PendingSignalId,
+    /// Session that owns the pending signal.
+    pub session_id: SessionId,
+    /// Kind of pending signal.
+    pub signal_type: PendingSignalType,
+    /// JSON-serialized payload for the signal.
+    pub payload: Value,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+}
+
+impl PendingSignal {
+    /// Creates a pending queued-message signal from a user message.
+    pub fn queue_message(session_id: SessionId, message: UserMessage) -> Result<Self> {
+        Ok(Self {
+            id: PendingSignalId::new(),
+            session_id,
+            signal_type: PendingSignalType::QueueMessage,
+            payload: serde_json::to_value(message)?,
+            created_at: Utc::now(),
+        })
+    }
+
+    /// Decodes the queued user message payload.
+    pub fn user_message(&self) -> Result<UserMessage> {
+        match self.signal_type {
+            PendingSignalType::QueueMessage => Ok(serde_json::from_value(self.payload.clone())?),
+        }
+    }
+}
+
+/// Supported pending signal kinds stored durably outside the append-only event log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingSignalType {
+    /// A user message queued for later turn-boundary flush.
+    QueueMessage,
 }
 
 /// Request for starting a new session.
@@ -598,6 +665,9 @@ pub struct WakeContext {
     pub checkpoint_summary: Option<String>,
     /// Events that occurred after the checkpoint, or all events when no checkpoint exists.
     pub recent_events: Vec<EventRecord>,
+    /// Unresolved queued signals that must be re-buffered on resume.
+    #[serde(default)]
+    pub pending_signals: Vec<PendingSignal>,
 }
 
 /// Cron specification for scheduled background jobs.
@@ -1961,6 +2031,23 @@ mod tests {
         let status = SessionStatus::WaitingApproval;
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("WaitingApproval") || json.contains("waiting_approval"));
+    }
+
+    #[test]
+    fn pending_signal_queue_message_round_trip() {
+        let session_id = SessionId::new();
+        let signal = PendingSignal::queue_message(
+            session_id.clone(),
+            UserMessage {
+                text: "queued".to_string(),
+                attachments: vec![],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(signal.session_id, session_id);
+        assert_eq!(signal.signal_type, PendingSignalType::QueueMessage);
+        assert_eq!(signal.user_message().unwrap().text, "queued");
     }
 
     #[test]

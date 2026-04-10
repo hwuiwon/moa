@@ -57,7 +57,10 @@ license = "Apache-2.0"
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
-async-openai = { version = "0.34", default-features = false, features = ["responses", "rustls"] }
+async-openai = { version = "0.34", default-features = false, features = [
+    "responses",
+    "rustls",
+] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 config = { version = "0.14", default-features = true, features = ["toml"] }
@@ -69,11 +72,18 @@ opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
 opentelemetry_sdk = "0.31"
 ratatui = "0.29"
-reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "rustls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "multipart",
+    "rustls",
+    "stream",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = "2"
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+syntect = { version = "5", default-features = false, features = [
+    "default-fancy",
+] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
@@ -82,3 +92,25 @@ tracing-opentelemetry = "0.32"
 tracing-subscriber = "0.3"
 tui-textarea = "0.7"
 uuid = { version = "1", features = ["serde", "v4"] }
+
+[profile.dev]
+# 1 = Line tables only. Enough for AI to see "Error at main.rs:42"
+# This is the single biggest space saver.
+debug = 1
+
+# Speed up the linker by keeping debug info in separate files 
+# (Works on macOS and Linux).
+split-debuginfo = "unpacked"
+
+# Optional: If your code is heavy on dependencies, level 1 
+# makes the AI's "test/run" cycles much faster.
+opt-level = 1
+
+[profile.release]
+# Strip all symbols from the final production binary.
+strip = "symbols"
+# Use 'thin' LTO to keep the binary small without the 
+# massive compile time of 'fat' LTO.
+lto = "thin"
+# No debug info needed for release.
+debug = 0

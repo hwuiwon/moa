@@ -1,8 +1,9 @@
 use moa_core::{
-    Event, EventFilter, EventRange, EventType, MoaConfig, SessionFilter, SessionMeta,
-    SessionStatus, SessionStore,
+    Event, EventFilter, EventRange, EventType, MoaConfig, PendingSignal, PendingSignalType,
+    SessionFilter, SessionMeta, SessionStatus, SessionStore, UserMessage,
 };
 use moa_session::TursoSessionStore;
+use serde_json::json;
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -265,6 +266,95 @@ async fn wake_without_checkpoint_returns_all_events() {
     let wake_ctx = store.wake(session_id).await.unwrap();
     assert!(wake_ctx.checkpoint_summary.is_none());
     assert_eq!(wake_ctx.recent_events.len(), 5);
+}
+
+#[tokio::test]
+async fn pending_signal_round_trip_and_resolution() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let store = TursoSessionStore::new_local(&db_path).await.unwrap();
+    let session_id = store
+        .create_session(SessionMeta {
+            workspace_id: "ws1".into(),
+            user_id: "u1".into(),
+            model: "test-model".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let signal = PendingSignal::queue_message(
+        session_id.clone(),
+        UserMessage {
+            text: "queued follow-up".into(),
+            attachments: vec![],
+        },
+    )
+    .unwrap();
+
+    let signal_id = store
+        .store_pending_signal(session_id.clone(), signal.clone())
+        .await
+        .unwrap();
+    assert_eq!(signal_id, signal.id);
+
+    let pending = store.get_pending_signals(session_id.clone()).await.unwrap();
+    assert_eq!(pending, vec![signal.clone()]);
+    assert_eq!(pending[0].signal_type, PendingSignalType::QueueMessage);
+    assert_eq!(
+        pending[0].payload,
+        json!({"text":"queued follow-up","attachments":[]})
+    );
+
+    store.resolve_pending_signal(signal_id).await.unwrap();
+    let pending = store.get_pending_signals(session_id).await.unwrap();
+    assert!(pending.is_empty());
+}
+
+#[tokio::test]
+async fn wake_returns_unresolved_pending_signals() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let store = TursoSessionStore::new_local(&db_path).await.unwrap();
+    let session_id = store
+        .create_session(SessionMeta {
+            workspace_id: "ws1".into(),
+            user_id: "u1".into(),
+            model: "test-model".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let unresolved = PendingSignal::queue_message(
+        session_id.clone(),
+        UserMessage {
+            text: "recover me".into(),
+            attachments: vec![],
+        },
+    )
+    .unwrap();
+    let resolved = PendingSignal::queue_message(
+        session_id.clone(),
+        UserMessage {
+            text: "already flushed".into(),
+            attachments: vec![],
+        },
+    )
+    .unwrap();
+
+    store
+        .store_pending_signal(session_id.clone(), unresolved.clone())
+        .await
+        .unwrap();
+    let resolved_id = store
+        .store_pending_signal(session_id.clone(), resolved)
+        .await
+        .unwrap();
+    store.resolve_pending_signal(resolved_id).await.unwrap();
+
+    let wake_ctx = store.wake(session_id).await.unwrap();
+    assert_eq!(wake_ctx.pending_signals, vec![unresolved]);
 }
 
 #[tokio::test]

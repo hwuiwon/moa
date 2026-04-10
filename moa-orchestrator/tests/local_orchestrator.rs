@@ -582,6 +582,29 @@ where
     }
 }
 
+async fn wait_for_pending_signal_count(
+    orchestrator: &LocalOrchestrator,
+    session_id: SessionId,
+    expected: usize,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let pending = orchestrator
+            .session_store()
+            .get_pending_signals(session_id.clone())
+            .await?;
+        if pending.len() == expected {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(MoaError::ProviderError(format!(
+                "timed out waiting for {expected} pending signals"
+            )));
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
 fn brain_response_texts(events: &[moa_core::EventRecord]) -> Vec<String> {
     events
         .iter()
@@ -869,12 +892,21 @@ async fn queued_message_is_processed_after_current_turn() -> Result<()> {
         )
         .await?;
 
+    wait_for_pending_signal_count(&orchestrator, session.session_id.clone(), 1).await?;
+    let pending = orchestrator
+        .session_store()
+        .get_pending_signals(session.session_id.clone())
+        .await?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].user_message()?.text, "second");
+
     wait_for_status(
         &orchestrator,
         session.session_id.clone(),
         SessionStatus::Completed,
     )
     .await?;
+    wait_for_pending_signal_count(&orchestrator, session.session_id.clone(), 0).await?;
     let events = orchestrator
         .session_store()
         .get_events(session.session_id, EventRange::all())
@@ -889,6 +921,89 @@ async fn queued_message_is_processed_after_current_turn() -> Result<()> {
         .filter(|record| record.event_type == EventType::BrainResponse)
         .count();
     assert!(responses >= 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
+    let (dir, orchestrator) = test_orchestrator().await?;
+    let session = start_session(&orchestrator).await?;
+
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::QueueMessage(UserMessage {
+                text: "initial".to_string(),
+                attachments: Vec::new(),
+            }),
+        )
+        .await?;
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::Completed,
+    )
+    .await?;
+
+    let pending = moa_core::PendingSignal::queue_message(
+        session.session_id.clone(),
+        UserMessage {
+            text: "recovered follow-up".to_string(),
+            attachments: Vec::new(),
+        },
+    )?;
+    orchestrator
+        .session_store()
+        .store_pending_signal(session.session_id.clone(), pending)
+        .await?;
+
+    drop(orchestrator);
+
+    let mut reopened_config = MoaConfig::default();
+    reopened_config.local.session_db = dir.path().join("sessions.db").display().to_string();
+    reopened_config.local.memory_dir = dir.path().join("memory").display().to_string();
+    reopened_config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+    let reopened_store = Arc::new(TursoSessionStore::from_config(&reopened_config).await?);
+    let reopened_memory = Arc::new(FileMemoryStore::from_config(&reopened_config).await?);
+    let reopened_provider: Arc<dyn LLMProvider> = Arc::new(MockProvider {
+        model: reopened_config.general.default_model.clone(),
+        first_turn_delay: Duration::from_millis(5),
+    });
+    let reopened_router = Arc::new(
+        ToolRouter::from_config(&reopened_config, reopened_memory.clone())
+            .await?
+            .with_rule_store(reopened_store.clone()),
+    );
+    let reopened = LocalOrchestrator::new(
+        reopened_config,
+        reopened_store,
+        reopened_memory,
+        reopened_provider,
+        reopened_router,
+    )
+    .await?;
+
+    reopened.resume_session(session.session_id.clone()).await?;
+    wait_for_status(
+        &reopened,
+        session.session_id.clone(),
+        SessionStatus::Completed,
+    )
+    .await?;
+    wait_for_pending_signal_count(&reopened, session.session_id.clone(), 0).await?;
+
+    let events = reopened
+        .session_store()
+        .get_events(session.session_id, EventRange::all())
+        .await?;
+    assert!(events.iter().any(|record| matches!(
+        record.event,
+        Event::QueuedMessage { ref text, .. } if text == "recovered follow-up"
+    )));
+    assert!(events.iter().any(|record| matches!(
+        record.event,
+        Event::BrainResponse { ref text, .. } if text.contains("recovered follow-up")
+    )));
     Ok(())
 }
 

@@ -108,6 +108,25 @@ CREATE TABLE IF NOT EXISTS users (
 );
 "#;
 
+/// DDL for transient-but-durable pending session signals.
+pub const CREATE_PENDING_SIGNALS_TABLE: &str = r#"
+CREATE TABLE IF NOT EXISTS pending_signals (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    signal_type TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+"#;
+
+/// DDL for pending signal indexes.
+pub const CREATE_PENDING_SIGNALS_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_pending_signals_session
+    ON pending_signals(session_id, resolved_at, created_at);
+"#;
+
 /// Runs all schema migrations idempotently on the provided connection.
 pub async fn migrate(connection: &Connection) -> Result<()> {
     connection
@@ -124,6 +143,8 @@ pub async fn migrate(connection: &Connection) -> Result<()> {
         CREATE_APPROVAL_RULES_TABLE,
         CREATE_WORKSPACES_TABLE,
         CREATE_USERS_TABLE,
+        CREATE_PENDING_SIGNALS_TABLE,
+        CREATE_PENDING_SIGNALS_INDEXES,
     ] {
         connection
             .execute_batch(statement)

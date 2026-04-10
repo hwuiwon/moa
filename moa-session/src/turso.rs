@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use libsql::{Builder, Connection, Database, TransactionBehavior, Value, params};
 use moa_core::{
-    ApprovalRule, Event, EventFilter, EventRange, EventRecord, MoaConfig, MoaError, PolicyAction,
-    PolicyScope, Result, SessionFilter, SessionMeta, SessionStatus, SessionStore, SessionSummary,
-    WakeContext, WorkspaceId,
+    ApprovalRule, Event, EventFilter, EventRange, EventRecord, MoaConfig, MoaError, PendingSignal,
+    PendingSignalId, PendingSignalType, PolicyAction, PolicyScope, Result, SessionFilter,
+    SessionMeta, SessionStatus, SessionStore, SessionSummary, WakeContext, WorkspaceId,
 };
 use moa_security::ApprovalRuleStore;
 use uuid::Uuid;
@@ -112,7 +112,7 @@ impl TursoSessionStore {
 
         let recent_events = self
             .get_events(
-                session_id,
+                session_id.clone(),
                 EventRange {
                     from_seq: Some(from_seq),
                     to_seq: None,
@@ -126,11 +126,13 @@ impl TursoSessionStore {
             Event::Checkpoint { summary, .. } => Some(summary),
             _ => None,
         });
+        let pending_signals = self.get_pending_signals(session_id).await?;
 
         Ok(WakeContext {
             session,
             checkpoint_summary,
             recent_events,
+            pending_signals,
         })
     }
 
@@ -545,6 +547,82 @@ impl SessionStore for TursoSessionStore {
         Ok(())
     }
 
+    /// Stores an unresolved pending signal for later turn-boundary processing.
+    async fn store_pending_signal(
+        &self,
+        session_id: moa_core::SessionId,
+        signal: PendingSignal,
+    ) -> Result<PendingSignalId> {
+        if signal.session_id != session_id {
+            return Err(MoaError::StorageError(
+                "pending signal session_id does not match store_pending_signal target".to_string(),
+            ));
+        }
+
+        let payload = serde_json::to_string(&signal.payload)?;
+        self.connection
+            .execute(
+                "INSERT INTO pending_signals (id, session_id, signal_type, payload, created_at, resolved_at) \
+                 VALUES (?, ?, ?, ?, ?, NULL)",
+                params![
+                    signal.id.to_string(),
+                    session_id.to_string(),
+                    pending_signal_type_to_db(signal.signal_type),
+                    payload,
+                    signal.created_at.to_rfc3339(),
+                ],
+            )
+            .await
+            .map_err(map_db_error)?;
+
+        Ok(signal.id)
+    }
+
+    /// Returns unresolved pending signals for a session in creation order.
+    async fn get_pending_signals(
+        &self,
+        session_id: moa_core::SessionId,
+    ) -> Result<Vec<PendingSignal>> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, session_id, signal_type, payload, created_at \
+                 FROM pending_signals \
+                 WHERE session_id = ? AND resolved_at IS NULL \
+                 ORDER BY created_at ASC, id ASC",
+                [session_id.to_string()],
+            )
+            .await
+            .map_err(map_db_error)?;
+        let mut signals = Vec::new();
+
+        while let Some(row) = rows.next().await.map_err(map_db_error)? {
+            signals.push(pending_signal_from_row(&row)?);
+        }
+
+        Ok(signals)
+    }
+
+    /// Marks a stored pending signal as resolved.
+    async fn resolve_pending_signal(&self, signal_id: PendingSignalId) -> Result<()> {
+        let affected = self
+            .connection
+            .execute(
+                "UPDATE pending_signals SET resolved_at = ? WHERE id = ? AND resolved_at IS NULL",
+                params![Utc::now().to_rfc3339(), signal_id.to_string(),],
+            )
+            .await
+            .map_err(map_db_error)?;
+
+        if affected == 0 {
+            return Err(MoaError::StorageError(format!(
+                "pending signal `{signal_id}` was not found or already resolved"
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Searches events using the FTS5 index and optional session filters.
     async fn search_events(
         &self,
@@ -703,6 +781,43 @@ fn build_event_fts_query(query: &str) -> String {
         .map(|token| format!("\"{token}\""))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn pending_signal_type_to_db(signal_type: PendingSignalType) -> &'static str {
+    match signal_type {
+        PendingSignalType::QueueMessage => "queue_message",
+    }
+}
+
+fn pending_signal_type_from_db(value: &str) -> Result<PendingSignalType> {
+    match value {
+        "queue_message" => Ok(PendingSignalType::QueueMessage),
+        other => Err(MoaError::StorageError(format!(
+            "unknown pending signal type `{other}`"
+        ))),
+    }
+}
+
+fn parse_rfc3339_timestamp(value: &str) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map_err(|error| MoaError::StorageError(error.to_string()))
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+fn pending_signal_from_row(row: &libsql::Row) -> Result<PendingSignal> {
+    let id: String = row.get(0).map_err(map_db_error)?;
+    let session_id: String = row.get(1).map_err(map_db_error)?;
+    let signal_type: String = row.get(2).map_err(map_db_error)?;
+    let payload: String = row.get(3).map_err(map_db_error)?;
+    let created_at: String = row.get(4).map_err(map_db_error)?;
+
+    Ok(PendingSignal {
+        id: PendingSignalId(Uuid::parse_str(&id)?),
+        session_id: moa_core::SessionId(Uuid::parse_str(&session_id)?),
+        signal_type: pending_signal_type_from_db(&signal_type)?,
+        payload: serde_json::from_str(&payload)?,
+        created_at: parse_rfc3339_timestamp(&created_at)?,
+    })
 }
 
 fn policy_action_to_db(action: &PolicyAction) -> &'static str {
