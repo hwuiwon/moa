@@ -132,6 +132,16 @@ impl LocalOrchestrator {
         self.session_store.clone()
     }
 
+    /// Returns the underlying file-backed memory store.
+    pub fn memory_store(&self) -> Arc<FileMemoryStore> {
+        self.memory_store.clone()
+    }
+
+    /// Returns the registered tool names exposed through the active router.
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tool_router.tool_names()
+    }
+
     /// Returns the configured default model identifier.
     pub fn model(&self) -> &str {
         &self.config.general.default_model

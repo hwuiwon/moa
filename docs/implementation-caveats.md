@@ -1400,3 +1400,41 @@ Remaining caveat:
 
 - Coverage is still selective, not exhaustive across every OpenAI/OpenRouter model id.
 - Adding new default models should include an explicit capability/pricing update rather than relying on the generic fallback.
+
+### 21.1 The Step 21 TUI memory/settings surfaces are functional, but still intentionally shallow
+
+Current state:
+
+- `moa-tui/src/app.rs` now exposes the documented Step 21 shells for sidebar, memory browser, settings, help, command palette, slash completion, and `@file` completion.
+- The memory browser in `moa-tui/src/views/memory.rs` supports page browsing, FTS-backed search, wikilink following, and back/forward history.
+- The settings panel in `moa-tui/src/views/settings.rs` persists a focused subset of config values and hot-reloads the provider/model path through the existing runtime seam.
+
+Consequence:
+
+- The TUI now has a real feature-complete shell instead of only chat/session/diff overlays.
+- Manual PTY smoke tests confirmed that the command palette, memory browser, and settings overlays all open in the live alternate-screen loop.
+
+Remaining caveat:
+
+- The memory browser does not yet implement destructive delete or external-editor open; those actions currently surface explicit status messages instead of performing the operation.
+- Markdown rendering in the memory pane is still lightweight text rendering, not full `pulldown-cmark` rich formatting.
+- The settings panel intentionally edits a small high-value subset of config rather than every field in `MoaConfig`.
+
+### 21.2 Prompt completion is intentionally simple
+
+Current state:
+
+- Slash completion and `@file` completion now render above the prompt and accept via `Tab`.
+- File completion is ranked by a small in-memory frecency map plus path order.
+- Sandbox files are scanned from the configured local sandbox root and refreshed on periodic sidebar refreshes.
+
+Consequence:
+
+- The documented completion flows now exist and are visible in the real TUI.
+- The implementation stayed local to `moa-tui` without introducing another completion engine or cursor-aware editor abstraction.
+
+Remaining caveat:
+
+- Completion is prompt-text based, not true cursor-position aware editing inside arbitrary multiline input.
+- `@file` completion currently only rewrites the trailing token, so paths with embedded spaces are not handled yet.
+- File-frecency is process-local and is not yet persisted across TUI restarts.

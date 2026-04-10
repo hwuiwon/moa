@@ -506,6 +506,13 @@ impl ToolRouter {
         self.registry.default_tool_schemas()
     }
 
+    /// Returns the stable registered tool names in sorted order.
+    pub fn tool_names(&self) -> Vec<String> {
+        let mut names = self.registry.tools.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
     async fn load_mcp_servers(&mut self, config: &MoaConfig) -> Result<()> {
         let mut registry = std::mem::take(&mut self.registry);
         if config

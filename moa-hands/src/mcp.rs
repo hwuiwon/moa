@@ -5,8 +5,6 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use eventsource_stream::Eventsource;
-use futures_util::StreamExt;
 use moa_core::{McpServerConfig, McpTransportConfig, MoaError, Result, ToolOutput};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
@@ -211,7 +209,6 @@ impl StdioClient {
 struct RemoteClient {
     client: reqwest::Client,
     url: String,
-    transport: McpTransportConfig,
 }
 
 impl RemoteClient {
@@ -230,7 +227,6 @@ impl RemoteClient {
                     MoaError::ProviderError(format!("failed to build MCP http client: {error}"))
                 })?,
             url,
-            transport: config.transport,
         })
     }
 
@@ -277,7 +273,7 @@ impl RemoteClient {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        if self.transport == McpTransportConfig::Sse || content_type.contains("text/event-stream") {
+        if content_type.contains("text/event-stream") {
             return read_sse_response(response).await;
         }
 
@@ -340,18 +336,46 @@ async fn read_framed_message(stdout: &mut BufReader<ChildStdout>) -> Result<Valu
 }
 
 async fn read_sse_response(response: reqwest::Response) -> Result<Value> {
-    let mut stream = response
-        .bytes_stream()
-        .eventsource()
-        .map(|event| event.map_err(|error| MoaError::StreamError(error.to_string())));
-    while let Some(event) = stream.next().await {
-        let event = event?;
-        if event.event == "message" || event.event.is_empty() {
-            return serde_json::from_str(&event.data).map_err(|error| {
-                MoaError::StreamError(format!("invalid MCP SSE payload: {error}"))
-            });
+    let body = response
+        .text()
+        .await
+        .map_err(|error| MoaError::StreamError(format!("failed reading MCP SSE body: {error}")))?;
+
+    let mut current_event = String::new();
+    let mut current_data = Vec::new();
+    for line in body.lines() {
+        if line.is_empty() {
+            if !current_data.is_empty() && (current_event.is_empty() || current_event == "message")
+            {
+                return serde_json::from_str(&current_data.join("\n")).map_err(|error| {
+                    MoaError::StreamError(format!("invalid MCP SSE payload: {error}"))
+                });
+            }
+            current_event.clear();
+            current_data.clear();
+            continue;
+        }
+
+        if let Some(comment) = line.strip_prefix(':') {
+            let _ = comment;
+            continue;
+        }
+
+        if let Some(event) = line.strip_prefix("event:") {
+            current_event = event.trim().to_string();
+            continue;
+        }
+
+        if let Some(data) = line.strip_prefix("data:") {
+            current_data.push(data.trim_start().to_string());
         }
     }
+
+    if !current_data.is_empty() && (current_event.is_empty() || current_event == "message") {
+        return serde_json::from_str(&current_data.join("\n"))
+            .map_err(|error| MoaError::StreamError(format!("invalid MCP SSE payload: {error}")));
+    }
+
     Err(MoaError::StreamError(
         "MCP SSE stream ended without a JSON-RPC response".to_string(),
     ))

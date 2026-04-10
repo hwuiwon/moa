@@ -1,6 +1,8 @@
 #![cfg(feature = "temporal")]
 
+use std::fs::OpenOptions;
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,9 +10,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moa_core::{
     BrainOrchestrator, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
-    ContextMessage, Event, LLMProvider, MessageRole, MoaConfig, Result, SessionFilter, SessionId,
-    SessionSignal, SessionStatus, StopReason, TokenPricing, ToolCallFormat, ToolInvocation,
-    UserMessage, WorkspaceId,
+    ContextMessage, Event, EventRange, LLMProvider, MessageRole, MoaConfig, Result, SessionFilter,
+    SessionId, SessionSignal, SessionStatus, SessionStore, StopReason, TokenPricing,
+    ToolCallFormat, ToolInvocation, UserMessage, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
@@ -218,6 +220,9 @@ async fn temporal_test_orchestrator_with_provider(
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     config.cloud.enabled = true;
+    if let Some(hands) = config.cloud.hands.as_mut() {
+        hands.default_provider = Some("local".to_string());
+    }
     config
         .cloud
         .temporal
@@ -282,6 +287,57 @@ async fn temporal_test_orchestrator() -> (TempDir, TemporalDevServer, TemporalOr
         requests: Arc::new(Mutex::new(Vec::new())),
     }))
     .await
+}
+
+fn temporal_helper_binary() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug/examples/temporal_worker_helper")
+}
+
+fn build_temporal_helper_binary() {
+    let status = Command::new("cargo")
+        .args([
+            "build",
+            "-p",
+            "moa-orchestrator",
+            "--features",
+            "temporal",
+            "--example",
+            "temporal_worker_helper",
+        ])
+        .status()
+        .expect("failed to invoke cargo build for temporal helper");
+    assert!(status.success(), "failed to build temporal helper example");
+}
+
+fn spawn_temporal_helper(
+    mode: &str,
+    root: &Path,
+    port: u16,
+    task_queue: &str,
+    delay_ms: u64,
+) -> Child {
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join(format!("helper-{mode}.stdout.log")))
+        .expect("open helper stdout log");
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join(format!("helper-{mode}.stderr.log")))
+        .expect("open helper stderr log");
+    Command::new(temporal_helper_binary())
+        .args([
+            mode,
+            &root.display().to_string(),
+            &port.to_string(),
+            task_queue,
+            &delay_ms.to_string(),
+        ])
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("failed to spawn temporal helper")
 }
 
 fn unused_port() -> u16 {
@@ -357,6 +413,56 @@ async fn wait_for_event_text(
     }
 }
 
+async fn wait_for_store_status(
+    session_store: &TursoSessionStore,
+    session_id: SessionId,
+    expected: SessionStatus,
+) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let session = session_store
+            .get_session(session_id.clone())
+            .await
+            .expect("get session");
+        if session.status == expected {
+            return;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "session never reached {expected:?}; current status={:?}",
+            session.status
+        );
+        sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn wait_for_store_event_text(
+    session_store: &TursoSessionStore,
+    session_id: SessionId,
+    expected_text: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let events = session_store
+            .get_events(session_id.clone(), EventRange::all())
+            .await
+            .expect("get events");
+        if events.iter().any(|record| match &record.event {
+            Event::BrainResponse { text, .. } => text.contains(expected_text),
+            _ => false,
+        }) {
+            return;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "brain response containing {expected_text:?} was never persisted"
+        );
+        sleep(Duration::from_millis(200)).await;
+    }
+}
+
 async fn wait_for_tool_result(
     orchestrator: &TemporalOrchestrator,
     session_id: SessionId,
@@ -409,6 +515,29 @@ async fn wait_for_brain_response_count(
         assert!(
             Instant::now() < deadline,
             "brain response count never reached {expected}"
+        );
+        sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn wait_for_session_id_file(root: &Path) -> SessionId {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let path = root.join("session_id.txt");
+    loop {
+        if let Ok(contents) = tokio::fs::read_to_string(&path).await {
+            let parsed = uuid::Uuid::parse_str(contents.trim()).expect("valid session id");
+            return SessionId(parsed);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for helper to write {}.\nstart stdout:\n{}\nstart stderr:\n{}",
+            path.display(),
+            tokio::fs::read_to_string(root.join("helper-start.stdout.log"))
+                .await
+                .unwrap_or_default(),
+            tokio::fs::read_to_string(root.join("helper-start.stderr.log"))
+                .await
+                .unwrap_or_default(),
         );
         sleep(Duration::from_millis(200)).await;
     }
@@ -926,6 +1055,9 @@ async fn temporal_orchestrator_live_anthropic_smoke() {
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     config.cloud.enabled = true;
+    if let Some(hands) = config.cloud.hands.as_mut() {
+        hands.default_provider = Some("local".to_string());
+    }
     config
         .cloud
         .temporal
@@ -980,4 +1112,32 @@ async fn temporal_orchestrator_live_anthropic_smoke() {
 
     let _ = server;
     let _ = dir;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual Temporal dev-server restart recovery test"]
+async fn temporal_orchestrator_recovers_after_worker_process_restart() {
+    build_temporal_helper_binary();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let server = TemporalDevServer::start(&dir);
+    server.wait_ready().await;
+    let task_queue = format!("moa-restart-{}", uuid::Uuid::new_v4());
+
+    let mut starter = spawn_temporal_helper("start", dir.path(), server.port, &task_queue, 3000);
+    let session_id = wait_for_session_id_file(dir.path()).await;
+    sleep(Duration::from_millis(500)).await;
+    let _ = starter.kill();
+    let _ = starter.wait();
+
+    let mut restarted = spawn_temporal_helper("worker", dir.path(), server.port, &task_queue, 200);
+    let session_store =
+        TursoSessionStore::new(&dir.path().join("sessions.db").display().to_string())
+            .await
+            .expect("session store");
+    wait_for_store_status(&session_store, session_id.clone(), SessionStatus::Completed).await;
+    wait_for_store_event_text(&session_store, session_id, "assistant:recover me").await;
+
+    let _ = restarted.kill();
+    let _ = restarted.wait();
 }

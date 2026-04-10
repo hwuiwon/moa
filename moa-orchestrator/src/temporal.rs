@@ -44,6 +44,7 @@ use uuid::Uuid;
 
 const DEFAULT_WORKFLOW_EXECUTION_TIMEOUT: Duration = Duration::from_secs(60 * 60 * 24);
 const DEFAULT_ACTIVITY_START_TO_CLOSE_TIMEOUT: Duration = Duration::from_secs(60 * 5);
+const DEFAULT_BRAIN_TURN_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_ACTIVITY_RETRY_INITIAL_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_ACTIVITY_RETRY_MAX_ATTEMPTS: i32 = 3;
 const DEFAULT_ACTIVITY_RETRY_BACKOFF_COEFFICIENT: f64 = 2.0;
@@ -221,7 +222,7 @@ impl SessionWorkflow {
                 .start_activity(
                     TemporalActivities::brain_turn,
                     session_id.clone(),
-                    activity_options(),
+                    brain_turn_activity_options(),
                 )
                 .await
                 .map_err(workflow_activity_error)?;
@@ -286,13 +287,29 @@ impl TemporalActivities {
     #[activity]
     async fn brain_turn(
         self: Arc<Self>,
-        _ctx: ActivityContext,
+        ctx: ActivityContext,
         session_id: SessionId,
     ) -> std::result::Result<TemporalTurnResult, ActivityError> {
         self.session_store
             .update_status(session_id.clone(), SessionStatus::Running)
             .await
             .map_err(non_retryable_activity_error)?;
+        let heartbeat_ctx = ctx.clone();
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        let heartbeat = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(2));
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => heartbeat_ctx.record_heartbeat(Vec::new()),
+                    changed = stop_rx.changed() => {
+                        if changed.is_err() || *stop_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = heartbeat_ctx.cancelled() => break,
+                }
+            }
+        });
         let pipeline = build_default_pipeline_with_tools(
             &self.config,
             self.session_store.clone(),
@@ -306,8 +323,10 @@ impl TemporalActivities {
             &pipeline,
             Some(self.tool_router.clone()),
         )
-        .await
-        .map_err(non_retryable_activity_error)?;
+        .await;
+        let _ = stop_tx.send(true);
+        let _ = heartbeat.await;
+        let turn_result = turn_result.map_err(non_retryable_activity_error)?;
 
         Ok(match turn_result {
             TurnResult::Complete => TemporalTurnResult::Complete,
@@ -960,6 +979,13 @@ fn activity_options() -> ActivityOptions {
             ..RetryPolicy::default()
         }),
         ..ActivityOptions::default()
+    }
+}
+
+fn brain_turn_activity_options() -> ActivityOptions {
+    ActivityOptions {
+        heartbeat_timeout: Some(DEFAULT_BRAIN_TURN_HEARTBEAT_TIMEOUT),
+        ..activity_options()
     }
 }
 

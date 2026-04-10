@@ -53,7 +53,7 @@ pub enum KeyAction {
     SwitchSessionTab(usize),
     /// Start the `Ctrl+O, S` session-picker chord.
     StartSessionPickerChord,
-    /// Start the `Ctrl+X, S` soft-stop chord.
+    /// Start the `Ctrl+X` leader chord.
     StartSoftStopChord,
     /// Move the session picker selection upward.
     PickerUp,
@@ -65,6 +65,66 @@ pub enum KeyAction {
     PickerBackspace,
     /// Forward a key into the session picker query.
     SessionPickerInput,
+    /// Open the command palette overlay.
+    OpenCommandPalette,
+    /// Open the memory browser.
+    OpenMemoryBrowser,
+    /// Open the settings view.
+    OpenSettings,
+    /// Accept the current prompt completion.
+    AcceptCompletion,
+    /// Clear the current screen view.
+    ClearScreen,
+    /// Move the transcript by half a page upward.
+    HalfPageUp,
+    /// Move the transcript by half a page downward.
+    HalfPageDown,
+    /// Jump to the start of the transcript.
+    ScrollHome,
+    /// Toggle observation verbosity.
+    CycleVerbosity,
+    /// Move up inside the command palette.
+    PaletteUp,
+    /// Move down inside the command palette.
+    PaletteDown,
+    /// Accept the selected command palette action.
+    PaletteSelect,
+    /// Edit the command palette query.
+    PaletteInput,
+    /// Backspace the command palette query.
+    PaletteBackspace,
+    /// Start searching inside the memory browser.
+    MemorySearch,
+    /// Backspace the memory-browser query.
+    MemorySearchBackspace,
+    /// Edit the memory-browser query.
+    MemorySearchInput,
+    /// Move up in the memory browser.
+    MemoryUp,
+    /// Move down in the memory browser.
+    MemoryDown,
+    /// Open the selected memory item.
+    MemoryOpen,
+    /// Navigate backward in memory history.
+    MemoryBack,
+    /// Navigate forward in memory history.
+    MemoryForward,
+    /// Open the selected memory page in an external editor.
+    MemoryEdit,
+    /// Delete the selected memory page.
+    MemoryDelete,
+    /// Move up in settings fields.
+    SettingsUp,
+    /// Move down in settings fields.
+    SettingsDown,
+    /// Move to the previous settings category.
+    SettingsCategoryLeft,
+    /// Move to the next settings category.
+    SettingsCategoryRight,
+    /// Apply the selected settings change.
+    SettingsApply,
+    /// Reverse the selected settings change.
+    SettingsReverse,
     /// Forward the key into the prompt widget.
     PromptInput,
     /// Ignore the key press.
@@ -85,6 +145,56 @@ pub fn map_key_event(mode: AppMode, key: KeyEvent) -> KeyAction {
             KeyCode::Down => KeyAction::PickerDown,
             KeyCode::Backspace => KeyAction::PickerBackspace,
             KeyCode::Char(_) | KeyCode::Delete => KeyAction::SessionPickerInput,
+            _ => KeyAction::Noop,
+        };
+    }
+
+    if mode == AppMode::CommandPalette {
+        return match key.code {
+            KeyCode::Esc => KeyAction::Cancel,
+            KeyCode::Enter => KeyAction::PaletteSelect,
+            KeyCode::Up => KeyAction::PaletteUp,
+            KeyCode::Down => KeyAction::PaletteDown,
+            KeyCode::Backspace => KeyAction::PaletteBackspace,
+            KeyCode::Char(_) | KeyCode::Delete => KeyAction::PaletteInput,
+            _ => KeyAction::Noop,
+        };
+    }
+
+    if mode == AppMode::MemoryBrowser {
+        return match key.code {
+            KeyCode::Esc => KeyAction::Cancel,
+            KeyCode::Char('/') => KeyAction::MemorySearch,
+            KeyCode::Enter => KeyAction::MemoryOpen,
+            KeyCode::Up => KeyAction::MemoryUp,
+            KeyCode::Down => KeyAction::MemoryDown,
+            KeyCode::Backspace => KeyAction::MemorySearchBackspace,
+            KeyCode::Char('e') | KeyCode::Char('E') => KeyAction::MemoryEdit,
+            KeyCode::Char('d') | KeyCode::Char('D') => KeyAction::MemoryDelete,
+            KeyCode::Char(_) => KeyAction::MemorySearchInput,
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => KeyAction::MemoryBack,
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => KeyAction::MemoryForward,
+            _ => KeyAction::Noop,
+        };
+    }
+
+    if mode == AppMode::Settings {
+        return match key.code {
+            KeyCode::Esc => KeyAction::Cancel,
+            KeyCode::Up => KeyAction::SettingsUp,
+            KeyCode::Down => KeyAction::SettingsDown,
+            KeyCode::Left => KeyAction::SettingsReverse,
+            KeyCode::Right => KeyAction::SettingsApply,
+            KeyCode::Char('h') | KeyCode::Char('H') => KeyAction::SettingsCategoryLeft,
+            KeyCode::Char('l') | KeyCode::Char('L') => KeyAction::SettingsCategoryRight,
+            KeyCode::Enter => KeyAction::SettingsApply,
+            _ => KeyAction::Noop,
+        };
+    }
+
+    if mode == AppMode::Help {
+        return match key.code {
+            KeyCode::Esc => KeyAction::Cancel,
             _ => KeyAction::Noop,
         };
     }
@@ -111,6 +221,11 @@ pub fn map_key_event(mode: AppMode, key: KeyEvent) -> KeyAction {
         return match key.code {
             KeyCode::Char('n') | KeyCode::Char('N') => KeyAction::NewSession,
             KeyCode::Char('o') | KeyCode::Char('O') => KeyAction::StartSessionPickerChord,
+            KeyCode::Char('p') | KeyCode::Char('P') => KeyAction::OpenCommandPalette,
+            KeyCode::Char('m') | KeyCode::Char('M') => KeyAction::OpenMemoryBrowser,
+            KeyCode::Char(',') => KeyAction::OpenSettings,
+            KeyCode::Char('l') | KeyCode::Char('L') => KeyAction::ClearScreen,
+            KeyCode::Char('u') | KeyCode::Char('U') => KeyAction::HalfPageUp,
             KeyCode::Char('q') | KeyCode::Char('Q') => KeyAction::QueuePrompt,
             KeyCode::Char('x') | KeyCode::Char('X') => KeyAction::StartSoftStopChord,
             _ => KeyAction::Noop,
@@ -142,16 +257,17 @@ pub fn map_key_event(mode: AppMode, key: KeyEvent) -> KeyAction {
     match key.code {
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => KeyAction::InsertNewline,
         KeyCode::Enter => KeyAction::Submit,
+        KeyCode::Tab => KeyAction::AcceptCompletion,
         KeyCode::Up | KeyCode::PageUp => KeyAction::ScrollUp,
         KeyCode::Down | KeyCode::PageDown => KeyAction::ScrollDown,
+        KeyCode::Home => KeyAction::ScrollHome,
         KeyCode::End => KeyAction::ScrollEnd,
+        KeyCode::Char('v') | KeyCode::Char('V') => KeyAction::CycleVerbosity,
         KeyCode::Char(_)
         | KeyCode::Backspace
         | KeyCode::Delete
-        | KeyCode::Tab
         | KeyCode::Left
-        | KeyCode::Right
-        | KeyCode::Home => KeyAction::PromptInput,
+        | KeyCode::Right => KeyAction::PromptInput,
         _ => KeyAction::Noop,
     }
 }
@@ -293,6 +409,50 @@ mod tests {
                 key(KeyCode::Char('s'), KeyModifiers::NONE)
             ),
             KeyAction::PromptInput
+        );
+    }
+
+    #[test]
+    fn command_palette_memory_and_settings_have_dedicated_maps() {
+        assert_eq!(
+            map_key_event(
+                AppMode::Idle,
+                key(KeyCode::Char('p'), KeyModifiers::CONTROL)
+            ),
+            KeyAction::OpenCommandPalette
+        );
+        assert_eq!(
+            map_key_event(
+                AppMode::Idle,
+                key(KeyCode::Char('m'), KeyModifiers::CONTROL)
+            ),
+            KeyAction::OpenMemoryBrowser
+        );
+        assert_eq!(
+            map_key_event(
+                AppMode::Idle,
+                key(KeyCode::Char(','), KeyModifiers::CONTROL)
+            ),
+            KeyAction::OpenSettings
+        );
+        assert_eq!(
+            map_key_event(
+                AppMode::MemoryBrowser,
+                key(KeyCode::Char('/'), KeyModifiers::NONE)
+            ),
+            KeyAction::MemorySearch
+        );
+        assert_eq!(
+            map_key_event(AppMode::Settings, key(KeyCode::Right, KeyModifiers::NONE)),
+            KeyAction::SettingsApply
+        );
+    }
+
+    #[test]
+    fn tab_accepts_completion_in_chat_mode() {
+        assert_eq!(
+            map_key_event(AppMode::Composing, key(KeyCode::Tab, KeyModifiers::NONE)),
+            KeyAction::AcceptCompletion
         );
     }
 }
