@@ -2,17 +2,15 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
-use moa_core::{
-    ConfidenceLevel, MemoryPath, MoaError, PageType, Result, SandboxTier, SkillMetadata, WikiPage,
-};
+use chrono::{DateTime, SecondsFormat, Utc};
+use moa_core::{ConfidenceLevel, MemoryPath, MoaError, PageType, Result, SkillMetadata, WikiPage};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use tracing::warn;
 
 const FRONTMATTER_DELIMITER: &str = "---";
 const DEFAULT_VERSION: &str = "1.0";
-const DEFAULT_ESTIMATED_TOKENS: usize = 256;
+const DEFAULT_SUCCESS_RATE: f32 = 1.0;
 const META_VERSION: &str = "moa-version";
 const META_ONE_LINER: &str = "moa-one-liner";
 const META_TAGS: &str = "moa-tags";
@@ -23,9 +21,6 @@ const META_SOURCE_SESSION: &str = "moa-source-session";
 const META_USE_COUNT: &str = "moa-use-count";
 const META_LAST_USED: &str = "moa-last-used";
 const META_SUCCESS_RATE: &str = "moa-success-rate";
-const META_SOURCE: &str = "moa-source";
-const META_BRAIN_AFFINITY: &str = "moa-brain-affinity";
-const META_SANDBOX_TIER: &str = "moa-sandbox-tier";
 const META_ESTIMATED_TOKENS: &str = "moa-estimated-tokens";
 const META_IMPROVED_FROM: &str = "moa-improved-from";
 
@@ -38,10 +33,7 @@ pub struct SkillDocument {
     pub body: String,
 }
 
-/// Parsed Agent Skill frontmatter.
-///
-/// This canonical representation follows the Agent Skills `name` + `description`
-/// model while retaining MOA-specific bookkeeping fields internally.
+/// Parsed Agent Skills frontmatter as stored on disk.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillFrontmatter {
     /// Stable skill name.
@@ -55,119 +47,178 @@ pub struct SkillFrontmatter {
     #[serde(default)]
     pub compatibility: Option<String>,
     /// Optional allowlist of tools the skill expects to use.
-    #[serde(default)]
-    pub allowed_tools: Vec<String>,
-    /// Arbitrary metadata preserved from the Agent Skills spec.
-    #[serde(default)]
-    pub metadata: HashMap<String, String>,
-    /// Semantic or dotted version string.
-    pub version: String,
-    /// Concise single-line summary.
-    pub one_liner: String,
-    /// User-defined tags.
-    #[serde(default)]
-    pub tags: Vec<String>,
-    /// Tools referenced by the skill.
-    #[serde(default)]
-    pub tools_required: Vec<String>,
-    /// Creation timestamp.
-    pub created: DateTime<Utc>,
-    /// Update timestamp.
-    pub updated: DateTime<Utc>,
-    /// Whether the skill was auto-generated.
-    #[serde(default)]
-    pub auto_generated: bool,
-    /// Source session identifier when auto-generated.
-    #[serde(default)]
-    pub source_session: Option<String>,
-    /// Number of successful or attempted uses recorded for the skill.
-    #[serde(default)]
-    pub use_count: u32,
-    /// Last time the skill was used.
-    #[serde(default)]
-    pub last_used: Option<DateTime<Utc>>,
-    /// Historical success rate between `0.0` and `1.0`.
-    #[serde(default = "default_success_rate")]
-    pub success_rate: f32,
-    /// Optional source label for imported community skills.
-    #[serde(default)]
-    pub source: Option<String>,
-    /// MOA-specific extensions.
-    #[serde(default)]
-    pub moa: SkillMoaFrontmatter,
-}
-
-/// MOA-specific Skill frontmatter extensions.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct SkillMoaFrontmatter {
-    /// Optional brain specialization hint.
-    #[serde(default)]
-    pub brain_affinity: Option<String>,
-    /// Preferred sandbox tier for the skill.
-    #[serde(default)]
-    pub sandbox_tier: Option<SandboxTier>,
-    /// Estimated token cost for the full skill body.
-    #[serde(default = "default_estimated_tokens")]
-    pub estimated_tokens: usize,
-    /// Previous version or skill lineage when self-improved.
-    #[serde(default)]
-    pub improved_from: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-struct ParsedSkillFrontmatter {
-    name: String,
-    description: String,
-    #[serde(default)]
-    license: Option<String>,
-    #[serde(default)]
-    compatibility: Option<String>,
     #[serde(
         default,
         rename = "allowed-tools",
-        deserialize_with = "deserialize_allowed_tools"
+        deserialize_with = "deserialize_allowed_tools",
+        serialize_with = "serialize_allowed_tools",
+        skip_serializing_if = "Vec::is_empty"
     )]
-    allowed_tools: Vec<String>,
-    #[serde(default)]
-    metadata: HashMap<String, String>,
+    pub allowed_tools: Vec<String>,
+    /// Arbitrary metadata preserved from the Agent Skills spec.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct RenderedSkillFrontmatter {
-    name: String,
-    description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    license: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    compatibility: Option<String>,
-    #[serde(
-        skip_serializing_if = "Vec::is_empty",
-        rename = "allowed-tools",
-        serialize_with = "serialize_allowed_tools"
-    )]
-    allowed_tools: Vec<String>,
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    metadata: HashMap<String, String>,
+impl SkillFrontmatter {
+    pub(crate) fn version(&self) -> String {
+        self.metadata_string(META_VERSION)
+            .unwrap_or_else(|| DEFAULT_VERSION.to_string())
+    }
+
+    pub(crate) fn set_version(&mut self, value: impl Into<String>) {
+        self.insert_metadata(META_VERSION, value.into());
+    }
+
+    pub(crate) fn one_liner(&self) -> String {
+        self.metadata_string(META_ONE_LINER)
+            .unwrap_or_else(|| self.description.clone())
+    }
+
+    pub(crate) fn tags(&self) -> Vec<String> {
+        metadata_csv(&self.metadata, META_TAGS)
+    }
+
+    pub(crate) fn set_tags(&mut self, tags: &[String]) {
+        self.set_metadata_csv(META_TAGS, tags);
+    }
+
+    pub(crate) fn created(&self) -> DateTime<Utc> {
+        self.metadata_timestamp(META_CREATED)
+            .unwrap_or_else(Utc::now)
+    }
+
+    pub(crate) fn set_created(&mut self, value: DateTime<Utc>) {
+        self.insert_metadata(META_CREATED, format_timestamp(value));
+    }
+
+    pub(crate) fn updated(&self) -> DateTime<Utc> {
+        self.metadata_timestamp(META_UPDATED)
+            .unwrap_or_else(|| self.created())
+    }
+
+    pub(crate) fn set_updated(&mut self, value: DateTime<Utc>) {
+        self.insert_metadata(META_UPDATED, format_timestamp(value));
+    }
+
+    pub(crate) fn auto_generated(&self) -> bool {
+        self.metadata_bool(META_AUTO_GENERATED).unwrap_or(false)
+    }
+
+    pub(crate) fn set_auto_generated(&mut self, value: bool) {
+        self.insert_metadata(META_AUTO_GENERATED, value.to_string());
+    }
+
+    pub(crate) fn set_source_session(&mut self, value: Option<String>) {
+        self.set_optional_metadata(META_SOURCE_SESSION, value);
+    }
+
+    pub(crate) fn use_count(&self) -> u32 {
+        self.metadata_u32(META_USE_COUNT).unwrap_or(0)
+    }
+
+    pub(crate) fn set_use_count(&mut self, value: u32) {
+        self.insert_metadata(META_USE_COUNT, value.to_string());
+    }
+
+    pub(crate) fn last_used(&self) -> Option<DateTime<Utc>> {
+        self.metadata_timestamp(META_LAST_USED)
+    }
+
+    pub(crate) fn set_last_used(&mut self, value: Option<DateTime<Utc>>) {
+        self.set_optional_metadata(META_LAST_USED, value.map(format_timestamp));
+    }
+
+    pub(crate) fn success_rate(&self) -> f32 {
+        self.metadata_f32(META_SUCCESS_RATE)
+            .unwrap_or(DEFAULT_SUCCESS_RATE)
+    }
+
+    pub(crate) fn set_success_rate(&mut self, value: f32) {
+        self.insert_metadata(META_SUCCESS_RATE, value.to_string());
+    }
+
+    pub(crate) fn estimated_tokens(&self, body: &str) -> usize {
+        self.metadata_usize(META_ESTIMATED_TOKENS)
+            .unwrap_or_else(|| estimate_skill_tokens(body))
+    }
+
+    pub(crate) fn set_improved_from(&mut self, value: Option<String>) {
+        self.set_optional_metadata(META_IMPROVED_FROM, value);
+    }
+
+    pub(crate) fn metadata_string(&self, key: &str) -> Option<String> {
+        self.metadata
+            .get(key)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    }
+
+    pub(crate) fn metadata_timestamp(&self, key: &str) -> Option<DateTime<Utc>> {
+        self.metadata_string(key)
+            .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
+            .map(|value| value.with_timezone(&Utc))
+    }
+
+    pub(crate) fn metadata_bool(&self, key: &str) -> Option<bool> {
+        self.metadata_string(key)
+            .and_then(|value| value.parse::<bool>().ok())
+    }
+
+    pub(crate) fn metadata_u32(&self, key: &str) -> Option<u32> {
+        self.metadata_string(key)
+            .and_then(|value| value.parse::<u32>().ok())
+    }
+
+    pub(crate) fn metadata_usize(&self, key: &str) -> Option<usize> {
+        self.metadata_string(key)
+            .and_then(|value| value.parse::<usize>().ok())
+    }
+
+    pub(crate) fn metadata_f32(&self, key: &str) -> Option<f32> {
+        self.metadata_string(key)
+            .and_then(|value| value.parse::<f32>().ok())
+    }
+
+    fn insert_metadata(&mut self, key: &str, value: String) {
+        self.metadata.insert(key.to_string(), value);
+    }
+
+    fn set_optional_metadata(&mut self, key: &str, value: Option<String>) {
+        if let Some(value) = value {
+            self.insert_metadata(key, value);
+        } else {
+            self.metadata.remove(key);
+        }
+    }
+
+    fn set_metadata_csv(&mut self, key: &str, values: &[String]) {
+        if values.is_empty() {
+            self.metadata.remove(key);
+        } else {
+            self.insert_metadata(key, values.join(", "));
+        }
+    }
 }
 
 /// Parses a `SKILL.md` document into a structured skill representation.
 pub fn parse_skill_markdown(markdown: &str) -> Result<SkillDocument> {
     let (yaml_block, body) = split_frontmatter(markdown)?;
-    let parsed = serde_yaml::from_str::<ParsedSkillFrontmatter>(yaml_block)
-        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
-    let frontmatter = canonicalize_frontmatter(parsed, body)?;
-    validate_skill_frontmatter(&frontmatter)?;
-
-    Ok(SkillDocument {
-        frontmatter,
+    let skill = SkillDocument {
+        frontmatter: serde_yaml::from_str::<SkillFrontmatter>(yaml_block)
+            .map_err(|error| MoaError::ValidationError(error.to_string()))?,
         body: body.trim_start_matches('\n').to_string(),
-    })
+    };
+    validate_skill_document(&skill)?;
+    Ok(skill)
 }
 
 /// Renders a structured skill representation back into `SKILL.md` markdown.
 pub fn render_skill_markdown(skill: &SkillDocument) -> Result<String> {
-    validate_skill_frontmatter(&skill.frontmatter)?;
-    let yaml = serde_yaml::to_string(&rendered_frontmatter(&skill.frontmatter))
+    validate_skill_document(skill)?;
+    let yaml = serde_yaml::to_string(&skill.frontmatter)
         .map_err(|error| MoaError::SerializationError(error.to_string()))?;
     Ok(format!(
         "{delimiter}\n{yaml}{delimiter}\n\n{body}",
@@ -178,22 +229,21 @@ pub fn render_skill_markdown(skill: &SkillDocument) -> Result<String> {
 
 /// Converts a parsed wiki page into a skill document.
 pub fn skill_from_wiki_page(page: &WikiPage) -> Result<SkillDocument> {
-    let parsed =
-        serde_json::from_value::<ParsedSkillFrontmatter>(serde_json::to_value(&page.metadata)?)
-            .map_err(|error| MoaError::ValidationError(error.to_string()))?;
-    let mut frontmatter = canonicalize_frontmatter(parsed, &page.content)?;
-    frontmatter.created = page.created;
-    frontmatter.updated = page.updated;
-    frontmatter.auto_generated = page.auto_generated;
-    if !page.tags.is_empty() {
-        frontmatter.tags = page.tags.clone();
+    let metadata_json = serde_json::to_value(&page.metadata)?;
+    let mut frontmatter = serde_json::from_value::<SkillFrontmatter>(metadata_json)
+        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+    frontmatter.set_created(page.created);
+    frontmatter.set_updated(page.updated);
+    frontmatter.set_auto_generated(page.auto_generated);
+    if !page.tags.is_empty() && frontmatter.tags().is_empty() {
+        frontmatter.set_tags(&page.tags);
     }
-    validate_skill_frontmatter(&frontmatter)?;
-
-    Ok(SkillDocument {
+    let skill = SkillDocument {
         frontmatter,
         body: page.content.clone(),
-    })
+    };
+    validate_skill_document(&skill)?;
+    Ok(skill)
 }
 
 /// Builds pipeline metadata for a parsed skill document.
@@ -201,14 +251,13 @@ pub fn skill_metadata_from_document(path: MemoryPath, skill: &SkillDocument) -> 
     SkillMetadata {
         path,
         name: skill.frontmatter.name.clone(),
-        version: skill.frontmatter.version.clone(),
-        one_liner: skill.frontmatter.one_liner.clone(),
-        tags: skill.frontmatter.tags.clone(),
-        tools_required: skill.frontmatter.tools_required.clone(),
-        estimated_tokens: skill.frontmatter.moa.estimated_tokens,
-        use_count: skill.frontmatter.use_count,
-        success_rate: skill.frontmatter.success_rate,
-        auto_generated: skill.frontmatter.auto_generated,
+        description: skill.frontmatter.description.clone(),
+        tags: skill.frontmatter.tags(),
+        allowed_tools: skill.frontmatter.allowed_tools.clone(),
+        estimated_tokens: skill.frontmatter.estimated_tokens(&skill.body),
+        use_count: skill.frontmatter.use_count(),
+        success_rate: skill.frontmatter.success_rate(),
+        auto_generated: skill.frontmatter.auto_generated(),
     }
 }
 
@@ -220,29 +269,28 @@ pub fn skill_metadata_from_page(path: MemoryPath, page: &WikiPage) -> Result<Ski
 
 /// Converts a structured skill document into a shared wiki page.
 pub fn wiki_page_from_skill(skill: &SkillDocument, path: Option<MemoryPath>) -> Result<WikiPage> {
-    validate_skill_frontmatter(&skill.frontmatter)?;
-    let metadata = serde_json::from_value::<HashMap<String, Value>>(
-        serde_json::to_value(rendered_frontmatter(&skill.frontmatter))
-            .map_err(|error| MoaError::SerializationError(error.to_string()))?,
-    )?;
-    let reference_count = u64::from(skill.frontmatter.use_count);
+    validate_skill_document(skill)?;
+    let metadata = serde_json::from_value::<HashMap<String, Value>>(serde_json::to_value(
+        &skill.frontmatter,
+    )?)?;
+    let reference_count = u64::from(skill.frontmatter.use_count());
     let last_referenced = skill
         .frontmatter
-        .last_used
-        .unwrap_or(skill.frontmatter.updated);
+        .last_used()
+        .unwrap_or_else(|| skill.frontmatter.updated());
 
     Ok(WikiPage {
         path,
         title: humanize_skill_name(&skill.frontmatter.name),
         page_type: PageType::Skill,
         content: skill.body.clone(),
-        created: skill.frontmatter.created,
-        updated: skill.frontmatter.updated,
-        confidence: confidence_for_skill(skill.frontmatter.success_rate),
+        created: skill.frontmatter.created(),
+        updated: skill.frontmatter.updated(),
+        confidence: confidence_for_skill(skill.frontmatter.success_rate()),
         related: Vec::new(),
         sources: Vec::new(),
-        tags: skill.frontmatter.tags.clone(),
-        auto_generated: skill.frontmatter.auto_generated,
+        tags: skill.frontmatter.tags(),
+        auto_generated: skill.frontmatter.auto_generated(),
         last_referenced,
         reference_count,
         metadata,
@@ -275,14 +323,6 @@ pub fn slugify_skill_name(skill_name: &str) -> String {
     slug.trim_matches('-').to_string()
 }
 
-fn default_success_rate() -> f32 {
-    1.0
-}
-
-fn default_estimated_tokens() -> usize {
-    DEFAULT_ESTIMATED_TOKENS
-}
-
 fn split_frontmatter(markdown: &str) -> Result<(&str, &str)> {
     if !markdown.starts_with(FRONTMATTER_DELIMITER) {
         return Err(MoaError::ValidationError(
@@ -304,10 +344,10 @@ fn split_frontmatter(markdown: &str) -> Result<(&str, &str)> {
     Ok((yaml_block, body))
 }
 
-fn validate_skill_frontmatter(frontmatter: &SkillFrontmatter) -> Result<()> {
+fn validate_skill_document(skill: &SkillDocument) -> Result<()> {
     for (field_name, value) in [
-        ("name", frontmatter.name.trim()),
-        ("description", frontmatter.description.trim()),
+        ("name", skill.frontmatter.name.trim()),
+        ("description", skill.frontmatter.description.trim()),
     ] {
         if value.is_empty() {
             return Err(MoaError::ValidationError(format!(
@@ -316,32 +356,32 @@ fn validate_skill_frontmatter(frontmatter: &SkillFrontmatter) -> Result<()> {
         }
     }
 
-    if !is_valid_skill_name(&frontmatter.name) {
+    if !is_valid_skill_name(&skill.frontmatter.name) {
         warn!(
-            skill = %frontmatter.name,
+            skill = %skill.frontmatter.name,
             "skill name does not follow the recommended Agent Skills slug format"
         );
     }
 
-    if frontmatter.version.trim().is_empty() {
+    if skill.frontmatter.version().trim().is_empty() {
         return Err(MoaError::ValidationError(
             "skill version metadata must not be empty".to_string(),
         ));
     }
 
-    if frontmatter.one_liner.trim().is_empty() {
+    if skill.frontmatter.one_liner().trim().is_empty() {
         return Err(MoaError::ValidationError(
             "skill summary metadata must not be empty".to_string(),
         ));
     }
 
-    if frontmatter.moa.estimated_tokens == 0 {
+    if skill.frontmatter.estimated_tokens(&skill.body) == 0 {
         return Err(MoaError::ValidationError(
-            "skill frontmatter `moa.estimated_tokens` must be greater than zero".to_string(),
+            "skill frontmatter `moa-estimated-tokens` must be greater than zero".to_string(),
         ));
     }
 
-    if !(0.0..=1.0).contains(&frontmatter.success_rate) {
+    if !(0.0..=1.0).contains(&skill.frontmatter.success_rate()) {
         return Err(MoaError::ValidationError(
             "skill `success_rate` must be between 0.0 and 1.0".to_string(),
         ));
@@ -350,210 +390,24 @@ fn validate_skill_frontmatter(frontmatter: &SkillFrontmatter) -> Result<()> {
     Ok(())
 }
 
-fn canonicalize_frontmatter(
-    parsed: ParsedSkillFrontmatter,
-    body: &str,
-) -> Result<SkillFrontmatter> {
-    let mut metadata = parsed.metadata;
-    let now = Utc::now();
-    let created = take_timestamp(&mut metadata, META_CREATED).unwrap_or(now);
-    let updated = take_timestamp(&mut metadata, META_UPDATED).unwrap_or(created);
-    let allowed_tools = parsed.allowed_tools;
-    let tools_required = allowed_tools.clone();
-    let estimated_tokens = take_usize(&mut metadata, META_ESTIMATED_TOKENS)
-        .unwrap_or_else(|| estimate_skill_tokens(body));
-    let brain_affinity = take_string(&mut metadata, META_BRAIN_AFFINITY);
-    let sandbox_tier = take_sandbox_tier(&mut metadata, META_SANDBOX_TIER);
-    let improved_from = take_string(&mut metadata, META_IMPROVED_FROM);
-    let version =
-        take_string(&mut metadata, META_VERSION).unwrap_or_else(|| DEFAULT_VERSION.to_string());
-    let one_liner =
-        take_string(&mut metadata, META_ONE_LINER).unwrap_or_else(|| parsed.description.clone());
-    let tags = take_csv(&mut metadata, META_TAGS);
-    let auto_generated = take_bool(&mut metadata, META_AUTO_GENERATED).unwrap_or(false);
-    let source_session = take_string(&mut metadata, META_SOURCE_SESSION);
-    let use_count = take_u32(&mut metadata, META_USE_COUNT).unwrap_or(0);
-    let last_used = take_timestamp(&mut metadata, META_LAST_USED);
-    let success_rate =
-        take_f32(&mut metadata, META_SUCCESS_RATE).unwrap_or_else(default_success_rate);
-    let source = take_string(&mut metadata, META_SOURCE);
-
-    Ok(SkillFrontmatter {
-        name: parsed.name,
-        description: parsed.description.clone(),
-        license: parsed.license,
-        compatibility: parsed.compatibility,
-        allowed_tools,
-        metadata,
-        version,
-        one_liner,
-        tags,
-        tools_required,
-        created,
-        updated,
-        auto_generated,
-        source_session,
-        use_count,
-        last_used,
-        success_rate,
-        source,
-        moa: SkillMoaFrontmatter {
-            brain_affinity,
-            sandbox_tier,
-            estimated_tokens,
-            improved_from,
-        },
-    })
-}
-
-fn rendered_frontmatter(frontmatter: &SkillFrontmatter) -> RenderedSkillFrontmatter {
-    let mut metadata = frontmatter.metadata.clone();
-    insert_metadata(&mut metadata, META_VERSION, frontmatter.version.clone());
-    insert_metadata(&mut metadata, META_ONE_LINER, frontmatter.one_liner.clone());
-    insert_metadata(
-        &mut metadata,
-        META_CREATED,
-        frontmatter.created.to_rfc3339(),
-    );
-    insert_metadata(
-        &mut metadata,
-        META_UPDATED,
-        frontmatter.updated.to_rfc3339(),
-    );
-    insert_metadata(
-        &mut metadata,
-        META_AUTO_GENERATED,
-        frontmatter.auto_generated.to_string(),
-    );
-    insert_optional_metadata(
-        &mut metadata,
-        META_SOURCE_SESSION,
-        frontmatter.source_session.clone(),
-    );
-    insert_metadata(
-        &mut metadata,
-        META_USE_COUNT,
-        frontmatter.use_count.to_string(),
-    );
-    insert_optional_metadata(
-        &mut metadata,
-        META_LAST_USED,
-        frontmatter.last_used.map(|value| value.to_rfc3339()),
-    );
-    insert_metadata(
-        &mut metadata,
-        META_SUCCESS_RATE,
-        frontmatter.success_rate.to_string(),
-    );
-    insert_optional_metadata(&mut metadata, META_SOURCE, frontmatter.source.clone());
-    if !frontmatter.tags.is_empty() {
-        insert_metadata(&mut metadata, META_TAGS, frontmatter.tags.join(", "));
-    }
-    insert_optional_metadata(
-        &mut metadata,
-        META_BRAIN_AFFINITY,
-        frontmatter.moa.brain_affinity.clone(),
-    );
-    insert_optional_metadata(
-        &mut metadata,
-        META_SANDBOX_TIER,
-        frontmatter
-            .moa
-            .sandbox_tier
-            .as_ref()
-            .map(|tier| format!("{tier:?}").to_ascii_lowercase()),
-    );
-    insert_metadata(
-        &mut metadata,
-        META_ESTIMATED_TOKENS,
-        frontmatter.moa.estimated_tokens.to_string(),
-    );
-    insert_optional_metadata(
-        &mut metadata,
-        META_IMPROVED_FROM,
-        frontmatter.moa.improved_from.clone(),
-    );
-
-    let allowed_tools = if frontmatter.allowed_tools.is_empty() {
-        frontmatter.tools_required.clone()
-    } else {
-        frontmatter.allowed_tools.clone()
-    };
-
-    RenderedSkillFrontmatter {
-        name: frontmatter.name.clone(),
-        description: frontmatter.description.clone(),
-        license: frontmatter.license.clone(),
-        compatibility: frontmatter.compatibility.clone(),
-        allowed_tools,
-        metadata,
-    }
-}
-
 fn estimate_skill_tokens(body: &str) -> usize {
     body.split_whitespace().count().max(1)
 }
 
-fn insert_metadata(metadata: &mut HashMap<String, String>, key: &str, value: String) {
-    metadata.insert(key.to_string(), value);
+fn format_timestamp(value: DateTime<Utc>) -> String {
+    value.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-fn insert_optional_metadata(
-    metadata: &mut HashMap<String, String>,
-    key: &str,
-    value: Option<String>,
-) {
-    if let Some(value) = value {
-        insert_metadata(metadata, key, value);
-    }
-}
-
-fn take_string(metadata: &mut HashMap<String, String>, key: &str) -> Option<String> {
+fn metadata_csv(metadata: &HashMap<String, String>, key: &str) -> Vec<String> {
     metadata
-        .remove(key)
-        .filter(|value| !value.trim().is_empty())
-}
-
-fn take_csv(metadata: &mut HashMap<String, String>, key: &str) -> Vec<String> {
-    take_string(metadata, key)
+        .get(key)
+        .map(String::as_str)
         .unwrap_or_default()
         .split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
-}
-
-fn take_timestamp(metadata: &mut HashMap<String, String>, key: &str) -> Option<DateTime<Utc>> {
-    take_string(metadata, key)
-        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
-        .map(|value| value.with_timezone(&Utc))
-}
-
-fn take_bool(metadata: &mut HashMap<String, String>, key: &str) -> Option<bool> {
-    take_string(metadata, key).and_then(|value| value.parse::<bool>().ok())
-}
-
-fn take_u32(metadata: &mut HashMap<String, String>, key: &str) -> Option<u32> {
-    take_string(metadata, key).and_then(|value| value.parse::<u32>().ok())
-}
-
-fn take_usize(metadata: &mut HashMap<String, String>, key: &str) -> Option<usize> {
-    take_string(metadata, key).and_then(|value| value.parse::<usize>().ok())
-}
-
-fn take_f32(metadata: &mut HashMap<String, String>, key: &str) -> Option<f32> {
-    take_string(metadata, key).and_then(|value| value.parse::<f32>().ok())
-}
-
-fn take_sandbox_tier(metadata: &mut HashMap<String, String>, key: &str) -> Option<SandboxTier> {
-    take_string(metadata, key).and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
-        "none" => Some(SandboxTier::None),
-        "container" => Some(SandboxTier::Container),
-        "microvm" => Some(SandboxTier::MicroVM),
-        "local" => Some(SandboxTier::Local),
-        _ => None,
-    })
 }
 
 fn is_valid_skill_name(name: &str) -> bool {
@@ -572,26 +426,13 @@ fn deserialize_allowed_tools<'de, D>(deserializer: D) -> std::result::Result<Vec
 where
     D: Deserializer<'de>,
 {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum AllowedTools {
-        String(String),
-        Sequence(Vec<String>),
-    }
-
-    Ok(match AllowedTools::deserialize(deserializer)? {
-        AllowedTools::String(value) => value
-            .split_whitespace()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-        AllowedTools::Sequence(values) => values
-            .into_iter()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .collect(),
-    })
+    let value = String::deserialize(deserializer)?;
+    Ok(value
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
 }
 
 fn serialize_allowed_tools<S>(
@@ -672,12 +513,15 @@ Run the deploy flow.
 
         assert_eq!(skill.frontmatter.name, "deploy-to-fly");
         assert_eq!(
-            skill.frontmatter.one_liner,
+            skill.frontmatter.one_liner(),
             "Fly.io deploy workflow with health checks"
         );
-        assert_eq!(skill.frontmatter.tags, vec!["deployment", "fly", "devops"]);
-        assert_eq!(skill.frontmatter.tools_required, vec!["bash", "file_read"]);
-        assert_eq!(skill.frontmatter.moa.estimated_tokens, 1200);
+        assert_eq!(
+            skill.frontmatter.tags(),
+            vec!["deployment", "fly", "devops"]
+        );
+        assert_eq!(skill.frontmatter.allowed_tools, vec!["bash", "file_read"]);
+        assert_eq!(skill.frontmatter.estimated_tokens(&skill.body), 1200);
     }
 
     #[test]
@@ -740,10 +584,13 @@ description: "Minimal Agent Skills document"
 "#;
         let skill = parse_skill_markdown(minimal).unwrap();
 
-        assert_eq!(skill.frontmatter.version, "1.0");
-        assert_eq!(skill.frontmatter.one_liner, "Minimal Agent Skills document");
-        assert!(skill.frontmatter.tags.is_empty());
+        assert_eq!(skill.frontmatter.version(), "1.0");
+        assert_eq!(
+            skill.frontmatter.one_liner(),
+            "Minimal Agent Skills document"
+        );
+        assert!(skill.frontmatter.tags().is_empty());
         assert!(skill.frontmatter.allowed_tools.is_empty());
-        assert!(skill.frontmatter.moa.estimated_tokens > 0);
+        assert!(skill.frontmatter.estimated_tokens(&skill.body) > 0);
     }
 }

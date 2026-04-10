@@ -114,11 +114,11 @@ fn find_similar_skill<'a>(
 
 fn similarity_score(summary_tokens: &HashSet<String>, skill: &SkillMetadata) -> f32 {
     let mut skill_tokens = tokenize(&skill.name);
-    skill_tokens.extend(tokenize(&skill.one_liner));
+    skill_tokens.extend(tokenize(&skill.description));
     for tag in &skill.tags {
         skill_tokens.extend(tokenize(tag));
     }
-    for tool in &skill.tools_required {
+    for tool in &skill.allowed_tools {
         skill_tokens.extend(tokenize(tool));
     }
 
@@ -140,11 +140,13 @@ fn tokenize(text: &str) -> HashSet<String> {
 
 fn normalize_new_skill(session: &SessionMeta, skill: &mut SkillDocument) {
     let now = Utc::now();
-    skill.frontmatter.auto_generated = true;
-    skill.frontmatter.source_session = Some(session.id.to_string());
-    skill.frontmatter.updated = now;
+    skill.frontmatter.set_auto_generated(true);
+    skill
+        .frontmatter
+        .set_source_session(Some(session.id.to_string()));
+    skill.frontmatter.set_updated(now);
     record_successful_use(skill, now);
-    if skill.frontmatter.use_count == 0 {
-        skill.frontmatter.use_count = 1;
+    if skill.frontmatter.use_count() == 0 {
+        skill.frontmatter.set_use_count(1);
     }
 }

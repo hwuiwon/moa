@@ -1062,6 +1062,21 @@ pub struct ApprovalRequest {
     pub risk_level: RiskLevel,
 }
 
+/// Normalized policy-facing description of one tool invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolPolicyInput {
+    /// Tool name being invoked.
+    pub tool_name: String,
+    /// Normalized string used for rule matching.
+    pub normalized_input: String,
+    /// Concise human-readable input summary.
+    pub input_summary: String,
+    /// Risk level assigned by the tool definition.
+    pub risk_level: RiskLevel,
+    /// Default action when no config override or persisted rule matches.
+    pub default_action: PolicyAction,
+}
+
 /// Human-readable approval field shown in local UI surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalField {
@@ -1409,14 +1424,12 @@ pub struct SkillMetadata {
     pub path: MemoryPath,
     /// Stable skill name from `SKILL.md`.
     pub name: String,
-    /// Version string for the skill.
-    pub version: String,
-    /// Short single-line summary used in Stage 4.
-    pub one_liner: String,
+    /// Longer description from the Agent Skills frontmatter.
+    pub description: String,
     /// User-defined tags.
     pub tags: Vec<String>,
     /// Tools referenced by the skill.
-    pub tools_required: Vec<String>,
+    pub allowed_tools: Vec<String>,
     /// Estimated token cost for the full skill body.
     pub estimated_tokens: usize,
     /// Historical usage count.

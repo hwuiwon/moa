@@ -47,12 +47,22 @@ pub async fn maybe_improve_skill(
     }
 
     let mut improved = parse_skill_markdown(updated_text)?;
-    improved.frontmatter.created = current.frontmatter.created;
-    improved.frontmatter.updated = now;
-    improved.frontmatter.auto_generated = current.frontmatter.auto_generated;
-    improved.frontmatter.source_session = Some(session.id.to_string());
-    improved.frontmatter.moa.improved_from = Some(current.frontmatter.version.clone());
-    improved.frontmatter.version = bump_version(&current.frontmatter.version);
+    improved
+        .frontmatter
+        .set_created(current.frontmatter.created());
+    improved.frontmatter.set_updated(now);
+    improved
+        .frontmatter
+        .set_auto_generated(current.frontmatter.auto_generated());
+    improved
+        .frontmatter
+        .set_source_session(Some(session.id.to_string()));
+    improved
+        .frontmatter
+        .set_improved_from(Some(current.frontmatter.version()));
+    improved
+        .frontmatter
+        .set_version(bump_version(&current.frontmatter.version()));
     record_successful_use_with_baseline(&mut improved, &current, now);
 
     let updated_page = wiki_page_from_skill(&improved, Some(existing.path.clone()))?;
@@ -78,16 +88,17 @@ pub(crate) fn normalize_llm_markdown(text: &str) -> &str {
 }
 
 pub(crate) fn record_successful_use(skill: &mut SkillDocument, now: chrono::DateTime<Utc>) {
-    let previous_uses = skill.frontmatter.use_count;
-    let previous_success_rate = skill.frontmatter.success_rate;
-    skill.frontmatter.use_count = previous_uses.saturating_add(1);
-    skill.frontmatter.success_rate = blended_success_rate(
+    let previous_uses = skill.frontmatter.use_count();
+    let previous_success_rate = skill.frontmatter.success_rate();
+    let next_uses = previous_uses.saturating_add(1);
+    skill.frontmatter.set_use_count(next_uses);
+    skill.frontmatter.set_success_rate(blended_success_rate(
         previous_uses,
         previous_success_rate,
-        skill.frontmatter.use_count,
-    );
-    skill.frontmatter.last_used = Some(now);
-    skill.frontmatter.updated = now;
+        next_uses,
+    ));
+    skill.frontmatter.set_last_used(Some(now));
+    skill.frontmatter.set_updated(now);
 }
 
 pub(crate) fn record_successful_use_with_baseline(
@@ -95,16 +106,18 @@ pub(crate) fn record_successful_use_with_baseline(
     previous_skill: &SkillDocument,
     now: chrono::DateTime<Utc>,
 ) {
-    let previous_uses = previous_skill.frontmatter.use_count;
+    let previous_uses = previous_skill.frontmatter.use_count();
     let next_uses = previous_uses.saturating_add(1);
-    next_skill.frontmatter.use_count = next_uses;
-    next_skill.frontmatter.last_used = Some(now);
-    next_skill.frontmatter.success_rate = blended_success_rate(
-        previous_uses,
-        previous_skill.frontmatter.success_rate,
-        next_uses,
-    );
-    next_skill.frontmatter.updated = now;
+    next_skill.frontmatter.set_use_count(next_uses);
+    next_skill.frontmatter.set_last_used(Some(now));
+    next_skill
+        .frontmatter
+        .set_success_rate(blended_success_rate(
+            previous_uses,
+            previous_skill.frontmatter.success_rate(),
+            next_uses,
+        ));
+    next_skill.frontmatter.set_updated(now);
 }
 
 pub(crate) fn bump_version(version: &str) -> String {

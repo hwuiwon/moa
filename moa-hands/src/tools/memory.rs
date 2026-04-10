@@ -7,7 +7,10 @@ use chrono::Utc;
 use moa_core::{MemoryPath, MemoryScope, MoaError, PageType, Result, ToolOutput, WikiPage};
 use serde::Deserialize;
 
-use crate::router::{BuiltInTool, ToolContext};
+use crate::router::{
+    BuiltInTool, ToolContext, ToolDiffStrategy, ToolInputShape, ToolPolicySpec, read_tool_policy,
+    write_tool_policy,
+};
 
 /// Built-in memory read tool.
 pub struct MemoryReadTool;
@@ -33,8 +36,8 @@ impl BuiltInTool for MemoryReadTool {
         })
     }
 
-    fn risk_level(&self) -> moa_core::RiskLevel {
-        moa_core::RiskLevel::Low
+    fn policy_spec(&self) -> ToolPolicySpec {
+        read_tool_policy(ToolInputShape::Path)
     }
 
     async fn execute(
@@ -88,8 +91,8 @@ impl BuiltInTool for MemorySearchTool {
         })
     }
 
-    fn risk_level(&self) -> moa_core::RiskLevel {
-        moa_core::RiskLevel::Low
+    fn policy_spec(&self) -> ToolPolicySpec {
+        read_tool_policy(ToolInputShape::Query)
     }
 
     async fn execute(
@@ -180,12 +183,8 @@ impl BuiltInTool for MemoryWriteTool {
         })
     }
 
-    fn risk_level(&self) -> moa_core::RiskLevel {
-        moa_core::RiskLevel::Medium
-    }
-
-    fn requires_approval(&self) -> bool {
-        true
+    fn policy_spec(&self) -> ToolPolicySpec {
+        write_tool_policy(ToolInputShape::Path, ToolDiffStrategy::None)
     }
 
     async fn execute(

@@ -114,7 +114,7 @@ fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
     
     // Tier 1: Metadata only (~100 tokens per skill)
     let skill_index: Vec<String> = skills.iter().map(|s| {
-        format!("- {}: {} [tags: {}]", s.name, s.one_liner, s.tags.join(", "))
+        format!("- {}: {} [tags: {}]", s.name, s.description, s.tags.join(", "))
     }).collect();
     
     ctx.append_system(format!(

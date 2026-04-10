@@ -2,26 +2,88 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
-    ApprovalRule, HandHandle, HandProvider, HandResources, HandSpec, MemoryStore, MoaConfig,
-    MoaError, PolicyAction, Result, RiskLevel, SandboxTier, SessionMeta, ToolInvocation,
-    ToolOutput, UserId,
+    ApprovalField, ApprovalFileDiff, ApprovalRule, HandHandle, HandProvider, HandResources,
+    HandSpec, MemoryStore, MoaConfig, MoaError, PolicyAction, Result, RiskLevel, SandboxTier,
+    SessionMeta, ToolInvocation, ToolOutput, ToolPolicyInput, UserId,
 };
 use moa_security::{ApprovalRuleStore, PolicyCheck, ToolPolicies, ToolPolicyContext};
 use serde_json::{Value, json};
+use tokio::fs;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::local::LocalHandProvider;
+use crate::tools::file_read::resolve_sandbox_path;
 use crate::tools::{memory, stub};
 
 const DEFAULT_PROVIDER_NAME: &str = "local";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[derive(Debug, Clone, Copy)]
+pub enum ToolInputShape {
+    Command,
+    Path,
+    Pattern,
+    Query,
+    Url,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ToolDiffStrategy {
+    None,
+    FileWrite,
+}
+
+/// Static policy and approval metadata for one registered tool.
+#[derive(Debug, Clone)]
+pub struct ToolPolicySpec {
+    /// Risk level shown to the user for this tool.
+    pub risk_level: RiskLevel,
+    /// Default action when no config override or approval rule matches.
+    pub default_action: PolicyAction,
+    /// Input shape used for normalization and approval summaries.
+    pub input_shape: ToolInputShape,
+    /// Diff strategy used for approval previews.
+    pub diff_strategy: ToolDiffStrategy,
+}
+
+pub(crate) fn read_tool_policy(input_shape: ToolInputShape) -> ToolPolicySpec {
+    ToolPolicySpec {
+        risk_level: RiskLevel::Low,
+        default_action: PolicyAction::Allow,
+        input_shape,
+        diff_strategy: ToolDiffStrategy::None,
+    }
+}
+
+pub(crate) fn write_tool_policy(
+    input_shape: ToolInputShape,
+    diff_strategy: ToolDiffStrategy,
+) -> ToolPolicySpec {
+    ToolPolicySpec {
+        risk_level: RiskLevel::Medium,
+        default_action: PolicyAction::RequireApproval,
+        input_shape,
+        diff_strategy,
+    }
+}
+
+pub(crate) fn execute_tool_policy(input_shape: ToolInputShape) -> ToolPolicySpec {
+    ToolPolicySpec {
+        risk_level: RiskLevel::High,
+        default_action: PolicyAction::RequireApproval,
+        input_shape,
+        diff_strategy: ToolDiffStrategy::None,
+    }
+}
 
 /// Execution context passed to built-in tools.
 pub struct ToolContext<'a> {
@@ -43,16 +105,26 @@ pub trait BuiltInTool: Send + Sync {
     /// Returns the JSON schema for tool parameters.
     fn input_schema(&self) -> Value;
 
-    /// Returns the default risk level for the tool.
-    fn risk_level(&self) -> RiskLevel;
-
-    /// Returns whether the tool should require approval by default.
-    fn requires_approval(&self) -> bool {
-        false
-    }
+    /// Returns the policy and approval metadata for the tool.
+    fn policy_spec(&self) -> ToolPolicySpec;
 
     /// Executes the built-in tool.
     async fn execute(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<ToolOutput>;
+}
+
+/// Prepared metadata for a concrete tool invocation.
+#[derive(Debug, Clone)]
+pub struct PreparedToolInvocation {
+    /// Normalized policy-facing description of the invocation.
+    pub policy_input: ToolPolicyInput,
+    /// Result of evaluating the invocation against the active policies.
+    pub policy: PolicyCheck,
+    /// Suggested rule pattern for "Always Allow".
+    pub always_allow_pattern: String,
+    /// Structured approval fields for the local UI.
+    pub approval_fields: Vec<ApprovalField>,
+    /// Optional inline file diffs for the local UI.
+    pub approval_diffs: Vec<ApprovalFileDiff>,
 }
 
 /// Tool execution routing target.
@@ -75,10 +147,8 @@ pub struct ToolDefinition {
     pub schema: Value,
     /// Execution target.
     pub execution: ToolExecution,
-    /// Default risk level.
-    pub risk_level: RiskLevel,
-    /// Whether approval is required by default.
-    pub requires_approval: bool,
+    /// Policy and approval metadata owned by the tool definition.
+    policy: ToolPolicySpec,
 }
 
 impl ToolDefinition {
@@ -125,8 +195,7 @@ impl ToolRegistry {
                 "required": ["cmd"],
                 "additionalProperties": false
             }),
-            RiskLevel::High,
-            true,
+            execute_tool_policy(ToolInputShape::Command),
         );
         registry.register_hand(
             "file_read",
@@ -139,8 +208,7 @@ impl ToolRegistry {
                 "required": ["path"],
                 "additionalProperties": false
             }),
-            RiskLevel::Low,
-            false,
+            read_tool_policy(ToolInputShape::Path),
         );
         registry.register_hand(
             "file_write",
@@ -154,8 +222,7 @@ impl ToolRegistry {
                 "required": ["path", "content"],
                 "additionalProperties": false
             }),
-            RiskLevel::Medium,
-            true,
+            write_tool_policy(ToolInputShape::Path, ToolDiffStrategy::FileWrite),
         );
         registry.register_hand(
             "file_search",
@@ -168,8 +235,7 @@ impl ToolRegistry {
                 "required": ["pattern"],
                 "additionalProperties": false
             }),
-            RiskLevel::Low,
-            false,
+            read_tool_policy(ToolInputShape::Pattern),
         );
         registry.register_builtin(Arc::new(stub::StubTool::new(
             "web_search",
@@ -198,6 +264,7 @@ impl ToolRegistry {
     /// Registers a built-in tool.
     pub fn register_builtin(&mut self, tool: Arc<dyn BuiltInTool>) {
         let name = tool.name().to_string();
+        let policy = tool.policy_spec();
         self.tools.insert(
             name.clone(),
             ToolDefinition {
@@ -205,8 +272,7 @@ impl ToolRegistry {
                 description: tool.description().to_string(),
                 schema: tool.input_schema(),
                 execution: ToolExecution::BuiltIn(tool.clone()),
-                risk_level: tool.risk_level(),
-                requires_approval: tool.requires_approval(),
+                policy,
             },
         );
     }
@@ -217,8 +283,7 @@ impl ToolRegistry {
         name: &str,
         description: &str,
         schema: Value,
-        risk_level: RiskLevel,
-        requires_approval: bool,
+        policy: ToolPolicySpec,
     ) {
         self.tools.insert(
             name.to_string(),
@@ -230,8 +295,7 @@ impl ToolRegistry {
                     provider: DEFAULT_PROVIDER_NAME.to_string(),
                     tier: SandboxTier::Local,
                 },
-                risk_level,
-                requires_approval,
+                policy,
             },
         );
     }
@@ -265,6 +329,7 @@ pub struct ToolRouter {
     active_hands: RwLock<HashMap<String, HandHandle>>,
     policies: ToolPolicies,
     rule_store: Option<Arc<dyn ApprovalRuleStore>>,
+    sandbox_root: Option<PathBuf>,
 }
 
 impl ToolRouter {
@@ -281,6 +346,7 @@ impl ToolRouter {
             active_hands: RwLock::new(HashMap::new()),
             policies: ToolPolicies::default(),
             rule_store: None,
+            sandbox_root: None,
         }
     }
 
@@ -297,11 +363,10 @@ impl ToolRouter {
         let mut providers = HashMap::new();
         providers.insert(DEFAULT_PROVIDER_NAME.to_string(), provider);
 
-        Ok(Self::new(
-            ToolRegistry::default_local(),
-            memory_store,
-            providers,
-        ))
+        Ok(Self {
+            sandbox_root: Some(sandbox_root.as_ref().to_path_buf()),
+            ..Self::new(ToolRegistry::default_local(), memory_store, providers)
+        })
     }
 
     /// Creates a local router from the loaded MOA config.
@@ -338,6 +403,22 @@ impl ToolRouter {
         session: &SessionMeta,
         invocation: &ToolInvocation,
     ) -> Result<PolicyCheck> {
+        Ok(self.prepare_invocation(session, invocation).await?.policy)
+    }
+
+    /// Prepares a tool invocation for policy evaluation and approval rendering.
+    pub async fn prepare_invocation(
+        &self,
+        session: &SessionMeta,
+        invocation: &ToolInvocation,
+    ) -> Result<PreparedToolInvocation> {
+        let tool_definition = self
+            .registry
+            .get(&invocation.name)
+            .ok_or_else(|| MoaError::ToolError(format!("unknown tool: {}", invocation.name)))?;
+        let policy_input = self
+            .describe_invocation(tool_definition, invocation)
+            .await?;
         let rules = if let Some(rule_store) = &self.rule_store {
             rule_store
                 .list_approval_rules(&session.workspace_id)
@@ -345,13 +426,31 @@ impl ToolRouter {
         } else {
             Vec::new()
         };
-
-        self.policies.check(
-            &invocation.name,
-            &invocation.input,
+        let policy = self.policies.check(
+            &policy_input,
             &ToolPolicyContext::from_session(session),
             &rules,
-        )
+        )?;
+
+        Ok(PreparedToolInvocation {
+            always_allow_pattern: approval_pattern_for(
+                tool_definition.policy.input_shape,
+                &policy_input.normalized_input,
+            ),
+            approval_fields: approval_fields_for(
+                self.sandbox_root.as_deref(),
+                tool_definition.policy.input_shape,
+                invocation,
+            ),
+            approval_diffs: approval_diffs_for(
+                self.sandbox_root.as_deref(),
+                tool_definition.policy.diff_strategy,
+                invocation,
+            )
+            .await?,
+            policy_input,
+            policy,
+        })
     }
 
     /// Persists an approval rule for the current workspace.
@@ -389,8 +488,8 @@ impl ToolRouter {
         session: &SessionMeta,
         invocation: &ToolInvocation,
     ) -> Result<(Option<String>, ToolOutput)> {
-        let policy = self.check_policy(session, invocation).await?;
-        match policy.action {
+        let prepared = self.prepare_invocation(session, invocation).await?;
+        match prepared.policy.action {
             PolicyAction::Allow => self.execute_authorized(session, invocation).await,
             PolicyAction::Deny => Err(MoaError::PermissionDenied(format!(
                 "tool {} denied by policy",
@@ -398,7 +497,7 @@ impl ToolRouter {
             ))),
             PolicyAction::RequireApproval => Err(MoaError::PermissionDenied(format!(
                 "tool {} requires approval: {}",
-                invocation.name, policy.input_summary
+                invocation.name, prepared.policy_input.input_summary
             ))),
         }
     }
@@ -440,6 +539,26 @@ impl ToolRouter {
                 "MCP tool routing is not implemented yet for server {server_name}"
             ))),
         }
+    }
+
+    async fn describe_invocation(
+        &self,
+        definition: &ToolDefinition,
+        invocation: &ToolInvocation,
+    ) -> Result<ToolPolicyInput> {
+        let normalized_input =
+            normalized_input_for(definition.policy.input_shape, &invocation.input)?;
+        Ok(ToolPolicyInput {
+            tool_name: invocation.name.clone(),
+            input_summary: summary_for(
+                definition.policy.input_shape,
+                &invocation.input,
+                &normalized_input,
+            ),
+            normalized_input,
+            risk_level: definition.policy.risk_level.clone(),
+            default_action: definition.policy.default_action.clone(),
+        })
     }
 
     async fn get_or_provision_hand(
@@ -485,6 +604,178 @@ fn hand_id(handle: &HandHandle) -> String {
         HandHandle::Daytona { workspace_id } => workspace_id.clone(),
         HandHandle::E2B { sandbox_id } => sandbox_id.clone(),
     }
+}
+
+fn normalized_input_for(input_shape: ToolInputShape, input: &Value) -> Result<String> {
+    let value = match input_shape {
+        ToolInputShape::Command => required_string_field(input, "cmd")?,
+        ToolInputShape::Path => required_string_field(input, "path")?,
+        ToolInputShape::Pattern => required_string_field(input, "pattern")?,
+        ToolInputShape::Query => required_string_field(input, "query")?,
+        ToolInputShape::Url => required_string_field(input, "url")?,
+        ToolInputShape::Json => serde_json::to_string(input)?,
+    };
+
+    Ok(value.trim().to_string())
+}
+
+fn summary_for(input_shape: ToolInputShape, input: &Value, normalized_input: &str) -> String {
+    match input_shape {
+        ToolInputShape::Command => normalized_input.to_string(),
+        ToolInputShape::Path => {
+            if let Some(content) = input.get("content").and_then(Value::as_str) {
+                format!(
+                    "Path: {normalized_input} | {} chars",
+                    content.chars().count()
+                )
+            } else {
+                format!("Path: {normalized_input}")
+            }
+        }
+        ToolInputShape::Pattern => format!("Pattern: {normalized_input}"),
+        ToolInputShape::Query => format!("Query: {normalized_input}"),
+        ToolInputShape::Url => format!("URL: {normalized_input}"),
+        ToolInputShape::Json => normalized_input.to_string(),
+    }
+}
+
+fn approval_pattern_for(input_shape: ToolInputShape, normalized_input: &str) -> String {
+    if matches!(input_shape, ToolInputShape::Command) {
+        let tokens = shell_words::split(normalized_input).unwrap_or_default();
+        if let Some(command) = tokens.first() {
+            return if tokens.len() == 1 {
+                command.clone()
+            } else {
+                format!("{command} *")
+            };
+        }
+    }
+
+    normalized_input.to_string()
+}
+
+fn approval_fields_for(
+    sandbox_root: Option<&Path>,
+    input_shape: ToolInputShape,
+    invocation: &ToolInvocation,
+) -> Vec<ApprovalField> {
+    match input_shape {
+        ToolInputShape::Command => {
+            let command = invocation
+                .input
+                .get("cmd")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let mut fields = vec![ApprovalField {
+                label: "Command".to_string(),
+                value: command,
+            }];
+            if let Some(sandbox_root) = sandbox_root {
+                fields.push(ApprovalField {
+                    label: "Working dir".to_string(),
+                    value: sandbox_root.display().to_string(),
+                });
+            }
+            fields
+        }
+        ToolInputShape::Path => {
+            let mut fields = single_approval_field("Path", &invocation.input, "path");
+            if invocation.name == "file_write" {
+                let content_len = invocation
+                    .input
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(|content| content.chars().count())
+                    .unwrap_or_default();
+                fields.push(ApprovalField {
+                    label: "Content".to_string(),
+                    value: format!("{content_len} chars"),
+                });
+            }
+            fields
+        }
+        ToolInputShape::Pattern => single_approval_field("Pattern", &invocation.input, "pattern"),
+        ToolInputShape::Query => single_approval_field("Query", &invocation.input, "query"),
+        ToolInputShape::Url => single_approval_field("URL", &invocation.input, "url"),
+        ToolInputShape::Json => serde_json::to_string_pretty(&invocation.input)
+            .map(|value| {
+                vec![ApprovalField {
+                    label: "Input".to_string(),
+                    value,
+                }]
+            })
+            .unwrap_or_default(),
+    }
+}
+
+fn single_approval_field(label: &str, input: &Value, field: &str) -> Vec<ApprovalField> {
+    let value = input
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    vec![ApprovalField {
+        label: label.to_string(),
+        value,
+    }]
+}
+
+async fn approval_diffs_for(
+    sandbox_root: Option<&Path>,
+    diff_strategy: ToolDiffStrategy,
+    invocation: &ToolInvocation,
+) -> Result<Vec<ApprovalFileDiff>> {
+    if !matches!(diff_strategy, ToolDiffStrategy::FileWrite) {
+        return Ok(Vec::new());
+    }
+
+    let Some(sandbox_root) = sandbox_root else {
+        return Ok(Vec::new());
+    };
+    let Some(path) = invocation.input.get("path").and_then(Value::as_str) else {
+        return Ok(Vec::new());
+    };
+    let Some(content) = invocation.input.get("content").and_then(Value::as_str) else {
+        return Ok(Vec::new());
+    };
+
+    let file_path = resolve_sandbox_path(sandbox_root, path)?;
+    let before = read_existing_text_file(&file_path).await?;
+
+    Ok(vec![ApprovalFileDiff {
+        path: path.to_string(),
+        before,
+        after: content.to_string(),
+        language_hint: language_hint_for_path(path),
+    }])
+}
+
+async fn read_existing_text_file(path: &Path) -> Result<String> {
+    match fs::read(path).await {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn language_hint_for_path(path: &str) -> Option<String> {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(ToOwned::to_owned)
+}
+
+fn required_string_field(input: &Value, field: &str) -> Result<String> {
+    input
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            MoaError::ValidationError(format!(
+                "tool input is missing required string field `{field}`"
+            ))
+        })
 }
 
 fn expand_local_path(path: &str) -> Result<PathBuf> {
