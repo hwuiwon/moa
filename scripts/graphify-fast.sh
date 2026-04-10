@@ -166,21 +166,63 @@ def auto_label(graph, member_ids):
     return cleaned
 
 manifest_path = Path('graphify-out/manifest.json')
-stored_labels = {}
+# Load stored labels WITH their content signatures. Cluster IDs from Louvain/
+# Leiden are not stable across runs — the same cluster can be renumbered when
+# the graph changes. So we match labels by *membership overlap*, not by raw ID.
+# Legacy manifests (dict labels, no signatures) are dropped because their
+# label→cluster mapping is known-unreliable after any graph edit.
+stored_label_entries = []  # list of (label, frozenset(member_ids))
 if manifest_path.exists():
     try:
         mf_prev = json.loads(manifest_path.read_text())
-        for k, v in mf_prev.get('community_labels', {}).items():
-            if v and not _PLACEHOLDER_LABEL.match(v):
-                stored_labels[int(k)] = v
+        raw_labels = mf_prev.get('community_labels', {})
+        raw_sigs   = mf_prev.get('community_signatures', {})
+        if isinstance(raw_labels, dict) and isinstance(raw_sigs, dict) and raw_sigs:
+            for k, v in raw_labels.items():
+                if not v or _PLACEHOLDER_LABEL.match(v):
+                    continue
+                sig = raw_sigs.get(str(k)) or raw_sigs.get(k)
+                if sig:
+                    stored_label_entries.append((v, frozenset(sig)))
     except (json.JSONDecodeError, ValueError, TypeError):
         pass
 
+# Match stored labels to new communities by greedy max-overlap assignment.
+# Each stored label can attach to at most one new community, and each new
+# community gets at most one carried-over label. A minimum coverage threshold
+# (half of the old cluster must still live in the new one) prevents a handful
+# of leftover nodes from stealing an unrelated label.
+new_community_sets = {cid: set(members) for cid, members in communities.items()}
+candidates = []  # (intersection_size, coverage, entry_idx, cid)
+for idx, (_label, old_set) in enumerate(stored_label_entries):
+    if not old_set:
+        continue
+    for cid, new_set in new_community_sets.items():
+        inter = len(old_set & new_set)
+        if inter == 0:
+            continue
+        coverage = inter / len(old_set)
+        candidates.append((inter, coverage, idx, cid))
+candidates.sort(reverse=True)
+
+carryover = {}          # cid -> label
+used_entries = set()
+MIN_COVERAGE = 0.5
+for inter, coverage, idx, cid in candidates:
+    if idx in used_entries or cid in carryover:
+        continue
+    if coverage < MIN_COVERAGE:
+        continue
+    carryover[cid] = stored_label_entries[idx][0]
+    used_entries.add(idx)
+
 labels = {}
 auto_count = 0
+preserved_count = 0
 for cid, members in communities.items():
-    if cid in stored_labels:
-        labels[cid] = stored_labels[cid]
+    if cid in carryover:
+        labels[cid] = carryover[cid]
+        preserved_count += 1
     else:
         derived = auto_label(G, members)
         labels[cid] = derived or f'Community {cid}'
@@ -197,10 +239,17 @@ to_json(G, communities, 'graphify-out/graph.json')
 if G.number_of_nodes() <= 5000:
     to_html(G, communities, 'graphify-out/graph.html', community_labels=labels)
 
-# 8. Persist manifest with labels folded in (one state file, no dotfiles).
+# 8. Persist manifest with labels + signatures (one state file, no dotfiles).
+#    community_signatures records the exact member set of each cluster so the
+#    next run can match labels by content overlap even if Louvain renumbers
+#    the communities. Keyed by current cid so /graphify-update's inline
+#    labeling step (which writes into community_labels[cid]) still aligns.
 save_manifest(detect['files'])
 mf = json.loads(manifest_path.read_text())  # re-read after save_manifest wrote it
 mf['community_labels'] = {str(k): v for k, v in labels.items()}
+mf['community_signatures'] = {
+    str(cid): sorted(members) for cid, members in communities.items()
+}
 manifest_path.write_text(json.dumps(mf, indent=2))
 
 # 9. Append to cost tracker
@@ -210,7 +259,7 @@ cost['runs'].append({'date': datetime.now(timezone.utc).isoformat(), 'input_toke
 cost_path.write_text(json.dumps(cost, indent=2))
 
 # 10. Summary
-print(f'[graphify-fast] Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges, {len(communities)} communities ({auto_count} auto-labeled, {len(stored_labels)} preserved), {len(cached_hyperedges)} hyperedges')
+print(f'[graphify-fast] Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges, {len(communities)} communities ({auto_count} auto-labeled, {preserved_count} preserved), {len(cached_hyperedges)} hyperedges')
 if non_code_changed:
     print(f'[graphify-fast] {len(non_code_changed)} non-code file(s) changed since last LLM run:')
     for f in non_code_changed[:5]:
