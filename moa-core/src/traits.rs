@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::error::Result;
 use crate::events::Event;
@@ -10,9 +10,9 @@ use crate::types::{
     CompletionRequest, CompletionStream, Credential, CronHandle, CronSpec, EventFilter, EventRange,
     EventRecord, EventStream, HandHandle, HandSpec, HandStatus, InboundMessage, MemoryPath,
     MemoryScope, MemorySearchResult, MessageId, ModelCapabilities, ObserveLevel, OutboundMessage,
-    PageSummary, PageType, Platform, PlatformCapabilities, ProcessorOutput, SequenceNum,
-    SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
-    SessionSummary, StartSessionRequest, ToolOutput, WikiPage, WorkingContext,
+    PageSummary, PageType, Platform, PlatformCapabilities, ProcessorOutput, RuntimeEvent,
+    SequenceNum, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
+    SessionStatus, SessionSummary, StartSessionRequest, ToolOutput, WikiPage, WorkingContext,
 };
 
 /// Orchestrates session lifecycle and observation.
@@ -32,6 +32,14 @@ pub trait BrainOrchestrator: Send + Sync {
 
     /// Observes a running or completed session.
     async fn observe(&self, session_id: SessionId, level: ObserveLevel) -> Result<EventStream>;
+
+    /// Subscribes to live runtime events for a session.
+    ///
+    /// Returns `Ok(None)` when the orchestrator does not support live runtime observation.
+    async fn observe_runtime(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<broadcast::Receiver<RuntimeEvent>>>;
 
     /// Registers a cron job for background work.
     async fn schedule_cron(&self, spec: CronSpec) -> Result<CronHandle>;

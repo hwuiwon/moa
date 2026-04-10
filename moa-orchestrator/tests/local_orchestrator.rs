@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use moa_core::{
     BrainOrchestrator, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
     ConfidenceLevel, ContextMessage, Event, EventRange, EventType, LLMProvider, MemoryScope,
-    MessageRole, MoaConfig, MoaError, PageType, Platform, Result, SessionFilter, SessionHandle,
-    SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, StartSessionRequest,
-    TokenPricing, ToolCallFormat, UserId, UserMessage, WikiPage, WorkspaceId,
+    MessageRole, MoaConfig, MoaError, PageType, Platform, Result, RuntimeEvent, SessionFilter,
+    SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore,
+    StartSessionRequest, TokenPricing, ToolCallFormat, UserId, UserMessage, WikiPage, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
@@ -486,6 +486,37 @@ async fn wait_for_approval_event(
     }
 }
 
+async fn collect_runtime_events_until<P>(
+    runtime_rx: &mut tokio::sync::broadcast::Receiver<RuntimeEvent>,
+    predicate: P,
+) -> Result<Vec<RuntimeEvent>>
+where
+    P: Fn(&RuntimeEvent) -> bool,
+{
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut events = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(MoaError::ProviderError(
+                "timed out waiting for runtime events".to_string(),
+            ));
+        }
+
+        let event = tokio::time::timeout(remaining, runtime_rx.recv())
+            .await
+            .map_err(|_| {
+                MoaError::ProviderError("timed out waiting for runtime event".to_string())
+            })?
+            .map_err(|error| MoaError::ProviderError(error.to_string()))?;
+        let should_stop = predicate(&event);
+        events.push(event);
+        if should_stop {
+            return Ok(events);
+        }
+    }
+}
+
 fn brain_response_texts(events: &[moa_core::EventRecord]) -> Vec<String> {
     events
         .iter()
@@ -734,6 +765,195 @@ async fn approval_requested_event_persists_full_prompt_details() -> Result<()> {
 }
 
 #[tokio::test]
+async fn observe_runtime_streams_assistant_text_and_turn_completion() -> Result<()> {
+    let (_dir, orchestrator) = test_orchestrator_with_delay(Duration::from_millis(40)).await?;
+    let session = start_session(&orchestrator).await?;
+    let mut runtime_rx = orchestrator
+        .observe_runtime(session.session_id.clone())
+        .await?
+        .expect("local orchestrator should support runtime observation");
+
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::QueueMessage(UserMessage {
+                text: "stream this".to_string(),
+                attachments: Vec::new(),
+            }),
+        )
+        .await?;
+
+    let runtime_events = collect_runtime_events_until(&mut runtime_rx, |event| {
+        matches!(event, RuntimeEvent::TurnCompleted)
+    })
+    .await?;
+
+    let delta_text = runtime_events
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::AssistantDelta(ch) => Some(*ch),
+            _ => None,
+        })
+        .collect::<String>();
+    let finished_text = runtime_events.iter().find_map(|event| match event {
+        RuntimeEvent::AssistantFinished { text, .. } => Some(text.clone()),
+        _ => None,
+    });
+
+    assert!(
+        runtime_events
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::AssistantStarted))
+    );
+    assert_eq!(delta_text, "assistant:stream this");
+    assert_eq!(finished_text, Some("assistant:stream this".to_string()));
+    assert!(matches!(
+        runtime_events.last(),
+        Some(RuntimeEvent::TurnCompleted)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn observe_runtime_reports_tool_updates_and_approval_flow() -> Result<()> {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let model = MoaConfig::default().general.default_model;
+    let provider: Arc<dyn LLMProvider> = Arc::new(FileWriteApprovalProvider { model, requests });
+    let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
+    let session = start_session(&orchestrator).await?;
+    let mut runtime_rx = orchestrator
+        .observe_runtime(session.session_id.clone())
+        .await?
+        .expect("local orchestrator should support runtime observation");
+
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::QueueMessage(UserMessage {
+                text: "write approval test".to_string(),
+                attachments: Vec::new(),
+            }),
+        )
+        .await?;
+
+    let pre_approval_events = collect_runtime_events_until(&mut runtime_rx, |event| {
+        matches!(event, RuntimeEvent::ApprovalRequested(_))
+    })
+    .await?;
+    let approval_prompt = pre_approval_events
+        .iter()
+        .find_map(|event| match event {
+            RuntimeEvent::ApprovalRequested(prompt) => Some(prompt.clone()),
+            _ => None,
+        })
+        .expect("approval prompt missing from runtime stream");
+
+    assert!(pre_approval_events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ToolUpdate(update)
+            if update.tool_name == "file_write"
+                && matches!(update.status, moa_core::ToolCardStatus::WaitingApproval)
+    )));
+
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::ApprovalDecided {
+                request_id: approval_prompt.request.request_id,
+                decision: moa_core::ApprovalDecision::AllowOnce,
+            },
+        )
+        .await?;
+
+    let post_approval_events = collect_runtime_events_until(&mut runtime_rx, |event| {
+        matches!(event, RuntimeEvent::TurnCompleted)
+    })
+    .await?;
+
+    assert!(post_approval_events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ToolUpdate(update)
+            if update.tool_name == "file_write"
+                && matches!(update.status, moa_core::ToolCardStatus::Succeeded)
+    )));
+    assert!(post_approval_events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::AssistantFinished { text, .. } if text == "done"
+    )));
+    assert!(matches!(
+        post_approval_events.last(),
+        Some(RuntimeEvent::TurnCompleted)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn resumed_session_observe_runtime_streams_from_persisted_events() -> Result<()> {
+    let (_dir, orchestrator) = test_orchestrator_with_delay(Duration::from_millis(150)).await?;
+    let session_id = SessionId::new();
+    let now = chrono::Utc::now();
+    orchestrator
+        .session_store()
+        .create_session(SessionMeta {
+            id: session_id.clone(),
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            model: orchestrator.model().to_string(),
+            status: SessionStatus::Created,
+            created_at: now,
+            updated_at: now,
+            ..SessionMeta::default()
+        })
+        .await?;
+    orchestrator
+        .session_store()
+        .emit_event(
+            session_id.clone(),
+            Event::SessionCreated {
+                workspace_id: "workspace".to_string(),
+                user_id: "user".to_string(),
+                model: orchestrator.model().to_string(),
+            },
+        )
+        .await?;
+    orchestrator
+        .session_store()
+        .emit_event(
+            session_id.clone(),
+            Event::UserMessage {
+                text: "resume me".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await?;
+
+    orchestrator.resume_session(session_id.clone()).await?;
+    let mut runtime_rx = orchestrator
+        .observe_runtime(session_id.clone())
+        .await?
+        .expect("local orchestrator should support runtime observation");
+
+    let runtime_events = collect_runtime_events_until(&mut runtime_rx, |event| {
+        matches!(event, RuntimeEvent::TurnCompleted)
+    })
+    .await?;
+
+    let delta_text = runtime_events
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::AssistantDelta(ch) => Some(*ch),
+            _ => None,
+        })
+        .collect::<String>();
+    assert_eq!(delta_text, "assistant:resume me");
+    assert!(runtime_events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::AssistantFinished { text, .. } if text == "assistant:resume me"
+    )));
+    Ok(())
+}
+
+#[tokio::test]
 async fn queued_follow_up_request_ends_with_user_message() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = MoaConfig::default().general.default_model;
@@ -777,8 +997,10 @@ async fn queued_follow_up_request_ends_with_user_message() -> Result<()> {
     assert_eq!(
         logged[1]
             .messages
-            .last()
-            .expect("second request should have messages")
+            .iter()
+            .rev()
+            .find(|message| message.role != MessageRole::System)
+            .expect("second request should contain a non-system message")
             .role,
         MessageRole::User
     );
