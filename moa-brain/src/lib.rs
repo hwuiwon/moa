@@ -7,7 +7,8 @@ pub mod turn;
 
 pub use compaction::maybe_compact;
 pub use harness::{
-    TurnResult, run_brain_turn, run_brain_turn_with_tools, run_brain_turn_with_tools_stepwise,
+    StreamedTurnResult, TurnResult, run_brain_turn, run_brain_turn_with_tools,
+    run_brain_turn_with_tools_stepwise, run_streamed_turn, run_streamed_turn_with_signals,
 };
 pub use pipeline::{
     ContextPipeline, PipelineStageReport, build_default_pipeline, build_default_pipeline_with_tools,

@@ -305,7 +305,12 @@ impl LocalChatRuntime {
         let mut runtime_rx = self
             .orchestrator
             .observe_runtime(session_id.clone())
-            .await?;
+            .await?
+            .ok_or_else(|| {
+                MoaError::ProviderError(
+                    "live runtime observation is unavailable for this session".to_string(),
+                )
+            })?;
         relay_session_runtime_events(&mut runtime_rx, session_id, event_tx).await
     }
 
@@ -377,7 +382,12 @@ impl LocalChatRuntime {
         let mut runtime_rx = self
             .orchestrator
             .observe_runtime(self.session_id.clone())
-            .await?;
+            .await?
+            .ok_or_else(|| {
+                MoaError::ProviderError(
+                    "live runtime observation is unavailable for this session".to_string(),
+                )
+            })?;
         self.queue_message(self.session_id.clone(), prompt).await?;
         relay_runtime_events(&mut runtime_rx, event_tx, true).await
     }

@@ -886,6 +886,15 @@ impl BrainOrchestrator for TemporalOrchestrator {
         Ok(EventStream::from_history_and_broadcast(history, receiver))
     }
 
+    /// Returns no live runtime stream for Temporal-backed sessions yet.
+    async fn observe_runtime(
+        &self,
+        _session_id: SessionId,
+    ) -> MoaResult<Option<broadcast::Receiver<moa_core::RuntimeEvent>>> {
+        // TODO: Expose Temporal runtime observation through SSE or WebSocket transport.
+        Ok(None)
+    }
+
     /// Registers a Temporal-cloud cron hook using the existing local scheduler wrapper.
     async fn schedule_cron(&self, spec: CronSpec) -> MoaResult<CronHandle> {
         let job_name = spec.name.clone();
