@@ -9,22 +9,22 @@
   "moa-memory/src/wiki.rs": 1775778606.150986,
   "moa-memory/src/branching.rs": 1775839600.85727,
   "moa-core/src/telemetry.rs": 1775833772.1335301,
-  "moa-core/src/types.rs": 1775850174.5690289,
-  "moa-core/src/events.rs": 1775843028.6884203,
+  "moa-core/src/types.rs": 1775853595.298202,
+  "moa-core/src/events.rs": 1775852566.1390347,
   "moa-core/src/error.rs": 1775845995.6183972,
-  "moa-core/src/config.rs": 1775851586.4785404,
-  "moa-core/src/lib.rs": 1775850624.0133011,
+  "moa-core/src/config.rs": 1775852110.2849004,
+  "moa-core/src/lib.rs": 1775852110.285173,
   "moa-core/src/daemon.rs": 1775833772.1297586,
-  "moa-core/src/traits.rs": 1775850624.014116,
+  "moa-core/src/traits.rs": 1775852110.285385,
   "moa-cli/tests/tui_workflows.rs": 1775831762.6463964,
   "moa-cli/src/exec.rs": 1775773153.4586587,
   "moa-cli/src/daemon.rs": 1775849781.7576056,
-  "moa-cli/src/main.rs": 1775851489.589131,
+  "moa-cli/src/main.rs": 1775852110.2846465,
   "moa-tui/src/keybindings.rs": 1775831762.650265,
   "moa-tui/src/lib.rs": 1775833772.138463,
   "moa-tui/src/runner.rs": 1775849781.7632113,
   "moa-tui/src/main.rs": 1775770714.3246653,
-  "moa-tui/src/app.rs": 1775849781.7630084,
+  "moa-tui/src/app.rs": 1775852663.8362646,
   "moa-tui/src/views/palette.rs": 1775831762.651187,
   "moa-tui/src/views/memory.rs": 1775831762.6507206,
   "moa-tui/src/views/sessions.rs": 1775776304.625459,
@@ -44,31 +44,32 @@
   "moa-gateway/src/lib.rs": 1775789259.2548513,
   "moa-gateway/src/slack.rs": 1775789259.255336,
   "moa-gateway/src/approval.rs": 1775789259.2542539,
-  "moa-session/tests/neon_branch_manager.rs": 1775851777.0644271,
+  "moa-session/tests/neon_branch_manager.rs": 1775852110.2868752,
   "moa-session/tests/turso_live.rs": 1775837415.0851872,
   "moa-session/tests/session_store.rs": 1775849781.7625916,
-  "moa-session/tests/postgres_store.rs": 1775849781.7623844,
+  "moa-session/tests/postgres_store.rs": 1775852666.2775235,
   "moa-session/tests/shared/mod.rs": 1775849781.7627285,
   "moa-session/src/queries_postgres.rs": 1775849781.7616248,
   "moa-session/src/turso.rs": 1775849781.762181,
-  "moa-session/src/neon.rs": 1775850719.6575677,
+  "moa-session/src/neon.rs": 1775852110.2862926,
   "moa-session/src/backend.rs": 1775849781.76099,
-  "moa-session/src/lib.rs": 1775850210.3466306,
+  "moa-session/src/lib.rs": 1775852110.286179,
   "moa-session/src/schema_turso.rs": 1775849781.761983,
   "moa-session/src/queries_turso.rs": 1775849781.7617595,
-  "moa-session/src/postgres.rs": 1775851816.3857317,
-  "moa-session/src/schema_postgres.rs": 1775851670.8798864,
+  "moa-session/src/postgres.rs": 1775852110.2864833,
+  "moa-session/src/schema_postgres.rs": 1775852110.2866921,
   "moa-providers/tests/openai_live.rs": 1775825706.3722425,
   "moa-providers/tests/openrouter_live.rs": 1775825706.37248,
   "moa-providers/tests/live_provider_matrix.rs": 1775831762.6491277,
   "moa-providers/tests/anthropic_live.rs": 1775762507.2161374,
   "moa-providers/tests/anthropic_provider.rs": 1775825706.3721237,
-  "moa-providers/tests/openai_provider.rs": 1775825706.3723626,
+  "moa-providers/tests/openai_provider.rs": 1775853484.6503134,
   "moa-providers/src/factory.rs": 1775825706.3716228,
   "moa-providers/src/openrouter.rs": 1775825706.3719666,
-  "moa-providers/src/lib.rs": 1775825706.3717306,
-  "moa-providers/src/anthropic.rs": 1775825706.3713348,
-  "moa-providers/src/common.rs": 1775825706.3715007,
+  "moa-providers/src/lib.rs": 1775852347.4408126,
+  "moa-providers/src/schema.rs": 1775853595.4011595,
+  "moa-providers/src/anthropic.rs": 1775853595.3947732,
+  "moa-providers/src/common.rs": 1775853595.3983872,
   "moa-providers/src/openai.rs": 1775825706.3718476,
   "moa-security/src/lib.rs": 1775797129.576963,
   "moa-security/src/injection.rs": 1775797129.576819,
@@ -79,7 +80,7 @@
   "moa-orchestrator/tests/live_provider_roundtrip.rs": 1775849781.7595367,
   "moa-orchestrator/tests/temporal_orchestrator.rs": 1775849781.7604132,
   "moa-orchestrator/examples/temporal_worker_helper.rs": 1775849781.7582712,
-  "moa-orchestrator/src/local.rs": 1775850624.0847359,
+  "moa-orchestrator/src/local.rs": 1775852110.2858846,
   "moa-orchestrator/src/lib.rs": 1775791482.8528197,
   "moa-orchestrator/src/temporal.rs": 1775849781.758791,
   "moa-hands/tests/e2b_live.rs": 1775841119.2257247,
@@ -107,7 +108,7 @@
   "moa-brain/examples/chat_harness.rs": 1775825706.3702106,
   "moa-brain/src/lib.rs": 1775844658.8046792,
   "moa-brain/src/turn.rs": 1775846684.6534336,
-  "moa-brain/src/harness.rs": 1775846827.1767707,
+  "moa-brain/src/harness.rs": 1775852580.7843363,
   "moa-brain/src/compaction.rs": 1775764277.0657463,
   "moa-brain/src/pipeline/cache.rs": 1775840261.5983925,
   "moa-brain/src/pipeline/instructions.rs": 1775840261.5993755,
@@ -116,8 +117,8 @@
   "moa-brain/src/pipeline/skills.rs": 1775840261.6000698,
   "moa-brain/src/pipeline/identity.rs": 1775840261.5991344,
   "moa-brain/src/pipeline/mod.rs": 1775840261.5998604,
-  "moa-brain/src/pipeline/history.rs": 1775847138.1531405,
-  "moa-skills/tests/skills.rs": 1775782880.295359,
+  "moa-brain/src/pipeline/history.rs": 1775853462.7986233,
+  "moa-skills/tests/skills.rs": 1775852660.8839002,
   "moa-skills/src/format.rs": 1775782880.294755,
   "moa-skills/src/registry.rs": 1775839600.8586621,
   "moa-skills/src/lib.rs": 1775782880.2951527,
@@ -140,10 +141,10 @@
     "12": "Tool Router & Policies",
     "13": "Config & Errors",
     "14": "Turso Session Store",
-    "15": "Neon Branch Manager",
-    "16": "Memory Consolidation",
-    "17": "CLI Entry Point",
-    "18": "Anthropic Provider",
+    "15": "Anthropic Provider",
+    "16": "Neon Branch Manager",
+    "17": "Memory Consolidation",
+    "18": "CLI Entry Point",
     "19": "Message Renderer",
     "20": "Temporal Orchestrator Tests",
     "21": "Daemon Service",
@@ -160,55 +161,56 @@
     "32": "Local Tool Tests",
     "33": "Docker File Operations",
     "34": "Skill Injection Stage",
-    "35": "Settings View",
-    "36": "Approval Card Widget",
-    "37": "History Compilation Stage",
+    "35": "History Compilation Stage",
+    "36": "Settings View",
+    "37": "Approval Card Widget",
     "38": "Context Pipeline Core",
     "39": "Session Database Backend",
     "40": "FTS5 Search Index",
     "41": "Session Picker View",
     "42": "Tool Approval Policies",
     "43": "Skill Improver & Distiller",
-    "44": "Daytona Live Tests",
-    "45": "Memory Maintenance Tests",
-    "46": "Session Store Tests",
-    "47": "Provider Factory",
-    "48": "E2B Live Tests",
-    "49": "OpenAI Provider Tests",
+    "44": "OpenAI Provider Tests",
+    "45": "Daytona Live Tests",
+    "46": "Memory Maintenance Tests",
+    "47": "Session Store Tests",
+    "48": "Provider Factory",
+    "49": "E2B Live Tests",
     "50": "Encrypted Secret Vault",
-    "51": "Command Palette",
-    "52": "Prompt Widget",
-    "53": "MCP Router Tests",
-    "54": "Core Event Model",
+    "51": "Core Event Model",
+    "52": "Command Palette",
+    "53": "Prompt Widget",
+    "54": "MCP Router Tests",
     "55": "TUI Keybindings",
     "56": "Toolbar Widget",
     "57": "Live Provider Roundtrip Tests",
     "58": "Memory Store Tests",
     "59": "Postgres Store Tests",
-    "60": "Tool Card Widget",
-    "61": "Neon Branch Manager Tests",
-    "62": "Live Provider Matrix Tests",
-    "63": "Temporal Worker Helper",
-    "64": "Stub Tool Definition",
-    "65": "Instruction Stage",
-    "66": "Chat View",
-    "67": "Bash Tool",
-    "68": "Cache Optimizer Stage",
-    "69": "Identity Stage",
-    "70": "CLI Exec Mode",
-    "71": "Sidebar Widget",
-    "72": "Anthropic Provider Tests",
-    "73": "File Search Tool",
-    "74": "Chat Harness Example",
-    "75": "Mock MCP Server",
-    "76": "TUI Workflow Tests",
-    "77": "Turso Schema Migration",
-    "78": "OpenAI Live Test",
-    "79": "OpenRouter Live Test",
-    "80": "Anthropic Live Test",
-    "81": "Docker Hardening Test",
-    "82": "Brain Live Harness Test",
-    "83": "Compaction"
+    "60": "OpenAI Schema Compiler",
+    "61": "Tool Card Widget",
+    "62": "Neon Branch Manager Tests",
+    "63": "Live Provider Matrix Tests",
+    "64": "Temporal Worker Helper",
+    "65": "Stub Tool Definition",
+    "66": "Instruction Stage",
+    "67": "Chat View",
+    "68": "Bash Tool",
+    "69": "Cache Optimizer Stage",
+    "70": "Identity Stage",
+    "71": "CLI Exec Mode",
+    "72": "Sidebar Widget",
+    "73": "Anthropic Provider Tests",
+    "74": "File Search Tool",
+    "75": "Chat Harness Example",
+    "76": "Mock MCP Server",
+    "77": "TUI Workflow Tests",
+    "78": "Turso Schema Migration",
+    "79": "OpenAI Live Test",
+    "80": "OpenRouter Live Test",
+    "81": "Anthropic Live Test",
+    "82": "Docker Hardening Test",
+    "83": "Brain Live Harness Test",
+    "84": "Compaction"
   },
   "community_signatures": {
     "0": [
@@ -248,10 +250,15 @@
       "types_completionstream_next",
       "types_completionstream_with_cancel_token",
       "types_confidencelevel",
+      "types_context_message_assistant_tool_call_preserves_invocation",
+      "types_context_message_tool_result_preserves_text_and_blocks",
+      "types_context_message_tool_still_defaults_to_text_only",
       "types_contextmessage",
       "types_contextmessage_assistant",
+      "types_contextmessage_assistant_tool_call",
       "types_contextmessage_system",
       "types_contextmessage_tool",
+      "types_contextmessage_tool_result",
       "types_contextmessage_user",
       "types_credential",
       "types_cronhandle",
@@ -932,6 +939,7 @@
       "common_map_openai_error",
       "common_metadata_as_strings",
       "common_openai_tool_from_schema",
+      "common_openai_tool_result_output",
       "common_parse_reasoning_effort",
       "common_parse_sse_json",
       "common_parse_tool_arguments",
@@ -1371,6 +1379,59 @@
       "turso_tursosessionstore_wake"
     ],
     "15": [
+      "anthropic",
+      "anthropic_anthropic_content_blocks",
+      "anthropic_anthropic_content_blocks_render_text_and_json_as_text_blocks",
+      "anthropic_anthropic_message",
+      "anthropic_anthropic_message_wraps_assistant_tool_calls_as_tool_use_blocks",
+      "anthropic_anthropic_message_wraps_tool_results_with_tool_use_id",
+      "anthropic_anthropic_tool_from_schema",
+      "anthropic_anthropic_tool_from_schema_moves_parameters_into_input_schema",
+      "anthropic_anthropicprovider",
+      "anthropic_anthropicprovider_capabilities",
+      "anthropic_anthropicprovider_complete",
+      "anthropic_anthropicprovider_from_config",
+      "anthropic_anthropicprovider_from_config_with_model",
+      "anthropic_anthropicprovider_from_env",
+      "anthropic_anthropicprovider_name",
+      "anthropic_anthropicprovider_new",
+      "anthropic_anthropicprovider_with_max_retries",
+      "anthropic_anthropicprovider_with_messages_url",
+      "anthropic_anthropicstreamstate",
+      "anthropic_anthropicstreamstate_apply_block_delta",
+      "anthropic_anthropicstreamstate_apply_block_start",
+      "anthropic_anthropicstreamstate_apply_block_stop",
+      "anthropic_anthropicstreamstate_apply_event",
+      "anthropic_anthropicstreamstate_ensure_capacity",
+      "anthropic_anthropicstreamstate_ensure_completed_capacity",
+      "anthropic_anthropicstreamstate_finish",
+      "anthropic_anthropicstreamstate_new",
+      "anthropic_blockaccumulator",
+      "anthropic_build_request_body",
+      "anthropic_canonical_model_id",
+      "anthropic_capabilities_for_model",
+      "anthropic_completion_request_serializes_to_anthropic_format",
+      "anthropic_consume_sse_events",
+      "anthropic_contentblockdelta",
+      "anthropic_contentblockdeltaevent",
+      "anthropic_contentblockstart",
+      "anthropic_contentblockstartevent",
+      "anthropic_contentblockstopevent",
+      "anthropic_errorevent",
+      "anthropic_initial_tool_input",
+      "anthropic_messagedeltaevent",
+      "anthropic_messagedeltapayload",
+      "anthropic_messageenvelope",
+      "anthropic_messagestartevent",
+      "anthropic_model_ids_resolve_without_aliasing",
+      "anthropic_parses_recorded_sse_stream_into_content_blocks",
+      "anthropic_provider_accepts_documented_default_models",
+      "anthropic_stop_reason_from_anthropic",
+      "anthropic_streamerrorpayload",
+      "anthropic_supported_models_return_expected_capabilities",
+      "anthropic_usage"
+    ],
+    "16": [
       "neon",
       "neon_checkpoint_branch_names_follow_moa_prefix",
       "neon_checkpoint_info_from_branch",
@@ -1420,7 +1481,7 @@
       "neon_test_checkpoint_branch",
       "neon_teststate"
     ],
-    "16": [
+    "17": [
       "consolidation",
       "consolidation_canonical_port_claims",
       "consolidation_confidence_rank",
@@ -1469,7 +1530,7 @@
       "ingest_split_inline_items",
       "ingest_upsert_derived_page"
     ],
-    "17": [
+    "18": [
       "main",
       "main_apply_config_update",
       "main_checkpoint_cleanup_report",
@@ -1515,53 +1576,6 @@
       "main_synccommand",
       "main_version_command_uses_package_version",
       "main_version_text"
-    ],
-    "18": [
-      "anthropic",
-      "anthropic_anthropic_message",
-      "anthropic_anthropicprovider",
-      "anthropic_anthropicprovider_capabilities",
-      "anthropic_anthropicprovider_complete",
-      "anthropic_anthropicprovider_from_config",
-      "anthropic_anthropicprovider_from_config_with_model",
-      "anthropic_anthropicprovider_from_env",
-      "anthropic_anthropicprovider_name",
-      "anthropic_anthropicprovider_new",
-      "anthropic_anthropicprovider_with_max_retries",
-      "anthropic_anthropicprovider_with_messages_url",
-      "anthropic_anthropicstreamstate",
-      "anthropic_anthropicstreamstate_apply_block_delta",
-      "anthropic_anthropicstreamstate_apply_block_start",
-      "anthropic_anthropicstreamstate_apply_block_stop",
-      "anthropic_anthropicstreamstate_apply_event",
-      "anthropic_anthropicstreamstate_ensure_capacity",
-      "anthropic_anthropicstreamstate_ensure_completed_capacity",
-      "anthropic_anthropicstreamstate_finish",
-      "anthropic_anthropicstreamstate_new",
-      "anthropic_blockaccumulator",
-      "anthropic_build_request_body",
-      "anthropic_canonical_model_id",
-      "anthropic_capabilities_for_model",
-      "anthropic_completion_request_serializes_to_anthropic_format",
-      "anthropic_consume_sse_events",
-      "anthropic_contentblockdelta",
-      "anthropic_contentblockdeltaevent",
-      "anthropic_contentblockstart",
-      "anthropic_contentblockstartevent",
-      "anthropic_contentblockstopevent",
-      "anthropic_errorevent",
-      "anthropic_initial_tool_input",
-      "anthropic_messagedeltaevent",
-      "anthropic_messagedeltapayload",
-      "anthropic_messageenvelope",
-      "anthropic_messagestartevent",
-      "anthropic_model_ids_resolve_without_aliasing",
-      "anthropic_parses_recorded_sse_stream_into_content_blocks",
-      "anthropic_provider_accepts_documented_default_models",
-      "anthropic_stop_reason_from_anthropic",
-      "anthropic_streamerrorpayload",
-      "anthropic_supported_models_return_expected_capabilities",
-      "anthropic_usage"
     ],
     "19": [
       "renderer",
@@ -2111,6 +2125,34 @@
       "skills_tool_rich_events"
     ],
     "35": [
+      "history",
+      "history_capabilities",
+      "history_event_record",
+      "history_event_to_context_message",
+      "history_history_compiler_formats_user_and_assistant_turns",
+      "history_history_compiler_preserves_structured_tool_call_invocation",
+      "history_history_compiler_preserves_structured_tool_result_blocks",
+      "history_history_processor_loads_events_directly_from_session_store",
+      "history_historycompiler",
+      "history_historycompiler_compile_messages",
+      "history_historycompiler_name",
+      "history_historycompiler_new",
+      "history_historycompiler_process",
+      "history_historycompiler_stage",
+      "history_mocksessionstore",
+      "history_mocksessionstore_create_session",
+      "history_mocksessionstore_emit_event",
+      "history_mocksessionstore_get_events",
+      "history_mocksessionstore_get_pending_signals",
+      "history_mocksessionstore_get_session",
+      "history_mocksessionstore_list_sessions",
+      "history_mocksessionstore_new",
+      "history_mocksessionstore_resolve_pending_signal",
+      "history_mocksessionstore_search_events",
+      "history_mocksessionstore_store_pending_signal",
+      "history_mocksessionstore_update_status"
+    ],
+    "36": [
       "settings",
       "settings_category_label",
       "settings_centered_rect",
@@ -2137,7 +2179,7 @@
       "settings_settingsviewstate_step_backward",
       "settings_settingsviewstate_step_forward"
     ],
-    "36": [
+    "37": [
       "approval",
       "approval_approval_buttons",
       "approval_approval_card_uses_expected_border_color_for_each_risk_level",
@@ -2162,32 +2204,6 @@
       "approval_text_fallback",
       "approval_truncate_to_width",
       "approval_wrap_text"
-    ],
-    "37": [
-      "history",
-      "history_capabilities",
-      "history_event_record",
-      "history_event_to_context_message",
-      "history_history_compiler_formats_user_and_assistant_turns",
-      "history_history_processor_loads_events_directly_from_session_store",
-      "history_historycompiler",
-      "history_historycompiler_compile_messages",
-      "history_historycompiler_name",
-      "history_historycompiler_new",
-      "history_historycompiler_process",
-      "history_historycompiler_stage",
-      "history_mocksessionstore",
-      "history_mocksessionstore_create_session",
-      "history_mocksessionstore_emit_event",
-      "history_mocksessionstore_get_events",
-      "history_mocksessionstore_get_pending_signals",
-      "history_mocksessionstore_get_session",
-      "history_mocksessionstore_list_sessions",
-      "history_mocksessionstore_new",
-      "history_mocksessionstore_resolve_pending_signal",
-      "history_mocksessionstore_search_events",
-      "history_mocksessionstore_store_pending_signal",
-      "history_mocksessionstore_update_status"
     ],
     "38": [
       "mod",
@@ -2320,6 +2336,25 @@
       "improver_record_successful_use_with_baseline"
     ],
     "44": [
+      "openai_provider",
+      "openai_provider_openai_provider_does_not_retry_after_partial_stream_output",
+      "openai_provider_openai_provider_drops_oversized_metadata_values",
+      "openai_provider_openai_provider_rejects_system_only_requests",
+      "openai_provider_openai_provider_retries_after_rate_limit",
+      "openai_provider_openai_provider_serializes_assistant_tool_calls_as_function_call_items",
+      "openai_provider_openai_provider_serializes_tool_result_messages_as_function_call_output",
+      "openai_provider_openai_provider_streams_parallel_tool_calls_in_order",
+      "openai_provider_openai_provider_streams_tool_calls_from_responses_events",
+      "openai_provider_openai_provider_translates_requests_to_responses_api",
+      "openai_provider_openrouter_provider_normalizes_bare_claude_models",
+      "openai_provider_openrouter_provider_sets_attribution_headers",
+      "openai_provider_parallel_tool_call_stream",
+      "openai_provider_partial_text_then_error_stream",
+      "openai_provider_simple_text_stream",
+      "openai_provider_sse_response",
+      "openai_provider_tool_call_stream"
+    ],
+    "45": [
       "daytona_live",
       "daytona_live_daytona_live_provider_handles_roundtrip_and_lifecycle",
       "daytona_live_daytona_live_router_lazy_provisions_reuses_and_isolates_sessions",
@@ -2338,7 +2373,7 @@
       "daytona_live_wait_for_destroyed",
       "daytona_live_wait_for_status"
     ],
-    "45": [
+    "46": [
       "maintenance",
       "maintenance_branch_reconciliation_merges_conflicting_writes",
       "maintenance_consolidation_decays_confidence_once_and_is_stable_on_repeat_runs",
@@ -2356,7 +2391,7 @@
       "maintenance_seededrng_next_usize",
       "maintenance_validate_memory_invariants"
     ],
-    "46": [
+    "47": [
       "session_store",
       "session_store_approval_rules_round_trip",
       "session_store_cloud_sync_requires_file_backed_session_db",
@@ -2374,7 +2409,7 @@
       "session_store_wake_returns_unresolved_pending_signals",
       "session_store_wake_without_checkpoint_returns_all_events"
     ],
-    "47": [
+    "48": [
       "factory",
       "factory_build_provider_from_config",
       "factory_build_provider_from_selection",
@@ -2392,7 +2427,7 @@
       "factory_split_explicit_provider",
       "factory_validate_provider_name"
     ],
-    "48": [
+    "49": [
       "e2b_live",
       "e2b_live_destroy_and_wait",
       "e2b_live_e2b_live_provider_handles_roundtrip_and_lifecycle",
@@ -2409,23 +2444,6 @@
       "e2b_live_live_provider",
       "e2b_live_session",
       "e2b_live_wait_for_destroyed"
-    ],
-    "49": [
-      "openai_provider",
-      "openai_provider_openai_provider_does_not_retry_after_partial_stream_output",
-      "openai_provider_openai_provider_drops_oversized_metadata_values",
-      "openai_provider_openai_provider_rejects_system_only_requests",
-      "openai_provider_openai_provider_retries_after_rate_limit",
-      "openai_provider_openai_provider_streams_parallel_tool_calls_in_order",
-      "openai_provider_openai_provider_streams_tool_calls_from_responses_events",
-      "openai_provider_openai_provider_translates_requests_to_responses_api",
-      "openai_provider_openrouter_provider_normalizes_bare_claude_models",
-      "openai_provider_openrouter_provider_sets_attribution_headers",
-      "openai_provider_parallel_tool_call_stream",
-      "openai_provider_partial_text_then_error_stream",
-      "openai_provider_simple_text_stream",
-      "openai_provider_sse_response",
-      "openai_provider_tool_call_stream"
     ],
     "50": [
       "vault",
@@ -2445,6 +2463,22 @@
       "vault_filevault_set"
     ],
     "51": [
+      "events",
+      "events_all_event_types_serialize",
+      "events_approval_requested_event_deserializes_without_prompt",
+      "events_approval_requested_event_round_trips_full_prompt",
+      "events_brain_response_event_has_cost_fields",
+      "events_event",
+      "events_event_cost_cents",
+      "events_event_event_type",
+      "events_event_input_tokens",
+      "events_event_output_tokens",
+      "events_event_serialization_roundtrip",
+      "events_event_token_count",
+      "events_event_type_name",
+      "events_tool_result_event_deserializes_without_provider_tool_use_id"
+    ],
+    "52": [
       "palette",
       "palette_centered_rect",
       "palette_filtered_actions",
@@ -2460,7 +2494,7 @@
       "palette_palettestate_selected_action",
       "palette_render_palette"
     ],
-    "52": [
+    "53": [
       "prompt",
       "prompt_build_textarea",
       "prompt_promptcompletionkind",
@@ -2476,7 +2510,7 @@
       "prompt_promptwidget_text",
       "prompt_render_completion_menu"
     ],
-    "53": [
+    "54": [
       "mcp_router",
       "mcp_router_emptymemorystore",
       "mcp_router_emptymemorystore_delete_page",
@@ -2491,21 +2525,6 @@
       "mcp_router_router_discovers_stdio_mcp_tools_from_config",
       "mcp_router_router_injects_mcp_credentials_via_proxy",
       "mcp_router_session"
-    ],
-    "54": [
-      "events",
-      "events_all_event_types_serialize",
-      "events_approval_requested_event_deserializes_without_prompt",
-      "events_approval_requested_event_round_trips_full_prompt",
-      "events_brain_response_event_has_cost_fields",
-      "events_event",
-      "events_event_cost_cents",
-      "events_event_event_type",
-      "events_event_input_tokens",
-      "events_event_output_tokens",
-      "events_event_serialization_roundtrip",
-      "events_event_token_count",
-      "events_event_type_name"
     ],
     "55": [
       "keybindings",
@@ -2574,6 +2593,18 @@
       "postgres_store_with_test_store"
     ],
     "60": [
+      "schema",
+      "schema_compile_for_openai_strict",
+      "schema_compile_for_openai_strict_adds_additional_properties_false_recursively",
+      "schema_compile_for_openai_strict_does_not_duplicate_null_in_type_arrays",
+      "schema_compile_for_openai_strict_makes_optional_properties_required_and_nullable",
+      "schema_compile_for_openai_strict_preserves_existing_required_properties",
+      "schema_compile_for_openai_strict_strips_validation_only_keywords",
+      "schema_make_nullable",
+      "schema_make_strict_compatible",
+      "schema_strip_validation_keywords"
+    ],
+    "61": [
       "tool_card",
       "tool_card_border_line",
       "tool_card_content_line",
@@ -2584,7 +2615,7 @@
       "tool_card_truncate_to_width",
       "tool_card_wrap_text"
     ],
-    "61": [
+    "62": [
       "neon_branch_manager",
       "neon_branch_manager_live_neon_config",
       "neon_branch_manager_live_neon_config_with_limit",
@@ -2594,7 +2625,7 @@
       "neon_branch_manager_neon_checkpoint_cleanup_without_expired_branches_returns_zero",
       "neon_branch_manager_wait_for_workspace_session_count"
     ],
-    "62": [
+    "63": [
       "live_provider_matrix",
       "live_provider_matrix_available_live_providers",
       "live_provider_matrix_emit_token_tool",
@@ -2604,7 +2635,7 @@
       "live_provider_matrix_liveprovider_complete",
       "live_provider_matrix_liveprovider_label"
     ],
-    "63": [
+    "64": [
       "temporal_worker_helper",
       "temporal_worker_helper_helper_config",
       "temporal_worker_helper_helperprovider",
@@ -2614,7 +2645,7 @@
       "temporal_worker_helper_main",
       "temporal_worker_helper_main_impl"
     ],
-    "64": [
+    "65": [
       "stub",
       "stub_stubtool",
       "stub_stubtool_description",
@@ -2624,7 +2655,7 @@
       "stub_stubtool_new",
       "stub_stubtool_policy_spec"
     ],
-    "65": [
+    "66": [
       "instructions",
       "instructions_instruction_processor_appends_config_backed_sections",
       "instructions_instructionprocessor",
@@ -2633,7 +2664,7 @@
       "instructions_instructionprocessor_process",
       "instructions_instructionprocessor_stage"
     ],
-    "66": [
+    "67": [
       "chat",
       "chat_max_scroll",
       "chat_render_chat",
@@ -2641,7 +2672,7 @@
       "chat_wrap_line",
       "chat_wrap_prefixed"
     ],
-    "67": [
+    "68": [
       "bash",
       "bash_bashtoolinput",
       "bash_bashtoolinput_timeout",
@@ -2649,7 +2680,7 @@
       "bash_execute_local",
       "bash_stop_container"
     ],
-    "68": [
+    "69": [
       "cache",
       "cache_cache_optimizer_validates_cache_breakpoint",
       "cache_cacheoptimizer",
@@ -2657,7 +2688,7 @@
       "cache_cacheoptimizer_process",
       "cache_cacheoptimizer_stage"
     ],
-    "69": [
+    "70": [
       "identity",
       "identity_identity_processor_appends_system_prompt",
       "identity_identityprocessor",
@@ -2665,74 +2696,74 @@
       "identity_identityprocessor_process",
       "identity_identityprocessor_stage"
     ],
-    "70": [
+    "71": [
       "exec",
       "exec_exec_mode_formats_tool_updates_compactly",
       "exec_format_tool_update",
       "exec_resolve_exec_approval",
       "exec_run_exec"
     ],
-    "71": [
+    "72": [
       "sidebar",
       "sidebar_render_sidebar",
       "sidebar_section_title",
       "sidebar_should_show_sidebar",
       "sidebar_sidebar_visibility_respects_width_and_override"
     ],
-    "72": [
+    "73": [
       "anthropic_provider",
       "anthropic_provider_provider_retries_after_rate_limit",
       "anthropic_provider_provider_returns_error_after_partial_output_without_retrying",
       "anthropic_provider_provider_streams_tokens_incrementally",
       "anthropic_provider_provider_streams_tool_use_blocks"
     ],
-    "73": [
+    "74": [
       "file_search",
       "file_search_collect_matches",
       "file_search_execute",
       "file_search_execute_docker",
       "file_search_filesearchinput"
     ],
-    "74": [
+    "75": [
       "chat_harness",
       "chat_harness_main",
       "chat_harness_resolve_session_db_path",
       "chat_harness_run_prompt"
     ],
-    "75": [
+    "76": [
       "mock_mcp_stdio_server",
       "mock_mcp_stdio_server_read_message",
       "mock_mcp_stdio_server_write_message"
     ],
-    "76": [
+    "77": [
       "tui_workflows",
       "tui_workflows_tui_manual_workflow_opens_memory_settings_and_palette"
     ],
-    "77": [
+    "78": [
       "schema_turso",
       "schema_turso_migrate"
     ],
-    "78": [
+    "79": [
       "openai_live",
       "openai_live_openai_live_completion_returns_expected_answer"
     ],
-    "79": [
+    "80": [
       "openrouter_live",
       "openrouter_live_openrouter_live_completion_returns_expected_answer"
     ],
-    "80": [
+    "81": [
       "anthropic_live",
       "anthropic_live_anthropic_live_completion_returns_expected_answer"
     ],
-    "81": [
+    "82": [
       "docker_hardening",
       "docker_hardening_docker_container_runs_with_hardening"
     ],
-    "82": [
+    "83": [
       "live_harness",
       "live_harness_live_brain_turn_returns_brain_response"
     ],
-    "83": [
+    "84": [
       "compaction",
       "compaction_maybe_compact"
     ]
