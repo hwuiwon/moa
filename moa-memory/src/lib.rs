@@ -6,17 +6,25 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    MemoryPath, MemoryScope, MemorySearchResult, MemoryStore, MoaConfig, MoaError, PageSummary,
-    PageType, Result, WikiPage,
+    BrainId, MemoryPath, MemoryScope, MemorySearchResult, MemoryStore, MoaConfig, MoaError,
+    PageSummary, PageType, Result, SessionStore, WikiPage,
 };
 use tokio::fs;
 
+pub mod branching;
+pub mod consolidation;
 pub mod fts;
 pub mod index;
+pub mod ingest;
 pub mod wiki;
 
+pub use branching::{ChangeOperation, ReconcileReport};
+pub use consolidation::ConsolidationReport;
 use fts::FtsIndex;
-use index::{INDEX_FILENAME, load_index_file};
+use index::{
+    INDEX_FILENAME, LogEntry, append_log_entry, compile_index, load_index_file, load_log_file,
+};
+pub use ingest::IngestReport;
 use wiki::{parse_markdown, render_markdown};
 
 /// File-wiki memory store rooted at a local `.moa` data directory.
@@ -52,6 +60,98 @@ impl FileMemoryStore {
     /// Returns the local filesystem root backing the memory store.
     pub fn base_dir(&self) -> &Path {
         self.base_dir.as_ref()
+    }
+
+    /// Appends a markdown entry to the scope-local `_log.md` file and refreshes its search row.
+    pub async fn append_scope_log(&self, scope: &MemoryScope, entry: LogEntry) -> Result<()> {
+        let scope_root = self.scope_root(scope);
+        append_log_entry(&scope_root, &entry).await?;
+        let log_path: MemoryPath = "_log.md".into();
+        let log_page = self.read_page_in_scope(scope, &log_path).await?;
+        self.search_index
+            .upsert_page(scope, &log_path, &log_page)
+            .await?;
+        Ok(())
+    }
+
+    /// Loads the raw append-only `_log.md` contents for a scope.
+    pub async fn load_scope_log(&self, scope: &MemoryScope) -> Result<String> {
+        load_log_file(&self.scope_root(scope)).await
+    }
+
+    /// Regenerates `MEMORY.md` from the current page summaries in a scope.
+    pub async fn refresh_scope_index(&self, scope: &MemoryScope) -> Result<String> {
+        let pages = self.list_pages(scope.clone(), None).await?;
+        let content = compile_index(scope, &pages);
+        let index_path: MemoryPath = INDEX_FILENAME.into();
+        let now = chrono::Utc::now();
+        let page = WikiPage {
+            path: Some(index_path.clone()),
+            title: "Memory Index".to_string(),
+            page_type: PageType::Index,
+            content: content.clone(),
+            created: now,
+            updated: now,
+            confidence: moa_core::ConfidenceLevel::High,
+            related: pages
+                .iter()
+                .filter(|page| {
+                    !matches!(
+                        page.page_type,
+                        PageType::Index | PageType::Log | PageType::Schema
+                    )
+                })
+                .take(32)
+                .map(|page| page.path.as_str().to_string())
+                .collect(),
+            sources: Vec::new(),
+            tags: vec!["index".to_string()],
+            auto_generated: true,
+            last_referenced: now,
+            reference_count: 0,
+            metadata: std::collections::HashMap::new(),
+        };
+        self.write_page_in_scope(scope, &index_path, page).await?;
+        Ok(content)
+    }
+
+    /// Runs direct consolidation tasks against a single memory scope.
+    pub async fn run_consolidation(&self, scope: &MemoryScope) -> Result<ConsolidationReport> {
+        consolidation::run_consolidation(self, scope).await
+    }
+
+    /// Runs scheduled consolidation checks and executes any due workspace consolidations.
+    pub async fn run_due_consolidations<S: SessionStore + ?Sized>(
+        &self,
+        session_store: &S,
+    ) -> Result<Vec<ConsolidationReport>> {
+        consolidation::run_due_consolidations(self, session_store).await
+    }
+
+    /// Ingests a raw source document into the scoped wiki and updates derived pages.
+    pub async fn ingest_source(
+        &self,
+        scope: &MemoryScope,
+        source_name: &str,
+        source: &str,
+    ) -> Result<IngestReport> {
+        ingest::ingest_source(self, scope, source_name, source).await
+    }
+
+    /// Writes a branch-local page snapshot for later reconciliation.
+    pub async fn write_page_branched(
+        &self,
+        scope: &MemoryScope,
+        brain_id: &BrainId,
+        path: &MemoryPath,
+        page: WikiPage,
+    ) -> Result<()> {
+        branching::write_page_branched(self, scope, brain_id, path, page).await
+    }
+
+    /// Reconciles all pending branch-local writes back into the main scope.
+    pub async fn reconcile_branches(&self, scope: &MemoryScope) -> Result<ReconcileReport> {
+        branching::reconcile_branches(self, scope).await
     }
 
     /// Reads a page from an explicit memory scope.
@@ -113,7 +213,7 @@ impl FileMemoryStore {
         Ok(())
     }
 
-    async fn list_scope_files(&self, scope: &MemoryScope) -> Result<Vec<MemoryPath>> {
+    pub(crate) async fn list_scope_files(&self, scope: &MemoryScope) -> Result<Vec<MemoryPath>> {
         let root = self.scope_root(scope);
         if !try_exists(&root).await? {
             return Ok(Vec::new());
@@ -172,7 +272,7 @@ impl FileMemoryStore {
         }
     }
 
-    fn scope_root(&self, scope: &MemoryScope) -> PathBuf {
+    pub(crate) fn scope_root(&self, scope: &MemoryScope) -> PathBuf {
         match scope {
             MemoryScope::User(_) => self.base_dir.join("memory"),
             MemoryScope::Workspace(workspace_id) => self
@@ -183,7 +283,7 @@ impl FileMemoryStore {
         }
     }
 
-    fn file_path(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<PathBuf> {
+    pub(crate) fn file_path(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<PathBuf> {
         let logical_path = Path::new(path.as_str());
         if logical_path.is_absolute() {
             return Err(MoaError::ValidationError(format!(

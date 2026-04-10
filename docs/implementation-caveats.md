@@ -937,3 +937,64 @@ Remaining caveat:
 
 - MOA-specific behavior still depends on `metadata` keys such as `moa-version`, `moa-one-liner`, and `moa-estimated-tokens`.
 - Any code outside `moa-skills` that reaches into raw `metadata` directly is now more fragile than code that goes through the helpers in `format.rs`.
+
+## 14. Step 13 memory maintenance
+
+### 14.1 Consolidation is heuristic, not yet LLM-driven
+
+Current state:
+
+- `moa-memory/src/consolidation.rs` now performs deterministic maintenance locally:
+  - relative date normalization
+  - port-claim contradiction resolution
+  - pruning entities with `metadata.entity_exists = false`
+  - confidence decay for old unreferenced pages
+  - orphan detection
+  - `MEMORY.md` regeneration and `_log.md` append
+
+Consequence:
+
+- Step 13 is implemented and testable without network or provider availability.
+- The behavior is stable and cheap, which is appropriate for local hourly maintenance.
+
+Remaining caveat:
+
+- Consolidation currently understands only a narrow set of contradiction patterns and stale-page signals.
+- The implementation matches the architectural role, but not the full eventual intelligence implied by the spec’s LLM-maintainer sketch.
+
+### 14.2 Branch writes exist as a concrete file-store feature, but the runtime still writes directly to mainline memory
+
+Current state:
+
+- `moa-memory/src/branching.rs` provides:
+  - branch-local writes under `.branches/`
+  - a JSON change manifest
+  - deterministic reconciliation back into the main scope
+- The live tool/runtime path still uses direct `write_page_in_scope()` / `memory_write`, not branch-local writes.
+
+Consequence:
+
+- Concurrent-write isolation is implemented at the store level and covered by tests.
+- The production runtime does not yet automatically route session-specific memory writes through branch directories.
+
+Remaining caveat:
+
+- The branch/reconcile model is available, but not yet wired into the orchestrator or tools as the default write path.
+- If true concurrent cloud writers become a near-term requirement, the router/runtime should switch to branched writes instead of direct mainline writes.
+
+### 14.3 Scheduled consolidation currently runs for workspace scopes only
+
+Current state:
+
+- `LocalOrchestrator` now registers an hourly maintenance job that calls `FileMemoryStore::run_due_consolidations(...)`.
+- That scheduler currently derives scopes from session history and only executes workspace consolidations.
+
+Consequence:
+
+- Shared project memory now gets the expected periodic maintenance.
+- The cron hook stays aligned with the existing local store model and avoids duplicating the known local user-scope ambiguity.
+
+Remaining caveat:
+
+- User-scope consolidation is not scheduled yet.
+- This is intentional while local user memory still shares one physical `memory/` root regardless of user id, but it means personal memory does not yet get automatic dream-cycle maintenance.

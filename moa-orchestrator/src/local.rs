@@ -20,7 +20,7 @@ use moa_core::{
     UserMessage,
 };
 use moa_hands::ToolRouter;
-use moa_memory::FileMemoryStore;
+use moa_memory::{ConsolidationReport, FileMemoryStore};
 use moa_providers::AnthropicProvider;
 use moa_session::TursoSessionStore;
 use moa_skills::maybe_distill_skill;
@@ -82,7 +82,7 @@ impl LocalOrchestrator {
             .await
             .map_err(|error| MoaError::ProviderError(error.to_string()))?;
 
-        Ok(Self {
+        let orchestrator = Self {
             config,
             session_store,
             memory_store,
@@ -90,7 +90,9 @@ impl LocalOrchestrator {
             tool_router,
             scheduler: Arc::new(scheduler),
             sessions: Arc::new(RwLock::new(HashMap::new())),
-        })
+        };
+        orchestrator.register_memory_maintenance_job().await?;
+        Ok(orchestrator)
     }
 
     /// Creates a fully local orchestrator from the loaded MOA config.
@@ -133,6 +135,26 @@ impl LocalOrchestrator {
     /// Returns the configured default model identifier.
     pub fn model(&self) -> &str {
         &self.config.general.default_model
+    }
+
+    /// Runs the memory consolidation maintenance check immediately.
+    pub async fn run_memory_maintenance_once(&self) -> Result<Vec<ConsolidationReport>> {
+        let reports = self
+            .memory_store
+            .run_due_consolidations(self.session_store.as_ref())
+            .await?;
+
+        for report in &reports {
+            tracing::info!(
+                scope = ?report.scope,
+                pages_updated = report.pages_updated,
+                pages_deleted = report.pages_deleted,
+                contradictions_resolved = report.contradictions_resolved,
+                "completed scheduled memory consolidation"
+            );
+        }
+
+        Ok(reports)
     }
 
     /// Subscribes to live runtime updates for a running session.
@@ -221,6 +243,36 @@ impl LocalOrchestrator {
             finished,
         };
         self.sessions.write().await.insert(session_id, handle);
+        Ok(())
+    }
+
+    async fn register_memory_maintenance_job(&self) -> Result<()> {
+        let memory_store = self.memory_store.clone();
+        let session_store = self.session_store.clone();
+        let job = Job::new_async("0 0 * * * *", move |_id, _lock| {
+            let memory_store = memory_store.clone();
+            let session_store = session_store.clone();
+            Box::pin(async move {
+                match memory_store
+                    .run_due_consolidations(session_store.as_ref())
+                    .await
+                {
+                    Ok(reports) => tracing::info!(
+                        count = reports.len(),
+                        "completed hourly memory maintenance check"
+                    ),
+                    Err(error) => tracing::error!(
+                        error = %error,
+                        "hourly memory maintenance check failed"
+                    ),
+                }
+            })
+        })
+        .map_err(|error| MoaError::ProviderError(error.to_string()))?;
+        self.scheduler
+            .add(job)
+            .await
+            .map_err(|error| MoaError::ProviderError(error.to_string()))?;
         Ok(())
     }
 }

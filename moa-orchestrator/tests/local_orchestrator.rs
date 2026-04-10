@@ -5,10 +5,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moa_core::{
     BrainOrchestrator, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
-    ContextMessage, Event, EventRange, EventType, LLMProvider, MessageRole, MoaConfig, MoaError,
-    Platform, Result, SessionFilter, SessionHandle, SessionId, SessionSignal, SessionStatus,
-    SessionStore, StartSessionRequest, TokenPricing, ToolCallFormat, UserId, UserMessage,
-    WorkspaceId,
+    ConfidenceLevel, ContextMessage, Event, EventRange, EventType, LLMProvider, MemoryScope,
+    MessageRole, MoaConfig, MoaError, PageType, Platform, Result, SessionFilter, SessionHandle,
+    SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, StartSessionRequest,
+    TokenPricing, ToolCallFormat, UserId, UserMessage, WikiPage, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
@@ -983,5 +983,149 @@ async fn list_sessions_includes_active_session() -> Result<()> {
             .iter()
             .any(|summary| summary.session_id == session.session_id)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn memory_maintenance_runs_due_workspace_consolidation() -> Result<()> {
+    let (dir, orchestrator) = test_orchestrator().await?;
+    let memory_store = FileMemoryStore::new(dir.path()).await?;
+    let session_store = orchestrator.session_store();
+    let workspace_id = WorkspaceId::new("ws1");
+    let user_id = UserId::new("u1");
+    let now = chrono::Utc::now();
+
+    memory_store
+        .write_page_in_scope(
+            &MemoryScope::Workspace(workspace_id.clone()),
+            &"topics/architecture.md".into(),
+            WikiPage {
+                path: None,
+                title: "Architecture".to_string(),
+                page_type: PageType::Topic,
+                content: "# Architecture\n\nRefresh tokens rotate today.\n".to_string(),
+                created: now,
+                updated: now - chrono::Duration::days(40),
+                confidence: ConfidenceLevel::High,
+                related: Vec::new(),
+                sources: Vec::new(),
+                tags: Vec::new(),
+                auto_generated: false,
+                last_referenced: now - chrono::Duration::days(40),
+                reference_count: 0,
+                metadata: std::collections::HashMap::new(),
+            },
+        )
+        .await?;
+
+    for index in 0..3 {
+        session_store
+            .create_session(SessionMeta {
+                id: SessionId::new(),
+                workspace_id: workspace_id.clone(),
+                user_id: user_id.clone(),
+                title: Some(format!("finished-{index}")),
+                status: SessionStatus::Completed,
+                platform: Platform::Cli,
+                model: "test-model".to_string(),
+                created_at: now,
+                updated_at: now,
+                completed_at: Some(now),
+                ..SessionMeta::default()
+            })
+            .await?;
+    }
+
+    let reports = orchestrator.run_memory_maintenance_once().await?;
+
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].relative_dates_normalized >= 1);
+    let architecture = memory_store
+        .read_page_in_scope(
+            &MemoryScope::Workspace(workspace_id),
+            &"topics/architecture.md".into(),
+        )
+        .await?;
+    assert!(architecture.content.contains("20"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn memory_maintenance_skips_when_threshold_or_cooldown_not_met() -> Result<()> {
+    let (dir, orchestrator) = test_orchestrator().await?;
+    let memory_store = FileMemoryStore::new(dir.path()).await?;
+    let session_store = orchestrator.session_store();
+    let workspace_id = WorkspaceId::new("ws1");
+    let user_id = UserId::new("u1");
+    let now = chrono::Utc::now();
+    let scope = MemoryScope::Workspace(workspace_id.clone());
+
+    memory_store
+        .write_page_in_scope(
+            &scope,
+            &"topics/architecture.md".into(),
+            WikiPage {
+                path: None,
+                title: "Architecture".to_string(),
+                page_type: PageType::Topic,
+                content: "# Architecture\n\nRefresh tokens rotate today.\n".to_string(),
+                created: now,
+                updated: now - chrono::Duration::days(40),
+                confidence: ConfidenceLevel::High,
+                related: Vec::new(),
+                sources: Vec::new(),
+                tags: Vec::new(),
+                auto_generated: false,
+                last_referenced: now - chrono::Duration::days(40),
+                reference_count: 0,
+                metadata: std::collections::HashMap::new(),
+            },
+        )
+        .await?;
+
+    for index in 0..2 {
+        session_store
+            .create_session(SessionMeta {
+                id: SessionId::new(),
+                workspace_id: workspace_id.clone(),
+                user_id: user_id.clone(),
+                title: Some(format!("finished-{index}")),
+                status: SessionStatus::Completed,
+                platform: Platform::Cli,
+                model: "test-model".to_string(),
+                created_at: now,
+                updated_at: now,
+                completed_at: Some(now),
+                ..SessionMeta::default()
+            })
+            .await?;
+    }
+
+    let first = orchestrator.run_memory_maintenance_once().await?;
+    assert!(first.is_empty());
+
+    session_store
+        .create_session(SessionMeta {
+            id: SessionId::new(),
+            workspace_id: workspace_id.clone(),
+            user_id,
+            title: Some("finished-2".to_string()),
+            status: SessionStatus::Completed,
+            platform: Platform::Cli,
+            model: "test-model".to_string(),
+            created_at: now,
+            updated_at: now,
+            completed_at: Some(now),
+            ..SessionMeta::default()
+        })
+        .await?;
+
+    let second = orchestrator.run_memory_maintenance_once().await?;
+    assert_eq!(second.len(), 1);
+
+    let third = orchestrator.run_memory_maintenance_once().await?;
+    assert!(third.is_empty());
+
     Ok(())
 }
