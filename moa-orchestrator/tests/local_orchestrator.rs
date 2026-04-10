@@ -13,7 +13,7 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
-use moa_session::TursoSessionStore;
+use moa_session::create_session_store;
 use tempfile::TempDir;
 use tokio::time::{Instant, sleep};
 
@@ -168,11 +168,11 @@ async fn test_orchestrator_with_provider(
 ) -> Result<(TempDir, LocalOrchestrator)> {
     let dir = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
-    config.local.session_db = dir.path().join("sessions.db").display().to_string();
+    config.database.url = dir.path().join("sessions.db").display().to_string();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
-    let session_store = Arc::new(TursoSessionStore::from_config(&config).await?);
+    let session_store = create_session_store(&config).await?;
     let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())
@@ -960,10 +960,10 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
     drop(orchestrator);
 
     let mut reopened_config = MoaConfig::default();
-    reopened_config.local.session_db = dir.path().join("sessions.db").display().to_string();
+    reopened_config.database.url = dir.path().join("sessions.db").display().to_string();
     reopened_config.local.memory_dir = dir.path().join("memory").display().to_string();
     reopened_config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
-    let reopened_store = Arc::new(TursoSessionStore::from_config(&reopened_config).await?);
+    let reopened_store = create_session_store(&reopened_config).await?;
     let reopened_memory = Arc::new(FileMemoryStore::from_config(&reopened_config).await?);
     let reopened_provider: Arc<dyn LLMProvider> = Arc::new(MockProvider {
         model: reopened_config.general.default_model.clone(),

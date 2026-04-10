@@ -7,6 +7,9 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+moa-session = { path = "moa-session", optional = true }
+
 [features]
 default = ["tui"]
 tui = []
@@ -17,6 +20,7 @@ cloud = []
 temporal = []
 daytona = []
 e2b = []
+postgres = ["moa-session/postgres"]
 
 [workspace]
 resolver = "2"

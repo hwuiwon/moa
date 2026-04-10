@@ -5,15 +5,16 @@ mod exec;
 
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use moa_core::{
-    MemoryPath, MemoryScope, MemoryStore, MoaConfig, SessionFilter, SessionId, SessionStatus,
-    SessionStore, WorkspaceId, init_observability,
+    DatabaseBackend, MemoryPath, MemoryScope, MemoryStore, MoaConfig, SessionFilter, SessionId,
+    SessionStatus, SessionStore, WorkspaceId, init_observability,
 };
 use moa_memory::FileMemoryStore;
-use moa_session::TursoSessionStore;
+use moa_session::{SessionDatabase, create_session_store};
 use moa_tui::{RunTuiOptions, run_tui, run_tui_with_options};
 use tokio::fs;
 use tokio::process::Command;
@@ -435,8 +436,8 @@ async fn most_recent_session_id(config: &MoaConfig) -> Result<SessionId> {
         .context("no sessions found")
 }
 
-async fn load_session_store(config: &MoaConfig) -> Result<TursoSessionStore> {
-    TursoSessionStore::from_config(config)
+async fn load_session_store(config: &MoaConfig) -> Result<Arc<SessionDatabase>> {
+    create_session_store(config)
         .await
         .context("opening session store")
 }
@@ -557,7 +558,20 @@ fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result
         }
         "local.docker_enabled" => config.local.docker_enabled = parse_bool(value)?,
         "local.sandbox_dir" => config.local.sandbox_dir = value.to_string(),
-        "local.session_db" => config.local.session_db = value.to_string(),
+        "local.session_db" | "database.url" => config.database.url = value.to_string(),
+        "database.backend" => {
+            config.database.backend = parse_database_backend(value)?;
+        }
+        "database.pool_min" => {
+            config.database.pool_min = value.parse().context("expected integer pool size")?
+        }
+        "database.pool_max" => {
+            config.database.pool_max = value.parse().context("expected integer pool size")?
+        }
+        "database.connect_timeout_secs" => {
+            config.database.connect_timeout_secs =
+                value.parse().context("expected integer timeout")?
+        }
         "local.memory_dir" => config.local.memory_dir = value.to_string(),
         "daemon.auto_connect" => config.daemon.auto_connect = parse_bool(value)?,
         "daemon.socket_path" => config.daemon.socket_path = value.to_string(),
@@ -569,6 +583,14 @@ fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result
     }
 
     Ok(())
+}
+
+fn parse_database_backend(value: &str) -> Result<DatabaseBackend> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "turso" => Ok(DatabaseBackend::Turso),
+        "postgres" => Ok(DatabaseBackend::Postgres),
+        _ => bail!("expected `turso` or `postgres`, got {value}"),
+    }
 }
 
 fn parse_bool(value: &str) -> Result<bool> {
@@ -607,8 +629,9 @@ async fn sync_enable_report(mut config: MoaConfig, turso_url: Option<String>) ->
     }
 
     config.cloud.enabled = true;
+    config.database.backend = DatabaseBackend::Turso;
     config.cloud.turso_url = Some(sync_url.clone());
-    let store = TursoSessionStore::from_config(&config)
+    let store = create_session_store(&config)
         .await
         .context("opening cloud-synced session store")?;
     store
@@ -619,14 +642,14 @@ async fn sync_enable_report(mut config: MoaConfig, turso_url: Option<String>) ->
 
     Ok(format!(
         "cloud sync enabled\nurl: {}\nlocal_db: {}\nsync_interval_secs: {}\n",
-        sync_url, config.local.session_db, config.cloud.turso_sync_interval_secs
+        sync_url, config.database.url, config.cloud.turso_sync_interval_secs
     ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_config_update, parse_bool, version_text};
-    use moa_core::MoaConfig;
+    use super::{apply_config_update, parse_bool, parse_database_backend, version_text};
+    use moa_core::{DatabaseBackend, MoaConfig};
 
     #[test]
     fn version_command_uses_package_version() {
@@ -648,5 +671,17 @@ mod tests {
     fn parse_bool_accepts_common_values() {
         assert!(parse_bool("yes").expect("bool"));
         assert!(!parse_bool("0").expect("bool"));
+    }
+
+    #[test]
+    fn parse_database_backend_accepts_supported_values() {
+        assert_eq!(
+            parse_database_backend("turso").expect("backend"),
+            DatabaseBackend::Turso
+        );
+        assert_eq!(
+            parse_database_backend("postgres").expect("backend"),
+            DatabaseBackend::Postgres
+        );
     }
 }

@@ -11,7 +11,7 @@ use moa_core::{
     DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent, EventRange,
     MoaConfig, Platform, SessionFilter, SessionStatus, SessionStore,
 };
-use moa_session::TursoSessionStore;
+use moa_session::{SessionDatabase, create_session_store};
 use moa_tui::runner::ChatRuntime;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -25,7 +25,7 @@ use tokio::task::JoinHandle;
 #[derive(Clone)]
 struct DaemonState {
     runtime: Arc<Mutex<ChatRuntime>>,
-    session_store: Arc<TursoSessionStore>,
+    session_store: Arc<SessionDatabase>,
     info: Arc<DaemonInfo>,
 }
 
@@ -134,7 +134,7 @@ pub async fn run_daemon_server(config: MoaConfig) -> Result<()> {
     }
 
     let runtime = ChatRuntime::from_local_config(config.clone(), Platform::Tui).await?;
-    let session_store = Arc::new(TursoSessionStore::from_config(&config).await?);
+    let session_store = create_session_store(&config).await?;
     let listener = UnixListener::bind(&socket_path)?;
     let info = Arc::new(DaemonInfo {
         pid: std::process::id(),
@@ -521,7 +521,7 @@ fn graceful_shutdown_timeout(config: &MoaConfig) -> Duration {
     Duration::from_secs(seconds)
 }
 
-async fn wait_for_active_turns(session_store: &TursoSessionStore, timeout: Duration) -> Result<()> {
+async fn wait_for_active_turns(session_store: &SessionDatabase, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
         let active = session_store
@@ -599,7 +599,7 @@ mod tests {
         let dir = tempdir().ok()?;
         let base = dir.keep();
         let mut config = MoaConfig::default();
-        config.local.session_db = base.join("sessions.db").display().to_string();
+        config.database.url = base.join("sessions.db").display().to_string();
         config.local.memory_dir = base.join("memory").display().to_string();
         config.local.sandbox_dir = base.join("sandbox").display().to_string();
         config.daemon.socket_path = base.join("daemon.sock").display().to_string();

@@ -2283,7 +2283,7 @@ mod tests {
         let runtime = Runtime::new().expect("runtime");
         let dir = tempfile::tempdir().expect("tempdir");
         let mut config = MoaConfig::default();
-        config.local.session_db = dir.path().join("sessions.db").display().to_string();
+        config.database.url = dir.path().join("sessions.db").display().to_string();
         config.local.memory_dir = dir.path().join("memory").display().to_string();
         config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
@@ -2294,7 +2294,7 @@ mod tests {
             let second_session_id = app.active_session_id.clone();
             assert_ne!(first_session_id, second_session_id);
 
-            let store = moa_session::TursoSessionStore::from_config(&config)
+            let store = moa_session::create_session_store(&config)
                 .await
                 .expect("session store");
             let request_id = Uuid::new_v4();

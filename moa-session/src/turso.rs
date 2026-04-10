@@ -15,12 +15,12 @@ use moa_core::{
 use moa_security::ApprovalRuleStore;
 use uuid::Uuid;
 
-use crate::queries::{
+use crate::queries_turso::{
     EVENT_COLUMNS, SESSION_COLUMNS, SESSION_SUMMARY_COLUMNS, event_record_from_row,
     event_type_to_db, expand_local_path, platform_to_db, session_meta_from_row,
     session_status_to_db, session_summary_from_row,
 };
-use crate::schema;
+use crate::schema_turso as schema;
 
 /// SQLite/Turso-backed implementation of `SessionStore`.
 #[derive(Clone)]
@@ -45,10 +45,10 @@ impl TursoSessionStore {
         if config.cloud.enabled
             && let Some(sync_url) = config.cloud.turso_url.as_deref()
         {
-            let local_path = expand_local_path(Path::new(&config.local.session_db))?;
+            let local_path = expand_local_path(Path::new(&config.database.url))?;
             if local_path == Path::new(":memory:") {
                 return Err(MoaError::ConfigError(
-                    "cloud.turso_url requires a file-backed local.session_db path".to_string(),
+                    "cloud.turso_url requires a file-backed database.url path".to_string(),
                 ));
             }
 
@@ -58,7 +58,7 @@ impl TursoSessionStore {
                 .await;
         }
 
-        Self::new(&config.local.session_db).await
+        Self::new(&config.database.url).await
     }
 
     /// Creates a session store backed by a local SQLite database file.

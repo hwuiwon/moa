@@ -495,10 +495,16 @@ api_key_env = "OPENAI_API_KEY"
 [providers.openrouter]
 api_key_env = "OPENROUTER_API_KEY"
 
+[database]
+backend = "turso"
+url = "~/.moa/sessions.db"
+pool_min = 1
+pool_max = 5
+connect_timeout_secs = 10
+
 [local]
 docker_enabled = true           # use Docker for local hands if available
 sandbox_dir = "~/.moa/sandbox"
-session_db = "~/.moa/sessions.db"
 memory_dir = "~/.moa/memory"
 
 [cloud]

@@ -11,7 +11,7 @@ use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
 use moa_providers::{AnthropicProvider, OpenAIProvider, OpenRouterProvider};
-use moa_session::TursoSessionStore;
+use moa_session::{SessionDatabase, create_session_store};
 use tempfile::TempDir;
 use tokio::time::{Instant, sleep};
 
@@ -63,14 +63,14 @@ fn available_live_providers() -> Vec<LiveProvider> {
 
 async fn live_orchestrator_with_provider(
     provider: Arc<dyn LLMProvider>,
-) -> Result<(TempDir, Arc<TursoSessionStore>, LocalOrchestrator)> {
+) -> Result<(TempDir, Arc<SessionDatabase>, LocalOrchestrator)> {
     let dir = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
-    config.local.session_db = dir.path().join("sessions.db").display().to_string();
+    config.database.url = dir.path().join("sessions.db").display().to_string();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
-    let session_store = Arc::new(TursoSessionStore::from_config(&config).await?);
+    let session_store = create_session_store(&config).await?;
     let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())
@@ -114,7 +114,7 @@ async fn wait_for_status(
 }
 
 async fn wait_for_approval_request(
-    session_store: &TursoSessionStore,
+    session_store: &SessionDatabase,
     session_id: moa_core::SessionId,
 ) -> moa_core::EventRecord {
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -160,7 +160,7 @@ async fn wait_for_file(root: PathBuf, relative: &str) -> PathBuf {
 }
 
 async fn wait_for_final_response(
-    session_store: &TursoSessionStore,
+    session_store: &SessionDatabase,
     session_id: moa_core::SessionId,
     token: &str,
 ) {
