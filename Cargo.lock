@@ -1774,6 +1774,7 @@ dependencies = [
  "chrono",
  "libsql",
  "moa-core",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",
