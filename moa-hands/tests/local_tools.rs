@@ -118,7 +118,7 @@ async fn file_read_reads_written_content() {
         .await
         .unwrap();
 
-    assert_eq!(output.stdout, "hello");
+    assert_eq!(output.to_text(), "hello");
 }
 
 #[tokio::test]
@@ -165,8 +165,9 @@ async fn file_search_finds_files_by_glob() {
         .await
         .unwrap();
 
-    assert!(output.stdout.contains("src/lib.rs"));
-    assert!(!output.stdout.contains("notes.txt"));
+    let rendered = output.to_text();
+    assert!(rendered.contains("src/lib.rs"));
+    assert!(!rendered.contains("notes.txt"));
 }
 
 #[tokio::test]
@@ -214,9 +215,9 @@ async fn bash_captures_stdout_and_stderr() {
         .await
         .unwrap();
 
-    assert_eq!(output.stdout, "out");
-    assert_eq!(output.stderr, "err");
-    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.process_stdout(), Some("out"));
+    assert_eq!(output.process_stderr(), Some("err"));
+    assert_eq!(output.process_exit_code(), Some(0));
 }
 
 #[tokio::test]
@@ -291,8 +292,10 @@ async fn memory_search_returns_indexed_results() {
         .await
         .unwrap();
 
-    assert!(output.stdout.contains("OAuth Notes"));
-    assert!(output.stdout.contains("refresh"));
+    let rendered = output.to_text();
+    assert!(rendered.contains("OAuth Notes"));
+    assert!(rendered.contains("refresh"));
+    assert!(output.structured.is_some());
 }
 
 #[tokio::test]
@@ -341,8 +344,9 @@ async fn memory_read_returns_page_contents() {
         .await
         .unwrap();
 
-    assert!(output.stdout.contains("# OAuth Refresh"));
-    assert!(output.stdout.contains("Use the exact workflow."));
+    let rendered = output.to_text();
+    assert!(rendered.contains("# OAuth Refresh"));
+    assert!(rendered.contains("Use the exact workflow."));
 }
 
 #[tokio::test]
@@ -375,7 +379,7 @@ async fn memory_write_with_scope_creates_new_workspace_page() {
 
     assert!(
         output
-            .stdout
+            .to_text()
             .contains("Wrote memory page topics/new-page.md")
     );
     let page = memory_store
@@ -507,7 +511,7 @@ async fn memory_read_without_scope_falls_back_to_user_scope() {
         .await
         .unwrap();
 
-    assert!(output.stdout.contains("User-only page."));
+    assert!(output.to_text().contains("User-only page."));
 }
 
 #[tokio::test]
@@ -560,6 +564,7 @@ async fn memory_read_with_explicit_scope_reads_only_that_scope() {
         .await
         .unwrap();
 
-    assert!(output.stdout.contains("User page."));
-    assert!(!output.stdout.contains("Workspace page."));
+    let rendered = output.to_text();
+    assert!(rendered.contains("User page."));
+    assert!(!rendered.contains("Workspace page."));
 }

@@ -1343,3 +1343,21 @@ Remaining note:
 
 - `WorkingContext.metadata` still exists for legitimate shared request state such as tool schemas and future cross-stage metrics.
 - If that map starts accumulating new stage-specific payload contracts again, the repo will drift back toward the same coupling problem that this step removed.
+
+### 26.1 `ToolOutput` now preserves structure, but the model still receives flattened text
+
+Current state:
+
+- `ToolOutput` is now a content-block type with `Vec<ToolContent>`, `is_error`, optional `structured` data, and `duration`.
+- Process-backed tools preserve shell metadata by storing `stdout`, `stderr`, and `exit_code` in `structured`, while built-in tools such as `memory_search` can return both a human-readable summary and structured JSON results.
+- `Event::ToolResult` now stores the richer `ToolOutput` value directly instead of flattening it into a string.
+
+Consequence:
+
+- MCP and built-in tools can retain structured results without losing fidelity at the event-log boundary.
+- TUI and gateway renderers can later distinguish plain text from structured JSON without re-parsing shell-shaped strings.
+
+Remaining note:
+
+- The LLM-facing path still uses `ToolOutput::to_text()` in the brain harness and history compiler, so the model sees a flattened text rendering rather than typed content blocks.
+- That is the correct short-term tradeoff, but if the repo later wants model-visible structured tool results, the provider request layer will need a first-class tool-result representation instead of a text-only flattening step.

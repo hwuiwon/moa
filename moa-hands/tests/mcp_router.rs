@@ -111,7 +111,7 @@ async fn router_discovers_stdio_mcp_tools_from_config() {
         .await
         .unwrap();
 
-    assert_eq!(output.stdout, "hello");
+    assert_eq!(output.to_text(), "hello");
 }
 
 #[tokio::test]
@@ -184,7 +184,7 @@ async fn router_injects_mcp_credentials_via_proxy() {
         .await
         .unwrap();
 
-    assert_eq!(output.stdout, "pong");
+    assert_eq!(output.to_text(), "pong");
     unsafe { std::env::remove_var(token_env) };
 }
 
@@ -333,5 +333,5 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
         .await
         .unwrap();
 
-    assert_eq!(output.stdout, "sse-pong");
+    assert_eq!(output.to_text(), "sse-pong");
 }

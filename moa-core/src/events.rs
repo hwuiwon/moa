@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::types::{ApprovalDecision, Attachment, EventType, RiskLevel, SessionStatus};
+use crate::types::{ApprovalDecision, Attachment, EventType, RiskLevel, SessionStatus, ToolOutput};
 
 /// Append-only session event payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,7 +86,7 @@ pub enum Event {
         /// Matching tool call identifier.
         tool_id: Uuid,
         /// Full tool output.
-        output: String,
+        output: ToolOutput,
         /// Whether execution succeeded.
         success: bool,
         /// Duration in milliseconds.

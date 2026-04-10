@@ -9,7 +9,6 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_security::{
     InputClassification, check_canary, contains_canary_tokens, inject_canary, inspect_input,
-    wrap_untrusted_tool_output,
 };
 use uuid::Uuid;
 
@@ -251,8 +250,8 @@ async fn run_brain_turn_with_tools_mode(
                                     session_id.clone(),
                                     Event::ToolResult {
                                         tool_id,
-                                        output: secured_output.rendered,
-                                        success: output.exit_code == 0,
+                                        output: output.clone(),
+                                        success: !output.is_error,
                                         duration_ms: output.duration.as_millis() as u64,
                                     },
                                 )
@@ -364,18 +363,7 @@ async fn run_brain_turn_with_tools_mode(
 }
 
 fn format_tool_output(output: &moa_core::ToolOutput) -> String {
-    let mut sections = Vec::new();
-    if !output.stdout.trim().is_empty() {
-        sections.push(output.stdout.trim_end().to_string());
-    }
-    if !output.stderr.trim().is_empty() {
-        sections.push(format!("stderr:\n{}", output.stderr.trim_end()));
-    }
-    if sections.is_empty() {
-        format!("exit_code: {}", output.exit_code)
-    } else {
-        sections.join("\n\n")
-    }
+    output.to_text()
 }
 
 async fn process_resolved_approval(
@@ -457,8 +445,8 @@ async fn execute_pending_tool(
                     session_id,
                     Event::ToolResult {
                         tool_id: pending.tool_id,
-                        output: secured_output.rendered,
-                        success: output.exit_code == 0,
+                        output: output.clone(),
+                        success: !output.is_error,
                         duration_ms: output.duration.as_millis() as u64,
                     },
                 )
@@ -482,7 +470,6 @@ async fn execute_pending_tool(
 }
 
 struct SecuredToolOutput {
-    rendered: String,
     inspection: moa_security::InputInspection,
 }
 
@@ -495,10 +482,7 @@ fn secure_tool_output(
         .map(|canary| vec![canary.to_string()])
         .unwrap_or_default();
     let inspection = inspect_input(&formatted, &canaries);
-    SecuredToolOutput {
-        rendered: wrap_untrusted_tool_output(&formatted),
-        inspection,
-    }
+    SecuredToolOutput { inspection }
 }
 
 async fn emit_tool_output_warning(

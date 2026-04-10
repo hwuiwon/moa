@@ -175,11 +175,16 @@ async fn e2b_live_provider_handles_roundtrip_and_lifecycle() {
                 .to_string(),
             )
             .await?;
-        assert_eq!(bash.exit_code, 0, "bash stderr: {}", bash.stderr);
+        assert_eq!(
+            bash.process_exit_code(),
+            Some(0),
+            "bash stderr: {}",
+            bash.process_stderr().unwrap_or_default()
+        );
         assert!(
-            bash.stdout.contains(&marker),
+            bash.process_stdout().unwrap_or_default().contains(&marker),
             "bash output missing marker: {}",
-            bash.stdout
+            bash.to_text()
         );
 
         let failing = provider
@@ -193,9 +198,19 @@ async fn e2b_live_provider_handles_roundtrip_and_lifecycle() {
                 .to_string(),
             )
             .await?;
-        assert_eq!(failing.exit_code, 7);
-        assert!(failing.stdout.contains("live-out"));
-        assert!(failing.stderr.contains("live-err"));
+        assert_eq!(failing.process_exit_code(), Some(7));
+        assert!(
+            failing
+                .process_stdout()
+                .unwrap_or_default()
+                .contains("live-out")
+        );
+        assert!(
+            failing
+                .process_stderr()
+                .unwrap_or_default()
+                .contains("live-err")
+        );
 
         let write = provider
             .execute(
@@ -204,7 +219,7 @@ async fn e2b_live_provider_handles_roundtrip_and_lifecycle() {
                 &json!({ "path": file_path, "content": marker }).to_string(),
             )
             .await?;
-        assert_eq!(write.exit_code, 0);
+        assert_eq!(write.process_exit_code(), Some(0));
 
         let read = provider
             .execute(
@@ -214,9 +229,9 @@ async fn e2b_live_provider_handles_roundtrip_and_lifecycle() {
             )
             .await?;
         assert!(
-            read.stdout.contains(&marker),
+            read.to_text().contains(&marker),
             "read output missing marker: {}",
-            read.stdout
+            read.to_text()
         );
 
         let search = provider
@@ -226,14 +241,14 @@ async fn e2b_live_provider_handles_roundtrip_and_lifecycle() {
                 &json!({ "pattern": file_path.rsplit('/').next().unwrap_or_default() }).to_string(),
             )
             .await?;
-        assert_eq!(search.exit_code, 0);
+        assert_eq!(search.process_exit_code(), Some(0));
         assert!(
-            search.stdout.contains(&file_path)
+            search.to_text().contains(&file_path)
                 || search
-                    .stdout
+                    .to_text()
                     .contains(file_path.rsplit('/').next().unwrap_or_default()),
             "search output missing path: {}",
-            search.stdout
+            search.to_text()
         );
 
         provider.pause(&handle).await?;
@@ -245,7 +260,7 @@ async fn e2b_live_provider_handles_roundtrip_and_lifecycle() {
                 &json!({ "path": file_path }).to_string(),
             )
             .await?;
-        assert!(resumed_read.stdout.contains(&marker));
+        assert!(resumed_read.to_text().contains(&marker));
 
         let unsupported_tool = provider
             .execute(
@@ -315,7 +330,7 @@ async fn e2b_live_router_lazy_provisions_reuses_and_isolates_sessions() {
             )
             .await
             .expect("first router write should provision a hand");
-        assert_eq!(write.exit_code, 0);
+        assert_eq!(write.process_exit_code(), Some(0));
         hand_id.expect("cloud hand execution should return a hand id")
     };
 
@@ -333,7 +348,7 @@ async fn e2b_live_router_lazy_provisions_reuses_and_isolates_sessions() {
             )
             .await?;
         assert_eq!(same_hand_id.as_deref(), Some(handle_one_id.as_str()));
-        assert!(read.stdout.contains(&content_one));
+        assert!(read.to_text().contains(&content_one));
 
         provider.pause(&handle_one).await?;
         let (resumed_hand_id, resumed_read) = router
@@ -347,7 +362,7 @@ async fn e2b_live_router_lazy_provisions_reuses_and_isolates_sessions() {
             )
             .await?;
         assert_eq!(resumed_hand_id.as_deref(), Some(handle_one_id.as_str()));
-        assert!(resumed_read.stdout.contains(&content_one));
+        assert!(resumed_read.to_text().contains(&content_one));
 
         let (hand_two_id, second_write) = router
             .execute_authorized(
@@ -359,7 +374,7 @@ async fn e2b_live_router_lazy_provisions_reuses_and_isolates_sessions() {
                 },
             )
             .await?;
-        assert_eq!(second_write.exit_code, 0);
+        assert_eq!(second_write.process_exit_code(), Some(0));
         let hand_two_id = hand_two_id.expect("second session should receive a distinct hand");
         assert_ne!(hand_two_id, handle_one_id);
         handle_two = Some(HandHandle::e2b(hand_two_id.clone()));
@@ -377,9 +392,10 @@ async fn e2b_live_router_lazy_provisions_reuses_and_isolates_sessions() {
         match missing_read {
             Ok((_, output)) => {
                 assert_ne!(
-                    output.exit_code, 0,
+                    output.process_exit_code(),
+                    Some(0),
                     "second sandbox unexpectedly read first sandbox file: {}",
-                    output.stdout
+                    output.to_text()
                 );
             }
             Err(error) => match error {
@@ -398,8 +414,8 @@ async fn e2b_live_router_lazy_provisions_reuses_and_isolates_sessions() {
                 },
             )
             .await?;
-        assert_eq!(bash.exit_code, 0);
-        assert!(bash.stdout.contains("router-bash"));
+        assert_eq!(bash.process_exit_code(), Some(0));
+        assert!(bash.to_text().contains("router-bash"));
 
         Ok::<(), MoaError>(())
     })

@@ -205,11 +205,16 @@ async fn daytona_live_provider_handles_roundtrip_and_lifecycle() {
                 .to_string(),
             )
             .await?;
-        assert_eq!(bash.exit_code, 0, "bash stderr: {}", bash.stderr);
+        assert_eq!(
+            bash.process_exit_code(),
+            Some(0),
+            "bash stderr: {}",
+            bash.process_stderr().unwrap_or_default()
+        );
         assert!(
-            bash.stdout.contains(&marker),
+            bash.process_stdout().unwrap_or_default().contains(&marker),
             "bash output missing marker: {}",
-            bash.stdout
+            bash.to_text()
         );
 
         let write = provider
@@ -219,7 +224,7 @@ async fn daytona_live_provider_handles_roundtrip_and_lifecycle() {
                 &json!({ "path": file_path, "content": marker }).to_string(),
             )
             .await?;
-        assert_eq!(write.exit_code, 0);
+        assert_eq!(write.process_exit_code(), Some(0));
 
         let read = provider
             .execute(
@@ -228,7 +233,7 @@ async fn daytona_live_provider_handles_roundtrip_and_lifecycle() {
                 &json!({ "path": file_path }).to_string(),
             )
             .await?;
-        assert_eq!(read.stdout, marker);
+        assert_eq!(read.to_text(), marker);
 
         let search = provider
             .execute(
@@ -237,11 +242,11 @@ async fn daytona_live_provider_handles_roundtrip_and_lifecycle() {
                 &json!({ "pattern": file_path.rsplit('/').next().unwrap_or_default() }).to_string(),
             )
             .await?;
-        assert_eq!(search.exit_code, 0);
+        assert!(!search.is_error);
         assert!(
-            search.stdout.contains(&file_path),
+            search.to_text().contains(&file_path),
             "search output missing path: {}",
-            search.stdout
+            search.to_text()
         );
 
         provider.pause(&handle).await?;
@@ -259,7 +264,7 @@ async fn daytona_live_provider_handles_roundtrip_and_lifecycle() {
                 &json!({ "path": file_path }).to_string(),
             )
             .await?;
-        assert_eq!(resumed_read.stdout, marker);
+        assert_eq!(resumed_read.to_text(), marker);
 
         let unsupported_tool = provider
             .execute(
@@ -329,7 +334,7 @@ async fn daytona_live_router_lazy_provisions_reuses_and_isolates_sessions() {
             )
             .await
             .expect("first router write should provision a hand");
-        assert_eq!(write.exit_code, 0);
+        assert_eq!(write.process_exit_code(), Some(0));
         hand_id.expect("cloud hand execution should return a hand id")
     };
 
@@ -347,7 +352,7 @@ async fn daytona_live_router_lazy_provisions_reuses_and_isolates_sessions() {
             )
             .await?;
         assert_eq!(same_hand_id.as_deref(), Some(handle_one_id.as_str()));
-        assert_eq!(read.stdout, content_one);
+        assert_eq!(read.to_text(), content_one);
 
         provider.pause(&handle_one).await?;
         let _ = wait_for_status(
@@ -368,7 +373,7 @@ async fn daytona_live_router_lazy_provisions_reuses_and_isolates_sessions() {
             )
             .await?;
         assert_eq!(resumed_hand_id.as_deref(), Some(handle_one_id.as_str()));
-        assert_eq!(resumed_read.stdout, content_one);
+        assert_eq!(resumed_read.to_text(), content_one);
 
         let (hand_two_id, second_write) = router
             .execute_authorized(
@@ -380,7 +385,7 @@ async fn daytona_live_router_lazy_provisions_reuses_and_isolates_sessions() {
                 },
             )
             .await?;
-        assert_eq!(second_write.exit_code, 0);
+        assert_eq!(second_write.process_exit_code(), Some(0));
         let hand_two_id = hand_two_id.expect("second session should receive a distinct hand");
         assert_ne!(hand_two_id, handle_one_id);
         handle_two = Some(HandHandle::daytona(hand_two_id.clone()));
@@ -395,8 +400,8 @@ async fn daytona_live_router_lazy_provisions_reuses_and_isolates_sessions() {
                 },
             )
             .await?;
-        assert_eq!(bash.exit_code, 0);
-        assert!(bash.stdout.contains("router-bash"));
+        assert_eq!(bash.process_exit_code(), Some(0));
+        assert!(bash.to_text().contains("router-bash"));
 
         Ok::<(), MoaError>(())
     })

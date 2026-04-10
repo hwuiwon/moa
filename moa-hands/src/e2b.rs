@@ -257,14 +257,12 @@ impl E2BHandProvider {
         if !response.status().is_success() {
             return Err(http_error(response).await);
         }
-        Ok(ToolOutput {
-            stdout: response.text().await.map_err(|error| {
+        Ok(ToolOutput::text(
+            response.text().await.map_err(|error| {
                 MoaError::ProviderError(format!("failed to decode E2B file response: {error}"))
             })?,
-            stderr: String::new(),
-            exit_code: 0,
-            duration: started_at.elapsed(),
-        })
+            started_at.elapsed(),
+        ))
     }
 
     async fn write_file(
@@ -291,12 +289,10 @@ impl E2BHandProvider {
                 MoaError::ProviderError(format!("failed to write E2B file: {error}"))
             })?;
         let _ = expect_success_json(response).await?;
-        Ok(ToolOutput {
-            stdout: format!("wrote {path}"),
-            stderr: String::new(),
-            exit_code: 0,
-            duration: started_at.elapsed(),
-        })
+        Ok(ToolOutput::text(
+            format!("wrote {path}"),
+            started_at.elapsed(),
+        ))
     }
 }
 
@@ -613,12 +609,9 @@ fn parse_e2b_connect_stream(body: &[u8], duration: Duration) -> Result<ToolOutpu
         ));
     }
 
-    Ok(ToolOutput {
-        stdout,
-        stderr,
-        exit_code,
-        duration,
-    })
+    Ok(ToolOutput::from_process(
+        stdout, stderr, exit_code, duration,
+    ))
 }
 
 fn decode_stream_chunk(value: &str) -> String {
@@ -759,7 +752,7 @@ mod tests {
             .execute(&handle, "bash", r#"{"cmd":"echo hello"}"#)
             .await
             .unwrap();
-        assert_eq!(output.stdout, "hello\n");
+        assert_eq!(output.process_stdout().as_deref(), Some("hello\n"));
 
         provider.destroy(&handle).await.unwrap();
     }

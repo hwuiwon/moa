@@ -177,7 +177,10 @@ pub(crate) fn format_events_for_learning(events: &[EventRecord]) -> String {
             Event::ToolResult {
                 output, success, ..
             } => {
-                lines.push(format!("tool_result success={success}: {output}"));
+                lines.push(format!(
+                    "tool_result success={success}: {}",
+                    output.to_text()
+                ));
             }
             Event::ToolError { error, .. } => lines.push(format!("tool_error: {error}")),
             Event::BrainResponse { text, .. } => lines.push(format!("assistant: {text}")),

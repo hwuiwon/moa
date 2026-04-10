@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{MemoryPath, MemoryScope, MoaError, PageType, Result, ToolOutput, WikiPage};
 use serde::Deserialize;
+use serde_json::json;
 
 use crate::router::{
     BuiltInTool, ToolContext, ToolDiffStrategy, ToolInputShape, ToolPolicySpec, read_tool_policy,
@@ -57,17 +58,15 @@ impl BuiltInTool for MemoryReadTool {
             None => read_page_with_fallback(ctx.memory_store, ctx.session, &path).await?,
         };
 
-        Ok(ToolOutput {
-            stdout: format!(
+        Ok(ToolOutput::text(
+            format!(
                 "# {} ({})\n\n{}",
                 page.title,
                 path.as_str(),
                 page.content.trim()
             ),
-            stderr: String::new(),
-            exit_code: 0,
-            duration: started_at.elapsed(),
-        })
+            started_at.elapsed(),
+        ))
     }
 }
 
@@ -118,6 +117,7 @@ impl BuiltInTool for MemorySearchTool {
         let scopes = params.scope.scopes(ctx.session);
         let per_scope_limit = limit.max(1);
         let mut rendered = Vec::new();
+        let mut structured_results = Vec::new();
 
         for scope in scopes {
             let scope_label = match &scope {
@@ -132,6 +132,23 @@ impl BuiltInTool for MemorySearchTool {
                 results.retain(|result| &result.page_type == page_type);
             }
             for result in results.into_iter().take(limit) {
+                let path = result.path.clone();
+                let title = result.title.clone();
+                let confidence = result.confidence.clone();
+                let updated = result.updated;
+                let snippet = result.snippet.clone();
+                let page_type = result.page_type.clone();
+                let reference_count = result.reference_count;
+                structured_results.push(json!({
+                    "path": path,
+                    "title": title,
+                    "scope": scope_label,
+                    "confidence": confidence,
+                    "updated": updated,
+                    "snippet": snippet,
+                    "page_type": page_type,
+                    "reference_count": reference_count,
+                }));
                 rendered.push(format!(
                     "## {} ({})\nScope: {} | Confidence: {:?} | Updated: {}\n{}\n",
                     result.title,
@@ -144,18 +161,17 @@ impl BuiltInTool for MemorySearchTool {
             }
         }
 
-        let stdout = if rendered.is_empty() {
+        let summary = if rendered.is_empty() {
             "No matching memory pages found.".to_string()
         } else {
             rendered.join("\n")
         };
 
-        Ok(ToolOutput {
-            stdout,
-            stderr: String::new(),
-            exit_code: 0,
-            duration: started_at.elapsed(),
-        })
+        Ok(ToolOutput::json(
+            summary,
+            serde_json::Value::Array(structured_results),
+            started_at.elapsed(),
+        ))
     }
 }
 
@@ -254,12 +270,10 @@ impl BuiltInTool for MemoryWriteTool {
         };
         ctx.memory_store.write_page(scope, &path, page).await?;
 
-        Ok(ToolOutput {
-            stdout: format!("Wrote memory page {}", path.as_str()),
-            stderr: String::new(),
-            exit_code: 0,
-            duration: started_at.elapsed(),
-        })
+        Ok(ToolOutput::text(
+            format!("Wrote memory page {}", path.as_str()),
+            started_at.elapsed(),
+        ))
     }
 }
 

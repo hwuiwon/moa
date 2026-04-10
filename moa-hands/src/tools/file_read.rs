@@ -13,12 +13,7 @@ pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     let path = resolve_sandbox_path(sandbox_dir, &params.path)?;
     let content = fs::read_to_string(path).await?;
 
-    Ok(ToolOutput {
-        stdout: content,
-        stderr: String::new(),
-        exit_code: 0,
-        duration: Duration::default(),
-    })
+    Ok(ToolOutput::text(content, Duration::default()))
 }
 
 /// Resolves a user-provided relative path inside a sandbox root.
