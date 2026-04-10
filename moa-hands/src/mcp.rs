@@ -1,0 +1,518 @@
+//! Model Context Protocol client support for stdio and remote transports.
+
+use std::collections::HashMap;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use eventsource_stream::Eventsource;
+use futures_util::StreamExt;
+use moa_core::{McpServerConfig, McpTransportConfig, MoaError, Result, ToolOutput};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::Mutex;
+
+const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+const DEFAULT_MCP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// One tool discovered from a connected MCP server.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpDiscoveredTool {
+    /// Stable MCP tool name.
+    pub name: String,
+    /// Human-readable tool description.
+    pub description: String,
+    /// JSON schema for the tool input.
+    pub input_schema: Value,
+}
+
+/// Async MCP client bound to a single configured server.
+pub struct MCPClient {
+    server_name: String,
+    transport: McpTransport,
+    next_id: AtomicU64,
+}
+
+impl MCPClient {
+    /// Connects to an MCP server and performs the initialize handshake.
+    pub async fn connect(config: &McpServerConfig) -> Result<Self> {
+        let transport = match config.transport {
+            McpTransportConfig::Stdio => {
+                McpTransport::Stdio(Box::new(Mutex::new(StdioClient::spawn(config).await?)))
+            }
+            McpTransportConfig::Http | McpTransportConfig::Sse => {
+                McpTransport::Remote(RemoteClient::new(config)?)
+            }
+        };
+        let client = Self {
+            server_name: config.name.clone(),
+            transport,
+            next_id: AtomicU64::new(1),
+        };
+        client.initialize().await?;
+        Ok(client)
+    }
+
+    /// Returns the configured MCP server name.
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    /// Lists all currently exposed tools from the server.
+    pub async fn list_tools(&self) -> Result<Vec<McpDiscoveredTool>> {
+        let response = self
+            .request("tools/list", json!({}), HeaderMap::new())
+            .await?;
+        let parsed: ToolsListResponse = serde_json::from_value(response)?;
+        Ok(parsed
+            .tools
+            .into_iter()
+            .map(|tool| McpDiscoveredTool {
+                name: tool.name,
+                description: tool.description.unwrap_or_default(),
+                input_schema: tool.input_schema,
+            })
+            .collect())
+    }
+
+    /// Calls one MCP tool with optional extra transport headers.
+    pub async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Value,
+        extra_headers: HashMap<String, String>,
+    ) -> Result<ToolOutput> {
+        let headers = header_map_from_pairs(extra_headers)?;
+        let response = self
+            .request(
+                "tools/call",
+                json!({
+                    "name": name,
+                    "arguments": arguments,
+                }),
+                headers,
+            )
+            .await?;
+        flatten_call_result(response)
+    }
+
+    async fn initialize(&self) -> Result<()> {
+        let _ = self
+            .request(
+                "initialize",
+                json!({
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "moa",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    }
+                }),
+                HeaderMap::new(),
+            )
+            .await?;
+        self.notify("notifications/initialized", json!({})).await
+    }
+
+    async fn notify(&self, method: &str, params: Value) -> Result<()> {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        match &self.transport {
+            McpTransport::Stdio(transport) => transport.lock().await.notify(message).await,
+            McpTransport::Remote(transport) => transport.notify(message).await,
+        }
+    }
+
+    async fn request(&self, method: &str, params: Value, headers: HeaderMap) -> Result<Value> {
+        let message_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": message_id,
+            "method": method,
+            "params": params,
+        });
+        let response = match &self.transport {
+            McpTransport::Stdio(transport) => transport.lock().await.request(request).await?,
+            McpTransport::Remote(transport) => transport.request(request, headers).await?,
+        };
+        parse_jsonrpc_result(response)
+    }
+}
+
+enum McpTransport {
+    Stdio(Box<Mutex<StdioClient>>),
+    Remote(RemoteClient),
+}
+
+struct StdioClient {
+    _child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl StdioClient {
+    async fn spawn(config: &McpServerConfig) -> Result<Self> {
+        let command = config.command.as_deref().ok_or_else(|| {
+            MoaError::ConfigError(format!(
+                "MCP server {} requires a command for stdio transport",
+                config.name
+            ))
+        })?;
+        let mut child = Command::new(command)
+            .args(&config.args)
+            .envs(&config.env)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            MoaError::ProviderError(format!(
+                "failed to capture stdin for MCP server {}",
+                config.name
+            ))
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            MoaError::ProviderError(format!(
+                "failed to capture stdout for MCP server {}",
+                config.name
+            ))
+        })?;
+        Ok(Self {
+            _child: child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    async fn notify(&mut self, message: Value) -> Result<()> {
+        write_framed_message(&mut self.stdin, &message).await
+    }
+
+    async fn request(&mut self, message: Value) -> Result<Value> {
+        write_framed_message(&mut self.stdin, &message).await?;
+        loop {
+            let value = read_framed_message(&mut self.stdout).await?;
+            if value.get("id").is_some()
+                || value.get("result").is_some()
+                || value.get("error").is_some()
+            {
+                return Ok(value);
+            }
+        }
+    }
+}
+
+struct RemoteClient {
+    client: reqwest::Client,
+    url: String,
+    transport: McpTransportConfig,
+}
+
+impl RemoteClient {
+    fn new(config: &McpServerConfig) -> Result<Self> {
+        let url = config.url.clone().ok_or_else(|| {
+            MoaError::ConfigError(format!(
+                "MCP server {} requires a url for remote transport",
+                config.name
+            ))
+        })?;
+        Ok(Self {
+            client: reqwest::Client::builder()
+                .timeout(DEFAULT_MCP_TIMEOUT)
+                .build()
+                .map_err(|error| {
+                    MoaError::ProviderError(format!("failed to build MCP http client: {error}"))
+                })?,
+            url,
+            transport: config.transport,
+        })
+    }
+
+    async fn notify(&self, message: Value) -> Result<()> {
+        let response = self
+            .client
+            .post(&self.url)
+            .json(&message)
+            .send()
+            .await
+            .map_err(|error| {
+                MoaError::ProviderError(format!("failed to notify MCP server: {error}"))
+            })?;
+        if !response.status().is_success() {
+            return Err(MoaError::HttpStatus {
+                status: response.status().as_u16(),
+                message: response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "failed to read MCP notify error".to_string()),
+            });
+        }
+        Ok(())
+    }
+
+    async fn request(&self, message: Value, headers: HeaderMap) -> Result<Value> {
+        let request = self.client.post(&self.url).headers(headers).json(&message);
+        let response = request.send().await.map_err(|error| {
+            MoaError::ProviderError(format!("failed to call MCP server: {error}"))
+        })?;
+        if !response.status().is_success() {
+            return Err(MoaError::HttpStatus {
+                status: response.status().as_u16(),
+                message: response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "failed to read MCP error body".to_string()),
+            });
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        if self.transport == McpTransportConfig::Sse || content_type.contains("text/event-stream") {
+            return read_sse_response(response).await;
+        }
+
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| MoaError::StreamError(format!("invalid MCP JSON response: {error}")))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolsListResponse {
+    tools: Vec<ToolsListEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolsListEntry {
+    name: String,
+    description: Option<String>,
+    #[serde(rename = "inputSchema")]
+    input_schema: Value,
+}
+
+async fn write_framed_message(stdin: &mut ChildStdin, message: &Value) -> Result<()> {
+    let payload = serde_json::to_vec(message)?;
+    let header = format!("Content-Length: {}\r\n\r\n", payload.len());
+    stdin.write_all(header.as_bytes()).await?;
+    stdin.write_all(&payload).await?;
+    stdin.flush().await?;
+    Ok(())
+}
+
+async fn read_framed_message(stdout: &mut BufReader<ChildStdout>) -> Result<Value> {
+    let mut content_length = None;
+    loop {
+        let mut line = String::new();
+        let bytes = stdout.read_line(&mut line).await?;
+        if bytes == 0 {
+            return Err(MoaError::StreamError(
+                "MCP stdio stream closed while waiting for response".to_string(),
+            ));
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some(value) = trimmed.strip_prefix("Content-Length:") {
+            content_length = Some(value.trim().parse::<usize>().map_err(|error| {
+                MoaError::StreamError(format!("invalid MCP Content-Length header: {error}"))
+            })?);
+        }
+    }
+
+    let content_length = content_length
+        .ok_or_else(|| MoaError::StreamError("missing MCP Content-Length header".to_string()))?;
+    let mut payload = vec![0_u8; content_length];
+    stdout.read_exact(&mut payload).await?;
+    serde_json::from_slice(&payload)
+        .map_err(|error| MoaError::StreamError(format!("invalid MCP stdio payload: {error}")))
+}
+
+async fn read_sse_response(response: reqwest::Response) -> Result<Value> {
+    let mut stream = response
+        .bytes_stream()
+        .eventsource()
+        .map(|event| event.map_err(|error| MoaError::StreamError(error.to_string())));
+    while let Some(event) = stream.next().await {
+        let event = event?;
+        if event.event == "message" || event.event.is_empty() {
+            return serde_json::from_str(&event.data).map_err(|error| {
+                MoaError::StreamError(format!("invalid MCP SSE payload: {error}"))
+            });
+        }
+    }
+    Err(MoaError::StreamError(
+        "MCP SSE stream ended without a JSON-RPC response".to_string(),
+    ))
+}
+
+fn parse_jsonrpc_result(response: Value) -> Result<Value> {
+    if let Some(error) = response.get("error") {
+        return Err(MoaError::ToolError(format!(
+            "MCP server returned error: {error}"
+        )));
+    }
+    response
+        .get("result")
+        .cloned()
+        .ok_or_else(|| MoaError::StreamError("missing MCP result payload".to_string()))
+}
+
+fn flatten_call_result(result: Value) -> Result<ToolOutput> {
+    let is_error = result
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut chunks = Vec::new();
+    if let Some(content) = result.get("content").and_then(Value::as_array) {
+        for item in content {
+            if let Some(text) = item.get("text").and_then(Value::as_str) {
+                chunks.push(text.to_string());
+                continue;
+            }
+            chunks.push(serde_json::to_string_pretty(item)?);
+        }
+    } else if result != Value::Null {
+        chunks.push(serde_json::to_string_pretty(&result)?);
+    }
+
+    let stdout = chunks.join("\n\n");
+    Ok(ToolOutput {
+        stdout: if is_error {
+            String::new()
+        } else {
+            stdout.clone()
+        },
+        stderr: if is_error { stdout } else { String::new() },
+        exit_code: if is_error { 1 } else { 0 },
+        duration: Duration::default(),
+    })
+}
+
+fn header_map_from_pairs(headers: HashMap<String, String>) -> Result<HeaderMap> {
+    let mut map = HeaderMap::new();
+    for (key, value) in headers {
+        let name = HeaderName::from_bytes(key.as_bytes()).map_err(|error| {
+            MoaError::ValidationError(format!("invalid MCP header name {key}: {error}"))
+        })?;
+        let value = HeaderValue::from_str(&value).map_err(|error| {
+            MoaError::ValidationError(format!("invalid MCP header value for {key}: {error}"))
+        })?;
+        map.insert(name, value);
+    }
+    Ok(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use moa_core::{McpServerConfig, McpTransportConfig};
+    use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::{MCPClient, flatten_call_result};
+
+    #[tokio::test]
+    async fn flatten_tool_result_aggregates_text_items() {
+        let output = flatten_call_result(json!({
+            "content": [
+                { "type": "text", "text": "hello" },
+                { "type": "text", "text": "world" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(output.stdout, "hello\n\nworld");
+        assert_eq!(output.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn stdio_client_lists_and_calls_tools() {
+        let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/mock_mcp_stdio_server.py");
+        let client = MCPClient::connect(&McpServerConfig {
+            name: "mock".to_string(),
+            transport: McpTransportConfig::Stdio,
+            command: Some("python3".to_string()),
+            args: vec![server.display().to_string()],
+            ..McpServerConfig::default()
+        })
+        .await
+        .unwrap();
+
+        let tools = client.list_tools().await.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
+
+        let output = client
+            .call_tool("echo", json!({ "text": "hello" }), HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(output.stdout, "hello");
+    }
+
+    #[tokio::test]
+    async fn http_client_sends_headers_and_parses_jsonrpc() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for request_index in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = vec![0_u8; 4096];
+                let bytes = socket.read(&mut buffer).await.unwrap();
+                let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                if request_index == 2 {
+                    assert!(
+                        request
+                            .to_ascii_lowercase()
+                            .contains("authorization: bearer token")
+                    );
+                }
+                let body = if request_index == 0 {
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#
+                } else if request_index == 1 {
+                    r#"{}"#
+                } else {
+                    r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"pong"}]}}"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let client = MCPClient::connect(&McpServerConfig {
+            name: "remote".to_string(),
+            transport: McpTransportConfig::Http,
+            url: Some(format!("http://{addr}")),
+            ..McpServerConfig::default()
+        })
+        .await
+        .unwrap();
+
+        let output = client
+            .call_tool(
+                "ping",
+                json!({}),
+                HashMap::from([("Authorization".to_string(), "Bearer token".to_string())]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.stdout, "pong");
+    }
+}

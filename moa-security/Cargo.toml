@@ -6,11 +6,13 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
 globset = "0.4"
 moa-core = { path = "../moa-core" }
 serde_json.workspace = true
 shell-words = "1.1"
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
-uuid.workspace = true

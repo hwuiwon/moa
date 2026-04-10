@@ -1204,3 +1204,86 @@ Remaining caveat:
 
 - Dropping `TemporalOrchestrator` does not perform a graceful worker shutdown; it effectively detaches the worker thread until process exit.
 - A production-ready Temporal deployment likely needs an explicit worker lifecycle manager instead of the current fire-and-forget thread model.
+
+## 19. Cloud hands and MCP
+
+### 19.1 E2B command execution is coupled to the current sandbox RPC surface
+
+Current state:
+
+- `moa-hands/src/e2b.rs` provisions, pauses, resumes, destroys, and reconnects sandboxes using the documented E2B REST lifecycle endpoints.
+- Command execution is then routed through the current sandbox RPC/process surface exposed by the sandbox domain, matching the behavior of the published E2B JS SDK as closely as practical.
+- Live validation showed that command execution is not a plain JSON POST. It is a Connect JSON stream:
+  - `Content-Type: application/connect+json`
+  - `Connect-Protocol-Version: 1`
+  - request body encoded as a Connect envelope
+  - response body decoded as Connect envelopes with `start`, `data`, `end`, and end-stream frames
+- Live validation also showed that `POST /sandboxes/{id}/pause` requires a JSON body, even when it is just `{}`.
+
+Consequence:
+
+- The current Step 18 E2B hand provider works for mocked tests and real E2B Cloud runs.
+- MOA can treat E2B as a real `HandProvider` without inventing a second execution abstraction just for microVMs.
+
+Remaining caveat:
+
+- The E2B command execution path is less stable than the local or Daytona hands because it depends on an upstream transport shape that is not as cleanly documented as the lifecycle REST API.
+- If E2B changes the sandbox RPC surface, `moa-hands/src/e2b.rs` is the first place likely to need adjustment.
+
+### 19.2 MCP remote auth currently applies only to HTTP/SSE transports
+
+Current state:
+
+- `moa-security/src/mcp_proxy.rs` issues session-scoped opaque tokens and injects real credentials only when a remote MCP call is dispatched.
+- `moa-hands/src/router.rs` uses that proxy when executing MCP tools discovered from configured servers.
+- `moa-hands/src/mcp.rs` supports stdio and remote JSON-RPC transports, with SSE response parsing for remote endpoints that reply as event streams.
+
+Consequence:
+
+- Remote MCP servers can receive credentials without exposing them to the brain or to serialized tool arguments.
+- Session-scoped auth is enforced at the router/proxy seam instead of being embedded in prompt-visible tool definitions.
+
+Remaining caveat:
+
+- Stdio MCP auth is still process/env based; the proxy does not inject credentials into subprocess transports.
+- The current credential flow is therefore strongest for HTTP/SSE MCP servers and weaker for stdio servers that need secrets at startup.
+
+### 19.3 MCP tool results are still flattened into shell-shaped output
+
+Current state:
+
+- `moa-hands/src/mcp.rs` flattens MCP `content` arrays into the existing `ToolOutput` shape.
+- Text-like results are concatenated into `stdout`; MCP `isError` is mapped onto `stderr` and a non-zero exit code.
+
+Consequence:
+
+- Existing brain, approval, and UI code can consume MCP tool results without a larger cross-crate type migration.
+- Step 18 landed with low blast radius outside `moa-hands` and `moa-security`.
+
+Remaining caveat:
+
+- Structured MCP results such as rich JSON objects, binary assets, or multiple typed content blocks lose fidelity when reduced to `ToolOutput`.
+- A future first-class structured tool result type would make MCP integrations cleaner across the brain, orchestrator, and UI layers.
+
+### 19.4 Daytona live API behavior diverges from the obvious reading of the docs
+
+Current state:
+
+- `moa-hands/src/daytona.rs` now provisions sandboxes successfully against the real Daytona Cloud API.
+- The provider uses the live proxy routes that actually answered during end-to-end validation:
+  - `.../toolbox/{sandboxId}/process/execute`
+  - `.../toolbox/{sandboxId}/files/download`
+  - `.../toolbox/{sandboxId}/files/upload`
+  - `.../toolbox/{sandboxId}/files/search`
+- File upload uses multipart form data, matching the live toolbox behavior.
+- Destroy now treats `409 state change in progress` as a retryable transition instead of a hard failure.
+
+Consequence:
+
+- The Daytona provider now passes both mocked tests and real ignored live integration tests.
+- Router-level lazy provisioning, hand reuse, pause/resume, and session isolation all work against the real Daytona service.
+
+Remaining caveat:
+
+- The live API rejected explicit sandbox resource fields on the current create path with `Cannot specify Sandbox resources when using a snapshot`, so `moa-hands/src/daytona.rs` currently relies on Daytona's default sandbox class instead of honoring requested CPU/memory overrides.
+- The published docs mix `/toolbox/{sandboxId}/toolbox/...` reference paths with curl examples that omit the second `/toolbox`; the real proxy accepted the shorter form during validation.

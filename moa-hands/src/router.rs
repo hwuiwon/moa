@@ -10,16 +10,24 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moa_core::{
     ApprovalField, ApprovalFileDiff, ApprovalRule, HandHandle, HandProvider, HandResources,
-    HandSpec, MemoryStore, MoaConfig, MoaError, PolicyAction, Result, RiskLevel, SandboxTier,
-    SessionMeta, ToolInvocation, ToolOutput, ToolPolicyInput, UserId,
+    HandSpec, McpServerConfig, MemoryStore, MoaConfig, MoaError, PolicyAction, Result, RiskLevel,
+    SandboxTier, SessionMeta, ToolInvocation, ToolOutput, ToolPolicyInput, UserId,
 };
-use moa_security::{ApprovalRuleStore, PolicyCheck, ToolPolicies, ToolPolicyContext};
+use moa_security::{
+    ApprovalRuleStore, EnvironmentCredentialVault, MCPCredentialProxy, PolicyCheck, ToolPolicies,
+    ToolPolicyContext,
+};
 use serde_json::{Value, json};
 use tokio::fs;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+#[cfg(feature = "daytona")]
+use crate::daytona::DaytonaHandProvider;
+#[cfg(feature = "e2b")]
+use crate::e2b::E2BHandProvider;
 use crate::local::LocalHandProvider;
+use crate::mcp::{MCPClient, McpDiscoveredTool};
 use crate::tools::file_read::resolve_sandbox_path;
 use crate::tools::{memory, stub};
 
@@ -300,6 +308,44 @@ impl ToolRegistry {
         );
     }
 
+    /// Registers a discovered MCP tool and adds it to the default loadout.
+    pub fn register_mcp_tool(&mut self, server_name: &str, tool: McpDiscoveredTool) {
+        let name = tool.name.clone();
+        self.tools.insert(
+            name.clone(),
+            ToolDefinition {
+                name: name.clone(),
+                description: tool.description,
+                schema: tool.input_schema,
+                execution: ToolExecution::Mcp {
+                    server_name: server_name.to_string(),
+                },
+                policy: execute_tool_policy(ToolInputShape::Json),
+            },
+        );
+        if !self
+            .default_loadout
+            .iter()
+            .any(|candidate| candidate == &name)
+        {
+            self.default_loadout.push(name);
+        }
+    }
+
+    /// Retargets all hand-based tools to a different provider and sandbox tier.
+    pub fn retarget_hand_tools(&mut self, provider: &str, tier: SandboxTier) {
+        for tool in self.tools.values_mut() {
+            if let ToolExecution::Hand {
+                provider: current_provider,
+                tier: current_tier,
+            } = &mut tool.execution
+            {
+                *current_provider = provider.to_string();
+                *current_tier = tier.clone();
+            }
+        }
+    }
+
     /// Returns a tool definition by name.
     pub fn get(&self, name: &str) -> Option<&ToolDefinition> {
         self.tools.get(name)
@@ -326,6 +372,9 @@ pub struct ToolRouter {
     registry: ToolRegistry,
     memory_store: Arc<dyn MemoryStore>,
     providers: HashMap<String, Arc<dyn HandProvider>>,
+    mcp_clients: HashMap<String, Arc<MCPClient>>,
+    mcp_servers: HashMap<String, McpServerConfig>,
+    mcp_proxy: Option<Arc<MCPCredentialProxy>>,
     active_hands: RwLock<HashMap<String, HandHandle>>,
     policies: ToolPolicies,
     rule_store: Option<Arc<dyn ApprovalRuleStore>>,
@@ -343,6 +392,9 @@ impl ToolRouter {
             registry,
             memory_store,
             providers,
+            mcp_clients: HashMap::new(),
+            mcp_servers: HashMap::new(),
+            mcp_proxy: None,
             active_hands: RwLock::new(HashMap::new()),
             policies: ToolPolicies::default(),
             rule_store: None,
@@ -375,14 +427,71 @@ impl ToolRouter {
         memory_store: Arc<dyn MemoryStore>,
     ) -> Result<Self> {
         let sandbox_root = expand_local_path(&config.local.sandbox_dir)?;
-        Ok(Self::new_local(memory_store, sandbox_root)
-            .await?
-            .with_policies(ToolPolicies::from_config(config)))
+        let local_provider: Arc<dyn HandProvider> = Arc::new(
+            LocalHandProvider::new(&sandbox_root)
+                .await?
+                .with_command_timeout(DEFAULT_TOOL_TIMEOUT),
+        );
+        let mut providers = HashMap::new();
+        providers.insert(DEFAULT_PROVIDER_NAME.to_string(), local_provider);
+
+        #[cfg(feature = "daytona")]
+        if config.cloud.enabled
+            && let Some(hands) = &config.cloud.hands
+            && (hands
+                .default_provider
+                .as_deref()
+                .is_some_and(|provider| provider == "daytona")
+                || hands.daytona_api_key_env.is_some())
+        {
+            providers.insert(
+                "daytona".to_string(),
+                Arc::new(DaytonaHandProvider::from_config(config)?),
+            );
+        }
+
+        #[cfg(feature = "e2b")]
+        if config.cloud.enabled
+            && let Some(hands) = &config.cloud.hands
+            && (hands
+                .default_provider
+                .as_deref()
+                .is_some_and(|provider| provider == "e2b")
+                || hands.e2b_api_key_env.is_some())
+        {
+            providers.insert(
+                "e2b".to_string(),
+                Arc::new(E2BHandProvider::from_config(config)?),
+            );
+        }
+
+        let mut registry = ToolRegistry::default_local();
+        if let Some((provider, tier)) = default_cloud_provider(config)? {
+            registry.retarget_hand_tools(&provider, tier);
+        }
+
+        let mut router = Self {
+            sandbox_root: Some(sandbox_root),
+            ..Self::new(registry, memory_store, providers)
+        }
+        .with_policies(ToolPolicies::from_config(config));
+
+        if !config.mcp_servers.is_empty() {
+            router.load_mcp_servers(config).await?;
+        }
+
+        Ok(router)
     }
 
     /// Attaches a persistent approval rule store to the router.
     pub fn with_rule_store(mut self, rule_store: Arc<dyn ApprovalRuleStore>) -> Self {
         self.rule_store = Some(rule_store);
+        self
+    }
+
+    /// Attaches an MCP credential proxy to the router.
+    pub fn with_mcp_proxy(mut self, mcp_proxy: Arc<MCPCredentialProxy>) -> Self {
+        self.mcp_proxy = Some(mcp_proxy);
         self
     }
 
@@ -395,6 +504,33 @@ impl ToolRouter {
     /// Returns the ordered tool schemas for prompt compilation.
     pub fn tool_schemas(&self) -> Vec<Value> {
         self.registry.default_tool_schemas()
+    }
+
+    async fn load_mcp_servers(&mut self, config: &MoaConfig) -> Result<()> {
+        let mut registry = std::mem::take(&mut self.registry);
+        if config
+            .mcp_servers
+            .iter()
+            .any(|server| server.credentials.is_some())
+            && self.mcp_proxy.is_none()
+        {
+            let vault = Arc::new(EnvironmentCredentialVault::from_mcp_servers(
+                &config.mcp_servers,
+            )?);
+            self.mcp_proxy = Some(Arc::new(MCPCredentialProxy::new(vault)));
+        }
+
+        for server in &config.mcp_servers {
+            let client = Arc::new(MCPClient::connect(server).await?);
+            for tool in client.list_tools().await? {
+                registry.register_mcp_tool(&server.name, tool);
+            }
+            self.mcp_servers.insert(server.name.clone(), server.clone());
+            self.mcp_clients.insert(server.name.clone(), client);
+        }
+
+        self.registry = registry;
+        Ok(())
     }
 
     /// Evaluates the policy action for a tool invocation in the current session.
@@ -529,15 +665,47 @@ impl ToolRouter {
                 let provider_impl = self.providers.get(provider).ok_or_else(|| {
                     MoaError::ProviderError(format!("unknown hand provider: {provider}"))
                 })?;
+                let status = provider_impl.status(&hand).await?;
+                if matches!(
+                    status,
+                    moa_core::HandStatus::Paused | moa_core::HandStatus::Stopped
+                ) {
+                    provider_impl.resume(&hand).await?;
+                }
                 let serialized_input = serde_json::to_string(&invocation.input)?;
                 let output = provider_impl
                     .execute(&hand, &invocation.name, &serialized_input)
                     .await?;
                 Ok((Some(hand_id(&hand)), output))
             }
-            ToolExecution::Mcp { server_name } => Err(MoaError::Unsupported(format!(
-                "MCP tool routing is not implemented yet for server {server_name}"
-            ))),
+            ToolExecution::Mcp { server_name } => {
+                let server = self.mcp_servers.get(server_name).ok_or_else(|| {
+                    MoaError::ProviderError(format!("unknown MCP server: {server_name}"))
+                })?;
+                let client = self.mcp_clients.get(server_name).ok_or_else(|| {
+                    MoaError::ProviderError(format!(
+                        "missing MCP client for configured server: {server_name}"
+                    ))
+                })?;
+                let extra_headers = if let (Some(proxy), Some(_credentials)) =
+                    (&self.mcp_proxy, server.credentials.as_ref())
+                {
+                    let token = proxy
+                        .create_session_token(&session.id, server_name, server_name)
+                        .await?;
+                    let headers = proxy
+                        .enrich_headers(&token, server.credentials.as_ref())
+                        .await?;
+                    proxy.revoke_session_token(&token).await;
+                    headers
+                } else {
+                    HashMap::new()
+                };
+                let output = client
+                    .call_tool(&invocation.name, invocation.input.clone(), extra_headers)
+                    .await?;
+                Ok((None, output))
+            }
         }
     }
 
@@ -603,6 +771,50 @@ fn hand_id(handle: &HandHandle) -> String {
         HandHandle::Docker { container_id } => container_id.clone(),
         HandHandle::Daytona { workspace_id } => workspace_id.clone(),
         HandHandle::E2B { sandbox_id } => sandbox_id.clone(),
+    }
+}
+
+fn default_cloud_provider(config: &MoaConfig) -> Result<Option<(String, SandboxTier)>> {
+    if !config.cloud.enabled {
+        return Ok(None);
+    }
+    let provider = config
+        .cloud
+        .hands
+        .as_ref()
+        .and_then(|hands| hands.default_provider.clone())
+        .unwrap_or_else(|| DEFAULT_PROVIDER_NAME.to_string());
+    match provider.as_str() {
+        DEFAULT_PROVIDER_NAME => Ok(None),
+        "daytona" => {
+            #[cfg(feature = "daytona")]
+            {
+                Ok(Some(("daytona".to_string(), SandboxTier::Container)))
+            }
+            #[cfg(not(feature = "daytona"))]
+            {
+                Err(MoaError::Unsupported(
+                    "cloud hands are configured for Daytona but the `daytona` feature is disabled"
+                        .to_string(),
+                ))
+            }
+        }
+        "e2b" => {
+            #[cfg(feature = "e2b")]
+            {
+                Ok(Some(("e2b".to_string(), SandboxTier::MicroVM)))
+            }
+            #[cfg(not(feature = "e2b"))]
+            {
+                Err(MoaError::Unsupported(
+                    "cloud hands are configured for E2B but the `e2b` feature is disabled"
+                        .to_string(),
+                ))
+            }
+        }
+        other => Err(MoaError::ConfigError(format!(
+            "unsupported cloud hand provider configured: {other}"
+        ))),
     }
 }
 
