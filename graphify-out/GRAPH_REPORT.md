@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-04-10)
 
 ## Corpus Check
-- 116 files · ~102,540 words
+- 116 files · ~103,076 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 2081 nodes · 3697 edges · 77 communities detected
+- 2096 nodes · 3716 edges · 78 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -28,7 +28,7 @@
 
 ### Community 0 - "Core Domain IDs"
 Cohesion: 0.02
-Nodes (78): Event, ActionButton, ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, ApprovalRule (+70 more)
+Nodes (84): ActionButton, ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, ApprovalRule, Attachment (+76 more)
 
 ### Community 1 - "TUI Chat Runtime"
 Cohesion: 0.03
@@ -135,7 +135,7 @@ Cohesion: 0.12
 Nodes (11): credential_from_env(), default_scope_for(), env_var(), environment_vault_loads_from_env_backed_server_config(), EnvironmentCredentialVault, headers_from_credential(), MCPCredentialProxy, McpSessionToken (+3 more)
 
 ### Community 27 - "Daytona Hand Provider"
-Cohesion: 0.18
+Cohesion: 0.17
 Nodes (10): build_url(), DaytonaHandProvider, default_headers(), derive_toolbox_url(), expect_success(), expect_success_json(), extract_workspace_id(), http_error() (+2 more)
 
 ### Community 28 - "Telegram Adapter"
@@ -194,17 +194,17 @@ Nodes (15): build_provider_from_config(), build_provider_from_selection(), expli
 Cohesion: 0.17
 Nodes (8): destroy_and_wait(), e2b_live_provider_handles_roundtrip_and_lifecycle(), e2b_live_router_lazy_provisions_reuses_and_isolates_sessions(), EmptyMemoryStore, live_config(), live_provider(), session(), wait_for_destroyed()
 
-### Community 42 - "Context Pipeline Core"
-Cohesion: 0.22
-Nodes (7): build_default_pipeline(), build_default_pipeline_with_tools(), ContextPipeline, estimate_tokens(), pipeline_runner_executes_stages_in_order(), PipelineStageReport, TestStage
-
-### Community 43 - "OpenAI Provider Tests"
+### Community 42 - "OpenAI Provider Tests"
 Cohesion: 0.25
 Nodes (13): openai_provider_does_not_retry_after_partial_stream_output(), openai_provider_drops_oversized_metadata_values(), openai_provider_retries_after_rate_limit(), openai_provider_streams_parallel_tool_calls_in_order(), openai_provider_streams_tool_calls_from_responses_events(), openai_provider_translates_requests_to_responses_api(), openrouter_provider_normalizes_bare_claude_models(), openrouter_provider_sets_attribution_headers() (+5 more)
 
-### Community 44 - "Encrypted Secret Vault"
+### Community 43 - "Encrypted Secret Vault"
 Cohesion: 0.3
 Nodes (4): decrypt_bytes(), encrypt_bytes(), file_vault_encrypts_and_decrypts_roundtrip(), FileVault
+
+### Community 44 - "Context Pipeline Core"
+Cohesion: 0.22
+Nodes (7): build_default_pipeline(), build_default_pipeline_with_tools(), ContextPipeline, estimate_tokens(), pipeline_runner_executes_stages_in_order(), PipelineStageReport, TestStage
 
 ### Community 45 - "Command Palette"
 Cohesion: 0.22
@@ -238,99 +238,103 @@ Nodes (7): build_tab_spans(), render_toolbar(), short_session_id(), tab_title(),
 Cohesion: 0.3
 Nodes (8): available_live_providers(), live_orchestrator_with_provider(), live_providers_complete_tool_approval_roundtrip_when_available(), LiveProvider, wait_for_approval_request(), wait_for_file(), wait_for_final_response(), wait_for_status()
 
-### Community 53 - "Memory Store Tests"
+### Community 53 - "Core Event Model"
+Cohesion: 0.18
+Nodes (1): Event
+
+### Community 54 - "Memory Store Tests"
 Cohesion: 0.36
 Nodes (8): create_read_update_and_delete_wiki_pages(), delete_page_removes_only_the_requested_scope(), fts_search_finds_ranked_results(), fts_search_handles_hyphenated_queries(), rebuild_search_index_from_files_restores_results(), sample_page(), user_and_workspace_scopes_are_separate(), write_page_creates_and_reads_pages_in_explicit_scopes()
 
-### Community 54 - "Tool Card Widget"
+### Community 55 - "Tool Card Widget"
 Cohesion: 0.42
 Nodes (7): border_line(), content_line(), render_tool_card(), status_label(), status_style(), truncate_to_width(), wrap_text()
 
-### Community 55 - "Live Provider Matrix Tests"
+### Community 56 - "Live Provider Matrix Tests"
 Cohesion: 0.39
 Nodes (4): available_live_providers(), live_providers_answer_simple_prompt_across_available_keys(), live_providers_emit_tool_calls_across_available_keys(), LiveProvider
 
-### Community 56 - "Temporal Worker Helper"
+### Community 57 - "Temporal Worker Helper"
 Cohesion: 0.32
 Nodes (4): helper_config(), HelperProvider, main(), main_impl()
 
-### Community 57 - "Instruction Stage"
+### Community 58 - "Instruction Stage"
 Cohesion: 0.38
 Nodes (2): instruction_processor_appends_config_backed_sections(), InstructionProcessor
 
-### Community 58 - "Chat View"
+### Community 59 - "Chat View"
 Cohesion: 0.6
 Nodes (5): max_scroll(), render_chat(), transcript_lines(), wrap_line(), wrap_prefixed()
 
-### Community 59 - "Cache Optimizer Stage"
+### Community 60 - "Cache Optimizer Stage"
 Cohesion: 0.4
 Nodes (2): cache_optimizer_validates_cache_breakpoint(), CacheOptimizer
 
-### Community 60 - "Identity Stage"
+### Community 61 - "Identity Stage"
 Cohesion: 0.4
 Nodes (2): identity_processor_appends_system_prompt(), IdentityProcessor
 
-### Community 61 - "CLI Exec Mode"
+### Community 62 - "CLI Exec Mode"
 Cohesion: 0.6
 Nodes (4): exec_mode_formats_tool_updates_compactly(), format_tool_update(), resolve_exec_approval(), run_exec()
 
-### Community 62 - "Sidebar Widget"
+### Community 63 - "Sidebar Widget"
 Cohesion: 0.5
 Nodes (2): render_sidebar(), section_title()
 
-### Community 63 - "Anthropic Provider Tests"
+### Community 64 - "Anthropic Provider Tests"
 Cohesion: 0.4
 Nodes (0): 
 
-### Community 64 - "Bash Tool"
+### Community 65 - "Bash Tool"
 Cohesion: 0.6
 Nodes (3): BashToolInput, execute_docker(), execute_local()
 
-### Community 65 - "File Search Tool"
+### Community 66 - "File Search Tool"
 Cohesion: 0.67
 Nodes (3): collect_matches(), execute(), FileSearchInput
 
-### Community 66 - "File Read Tool"
+### Community 67 - "File Read Tool"
 Cohesion: 0.67
 Nodes (3): execute(), FileReadInput, resolve_sandbox_path()
 
-### Community 67 - "Chat Harness Example"
+### Community 68 - "Chat Harness Example"
 Cohesion: 0.83
 Nodes (3): main(), resolve_session_db_path(), run_prompt()
 
-### Community 68 - "Mock MCP Server"
+### Community 69 - "Mock MCP Server"
 Cohesion: 0.67
 Nodes (0): 
 
-### Community 69 - "File Write Tool"
+### Community 70 - "File Write Tool"
 Cohesion: 0.67
 Nodes (1): FileWriteInput
 
-### Community 70 - "TUI Workflow Tests"
+### Community 71 - "TUI Workflow Tests"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 71 - "OpenAI Live Test"
+### Community 72 - "OpenAI Live Test"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 72 - "OpenRouter Live Test"
+### Community 73 - "OpenRouter Live Test"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 73 - "Anthropic Live Test"
+### Community 74 - "Anthropic Live Test"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 74 - "Docker Hardening Test"
+### Community 75 - "Docker Hardening Test"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 75 - "Brain Live Harness Test"
+### Community 76 - "Brain Live Harness Test"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 76 - "Compaction"
+### Community 77 - "Compaction"
 Cohesion: 1.0
 Nodes (0): 
 
