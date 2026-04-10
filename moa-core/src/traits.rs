@@ -136,14 +136,15 @@ pub trait MemoryStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<MemorySearchResult>>;
 
-    /// Reads a wiki page by logical path.
-    async fn read_page(&self, path: &MemoryPath) -> Result<WikiPage>;
+    /// Reads a wiki page by logical path within an explicit scope.
+    async fn read_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage>;
 
-    /// Writes a wiki page by logical path.
-    async fn write_page(&self, path: &MemoryPath, page: WikiPage) -> Result<()>;
+    /// Writes a wiki page by logical path within an explicit scope.
+    async fn write_page(&self, scope: MemoryScope, path: &MemoryPath, page: WikiPage)
+    -> Result<()>;
 
-    /// Deletes a wiki page by logical path.
-    async fn delete_page(&self, path: &MemoryPath) -> Result<()>;
+    /// Deletes a wiki page by logical path within an explicit scope.
+    async fn delete_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<()>;
 
     /// Lists pages within a scope.
     async fn list_pages(

@@ -76,7 +76,7 @@ impl FileMemoryStore {
         let scope_root = self.scope_root(scope);
         append_log_entry(&scope_root, &entry).await?;
         let log_path: MemoryPath = "_log.md".into();
-        let log_page = self.read_page_in_scope(scope, &log_path).await?;
+        let log_page = self.read_page(scope.clone(), &log_path).await?;
         self.search_index
             .upsert_page(scope, &log_path, &log_page)
             .await?;
@@ -120,7 +120,7 @@ impl FileMemoryStore {
             reference_count: 0,
             metadata: std::collections::HashMap::new(),
         };
-        self.write_page_in_scope(scope, &index_path, page).await?;
+        self.write_page(scope.clone(), &index_path, page).await?;
         Ok(content)
     }
 
@@ -164,62 +164,33 @@ impl FileMemoryStore {
     }
 
     /// Reads a page from an explicit memory scope.
+    ///
+    /// Deprecated compatibility shim for older concrete `FileMemoryStore` call sites.
     pub async fn read_page_in_scope(
         &self,
         scope: &MemoryScope,
         path: &MemoryPath,
     ) -> Result<WikiPage> {
-        let file_path = self.file_path(scope, path)?;
-        let markdown =
-            fs::read_to_string(&file_path)
-                .await
-                .map_err(|error| match error.kind() {
-                    std::io::ErrorKind::NotFound => {
-                        MoaError::StorageError(format!("memory page not found: {}", path.as_str()))
-                    }
-                    _ => error.into(),
-                })?;
-        let mut page = parse_markdown(Some(path.clone()), &markdown)?;
-        page.path = Some(path.clone());
-        Ok(page)
+        <Self as MemoryStore>::read_page(self, scope.clone(), path).await
     }
 
     /// Writes a page into an explicit memory scope.
+    ///
+    /// Deprecated compatibility shim for older concrete `FileMemoryStore` call sites.
     pub async fn write_page_in_scope(
         &self,
         scope: &MemoryScope,
         path: &MemoryPath,
-        mut page: WikiPage,
+        page: WikiPage,
     ) -> Result<()> {
-        let file_path = self.file_path(scope, path)?;
-        if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-
-        page.path = Some(path.clone());
-        let markdown = render_markdown(&page)?;
-        fs::write(&file_path, markdown).await?;
-        self.search_index.upsert_page(scope, path, &page).await?;
-
-        Ok(())
+        <Self as MemoryStore>::write_page(self, scope.clone(), path, page).await
     }
 
     /// Deletes a page from an explicit memory scope.
+    ///
+    /// Deprecated compatibility shim for older concrete `FileMemoryStore` call sites.
     pub async fn delete_page_in_scope(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<()> {
-        let file_path = self.file_path(scope, path)?;
-        match fs::remove_file(&file_path).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(MoaError::StorageError(format!(
-                    "memory page not found: {}",
-                    path.as_str()
-                )));
-            }
-            Err(error) => return Err(error.into()),
-        }
-        self.search_index.delete_page(scope, path).await?;
-
-        Ok(())
+        <Self as MemoryStore>::delete_page(self, scope.clone(), path).await
     }
 
     pub(crate) async fn list_scope_files(&self, scope: &MemoryScope) -> Result<Vec<MemoryPath>> {
@@ -233,52 +204,6 @@ impl FileMemoryStore {
         files.sort_by(|left, right| left.as_str().cmp(right.as_str()));
 
         Ok(files)
-    }
-
-    async fn resolve_scope_for_path(&self, path: &MemoryPath) -> Result<MemoryScope> {
-        let indexed_scopes = self.search_index.scopes_for_path(path).await?;
-        if indexed_scopes.len() == 1 {
-            return Ok(indexed_scopes[0].clone());
-        }
-        if indexed_scopes.len() > 1 {
-            return Err(MoaError::ValidationError(format!(
-                "ambiguous memory path across scopes: {}",
-                path.as_str()
-            )));
-        }
-
-        let mut filesystem_matches = Vec::new();
-        let user_scope = MemoryScope::User("default".into());
-        if try_exists(&self.file_path(&user_scope, path)?).await? {
-            filesystem_matches.push(user_scope);
-        }
-
-        let workspaces_root = self.base_dir.join("workspaces");
-        if try_exists(&workspaces_root).await? {
-            let mut entries = fs::read_dir(&workspaces_root).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                if !entry.file_type().await?.is_dir() {
-                    continue;
-                }
-                let workspace_id = entry.file_name().to_string_lossy().to_string();
-                let scope = MemoryScope::Workspace(workspace_id.into());
-                if try_exists(&self.file_path(&scope, path)?).await? {
-                    filesystem_matches.push(scope);
-                }
-            }
-        }
-
-        match filesystem_matches.as_slice() {
-            [scope] => Ok(scope.clone()),
-            [] => Err(MoaError::StorageError(format!(
-                "memory page not found: {}",
-                path.as_str()
-            ))),
-            _ => Err(MoaError::ValidationError(format!(
-                "ambiguous memory path across scopes: {}",
-                path.as_str()
-            ))),
-        }
     }
 
     pub(crate) fn scope_root(&self, scope: &MemoryScope) -> PathBuf {
@@ -337,22 +262,59 @@ impl MemoryStore for FileMemoryStore {
         self.search_index.search(query, &scope, limit).await
     }
 
-    /// Reads a wiki page, resolving the path to a unique scope.
-    async fn read_page(&self, path: &MemoryPath) -> Result<WikiPage> {
-        let scope = self.resolve_scope_for_path(path).await?;
-        self.read_page_in_scope(&scope, path).await
+    /// Reads a wiki page within an explicit scope.
+    async fn read_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
+        let file_path = self.file_path(&scope, path)?;
+        let markdown =
+            fs::read_to_string(&file_path)
+                .await
+                .map_err(|error| match error.kind() {
+                    std::io::ErrorKind::NotFound => {
+                        MoaError::StorageError(format!("memory page not found: {}", path.as_str()))
+                    }
+                    _ => error.into(),
+                })?;
+        let mut page = parse_markdown(Some(path.clone()), &markdown)?;
+        page.path = Some(path.clone());
+        Ok(page)
     }
 
-    /// Writes a wiki page when its path resolves to a unique scope.
-    async fn write_page(&self, path: &MemoryPath, page: WikiPage) -> Result<()> {
-        let scope = self.resolve_scope_for_path(path).await?;
-        self.write_page_in_scope(&scope, path, page).await
+    /// Writes a wiki page within an explicit scope.
+    async fn write_page(
+        &self,
+        scope: MemoryScope,
+        path: &MemoryPath,
+        mut page: WikiPage,
+    ) -> Result<()> {
+        let file_path = self.file_path(&scope, path)?;
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        page.path = Some(path.clone());
+        let markdown = render_markdown(&page)?;
+        fs::write(&file_path, markdown).await?;
+        self.search_index.upsert_page(&scope, path, &page).await?;
+
+        Ok(())
     }
 
-    /// Deletes a wiki page when its path resolves to a unique scope.
-    async fn delete_page(&self, path: &MemoryPath) -> Result<()> {
-        let scope = self.resolve_scope_for_path(path).await?;
-        self.delete_page_in_scope(&scope, path).await
+    /// Deletes a wiki page within an explicit scope.
+    async fn delete_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<()> {
+        let file_path = self.file_path(&scope, path)?;
+        match fs::remove_file(&file_path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(MoaError::StorageError(format!(
+                    "memory page not found: {}",
+                    path.as_str()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        self.search_index.delete_page(&scope, path).await?;
+
+        Ok(())
     }
 
     /// Lists all markdown pages stored in a scope.
@@ -365,7 +327,7 @@ impl MemoryStore for FileMemoryStore {
         let mut pages = Vec::new();
 
         for path in paths {
-            let page = self.read_page_in_scope(&scope, &path).await?;
+            let page = self.read_page(scope.clone(), &path).await?;
             if filter
                 .as_ref()
                 .is_some_and(|page_type| page.page_type != *page_type)
@@ -396,7 +358,7 @@ impl MemoryStore for FileMemoryStore {
         let mut pages = Vec::with_capacity(paths.len());
 
         for path in paths {
-            let page = self.read_page_in_scope(&scope, &path).await?;
+            let page = self.read_page(scope.clone(), &path).await?;
             pages.push((path, page));
         }
 

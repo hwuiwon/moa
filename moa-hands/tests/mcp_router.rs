@@ -27,15 +27,20 @@ impl MemoryStore for EmptyMemoryStore {
         Ok(Vec::new())
     }
 
-    async fn read_page(&self, _path: &MemoryPath) -> Result<WikiPage> {
+    async fn read_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
         Err(moa_core::MoaError::StorageError("not found".to_string()))
     }
 
-    async fn write_page(&self, _path: &MemoryPath, _page: WikiPage) -> Result<()> {
+    async fn write_page(
+        &self,
+        _scope: MemoryScope,
+        _path: &MemoryPath,
+        _page: WikiPage,
+    ) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_page(&self, _path: &MemoryPath) -> Result<()> {
+    async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
         Ok(())
     }
 

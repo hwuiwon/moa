@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_core::{
-    CompletionRequest, Event, EventRecord, LLMProvider, MemoryScope, Result, SessionMeta,
-    SkillMetadata,
+    CompletionRequest, Event, EventRecord, LLMProvider, MemoryScope, MemoryStore, Result,
+    SessionMeta, SkillMetadata,
 };
 use moa_memory::FileMemoryStore;
 
@@ -24,7 +24,7 @@ pub async fn maybe_improve_skill(
 ) -> Result<Option<SkillMetadata>> {
     let scope = MemoryScope::Workspace(session.workspace_id.clone());
     let page = memory_store
-        .read_page_in_scope(&scope, &existing.path)
+        .read_page(scope.clone(), &existing.path)
         .await?;
     let mut current = skill_from_wiki_page(&page)?;
     let current_markdown = render_skill_markdown(&current)?;
@@ -41,7 +41,7 @@ pub async fn maybe_improve_skill(
         record_successful_use(&mut current, now);
         let updated_page = wiki_page_from_skill(&current, Some(existing.path.clone()))?;
         memory_store
-            .write_page_in_scope(&scope, &existing.path, updated_page)
+            .write_page(scope.clone(), &existing.path, updated_page)
             .await?;
         return Ok(None);
     }
@@ -67,7 +67,7 @@ pub async fn maybe_improve_skill(
 
     let updated_page = wiki_page_from_skill(&improved, Some(existing.path.clone()))?;
     memory_store
-        .write_page_in_scope(&scope, &existing.path, updated_page)
+        .write_page(scope, &existing.path, updated_page)
         .await?;
 
     Ok(Some(skill_metadata_from_document(

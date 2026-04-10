@@ -24,15 +24,20 @@ impl MemoryStore for EmptyMemoryStore {
         Ok(Vec::new())
     }
 
-    async fn read_page(&self, _path: &MemoryPath) -> Result<WikiPage> {
+    async fn read_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
         Err(moa_core::MoaError::StorageError("not found".to_string()))
     }
 
-    async fn write_page(&self, _path: &MemoryPath, _page: WikiPage) -> Result<()> {
+    async fn write_page(
+        &self,
+        _scope: MemoryScope,
+        _path: &MemoryPath,
+        _page: WikiPage,
+    ) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_page(&self, _path: &MemoryPath) -> Result<()> {
+    async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
         Ok(())
     }
 
@@ -59,6 +64,25 @@ fn session() -> SessionMeta {
         user_id: UserId::new("user"),
         model: "claude-sonnet-4-6".to_string(),
         ..SessionMeta::default()
+    }
+}
+
+fn sample_page(path: &str, title: &str, page_type: PageType, content: &str) -> WikiPage {
+    WikiPage {
+        path: Some(MemoryPath::new(path)),
+        title: title.to_string(),
+        page_type,
+        content: content.to_string(),
+        created: chrono::Utc::now(),
+        updated: chrono::Utc::now(),
+        confidence: moa_core::ConfidenceLevel::High,
+        related: Vec::new(),
+        sources: Vec::new(),
+        tags: Vec::new(),
+        auto_generated: false,
+        last_referenced: chrono::Utc::now(),
+        reference_count: 1,
+        metadata: std::collections::HashMap::new(),
     }
 }
 
@@ -319,4 +343,223 @@ async fn memory_read_returns_page_contents() {
 
     assert!(output.stdout.contains("# OAuth Refresh"));
     assert!(output.stdout.contains("Use the exact workflow."));
+}
+
+#[tokio::test]
+async fn memory_write_with_scope_creates_new_workspace_page() {
+    let dir = tempdir().unwrap();
+    let memory_root = dir.path().join("memory-root");
+    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
+    let memory_store_trait: Arc<dyn MemoryStore> = memory_store.clone();
+    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
+        .await
+        .unwrap();
+    let session = session();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "memory_write".to_string(),
+                input: json!({
+                    "path": "topics/new-page.md",
+                    "scope": "workspace",
+                    "title": "New Page",
+                    "content": "# New Page\nCreated from the tool."
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        output
+            .stdout
+            .contains("Wrote memory page topics/new-page.md")
+    );
+    let page = memory_store
+        .read_page(
+            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryPath::new("topics/new-page.md"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.title, "New Page");
+    assert!(page.content.contains("Created from the tool."));
+}
+
+#[tokio::test]
+async fn memory_write_without_scope_updates_existing_page() {
+    let dir = tempdir().unwrap();
+    let memory_root = dir.path().join("memory-root");
+    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
+    memory_store
+        .write_page(
+            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryPath::new("topics/existing.md"),
+            sample_page(
+                "topics/existing.md",
+                "Existing",
+                PageType::Topic,
+                "# Existing\nBefore.",
+            ),
+        )
+        .await
+        .unwrap();
+    let memory_store_trait: Arc<dyn MemoryStore> = memory_store.clone();
+    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
+        .await
+        .unwrap();
+    let session = session();
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "memory_write".to_string(),
+                input: json!({
+                    "path": "topics/existing.md",
+                    "content": "# Existing\nAfter."
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let page = memory_store
+        .read_page(
+            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryPath::new("topics/existing.md"),
+        )
+        .await
+        .unwrap();
+    assert!(page.content.contains("After."));
+}
+
+#[tokio::test]
+async fn memory_write_without_scope_requires_scope_for_new_page() {
+    let dir = tempdir().unwrap();
+    let memory_root = dir.path().join("memory-root");
+    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
+    let memory_store_trait: Arc<dyn MemoryStore> = memory_store;
+    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
+        .await
+        .unwrap();
+    let session = session();
+
+    let error = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "memory_write".to_string(),
+                input: json!({
+                    "path": "topics/new-page.md",
+                    "content": "# New Page\nNeeds scope."
+                }),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        moa_core::MoaError::ToolError(message)
+            if message.contains("specify `scope`") && message.contains("topics/new-page.md")
+    ));
+}
+
+#[tokio::test]
+async fn memory_read_without_scope_falls_back_to_user_scope() {
+    let dir = tempdir().unwrap();
+    let memory_root = dir.path().join("memory-root");
+    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
+    memory_store
+        .write_page(
+            MemoryScope::User(UserId::new("user")),
+            &MemoryPath::new("topics/preferences.md"),
+            sample_page(
+                "topics/preferences.md",
+                "Preferences",
+                PageType::Topic,
+                "# Preferences\nUser-only page.",
+            ),
+        )
+        .await
+        .unwrap();
+    let memory_store_trait: Arc<dyn MemoryStore> = memory_store;
+    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
+        .await
+        .unwrap();
+    let session = session();
+
+    let (_, output) = router
+        .execute(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "memory_read".to_string(),
+                input: json!({ "path": "topics/preferences.md" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(output.stdout.contains("User-only page."));
+}
+
+#[tokio::test]
+async fn memory_read_with_explicit_scope_reads_only_that_scope() {
+    let dir = tempdir().unwrap();
+    let memory_root = dir.path().join("memory-root");
+    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
+    let path = MemoryPath::new("topics/preferences.md");
+    memory_store
+        .write_page(
+            MemoryScope::User(UserId::new("user")),
+            &path,
+            sample_page(
+                "topics/preferences.md",
+                "Preferences",
+                PageType::Topic,
+                "# Preferences\nUser page.",
+            ),
+        )
+        .await
+        .unwrap();
+    memory_store
+        .write_page(
+            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &path,
+            sample_page(
+                "topics/preferences.md",
+                "Preferences",
+                PageType::Topic,
+                "# Preferences\nWorkspace page.",
+            ),
+        )
+        .await
+        .unwrap();
+    let memory_store_trait: Arc<dyn MemoryStore> = memory_store;
+    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
+        .await
+        .unwrap();
+    let session = session();
+
+    let (_, output) = router
+        .execute(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "memory_read".to_string(),
+                input: json!({ "path": "topics/preferences.md", "scope": "user" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(output.stdout.contains("User page."));
+    assert!(!output.stdout.contains("Workspace page."));
 }

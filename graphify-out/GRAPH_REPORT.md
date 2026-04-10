@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-04-10)
 
 ## Corpus Check
-- 116 files · ~100,752 words
+- 116 files · ~102,457 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 2041 nodes · 3620 edges · 79 communities detected
+- 2069 nodes · 3674 edges · 79 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -15,7 +15,7 @@
 3. `LocalChatRuntime` - 31 edges
 4. `DaemonChatRuntime` - 30 edges
 5. `SkillFrontmatter` - 30 edges
-6. `FileMemoryStore` - 26 edges
+6. `FileMemoryStore` - 25 edges
 7. `LocalOrchestrator` - 21 edges
 8. `MemoryViewState` - 20 edges
 9. `TursoSessionStore` - 20 edges
@@ -39,42 +39,42 @@ Cohesion: 0.06
 Nodes (35): App, app_state_transitions_follow_idle_composing_running_waiting_idle(), AppMode, approval_status_and_note(), ApprovalCardStatus, ApprovalEntry, ChatEntry, collect_sandbox_files() (+27 more)
 
 ### Community 3 - "File Memory Store"
-Cohesion: 0.05
+Cohesion: 0.04
 Nodes (35): MoaError, emit_tool_output_warning(), execute_pending_tool(), format_tool_output(), process_resolved_approval(), run_brain_turn(), run_brain_turn_with_tools(), run_brain_turn_with_tools_mode() (+27 more)
 
 ### Community 4 - "Tool Router & Policies"
 Cohesion: 0.05
 Nodes (29): approval_diffs_for(), approval_fields_for(), approval_pattern_for(), BuiltInTool, default_cloud_provider(), execute_tool_policy(), expand_local_path(), hand_id() (+21 more)
 
-### Community 5 - "Skill Document Format"
+### Community 5 - "Brain Turn Tests"
+Cohesion: 0.05
+Nodes (17): always_allow_rule_persists_and_skips_next_approval(), canary_leaks_in_tool_input_are_detected_and_blocked(), CanaryLeakLlmProvider, CapturingTextLlmProvider, FixedPageMemoryStore, malicious_tool_results_are_wrapped_as_untrusted_content(), MaliciousToolOutputLlmProvider, MemoryWriteLoopLlmProvider (+9 more)
+
+### Community 6 - "Skill Document Format"
 Cohesion: 0.07
 Nodes (22): build_skill_path(), confidence_for_skill(), defaults_missing_moa_metadata(), estimate_skill_tokens(), format_timestamp(), humanize_skill_name(), is_valid_skill_name(), metadata_csv() (+14 more)
 
-### Community 6 - "Local Orchestrator"
+### Community 7 - "Memory Browser View"
+Cohesion: 0.05
+Nodes (23): centered_rect(), filter_pages(), fuzzy_filter_matches_titles(), infer_page_title(), infer_page_type(), is_memory_not_found(), memory_view_surfaces_wikilinks_before_page_list(), MemoryNavItem (+15 more)
+
+### Community 8 - "Local Orchestrator"
 Cohesion: 0.07
 Nodes (26): accept_user_message(), append_event(), buffer_queued_message(), detect_docker(), DockerSandbox, drain_signal_queue(), drive_turn(), execute_tool() (+18 more)
 
-### Community 7 - "Brain Turn Tests"
+### Community 9 - "Context Pipeline"
 Cohesion: 0.05
-Nodes (15): always_allow_rule_persists_and_skips_next_approval(), canary_leaks_in_tool_input_are_detected_and_blocked(), CanaryLeakLlmProvider, CapturingTextLlmProvider, FixedPageMemoryStore, malicious_tool_results_are_wrapped_as_untrusted_content(), MaliciousToolOutputLlmProvider, MockLlmProvider (+7 more)
+Nodes (23): build_default_pipeline(), build_default_pipeline_with_tools(), ContextPipeline, estimate_tokens(), load_history_events(), MockMemoryStore, MockSessionStore, pipeline_runner_executes_stages_in_order() (+15 more)
 
-### Community 8 - "Provider Common Layer"
+### Community 10 - "Provider Common Layer"
 Cohesion: 0.06
 Nodes (30): build_function_tool(), build_http_client(), build_responses_request(), consume_responses_stream_once(), is_rate_limit_error(), is_rate_limit_message(), map_openai_error(), metadata_as_strings() (+22 more)
 
-### Community 9 - "Memory Browser View"
-Cohesion: 0.05
-Nodes (17): centered_rect(), filter_pages(), fuzzy_filter_matches_titles(), memory_view_surfaces_wikilinks_before_page_list(), MemoryNavItem, MemoryReadInput, MemoryReadTool, MemorySearchInput (+9 more)
-
-### Community 10 - "Temporal Orchestrator"
+### Community 11 - "Temporal Orchestrator"
 Cohesion: 0.06
 Nodes (25): activity_options(), apply_approval_decision(), ApprovalDecisionActivityInput, ApprovalSignalInput, brain_turn_activity_options(), CancelMode, connect_temporal_client(), flush_all_queued_messages() (+17 more)
 
-### Community 11 - "Context Pipeline"
-Cohesion: 0.06
-Nodes (20): build_default_pipeline(), build_default_pipeline_with_tools(), ContextPipeline, estimate_tokens(), load_history_events(), MockMemoryStore, MockSessionStore, pipeline_runner_executes_stages_in_order() (+12 more)
-
-### Community 12 - "Memory Index & Log"
+### Community 12 - "Memory Consolidation"
 Cohesion: 0.08
 Nodes (40): canonical_port_claims(), confidence_rank(), consolidation_due_for_scope(), consolidation_resolves_dates_prunes_and_refreshes_index(), ConsolidationReport, decay_confidence(), extract_port_claims(), inbound_reference_counts() (+32 more)
 
@@ -90,7 +90,7 @@ Nodes (25): anthropic_message(), AnthropicProvider, AnthropicStreamState, BlockA
 Cohesion: 0.06
 Nodes (19): CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, config_loads_from_file(), DaemonConfig, default_config_is_valid(), GatewayConfig (+11 more)
 
-### Community 16 - "Telegram Renderer"
+### Community 16 - "Message Renderer"
 Cohesion: 0.09
 Nodes (23): append_piece(), discord_renderer_attaches_buttons_to_last_chunk_only(), discord_renderer_uses_embed_limit_for_long_text(), DiscordRenderChunk, DiscordRenderer, render_approval_request(), render_diff(), render_tool_card() (+15 more)
 
@@ -154,25 +154,25 @@ Nodes (13): category_label(), centered_rect(), cycle_string(), cycling_provider_
 Cohesion: 0.13
 Nodes (15): approval_buttons(), approval_request(), ApprovalCallbackAction, border_line(), callback_data_roundtrips(), content_line(), prepare_outbound_message(), prepare_outbound_message_adds_inline_buttons_when_supported() (+7 more)
 
-### Community 32 - "FTS5 Search Index"
+### Community 32 - "Local Tool Tests"
+Cohesion: 0.17
+Nodes (15): bash_captures_stdout_and_stderr(), bash_respects_timeout(), EmptyMemoryStore, file_operations_reject_path_traversal(), file_read_reads_written_content(), file_search_finds_files_by_glob(), memory_read_returns_page_contents(), memory_read_with_explicit_scope_reads_only_that_scope() (+7 more)
+
+### Community 33 - "FTS5 Search Index"
 Cohesion: 0.19
 Nodes (10): build_fts_query(), delete_page_entries(), FtsIndex, insert_page(), migrate(), parse_confidence(), parse_page_type(), parse_scope_key() (+2 more)
 
-### Community 33 - "Session Picker View"
+### Community 34 - "Session Picker View"
 Cohesion: 0.18
 Nodes (8): centered_rect(), filtered_sessions(), fuzzy_search_matches_title_and_last_message(), picker_haystack(), picker_selection_wraps_and_clamps(), preview(), render_session_picker(), SessionPickerState
 
-### Community 34 - "Tool Approval Policies"
+### Community 35 - "Tool Approval Policies"
 Cohesion: 0.22
 Nodes (12): ApprovalRuleStore, glob_match(), parse_and_match_bash(), persistent_rule_matching_uses_glob_patterns(), PolicyCheck, read_tools_are_auto_approved_and_bash_requires_approval(), rule_matches(), rule_visible_to_workspace() (+4 more)
 
-### Community 35 - "Skill Improver & Distiller"
+### Community 36 - "Skill Improver & Distiller"
 Cohesion: 0.21
 Nodes (15): build_distillation_prompt(), count_tool_calls(), extract_task_summary(), find_similar_skill(), maybe_distill_skill(), normalize_new_skill(), similarity_score(), tokenize() (+7 more)
-
-### Community 36 - "Local Tool Tests"
-Cohesion: 0.17
-Nodes (9): bash_captures_stdout_and_stderr(), bash_respects_timeout(), EmptyMemoryStore, file_operations_reject_path_traversal(), file_read_reads_written_content(), file_search_finds_files_by_glob(), memory_read_returns_page_contents(), memory_search_returns_indexed_results() (+1 more)
 
 ### Community 37 - "Daytona Live Tests"
 Cohesion: 0.18
@@ -234,13 +234,13 @@ Nodes (8): available_live_providers(), live_orchestrator_with_provider(), live_p
 Cohesion: 0.25
 Nodes (4): capabilities(), history_compiler_formats_user_and_assistant_turns(), history_processor_uses_preloaded_events(), HistoryCompiler
 
-### Community 52 - "Tool Card Widget"
+### Community 52 - "Memory Store Tests"
+Cohesion: 0.36
+Nodes (8): create_read_update_and_delete_wiki_pages(), delete_page_removes_only_the_requested_scope(), fts_search_finds_ranked_results(), fts_search_handles_hyphenated_queries(), rebuild_search_index_from_files_restores_results(), sample_page(), user_and_workspace_scopes_are_separate(), write_page_creates_and_reads_pages_in_explicit_scopes()
+
+### Community 53 - "Tool Card Widget"
 Cohesion: 0.42
 Nodes (7): border_line(), content_line(), render_tool_card(), status_label(), status_style(), truncate_to_width(), wrap_text()
-
-### Community 53 - "Memory Store Tests"
-Cohesion: 0.43
-Nodes (6): create_read_update_and_delete_wiki_pages(), fts_search_finds_ranked_results(), fts_search_handles_hyphenated_queries(), rebuild_search_index_from_files_restores_results(), sample_page(), user_and_workspace_scopes_are_separate()
 
 ### Community 54 - "Live Provider Matrix Tests"
 Cohesion: 0.39
@@ -376,8 +376,8 @@ _Questions this graph is uniquely positioned to answer:_
 - **Should `TUI App State` be split into smaller, more focused modules?**
   _Cohesion score 0.06 - nodes in this community are weakly interconnected._
 - **Should `File Memory Store` be split into smaller, more focused modules?**
-  _Cohesion score 0.05 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.04 - nodes in this community are weakly interconnected._
 - **Should `Tool Router & Policies` be split into smaller, more focused modules?**
   _Cohesion score 0.05 - nodes in this community are weakly interconnected._
-- **Should `Skill Document Format` be split into smaller, more focused modules?**
-  _Cohesion score 0.07 - nodes in this community are weakly interconnected._
+- **Should `Brain Turn Tests` be split into smaller, more focused modules?**
+  _Cohesion score 0.05 - nodes in this community are weakly interconnected._
