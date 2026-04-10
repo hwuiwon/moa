@@ -13,16 +13,33 @@ use crate::runner::SessionPreview;
 
 const MAX_VISIBLE_TABS: usize = 8;
 
+/// Header metrics rendered alongside the session tabs.
+pub(crate) struct ToolbarMetrics<'a> {
+    /// Current workspace label.
+    pub workspace_name: &'a str,
+    /// Active model identifier.
+    pub model: &'a str,
+    /// Aggregate token count for the current session.
+    pub total_tokens: usize,
+    /// Aggregate session cost in cents.
+    pub total_cost_cents: u32,
+}
+
 /// Renders the top toolbar with session tabs, model information, and token totals.
 pub(crate) fn render_toolbar(
     frame: &mut Frame<'_>,
     area: Rect,
     sessions: &[SessionPreview],
     active_session_id: &SessionId,
-    model: &str,
-    total_tokens: usize,
+    metrics: ToolbarMetrics<'_>,
 ) {
-    let title = format!("MOA · {model} · {total_tokens} tok");
+    let title = format!(
+        "MOA · workspace: {workspace_name} · {model} · {total_tokens} tok · ${:.2}",
+        metrics.total_cost_cents as f32 / 100.0,
+        workspace_name = metrics.workspace_name,
+        model = metrics.model,
+        total_tokens = metrics.total_tokens,
+    );
     let tab_spans = build_tab_spans(sessions, active_session_id, MAX_VISIBLE_TABS);
     let lines = if tab_spans.is_empty() {
         vec![
@@ -35,7 +52,9 @@ pub(crate) fn render_toolbar(
     } else {
         vec![
             Line::from(tab_spans),
-            Line::from("Alt+1-9 switch · Alt+[ / Alt+] cycle · Ctrl+N new · Ctrl+O, S sessions"),
+            Line::from(
+                "Alt+1-9 switch · Alt+[ / Alt+] cycle · Ctrl+N new · Ctrl+P palette · Ctrl+O, S sessions",
+            ),
         ]
     };
 

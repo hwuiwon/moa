@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -15,13 +16,14 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     widgets::{Block, Borders, Paragraph},
 };
+use tokio::fs;
 use tokio::{sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
 
 use moa_core::{
     ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, Event,
-    EventRecord, MoaConfig, Result, RiskLevel, RuntimeEvent, SessionId, SessionMeta, SessionStatus,
-    ToolCardStatus, ToolUpdate,
+    EventRecord, MemoryPath, MoaConfig, PageSummary, Result, RiskLevel, RuntimeEvent, SessionId,
+    SessionMeta, SessionStatus, ToolCardStatus, ToolUpdate, WorkspaceId,
 };
 
 use crate::{
@@ -30,9 +32,17 @@ use crate::{
     views::{
         chat,
         diff::{self, DiffViewState},
+        memory::{self, MemoryViewState},
+        palette::{self, PaletteAction, PaletteState},
         sessions::{self, SessionPickerState},
+        settings::{self, SettingsMutation, SettingsViewState},
     },
-    widgets::{prompt::PromptWidget, toolbar},
+    widgets::{
+        prompt::{
+            PromptCompletionKind, PromptCompletionState, PromptWidget, render_completion_menu,
+        },
+        sidebar, toolbar,
+    },
 };
 
 const FRAME_DURATION: Duration = Duration::from_millis(33);
@@ -53,6 +63,14 @@ pub enum AppMode {
     ViewingDiff,
     /// The session picker overlay is open.
     PickingSession,
+    /// The command palette overlay is open.
+    CommandPalette,
+    /// The memory browser is open.
+    MemoryBrowser,
+    /// The settings overlay is open.
+    Settings,
+    /// The help overlay is open.
+    Help,
 }
 
 /// Renderable transcript entry.
@@ -106,16 +124,29 @@ struct SessionViewState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingChord {
     OpenSessions,
-    SoftStop,
+    Leader,
 }
 
 /// Stateful TUI application model.
 pub struct App {
+    config: MoaConfig,
+    config_path: PathBuf,
     runtime: ChatRuntime,
     mode: AppMode,
     prompt: PromptWidget,
     sessions: Vec<SessionPreview>,
+    session_meta: HashMap<SessionId, SessionMeta>,
     session_views: HashMap<SessionId, SessionViewState>,
+    memory_view: Option<MemoryViewState>,
+    settings_view: Option<SettingsViewState>,
+    command_palette: Option<PaletteState>,
+    prompt_completion: Option<PromptCompletionState>,
+    sidebar_override: Option<bool>,
+    show_help: bool,
+    recent_memory: Vec<PageSummary>,
+    tool_names: Vec<String>,
+    file_frecency: HashMap<String, u32>,
+    known_files: Vec<String>,
     active_session_id: SessionId,
     viewport_width: u16,
     should_exit: bool,
@@ -131,15 +162,34 @@ pub struct App {
 impl App {
     /// Creates a new TUI app from the loaded MOA config.
     pub async fn new(config: MoaConfig) -> Result<Self> {
-        let runtime = ChatRuntime::from_config(config, moa_core::Platform::Tui).await?;
+        let config_path = default_config_path()?;
+        let runtime = ChatRuntime::from_config(config.clone(), moa_core::Platform::Tui).await?;
         let active_session_id = runtime.session_id().clone();
+        let tool_names = runtime.tool_names();
+        let recent_memory = runtime.recent_memory_entries(6).await.unwrap_or_default();
+        let known_files = collect_sandbox_files(&runtime.sandbox_root())
+            .await
+            .unwrap_or_default();
         let (runtime_event_tx, runtime_event_rx) = mpsc::unbounded_channel();
         let mut app = Self {
+            config,
+            config_path,
             runtime,
             mode: AppMode::Idle,
             prompt: PromptWidget::new(),
             sessions: Vec::new(),
+            session_meta: HashMap::new(),
             session_views: HashMap::new(),
+            memory_view: None,
+            settings_view: None,
+            command_palette: None,
+            prompt_completion: None,
+            sidebar_override: None,
+            show_help: false,
+            recent_memory,
+            tool_names,
+            file_frecency: HashMap::new(),
+            known_files,
             active_session_id,
             viewport_width: 0,
             should_exit: false,
@@ -188,11 +238,26 @@ impl App {
             return Ok(());
         }
 
+        if matches!(key.code, KeyCode::Char('d'))
+            && key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+        {
+            if self.prompt.text().trim().is_empty() && !self.active_session_is_busy() {
+                self.should_exit = true;
+            } else {
+                self.half_page_scroll(true);
+            }
+            self.sync_mode_with_state();
+            return Ok(());
+        }
+
         match map_key_event(self.mode, key) {
             KeyAction::Submit => self.submit_prompt(false).await?,
             KeyAction::QueuePrompt => self.submit_prompt(true).await?,
             KeyAction::InsertNewline => {
                 self.prompt.insert_newline();
+                self.refresh_prompt_completion().await?;
                 self.sync_mode_with_state();
             }
             KeyAction::Cancel => self.cancel_or_exit().await?,
@@ -239,6 +304,14 @@ impl App {
                 self.session_view_mut(self.active_session_id.clone())
                     .auto_scroll = true;
             }
+            KeyAction::ScrollHome => {
+                let view = self.session_view_mut(self.active_session_id.clone());
+                view.auto_scroll = false;
+                view.scroll = 0;
+            }
+            KeyAction::HalfPageUp => self.half_page_scroll(false),
+            KeyAction::HalfPageDown => self.half_page_scroll(true),
+            KeyAction::ClearScreen => self.reload_active_session().await?,
             KeyAction::NewSession => self.create_new_session().await?,
             KeyAction::NextSession => self.cycle_session(true).await?,
             KeyAction::PreviousSession => self.cycle_session(false).await?,
@@ -247,15 +320,47 @@ impl App {
                 self.pending_chord = Some(PendingChord::OpenSessions);
             }
             KeyAction::StartSoftStopChord => {
-                self.pending_chord = Some(PendingChord::SoftStop);
+                self.pending_chord = Some(PendingChord::Leader);
             }
             KeyAction::PickerUp => self.move_picker(false),
             KeyAction::PickerDown => self.move_picker(true),
             KeyAction::PickerSelect => self.confirm_picker_selection().await?,
             KeyAction::PickerBackspace => self.update_picker_query(None),
             KeyAction::SessionPickerInput => self.handle_picker_input(key),
+            KeyAction::OpenCommandPalette => self.open_command_palette(),
+            KeyAction::OpenMemoryBrowser => self.open_memory_browser().await?,
+            KeyAction::OpenSettings => self.open_settings(),
+            KeyAction::AcceptCompletion => self.accept_prompt_completion().await?,
+            KeyAction::PaletteUp => self.move_palette(false),
+            KeyAction::PaletteDown => self.move_palette(true),
+            KeyAction::PaletteSelect => self.select_palette_action().await?,
+            KeyAction::PaletteInput => self.handle_palette_input(key),
+            KeyAction::PaletteBackspace => self.handle_palette_backspace(),
+            KeyAction::MemorySearch => self.start_memory_search(),
+            KeyAction::MemorySearchBackspace => self.memory_search_backspace().await?,
+            KeyAction::MemorySearchInput => self.memory_search_input(key).await?,
+            KeyAction::MemoryUp => self.move_memory(false),
+            KeyAction::MemoryDown => self.move_memory(true),
+            KeyAction::MemoryOpen => self.open_selected_memory_item().await?,
+            KeyAction::MemoryBack => self.navigate_memory_history(false).await?,
+            KeyAction::MemoryForward => self.navigate_memory_history(true).await?,
+            KeyAction::MemoryEdit => self.open_memory_page_in_editor().await?,
+            KeyAction::MemoryDelete => self.delete_memory_page().await?,
+            KeyAction::SettingsUp => self.move_settings(false),
+            KeyAction::SettingsDown => self.move_settings(true),
+            KeyAction::SettingsCategoryLeft => self.move_settings_category(false),
+            KeyAction::SettingsCategoryRight => self.move_settings_category(true),
+            KeyAction::SettingsApply => self.apply_settings_change(true).await?,
+            KeyAction::SettingsReverse => self.apply_settings_change(false).await?,
+            KeyAction::CycleVerbosity => {
+                self.push_status_line(
+                    self.active_session_id.clone(),
+                    "Observation verbosity cycling is not implemented yet.".to_string(),
+                );
+            }
             KeyAction::PromptInput => {
                 self.prompt.input(key);
+                self.refresh_prompt_completion().await?;
                 self.sync_mode_with_state();
             }
             KeyAction::Noop => {}
@@ -283,17 +388,46 @@ impl App {
             layout[0],
             &self.sessions,
             &self.active_session_id,
-            self.runtime.model(),
-            self.active_view()
-                .map(|view| view.total_tokens)
-                .unwrap_or_default(),
+            toolbar::ToolbarMetrics {
+                workspace_name: self.runtime.workspace_id().as_str(),
+                model: self.runtime.model(),
+                total_tokens: self
+                    .active_view()
+                    .map(|view| view.total_tokens)
+                    .unwrap_or_default(),
+                total_cost_cents: self
+                    .active_session_meta()
+                    .map(|meta| meta.total_cost_cents)
+                    .unwrap_or_default(),
+            },
         );
+
+        let show_sidebar = sidebar::should_show_sidebar(
+            size.width,
+            self.config.tui.sidebar_auto,
+            self.sidebar_override,
+        );
+        let body = if show_sidebar {
+            let split = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(72), Constraint::Percentage(28)])
+                .split(layout[1]);
+            sidebar::render_sidebar(
+                frame,
+                split[1],
+                self.active_session_meta(),
+                &self.tool_names,
+                &self.recent_memory,
+            );
+            split[0]
+        } else {
+            layout[1]
+        };
 
         let (entries, scroll) = match self.active_view_mut() {
             Some(view) => {
                 if view.auto_scroll {
-                    view.scroll =
-                        chat::max_scroll(&view.entries, layout[1].width, layout[1].height);
+                    view.scroll = chat::max_scroll(&view.entries, body.width, body.height);
                 }
                 (&view.entries, view.scroll)
             }
@@ -302,9 +436,12 @@ impl App {
                 (&EMPTY, 0)
             }
         };
-        chat::render_chat(frame, layout[1], entries, scroll);
+        chat::render_chat(frame, body, entries, scroll);
 
         self.prompt.render(frame, layout[2], self.mode);
+        if let Some(completion) = &self.prompt_completion {
+            render_completion_menu(frame, layout[2], completion);
+        }
 
         let footer =
             Paragraph::new(self.footer_text()).block(Block::default().borders(Borders::ALL));
@@ -317,6 +454,18 @@ impl App {
         if let Some(picker) = &self.session_picker {
             sessions::render_session_picker(frame, size, picker, &self.sessions);
         }
+        if let Some(memory_view) = &self.memory_view {
+            memory::render_memory_view(frame, size, memory_view);
+        }
+        if let Some(settings_view) = &self.settings_view {
+            settings::render_settings_view(frame, size, settings_view, &self.config);
+        }
+        if let Some(palette) = &self.command_palette {
+            palette::render_palette(frame, size, palette, &palette_actions());
+        }
+        if self.show_help {
+            render_help_overlay(frame, size);
+        }
     }
 
     async fn submit_prompt(&mut self, queue_only: bool) -> Result<()> {
@@ -328,6 +477,7 @@ impl App {
 
         if trimmed.starts_with('/') && !queue_only {
             self.prompt.clear();
+            self.prompt_completion = None;
             self.sync_mode_with_state();
             self.handle_slash_command(trimmed).await?;
             return Ok(());
@@ -348,6 +498,7 @@ impl App {
             .push(ChatEntry::User(trimmed.to_string()));
         self.session_view_mut(session_id.clone()).auto_scroll = true;
         self.prompt.clear();
+        self.prompt_completion = None;
 
         self.runtime
             .queue_message(session_id.clone(), trimmed.to_string())
@@ -362,10 +513,7 @@ impl App {
         let mut parts = command.split_whitespace();
         match parts.next().unwrap_or_default() {
             "/help" => {
-                self.push_status_line(
-                    self.active_session_id.clone(),
-                    "/help, /model [name], /new, /sessions, /clear, /quit".to_string(),
-                );
+                self.show_help = true;
             }
             "/quit" => {
                 self.should_exit = true;
@@ -376,12 +524,18 @@ impl App {
             "/sessions" => {
                 self.open_session_picker();
             }
+            "/memory" => {
+                self.open_memory_browser().await?;
+            }
+            "/settings" => self.open_settings(),
             "/model" => {
                 if let Some(model) = parts.next() {
                     let session_id = self.runtime.set_model(model.to_string()).await?;
+                    self.config.general.default_model = self.runtime.model().to_string();
                     self.prompt.clear();
                     self.refresh_session_list().await?;
                     self.switch_to_session(session_id).await?;
+                    self.persist_config().await?;
                     self.push_status_line(
                         self.active_session_id.clone(),
                         format!("Switched model to {model} and started a fresh session."),
@@ -390,6 +544,39 @@ impl App {
                     self.push_status_line(
                         self.active_session_id.clone(),
                         format!("Current model: {}", self.runtime.model()),
+                    );
+                }
+            }
+            "/workspace" => {
+                if let Some(workspace) = parts.next() {
+                    let workspace_id = workspace_name_from_input(workspace);
+                    let session_id = self.runtime.set_workspace(workspace_id.clone()).await?;
+                    self.refresh_session_list().await?;
+                    self.switch_to_session(session_id).await?;
+                    self.push_status_line(
+                        self.active_session_id.clone(),
+                        format!("Switched workspace to {}.", workspace_id.as_str()),
+                    );
+                } else {
+                    self.push_status_line(
+                        self.active_session_id.clone(),
+                        format!(
+                            "Current workspace: {}",
+                            self.runtime.workspace_id().as_str()
+                        ),
+                    );
+                }
+            }
+            "/status" => {
+                if let Some(meta) = self.active_session_meta() {
+                    self.push_status_line(
+                        self.active_session_id.clone(),
+                        format!(
+                            "status={} tokens={} cost=${:.2}",
+                            format!("{:?}", meta.status).to_lowercase(),
+                            meta.total_input_tokens + meta.total_output_tokens,
+                            meta.total_cost_cents as f32 / 100.0
+                        ),
                     );
                 }
             }
@@ -407,6 +594,7 @@ impl App {
 
     async fn refresh_session_list(&mut self) -> Result<()> {
         self.sessions = self.runtime.list_session_previews().await?;
+        self.refresh_sidebar_data().await?;
         if !self
             .sessions
             .iter()
@@ -423,6 +611,8 @@ impl App {
                     last_message: None,
                 },
             );
+            self.session_meta
+                .insert(self.active_session_id.clone(), meta);
         }
 
         if let Some(picker) = &mut self.session_picker {
@@ -496,6 +686,7 @@ impl App {
 
         let events = self.runtime.session_events(session_id.clone()).await?;
         let meta = self.runtime.session_meta_by_id(session_id.clone()).await?;
+        self.session_meta.insert(session_id.clone(), meta.clone());
         let cached_prompt = self
             .session_views
             .get(&session_id)
@@ -533,6 +724,9 @@ impl App {
                     streaming: true,
                 });
                 self.update_session_status(&session_id, SessionStatus::Running);
+                if let Some(meta) = self.session_meta.get_mut(&session_id) {
+                    meta.status = SessionStatus::Running;
+                }
             }
             RuntimeEvent::AssistantDelta(ch) => {
                 if let Some(ChatEntry::Assistant { text, .. }) = view.entries.last_mut() {
@@ -570,6 +764,9 @@ impl App {
                 view.pending_approval = Some(prompt);
                 view.auto_scroll = true;
                 self.update_session_status(&session_id, SessionStatus::WaitingApproval);
+                if let Some(meta) = self.session_meta.get_mut(&session_id) {
+                    meta.status = SessionStatus::WaitingApproval;
+                }
             }
             RuntimeEvent::UsageUpdated { total_tokens } => {
                 view.total_tokens = total_tokens;
@@ -588,6 +785,9 @@ impl App {
                     .unwrap_or(false)
                 {
                     self.update_session_status(&session_id, SessionStatus::Completed);
+                    if let Some(meta) = self.session_meta.get_mut(&session_id) {
+                        meta.status = SessionStatus::Completed;
+                    }
                 }
             }
         }
@@ -633,6 +833,26 @@ impl App {
             self.close_session_picker();
             return Ok(());
         }
+        if self.command_palette.is_some() {
+            self.command_palette = None;
+            self.sync_mode_with_state();
+            return Ok(());
+        }
+        if self.memory_view.is_some() {
+            self.memory_view = None;
+            self.sync_mode_with_state();
+            return Ok(());
+        }
+        if self.settings_view.is_some() {
+            self.settings_view = None;
+            self.sync_mode_with_state();
+            return Ok(());
+        }
+        if self.show_help {
+            self.show_help = false;
+            self.sync_mode_with_state();
+            return Ok(());
+        }
         if self.active_session_is_busy() {
             self.runtime
                 .hard_cancel_session(self.active_session_id.clone())
@@ -661,11 +881,13 @@ impl App {
         }
 
         let matched = matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S'));
-        if matched {
+        let help_matched = matches!(key.code, KeyCode::Char('h') | KeyCode::Char('H'));
+        let sidebar_matched = matches!(key.code, KeyCode::Char('b') | KeyCode::Char('B'));
+        if matched || help_matched || sidebar_matched {
             self.pending_chord = None;
             match chord {
-                PendingChord::OpenSessions => self.open_session_picker(),
-                PendingChord::SoftStop => {
+                PendingChord::OpenSessions if matched => self.open_session_picker(),
+                PendingChord::Leader if matched => {
                     self.runtime
                         .soft_cancel_session(self.active_session_id.clone())
                         .await?;
@@ -674,6 +896,18 @@ impl App {
                         "Stop requested. MOA will stop after the current step.".to_string(),
                     );
                 }
+                PendingChord::Leader if help_matched => {
+                    self.show_help = !self.show_help;
+                }
+                PendingChord::Leader if sidebar_matched => {
+                    let visible = sidebar::should_show_sidebar(
+                        self.viewport_width,
+                        self.config.tui.sidebar_auto,
+                        self.sidebar_override,
+                    );
+                    self.sidebar_override = Some(!visible);
+                }
+                _ => {}
             }
             self.sync_mode_with_state();
             return Ok(true);
@@ -733,6 +967,11 @@ impl App {
     }
 
     fn open_session_picker(&mut self) {
+        self.show_help = false;
+        self.command_palette = None;
+        self.memory_view = None;
+        self.settings_view = None;
+        self.prompt_completion = None;
         let mut picker = SessionPickerState::new();
         picker.clamp_selection(self.sessions.len());
         self.session_picker = Some(picker);
@@ -804,8 +1043,22 @@ impl App {
         if let Some(chord) = self.pending_chord {
             return match chord {
                 PendingChord::OpenSessions => "Press S to open the session picker.".to_string(),
-                PendingChord::SoftStop => "Press S to request a soft stop.".to_string(),
+                PendingChord::Leader => "Ctrl+X chord: S stop  H help  B sidebar".to_string(),
             };
+        }
+        if self.show_help {
+            return "Esc close  Ctrl+P palette  Ctrl+M memory  Ctrl+, settings  Ctrl+X, B sidebar"
+                .to_string();
+        }
+        if self.command_palette.is_some() {
+            return "Enter run  Esc close  ↑/↓ select  Type to filter".to_string();
+        }
+        if self.memory_view.is_some() {
+            return "/ search  Enter open  Alt+←/→ history  e edit  d delete  Esc close"
+                .to_string();
+        }
+        if self.settings_view.is_some() {
+            return "←/→ adjust  h/l category  ↑/↓ field  Enter apply  Esc close".to_string();
         }
         if self.session_picker.is_some() {
             return "Enter: open  Esc: close  ↑/↓: select  Type to filter".to_string();
@@ -819,10 +1072,10 @@ impl App {
                 .to_string();
         }
         if self.active_session_is_busy() {
-            return "Ctrl+Q: queue message  Ctrl+X, S: stop  Ctrl+C/Esc: hard cancel  Alt+[/]: tabs"
+            return "Ctrl+Q queue  Ctrl+X, S stop  Ctrl+P palette  Ctrl+M memory  Ctrl+C/Esc cancel"
                 .to_string();
         }
-        "Enter: send  Shift+Enter: newline  Ctrl+N: new  Ctrl+O, S: sessions  Alt+[/]: tabs  /help"
+        "Enter send  Shift+Enter newline  Tab complete  Ctrl+P palette  Ctrl+M memory  /help"
             .to_string()
     }
 
@@ -833,7 +1086,15 @@ impl App {
     }
 
     fn sync_mode_with_state(&mut self) {
-        self.mode = if self.session_picker.is_some() {
+        self.mode = if self.show_help {
+            AppMode::Help
+        } else if self.command_palette.is_some() {
+            AppMode::CommandPalette
+        } else if self.memory_view.is_some() {
+            AppMode::MemoryBrowser
+        } else if self.settings_view.is_some() {
+            AppMode::Settings
+        } else if self.session_picker.is_some() {
             AppMode::PickingSession
         } else if self
             .active_view()
@@ -878,7 +1139,10 @@ impl App {
             .iter_mut()
             .find(|preview| preview.summary.session_id == *session_id)
         {
-            preview.summary.status = status;
+            preview.summary.status = status.clone();
+        }
+        if let Some(meta) = self.session_meta.get_mut(session_id) {
+            meta.status = status;
         }
     }
 
@@ -898,6 +1162,356 @@ impl App {
 
     fn session_view_mut(&mut self, session_id: SessionId) -> &mut SessionViewState {
         self.session_views.entry(session_id).or_default()
+    }
+
+    fn active_session_meta(&self) -> Option<&SessionMeta> {
+        self.session_meta.get(&self.active_session_id)
+    }
+
+    async fn refresh_sidebar_data(&mut self) -> Result<()> {
+        self.recent_memory = self
+            .runtime
+            .recent_memory_entries(6)
+            .await
+            .unwrap_or_default();
+        self.tool_names = self.runtime.tool_names();
+        self.known_files = collect_sandbox_files(&self.runtime.sandbox_root())
+            .await
+            .unwrap_or_else(|_| self.known_files.clone());
+        if let Some(memory_view) = &mut self.memory_view {
+            memory_view.set_pages(
+                self.runtime
+                    .list_memory_pages(None)
+                    .await
+                    .unwrap_or_default(),
+            );
+        }
+        Ok(())
+    }
+
+    async fn refresh_prompt_completion(&mut self) -> Result<()> {
+        self.prompt_completion =
+            completion_for_prompt(&self.prompt.text(), &self.known_files, &self.file_frecency);
+        Ok(())
+    }
+
+    async fn accept_prompt_completion(&mut self) -> Result<()> {
+        let Some(completion) = &mut self.prompt_completion else {
+            return Ok(());
+        };
+        let Some(item) = completion.items.get(completion.selected).cloned() else {
+            return Ok(());
+        };
+        let prompt = self.prompt.text();
+        let replaced = match completion.kind {
+            PromptCompletionKind::Slash => complete_slash_command(&prompt, &item),
+            PromptCompletionKind::File => {
+                *self.file_frecency.entry(item.clone()).or_insert(0) += 1;
+                complete_file_reference(&prompt, &item)
+            }
+        };
+        self.prompt.replace_text(replaced);
+        self.prompt_completion =
+            completion_for_prompt(&self.prompt.text(), &self.known_files, &self.file_frecency);
+        self.sync_mode_with_state();
+        Ok(())
+    }
+
+    fn half_page_scroll(&mut self, down: bool) {
+        let delta = 8;
+        let view = self.session_view_mut(self.active_session_id.clone());
+        view.auto_scroll = false;
+        if down {
+            view.scroll = view.scroll.saturating_add(delta);
+        } else {
+            view.scroll = view.scroll.saturating_sub(delta);
+        }
+    }
+
+    async fn reload_active_session(&mut self) -> Result<()> {
+        self.session_views.remove(&self.active_session_id.clone());
+        self.load_session_if_needed(self.active_session_id.clone())
+            .await?;
+        self.sync_mode_with_state();
+        Ok(())
+    }
+
+    fn open_command_palette(&mut self) {
+        self.show_help = false;
+        self.memory_view = None;
+        self.settings_view = None;
+        self.session_picker = None;
+        self.prompt_completion = None;
+        self.command_palette = Some(PaletteState::new());
+        self.sync_mode_with_state();
+    }
+
+    fn move_palette(&mut self, down: bool) {
+        let Some(palette) = &mut self.command_palette else {
+            return;
+        };
+        let len = palette::filtered_actions(palette.query(), &palette_actions()).len();
+        if down {
+            palette.move_down(len);
+        } else {
+            palette.move_up(len);
+        }
+        self.sync_mode_with_state();
+    }
+
+    fn handle_palette_input(&mut self, key: KeyEvent) {
+        let Some(palette) = &mut self.command_palette else {
+            return;
+        };
+        if let KeyCode::Char(ch) = key.code {
+            palette.push_char(ch);
+        }
+        self.sync_mode_with_state();
+    }
+
+    fn handle_palette_backspace(&mut self) {
+        if let Some(palette) = &mut self.command_palette {
+            palette.backspace();
+        }
+        self.sync_mode_with_state();
+    }
+
+    async fn select_palette_action(&mut self) -> Result<()> {
+        let Some(action) = self
+            .command_palette
+            .as_ref()
+            .and_then(|palette| palette.selected_action(&palette_actions()))
+        else {
+            return Ok(());
+        };
+        self.command_palette = None;
+        self.execute_palette_action(action).await?;
+        self.sync_mode_with_state();
+        Ok(())
+    }
+
+    async fn execute_palette_action(&mut self, action: PaletteAction) -> Result<()> {
+        match action.id {
+            "new_session" => self.create_new_session().await?,
+            "sessions" => self.open_session_picker(),
+            "memory" => self.open_memory_browser().await?,
+            "settings" => self.open_settings(),
+            "help" => self.show_help = true,
+            "toggle_sidebar" => {
+                let visible = sidebar::should_show_sidebar(
+                    self.viewport_width,
+                    self.config.tui.sidebar_auto,
+                    self.sidebar_override,
+                );
+                self.sidebar_override = Some(!visible);
+            }
+            "clear" => self.reload_active_session().await?,
+            "quit" => self.should_exit = true,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn open_memory_browser(&mut self) -> Result<()> {
+        self.show_help = false;
+        self.command_palette = None;
+        self.settings_view = None;
+        self.session_picker = None;
+        self.prompt_completion = None;
+        let pages = self
+            .runtime
+            .list_memory_pages(None)
+            .await
+            .unwrap_or_default();
+        let mut state = MemoryViewState::new(pages);
+        let initial_path = state
+            .selected_path()
+            .or_else(|| Some(MemoryPath::new("MEMORY.md")));
+        if let Some(path) = initial_path
+            && let Ok(page) = self.runtime.read_memory_page(&path).await
+        {
+            state.set_current_page(page);
+        }
+        self.memory_view = Some(state);
+        self.sync_mode_with_state();
+        Ok(())
+    }
+
+    fn start_memory_search(&mut self) {
+        if let Some(memory_view) = &mut self.memory_view {
+            memory_view.start_search();
+        }
+        self.sync_mode_with_state();
+    }
+
+    async fn memory_search_backspace(&mut self) -> Result<()> {
+        if let Some(memory_view) = &mut self.memory_view
+            && memory_view.search_mode()
+        {
+            memory_view.backspace_query();
+            self.refresh_memory_search_results().await?;
+        }
+        self.sync_mode_with_state();
+        Ok(())
+    }
+
+    async fn memory_search_input(&mut self, key: KeyEvent) -> Result<()> {
+        if let Some(memory_view) = &mut self.memory_view
+            && memory_view.search_mode()
+            && let KeyCode::Char(ch) = key.code
+        {
+            memory_view.push_query_char(ch);
+            self.refresh_memory_search_results().await?;
+        }
+        self.sync_mode_with_state();
+        Ok(())
+    }
+
+    async fn refresh_memory_search_results(&mut self) -> Result<()> {
+        let Some(memory_view) = &mut self.memory_view else {
+            return Ok(());
+        };
+        if memory_view.query().trim().is_empty() {
+            memory_view.set_search_results(Vec::new());
+        } else {
+            memory_view.set_search_results(
+                self.runtime
+                    .search_memory(memory_view.query(), 24)
+                    .await
+                    .unwrap_or_default(),
+            );
+        }
+        Ok(())
+    }
+
+    fn move_memory(&mut self, down: bool) {
+        let Some(memory_view) = &mut self.memory_view else {
+            return;
+        };
+        if down {
+            memory_view.move_down();
+        } else {
+            memory_view.move_up();
+        }
+        self.sync_mode_with_state();
+    }
+
+    async fn open_selected_memory_item(&mut self) -> Result<()> {
+        let Some(memory_view) = &mut self.memory_view else {
+            return Ok(());
+        };
+        let Some(path) = memory_view.selected_path() else {
+            return Ok(());
+        };
+        memory_view.record_open(&path);
+        if let Ok(page) = self.runtime.read_memory_page(&path).await {
+            memory_view.set_current_page(page);
+            memory_view.stop_search();
+        }
+        self.sync_mode_with_state();
+        Ok(())
+    }
+
+    async fn navigate_memory_history(&mut self, forward: bool) -> Result<()> {
+        let Some(memory_view) = &mut self.memory_view else {
+            return Ok(());
+        };
+        let path = if forward {
+            memory_view.go_forward()
+        } else {
+            memory_view.go_back()
+        };
+        if let Some(path) = path
+            && let Ok(page) = self.runtime.read_memory_page(&path).await
+        {
+            memory_view.set_current_page(page);
+        }
+        self.sync_mode_with_state();
+        Ok(())
+    }
+
+    async fn open_memory_page_in_editor(&mut self) -> Result<()> {
+        self.push_status_line(
+            self.active_session_id.clone(),
+            "Opening memory pages in an external editor is not implemented yet.".to_string(),
+        );
+        self.sync_mode_with_state();
+        Ok(())
+    }
+
+    async fn delete_memory_page(&mut self) -> Result<()> {
+        self.push_status_line(
+            self.active_session_id.clone(),
+            "Deleting memory pages from the TUI is not implemented yet.".to_string(),
+        );
+        self.sync_mode_with_state();
+        Ok(())
+    }
+
+    fn open_settings(&mut self) {
+        self.show_help = false;
+        self.command_palette = None;
+        self.memory_view = None;
+        self.session_picker = None;
+        self.prompt_completion = None;
+        self.settings_view = Some(SettingsViewState::new());
+        self.sync_mode_with_state();
+    }
+
+    fn move_settings(&mut self, down: bool) {
+        let Some(settings_view) = &mut self.settings_view else {
+            return;
+        };
+        if down {
+            settings_view.move_down(&self.config);
+        } else {
+            settings_view.move_up(&self.config);
+        }
+        self.sync_mode_with_state();
+    }
+
+    fn move_settings_category(&mut self, forward: bool) {
+        let Some(settings_view) = &mut self.settings_view else {
+            return;
+        };
+        if forward {
+            settings_view.move_right();
+        } else {
+            settings_view.move_left();
+        }
+        self.sync_mode_with_state();
+    }
+
+    async fn apply_settings_change(&mut self, forward: bool) -> Result<()> {
+        let Some(settings_view) = &self.settings_view else {
+            return Ok(());
+        };
+        let mutation = if forward {
+            settings_view.step_forward(&mut self.config)
+        } else {
+            settings_view.step_backward(&mut self.config)
+        };
+        self.persist_config().await?;
+        if mutation == SettingsMutation::ModelChanged {
+            let session_id = self
+                .runtime
+                .set_model(self.config.general.default_model.clone())
+                .await?;
+            self.refresh_session_list().await?;
+            self.switch_to_session(session_id).await?;
+        }
+        self.sync_mode_with_state();
+        Ok(())
+    }
+
+    async fn persist_config(&self) -> Result<()> {
+        if let Some(parent) = self.config_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let content = toml::to_string_pretty(&self.config)
+            .map_err(|error| moa_core::MoaError::ConfigError(error.to_string()))?;
+        fs::write(&self.config_path, content).await?;
+        Ok(())
     }
 }
 
@@ -1179,6 +1793,240 @@ fn approval_status_and_note(decision: &ApprovalDecision) -> (ApprovalCardStatus,
     }
 }
 
+fn palette_actions() -> Vec<PaletteAction> {
+    vec![
+        PaletteAction {
+            id: "new_session",
+            label: "New Session",
+            shortcut: "Ctrl+N",
+            description: "Start a fresh chat session",
+        },
+        PaletteAction {
+            id: "sessions",
+            label: "Open Sessions",
+            shortcut: "Ctrl+O, S",
+            description: "Open the fuzzy session picker",
+        },
+        PaletteAction {
+            id: "memory",
+            label: "Open Memory Browser",
+            shortcut: "Ctrl+M",
+            description: "Browse workspace memory pages",
+        },
+        PaletteAction {
+            id: "settings",
+            label: "Open Settings",
+            shortcut: "Ctrl+,",
+            description: "Edit configuration values",
+        },
+        PaletteAction {
+            id: "toggle_sidebar",
+            label: "Toggle Sidebar",
+            shortcut: "Ctrl+X, B",
+            description: "Show or hide the sidebar",
+        },
+        PaletteAction {
+            id: "help",
+            label: "Show Help",
+            shortcut: "Ctrl+X, H",
+            description: "Open the shortcut reference",
+        },
+        PaletteAction {
+            id: "clear",
+            label: "Clear Screen",
+            shortcut: "Ctrl+L",
+            description: "Reload the active session view",
+        },
+        PaletteAction {
+            id: "quit",
+            label: "Quit",
+            shortcut: "/quit",
+            description: "Exit the TUI",
+        },
+    ]
+}
+
+fn render_help_overlay(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
+    use ratatui::{
+        layout::{Constraint, Direction, Layout},
+        widgets::{Block, Borders, Clear, Paragraph},
+    };
+
+    let popup = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(12),
+            Constraint::Percentage(76),
+            Constraint::Percentage(12),
+        ])
+        .split(area)[1];
+    let popup = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(15),
+            Constraint::Percentage(70),
+            Constraint::Percentage(15),
+        ])
+        .split(popup)[1];
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(
+            "Ctrl+P command palette\n\
+             Ctrl+M memory browser\n\
+             Ctrl+, settings\n\
+             Ctrl+X, H help\n\
+             Ctrl+X, B toggle sidebar\n\
+             Ctrl+O, S session picker\n\
+             Ctrl+Q queue prompt\n\
+             Ctrl+X, S soft stop\n\
+             Tab autocomplete (/command, @file)\n\
+             Alt+1-9 switch tabs\n\
+             Alt+[ / Alt+] cycle tabs\n\
+             Esc closes overlays",
+        )
+        .block(Block::default().borders(Borders::ALL).title("Help")),
+        popup,
+    );
+}
+
+fn completion_for_prompt(
+    prompt: &str,
+    known_files: &[String],
+    file_frecency: &HashMap<String, u32>,
+) -> Option<PromptCompletionState> {
+    let trimmed = prompt.trim_start();
+    if trimmed.starts_with('/') && !trimmed.contains(char::is_whitespace) {
+        let prefix = trimmed.trim_start_matches('/');
+        let mut items = slash_commands()
+            .into_iter()
+            .filter(|command| command.trim_start_matches('/').starts_with(prefix))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if items.is_empty() {
+            return None;
+        }
+        items.sort();
+        return Some(PromptCompletionState {
+            kind: PromptCompletionKind::Slash,
+            items,
+            selected: 0,
+        });
+    }
+
+    let token = prompt
+        .split_whitespace()
+        .last()
+        .filter(|token| token.starts_with('@'))?;
+    let prefix = token.trim_start_matches('@');
+    let mut items = known_files
+        .iter()
+        .filter(|path| path.starts_with(prefix))
+        .cloned()
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return None;
+    }
+    items.sort_by(|left, right| {
+        file_frecency
+            .get(right)
+            .unwrap_or(&0)
+            .cmp(file_frecency.get(left).unwrap_or(&0))
+            .then_with(|| left.cmp(right))
+    });
+    Some(PromptCompletionState {
+        kind: PromptCompletionKind::File,
+        items,
+        selected: 0,
+    })
+}
+
+fn complete_slash_command(prompt: &str, command: &str) -> String {
+    let _ = prompt;
+    format!("{command} ")
+}
+
+fn complete_file_reference(prompt: &str, path: &str) -> String {
+    let token = prompt.split_whitespace().last().unwrap_or_default();
+    if !token.starts_with('@') {
+        return prompt.to_string();
+    }
+
+    let replacement = format!("@{path}");
+    let trimmed = prompt.trim_end();
+    let prefix = trimmed.strip_suffix(token).unwrap_or(trimmed).to_string();
+    format!("{prefix}{replacement} ")
+}
+
+fn slash_commands() -> Vec<&'static str> {
+    vec![
+        "/new",
+        "/sessions",
+        "/resume",
+        "/model",
+        "/memory",
+        "/workspace",
+        "/tools",
+        "/settings",
+        "/compact",
+        "/export",
+        "/undo",
+        "/redo",
+        "/clear",
+        "/editor",
+        "/status",
+        "/help",
+        "/quit",
+    ]
+}
+
+fn default_config_path() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or(moa_core::MoaError::HomeDirectoryNotFound)?;
+    Ok(Path::new(&home).join(".moa").join("config.toml"))
+}
+
+fn workspace_name_from_input(input: &str) -> WorkspaceId {
+    let normalized = Path::new(input)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(input)
+        .trim();
+    WorkspaceId::new(if normalized.is_empty() {
+        "default"
+    } else {
+        normalized
+    })
+}
+
+async fn collect_sandbox_files(root: &Path) -> Result<Vec<String>> {
+    let mut results = Vec::new();
+    let root = root.to_path_buf();
+    if !fs::try_exists(&root).await? {
+        return Ok(results);
+    }
+
+    let mut pending = vec![root.clone()];
+    while let Some(directory) = pending.pop() {
+        let mut entries = fs::read_dir(&directory).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let file_type = entry.file_type().await?;
+            if file_type.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            if let Ok(relative) = path.strip_prefix(&root) {
+                results.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    results.sort();
+    Ok(results)
+}
+
 /// Runs the full-screen TUI until the user exits.
 pub async fn run_tui(config: MoaConfig) -> Result<()> {
     enable_raw_mode()?;
@@ -1232,8 +2080,13 @@ mod tests {
         Runtime::new().expect("runtime").block_on(async {
             let runtime = ChatRuntime::for_test(Platform::Tui).await.expect("runtime");
             let active_session_id = runtime.session_id().clone();
+            let config = runtime.config().clone();
+            let config_path =
+                std::env::temp_dir().join(format!("moa-config-{}.toml", Uuid::new_v4()));
             let (runtime_event_tx, runtime_event_rx) = mpsc::unbounded_channel();
             let mut app = App {
+                config,
+                config_path,
                 runtime,
                 mode: AppMode::Idle,
                 prompt: PromptWidget::new(),
@@ -1250,10 +2103,25 @@ mod tests {
                     },
                     last_message: None,
                 }],
+                session_meta: HashMap::new(),
                 session_views: HashMap::from([(
                     active_session_id.clone(),
                     SessionViewState::default(),
                 )]),
+                memory_view: None,
+                settings_view: None,
+                command_palette: None,
+                prompt_completion: None,
+                sidebar_override: None,
+                show_help: false,
+                recent_memory: Vec::new(),
+                tool_names: vec!["bash".to_string(), "file_read".to_string()],
+                file_frecency: HashMap::new(),
+                known_files: vec![
+                    "src/main.rs".to_string(),
+                    "src/lib.rs".to_string(),
+                    "README.md".to_string(),
+                ],
                 active_session_id,
                 viewport_width: 100,
                 should_exit: false,
@@ -1425,5 +2293,81 @@ mod tests {
                 ChatEntry::Approval(card) if card.prompt.request.request_id == request_id
             )));
         });
+    }
+
+    #[test]
+    fn slash_completion_and_sidebar_toggle_modes_are_reachable() {
+        let mut app = test_app();
+        app.prompt.replace_text("/me");
+        Runtime::new()
+            .expect("runtime")
+            .block_on(async { app.refresh_prompt_completion().await.expect("completion") });
+        assert!(app.prompt_completion.is_some());
+
+        app.sidebar_override = Some(true);
+        app.sync_mode_with_state();
+        assert_eq!(app.mode(), AppMode::Composing);
+    }
+
+    #[test]
+    fn memory_and_settings_overlays_change_app_mode() {
+        let mut app = test_app();
+        app.memory_view = Some(MemoryViewState::default());
+        app.sync_mode_with_state();
+        assert_eq!(app.mode(), AppMode::MemoryBrowser);
+
+        app.memory_view = None;
+        app.settings_view = Some(SettingsViewState::new());
+        app.sync_mode_with_state();
+        assert_eq!(app.mode(), AppMode::Settings);
+    }
+
+    #[test]
+    fn settings_persist_to_disk_and_reload() {
+        let runtime = Runtime::new().expect("runtime");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = test_app();
+        app.config_path = dir.path().join("config.toml");
+        app.config.general.default_provider = "anthropic".to_string();
+        app.config.general.default_model = "claude-sonnet-4-6".to_string();
+        app.config.tui.sidebar_auto = false;
+        runtime.block_on(async { app.persist_config().await.expect("persist config") });
+
+        let reloaded = MoaConfig::load_from_path(&app.config_path).expect("reload config");
+        assert_eq!(reloaded.general.default_provider, "anthropic");
+        assert_eq!(reloaded.general.default_model, "claude-sonnet-4-6");
+        assert!(!reloaded.tui.sidebar_auto);
+    }
+
+    #[test]
+    fn file_completion_prefers_frecency_and_replaces_active_token() {
+        let runtime = Runtime::new().expect("runtime");
+        let mut app = test_app();
+        app.known_files = vec![
+            "src/main.rs".to_string(),
+            "src/lib.rs".to_string(),
+            "docs/guide.md".to_string(),
+        ];
+        app.file_frecency.insert("src/lib.rs".to_string(), 5);
+        app.prompt.replace_text("@src/l");
+        runtime.block_on(async {
+            app.refresh_prompt_completion()
+                .await
+                .expect("refresh completion");
+        });
+
+        let completion = app.prompt_completion.clone().expect("completion");
+        assert_eq!(completion.kind, PromptCompletionKind::File);
+        assert_eq!(
+            completion.items.first().map(String::as_str),
+            Some("src/lib.rs")
+        );
+
+        runtime.block_on(async {
+            app.accept_prompt_completion()
+                .await
+                .expect("accept completion");
+        });
+        assert_eq!(app.prompt.text(), "@src/lib.rs ");
     }
 }

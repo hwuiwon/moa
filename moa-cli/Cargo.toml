@@ -16,3 +16,7 @@ moa-tui = { path = "../moa-tui" }
 tokio.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+expectrl = "0.7"
+tempfile = "3"

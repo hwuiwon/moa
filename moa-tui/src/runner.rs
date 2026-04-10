@@ -1,12 +1,14 @@
 //! Shared chat runtime facade backed by the local multi-session orchestrator.
 
 use std::env;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use moa_core::{
-    ApprovalDecision, BrainOrchestrator, Event, EventRange, EventRecord, MoaConfig, Platform,
-    Result, RuntimeEvent, SessionFilter, SessionId, SessionMeta, SessionSignal, SessionStore,
-    SessionSummary, StartSessionRequest, UserId, UserMessage, WorkspaceId,
+    ApprovalDecision, BrainOrchestrator, Event, EventRange, EventRecord, MemoryPath, MemoryScope,
+    MemorySearchResult, MemoryStore, MoaConfig, PageSummary, PageType, Platform, Result,
+    RuntimeEvent, SessionFilter, SessionId, SessionMeta, SessionSignal, SessionStore,
+    SessionSummary, StartSessionRequest, UserId, UserMessage, WikiPage, WorkspaceId,
 };
 use moa_orchestrator::LocalOrchestrator;
 use tokio::sync::{broadcast, mpsc};
@@ -98,6 +100,27 @@ impl ChatRuntime {
         &self.model
     }
 
+    /// Returns the active workspace identifier.
+    pub fn workspace_id(&self) -> &WorkspaceId {
+        &self.workspace_id
+    }
+
+    /// Returns the sandbox root configured for local tools.
+    pub fn sandbox_root(&self) -> PathBuf {
+        expand_local_path(&self.config.local.sandbox_dir)
+    }
+
+    /// Returns the current in-memory configuration snapshot.
+    pub fn config(&self) -> &MoaConfig {
+        &self.config
+    }
+
+    /// Switches the runtime to a different workspace and starts a fresh session there.
+    pub async fn set_workspace(&mut self, workspace_id: WorkspaceId) -> Result<SessionId> {
+        self.workspace_id = workspace_id;
+        self.reset_session().await
+    }
+
     /// Replaces the active session with a fresh empty session.
     pub async fn reset_session(&mut self) -> Result<SessionId> {
         self.session_id = start_empty_session(
@@ -173,6 +196,61 @@ impl ChatRuntime {
         }
 
         Ok(previews)
+    }
+
+    /// Returns the tool names exposed by the current router.
+    pub fn tool_names(&self) -> Vec<String> {
+        self.orchestrator.tool_names()
+    }
+
+    /// Lists memory pages for the current workspace.
+    pub async fn list_memory_pages(&self, filter: Option<PageType>) -> Result<Vec<PageSummary>> {
+        let mut pages = self
+            .orchestrator
+            .memory_store()
+            .list_pages(MemoryScope::Workspace(self.workspace_id.clone()), filter)
+            .await?;
+        pages.sort_by(|left, right| right.updated.cmp(&left.updated));
+        Ok(pages)
+    }
+
+    /// Returns recent memory entries for the sidebar.
+    pub async fn recent_memory_entries(&self, limit: usize) -> Result<Vec<PageSummary>> {
+        let mut pages = self.list_memory_pages(None).await?;
+        pages.truncate(limit);
+        Ok(pages)
+    }
+
+    /// Searches memory within the current workspace.
+    pub async fn search_memory(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemorySearchResult>> {
+        self.orchestrator
+            .memory_store()
+            .search(
+                query,
+                MemoryScope::Workspace(self.workspace_id.clone()),
+                limit,
+            )
+            .await
+    }
+
+    /// Loads one wiki page from the current workspace.
+    pub async fn read_memory_page(&self, path: &MemoryPath) -> Result<WikiPage> {
+        self.orchestrator
+            .memory_store()
+            .read_page_in_scope(&MemoryScope::Workspace(self.workspace_id.clone()), path)
+            .await
+    }
+
+    /// Returns the current workspace memory index document.
+    pub async fn memory_index(&self) -> Result<String> {
+        self.orchestrator
+            .memory_store()
+            .get_index(MemoryScope::Workspace(self.workspace_id.clone()))
+            .await
     }
 
     /// Relays live runtime updates for one session until the receiver closes.
@@ -275,6 +353,16 @@ impl ChatRuntime {
     pub async fn cancel_active_generation(&self) -> Result<()> {
         self.hard_cancel_session(self.session_id.clone()).await
     }
+}
+
+fn expand_local_path(path: &str) -> PathBuf {
+    if let Some(relative) = path.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return Path::new(&home).join(relative);
+    }
+
+    PathBuf::from(path)
 }
 
 async fn relay_runtime_events(
