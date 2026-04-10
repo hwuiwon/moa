@@ -57,11 +57,12 @@ pub struct SkillFrontmatter {
     pub allowed_tools: Vec<String>,
     /// Arbitrary metadata preserved from the Agent Skills spec.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub metadata: HashMap<String, String>,
+    metadata: HashMap<String, String>,
 }
 
 impl SkillFrontmatter {
-    pub(crate) fn version(&self) -> String {
+    /// Returns the MOA version for the skill, defaulting to the base format version.
+    pub fn version(&self) -> String {
         self.metadata_string(META_VERSION)
             .unwrap_or_else(|| DEFAULT_VERSION.to_string())
     }
@@ -70,12 +71,14 @@ impl SkillFrontmatter {
         self.insert_metadata(META_VERSION, value.into());
     }
 
-    pub(crate) fn one_liner(&self) -> String {
+    /// Returns the concise one-line summary used in MOA UIs.
+    pub fn one_liner(&self) -> String {
         self.metadata_string(META_ONE_LINER)
             .unwrap_or_else(|| self.description.clone())
     }
 
-    pub(crate) fn tags(&self) -> Vec<String> {
+    /// Returns the normalized skill tags.
+    pub fn tags(&self) -> Vec<String> {
         metadata_csv(&self.metadata, META_TAGS)
     }
 
@@ -83,7 +86,8 @@ impl SkillFrontmatter {
         self.set_metadata_csv(META_TAGS, tags);
     }
 
-    pub(crate) fn created(&self) -> DateTime<Utc> {
+    /// Returns the creation timestamp tracked by MOA.
+    pub fn created(&self) -> DateTime<Utc> {
         self.metadata_timestamp(META_CREATED)
             .unwrap_or_else(Utc::now)
     }
@@ -92,7 +96,8 @@ impl SkillFrontmatter {
         self.insert_metadata(META_CREATED, format_timestamp(value));
     }
 
-    pub(crate) fn updated(&self) -> DateTime<Utc> {
+    /// Returns the last-updated timestamp tracked by MOA.
+    pub fn updated(&self) -> DateTime<Utc> {
         self.metadata_timestamp(META_UPDATED)
             .unwrap_or_else(|| self.created())
     }
@@ -101,7 +106,8 @@ impl SkillFrontmatter {
         self.insert_metadata(META_UPDATED, format_timestamp(value));
     }
 
-    pub(crate) fn auto_generated(&self) -> bool {
+    /// Returns whether MOA auto-generated the skill.
+    pub fn auto_generated(&self) -> bool {
         self.metadata_bool(META_AUTO_GENERATED).unwrap_or(false)
     }
 
@@ -113,7 +119,8 @@ impl SkillFrontmatter {
         self.set_optional_metadata(META_SOURCE_SESSION, value);
     }
 
-    pub(crate) fn use_count(&self) -> u32 {
+    /// Returns how many times MOA has used this skill.
+    pub fn use_count(&self) -> u32 {
         self.metadata_u32(META_USE_COUNT).unwrap_or(0)
     }
 
@@ -121,7 +128,8 @@ impl SkillFrontmatter {
         self.insert_metadata(META_USE_COUNT, value.to_string());
     }
 
-    pub(crate) fn last_used(&self) -> Option<DateTime<Utc>> {
+    /// Returns the last time MOA used this skill, when known.
+    pub fn last_used(&self) -> Option<DateTime<Utc>> {
         self.metadata_timestamp(META_LAST_USED)
     }
 
@@ -129,7 +137,8 @@ impl SkillFrontmatter {
         self.set_optional_metadata(META_LAST_USED, value.map(format_timestamp));
     }
 
-    pub(crate) fn success_rate(&self) -> f32 {
+    /// Returns the tracked success rate for this skill.
+    pub fn success_rate(&self) -> f32 {
         self.metadata_f32(META_SUCCESS_RATE)
             .unwrap_or(DEFAULT_SUCCESS_RATE)
     }
@@ -138,7 +147,8 @@ impl SkillFrontmatter {
         self.insert_metadata(META_SUCCESS_RATE, value.to_string());
     }
 
-    pub(crate) fn estimated_tokens(&self, body: &str) -> usize {
+    /// Returns the estimated token cost of loading the full skill body.
+    pub fn estimated_tokens(&self, body: &str) -> usize {
         self.metadata_usize(META_ESTIMATED_TOKENS)
             .unwrap_or_else(|| estimate_skill_tokens(body))
     }
@@ -147,7 +157,16 @@ impl SkillFrontmatter {
         self.set_optional_metadata(META_IMPROVED_FROM, value);
     }
 
-    pub(crate) fn metadata_string(&self, key: &str) -> Option<String> {
+    /// Returns one raw metadata value by key.
+    pub fn metadata_value(&self, key: &str) -> Option<&str> {
+        self.metadata
+            .get(key)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn metadata_string(&self, key: &str) -> Option<String> {
         self.metadata
             .get(key)
             .map(String::as_str)

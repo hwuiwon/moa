@@ -179,7 +179,7 @@ mod tests {
 
         async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
             let mut order = ctx
-                .metadata
+                .metadata()
                 .get("stage_order")
                 .cloned()
                 .unwrap_or_else(|| json!([]));
@@ -189,7 +189,7 @@ mod tests {
                 ));
             };
             order_items.push(json!(self.name));
-            ctx.metadata.insert("stage_order".to_string(), order);
+            ctx.insert_metadata("stage_order", order);
 
             Ok(ProcessorOutput {
                 tokens_added: estimate_tokens(self.name),
@@ -240,8 +240,8 @@ mod tests {
             vec!["identity", "instructions", "tools"]
         );
         assert_eq!(
-            ctx.metadata["stage_order"],
-            json!(["identity", "instructions", "tools"])
+            ctx.metadata().get("stage_order"),
+            Some(&json!(["identity", "instructions", "tools"]))
         );
     }
 }

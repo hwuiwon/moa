@@ -175,14 +175,7 @@ fn parses_skill_markdown() {
     let skill = parse_skill_markdown(DISTILLED_SKILL).unwrap();
 
     assert_eq!(skill.frontmatter.name, "debug-oauth-refresh");
-    assert_eq!(
-        skill
-            .frontmatter
-            .metadata
-            .get("moa-estimated-tokens")
-            .unwrap(),
-        "900"
-    );
+    assert_eq!(skill.frontmatter.estimated_tokens(&skill.body), 900);
 }
 
 #[tokio::test]
@@ -262,9 +255,6 @@ async fn improves_existing_skill_when_better_flow_is_found() -> Result<()> {
             .contains("Add a regression test before changing code")
     );
     let reparsed = skill_from_wiki_page(&updated)?;
-    assert_eq!(
-        reparsed.frontmatter.metadata.get("moa-version").unwrap(),
-        "1.1"
-    );
+    assert_eq!(reparsed.frontmatter.version(), "1.1");
     Ok(())
 }

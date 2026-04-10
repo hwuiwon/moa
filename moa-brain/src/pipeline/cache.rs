@@ -1,10 +1,8 @@
 //! Stage 7: validates cache breakpoint ordering and reports cache efficiency.
 
+use super::{estimate_tokens, sort_json_keys};
 use async_trait::async_trait;
 use moa_core::{ContextProcessor, MoaError, ProcessorOutput, Result, WorkingContext};
-use serde_json::Value;
-
-use super::{estimate_tokens, sort_json_keys};
 
 /// Final cache verification pass.
 #[derive(Debug, Default)]
@@ -38,10 +36,8 @@ impl ContextProcessor for CacheOptimizer {
             }
         }
 
-        if let Some(Value::Array(tool_schemas)) = ctx.metadata.get_mut("tool_schemas") {
-            for schema in tool_schemas {
-                sort_json_keys(schema);
-            }
+        for schema in ctx.tools_mut() {
+            sort_json_keys(schema);
         }
 
         let prefix_tokens = ctx.messages[..cache_breakpoint]

@@ -142,36 +142,6 @@ The Temporal integration works for the current prototype but is not yet producti
 
 ---
 
-## Architectural drift risks
-
-These caveats are not bugs today but mark places where a future change could silently reintroduce the coupling or duplication that was just cleaned up.
-
-### Tool approval metadata has one source of truth in `ToolRouter`
-
-- Tool normalization, approval summaries, default policy actions, always-allow patterns, and file diff previews all come from the tool definition metadata in `moa-hands/src/router.rs`.
-- `moa-security` evaluates policy decisions against a normalized `ToolPolicyInput` prepared by the router. `moa-orchestrator` and `moa-brain` both consume router-prepared invocation metadata.
-- Any future non-router execution path must also use `ToolRouter::prepare_invocation()` before applying policy or rendering approval UI. Bypassing the router would reintroduce drift immediately.
-
-### The in-memory skills model matches the on-disk Agent Skills shape
-
-- `SkillFrontmatter` stores only the spec-shaped fields: `name`, `description`, optional `license`, `compatibility`, `allowed-tools`, and `metadata`. MOA bookkeeping is derived lazily from `metadata` through helper accessors.
-- The in-memory and on-disk skill representations line up directly, and round-tripping `SKILL.md` is less surprising.
-- MOA-specific behavior still depends on `metadata` keys such as `moa-version`, `moa-one-liner`, and `moa-estimated-tokens`. Any code outside `moa-skills` that reaches into raw `metadata` directly is more fragile than code that goes through the helpers in `format.rs`.
-
-### Context stages own their async I/O directly
-
-- `ContextProcessor::process()` is async across `moa-core` and `moa-brain`. Stage 4 (`SkillInjector`), Stage 5 (`MemoryRetriever`), and Stage 6 (`HistoryCompiler`) receive their dependencies through constructor injection and do their own I/O inside `process()`.
-- The pipeline runner no longer preloads stage inputs into `WorkingContext.metadata` via stringly-typed JSON keys.
-- `WorkingContext.metadata` still exists for legitimate shared request state such as tool schemas. If that map starts accumulating new stage-specific payload contracts again, the repo will drift back toward the same coupling problem.
-
-### Tool metadata lives in `moa-core`, routing stays in `moa-hands`
-
-- `BuiltInTool`, `ToolContext`, `ToolDefinition`, `ToolPolicySpec`, `ToolInputShape`, and `ToolDiffStrategy` live in `moa-core`. `ToolRegistry`, `ToolRouter`, and `ToolExecution` remain in `moa-hands`.
-- `moa-hands` re-exports the moved interface types so existing import paths continue to work during the transition.
-- `ToolRegistry` still stores execution state separately from the shared `ToolDefinition`, so there are two closely related internal shapes in `moa-hands`. If registry metadata starts drifting from the core definition, the next cleanup should tighten construction helpers around the registry entry type.
-
----
-
 ## TUI feature gaps
 
 The TUI surfaces are functional but intentionally shallow. These caveats share a root in the TUI being a thin consumer layer that defers richer interactions to later passes.

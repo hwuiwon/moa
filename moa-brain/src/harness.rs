@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use moa_core::{
-    ApprovalDecision, ApprovalPrompt, ApprovalRequest, CompletionContent, Event, EventRange,
-    EventRecord, LLMProvider, MoaError, PolicyAction, Result, RuntimeEvent, SessionId, SessionMeta,
+    ApprovalDecision, ApprovalRequest, CompletionContent, Event, EventRange, EventRecord,
+    LLMProvider, MoaError, PolicyAction, Result, RuntimeEvent, SessionId, SessionMeta,
     SessionSignal, SessionStatus, SessionStore, StopReason, ToolCardStatus, ToolInvocation,
     ToolUpdate, UserId, UserMessage, WorkingContext,
 };
@@ -556,9 +556,9 @@ async fn handle_tool_call(
     };
 
     let prepared = router.prepare_invocation(session, call).await?;
-    let summary = prepared.policy_input.input_summary.clone();
+    let summary = prepared.input_summary().to_string();
 
-    match prepared.policy.action {
+    match &prepared.policy().action {
         PolicyAction::Allow => {
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
                 tool_id,
@@ -632,18 +632,8 @@ async fn handle_tool_call(
                 },
             )
             .await?;
-            let request = ApprovalRequest {
-                request_id: tool_id,
-                tool_name: call.name.clone(),
-                input_summary: summary.clone(),
-                risk_level: prepared.policy_input.risk_level.clone(),
-            };
-            let prompt = ApprovalPrompt {
-                request: request.clone(),
-                pattern: prepared.always_allow_pattern,
-                parameters: prepared.approval_fields,
-                file_diffs: prepared.approval_diffs,
-            };
+            let prompt = prepared.approval_prompt(tool_id);
+            let request = prompt.request.clone();
             append_event(
                 &session_store,
                 event_tx,
@@ -878,7 +868,7 @@ async fn process_resolved_approval(
                 tool_id: pending.tool_id,
                 tool_name: pending.tool_name.clone(),
                 status: ToolCardStatus::Running,
-                summary: prepared.policy_input.input_summary,
+                summary: prepared.input_summary().to_string(),
                 detail: None,
             }));
             execute_pending_tool(
@@ -918,7 +908,7 @@ async fn process_resolved_approval(
                 tool_id: pending.tool_id,
                 tool_name: pending.tool_name.clone(),
                 status: ToolCardStatus::Running,
-                summary: prepared.policy_input.input_summary,
+                summary: prepared.input_summary().to_string(),
                 detail: Some(format!("Always allow rule stored: {pattern}")),
             }));
             execute_pending_tool(
@@ -984,23 +974,13 @@ async fn wait_for_approval(
         input: pending.input.clone(),
     };
     let prepared = tool_router.prepare_invocation(session, &invocation).await?;
-    let prompt = ApprovalPrompt {
-        request: ApprovalRequest {
-            request_id: pending.tool_id,
-            tool_name: pending.tool_name.clone(),
-            input_summary: prepared.policy_input.input_summary.clone(),
-            risk_level: prepared.policy_input.risk_level.clone(),
-        },
-        pattern: prepared.always_allow_pattern.clone(),
-        parameters: prepared.approval_fields.clone(),
-        file_diffs: prepared.approval_diffs.clone(),
-    };
+    let prompt = prepared.approval_prompt(pending.tool_id);
     let _ = runtime_tx.send(RuntimeEvent::ApprovalRequested(prompt));
     let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
         tool_id: pending.tool_id,
         tool_name: pending.tool_name.clone(),
         status: ToolCardStatus::WaitingApproval,
-        summary: prepared.policy_input.input_summary.clone(),
+        summary: prepared.input_summary().to_string(),
         detail: Some("Press y to allow once, a to always allow, n to deny".to_string()),
     }));
 
@@ -1028,7 +1008,7 @@ async fn wait_for_approval(
                             tool_id: pending.tool_id,
                             tool_name: pending.tool_name.clone(),
                             status: ToolCardStatus::Running,
-                            summary: prepared.policy_input.input_summary.clone(),
+                            summary: prepared.input_summary().to_string(),
                             detail: None,
                         }));
                         execute_tool(
@@ -1061,7 +1041,7 @@ async fn wait_for_approval(
                             tool_id: pending.tool_id,
                             tool_name: pending.tool_name.clone(),
                             status: ToolCardStatus::Running,
-                            summary: prepared.policy_input.input_summary.clone(),
+                            summary: prepared.input_summary().to_string(),
                             detail: Some(format!("Always allow rule stored: {pattern}")),
                         }));
                         execute_tool(

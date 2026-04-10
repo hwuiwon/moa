@@ -8,11 +8,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use moa_core::{
-    ApprovalField, ApprovalFileDiff, ApprovalRule, BuiltInTool, HandHandle, HandProvider,
-    HandResources, HandSpec, McpServerConfig, MemoryStore, MoaConfig, MoaError, PolicyAction,
-    Result, RiskLevel, SandboxTier, SessionMeta, ToolContext, ToolDefinition, ToolDiffStrategy,
-    ToolInputShape, ToolInvocation, ToolOutput, ToolPolicyInput, ToolPolicySpec, UserId,
-    read_tool_policy, write_tool_policy,
+    ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, ApprovalRule, BuiltInTool,
+    HandHandle, HandProvider, HandResources, HandSpec, McpServerConfig, MemoryStore, MoaConfig,
+    MoaError, PolicyAction, Result, RiskLevel, SandboxTier, SessionMeta, ToolContext,
+    ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolInvocation, ToolOutput, ToolPolicyInput,
+    ToolPolicySpec, UserId, read_tool_policy, write_tool_policy,
 };
 use moa_security::{
     ApprovalRuleStore, EnvironmentCredentialVault, MCPCredentialProxy, PolicyCheck, ToolPolicies,
@@ -49,15 +49,47 @@ pub(crate) fn execute_tool_policy(input_shape: ToolInputShape) -> ToolPolicySpec
 #[derive(Debug, Clone)]
 pub struct PreparedToolInvocation {
     /// Normalized policy-facing description of the invocation.
-    pub policy_input: ToolPolicyInput,
+    policy_input: ToolPolicyInput,
     /// Result of evaluating the invocation against the active policies.
-    pub policy: PolicyCheck,
+    policy: PolicyCheck,
     /// Suggested rule pattern for "Always Allow".
-    pub always_allow_pattern: String,
+    always_allow_pattern: String,
     /// Structured approval fields for the local UI.
-    pub approval_fields: Vec<ApprovalField>,
+    approval_fields: Vec<ApprovalField>,
     /// Optional inline file diffs for the local UI.
-    pub approval_diffs: Vec<ApprovalFileDiff>,
+    approval_diffs: Vec<ApprovalFileDiff>,
+}
+
+impl PreparedToolInvocation {
+    /// Returns the policy evaluation outcome for the invocation.
+    pub fn policy(&self) -> &PolicyCheck {
+        &self.policy
+    }
+
+    /// Returns the normalized policy input used for rule evaluation.
+    pub fn policy_input(&self) -> &ToolPolicyInput {
+        &self.policy_input
+    }
+
+    /// Returns the concise invocation summary for tool cards and errors.
+    pub fn input_summary(&self) -> &str {
+        &self.policy_input.input_summary
+    }
+
+    /// Builds the approval prompt for this invocation with the given request identifier.
+    pub fn approval_prompt(&self, request_id: Uuid) -> ApprovalPrompt {
+        ApprovalPrompt {
+            request: ApprovalRequest {
+                request_id,
+                tool_name: self.policy_input.tool_name.clone(),
+                input_summary: self.policy_input.input_summary.clone(),
+                risk_level: self.policy_input.risk_level.clone(),
+            },
+            pattern: self.always_allow_pattern.clone(),
+            parameters: self.approval_fields.clone(),
+            file_diffs: self.approval_diffs.clone(),
+        }
+    }
 }
 
 /// Tool execution routing target.
@@ -73,6 +105,45 @@ pub enum ToolExecution {
 struct RegisteredTool {
     definition: ToolDefinition,
     execution: ToolExecution,
+}
+
+impl RegisteredTool {
+    fn builtin(tool: Arc<dyn BuiltInTool>) -> Self {
+        Self {
+            definition: tool.definition(),
+            execution: ToolExecution::BuiltIn(tool),
+        }
+    }
+
+    fn hand(name: &str, description: &str, schema: Value, policy: ToolPolicySpec) -> Self {
+        Self {
+            definition: ToolDefinition {
+                name: name.to_string(),
+                description: description.to_string(),
+                schema,
+                policy,
+            },
+            execution: ToolExecution::Hand {
+                provider: DEFAULT_PROVIDER_NAME.to_string(),
+                tier: SandboxTier::Local,
+            },
+        }
+    }
+
+    fn mcp(server_name: &str, tool: McpDiscoveredTool) -> Self {
+        let name = tool.name;
+        Self {
+            definition: ToolDefinition {
+                name: name.clone(),
+                description: tool.description,
+                schema: tool.input_schema,
+                policy: execute_tool_policy(ToolInputShape::Json),
+            },
+            execution: ToolExecution::Mcp {
+                server_name: server_name.to_string(),
+            },
+        }
+    }
 }
 
 /// In-memory registry of available tools.
@@ -177,19 +248,7 @@ impl ToolRegistry {
     /// Registers a built-in tool.
     pub fn register_builtin(&mut self, tool: Arc<dyn BuiltInTool>) {
         let name = tool.name().to_string();
-        let policy = tool.policy_spec();
-        self.tools.insert(
-            name.clone(),
-            RegisteredTool {
-                definition: ToolDefinition {
-                    name,
-                    description: tool.description().to_string(),
-                    schema: tool.input_schema(),
-                    policy,
-                },
-                execution: ToolExecution::BuiltIn(tool.clone()),
-            },
-        );
+        self.tools.insert(name, RegisteredTool::builtin(tool));
     }
 
     /// Registers a hand-routed tool using the local provider.
@@ -202,38 +261,15 @@ impl ToolRegistry {
     ) {
         self.tools.insert(
             name.to_string(),
-            RegisteredTool {
-                definition: ToolDefinition {
-                    name: name.to_string(),
-                    description: description.to_string(),
-                    schema,
-                    policy,
-                },
-                execution: ToolExecution::Hand {
-                    provider: DEFAULT_PROVIDER_NAME.to_string(),
-                    tier: SandboxTier::Local,
-                },
-            },
+            RegisteredTool::hand(name, description, schema, policy),
         );
     }
 
     /// Registers a discovered MCP tool and adds it to the default loadout.
     pub fn register_mcp_tool(&mut self, server_name: &str, tool: McpDiscoveredTool) {
         let name = tool.name.clone();
-        self.tools.insert(
-            name.clone(),
-            RegisteredTool {
-                definition: ToolDefinition {
-                    name: name.clone(),
-                    description: tool.description,
-                    schema: tool.input_schema,
-                    policy: execute_tool_policy(ToolInputShape::Json),
-                },
-                execution: ToolExecution::Mcp {
-                    server_name: server_name.to_string(),
-                },
-            },
-        );
+        self.tools
+            .insert(name.clone(), RegisteredTool::mcp(server_name, tool));
         if !self
             .default_loadout
             .iter()
@@ -463,7 +499,11 @@ impl ToolRouter {
         session: &SessionMeta,
         invocation: &ToolInvocation,
     ) -> Result<PolicyCheck> {
-        Ok(self.prepare_invocation(session, invocation).await?.policy)
+        Ok(self
+            .prepare_invocation(session, invocation)
+            .await?
+            .policy()
+            .clone())
     }
 
     /// Prepares a tool invocation for policy evaluation and approval rendering.
@@ -549,7 +589,7 @@ impl ToolRouter {
         invocation: &ToolInvocation,
     ) -> Result<(Option<String>, ToolOutput)> {
         let prepared = self.prepare_invocation(session, invocation).await?;
-        match prepared.policy.action {
+        match &prepared.policy().action {
             PolicyAction::Allow => self.execute_authorized(session, invocation).await,
             PolicyAction::Deny => Err(MoaError::PermissionDenied(format!(
                 "tool {} denied by policy",
@@ -557,7 +597,8 @@ impl ToolRouter {
             ))),
             PolicyAction::RequireApproval => Err(MoaError::PermissionDenied(format!(
                 "tool {} requires approval: {}",
-                invocation.name, prepared.policy_input.input_summary
+                invocation.name,
+                prepared.input_summary()
             ))),
         }
     }
