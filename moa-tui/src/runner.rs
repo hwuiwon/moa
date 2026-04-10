@@ -17,7 +17,8 @@ use moa_hands::ToolRouter;
 #[cfg(test)]
 use moa_memory::FileMemoryStore;
 #[cfg(test)]
-use moa_providers::AnthropicProvider;
+use moa_providers::build_provider_from_config;
+use moa_providers::resolve_provider_selection;
 #[cfg(test)]
 use moa_session::TursoSessionStore;
 
@@ -53,7 +54,10 @@ pub struct SessionRuntimeEvent {
 
 impl ChatRuntime {
     /// Creates a new local runtime from the loaded MOA config.
-    pub async fn from_config(config: MoaConfig, platform: Platform) -> Result<Self> {
+    pub async fn from_config(mut config: MoaConfig, platform: Platform) -> Result<Self> {
+        let selection = resolve_provider_selection(&config, None)?;
+        config.general.default_provider = selection.provider_name;
+        config.general.default_model = selection.model_id;
         let model = config.general.default_model.clone();
         let orchestrator = Arc::new(LocalOrchestrator::from_config(config.clone()).await?);
         let workspace_id = WorkspaceId::new("default");
@@ -109,8 +113,11 @@ impl ChatRuntime {
 
     /// Switches models and starts a fresh session using the new default model.
     pub async fn set_model(&mut self, model: impl Into<String>) -> Result<SessionId> {
-        self.model = model.into();
-        self.config.general.default_model = self.model.clone();
+        let requested_model = model.into();
+        let selection = resolve_provider_selection(&self.config, Some(requested_model.as_str()))?;
+        self.model = selection.model_id.clone();
+        self.config.general.default_model = selection.model_id;
+        self.config.general.default_provider = selection.provider_name;
         self.orchestrator = Arc::new(
             LocalOrchestrator::from_config_with_model(
                 self.config.clone(),
@@ -372,10 +379,7 @@ impl ChatRuntime {
                 .await?
                 .with_rule_store(session_store.clone()),
         );
-        let llm_provider = Arc::new(AnthropicProvider::new(
-            "test-key",
-            config.general.default_model.clone(),
-        )?);
+        let llm_provider = build_provider_from_config(&config)?;
         let orchestrator = Arc::new(
             LocalOrchestrator::new(
                 config.clone(),

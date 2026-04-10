@@ -21,7 +21,7 @@ use moa_core::{
 };
 use moa_hands::ToolRouter;
 use moa_memory::{ConsolidationReport, FileMemoryStore};
-use moa_providers::AnthropicProvider;
+use moa_providers::{build_provider_from_config, resolve_provider_selection};
 use moa_session::TursoSessionStore;
 use moa_skills::maybe_distill_skill;
 use tokio::sync::{RwLock, broadcast, mpsc};
@@ -105,9 +105,9 @@ impl LocalOrchestrator {
         mut config: MoaConfig,
         model_override: Option<String>,
     ) -> Result<Self> {
-        if let Some(model) = model_override {
-            config.general.default_model = model;
-        }
+        let selection = resolve_provider_selection(&config, model_override.as_deref())?;
+        config.general.default_provider = selection.provider_name;
+        config.general.default_model = selection.model_id;
 
         let session_store = Arc::new(TursoSessionStore::new(&config.local.session_db).await?);
         let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
@@ -116,7 +116,7 @@ impl LocalOrchestrator {
                 .await?
                 .with_rule_store(session_store.clone()),
         );
-        let llm_provider: Arc<dyn LLMProvider> = Arc::new(AnthropicProvider::from_config(&config)?);
+        let llm_provider = build_provider_from_config(&config)?;
         Self::new(
             config,
             session_store,

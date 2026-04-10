@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-openai.workspace = true
 async-trait.workspace = true
 moa-core = { path = "../moa-core" }
 eventsource-stream.workspace = true
