@@ -1055,3 +1055,60 @@ Remaining caveat:
 
 - Rich Telegram-specific formatting is not fully implemented yet.
 - If the bot starts carrying heavier user-facing traffic, the next upgrade should be a proper Telegram-safe formatting layer with escaping and richer inline emphasis.
+
+## 16. Step 15 Slack gateway
+
+### 16.1 Slack approval buttons are still normalized back into control messages
+
+Current state:
+
+- `moa-gateway/src/slack.rs` receives Block Kit button actions over Socket Mode.
+- The core `PlatformAdapter` trait still only emits `InboundMessage`.
+- The adapter converts approval button clicks into normalized commands such as `/approval deny <request_id>`.
+
+Consequence:
+
+- Step 15 works without widening the gateway trait surface.
+- Approval actions from Slack and Telegram now share the same downstream parsing model.
+
+Remaining caveat:
+
+- Slack button actions are not yet first-class typed gateway events.
+- If adapters need richer structured callbacks later, `InboundMessage.text` should stop carrying control commands.
+
+### 16.2 Slack outbound routing still depends on an existing reply anchor
+
+Current state:
+
+- `OutboundMessage` still has no explicit Slack destination.
+- `moa-gateway/src/slack.rs` resolves channel/thread targets from `reply_to`, using either:
+  - a known inbound Slack message timestamp, or
+  - a previously sent synthetic gateway message id.
+
+Consequence:
+
+- The intended session model works: one MOA session per Slack thread, with replies and edits anchored correctly.
+- Status and event-log messages can be posted and updated in-thread.
+
+Remaining caveat:
+
+- The adapter cannot proactively open a brand-new channel/thread without a prior inbound anchor.
+- If outbound-initiated Slack workflows are needed, the platform trait or outbound message model must gain an explicit destination.
+
+### 16.3 Slack rendering is intentionally minimal Block Kit right now
+
+Current state:
+
+- `moa-gateway/src/renderer.rs` now splits Slack output at the 40K text cap and renders approval buttons as Block Kit actions.
+- Normal text/code/diff output stays text-first, with Block Kit only added when interactive buttons are needed.
+- The adapter uses `chat.update` directly and advertises a 1-second edit interval, but it does not yet coalesce bursts of intermediate status updates into a smarter buffer.
+
+Consequence:
+
+- The renderer is simple, testable, and low-risk for the initial Slack adapter milestone.
+- Approval flows work with primary/danger button styling and thread-safe message updates.
+
+Remaining caveat:
+
+- Slack-specific rich layouts are still conservative.
+- If Slack becomes a primary surface, the next upgrade should add richer per-event thread rendering and more deliberate edit throttling/coalescing.
