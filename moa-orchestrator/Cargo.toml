@@ -4,9 +4,25 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+temporal = [
+    "dep:futures",
+    "dep:futures-util",
+    "dep:serde",
+    "dep:temporalio-client",
+    "dep:temporalio-common",
+    "dep:temporalio-macros",
+    "dep:temporalio-sdk",
+    "dep:temporalio-sdk-core",
+    "dep:url",
+]
+
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+futures = { version = "0.3", optional = true }
+futures-util = { workspace = true, optional = true }
 moa-brain = { path = "../moa-brain" }
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
@@ -14,11 +30,18 @@ moa-memory = { path = "../moa-memory" }
 moa-providers = { path = "../moa-providers" }
 moa-session = { path = "../moa-session" }
 moa-skills = { path = "../moa-skills" }
+serde = { workspace = true, optional = true }
 serde_json.workspace = true
 shell-words = "1.1"
 tokio.workspace = true
 tokio-cron-scheduler = "0.13"
 tracing.workspace = true
+temporalio-client = { version = "0.2.0", optional = true }
+temporalio-common = { version = "0.2.0", optional = true }
+temporalio-macros = { version = "0.2.0", optional = true }
+temporalio-sdk = { version = "0.2.0", optional = true }
+temporalio-sdk-core = { version = "0.2.0", optional = true }
+url = { version = "2", optional = true }
 uuid.workspace = true
 
 [dev-dependencies]

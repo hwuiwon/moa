@@ -1150,3 +1150,57 @@ Remaining caveat:
 
 - Like Telegram and Slack, the Discord adapter still relies on `reply_to` as its routing anchor.
 - It cannot proactively open a new conversation without an inbound message or prior synthetic gateway message id.
+
+## 18. Temporal orchestrator
+
+### 18.1 Temporal approval resume had a real wait-condition bug
+
+Current state:
+
+- `moa-orchestrator/src/temporal.rs` now gates the workflow loop differently while paused for approval.
+- When `waiting_for_approval` is true, the workflow waits only for an approval decision or cancel request.
+- The manual Temporal dev-server integration test in `moa-orchestrator/tests/temporal_orchestrator.rs` now covers the full approval path end to end.
+
+Consequence:
+
+- `ApprovalRequested` no longer deadlocks the workflow.
+- An `ApprovalDecided` signal now wakes the workflow, appends the decision event, resumes the turn, executes the approved tool, and reaches completion.
+
+Remaining caveat:
+
+- This was a real correctness bug in the initial Step 17 implementation, not just a missing test.
+- The Temporal path should keep at least one ignored live dev-server integration test because replay-only or unit tests would not have caught this specific bug.
+
+### 18.2 Temporal child workflows are still not true Temporal child workflows
+
+Current state:
+
+- `TemporalOrchestrator::spawn_child_workflow()` currently delegates to `start_session()`.
+- That means it creates another top-level session workflow with normal session metadata and workflow id allocation.
+
+Consequence:
+
+- Sub-brain work can still be started as an independent Temporal-backed session.
+- The public API surface is usable for now without blocking later cloud work.
+
+Remaining caveat:
+
+- This is not yet using Temporal's actual child-workflow semantics from the spec.
+- Parent/child cancellation propagation, parent-close behavior, and Temporal-native child observability are not implemented yet.
+
+### 18.3 Worker lifetime is process-scoped and not gracefully stoppable yet
+
+Current state:
+
+- `TemporalRuntime::connect()` starts a dedicated OS thread that owns a current-thread Tokio runtime and runs the Temporal worker.
+- The `JoinHandle` is retained only to keep the thread alive for the life of the orchestrator.
+
+Consequence:
+
+- The worker can poll workflows and activities correctly without violating the SDK's non-`Send` constraints.
+- The in-process cloud-mode prototype is workable for tests and local development.
+
+Remaining caveat:
+
+- Dropping `TemporalOrchestrator` does not perform a graceful worker shutdown; it effectively detaches the worker thread until process exit.
+- A production-ready Temporal deployment likely needs an explicit worker lifecycle manager instead of the current fire-and-forget thread model.
