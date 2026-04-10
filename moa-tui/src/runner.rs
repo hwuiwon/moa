@@ -288,6 +288,14 @@ impl LocalChatRuntime {
             .await
     }
 
+    /// Deletes one wiki page from the current workspace.
+    pub async fn delete_memory_page(&self, path: &MemoryPath) -> Result<()> {
+        self.orchestrator
+            .memory_store()
+            .delete_page(MemoryScope::Workspace(self.workspace_id.clone()), path)
+            .await
+    }
+
     /// Returns the current workspace memory index document.
     pub async fn memory_index(&self) -> Result<String> {
         self.orchestrator
@@ -658,6 +666,18 @@ impl DaemonChatRuntime {
         }
     }
 
+    /// Deletes one wiki page from the current workspace.
+    async fn delete_memory_page(&self, path: &MemoryPath) -> Result<()> {
+        daemon_expect_ack(
+            &self.socket_path,
+            &DaemonCommand::DeleteMemoryPage {
+                workspace_id: self.workspace_id.clone(),
+                path: path.clone(),
+            },
+        )
+        .await
+    }
+
     /// Returns the current workspace memory index document.
     async fn memory_index(&self) -> Result<String> {
         match daemon_request(
@@ -983,6 +1003,14 @@ impl ChatRuntime {
         match self {
             Self::Local(runtime) => runtime.read_memory_page(path).await,
             Self::Daemon(runtime) => runtime.read_memory_page(path).await,
+        }
+    }
+
+    /// Deletes one wiki page from the current workspace.
+    pub async fn delete_memory_page(&self, path: &MemoryPath) -> Result<()> {
+        match self {
+            Self::Local(runtime) => runtime.delete_memory_page(path).await,
+            Self::Daemon(runtime) => runtime.delete_memory_page(path).await,
         }
     }
 
