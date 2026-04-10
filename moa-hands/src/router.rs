@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use moa_core::{
-    ApprovalField, ApprovalFileDiff, ApprovalRule, HandHandle, HandProvider, HandResources,
-    HandSpec, McpServerConfig, MemoryStore, MoaConfig, MoaError, PolicyAction, Result, RiskLevel,
-    SandboxTier, SessionMeta, ToolInvocation, ToolOutput, ToolPolicyInput, UserId,
+    ApprovalField, ApprovalFileDiff, ApprovalRule, BuiltInTool, HandHandle, HandProvider,
+    HandResources, HandSpec, McpServerConfig, MemoryStore, MoaConfig, MoaError, PolicyAction,
+    Result, RiskLevel, SandboxTier, SessionMeta, ToolContext, ToolDefinition, ToolDiffStrategy,
+    ToolInputShape, ToolInvocation, ToolOutput, ToolPolicyInput, ToolPolicySpec, UserId,
+    read_tool_policy, write_tool_policy,
 };
 use moa_security::{
     ApprovalRuleStore, EnvironmentCredentialVault, MCPCredentialProxy, PolicyCheck, ToolPolicies,
@@ -34,90 +35,13 @@ use crate::tools::{memory, stub};
 const DEFAULT_PROVIDER_NAME: &str = "local";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 
-#[derive(Debug, Clone, Copy)]
-pub enum ToolInputShape {
-    Command,
-    Path,
-    Pattern,
-    Query,
-    Url,
-    Json,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum ToolDiffStrategy {
-    None,
-    FileWrite,
-}
-
-/// Static policy and approval metadata for one registered tool.
-#[derive(Debug, Clone)]
-pub struct ToolPolicySpec {
-    /// Risk level shown to the user for this tool.
-    pub risk_level: RiskLevel,
-    /// Default action when no config override or approval rule matches.
-    pub default_action: PolicyAction,
-    /// Input shape used for normalization and approval summaries.
-    pub input_shape: ToolInputShape,
-    /// Diff strategy used for approval previews.
-    pub diff_strategy: ToolDiffStrategy,
-}
-
-pub(crate) fn read_tool_policy(input_shape: ToolInputShape) -> ToolPolicySpec {
-    ToolPolicySpec {
-        risk_level: RiskLevel::Low,
-        default_action: PolicyAction::Allow,
-        input_shape,
-        diff_strategy: ToolDiffStrategy::None,
-    }
-}
-
-pub(crate) fn write_tool_policy(
-    input_shape: ToolInputShape,
-    diff_strategy: ToolDiffStrategy,
-) -> ToolPolicySpec {
-    ToolPolicySpec {
-        risk_level: RiskLevel::Medium,
-        default_action: PolicyAction::RequireApproval,
-        input_shape,
-        diff_strategy,
-    }
-}
-
 pub(crate) fn execute_tool_policy(input_shape: ToolInputShape) -> ToolPolicySpec {
     ToolPolicySpec {
-        risk_level: RiskLevel::High,
+        risk_level: moa_core::RiskLevel::High,
         default_action: PolicyAction::RequireApproval,
         input_shape,
         diff_strategy: ToolDiffStrategy::None,
     }
-}
-
-/// Execution context passed to built-in tools.
-pub struct ToolContext<'a> {
-    /// Active session metadata.
-    pub session: &'a SessionMeta,
-    /// Shared memory store.
-    pub memory_store: &'a dyn MemoryStore,
-}
-
-/// Async built-in tool handler.
-#[async_trait]
-pub trait BuiltInTool: Send + Sync {
-    /// Returns the stable tool name.
-    fn name(&self) -> &'static str;
-
-    /// Returns the tool description shown to the model.
-    fn description(&self) -> &'static str;
-
-    /// Returns the JSON schema for tool parameters.
-    fn input_schema(&self) -> Value;
-
-    /// Returns the policy and approval metadata for the tool.
-    fn policy_spec(&self) -> ToolPolicySpec;
-
-    /// Executes the built-in tool.
-    async fn execute(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<ToolOutput>;
 }
 
 /// Prepared metadata for a concrete tool invocation.
@@ -145,34 +69,14 @@ pub enum ToolExecution {
     Mcp { server_name: String },
 }
 
-/// Static metadata for one tool.
-pub struct ToolDefinition {
-    /// Stable tool name.
-    pub name: String,
-    /// Human-readable description.
-    pub description: String,
-    /// JSON schema for parameters.
-    pub schema: Value,
-    /// Execution target.
-    pub execution: ToolExecution,
-    /// Policy and approval metadata owned by the tool definition.
-    policy: ToolPolicySpec,
-}
-
-impl ToolDefinition {
-    /// Converts the definition into the Anthropic tool schema shape.
-    pub fn anthropic_schema(&self) -> Value {
-        json!({
-            "name": self.name,
-            "description": self.description,
-            "input_schema": self.schema,
-        })
-    }
+struct RegisteredTool {
+    definition: ToolDefinition,
+    execution: ToolExecution,
 }
 
 /// In-memory registry of available tools.
 pub struct ToolRegistry {
-    tools: HashMap<String, ToolDefinition>,
+    tools: HashMap<String, RegisteredTool>,
     default_loadout: Vec<String>,
 }
 
@@ -275,12 +179,14 @@ impl ToolRegistry {
         let policy = tool.policy_spec();
         self.tools.insert(
             name.clone(),
-            ToolDefinition {
-                name,
-                description: tool.description().to_string(),
-                schema: tool.input_schema(),
+            RegisteredTool {
+                definition: ToolDefinition {
+                    name,
+                    description: tool.description().to_string(),
+                    schema: tool.input_schema(),
+                    policy,
+                },
                 execution: ToolExecution::BuiltIn(tool.clone()),
-                policy,
             },
         );
     }
@@ -295,15 +201,17 @@ impl ToolRegistry {
     ) {
         self.tools.insert(
             name.to_string(),
-            ToolDefinition {
-                name: name.to_string(),
-                description: description.to_string(),
-                schema,
+            RegisteredTool {
+                definition: ToolDefinition {
+                    name: name.to_string(),
+                    description: description.to_string(),
+                    schema,
+                    policy,
+                },
                 execution: ToolExecution::Hand {
                     provider: DEFAULT_PROVIDER_NAME.to_string(),
                     tier: SandboxTier::Local,
                 },
-                policy,
             },
         );
     }
@@ -313,14 +221,16 @@ impl ToolRegistry {
         let name = tool.name.clone();
         self.tools.insert(
             name.clone(),
-            ToolDefinition {
-                name: name.clone(),
-                description: tool.description,
-                schema: tool.input_schema,
+            RegisteredTool {
+                definition: ToolDefinition {
+                    name: name.clone(),
+                    description: tool.description,
+                    schema: tool.input_schema,
+                    policy: execute_tool_policy(ToolInputShape::Json),
+                },
                 execution: ToolExecution::Mcp {
                     server_name: server_name.to_string(),
                 },
-                policy: execute_tool_policy(ToolInputShape::Json),
             },
         );
         if !self
@@ -348,7 +258,7 @@ impl ToolRegistry {
 
     /// Returns a tool definition by name.
     pub fn get(&self, name: &str) -> Option<&ToolDefinition> {
-        self.tools.get(name)
+        self.tools.get(name).map(|tool| &tool.definition)
     }
 
     /// Returns the ordered default tool schemas for prompt compilation.
@@ -356,7 +266,7 @@ impl ToolRegistry {
         self.default_loadout
             .iter()
             .filter_map(|name| self.tools.get(name))
-            .map(ToolDefinition::anthropic_schema)
+            .map(|tool| tool.definition.anthropic_schema())
             .collect()
     }
 }
@@ -651,12 +561,13 @@ impl ToolRouter {
         session: &SessionMeta,
         invocation: &ToolInvocation,
     ) -> Result<(Option<String>, ToolOutput)> {
-        let tool_definition = self
+        let registered_tool = self
             .registry
+            .tools
             .get(&invocation.name)
             .ok_or_else(|| MoaError::ToolError(format!("unknown tool: {}", invocation.name)))?;
 
-        match &tool_definition.execution {
+        match &registered_tool.execution {
             ToolExecution::BuiltIn(tool) => {
                 let ctx = ToolContext {
                     session,

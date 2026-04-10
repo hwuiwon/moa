@@ -1361,3 +1361,21 @@ Remaining note:
 
 - The LLM-facing path still uses `ToolOutput::to_text()` in the brain harness and history compiler, so the model sees a flattened text rendering rather than typed content blocks.
 - That is the correct short-term tradeoff, but if the repo later wants model-visible structured tool results, the provider request layer will need a first-class tool-result representation instead of a text-only flattening step.
+
+### 27.1 Tool metadata now lives in `moa-core`, while routing stays in `moa-hands`
+
+Current state:
+
+- `BuiltInTool`, `ToolContext`, `ToolDefinition`, `ToolPolicySpec`, `ToolInputShape`, and `ToolDiffStrategy` now live in `moa-core`.
+- `ToolRegistry`, `ToolRouter`, and `ToolExecution` remain in `moa-hands`, where the actual routing and execution logic belongs.
+- `moa-hands` re-exports the moved interface types so existing import paths continue to work during the transition.
+
+Consequence:
+
+- Crates such as `moa-brain` and `moa-security` no longer need to depend on `moa-hands` just to talk about tool metadata.
+- The dependency direction is cleaner: core defines what a tool is, and hands defines how tools are executed.
+
+Remaining note:
+
+- `ToolRegistry` still stores execution state separately from the shared `ToolDefinition`, so there are now two closely related internal shapes in `moa-hands`.
+- That is intentional for layering, but if registry metadata starts drifting from the core definition again, the next cleanup step should be to tighten construction helpers around the registry entry type rather than moving routing concerns back into `moa-core`.

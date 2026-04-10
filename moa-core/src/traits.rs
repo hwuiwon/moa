@@ -1,6 +1,7 @@
 //! Stable trait interfaces shared across MOA crates.
 
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::error::Result;
@@ -158,6 +159,33 @@ pub trait MemoryStore: Send + Sync {
 
     /// Rebuilds the search index for a memory scope.
     async fn rebuild_search_index(&self, scope: MemoryScope) -> Result<()>;
+}
+
+/// Execution context passed to built-in tool implementations.
+pub struct ToolContext<'a> {
+    /// Active session metadata.
+    pub session: &'a SessionMeta,
+    /// Shared memory store.
+    pub memory_store: &'a dyn MemoryStore,
+}
+
+/// Async built-in tool handler.
+#[async_trait]
+pub trait BuiltInTool: Send + Sync {
+    /// Returns the stable tool name.
+    fn name(&self) -> &'static str;
+
+    /// Returns the tool description shown to the model.
+    fn description(&self) -> &'static str;
+
+    /// Returns the JSON schema for tool parameters.
+    fn input_schema(&self) -> Value;
+
+    /// Returns the policy and approval metadata for the tool.
+    fn policy_spec(&self) -> crate::types::ToolPolicySpec;
+
+    /// Executes the built-in tool.
+    async fn execute(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<ToolOutput>;
 }
 
 /// Single stage in the context compilation pipeline.

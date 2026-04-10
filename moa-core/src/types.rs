@@ -734,6 +734,70 @@ pub enum ToolContent {
     },
 }
 
+/// High-level shape of tool inputs for normalization and approvals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolInputShape {
+    /// Shell command input.
+    Command,
+    /// Filesystem path input.
+    Path,
+    /// Glob or pattern input.
+    Pattern,
+    /// Free-text query input.
+    Query,
+    /// URL input.
+    Url,
+    /// Structured JSON input.
+    Json,
+}
+
+/// Strategy for rendering diffs during approvals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolDiffStrategy {
+    /// No diff preview is available.
+    None,
+    /// The tool writes a full file body and can show a file diff.
+    FileWrite,
+}
+
+/// Static policy and approval metadata for a tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolPolicySpec {
+    /// Risk level shown to the user for this tool.
+    pub risk_level: RiskLevel,
+    /// Default action when no config override or approval rule matches.
+    pub default_action: PolicyAction,
+    /// Input shape used for normalization and approval summaries.
+    pub input_shape: ToolInputShape,
+    /// Diff strategy used for approval previews.
+    pub diff_strategy: ToolDiffStrategy,
+}
+
+/// Creates a read-only tool policy with auto-approval.
+pub fn read_tool_policy(input_shape: ToolInputShape) -> ToolPolicySpec {
+    ToolPolicySpec {
+        risk_level: RiskLevel::Low,
+        default_action: PolicyAction::Allow,
+        input_shape,
+        diff_strategy: ToolDiffStrategy::None,
+    }
+}
+
+/// Creates a write-capable tool policy that requires approval.
+pub fn write_tool_policy(
+    input_shape: ToolInputShape,
+    diff_strategy: ToolDiffStrategy,
+) -> ToolPolicySpec {
+    ToolPolicySpec {
+        risk_level: RiskLevel::Medium,
+        default_action: PolicyAction::RequireApproval,
+        input_shape,
+        diff_strategy,
+    }
+}
+
 /// Standard tool execution result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolOutput {
@@ -869,6 +933,30 @@ impl ToolOutput {
         } else {
             rendered.join("\n\n")
         }
+    }
+}
+
+/// Shared metadata that describes one callable tool.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    /// Stable tool name.
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// JSON schema for parameters.
+    pub schema: Value,
+    /// Static policy and approval metadata.
+    pub policy: ToolPolicySpec,
+}
+
+impl ToolDefinition {
+    /// Converts the definition into the Anthropic tool schema shape.
+    pub fn anthropic_schema(&self) -> Value {
+        serde_json::json!({
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self.schema,
+        })
     }
 }
 

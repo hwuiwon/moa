@@ -4,14 +4,13 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_core::{MemoryPath, MemoryScope, MoaError, PageType, Result, ToolOutput, WikiPage};
-use serde::Deserialize;
-use serde_json::json;
-
-use crate::router::{
-    BuiltInTool, ToolContext, ToolDiffStrategy, ToolInputShape, ToolPolicySpec, read_tool_policy,
+use moa_core::{
+    BuiltInTool, MemoryPath, MemoryScope, MoaError, PageType, Result, ToolContext,
+    ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec, WikiPage, read_tool_policy,
     write_tool_policy,
 };
+use serde::Deserialize;
+use serde_json::json;
 
 /// Built-in memory read tool.
 pub struct MemoryReadTool;

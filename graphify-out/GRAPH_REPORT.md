@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-04-10)
 
 ## Corpus Check
-- 116 files · ~103,076 words
+- 116 files · ~103,218 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 2096 nodes · 3716 edges · 78 communities detected
+- 2097 nodes · 3713 edges · 79 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -28,7 +28,7 @@
 
 ### Community 0 - "Core Domain IDs"
 Cohesion: 0.02
-Nodes (84): ActionButton, ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, ApprovalRule, Attachment (+76 more)
+Nodes (88): ActionButton, ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, ApprovalRule, Attachment (+80 more)
 
 ### Community 1 - "TUI Chat Runtime"
 Cohesion: 0.03
@@ -44,31 +44,31 @@ Nodes (34): centered_rect(), extract_search_keywords(), extract_search_query(), 
 
 ### Community 4 - "File Memory Store"
 Cohesion: 0.04
-Nodes (35): MoaError, emit_tool_output_warning(), execute_pending_tool(), format_tool_output(), process_resolved_approval(), run_brain_turn(), run_brain_turn_with_tools(), run_brain_turn_with_tools_mode() (+27 more)
+Nodes (37): MoaError, emit_tool_output_warning(), execute_pending_tool(), format_tool_output(), process_resolved_approval(), run_brain_turn(), run_brain_turn_with_tools(), run_brain_turn_with_tools_mode() (+29 more)
 
-### Community 5 - "Tool Router & Policies"
-Cohesion: 0.05
-Nodes (29): approval_diffs_for(), approval_fields_for(), approval_pattern_for(), BuiltInTool, default_cloud_provider(), execute_tool_policy(), expand_local_path(), hand_id() (+21 more)
-
-### Community 6 - "Brain Turn Tests"
+### Community 5 - "Brain Turn Tests"
 Cohesion: 0.05
 Nodes (17): always_allow_rule_persists_and_skips_next_approval(), canary_leaks_in_tool_input_are_detected_and_blocked(), CanaryLeakLlmProvider, CapturingTextLlmProvider, FixedPageMemoryStore, malicious_tool_results_are_wrapped_as_untrusted_content(), MaliciousToolOutputLlmProvider, MemoryWriteLoopLlmProvider (+9 more)
 
-### Community 7 - "Skill Document Format"
+### Community 6 - "Skill Document Format"
 Cohesion: 0.07
 Nodes (22): build_skill_path(), confidence_for_skill(), defaults_missing_moa_metadata(), estimate_skill_tokens(), format_timestamp(), humanize_skill_name(), is_valid_skill_name(), metadata_csv() (+14 more)
 
-### Community 8 - "Local Orchestrator"
+### Community 7 - "Local Orchestrator"
 Cohesion: 0.07
 Nodes (26): accept_user_message(), append_event(), buffer_queued_message(), detect_docker(), DockerSandbox, drain_signal_queue(), drive_turn(), execute_tool() (+18 more)
 
-### Community 9 - "Provider Common Layer"
+### Community 8 - "Provider Common Layer"
 Cohesion: 0.06
 Nodes (30): build_function_tool(), build_http_client(), build_responses_request(), consume_responses_stream_once(), is_rate_limit_error(), is_rate_limit_message(), map_openai_error(), metadata_as_strings() (+22 more)
 
-### Community 10 - "Temporal Orchestrator"
+### Community 9 - "Temporal Orchestrator"
 Cohesion: 0.06
 Nodes (25): activity_options(), apply_approval_decision(), ApprovalDecisionActivityInput, ApprovalSignalInput, brain_turn_activity_options(), CancelMode, connect_temporal_client(), flush_all_queued_messages() (+17 more)
+
+### Community 10 - "Tool Router & Policies"
+Cohesion: 0.08
+Nodes (21): approval_diffs_for(), approval_fields_for(), approval_pattern_for(), default_cloud_provider(), execute_tool_policy(), expand_local_path(), hand_id(), language_hint_for_path() (+13 more)
 
 ### Community 11 - "Memory Consolidation"
 Cohesion: 0.08
@@ -258,88 +258,92 @@ Nodes (4): available_live_providers(), live_providers_answer_simple_prompt_acros
 Cohesion: 0.32
 Nodes (4): helper_config(), HelperProvider, main(), main_impl()
 
-### Community 58 - "Instruction Stage"
+### Community 58 - "Stub Tool Definition"
+Cohesion: 0.25
+Nodes (1): StubTool
+
+### Community 59 - "Instruction Stage"
 Cohesion: 0.38
 Nodes (2): instruction_processor_appends_config_backed_sections(), InstructionProcessor
 
-### Community 59 - "Chat View"
+### Community 60 - "Chat View"
 Cohesion: 0.6
 Nodes (5): max_scroll(), render_chat(), transcript_lines(), wrap_line(), wrap_prefixed()
 
-### Community 60 - "Cache Optimizer Stage"
+### Community 61 - "Cache Optimizer Stage"
 Cohesion: 0.4
 Nodes (2): cache_optimizer_validates_cache_breakpoint(), CacheOptimizer
 
-### Community 61 - "Identity Stage"
+### Community 62 - "Identity Stage"
 Cohesion: 0.4
 Nodes (2): identity_processor_appends_system_prompt(), IdentityProcessor
 
-### Community 62 - "CLI Exec Mode"
+### Community 63 - "CLI Exec Mode"
 Cohesion: 0.6
 Nodes (4): exec_mode_formats_tool_updates_compactly(), format_tool_update(), resolve_exec_approval(), run_exec()
 
-### Community 63 - "Sidebar Widget"
+### Community 64 - "Sidebar Widget"
 Cohesion: 0.5
 Nodes (2): render_sidebar(), section_title()
 
-### Community 64 - "Anthropic Provider Tests"
+### Community 65 - "Anthropic Provider Tests"
 Cohesion: 0.4
 Nodes (0): 
 
-### Community 65 - "Bash Tool"
+### Community 66 - "Bash Tool"
 Cohesion: 0.6
 Nodes (3): BashToolInput, execute_docker(), execute_local()
 
-### Community 66 - "File Search Tool"
+### Community 67 - "File Search Tool"
 Cohesion: 0.67
 Nodes (3): collect_matches(), execute(), FileSearchInput
 
-### Community 67 - "File Read Tool"
+### Community 68 - "File Read Tool"
 Cohesion: 0.67
 Nodes (3): execute(), FileReadInput, resolve_sandbox_path()
 
-### Community 68 - "Chat Harness Example"
+### Community 69 - "Chat Harness Example"
 Cohesion: 0.83
 Nodes (3): main(), resolve_session_db_path(), run_prompt()
 
-### Community 69 - "Mock MCP Server"
+### Community 70 - "Mock MCP Server"
 Cohesion: 0.67
 Nodes (0): 
 
-### Community 70 - "File Write Tool"
+### Community 71 - "File Write Tool"
 Cohesion: 0.67
 Nodes (1): FileWriteInput
 
-### Community 71 - "TUI Workflow Tests"
+### Community 72 - "TUI Workflow Tests"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 72 - "OpenAI Live Test"
+### Community 73 - "OpenAI Live Test"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 73 - "OpenRouter Live Test"
+### Community 74 - "OpenRouter Live Test"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 74 - "Anthropic Live Test"
+### Community 75 - "Anthropic Live Test"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 75 - "Docker Hardening Test"
+### Community 76 - "Docker Hardening Test"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 76 - "Brain Live Harness Test"
+### Community 77 - "Brain Live Harness Test"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 77 - "Compaction"
+### Community 78 - "Compaction"
 Cohesion: 1.0
 Nodes (0): 
 
 ## Knowledge Gaps
-- **184 isolated node(s):** `LogChange`, `LogEntry`, `IngestReport`, `PageFrontmatter`, `ChangeOperation` (+179 more)
+- **185 isolated node(s):** `LogChange`, `LogEntry`, `IngestReport`, `PageFrontmatter`, `ChangeOperation` (+180 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **Thin community `TUI Workflow Tests`** (2 nodes): `tui_workflows.rs`, `tui_manual_workflow_opens_memory_settings_and_palette()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -360,7 +364,7 @@ Nodes (0):
 _Questions this graph is uniquely positioned to answer:_
 
 - **What connects `LogChange`, `LogEntry`, `IngestReport` to the rest of the system?**
-  _184 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _185 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Core Domain IDs` be split into smaller, more focused modules?**
   _Cohesion score 0.02 - nodes in this community are weakly interconnected._
 - **Should `TUI Chat Runtime` be split into smaller, more focused modules?**
@@ -371,5 +375,5 @@ _Questions this graph is uniquely positioned to answer:_
   _Cohesion score 0.03 - nodes in this community are weakly interconnected._
 - **Should `File Memory Store` be split into smaller, more focused modules?**
   _Cohesion score 0.04 - nodes in this community are weakly interconnected._
-- **Should `Tool Router & Policies` be split into smaller, more focused modules?**
+- **Should `Brain Turn Tests` be split into smaller, more focused modules?**
   _Cohesion score 0.05 - nodes in this community are weakly interconnected._
