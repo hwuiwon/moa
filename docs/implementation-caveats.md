@@ -998,3 +998,60 @@ Remaining caveat:
 
 - User-scope consolidation is not scheduled yet.
 - This is intentional while local user memory still shares one physical `memory/` root regardless of user id, but it means personal memory does not yet get automatic dream-cycle maintenance.
+
+## 15. Step 14 Telegram gateway
+
+### 15.1 `PlatformAdapter` is still message-oriented, so Telegram callbacks are normalized into control messages
+
+Current state:
+
+- `moa-gateway/src/telegram.rs` receives Telegram callback queries for approval buttons.
+- The core `PlatformAdapter` trait only emits `InboundMessage`; it does not have a direct signal callback surface for `ApprovalDecided`.
+- The adapter therefore converts callback payloads into normalized control text such as `/approval allow <request_id>` and forwards that as an `InboundMessage`.
+
+Consequence:
+
+- Step 14 works without widening the core gateway trait surface.
+- Approval button payloads are compact, testable, and future routing layers can parse them deterministically.
+
+Remaining caveat:
+
+- Telegram approval callbacks are not yet first-class typed gateway events.
+- A future gateway/orchestrator seam may want a richer event type than `InboundMessage.text` for platform-originated control actions.
+
+### 15.2 Outbound Telegram sends still require a reply anchor
+
+Current state:
+
+- `OutboundMessage` does not carry an explicit destination chat or thread.
+- The Telegram adapter resolves where to send by using `reply_to` as an anchor into either:
+  - a known inbound Telegram message id, or
+  - a previously sent synthetic gateway message id.
+
+Consequence:
+
+- Reply-chain session mapping works for the intended session model.
+- The adapter can send, edit, and delete multi-part Telegram replies without changing the existing trait.
+
+Remaining caveat:
+
+- The adapter cannot originate a brand-new top-level Telegram conversation without an existing reply anchor.
+- If gateway adapters eventually need to proactively start conversations, `OutboundMessage` or the adapter trait should grow an explicit destination field.
+
+### 15.3 Telegram rendering is intentionally conservative right now
+
+Current state:
+
+- `moa-gateway/src/renderer.rs` renders text, tool cards, approvals, status updates, diffs, and code blocks.
+- Long messages are split at Telegram’s 4096-character limit and approval buttons stay on the final chunk.
+- Rendering currently uses plain text plus fenced blocks instead of full Telegram Markdown/HTML parse-mode formatting.
+
+Consequence:
+
+- The renderer is robust against escaping bugs and message splitting issues.
+- Code/diff output stays readable and the adapter passed feature-gated tests quickly.
+
+Remaining caveat:
+
+- Rich Telegram-specific formatting is not fully implemented yet.
+- If the bot starts carrying heavier user-facing traffic, the next upgrade should be a proper Telegram-safe formatting layer with escaping and richer inline emphasis.
