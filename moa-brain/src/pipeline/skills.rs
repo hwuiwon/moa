@@ -3,18 +3,25 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_core::{ContextProcessor, ProcessorOutput, Result, WorkingContext};
-use moa_skills::SkillRegistry;
+use moa_core::{
+    ContextProcessor, MemoryStore, PageType, ProcessorOutput, Result, SkillMetadata, WorkingContext,
+};
+use serde_json::Value;
 
 /// Injects workspace skill metadata into the stable prompt prefix.
 pub struct SkillInjector {
-    skill_registry: Arc<SkillRegistry>,
+    memory_store: Arc<dyn MemoryStore>,
 }
 
 impl SkillInjector {
-    /// Creates a skill injector backed by the shared skill registry.
-    pub fn new(skill_registry: Arc<SkillRegistry>) -> Self {
-        Self { skill_registry }
+    /// Creates a skill injector backed by the shared memory store.
+    pub fn new(memory_store: Arc<dyn MemoryStore>) -> Self {
+        Self { memory_store }
+    }
+
+    /// Creates a skill injector from a memory store.
+    pub fn from_memory(memory_store: Arc<dyn MemoryStore>) -> Self {
+        Self::new(memory_store)
     }
 }
 
@@ -29,10 +36,7 @@ impl ContextProcessor for SkillInjector {
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
-        let skills = self
-            .skill_registry
-            .list_for_pipeline(&ctx.workspace_id)
-            .await?;
+        let skills = load_skills(self.memory_store.as_ref(), &ctx.workspace_id).await?;
         let tokens_before = ctx.token_count;
         let mut items_included = Vec::new();
 
@@ -69,6 +73,147 @@ If one of these skills is clearly relevant and you need the exact workflow, call
     }
 }
 
+async fn load_skills(
+    memory_store: &dyn MemoryStore,
+    workspace_id: &moa_core::WorkspaceId,
+) -> Result<Vec<SkillMetadata>> {
+    let scope = moa_core::MemoryScope::Workspace(workspace_id.clone());
+    let summaries = memory_store
+        .list_pages(scope.clone(), Some(PageType::Skill))
+        .await?;
+    let mut skills = Vec::with_capacity(summaries.len());
+
+    for summary in summaries {
+        let page = memory_store.read_page(scope.clone(), &summary.path).await?;
+        skills.push(skill_metadata_from_page(summary.path, &page));
+    }
+
+    skills.sort_by(|left, right| {
+        right
+            .use_count
+            .cmp(&left.use_count)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(skills)
+}
+
+fn skill_metadata_from_page(
+    path: moa_core::MemoryPath,
+    page: &moa_core::WikiPage,
+) -> SkillMetadata {
+    SkillMetadata {
+        path,
+        name: metadata_string(&page.metadata, "name").unwrap_or_else(|| page.title.clone()),
+        description: metadata_string(&page.metadata, "description")
+            .unwrap_or_else(|| page.title.clone()),
+        tags: skill_tags(page),
+        allowed_tools: allowed_tools(page),
+        estimated_tokens: metadata_nested_usize(&page.metadata, "metadata", "moa-estimated-tokens")
+            .unwrap_or_else(|| estimate_skill_tokens(&page.content)),
+        use_count: metadata_nested_u32(&page.metadata, "metadata", "moa-use-count")
+            .unwrap_or(page.reference_count.min(u64::from(u32::MAX)) as u32),
+        success_rate: metadata_nested_f32(&page.metadata, "metadata", "moa-success-rate")
+            .unwrap_or(1.0),
+        auto_generated: page.auto_generated,
+    }
+}
+
+fn skill_tags(page: &moa_core::WikiPage) -> Vec<String> {
+    if !page.tags.is_empty() {
+        return page.tags.clone();
+    }
+
+    metadata_nested_csv(&page.metadata, "metadata", "moa-tags")
+}
+
+fn allowed_tools(page: &moa_core::WikiPage) -> Vec<String> {
+    match page.metadata.get("allowed-tools") {
+        Some(Value::String(value)) => value
+            .split_whitespace()
+            .map(str::trim)
+            .filter(|tool| !tool.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|tool| !tool.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn metadata_string(
+    metadata: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Option<String> {
+    metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn metadata_nested_string(
+    metadata: &std::collections::HashMap<String, Value>,
+    container: &str,
+    key: &str,
+) -> Option<String> {
+    metadata
+        .get(container)
+        .and_then(Value::as_object)
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn metadata_nested_csv(
+    metadata: &std::collections::HashMap<String, Value>,
+    container: &str,
+    key: &str,
+) -> Vec<String> {
+    metadata_nested_string(metadata, container, key)
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn metadata_nested_usize(
+    metadata: &std::collections::HashMap<String, Value>,
+    container: &str,
+    key: &str,
+) -> Option<usize> {
+    metadata_nested_string(metadata, container, key).and_then(|value| value.parse().ok())
+}
+
+fn metadata_nested_u32(
+    metadata: &std::collections::HashMap<String, Value>,
+    container: &str,
+    key: &str,
+) -> Option<u32> {
+    metadata_nested_string(metadata, container, key).and_then(|value| value.parse().ok())
+}
+
+fn metadata_nested_f32(
+    metadata: &std::collections::HashMap<String, Value>,
+    container: &str,
+    key: &str,
+) -> Option<f32> {
+    metadata_nested_string(metadata, container, key).and_then(|value| value.parse().ok())
+}
+
+fn estimate_skill_tokens(body: &str) -> usize {
+    body.split_whitespace().count().max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -80,7 +225,6 @@ mod tests {
         PageType, Platform, Result, SessionId, SessionMeta, TokenPricing, ToolCallFormat, UserId,
         WikiPage, WorkspaceId,
     };
-    use moa_skills::SkillRegistry;
 
     use super::SkillInjector;
 
@@ -212,9 +356,8 @@ mod tests {
                 confidence: moa_core::ConfidenceLevel::High,
             }],
         };
-        let registry = Arc::new(SkillRegistry::new(Arc::new(store)));
 
-        let output = SkillInjector::new(registry)
+        let output = SkillInjector::from_memory(Arc::new(store))
             .process(&mut ctx)
             .await
             .unwrap();
@@ -266,13 +409,14 @@ mod tests {
             summaries: Vec::new(),
         };
 
-        let output = SkillInjector::new(Arc::new(SkillRegistry::new(Arc::new(store))))
+        let output = SkillInjector::from_memory(Arc::new(store))
             .process(&mut ctx)
             .await
             .unwrap();
 
-        assert!(ctx.messages.is_empty());
         assert_eq!(ctx.cache_breakpoints, vec![0]);
+        assert!(ctx.messages.is_empty());
         assert_eq!(output.tokens_added, 0);
+        assert!(output.items_included.is_empty());
     }
 }

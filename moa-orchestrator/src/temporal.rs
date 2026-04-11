@@ -438,6 +438,7 @@ impl TemporalActivities {
             .map_err(non_retryable_activity_error)?;
 
         if let Some(skill) = maybe_distill_skill(
+            &self.config,
             &session,
             &events,
             self.memory_store.clone(),

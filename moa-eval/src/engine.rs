@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use moa_brain::{StreamedTurnResult, run_streamed_turn};
-use moa_core::{Event, EventRange, MoaConfig, RuntimeEvent};
+use moa_core::{Event, EventRange, LLMProvider, MoaConfig, RuntimeEvent};
 use opentelemetry::trace::TraceContextExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, broadcast};
@@ -17,7 +17,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::collector::{CollectedExecution, TrajectoryCollector};
 use crate::plan::{EvalPlan, build_eval_plan};
-use crate::setup::build_agent_environment;
+use crate::setup::{build_agent_environment, build_agent_environment_with_provider};
 use crate::{
     AgentConfig, EvalError, EvalMetrics, EvalResult, EvalStatus, Result, TestCase, TestSuite,
 };
@@ -149,6 +149,48 @@ impl EvalEngine {
 
     /// Runs all test cases in a suite against all provided configs.
     pub async fn run_suite(&self, suite: &TestSuite, configs: &[AgentConfig]) -> Result<EvalRun> {
+        self.run_suite_inner(suite, configs, None).await
+    }
+
+    /// Runs all test cases in a suite against all provided configs using one provider instance.
+    pub async fn run_suite_with_provider(
+        &self,
+        suite: &TestSuite,
+        configs: &[AgentConfig],
+        llm_provider: Arc<dyn LLMProvider>,
+    ) -> Result<EvalRun> {
+        self.run_suite_inner(suite, configs, Some(llm_provider))
+            .await
+    }
+
+    /// Runs one test case against one agent config.
+    pub async fn run_single(&self, case: &TestCase, config: &AgentConfig) -> Result<EvalResult> {
+        self.run_single_with_timeout(case, config, DEFAULT_SINGLE_TIMEOUT_SECONDS, None)
+            .await
+    }
+
+    /// Runs one test case against one agent config using one provider instance.
+    pub async fn run_single_with_provider(
+        &self,
+        case: &TestCase,
+        config: &AgentConfig,
+        llm_provider: Arc<dyn LLMProvider>,
+    ) -> Result<EvalResult> {
+        self.run_single_with_timeout(
+            case,
+            config,
+            DEFAULT_SINGLE_TIMEOUT_SECONDS,
+            Some(llm_provider),
+        )
+        .await
+    }
+
+    async fn run_suite_inner(
+        &self,
+        suite: &TestSuite,
+        configs: &[AgentConfig],
+        llm_provider: Option<Arc<dyn LLMProvider>>,
+    ) -> Result<EvalRun> {
         let started_at = Utc::now();
         let mut indexed_pairs = Vec::new();
         for (config_index, config) in configs.iter().enumerate() {
@@ -161,8 +203,13 @@ impl EvalEngine {
             let mut results = Vec::with_capacity(indexed_pairs.len());
             for (_, _, config, case) in indexed_pairs {
                 results.push(
-                    self.run_single_with_timeout(&case, &config, suite.default_timeout_seconds)
-                        .await?,
+                    self.run_single_with_timeout(
+                        &case,
+                        &config,
+                        suite.default_timeout_seconds,
+                        llm_provider.clone(),
+                    )
+                    .await?,
                 );
             }
             results
@@ -172,13 +219,14 @@ impl EvalEngine {
             for (config_index, case_index, config, case) in indexed_pairs {
                 let engine = self.clone();
                 let default_timeout = suite.default_timeout_seconds;
+                let llm_provider = llm_provider.clone();
                 let permit = semaphore.clone().acquire_owned().await.map_err(|_| {
                     EvalError::InvalidConfig("parallel semaphore closed unexpectedly".to_string())
                 })?;
                 join_set.spawn(async move {
                     let _permit = permit;
                     let result = engine
-                        .run_single_with_timeout(&case, &config, default_timeout)
+                        .run_single_with_timeout(&case, &config, default_timeout, llm_provider)
                         .await;
                     (config_index, case_index, result)
                 });
@@ -203,17 +251,12 @@ impl EvalEngine {
         })
     }
 
-    /// Runs one test case against one agent config.
-    pub async fn run_single(&self, case: &TestCase, config: &AgentConfig) -> Result<EvalResult> {
-        self.run_single_with_timeout(case, config, DEFAULT_SINGLE_TIMEOUT_SECONDS)
-            .await
-    }
-
     async fn run_single_with_timeout(
         &self,
         case: &TestCase,
         config: &AgentConfig,
         default_timeout_seconds: u64,
+        llm_provider: Option<Arc<dyn LLMProvider>>,
     ) -> Result<EvalResult> {
         let started_at = Utc::now();
 
@@ -228,22 +271,38 @@ impl EvalEngine {
             });
         }
 
-        let environment = match build_agent_environment(
-            &self.base_config,
-            config,
-            &self.options.temp_dir,
-        )
-        .await
-        {
-            Ok(environment) => environment,
-            Err(error) => {
-                return Ok(build_error_result(
-                    case,
-                    config,
-                    started_at,
-                    error.to_string(),
-                    EvalStatus::Error,
-                ));
+        let environment = if let Some(llm_provider) = llm_provider {
+            match build_agent_environment_with_provider(
+                &self.base_config,
+                config,
+                &self.options.temp_dir,
+                llm_provider,
+            )
+            .await
+            {
+                Ok(environment) => environment,
+                Err(error) => {
+                    return Ok(build_error_result(
+                        case,
+                        config,
+                        started_at,
+                        error.to_string(),
+                        EvalStatus::Error,
+                    ));
+                }
+            }
+        } else {
+            match build_agent_environment(&self.base_config, config, &self.options.temp_dir).await {
+                Ok(environment) => environment,
+                Err(error) => {
+                    return Ok(build_error_result(
+                        case,
+                        config,
+                        started_at,
+                        error.to_string(),
+                        EvalStatus::Error,
+                    ));
+                }
             }
         };
         let run_root = environment

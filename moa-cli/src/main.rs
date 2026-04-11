@@ -23,6 +23,7 @@ use moa_eval::{
 };
 use moa_memory::FileMemoryStore;
 use moa_session::{NeonBranchManager, SessionDatabase, create_session_store};
+use moa_skills::run_skill_suite;
 use moa_tui::{RunTuiOptions, run_tui, run_tui_with_options};
 use tokio::fs;
 use tokio::process::Command;
@@ -200,6 +201,8 @@ enum EvalCommand {
     Run(EvalRunArgs),
     /// Shows the eval plan without executing.
     Plan(EvalPlanArgs),
+    /// Runs the regression suite for one workspace skill.
+    Skill(EvalSkillArgs),
     /// Lists discoverable eval suites in a directory.
     List {
         /// Directory to scan for suites.
@@ -265,6 +268,25 @@ struct EvalRunArgs {
     /// Include per-case response and score comments in terminal output.
     #[arg(long, short)]
     verbose: bool,
+}
+
+/// Arguments for `moa eval skill`.
+#[derive(Debug, Args)]
+struct EvalSkillArgs {
+    /// Skill name, path fragment, or full memory path.
+    skill: String,
+
+    /// Report sink spec: `terminal`, `json:<path>`, or `langfuse`.
+    #[arg(long, default_value = "terminal")]
+    report: Vec<String>,
+
+    /// Verbose output with per-case detail.
+    #[arg(long, short)]
+    verbose: bool,
+
+    /// Exit non-zero when the skill suite fails.
+    #[arg(long)]
+    ci: bool,
 }
 
 /// Arguments for `moa eval plan`.
@@ -415,6 +437,12 @@ async fn main() -> Result<()> {
             EvalCommand::Plan(args) => {
                 handle_eval_plan(args, config).await?;
             }
+            EvalCommand::Skill(args) => {
+                let exit_code = handle_eval_skill(args, config).await?;
+                if exit_code != 0 {
+                    std::process::exit(exit_code);
+                }
+            }
             EvalCommand::List { dir } => {
                 handle_eval_list(dir).await?;
             }
@@ -496,6 +524,34 @@ async fn handle_eval_plan(args: EvalPlanArgs, config: MoaConfig) -> Result<()> {
         plan.estimated_cost_range.0, plan.estimated_cost_range.1
     );
     Ok(())
+}
+
+async fn handle_eval_skill(args: EvalSkillArgs, config: MoaConfig) -> Result<i32> {
+    let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
+    let workspace_id = current_workspace_id();
+    let skill_run = run_skill_suite(&config, memory_store, &workspace_id, &args.skill).await?;
+    let reporters = build_reporters(
+        &args.report,
+        &ReporterOptions {
+            verbose: args.verbose,
+            color: !args.ci && std::io::stdout().is_terminal(),
+            json_pretty: true,
+        },
+    )
+    .context("building reporters")?;
+
+    for reporter in &reporters {
+        reporter
+            .report(
+                &skill_run.suite,
+                std::slice::from_ref(&skill_run.config),
+                &skill_run.run,
+            )
+            .await
+            .context("reporting skill eval results")?;
+    }
+
+    Ok(eval_exit_code(args.ci, &skill_run.run))
 }
 
 async fn handle_eval_list(dir: PathBuf) -> Result<()> {

@@ -1,21 +1,25 @@
 //! Existing-skill self-improvement logic.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;
 use moa_core::{
-    CompletionRequest, Event, EventRecord, LLMProvider, MemoryScope, MemoryStore, Result,
-    SessionMeta, SkillMetadata,
+    CompletionRequest, Event, EventRecord, LLMProvider, MemoryScope, MemoryStore, MoaConfig,
+    Result, SessionMeta, SkillMetadata,
 };
 use moa_memory::FileMemoryStore;
+use tokio::fs;
 
 use crate::format::{
     SkillDocument, parse_skill_markdown, render_skill_markdown, skill_from_wiki_page,
     skill_metadata_from_document, wiki_page_from_skill,
 };
+use crate::regression::{append_skill_regression_log, run_skill_regression};
 
 /// Compares a run against an existing skill and updates it when the LLM proposes a better version.
 pub async fn maybe_improve_skill(
+    config: &MoaConfig,
     session: &SessionMeta,
     existing: &SkillMetadata,
     events: &[EventRecord],
@@ -64,11 +68,51 @@ pub async fn maybe_improve_skill(
         .frontmatter
         .set_version(bump_version(&current.frontmatter.version()));
     record_successful_use_with_baseline(&mut improved, &current, now);
+    persist_previous_version(
+        memory_store.as_ref(),
+        &session.workspace_id,
+        &existing.path,
+        &current_markdown,
+    )
+    .await?;
 
+    let candidate_markdown = render_skill_markdown(&improved)?;
     let updated_page = wiki_page_from_skill(&improved, Some(existing.path.clone()))?;
     memory_store
-        .write_page(scope, &existing.path, updated_page)
+        .write_page(scope.clone(), &existing.path, updated_page)
         .await?;
+    let report = run_skill_regression(
+        config,
+        session,
+        existing,
+        &current_markdown,
+        &candidate_markdown,
+        memory_store.clone(),
+        llm,
+    )
+    .await?;
+    append_skill_regression_log(
+        memory_store.as_ref(),
+        session,
+        &current.frontmatter.name,
+        &current.frontmatter.version(),
+        &improved.frontmatter.version(),
+        &report,
+    )
+    .await?;
+
+    if !report.accepted() {
+        let mut restored = current.clone();
+        record_successful_use(&mut restored, now);
+        restored
+            .frontmatter
+            .set_regression_count(restored.frontmatter.regression_count().saturating_add(1));
+        let restored_page = wiki_page_from_skill(&restored, Some(existing.path.clone()))?;
+        memory_store
+            .write_page(scope, &existing.path, restored_page)
+            .await?;
+        return Ok(None);
+    }
 
     Ok(Some(skill_metadata_from_document(
         existing.path.clone(),
@@ -148,6 +192,28 @@ fn blended_success_rate(previous_uses: u32, previous_success_rate: f32, next_use
         return 1.0;
     }
     ((previous_success_rate * previous_uses as f32) + 1.0) / next_uses as f32
+}
+
+async fn persist_previous_version(
+    memory_store: &FileMemoryStore,
+    workspace_id: &moa_core::WorkspaceId,
+    skill_path: &moa_core::MemoryPath,
+    markdown: &str,
+) -> Result<()> {
+    let skill_root = memory_store
+        .base_dir()
+        .join("workspaces")
+        .join(workspace_id.as_str())
+        .join("memory");
+    let relative = Path::new(skill_path.as_str())
+        .parent()
+        .unwrap_or_else(|| Path::new("skills"));
+    let previous_path = skill_root.join(relative).join("SKILL.md.prev");
+    if let Some(parent) = previous_path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    fs::write(previous_path, markdown).await?;
+    Ok(())
 }
 
 fn build_improvement_prompt(current_skill: &str, events: &[EventRecord]) -> String {

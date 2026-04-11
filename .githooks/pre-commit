@@ -31,24 +31,75 @@ done <<< "$staged"
 
 if $is_doc_only; then
   echo "[pre-commit] doc-only change set — skipping cargo checks"
-  while IFS= read -r path; do
-    echo "[pre-commit]   $path"
-  done <<< "$staged"
   exit 0
 fi
 
-run_check() {
-  local label="$1"
-  shift
+# ---------------------------------------------------------------------------
+# Scope clippy & tests to only the crates that changed.
+# Falls back to --workspace when root-level files are touched (e.g. root
+# Cargo.toml, CI configs, rust-toolchain.toml).
+# ---------------------------------------------------------------------------
+WORKSPACE_MEMBERS=(
+  moa-core moa-brain moa-session moa-memory moa-hands
+  moa-providers moa-orchestrator moa-gateway moa-tui
+  moa-cli moa-security moa-skills moa-eval
+)
 
+affected=()
+root_touched=false
+
+while IFS= read -r path; do
+  in_crate=false
+  for member in "${WORKSPACE_MEMBERS[@]}"; do
+    case "$path" in
+      "$member/"*)
+        already=false
+        for a in "${affected[@]+"${affected[@]}"}"; do
+          [[ "$a" == "$member" ]] && { already=true; break; }
+        done
+        $already || affected+=("$member")
+        in_crate=true
+        break
+        ;;
+    esac
+  done
+  $in_crate || root_touched=true
+done <<< "$staged"
+
+if $root_touched || [ ${#affected[@]} -eq 0 ]; then
+  echo "[pre-commit] root files changed — full workspace check"
+  scope=("--workspace")
+  scope_label="workspace"
+else
+  scope=()
+  for c in "${affected[@]}"; do scope+=("-p" "$c"); done
+  scope_label="${affected[*]}"
+  echo "[pre-commit] scoped to: $scope_label"
+fi
+
+# ---------------------------------------------------------------------------
+
+timed() {
+  local label="$1"; shift
+  local t0; t0=$(date +%s)
   echo "[pre-commit] $label"
   "$@"
+  echo "[pre-commit] $label — $(($(date +%s) - t0))s"
 }
 
-run_check "cargo fmt --all --check" cargo fmt --all --check
-run_check "cargo build" cargo build
-run_check "cargo clippy --workspace --all-targets -- -D warnings" \
-  cargo clippy --workspace --all-targets -- -D warnings
-run_check "cargo test" cargo test
+# 1. Format — always full workspace (no compilation, ~1s)
+timed "fmt" cargo fmt --all --check
+
+# 2. Clippy — scoped to affected crates. Clippy compiles + lints in one pass,
+#    so a separate `cargo build` step is redundant.
+timed "clippy [$scope_label]" \
+  cargo clippy "${scope[@]}" --all-targets -- -D warnings
+
+# 3. Test — scoped to affected crates. Prefer nextest for parallel execution.
+if command -v cargo-nextest &>/dev/null; then
+  timed "nextest [$scope_label]" cargo nextest run "${scope[@]}"
+else
+  timed "test [$scope_label]" cargo test "${scope[@]}"
+fi
 
 echo "[pre-commit] all checks passed"

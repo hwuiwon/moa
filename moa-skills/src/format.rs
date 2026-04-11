@@ -23,6 +23,7 @@ const META_LAST_USED: &str = "moa-last-used";
 const META_SUCCESS_RATE: &str = "moa-success-rate";
 const META_ESTIMATED_TOKENS: &str = "moa-estimated-tokens";
 const META_IMPROVED_FROM: &str = "moa-improved-from";
+const META_REGRESSION_COUNT: &str = "moa-regression-count";
 
 /// Fully parsed Agent Skill document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -155,6 +156,15 @@ impl SkillFrontmatter {
 
     pub(crate) fn set_improved_from(&mut self, value: Option<String>) {
         self.set_optional_metadata(META_IMPROVED_FROM, value);
+    }
+
+    /// Returns how many candidate improvements were rolled back for this skill.
+    pub fn regression_count(&self) -> u32 {
+        self.metadata_u32(META_REGRESSION_COUNT).unwrap_or(0)
+    }
+
+    pub(crate) fn set_regression_count(&mut self, value: u32) {
+        self.insert_metadata(META_REGRESSION_COUNT, value.to_string());
     }
 
     /// Returns one raw metadata value by key.

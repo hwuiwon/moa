@@ -9,7 +9,6 @@ chrono.workspace = true
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
 moa-security = { path = "../moa-security" }
-moa-skills = { path = "../moa-skills" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

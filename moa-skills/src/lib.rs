@@ -4,6 +4,7 @@ pub mod distiller;
 pub mod format;
 pub mod improver;
 pub mod registry;
+pub mod regression;
 
 pub use distiller::maybe_distill_skill;
 pub use format::{
@@ -13,3 +14,8 @@ pub use format::{
 };
 pub use improver::maybe_improve_skill;
 pub use registry::SkillRegistry;
+pub use regression::{
+    SkillEvalRun, SkillRegressionDecision, SkillRegressionReport, SkillRegressionSummary,
+    append_skill_regression_log, compare_scores, generate_skill_test_suite, run_skill_regression,
+    run_skill_suite,
+};

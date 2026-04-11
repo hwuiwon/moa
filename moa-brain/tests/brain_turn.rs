@@ -17,8 +17,8 @@ use moa_core::{
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
+use moa_memory::wiki::parse_markdown;
 use moa_session::TursoSessionStore;
-use moa_skills::{build_skill_path, parse_skill_markdown, wiki_page_from_skill};
 use serde_json::json;
 use tempfile::tempdir;
 use tokio::sync::{Mutex, broadcast};
@@ -1048,7 +1048,9 @@ async fn pipeline_stage_four_injects_workspace_skill_metadata() {
         ..SessionMeta::default()
     };
     let session_id = store.create_session(session.clone()).await.unwrap();
-    let skill = parse_skill_markdown(
+    let skill_path = MemoryPath::new("skills/debug-oauth-refresh/SKILL.md");
+    let skill_page = parse_markdown(
+        Some(skill_path.clone()),
         r#"---
 name: debug-oauth-refresh
 description: "Investigate and fix OAuth refresh-token bugs"
@@ -1077,12 +1079,11 @@ metadata:
 "#,
     )
     .unwrap();
-    let skill_path = build_skill_path(&skill.frontmatter.name);
     memory_store
         .write_page(
             MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &skill_path,
-            wiki_page_from_skill(&skill, Some(skill_path.clone())).unwrap(),
+            skill_page,
         )
         .await
         .unwrap();
