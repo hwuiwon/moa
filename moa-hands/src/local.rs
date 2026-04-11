@@ -11,10 +11,13 @@ use async_trait::async_trait;
 use moa_core::{
     HandHandle, HandProvider, HandSpec, HandStatus, MoaError, Result, SandboxTier, ToolOutput,
 };
+use opentelemetry::trace::Status;
 use tokio::fs;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use crate::tools::{bash, file_read, file_search, file_write};
@@ -235,19 +238,47 @@ impl LocalHandProvider {
         input: &str,
         hard_cancel_token: Option<&CancellationToken>,
     ) -> Result<ToolOutput> {
-        match handle {
-            HandHandle::Local { sandbox_dir } => {
-                self.execute_local_tool(sandbox_dir, tool, input, hard_cancel_token)
-                    .await
+        let tier = match handle {
+            HandHandle::Local { .. } => "local",
+            HandHandle::Docker { .. } => "container",
+            HandHandle::Daytona { .. } => "container",
+            HandHandle::E2B { .. } => "microvm",
+        };
+        let span_name = format!("hand.execute local/{tool}");
+        let hand_span = tracing::info_span!("hand_execute", otel.name = %span_name);
+        hand_span.set_attribute("moa.hand.provider", "local");
+        hand_span.set_attribute("moa.hand.tier", tier);
+
+        let instrument_hand_span = hand_span.clone();
+        async move {
+            let result = match handle {
+                HandHandle::Local { sandbox_dir } => {
+                    self.execute_local_tool(sandbox_dir, tool, input, hard_cancel_token)
+                        .await
+                }
+                HandHandle::Docker { container_id } => {
+                    self.execute_docker_tool(container_id, tool, input, hard_cancel_token)
+                        .await
+                }
+                _ => Err(MoaError::Unsupported(
+                    "non-local hand handle passed to LocalHandProvider".to_string(),
+                )),
+            };
+
+            match &result {
+                Ok(output) if output.is_error => {
+                    hand_span.set_status(Status::error(output.to_text()));
+                }
+                Ok(_) | Err(MoaError::Cancelled) => {}
+                Err(error) => {
+                    hand_span.set_status(Status::error(error.to_string()));
+                }
             }
-            HandHandle::Docker { container_id } => {
-                self.execute_docker_tool(container_id, tool, input, hard_cancel_token)
-                    .await
-            }
-            _ => Err(MoaError::Unsupported(
-                "non-local hand handle passed to LocalHandProvider".to_string(),
-            )),
+
+            result
         }
+        .instrument(instrument_hand_span)
+        .await
     }
 }
 
