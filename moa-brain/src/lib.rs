@@ -3,6 +3,7 @@
 pub mod compaction;
 pub mod harness;
 pub mod pipeline;
+pub mod tool_stats;
 pub mod turn;
 
 pub use compaction::maybe_compact;
@@ -13,6 +14,10 @@ pub use harness::{
 pub use pipeline::{
     ContextPipeline, PipelineStageReport, build_default_pipeline,
     build_default_pipeline_with_runtime, build_default_pipeline_with_tools,
+};
+pub use tool_stats::{
+    ToolStats, WorkspaceToolStats, load_workspace_tool_stats, update_ema,
+    update_workspace_tool_stats, write_workspace_tool_stats,
 };
 pub use turn::{
     PendingToolApproval, StoredApprovalDecision, StreamSignalDisposition, StreamedCompletion,

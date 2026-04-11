@@ -260,7 +260,10 @@ async fn build_pipeline(
             workspace_instructions,
             user_instructions,
         )),
-        Box::new(ToolDefinitionProcessor::new(tool_schemas)),
+        Box::new(ToolDefinitionProcessor::with_memory(
+            tool_schemas,
+            memory_store.clone(),
+        )),
         Box::new(SkillInjector::new(skill_registry)),
         Box::new(MemoryRetriever::new(
             memory_store_dyn,

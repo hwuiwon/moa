@@ -138,8 +138,11 @@ impl MemoryStore for MockMemoryStore {
         Ok(Vec::new())
     }
 
-    async fn read_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
-        panic!("brain turn test does not expect memory reads")
+    async fn read_page(&self, _scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
+        Err(moa_core::MoaError::StorageError(format!(
+            "memory page not found: {}",
+            path.as_str()
+        )))
     }
 
     async fn write_page(
