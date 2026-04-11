@@ -16,11 +16,13 @@ use teloxide::{
     types::{InlineKeyboardButton, InlineKeyboardMarkup, Message, Update, User},
 };
 use tokio::sync::{Mutex, mpsc};
+use tracing::Instrument;
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
     approval::{ApprovalCallbackAction, prepare_outbound_message},
+    gateway_receive_span,
     renderer::{TelegramRenderChunk, TelegramRenderer},
 };
 
@@ -314,13 +316,18 @@ async fn handle_message(
     inbound_contexts: Arc<Mutex<HashMap<String, TelegramMessageRef>>>,
 ) -> std::result::Result<(), teloxide::RequestError> {
     if let Some(inbound) = inbound_from_message(&msg) {
-        inbound_contexts.lock().await.insert(
-            inbound.platform_msg_id.clone(),
-            TelegramMessageRef::from_message(&msg),
-        );
-        if event_tx.send(inbound).await.is_err() {
-            warn!("telegram inbound receiver dropped");
+        let gateway_span = gateway_receive_span(&inbound);
+        async {
+            inbound_contexts.lock().await.insert(
+                inbound.platform_msg_id.clone(),
+                TelegramMessageRef::from_message(&msg),
+            );
+            if event_tx.send(inbound).await.is_err() {
+                warn!("telegram inbound receiver dropped");
+            }
         }
+        .instrument(gateway_span)
+        .await;
     }
 
     Ok(())
@@ -337,9 +344,15 @@ async fn handle_callback_query(
     if let Some(inbound) =
         inbound_from_callback_query(&query, inbound_contexts.clone(), outbound_messages.clone())
             .await
-        && event_tx.send(inbound).await.is_err()
     {
-        warn!("telegram inbound receiver dropped");
+        let gateway_span = gateway_receive_span(&inbound);
+        async {
+            if event_tx.send(inbound).await.is_err() {
+                warn!("telegram inbound receiver dropped");
+            }
+        }
+        .instrument(gateway_span)
+        .await;
     }
     Ok(())
 }

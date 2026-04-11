@@ -3,6 +3,7 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use moa_core::{CompletionContent, CompletionRequest, CompletionResponse, TokenPricing};
 use opentelemetry::trace::Status;
+use serde_json::Value;
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -38,6 +39,20 @@ pub(crate) struct LLMSpanAttributes {
     pub input_content: Option<String>,
     /// Serialized output content.
     pub output_content: Option<String>,
+    /// Session identifier for Langfuse session grouping.
+    pub session_id: Option<String>,
+    /// User identifier for Langfuse user analytics.
+    pub user_id: Option<String>,
+    /// Workspace identifier for filterable metadata.
+    pub workspace_id: Option<String>,
+    /// Originating platform name.
+    pub platform: Option<String>,
+    /// Human-readable trace name.
+    pub trace_name: Option<String>,
+    /// Total compiled context tokens for the request.
+    pub context_tokens: Option<usize>,
+    /// Prefix cache hit ratio for the request.
+    pub cache_hit_ratio: Option<f64>,
 }
 
 /// Per-request span recorder used by provider streaming tasks.
@@ -72,6 +87,13 @@ impl LLMSpanRecorder {
                 temperature: request.temperature.map(f64::from),
                 max_tokens,
                 input_content: serialize_input_content(request),
+                session_id: metadata_string(request, "_moa.session_id"),
+                user_id: metadata_string(request, "_moa.user_id"),
+                workspace_id: metadata_string(request, "_moa.workspace_id"),
+                platform: metadata_string(request, "_moa.platform"),
+                trace_name: metadata_string(request, "_moa.trace_name"),
+                context_tokens: metadata_usize(request, "_moa.context_tokens"),
+                cache_hit_ratio: metadata_f64(request, "_moa.cache_ratio"),
                 ..LLMSpanAttributes::default()
             },
         );
@@ -204,6 +226,33 @@ pub(crate) fn record_llm_span_attributes(span: &Span, attrs: &LLMSpanAttributes)
     if let Some(output) = attrs.output_content.as_ref() {
         span.set_attribute("langfuse.observation.output", output.clone());
     }
+    if let Some(session_id) = attrs.session_id.as_ref() {
+        span.set_attribute("langfuse.session.id", session_id.clone());
+    }
+    if let Some(user_id) = attrs.user_id.as_ref() {
+        span.set_attribute("langfuse.user.id", user_id.clone());
+    }
+    if let Some(workspace_id) = attrs.workspace_id.as_ref() {
+        span.set_attribute("langfuse.trace.metadata.workspace_id", workspace_id.clone());
+    }
+    if let Some(platform) = attrs.platform.as_ref() {
+        span.set_attribute("langfuse.trace.metadata.platform", platform.clone());
+    }
+    if let Some(trace_name) = attrs.trace_name.as_ref() {
+        span.set_attribute("langfuse.trace.name", trace_name.clone());
+    }
+    if let Some(context_tokens) = attrs.context_tokens {
+        span.set_attribute(
+            "langfuse.observation.metadata.context_tokens",
+            context_tokens as i64,
+        );
+    }
+    if let Some(cache_hit_ratio) = attrs.cache_hit_ratio {
+        span.set_attribute(
+            "langfuse.observation.metadata.cache_hit_ratio",
+            cache_hit_ratio,
+        );
+    }
 }
 
 /// Builds the exported span name for an LLM completion call.
@@ -258,6 +307,26 @@ fn serialize_output_text(text: &str) -> Option<String> {
     } else {
         Some(truncate_attribute_value(text.to_string()))
     }
+}
+
+fn metadata_string(request: &CompletionRequest, key: &str) -> Option<String> {
+    request
+        .metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn metadata_usize(request: &CompletionRequest, key: &str) -> Option<usize> {
+    request
+        .metadata
+        .get(key)
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+}
+
+fn metadata_f64(request: &CompletionRequest, key: &str) -> Option<f64> {
+    request.metadata.get(key).and_then(Value::as_f64)
 }
 
 fn serialize_output_content(content: &[CompletionContent]) -> Option<String> {

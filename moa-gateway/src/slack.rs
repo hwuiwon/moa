@@ -13,11 +13,13 @@ use tokio::{
     sync::{Mutex, mpsc},
     time::sleep,
 };
+use tracing::Instrument;
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
     approval::{ApprovalCallbackAction, prepare_outbound_message},
+    gateway_receive_span,
     renderer::{SlackRenderChunk, SlackRenderer},
 };
 
@@ -345,16 +347,21 @@ async fn handle_push_event(
     };
 
     if let Some(inbound) = inbound_from_push_event(&event) {
-        if let Some(origin) = push_event_origin(&event) {
-            shared
-                .inbound_contexts
-                .lock()
-                .await
-                .insert(inbound.platform_msg_id.clone(), origin);
+        let gateway_span = gateway_receive_span(&inbound);
+        async {
+            if let Some(origin) = push_event_origin(&event) {
+                shared
+                    .inbound_contexts
+                    .lock()
+                    .await
+                    .insert(inbound.platform_msg_id.clone(), origin);
+            }
+            if shared.event_tx.send(inbound).await.is_err() {
+                warn!("slack inbound receiver dropped");
+            }
         }
-        if shared.event_tx.send(inbound).await.is_err() {
-            warn!("slack inbound receiver dropped");
-        }
+        .instrument(gateway_span)
+        .await;
     }
     Ok(())
 }
@@ -373,10 +380,15 @@ async fn handle_interaction_event(
         return Ok(());
     };
 
-    if let Some(inbound) = inbound_from_interaction_event(&event, shared.inbound_contexts).await
-        && shared.event_tx.send(inbound).await.is_err()
-    {
-        warn!("slack inbound receiver dropped");
+    if let Some(inbound) = inbound_from_interaction_event(&event, shared.inbound_contexts).await {
+        let gateway_span = gateway_receive_span(&inbound);
+        async {
+            if shared.event_tx.send(inbound).await.is_err() {
+                warn!("slack inbound receiver dropped");
+            }
+        }
+        .instrument(gateway_span)
+        .await;
     }
     Ok(())
 }

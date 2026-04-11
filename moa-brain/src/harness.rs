@@ -6,7 +6,7 @@ use moa_core::{
     ApprovalDecision, ApprovalRequest, CompletionContent, Event, EventRange, EventRecord,
     LLMProvider, MoaError, PolicyAction, Result, RiskLevel, RuntimeEvent, SessionId, SessionMeta,
     SessionSignal, SessionStatus, SessionStore, StopReason, ToolCardStatus, ToolInvocation,
-    ToolUpdate, UserId, UserMessage, WorkingContext,
+    ToolUpdate, TraceContext, UserId, UserMessage, WorkingContext,
 };
 use moa_hands::ToolRouter;
 use moa_security::{
@@ -237,16 +237,20 @@ async fn run_streamed_turn_with_tools_mode(
         .get_events(session_id.clone(), EventRange::all())
         .await?;
     let turn_number = turn_number_for_events(&initial_events);
+    let trace_context =
+        TraceContext::from_session_meta(&initial_session, last_user_message_text(&initial_events));
     let turn_span = tracing::info_span!(
         "brain_turn",
         moa.session.id = %session_id,
         moa.turn.number = turn_number,
         moa.model = %initial_session.model,
+        langfuse.trace.metadata.turn_number = turn_number,
         moa.turn.tool_calls = tracing::field::Empty,
         moa.turn.input_tokens = tracing::field::Empty,
         moa.turn.output_tokens = tracing::field::Empty,
         moa.turn.result = tracing::field::Empty,
     );
+    trace_context.apply_to_span(&turn_span);
 
     let mut local_turn_requested = false;
     let turn_requested = turn_requested.unwrap_or(&mut local_turn_requested);
@@ -387,6 +391,25 @@ async fn run_streamed_turn_with_tools_mode(
 
             let stage_reports = pipeline.run(&mut ctx).await?;
             let active_canary = tool_router.as_ref().map(|_| inject_canary(&mut ctx));
+            ctx.insert_metadata(
+                "_moa.session_id",
+                serde_json::json!(trace_context.session_id.to_string()),
+            );
+            ctx.insert_metadata(
+                "_moa.user_id",
+                serde_json::json!(trace_context.user_id.to_string()),
+            );
+            ctx.insert_metadata(
+                "_moa.workspace_id",
+                serde_json::json!(trace_context.workspace_id.to_string()),
+            );
+            ctx.insert_metadata("_moa.model", serde_json::json!(trace_context.model.clone()));
+            if let Some(platform) = trace_context.platform.as_ref() {
+                ctx.insert_metadata("_moa.platform", serde_json::json!(platform.to_string()));
+            }
+            if let Some(trace_name) = trace_context.trace_name.as_ref() {
+                ctx.insert_metadata("_moa.trace_name", serde_json::json!(trace_name));
+            }
             tracing::info!(
                 session_id = %session_id,
                 compiled_messages = ctx.messages.len(),
@@ -1494,6 +1517,13 @@ fn turn_number_for_events(events: &[EventRecord]) -> i64 {
         .filter(|record| matches!(record.event, Event::BrainResponse { .. }))
         .count() as i64
         + 1
+}
+
+fn last_user_message_text(events: &[EventRecord]) -> Option<&str> {
+    events.iter().rev().find_map(|record| match &record.event {
+        Event::UserMessage { text, .. } | Event::QueuedMessage { text, .. } => Some(text.as_str()),
+        _ => None,
+    })
 }
 
 fn record_turn_span_metrics(
