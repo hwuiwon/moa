@@ -1,0 +1,28 @@
+[agent]
+name = "variant-fast"
+model = "gpt-4.1"
+
+[agent.skills]
+include = ["skills/deploy-to-fly"]
+exclude = ["skills/incident-triage"]
+exclusive = false
+
+[agent.memory]
+workspace_memory_path = "tests/fixtures/memory/webapp-v2"
+user_memory_path = "tests/fixtures/memory/users/default"
+clear_defaults = true
+
+[agent.instructions]
+system_prompt_override = "You are a concise deployment assistant."
+
+[agent.tools]
+disable = ["file_write"]
+
+[agent.permissions]
+auto_approve_all = false
+auto_approve = ["bash"]
+always_deny = ["file_write"]
+
+[agent.metadata]
+variant = "fast"
+experiment = "tool-restrictions"

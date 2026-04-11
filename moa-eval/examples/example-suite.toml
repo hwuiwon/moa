@@ -1,0 +1,40 @@
+[suite]
+name = "example-suite"
+description = "A small smoke suite for the moa-eval scaffold"
+default_timeout_seconds = 90
+tags = ["example", "smoke"]
+
+[[cases]]
+name = "basic-greeting"
+input = "Say hello to the user."
+timeout_seconds = 30
+tags = ["chat"]
+expected_trajectory = []
+
+[cases.expected_output]
+contains = ["hello"]
+not_contains = ["error"]
+facts = ["the assistant greeted the user"]
+
+[[cases]]
+name = "staging-deploy-plan"
+input = "Deploy the app to staging and verify health."
+timeout_seconds = 120
+tags = ["deployment", "staging"]
+expected_trajectory = ["bash", "bash", "bash"]
+
+[cases.expected_output]
+contains = ["staging", "health"]
+facts = ["the response mentions deployment verification"]
+
+[cases.metadata]
+requires_approval = true
+
+[[cases]]
+name = "incident-triage"
+input = "Investigate the checkout latency spike."
+tags = ["incident", "ops"]
+
+[cases.expected_output]
+contains = ["latency"]
+not_contains = ["ignore"]

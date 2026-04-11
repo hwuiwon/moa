@@ -1,0 +1,28 @@
+[agent]
+name = "baseline"
+model = "claude-sonnet-4-20250514"
+
+[agent.skills]
+include = ["skills/deploy-to-fly", "skills/incident-triage"]
+exclude = []
+exclusive = false
+
+[agent.memory]
+workspace_memory_path = "tests/fixtures/memory/webapp-v1"
+clear_defaults = false
+
+[agent.instructions]
+system_prompt_append = "Prefer safe, explicit operational steps."
+
+[agent.tools]
+enabled = ["bash", "file_read", "file_write"]
+disable = []
+
+[agent.permissions]
+auto_approve_all = true
+auto_approve = []
+always_deny = []
+
+[agent.metadata]
+variant = "baseline"
+owner = "eval-team"
