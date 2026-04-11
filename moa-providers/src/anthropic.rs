@@ -14,8 +14,10 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 use crate::common::{build_http_client, parse_sse_json, send_with_retry};
+use crate::instrumentation::LLMSpanRecorder;
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -108,37 +110,82 @@ impl LLMProvider for AnthropicProvider {
             .to_string();
         let resolved_model = canonical_model_id(&requested_model)?;
         let model_capabilities = capabilities_for_model(&resolved_model)?;
-        let request_body = build_request_body(&request, &resolved_model, &model_capabilities)?;
+        let max_output_tokens = Some(
+            request
+                .max_output_tokens
+                .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
+                .min(model_capabilities.max_output),
+        );
+        let span_recorder = LLMSpanRecorder::new(
+            "anthropic",
+            resolved_model.clone(),
+            &request,
+            max_output_tokens,
+            model_capabilities.pricing.clone(),
+        );
+        let span = span_recorder.span().clone();
+        let request_body = match build_request_body(&request, &resolved_model, &model_capabilities)
+        {
+            Ok(body) => body,
+            Err(error) => {
+                span_recorder.fail(&error);
+                return Err(error);
+            }
+        };
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         let messages_url = self.messages_url.clone();
         let max_retries = self.max_retries;
         let (tx, rx) = mpsc::channel(DEFAULT_STREAM_BUFFER);
 
-        let completion_task = tokio::spawn(async move {
-            let started_at = Instant::now();
-            let response = send_with_retry(
-                || {
-                    client
-                        .post(&messages_url)
-                        .header("x-api-key", &api_key)
-                        .header("anthropic-version", ANTHROPIC_API_VERSION)
-                        .header(ACCEPT, "text/event-stream")
-                        .header(CONTENT_TYPE, "application/json")
-                        .json(&request_body)
-                },
-                max_retries,
-            )
-            .await?;
+        let completion_task = tokio::spawn(
+            async move {
+                let mut span_recorder = span_recorder;
+                let started_at = Instant::now();
+                let response = send_with_retry(
+                    || {
+                        client
+                            .post(&messages_url)
+                            .header("x-api-key", &api_key)
+                            .header("anthropic-version", ANTHROPIC_API_VERSION)
+                            .header(ACCEPT, "text/event-stream")
+                            .header(CONTENT_TYPE, "application/json")
+                            .json(&request_body)
+                    },
+                    max_retries,
+                )
+                .await;
 
-            consume_sse_events(
-                response.bytes_stream().eventsource(),
-                tx,
-                resolved_model,
-                started_at,
-            )
-            .await
-        });
+                let response = match response {
+                    Ok(response) => response,
+                    Err(error) => {
+                        span_recorder.fail(&error);
+                        return Err(error);
+                    }
+                };
+
+                let response = consume_sse_events(
+                    response.bytes_stream().eventsource(),
+                    tx,
+                    resolved_model,
+                    started_at,
+                    &mut span_recorder,
+                )
+                .await;
+
+                match response {
+                    Ok(response) => {
+                        span_recorder.finish(&response);
+                        Ok(response)
+                    }
+                    Err(error) => {
+                        span_recorder.fail(&error);
+                        Err(error)
+                    }
+                }
+            }
+            .instrument(span),
+        );
 
         Ok(CompletionStream::new(rx, completion_task))
     }
@@ -362,6 +409,7 @@ async fn consume_sse_events<S, E>(
     tx: mpsc::Sender<Result<CompletionContent>>,
     fallback_model: String,
     started_at: Instant,
+    span_recorder: &mut LLMSpanRecorder,
 ) -> Result<CompletionResponse>
 where
     S: Stream<Item = std::result::Result<SseEvent, E>>,
@@ -376,6 +424,7 @@ where
         let emitted = state.apply_event(&event)?;
 
         for block in emitted {
+            span_recorder.observe_block(&block);
             if tx.send(Ok(block)).await.is_err() {
                 tracing::debug!("completion stream receiver dropped before the response finished");
                 break;
@@ -765,6 +814,7 @@ mod tests {
         anthropic_message, anthropic_tool_from_schema, build_request_body, canonical_model_id,
         capabilities_for_model, consume_sse_events,
     };
+    use crate::instrumentation::LLMSpanRecorder;
 
     #[test]
     fn completion_request_serializes_to_anthropic_format() {
@@ -908,10 +958,25 @@ mod tests {
         let raw_stream = stream::iter(vec![Ok::<Vec<u8>, std::io::Error>(sse.as_bytes().to_vec())]);
         let events = raw_stream.eventsource();
         let (tx, mut rx) = mpsc::channel(8);
+        let request = CompletionRequest::new("Hello");
+        let capabilities = capabilities_for_model(MODEL_SONNET_4_6).unwrap();
+        let mut span_recorder = LLMSpanRecorder::new(
+            "anthropic",
+            MODEL_SONNET_4_6,
+            &request,
+            request.max_output_tokens,
+            capabilities.pricing,
+        );
 
-        let response = consume_sse_events(events, tx, MODEL_SONNET_4_6.to_string(), Instant::now())
-            .await
-            .unwrap();
+        let response = consume_sse_events(
+            events,
+            tx,
+            MODEL_SONNET_4_6.to_string(),
+            Instant::now(),
+            &mut span_recorder,
+        )
+        .await
+        .unwrap();
 
         let mut streamed_blocks = Vec::new();
         while let Some(block) = rx.recv().await {

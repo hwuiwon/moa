@@ -27,6 +27,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+use crate::instrumentation::LLMSpanRecorder;
 use crate::schema::compile_for_openai_strict;
 
 const INITIAL_RETRY_DELAY_MS: u64 = 250;
@@ -222,6 +223,7 @@ pub(crate) async fn stream_responses_with_retry(
     fallback_model: String,
     started_at: Instant,
     max_retries: usize,
+    mut span_recorder: LLMSpanRecorder,
 ) -> Result<CompletionResponse> {
     let mut attempt = 0usize;
 
@@ -232,10 +234,14 @@ pub(crate) async fn stream_responses_with_retry(
                 tx.clone(),
                 fallback_model.clone(),
                 started_at,
+                &mut span_recorder,
             )
             .await
             {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    span_recorder.finish(&response);
+                    return Ok(response);
+                }
                 Err(error)
                     if error.retryable && !error.emitted_content && attempt < max_retries =>
                 {
@@ -249,14 +255,19 @@ pub(crate) async fn stream_responses_with_retry(
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                 }
-                Err(error) => return Err(error.error),
+                Err(error) => {
+                    span_recorder.fail(&error.error);
+                    return Err(error.error);
+                }
             },
             Err(error) if is_rate_limit_error(&error) => {
                 if attempt >= max_retries {
-                    return Err(MoaError::RateLimited {
+                    let error = MoaError::RateLimited {
                         retries: max_retries,
                         message: error.to_string(),
-                    });
+                    };
+                    span_recorder.fail(&error);
+                    return Err(error);
                 }
 
                 let delay = retry_delay(attempt);
@@ -269,7 +280,11 @@ pub(crate) async fn stream_responses_with_retry(
                 tokio::time::sleep(delay).await;
                 attempt += 1;
             }
-            Err(error) => return Err(map_openai_error(error)),
+            Err(error) => {
+                let error = map_openai_error(error);
+                span_recorder.fail(&error);
+                return Err(error);
+            }
         }
     }
 }
@@ -280,6 +295,7 @@ async fn consume_responses_stream_once(
     tx: mpsc::Sender<Result<CompletionContent>>,
     fallback_model: String,
     started_at: Instant,
+    span_recorder: &mut LLMSpanRecorder,
 ) -> std::result::Result<CompletionResponse, ResponsesStreamError> {
     let mut text = String::new();
     let mut content = Vec::new();
@@ -306,6 +322,7 @@ async fn consume_responses_stream_once(
                 text.push_str(&event.delta);
                 let block = CompletionContent::Text(event.delta);
                 content.push(block.clone());
+                span_recorder.observe_block(&block);
                 emitted_content = true;
                 if tx.send(Ok(block)).await.is_err() {
                     break;
@@ -359,6 +376,7 @@ async fn consume_responses_stream_once(
                 });
                 emitted_function_items.insert(event.item_id);
                 content.push(call.clone());
+                span_recorder.observe_block(&call);
                 emitted_content = true;
                 if tx.send(Ok(call)).await.is_err() {
                     break;
@@ -411,6 +429,7 @@ async fn consume_responses_stream_once(
         .as_ref()
         .map(|usage| usage.input_tokens_details.cached_tokens as usize)
         .unwrap_or(0);
+    span_recorder.set_cached_input_tokens(cached_input_tokens);
     let input_tokens = usage
         .as_ref()
         .map(|usage| usage.input_tokens as usize)

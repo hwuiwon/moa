@@ -9,8 +9,10 @@ use moa_core::{
     Result, TokenPricing, ToolCallFormat,
 };
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 use crate::common::{build_openai_client, build_responses_request, stream_responses_with_retry};
+use crate::instrumentation::LLMSpanRecorder;
 use crate::openai::{
     canonical_model_id as canonical_openai_model_id,
     capabilities_for_model as openai_capabilities_for_model,
@@ -133,24 +135,46 @@ impl LLMProvider for OpenRouterProvider {
             .unwrap_or(self.default_model.as_str())
             .to_string();
         let resolved_model = canonical_model_id(&requested_model);
-        let request =
-            build_responses_request(&request, &resolved_model, &self.default_reasoning_effort)?;
+        let model_capabilities = capabilities_for_model(&resolved_model);
+        let span_recorder = LLMSpanRecorder::new(
+            "openrouter",
+            resolved_model.clone(),
+            &request,
+            request.max_output_tokens,
+            model_capabilities.pricing.clone(),
+        );
+        let span = span_recorder.span().clone();
+        let request = match build_responses_request(
+            &request,
+            &resolved_model,
+            &self.default_reasoning_effort,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                span_recorder.fail(&error);
+                return Err(error);
+            }
+        };
         let client = self.client.clone();
         let max_retries = self.max_retries;
         let (tx, rx) = mpsc::channel(DEFAULT_STREAM_BUFFER);
 
-        let completion_task = tokio::spawn(async move {
-            let started_at = Instant::now();
-            stream_responses_with_retry(
-                &client,
-                &request,
-                tx,
-                resolved_model,
-                started_at,
-                max_retries,
-            )
-            .await
-        });
+        let completion_task = tokio::spawn(
+            async move {
+                let started_at = Instant::now();
+                stream_responses_with_retry(
+                    &client,
+                    &request,
+                    tx,
+                    resolved_model,
+                    started_at,
+                    max_retries,
+                    span_recorder,
+                )
+                .await
+            }
+            .instrument(span),
+        );
 
         Ok(CompletionStream::new(rx, completion_task))
     }
