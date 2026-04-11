@@ -177,7 +177,7 @@ pub fn build_default_pipeline_with_tools(
     let registry_memory: Arc<dyn MemoryStore> = memory_store.clone();
     let skill_registry = Arc::new(SkillRegistry::new(registry_memory));
     ContextPipeline::new(vec![
-        Box::new(IdentityProcessor),
+        Box::new(IdentityProcessor::default()),
         Box::new(InstructionProcessor::from_config(config)),
         Box::new(ToolDefinitionProcessor::new(tool_schemas)),
         Box::new(SkillInjector::new(skill_registry)),

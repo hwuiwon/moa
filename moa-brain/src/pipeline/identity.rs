@@ -5,7 +5,8 @@ use moa_core::{ContextProcessor, ProcessorOutput, Result, WorkingContext};
 
 use super::estimate_tokens;
 
-const IDENTITY_PROMPT: &str = "\
+/// Default identity prompt used by the MOA brain.
+pub const DEFAULT_IDENTITY_PROMPT: &str = "\
 You are MOA, a general-purpose AI agent. You help users accomplish tasks by \
 reasoning, using tools, and building on accumulated knowledge.\n\n\
 You have access to tools for file operations, shell commands, web search, \
@@ -14,8 +15,25 @@ When you make changes, explain what you did and why. When you encounter \
 errors, preserve them in context so they are not repeated.";
 
 /// Injects the brain identity prompt into the working context.
-#[derive(Debug, Default)]
-pub struct IdentityProcessor;
+#[derive(Debug, Clone)]
+pub struct IdentityProcessor {
+    prompt: String,
+}
+
+impl IdentityProcessor {
+    /// Creates an identity processor with an explicit prompt.
+    pub fn new(prompt: impl Into<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+        }
+    }
+}
+
+impl Default for IdentityProcessor {
+    fn default() -> Self {
+        Self::new(DEFAULT_IDENTITY_PROMPT)
+    }
+}
 
 #[async_trait]
 impl ContextProcessor for IdentityProcessor {
@@ -28,9 +46,9 @@ impl ContextProcessor for IdentityProcessor {
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
-        ctx.append_system(IDENTITY_PROMPT);
+        ctx.append_system(self.prompt.clone());
         Ok(ProcessorOutput {
-            tokens_added: estimate_tokens(IDENTITY_PROMPT),
+            tokens_added: estimate_tokens(&self.prompt),
             items_included: vec!["moa_identity".to_string()],
             ..ProcessorOutput::default()
         })
@@ -73,7 +91,10 @@ mod tests {
         };
         let mut ctx = WorkingContext::new(&session, capabilities);
 
-        let output = IdentityProcessor.process(&mut ctx).await.unwrap();
+        let output = IdentityProcessor::default()
+            .process(&mut ctx)
+            .await
+            .unwrap();
 
         assert_eq!(ctx.messages.len(), 1);
         assert_eq!(ctx.messages[0].role, moa_core::MessageRole::System);

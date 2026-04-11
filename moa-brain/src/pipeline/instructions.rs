@@ -13,12 +13,20 @@ pub struct InstructionProcessor {
 }
 
 impl InstructionProcessor {
+    /// Creates an instruction processor from explicit workspace and user sections.
+    pub fn new(workspace_instructions: Option<String>, user_instructions: Option<String>) -> Self {
+        Self {
+            workspace_instructions,
+            user_instructions,
+        }
+    }
+
     /// Creates an instruction processor from the loaded MOA configuration.
     pub fn from_config(config: &MoaConfig) -> Self {
-        Self {
-            workspace_instructions: config.general.workspace_instructions.clone(),
-            user_instructions: config.general.user_instructions.clone(),
-        }
+        Self::new(
+            config.general.workspace_instructions.clone(),
+            config.general.user_instructions.clone(),
+        )
     }
 }
 

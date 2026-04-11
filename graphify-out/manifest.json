@@ -95,7 +95,7 @@
   "moa-hands/src/local.rs": 1775878402.1040738,
   "moa-hands/src/daytona.rs": 1775841119.2240832,
   "moa-hands/src/lib.rs": 1775857718.0081663,
-  "moa-hands/src/router.rs": 1775879611.4949095,
+  "moa-hands/src/router.rs": 1775881345.0208292,
   "moa-hands/src/mcp.rs": 1775841119.2244742,
   "moa-hands/src/tools/docker_file.rs": 1775845995.6196194,
   "moa-hands/src/tools/file_search.rs": 1775845995.619889,
@@ -113,21 +113,26 @@
   "moa-brain/src/harness.rs": 1775879611.493348,
   "moa-brain/src/compaction.rs": 1775878402.103405,
   "moa-brain/src/pipeline/cache.rs": 1775857718.0073583,
-  "moa-brain/src/pipeline/instructions.rs": 1775840261.5993755,
+  "moa-brain/src/pipeline/instructions.rs": 1775881810.5821767,
   "moa-brain/src/pipeline/tools.rs": 1775857718.0076365,
   "moa-brain/src/pipeline/memory.rs": 1775847138.1533923,
   "moa-brain/src/pipeline/skills.rs": 1775840261.6000698,
-  "moa-brain/src/pipeline/identity.rs": 1775840261.5991344,
-  "moa-brain/src/pipeline/mod.rs": 1775879611.493559,
+  "moa-brain/src/pipeline/identity.rs": 1775881810.5816512,
+  "moa-brain/src/pipeline/mod.rs": 1775881626.8088262,
   "moa-brain/src/pipeline/history.rs": 1775853853.2404208,
-  "moa-eval/tests/loader.rs": 1775880110.7967412,
-  "moa-eval/src/types.rs": 1775880035.2791286,
-  "moa-eval/src/reporter.rs": 1775880035.2788992,
-  "moa-eval/src/error.rs": 1775880035.2787554,
-  "moa-eval/src/lib.rs": 1775880048.0884523,
-  "moa-eval/src/results.rs": 1775880035.2790284,
-  "moa-eval/src/evaluator.rs": 1775880048.0883188,
-  "moa-eval/src/loader.rs": 1775880035.2792058,
+  "moa-eval/tests/engine_live.rs": 1775881911.5803964,
+  "moa-eval/tests/loader.rs": 1775880336.0995395,
+  "moa-eval/src/collector.rs": 1775881810.6206813,
+  "moa-eval/src/types.rs": 1775880336.0969136,
+  "moa-eval/src/reporter.rs": 1775880336.0937793,
+  "moa-eval/src/error.rs": 1775881368.0062544,
+  "moa-eval/src/lib.rs": 1775881368.0061114,
+  "moa-eval/src/results.rs": 1775880336.0953958,
+  "moa-eval/src/plan.rs": 1775881850.5851908,
+  "moa-eval/src/evaluator.rs": 1775880336.0890086,
+  "moa-eval/src/loader.rs": 1775880336.092602,
+  "moa-eval/src/engine.rs": 1775881850.58553,
+  "moa-eval/src/setup.rs": 1775881865.7414052,
   "moa-skills/tests/skills.rs": 1775857718.0086646,
   "moa-skills/src/format.rs": 1775857718.0085053,
   "moa-skills/src/registry.rs": 1775839600.8586621,
@@ -141,11 +146,11 @@
     "2": "TUI Chat Runtime",
     "3": "File Memory Store",
     "4": "Memory Pipeline & Views",
-    "5": "Brain Turn Tests",
-    "6": "Skill Document Format",
+    "5": "Skill Document Format",
+    "6": "Brain Turn Tests",
     "7": "Local Orchestrator",
-    "8": "Provider Common Layer",
-    "9": "Tool Router & Policies",
+    "8": "Tool Router & Policies",
+    "9": "Provider Common Layer",
     "10": "Config & Errors",
     "11": "Temporal Orchestrator",
     "12": "Postgres Session Store",
@@ -155,74 +160,76 @@
     "16": "CLI Entry Point",
     "17": "Settings View",
     "18": "Neon Branch Manager",
-    "19": "Memory Consolidation",
-    "20": "Brain Turn Execution",
-    "21": "Daemon Service",
-    "22": "Message Renderer",
-    "23": "Temporal Orchestrator Tests",
-    "24": "Diff View",
-    "25": "Discord Adapter",
-    "26": "E2B Sandbox Provider",
-    "27": "Slack Adapter",
-    "28": "Wiki & Memory Branching",
-    "29": "MCP Client",
-    "30": "MCP Credential Proxy",
-    "31": "Daytona Workspace Provider",
-    "32": "Telegram Adapter",
-    "33": "Local Tool Tests",
-    "34": "Docker File Operations",
-    "35": "Skill Injection Stage",
-    "36": "History Compilation Stage",
-    "37": "Approval Card Widget",
-    "38": "Pipeline & Session Helpers",
-    "39": "LLM Span Instrumentation",
-    "40": "Prompt Widget",
-    "41": "Session Database Backend",
-    "42": "Full Text Search",
-    "43": "CLI API Server",
-    "44": "Session Picker View",
-    "45": "Tool Approval Policies",
-    "46": "Skill Improver & Distiller",
-    "47": "OpenAI Provider Tests",
-    "48": "Daytona Live Tests",
-    "49": "Memory Maintenance Tests",
-    "50": "Session Store Tests",
-    "51": "E2B Live Tests",
-    "52": "Encrypted Secret Vault",
-    "53": "Core Event Model",
-    "54": "Command Palette",
-    "55": "MCP Router Tests",
-    "56": "Injection Detection",
-    "57": "TUI Keybindings",
-    "58": "Toolbar Widget",
-    "59": "Live Provider Roundtrip Tests",
-    "60": "Memory Store Tests",
-    "61": "Postgres Store Tests",
-    "62": "OpenAI Schema Compiler",
-    "63": "Tool Card Widget",
-    "64": "Neon Branch Manager Tests",
-    "65": "Live Provider Matrix Tests",
-    "66": "Temporal Worker Helper",
-    "67": "Stub Tool Definition",
-    "68": "Instruction Stage",
-    "69": "Chat View",
-    "70": "Bash Tool",
-    "71": "Cache Optimizer Stage",
-    "72": "Identity Stage",
-    "73": "CLI Exec Mode",
-    "74": "Sidebar Widget",
-    "75": "Anthropic Provider Tests",
-    "76": "File Search Tool",
-    "77": "Chat Harness Example",
-    "78": "Mock MCP Server",
-    "79": "TUI Workflow Tests",
-    "80": "Turso Schema Migration",
-    "81": "OpenAI Live Test",
-    "82": "OpenRouter Live Test",
-    "83": "Anthropic Live Test",
-    "84": "Docker Hardening Test",
-    "85": "Brain Live Harness Test",
-    "86": "Compaction"
+    "19": "Eval Execution Engine",
+    "20": "Memory Consolidation",
+    "21": "Brain Turn Execution",
+    "22": "Daemon Service",
+    "23": "Message Renderer",
+    "24": "Temporal Orchestrator Tests",
+    "25": "Diff View",
+    "26": "Discord Adapter",
+    "27": "E2B Sandbox Provider",
+    "28": "Slack Adapter",
+    "29": "Wiki & Memory Branching",
+    "30": "MCP Client",
+    "31": "Eval Agent Setup",
+    "32": "MCP Credential Proxy",
+    "33": "Daytona Workspace Provider",
+    "34": "Telegram Adapter",
+    "35": "Local Tool Tests",
+    "36": "Docker File Operations",
+    "37": "Skill Injection Stage",
+    "38": "History Compilation Stage",
+    "39": "Approval Card Widget",
+    "40": "Pipeline & Session Helpers",
+    "41": "LLM Span Instrumentation",
+    "42": "Prompt Widget",
+    "43": "Session Database Backend",
+    "44": "Full Text Search",
+    "45": "CLI API Server",
+    "46": "Session Picker View",
+    "47": "Tool Approval Policies",
+    "48": "OpenAI Provider Tests",
+    "49": "Daytona Live Tests",
+    "50": "Memory Maintenance Tests",
+    "51": "Session Store Tests",
+    "52": "E2B Live Tests",
+    "53": "Encrypted Secret Vault",
+    "54": "Core Event Model",
+    "55": "Command Palette",
+    "56": "MCP Router Tests",
+    "57": "Injection Detection",
+    "58": "TUI Keybindings",
+    "59": "Toolbar Widget",
+    "60": "Live Provider Roundtrip Tests",
+    "61": "Memory Store Tests",
+    "62": "Postgres Store Tests",
+    "63": "OpenAI Schema Compiler",
+    "64": "Tool Card Widget",
+    "65": "Neon Branch Manager Tests",
+    "66": "Live Provider Matrix Tests",
+    "67": "Temporal Worker Helper",
+    "68": "Stub Tool Definition",
+    "69": "Instruction Stage",
+    "70": "Identity Stage",
+    "71": "Chat View",
+    "72": "Bash Tool",
+    "73": "Cache Optimizer Stage",
+    "74": "CLI Exec Mode",
+    "75": "Sidebar Widget",
+    "76": "Anthropic Provider Tests",
+    "77": "File Search Tool",
+    "78": "Chat Harness Example",
+    "79": "Mock MCP Server",
+    "80": "TUI Workflow Tests",
+    "81": "Turso Schema Migration",
+    "82": "OpenAI Live Test",
+    "83": "OpenRouter Live Test",
+    "84": "Anthropic Live Test",
+    "85": "Docker Hardening Test",
+    "86": "Brain Live Harness Test",
+    "87": "Compaction",
+    "88": "Eval Live Tests"
   },
   "community_signatures": {
     "0": [
@@ -906,6 +913,90 @@
       "memory_wikilinks_from_page"
     ],
     "5": [
+      "distiller",
+      "distiller_build_distillation_prompt",
+      "distiller_count_tool_calls",
+      "distiller_extract_task_summary",
+      "distiller_find_similar_skill",
+      "distiller_maybe_distill_skill",
+      "distiller_normalize_new_skill",
+      "distiller_similarity_score",
+      "distiller_tokenize",
+      "format",
+      "format_build_skill_path",
+      "format_confidence_for_skill",
+      "format_defaults_missing_moa_metadata",
+      "format_deserialize_allowed_tools",
+      "format_estimate_skill_tokens",
+      "format_format_timestamp",
+      "format_humanize_skill_name",
+      "format_is_valid_skill_name",
+      "format_metadata_csv",
+      "format_parse_skill_markdown",
+      "format_parses_valid_skill_markdown",
+      "format_rejects_invalid_skill_markdown",
+      "format_render_skill_markdown",
+      "format_renders_skill_markdown",
+      "format_roundtrips_skill_markdown_through_wiki_page",
+      "format_serialize_allowed_tools",
+      "format_skill_from_wiki_page",
+      "format_skill_metadata_from_document",
+      "format_skill_metadata_from_page",
+      "format_skilldocument",
+      "format_skillfrontmatter",
+      "format_skillfrontmatter_auto_generated",
+      "format_skillfrontmatter_created",
+      "format_skillfrontmatter_estimated_tokens",
+      "format_skillfrontmatter_insert_metadata",
+      "format_skillfrontmatter_last_used",
+      "format_skillfrontmatter_metadata_bool",
+      "format_skillfrontmatter_metadata_f32",
+      "format_skillfrontmatter_metadata_string",
+      "format_skillfrontmatter_metadata_timestamp",
+      "format_skillfrontmatter_metadata_u32",
+      "format_skillfrontmatter_metadata_usize",
+      "format_skillfrontmatter_metadata_value",
+      "format_skillfrontmatter_one_liner",
+      "format_skillfrontmatter_set_auto_generated",
+      "format_skillfrontmatter_set_created",
+      "format_skillfrontmatter_set_improved_from",
+      "format_skillfrontmatter_set_last_used",
+      "format_skillfrontmatter_set_metadata_csv",
+      "format_skillfrontmatter_set_optional_metadata",
+      "format_skillfrontmatter_set_source_session",
+      "format_skillfrontmatter_set_success_rate",
+      "format_skillfrontmatter_set_tags",
+      "format_skillfrontmatter_set_updated",
+      "format_skillfrontmatter_set_use_count",
+      "format_skillfrontmatter_set_version",
+      "format_skillfrontmatter_success_rate",
+      "format_skillfrontmatter_tags",
+      "format_skillfrontmatter_updated",
+      "format_skillfrontmatter_use_count",
+      "format_skillfrontmatter_version",
+      "format_slugifies_skill_names_consistently",
+      "format_slugify_skill_name",
+      "format_split_frontmatter",
+      "format_validate_skill_document",
+      "format_wiki_page_from_skill",
+      "improver",
+      "improver_blended_success_rate",
+      "improver_build_improvement_prompt",
+      "improver_bump_version",
+      "improver_format_events_for_learning",
+      "improver_maybe_improve_skill",
+      "improver_normalize_llm_markdown",
+      "improver_record_successful_use",
+      "improver_record_successful_use_with_baseline",
+      "registry",
+      "registry_skillregistry",
+      "registry_skillregistry_ensure_loaded",
+      "registry_skillregistry_list_for_pipeline",
+      "registry_skillregistry_load",
+      "registry_skillregistry_load_full",
+      "registry_skillregistry_new"
+    ],
+    "6": [
       "brain_turn",
       "brain_turn_always_allow_rule_persists_and_skips_next_approval",
       "brain_turn_canary_leaks_in_tool_input_are_detected_and_blocked",
@@ -974,72 +1065,6 @@
       "brain_turn_toolloopllmprovider_complete",
       "brain_turn_toolloopllmprovider_name"
     ],
-    "6": [
-      "format",
-      "format_build_skill_path",
-      "format_confidence_for_skill",
-      "format_defaults_missing_moa_metadata",
-      "format_deserialize_allowed_tools",
-      "format_estimate_skill_tokens",
-      "format_format_timestamp",
-      "format_humanize_skill_name",
-      "format_is_valid_skill_name",
-      "format_metadata_csv",
-      "format_parse_skill_markdown",
-      "format_parses_valid_skill_markdown",
-      "format_rejects_invalid_skill_markdown",
-      "format_render_skill_markdown",
-      "format_renders_skill_markdown",
-      "format_roundtrips_skill_markdown_through_wiki_page",
-      "format_serialize_allowed_tools",
-      "format_skill_from_wiki_page",
-      "format_skill_metadata_from_document",
-      "format_skill_metadata_from_page",
-      "format_skilldocument",
-      "format_skillfrontmatter",
-      "format_skillfrontmatter_auto_generated",
-      "format_skillfrontmatter_created",
-      "format_skillfrontmatter_estimated_tokens",
-      "format_skillfrontmatter_insert_metadata",
-      "format_skillfrontmatter_last_used",
-      "format_skillfrontmatter_metadata_bool",
-      "format_skillfrontmatter_metadata_f32",
-      "format_skillfrontmatter_metadata_string",
-      "format_skillfrontmatter_metadata_timestamp",
-      "format_skillfrontmatter_metadata_u32",
-      "format_skillfrontmatter_metadata_usize",
-      "format_skillfrontmatter_metadata_value",
-      "format_skillfrontmatter_one_liner",
-      "format_skillfrontmatter_set_auto_generated",
-      "format_skillfrontmatter_set_created",
-      "format_skillfrontmatter_set_improved_from",
-      "format_skillfrontmatter_set_last_used",
-      "format_skillfrontmatter_set_metadata_csv",
-      "format_skillfrontmatter_set_optional_metadata",
-      "format_skillfrontmatter_set_source_session",
-      "format_skillfrontmatter_set_success_rate",
-      "format_skillfrontmatter_set_tags",
-      "format_skillfrontmatter_set_updated",
-      "format_skillfrontmatter_set_use_count",
-      "format_skillfrontmatter_set_version",
-      "format_skillfrontmatter_success_rate",
-      "format_skillfrontmatter_tags",
-      "format_skillfrontmatter_updated",
-      "format_skillfrontmatter_use_count",
-      "format_skillfrontmatter_version",
-      "format_slugifies_skill_names_consistently",
-      "format_slugify_skill_name",
-      "format_split_frontmatter",
-      "format_validate_skill_document",
-      "format_wiki_page_from_skill",
-      "registry",
-      "registry_skillregistry",
-      "registry_skillregistry_ensure_loaded",
-      "registry_skillregistry_list_for_pipeline",
-      "registry_skillregistry_load",
-      "registry_skillregistry_load_full",
-      "registry_skillregistry_new"
-    ],
     "7": [
       "local",
       "local_accept_user_message",
@@ -1106,6 +1131,70 @@
       "tools_tooldefinitionprocessor_stage"
     ],
     "8": [
+      "router",
+      "router_approval_diffs_for",
+      "router_approval_fields_for",
+      "router_approval_pattern_for",
+      "router_default_cloud_provider",
+      "router_execute_tool_policy",
+      "router_expand_local_path",
+      "router_hand_id",
+      "router_language_hint_for_path",
+      "router_normalized_input_for",
+      "router_preparedtoolinvocation",
+      "router_preparedtoolinvocation_approval_prompt",
+      "router_preparedtoolinvocation_input_summary",
+      "router_preparedtoolinvocation_policy",
+      "router_preparedtoolinvocation_policy_input",
+      "router_read_existing_text_file",
+      "router_record_tool_execution_result",
+      "router_record_tool_invocation_metadata",
+      "router_registeredtool",
+      "router_registeredtool_builtin",
+      "router_registeredtool_hand",
+      "router_registeredtool_mcp",
+      "router_required_string_field",
+      "router_sandbox_tier_label",
+      "router_session_provider_key",
+      "router_single_approval_field",
+      "router_summary_for",
+      "router_tool_execution_span",
+      "router_toolexecution",
+      "router_toolregistry",
+      "router_toolregistry_default",
+      "router_toolregistry_default_local",
+      "router_toolregistry_default_tool_schemas",
+      "router_toolregistry_get",
+      "router_toolregistry_new",
+      "router_toolregistry_register_builtin",
+      "router_toolregistry_register_hand",
+      "router_toolregistry_register_mcp_tool",
+      "router_toolregistry_retain_only",
+      "router_toolregistry_retarget_hand_tools",
+      "router_toolrouter",
+      "router_toolrouter_check_policy",
+      "router_toolrouter_describe_invocation",
+      "router_toolrouter_execute",
+      "router_toolrouter_execute_authorized",
+      "router_toolrouter_execute_authorized_inner",
+      "router_toolrouter_execute_authorized_with_cancel",
+      "router_toolrouter_from_config",
+      "router_toolrouter_get_or_provision_hand",
+      "router_toolrouter_has_tool",
+      "router_toolrouter_load_mcp_servers",
+      "router_toolrouter_new",
+      "router_toolrouter_new_local",
+      "router_toolrouter_prepare_invocation",
+      "router_toolrouter_store_approval_rule",
+      "router_toolrouter_tool_names",
+      "router_toolrouter_tool_schemas",
+      "router_toolrouter_with_enabled_tools",
+      "router_toolrouter_with_mcp_proxy",
+      "router_toolrouter_with_policies",
+      "router_toolrouter_with_rule_store",
+      "router_truncate_tool_span_text"
+    ],
+    "9": [
       "common",
       "common_build_function_tool",
       "common_build_http_client",
@@ -1165,67 +1254,6 @@
       "openrouter_openrouterprovider_new_with_reasoning_effort",
       "openrouter_openrouterprovider_with_api_base",
       "openrouter_openrouterprovider_with_max_retries"
-    ],
-    "9": [
-      "router",
-      "router_approval_diffs_for",
-      "router_approval_fields_for",
-      "router_approval_pattern_for",
-      "router_default_cloud_provider",
-      "router_execute_tool_policy",
-      "router_expand_local_path",
-      "router_hand_id",
-      "router_language_hint_for_path",
-      "router_normalized_input_for",
-      "router_preparedtoolinvocation",
-      "router_preparedtoolinvocation_approval_prompt",
-      "router_preparedtoolinvocation_input_summary",
-      "router_preparedtoolinvocation_policy",
-      "router_preparedtoolinvocation_policy_input",
-      "router_read_existing_text_file",
-      "router_record_tool_execution_result",
-      "router_record_tool_invocation_metadata",
-      "router_registeredtool",
-      "router_registeredtool_builtin",
-      "router_registeredtool_hand",
-      "router_registeredtool_mcp",
-      "router_required_string_field",
-      "router_sandbox_tier_label",
-      "router_session_provider_key",
-      "router_single_approval_field",
-      "router_summary_for",
-      "router_tool_execution_span",
-      "router_toolexecution",
-      "router_toolregistry",
-      "router_toolregistry_default",
-      "router_toolregistry_default_local",
-      "router_toolregistry_default_tool_schemas",
-      "router_toolregistry_get",
-      "router_toolregistry_new",
-      "router_toolregistry_register_builtin",
-      "router_toolregistry_register_hand",
-      "router_toolregistry_register_mcp_tool",
-      "router_toolregistry_retarget_hand_tools",
-      "router_toolrouter",
-      "router_toolrouter_check_policy",
-      "router_toolrouter_describe_invocation",
-      "router_toolrouter_execute",
-      "router_toolrouter_execute_authorized",
-      "router_toolrouter_execute_authorized_inner",
-      "router_toolrouter_execute_authorized_with_cancel",
-      "router_toolrouter_from_config",
-      "router_toolrouter_get_or_provision_hand",
-      "router_toolrouter_load_mcp_servers",
-      "router_toolrouter_new",
-      "router_toolrouter_new_local",
-      "router_toolrouter_prepare_invocation",
-      "router_toolrouter_store_approval_rule",
-      "router_toolrouter_tool_names",
-      "router_toolrouter_tool_schemas",
-      "router_toolrouter_with_mcp_proxy",
-      "router_toolrouter_with_policies",
-      "router_toolrouter_with_rule_store",
-      "router_truncate_tool_span_text"
     ],
     "10": [
       "config",
@@ -1717,6 +1745,56 @@
       "neon_teststate"
     ],
     "19": [
+      "collector",
+      "collector_collectedexecution",
+      "collector_collector_tracks_tool_steps_and_metrics",
+      "collector_estimate_cost",
+      "collector_trajectorycollector",
+      "collector_trajectorycollector_ensure_step",
+      "collector_trajectorycollector_finish",
+      "collector_trajectorycollector_metrics",
+      "collector_trajectorycollector_new",
+      "collector_trajectorycollector_process_event",
+      "collector_trajectorycollector_process_events",
+      "collector_trajectorycollector_render_json",
+      "collector_trajectorycollector_render_text",
+      "collector_trajectorycollector_response",
+      "collector_trajectorycollector_steps",
+      "collector_truncate",
+      "engine",
+      "engine_build_error_result",
+      "engine_cleanup_workspace",
+      "engine_dry_run_marks_results_skipped",
+      "engine_engineoptions",
+      "engine_engineoptions_default",
+      "engine_evalengine",
+      "engine_evalengine_new",
+      "engine_evalengine_plan",
+      "engine_evalengine_run_single",
+      "engine_evalengine_run_single_with_timeout",
+      "engine_evalengine_run_suite",
+      "engine_evalrun",
+      "engine_extract_trace_id",
+      "engine_fs_try_exists",
+      "engine_mockprovider",
+      "engine_mockprovider_capabilities",
+      "engine_mockprovider_complete",
+      "engine_mockprovider_name",
+      "engine_plan_reports_matrix_size",
+      "engine_run_environment",
+      "engine_run_environment_collects_response_and_metrics",
+      "engine_run_suite_preserves_config_case_order_in_parallel_mode",
+      "engine_runsummary",
+      "engine_runsummary_from_results",
+      "plan",
+      "plan_build_eval_plan",
+      "plan_estimate_run_cost_range",
+      "plan_estimate_tokens",
+      "plan_evalplan",
+      "plan_plan_counts_all_runs",
+      "plan_price_for_tokens"
+    ],
+    "20": [
       "consolidation",
       "consolidation_canonical_port_claims",
       "consolidation_confidence_rank",
@@ -1765,7 +1843,7 @@
       "ingest_split_inline_items",
       "ingest_upsert_derived_page"
     ],
-    "20": [
+    "21": [
       "harness",
       "harness_append_event",
       "harness_approval_decision_label",
@@ -1809,7 +1887,7 @@
       "turn_streamedcompletion",
       "turn_streamsignaldisposition"
     ],
-    "21": [
+    "22": [
       "daemon",
       "daemon_daemon_create_session_uses_explicit_client_scope",
       "daemon_daemon_health_endpoint_responds_when_cloud_enabled",
@@ -1851,7 +1929,7 @@
       "daemon_write_reply",
       "daemon_write_stream_event"
     ],
-    "22": [
+    "23": [
       "renderer",
       "renderer_append_piece",
       "renderer_discord_renderer_attaches_buttons_to_last_chunk_only",
@@ -1893,7 +1971,7 @@
       "renderer_tool_status_color",
       "renderer_tool_status_icon"
     ],
-    "23": [
+    "24": [
       "temporal_orchestrator",
       "temporal_orchestrator_brain_response_texts",
       "temporal_orchestrator_build_temporal_helper_binary",
@@ -1934,7 +2012,7 @@
       "temporal_orchestrator_wait_for_store_status",
       "temporal_orchestrator_wait_for_tool_result"
     ],
-    "24": [
+    "25": [
       "diff",
       "diff_build_diff_file_view",
       "diff_default_mode_for_width",
@@ -1971,7 +2049,7 @@
       "diff_truncate_to_width",
       "diff_unifiedline"
     ],
-    "25": [
+    "26": [
       "discord",
       "discord_approval_callback_maps_to_control_message",
       "discord_attachments_from_message",
@@ -2008,7 +2086,7 @@
       "discord_inbound_from_message",
       "discord_is_thread_kind"
     ],
-    "26": [
+    "27": [
       "e2b",
       "e2b_build_url",
       "e2b_connectedsandbox",
@@ -2045,7 +2123,7 @@
       "e2b_required_string_field",
       "e2b_shell_escape"
     ],
-    "27": [
+    "28": [
       "slack",
       "slack_handle_interaction_event",
       "slack_handle_push_event",
@@ -2081,7 +2159,7 @@
       "slack_slackmessageref_thread_anchor",
       "slack_slacktarget"
     ],
-    "28": [
+    "29": [
       "branching",
       "branching_append_change_manifest",
       "branching_branch_dir",
@@ -2114,7 +2192,7 @@
       "wiki_wiki_page_roundtrip",
       "wiki_yaml_to_json_value"
     ],
-    "29": [
+    "30": [
       "mcp",
       "mcp_flatten_call_result",
       "mcp_flatten_tool_result_aggregates_text_items",
@@ -2146,7 +2224,39 @@
       "mcp_toolslistresponse",
       "mcp_write_framed_message"
     ],
-    "30": [
+    "31": [
+      "setup",
+      "setup_agentenvironment",
+      "setup_apply_skill_overrides",
+      "setup_build_agent_environment",
+      "setup_build_agent_environment_with_provider",
+      "setup_build_eval_policies",
+      "setup_build_pipeline",
+      "setup_build_tool_router",
+      "setup_clear_workspace_skills",
+      "setup_compose_identity_prompt",
+      "setup_configured_default_memory_root",
+      "setup_copy_dir_contents",
+      "setup_copy_dir_contents_if_exists",
+      "setup_expand_local_path",
+      "setup_load_skill_page",
+      "setup_load_workspace_instructions",
+      "setup_mockprovider",
+      "setup_mockprovider_capabilities",
+      "setup_mockprovider_complete",
+      "setup_mockprovider_name",
+      "setup_refresh_indices",
+      "setup_resolve_enabled_tools",
+      "setup_resolve_path",
+      "setup_seed_memory",
+      "setup_setup_copies_workspace_memory_snapshot",
+      "setup_setup_respects_tool_allowlist",
+      "setup_skill_selector_matches",
+      "setup_slugify_name",
+      "setup_slugify_preserves_eval_prefix",
+      "setup_validate_named_tools"
+    ],
+    "32": [
       "mcp_proxy",
       "mcp_proxy_credential_from_env",
       "mcp_proxy_default_scope_for",
@@ -2177,7 +2287,7 @@
       "mcp_proxy_proxy_creates_tokens_and_injects_headers",
       "mcp_proxy_proxygrant"
     ],
-    "31": [
+    "33": [
       "daytona",
       "daytona_build_url",
       "daytona_daytonahandprovider",
@@ -2207,7 +2317,7 @@
       "daytona_provisions_executes_and_destroys_workspace",
       "daytona_required_string_field"
     ],
-    "32": [
+    "34": [
       "telegram",
       "telegram_channel_from_chat_and_reply",
       "telegram_handle_callback_query",
@@ -2236,7 +2346,7 @@
       "telegram_telegrammessageref_from_message",
       "telegram_telegramtarget"
     ],
-    "33": [
+    "35": [
       "local_tools",
       "local_tools_bash_captures_stdout_and_stderr",
       "local_tools_bash_respects_timeout",
@@ -2264,7 +2374,7 @@
       "local_tools_sample_page",
       "local_tools_session"
     ],
-    "34": [
+    "36": [
       "docker_file",
       "docker_file_container_path_validation_accepts_workspace_absolute_paths",
       "docker_file_container_path_validation_rejects_absolute_paths_outside_workspace",
@@ -2292,7 +2402,7 @@
       "file_write_execute_docker",
       "file_write_filewriteinput"
     ],
-    "35": [
+    "37": [
       "skills",
       "skills_distills_skill_after_tool_heavy_session",
       "skills_improves_existing_skill_when_better_flow_is_found",
@@ -2320,7 +2430,7 @@
       "skills_stubskillmemorystore_write_page",
       "skills_tool_rich_events"
     ],
-    "36": [
+    "38": [
       "history",
       "history_capabilities",
       "history_event_record",
@@ -2348,7 +2458,7 @@
       "history_mocksessionstore_store_pending_signal",
       "history_mocksessionstore_update_status"
     ],
-    "37": [
+    "39": [
       "approval",
       "approval_approval_buttons",
       "approval_approval_card_uses_expected_border_color_for_each_risk_level",
@@ -2374,7 +2484,7 @@
       "approval_truncate_to_width",
       "approval_wrap_text"
     ],
-    "38": [
+    "40": [
       "mod",
       "mod_build_default_pipeline",
       "mod_build_default_pipeline_with_tools",
@@ -2400,7 +2510,7 @@
       "mod_teststage_process",
       "mod_teststage_stage"
     ],
-    "39": [
+    "41": [
       "instrumentation",
       "instrumentation_calculate_cost",
       "instrumentation_calculate_cost_with_cached",
@@ -2425,7 +2535,7 @@
       "instrumentation_serialize_output_text",
       "instrumentation_truncate_attribute_value"
     ],
-    "40": [
+    "42": [
       "prompt",
       "prompt_build_textarea",
       "prompt_byte_index_for_char_position",
@@ -2448,7 +2558,7 @@
       "prompt_promptwidget_text",
       "prompt_render_completion_menu"
     ],
-    "41": [
+    "43": [
       "backend",
       "backend_create_session_store",
       "backend_sessiondatabase",
@@ -2471,7 +2581,7 @@
       "backend_sessiondatabase_upsert_approval_rule",
       "backend_sessiondatabase_wake"
     ],
-    "42": [
+    "44": [
       "fts",
       "fts_build_fts_query",
       "fts_confidence_to_db",
@@ -2492,7 +2602,7 @@
       "fts_parse_timestamp",
       "fts_scope_key"
     ],
-    "43": [
+    "45": [
       "api",
       "api_apistate",
       "api_build_api_router",
@@ -2513,7 +2623,7 @@
       "api_stuborchestrator_start_session",
       "api_two_sse_subscribers_receive_the_same_runtime_event"
     ],
-    "44": [
+    "46": [
       "sessions",
       "sessions_centered_rect",
       "sessions_filtered_sessions",
@@ -2534,7 +2644,7 @@
       "sessions_sessionpickerstate_selected_session_id",
       "sessions_status_icon"
     ],
-    "45": [
+    "47": [
       "policies",
       "policies_approvalrulestore",
       "policies_glob_match",
@@ -2554,27 +2664,7 @@
       "policies_toolpolicycontext",
       "policies_toolpolicycontext_from_session"
     ],
-    "46": [
-      "distiller",
-      "distiller_build_distillation_prompt",
-      "distiller_count_tool_calls",
-      "distiller_extract_task_summary",
-      "distiller_find_similar_skill",
-      "distiller_maybe_distill_skill",
-      "distiller_normalize_new_skill",
-      "distiller_similarity_score",
-      "distiller_tokenize",
-      "improver",
-      "improver_blended_success_rate",
-      "improver_build_improvement_prompt",
-      "improver_bump_version",
-      "improver_format_events_for_learning",
-      "improver_maybe_improve_skill",
-      "improver_normalize_llm_markdown",
-      "improver_record_successful_use",
-      "improver_record_successful_use_with_baseline"
-    ],
-    "47": [
+    "48": [
       "openai_provider",
       "openai_provider_openai_provider_does_not_retry_after_partial_stream_output",
       "openai_provider_openai_provider_drops_oversized_metadata_values",
@@ -2593,7 +2683,7 @@
       "openai_provider_sse_response",
       "openai_provider_tool_call_stream"
     ],
-    "48": [
+    "49": [
       "daytona_live",
       "daytona_live_daytona_live_provider_handles_roundtrip_and_lifecycle",
       "daytona_live_daytona_live_router_lazy_provisions_reuses_and_isolates_sessions",
@@ -2612,7 +2702,7 @@
       "daytona_live_wait_for_destroyed",
       "daytona_live_wait_for_status"
     ],
-    "49": [
+    "50": [
       "maintenance",
       "maintenance_branch_reconciliation_merges_conflicting_writes",
       "maintenance_consolidation_decays_confidence_once_and_is_stable_on_repeat_runs",
@@ -2630,7 +2720,7 @@
       "maintenance_seededrng_next_usize",
       "maintenance_validate_memory_invariants"
     ],
-    "50": [
+    "51": [
       "session_store",
       "session_store_approval_rules_round_trip",
       "session_store_cloud_sync_requires_file_backed_session_db",
@@ -2648,7 +2738,7 @@
       "session_store_wake_returns_unresolved_pending_signals",
       "session_store_wake_without_checkpoint_returns_all_events"
     ],
-    "51": [
+    "52": [
       "e2b_live",
       "e2b_live_destroy_and_wait",
       "e2b_live_e2b_live_provider_handles_roundtrip_and_lifecycle",
@@ -2666,7 +2756,7 @@
       "e2b_live_session",
       "e2b_live_wait_for_destroyed"
     ],
-    "52": [
+    "53": [
       "vault",
       "vault_decrypt_bytes",
       "vault_encrypt_bytes",
@@ -2683,7 +2773,7 @@
       "vault_filevault_persist_store",
       "vault_filevault_set"
     ],
-    "53": [
+    "54": [
       "events",
       "events_all_event_types_serialize",
       "events_approval_requested_event_round_trips_full_prompt",
@@ -2699,7 +2789,7 @@
       "events_sample_approval_prompt",
       "events_tool_result_event_deserializes_without_provider_tool_use_id"
     ],
-    "54": [
+    "55": [
       "palette",
       "palette_centered_rect",
       "palette_filtered_actions",
@@ -2715,7 +2805,7 @@
       "palette_palettestate_selected_action",
       "palette_render_palette"
     ],
-    "55": [
+    "56": [
       "mcp_router",
       "mcp_router_emptymemorystore",
       "mcp_router_emptymemorystore_delete_page",
@@ -2731,7 +2821,7 @@
       "mcp_router_router_injects_mcp_credentials_via_proxy",
       "mcp_router_session"
     ],
-    "56": [
+    "57": [
       "injection",
       "injection_canary_detection_works",
       "injection_check_canary",
@@ -2746,7 +2836,7 @@
       "injection_working_context",
       "injection_wrap_untrusted_tool_output"
     ],
-    "57": [
+    "58": [
       "keybindings",
       "keybindings_approval_shortcuts_only_activate_while_waiting",
       "keybindings_command_palette_memory_and_settings_have_dedicated_maps",
@@ -2760,7 +2850,7 @@
       "keybindings_tab_accepts_completion_in_chat_mode",
       "keybindings_tab_and_session_shortcuts_map_correctly"
     ],
-    "58": [
+    "59": [
       "toolbar",
       "toolbar_build_tab_spans",
       "toolbar_preview",
@@ -2774,7 +2864,7 @@
       "toolbar_visible_window",
       "toolbar_visible_window_caps_tabs_to_requested_limit"
     ],
-    "59": [
+    "60": [
       "live_provider_roundtrip",
       "live_provider_roundtrip_available_live_providers",
       "live_provider_roundtrip_live_orchestrator_with_provider",
@@ -2788,7 +2878,7 @@
       "live_provider_roundtrip_wait_for_final_response",
       "live_provider_roundtrip_wait_for_status"
     ],
-    "60": [
+    "61": [
       "memory_store",
       "memory_store_create_read_update_and_delete_wiki_pages",
       "memory_store_delete_page_removes_only_the_requested_scope",
@@ -2800,7 +2890,7 @@
       "memory_store_user_and_workspace_scopes_are_separate",
       "memory_store_write_page_creates_and_reads_pages_in_explicit_scopes"
     ],
-    "61": [
+    "62": [
       "postgres_store",
       "postgres_store_cleanup_schema",
       "postgres_store_create_test_store",
@@ -2812,7 +2902,7 @@
       "postgres_store_quote_identifier",
       "postgres_store_with_test_store"
     ],
-    "62": [
+    "63": [
       "schema",
       "schema_compile_for_openai_strict",
       "schema_compile_for_openai_strict_adds_additional_properties_false_recursively",
@@ -2824,7 +2914,7 @@
       "schema_make_strict_compatible",
       "schema_strip_validation_keywords"
     ],
-    "63": [
+    "64": [
       "tool_card",
       "tool_card_border_line",
       "tool_card_content_line",
@@ -2835,7 +2925,7 @@
       "tool_card_truncate_to_width",
       "tool_card_wrap_text"
     ],
-    "64": [
+    "65": [
       "neon_branch_manager",
       "neon_branch_manager_live_neon_config",
       "neon_branch_manager_live_neon_config_with_limit",
@@ -2845,7 +2935,7 @@
       "neon_branch_manager_neon_checkpoint_cleanup_without_expired_branches_returns_zero",
       "neon_branch_manager_wait_for_workspace_session_count"
     ],
-    "65": [
+    "66": [
       "live_provider_matrix",
       "live_provider_matrix_available_live_providers",
       "live_provider_matrix_emit_token_tool",
@@ -2855,7 +2945,7 @@
       "live_provider_matrix_liveprovider_complete",
       "live_provider_matrix_liveprovider_label"
     ],
-    "66": [
+    "67": [
       "temporal_worker_helper",
       "temporal_worker_helper_helper_config",
       "temporal_worker_helper_helperprovider",
@@ -2865,7 +2955,7 @@
       "temporal_worker_helper_main",
       "temporal_worker_helper_main_impl"
     ],
-    "67": [
+    "68": [
       "stub",
       "stub_stubtool",
       "stub_stubtool_description",
@@ -2875,16 +2965,27 @@
       "stub_stubtool_new",
       "stub_stubtool_policy_spec"
     ],
-    "68": [
+    "69": [
       "instructions",
       "instructions_instruction_processor_appends_config_backed_sections",
       "instructions_instructionprocessor",
       "instructions_instructionprocessor_from_config",
       "instructions_instructionprocessor_name",
+      "instructions_instructionprocessor_new",
       "instructions_instructionprocessor_process",
       "instructions_instructionprocessor_stage"
     ],
-    "69": [
+    "70": [
+      "identity",
+      "identity_identity_processor_appends_system_prompt",
+      "identity_identityprocessor",
+      "identity_identityprocessor_default",
+      "identity_identityprocessor_name",
+      "identity_identityprocessor_new",
+      "identity_identityprocessor_process",
+      "identity_identityprocessor_stage"
+    ],
+    "71": [
       "chat",
       "chat_max_scroll",
       "chat_render_chat",
@@ -2892,7 +2993,7 @@
       "chat_wrap_line",
       "chat_wrap_prefixed"
     ],
-    "70": [
+    "72": [
       "bash",
       "bash_bashtoolinput",
       "bash_bashtoolinput_timeout",
@@ -2900,7 +3001,7 @@
       "bash_execute_local",
       "bash_stop_container"
     ],
-    "71": [
+    "73": [
       "cache",
       "cache_cache_optimizer_validates_cache_breakpoint",
       "cache_cacheoptimizer",
@@ -2908,84 +3009,80 @@
       "cache_cacheoptimizer_process",
       "cache_cacheoptimizer_stage"
     ],
-    "72": [
-      "identity",
-      "identity_identity_processor_appends_system_prompt",
-      "identity_identityprocessor",
-      "identity_identityprocessor_name",
-      "identity_identityprocessor_process",
-      "identity_identityprocessor_stage"
-    ],
-    "73": [
+    "74": [
       "exec",
       "exec_exec_mode_formats_tool_updates_compactly",
       "exec_format_tool_update",
       "exec_resolve_exec_approval",
       "exec_run_exec"
     ],
-    "74": [
+    "75": [
       "sidebar",
       "sidebar_render_sidebar",
       "sidebar_section_title",
       "sidebar_should_show_sidebar",
       "sidebar_sidebar_visibility_respects_width_and_override"
     ],
-    "75": [
+    "76": [
       "anthropic_provider",
       "anthropic_provider_provider_retries_after_rate_limit",
       "anthropic_provider_provider_returns_error_after_partial_output_without_retrying",
       "anthropic_provider_provider_streams_tokens_incrementally",
       "anthropic_provider_provider_streams_tool_use_blocks"
     ],
-    "76": [
+    "77": [
       "file_search",
       "file_search_collect_matches",
       "file_search_execute",
       "file_search_execute_docker",
       "file_search_filesearchinput"
     ],
-    "77": [
+    "78": [
       "chat_harness",
       "chat_harness_main",
       "chat_harness_resolve_session_db_path",
       "chat_harness_run_prompt"
     ],
-    "78": [
+    "79": [
       "mock_mcp_stdio_server",
       "mock_mcp_stdio_server_read_message",
       "mock_mcp_stdio_server_write_message"
     ],
-    "79": [
+    "80": [
       "tui_workflows",
       "tui_workflows_tui_manual_workflow_opens_memory_settings_and_palette"
     ],
-    "80": [
+    "81": [
       "schema_turso",
       "schema_turso_migrate"
     ],
-    "81": [
+    "82": [
       "openai_live",
       "openai_live_openai_live_completion_returns_expected_answer"
     ],
-    "82": [
+    "83": [
       "openrouter_live",
       "openrouter_live_openrouter_live_completion_returns_expected_answer"
     ],
-    "83": [
+    "84": [
       "anthropic_live",
       "anthropic_live_anthropic_live_completion_returns_expected_answer"
     ],
-    "84": [
+    "85": [
       "docker_hardening",
       "docker_hardening_docker_container_runs_with_hardening"
     ],
-    "85": [
+    "86": [
       "live_harness",
       "live_harness_live_brain_turn_returns_brain_response"
     ],
-    "86": [
+    "87": [
       "compaction",
       "compaction_maybe_compact"
+    ],
+    "88": [
+      "engine_live",
+      "engine_live_live_run_single_produces_eval_result"
     ]
   }
 }

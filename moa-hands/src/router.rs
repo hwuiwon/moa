@@ -309,6 +309,20 @@ impl ToolRegistry {
             .map(|tool| tool.definition.anthropic_schema())
             .collect()
     }
+
+    /// Retains only the registered tools whose names are present in the allowlist.
+    pub fn retain_only<I, S>(&mut self, tool_names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let allowed = tool_names
+            .into_iter()
+            .map(|name| name.as_ref().to_string())
+            .collect::<std::collections::HashSet<_>>();
+        self.tools.retain(|name, _| allowed.contains(name));
+        self.default_loadout.retain(|name| allowed.contains(name));
+    }
 }
 
 impl Default for ToolRegistry {
@@ -467,6 +481,21 @@ impl ToolRouter {
         let mut names = self.registry.tools.keys().cloned().collect::<Vec<_>>();
         names.sort();
         names
+    }
+
+    /// Returns whether a tool is currently registered on the router.
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.registry.tools.contains_key(name)
+    }
+
+    /// Restricts the router to an explicit set of enabled tool names.
+    pub fn with_enabled_tools<I, S>(mut self, tool_names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.registry.retain_only(tool_names);
+        self
     }
 
     async fn load_mcp_servers(&mut self, config: &MoaConfig) -> Result<()> {
