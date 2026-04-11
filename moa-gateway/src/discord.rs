@@ -19,11 +19,13 @@ use tokio::{
     sync::{Mutex, mpsc},
     time::sleep,
 };
+use tracing::Instrument;
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
     approval::{ApprovalCallbackAction, prepare_outbound_message},
+    gateway_receive_span,
     renderer::{DiscordRenderChunk, DiscordRenderer},
 };
 
@@ -317,14 +319,19 @@ impl EventHandler for DiscordGatewayHandler {
         }
 
         if let Some((inbound, context_ref)) = inbound_from_message(&ctx, &new_message).await {
-            self.shared
-                .inbound_contexts
-                .lock()
-                .await
-                .insert(inbound.platform_msg_id.clone(), context_ref);
-            if self.shared.event_tx.send(inbound).await.is_err() {
-                warn!("discord inbound receiver dropped");
+            let gateway_span = gateway_receive_span(&inbound);
+            async {
+                self.shared
+                    .inbound_contexts
+                    .lock()
+                    .await
+                    .insert(inbound.platform_msg_id.clone(), context_ref);
+                if self.shared.event_tx.send(inbound).await.is_err() {
+                    warn!("discord inbound receiver dropped");
+                }
             }
+            .instrument(gateway_span)
+            .await;
         }
     }
 
@@ -338,14 +345,19 @@ impl EventHandler for DiscordGatewayHandler {
         }
 
         if let Some((inbound, context_ref)) = inbound_from_component_interaction(&component) {
-            self.shared
-                .inbound_contexts
-                .lock()
-                .await
-                .insert(inbound.platform_msg_id.clone(), context_ref);
-            if self.shared.event_tx.send(inbound).await.is_err() {
-                warn!("discord inbound receiver dropped");
+            let gateway_span = gateway_receive_span(&inbound);
+            async {
+                self.shared
+                    .inbound_contexts
+                    .lock()
+                    .await
+                    .insert(inbound.platform_msg_id.clone(), context_ref);
+                if self.shared.event_tx.send(inbound).await.is_err() {
+                    warn!("discord inbound receiver dropped");
+                }
             }
+            .instrument(gateway_span)
+            .await;
         }
     }
 }

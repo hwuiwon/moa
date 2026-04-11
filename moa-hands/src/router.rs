@@ -12,7 +12,7 @@ use moa_core::{
     HandHandle, HandProvider, HandResources, HandSpec, McpServerConfig, MemoryStore, MoaConfig,
     MoaError, PolicyAction, Result, RiskLevel, SandboxTier, SessionMeta, ToolContext,
     ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolInvocation, ToolOutput, ToolPolicyInput,
-    ToolPolicySpec, UserId, read_tool_policy, write_tool_policy,
+    ToolPolicySpec, TraceContext, UserId, read_tool_policy, write_tool_policy,
 };
 use moa_security::{
     ApprovalRuleStore, EnvironmentCredentialVault, MCPCredentialProxy, PolicyCheck, ToolPolicies,
@@ -591,12 +591,22 @@ impl ToolRouter {
         session: &SessionMeta,
         invocation: &ToolInvocation,
     ) -> Result<(Option<String>, ToolOutput)> {
-        let tool_span = tool_execution_span(invocation);
+        let tool_span = tool_execution_span(session, invocation);
 
         let instrument_tool_span = tool_span.clone();
         async move {
             let started_at = Instant::now();
             let prepared = self.prepare_invocation(session, invocation).await?;
+            let registered_tool =
+                self.registry.tools.get(&invocation.name).ok_or_else(|| {
+                    MoaError::ToolError(format!("unknown tool: {}", invocation.name))
+                })?;
+            record_tool_invocation_metadata(
+                &tool_span,
+                session,
+                &registered_tool.execution,
+                &prepared.policy().action,
+            );
             let result = match &prepared.policy().action {
                 PolicyAction::Allow => {
                     self.execute_authorized_inner(session, invocation, None, None)
@@ -641,11 +651,22 @@ impl ToolRouter {
         cancel_token: Option<&CancellationToken>,
         hard_cancel_token: Option<&CancellationToken>,
     ) -> Result<(Option<String>, ToolOutput)> {
-        let tool_span = tool_execution_span(invocation);
+        let tool_span = tool_execution_span(session, invocation);
 
         let instrument_tool_span = tool_span.clone();
         async move {
             let started_at = Instant::now();
+            let prepared = self.prepare_invocation(session, invocation).await?;
+            let registered_tool =
+                self.registry.tools.get(&invocation.name).ok_or_else(|| {
+                    MoaError::ToolError(format!("unknown tool: {}", invocation.name))
+                })?;
+            record_tool_invocation_metadata(
+                &tool_span,
+                session,
+                &registered_tool.execution,
+                &prepared.policy().action,
+            );
             let result = self
                 .execute_authorized_inner(session, invocation, cancel_token, hard_cancel_token)
                 .await;
@@ -1041,9 +1062,10 @@ fn expand_local_path(path: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
-fn tool_execution_span(invocation: &ToolInvocation) -> tracing::Span {
+fn tool_execution_span(session: &SessionMeta, invocation: &ToolInvocation) -> tracing::Span {
     let span_name = format!("execute_tool {}", invocation.name);
     let span = tracing::info_span!("tool_execution", otel.name = %span_name);
+    TraceContext::from_session_meta(session, None).apply_to_span(&span);
     span.set_attribute("gen_ai.tool.name", invocation.name.clone());
     if let Some(tool_call_id) = invocation.id.as_ref() {
         span.set_attribute("gen_ai.tool.call.id", tool_call_id.clone());
@@ -1053,6 +1075,37 @@ fn tool_execution_span(invocation: &ToolInvocation) -> tracing::Span {
     }
     span.set_attribute("moa.tool.denied", false);
     span
+}
+
+fn record_tool_invocation_metadata(
+    span: &tracing::Span,
+    session: &SessionMeta,
+    execution: &ToolExecution,
+    action: &PolicyAction,
+) {
+    TraceContext::from_session_meta(session, None).apply_to_span(span);
+
+    let (category, sandbox_tier) = match execution {
+        ToolExecution::BuiltIn(_) => ("builtin", "none"),
+        ToolExecution::Hand { tier, .. } => ("hand", sandbox_tier_label(tier)),
+        ToolExecution::Mcp { .. } => ("mcp", "external"),
+    };
+
+    span.set_attribute("langfuse.observation.metadata.tool_category", category);
+    span.set_attribute("langfuse.observation.metadata.sandbox_tier", sandbox_tier);
+    span.set_attribute(
+        "langfuse.observation.metadata.approval_required",
+        matches!(action, PolicyAction::RequireApproval),
+    );
+}
+
+fn sandbox_tier_label(tier: &SandboxTier) -> &'static str {
+    match tier {
+        SandboxTier::None => "none",
+        SandboxTier::Container => "container",
+        SandboxTier::MicroVM => "microvm",
+        SandboxTier::Local => "local",
+    }
 }
 
 fn record_tool_execution_result(

@@ -690,6 +690,10 @@ fn metadata_as_strings(metadata: &HashMap<String, Value>) -> Option<HashMap<Stri
     let filtered: HashMap<String, String> = metadata
         .iter()
         .filter_map(|(key, value)| {
+            if key.starts_with("_moa.") {
+                return None;
+            }
+
             let value = value
                 .as_str()
                 .map(str::to_string)
@@ -717,17 +721,19 @@ fn supports_reasoning(model: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
 
+    use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     use reqwest::StatusCode;
 
-    use super::{build_http_client, send_with_retry};
+    use super::{build_http_client, metadata_as_strings, send_with_retry};
 
     #[tokio::test]
     async fn retries_on_rate_limit() {
@@ -763,5 +769,18 @@ mod tests {
         assert_eq!(request_count.load(Ordering::SeqCst), 2);
 
         server.abort();
+    }
+
+    #[test]
+    fn metadata_as_strings_drops_internal_moa_keys() {
+        let metadata = HashMap::from([
+            ("_moa.session_id".to_string(), json!("session-123")),
+            ("visible".to_string(), json!("value")),
+        ]);
+
+        let filtered = metadata_as_strings(&metadata).expect("filtered metadata");
+
+        assert_eq!(filtered.get("visible").map(String::as_str), Some("value"));
+        assert!(!filtered.contains_key("_moa.session_id"));
     }
 }

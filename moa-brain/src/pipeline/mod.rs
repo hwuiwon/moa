@@ -52,6 +52,13 @@ impl ContextPipeline {
         let pipeline_span = tracing::info_span!(
             "context_compilation",
             moa.session.id = %ctx.session_id,
+            moa.user.id = %ctx.user_id,
+            moa.workspace.id = %ctx.workspace_id,
+            moa.model = %ctx.model_capabilities.model_id,
+            langfuse.session.id = %ctx.session_id,
+            langfuse.user.id = %ctx.user_id,
+            langfuse.trace.metadata.workspace_id = %ctx.workspace_id,
+            langfuse.trace.metadata.model = %ctx.model_capabilities.model_id,
             moa.pipeline.stage_count = self.stages.len() as i64,
             moa.pipeline.total_tokens = tracing::field::Empty,
             moa.pipeline.cache_ratio = tracing::field::Empty,
@@ -68,6 +75,14 @@ impl ContextPipeline {
                 let stage_span = tracing::info_span!(
                     "pipeline_stage",
                     otel.name = %stage_span_name,
+                    moa.session.id = %ctx.session_id,
+                    moa.user.id = %ctx.user_id,
+                    moa.workspace.id = %ctx.workspace_id,
+                    moa.model = %ctx.model_capabilities.model_id,
+                    langfuse.session.id = %ctx.session_id,
+                    langfuse.user.id = %ctx.user_id,
+                    langfuse.trace.metadata.workspace_id = %ctx.workspace_id,
+                    langfuse.trace.metadata.model = %ctx.model_capabilities.model_id,
                     moa.pipeline.stage.number = stage.stage() as i64,
                     moa.pipeline.stage.name = %stage_name,
                     moa.pipeline.stage.tokens_added = tracing::field::Empty,
@@ -133,6 +148,8 @@ impl ContextPipeline {
                 "moa.pipeline.cache_breakpoints",
                 ctx.cache_breakpoints.len() as i64,
             );
+            ctx.insert_metadata("_moa.context_tokens", serde_json::json!(ctx.token_count));
+            ctx.insert_metadata("_moa.cache_ratio", serde_json::json!(cache_ratio));
 
             Ok(reports)
         }

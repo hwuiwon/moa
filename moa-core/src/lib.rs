@@ -35,7 +35,7 @@ pub use types::{
     SequenceNum, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
     SessionStatus, SessionSummary, SkillMetadata, StartSessionRequest, StopReason, TokenPricing,
     ToolCallFormat, ToolCardStatus, ToolContent, ToolDefinition, ToolDiffStrategy, ToolInputShape,
-    ToolInvocation, ToolOutput, ToolPolicyInput, ToolPolicySpec, ToolStatus, ToolUpdate, UserId,
-    UserMessage, WakeContext, WikiPage, WorkingContext, WorkspaceId, read_tool_policy,
-    write_tool_policy,
+    ToolInvocation, ToolOutput, ToolPolicyInput, ToolPolicySpec, ToolStatus, ToolUpdate,
+    TraceContext, UserId, UserMessage, WakeContext, WikiPage, WorkingContext, WorkspaceId,
+    generate_trace_tags, read_tool_policy, trace_name_from_message, write_tool_policy,
 };

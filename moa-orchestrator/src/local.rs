@@ -14,7 +14,7 @@ use moa_core::{
     BrainOrchestrator, BranchManager, CronHandle, CronSpec, Event, EventRange, EventRecord,
     EventStream, LLMProvider, MoaConfig, MoaError, ObserveLevel, PendingSignal, Result,
     RuntimeEvent, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
-    SessionStatus, SessionStore, SessionSummary, StartSessionRequest, UserMessage,
+    SessionStatus, SessionStore, SessionSummary, StartSessionRequest, TraceContext, UserMessage,
 };
 use moa_hands::ToolRouter;
 use moa_memory::{ConsolidationReport, FileMemoryStore};
@@ -24,6 +24,7 @@ use moa_skills::maybe_distill_skill;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 /// Local orchestrator backed by Tokio tasks and broadcast channels.
 #[derive(Clone)]
@@ -585,6 +586,22 @@ async fn run_session_task(
 
         turn_requested = false;
         let mut soft_cancel_requested = false;
+        let turn_number = turn_number_for_events(&events);
+        let trace_context =
+            TraceContext::from_session_meta(&session, last_user_message_text(&events))
+                .with_environment(context.config.observability.environment.clone());
+        let trace_name = trace_context
+            .trace_name
+            .clone()
+            .unwrap_or_else(|| format!("MOA turn {turn_number}"));
+        let turn_root_span = tracing::info_span!(
+            "session_turn",
+            otel.name = %trace_name,
+            moa.turn.number = turn_number,
+            langfuse.trace.metadata.turn_number = turn_number,
+        );
+        trace_context.apply_to_span(&turn_root_span);
+
         let turn_result = run_streamed_turn_with_signals(
             context.session_id.clone(),
             context.session_store.clone(),
@@ -600,6 +617,7 @@ async fn run_session_task(
             Some(&cancel_token),
             Some(&hard_cancel_token),
         )
+        .instrument(turn_root_span)
         .await;
 
         match turn_result {
@@ -877,5 +895,20 @@ fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) ->
                 | Event::ApprovalDecided { .. }
                 | Event::ToolCall { .. }
         )
+    })
+}
+
+fn turn_number_for_events(events: &[EventRecord]) -> i64 {
+    events
+        .iter()
+        .filter(|record| matches!(record.event, Event::BrainResponse { .. }))
+        .count() as i64
+        + 1
+}
+
+fn last_user_message_text(events: &[EventRecord]) -> Option<&str> {
+    events.iter().rev().find_map(|record| match &record.event {
+        Event::UserMessage { text, .. } | Event::QueuedMessage { text, .. } => Some(text.as_str()),
+        _ => None,
     })
 }
