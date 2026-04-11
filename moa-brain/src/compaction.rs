@@ -1,6 +1,7 @@
 //! Context compaction stub used until full checkpointing lands.
 
 use moa_core::{LLMProvider, Result, SessionId, SessionStore};
+use tracing::Instrument;
 
 use crate::pipeline::ContextPipeline;
 
@@ -8,8 +9,9 @@ use crate::pipeline::ContextPipeline;
 pub async fn maybe_compact(
     _store: &dyn SessionStore,
     _llm: &dyn LLMProvider,
-    _session_id: SessionId,
+    session_id: SessionId,
     _pipeline: &ContextPipeline,
 ) -> Result<bool> {
-    Ok(false)
+    let span = tracing::info_span!("compaction", moa.session.id = %session_id);
+    async { Ok(false) }.instrument(span).await
 }

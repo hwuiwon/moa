@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use moa_core::{
     ApprovalDecision, ApprovalRequest, CompletionContent, Event, EventRange, EventRecord,
-    LLMProvider, MoaError, PolicyAction, Result, RuntimeEvent, SessionId, SessionMeta,
+    LLMProvider, MoaError, PolicyAction, Result, RiskLevel, RuntimeEvent, SessionId, SessionMeta,
     SessionSignal, SessionStatus, SessionStore, StopReason, ToolCardStatus, ToolInvocation,
     ToolUpdate, UserId, UserMessage, WorkingContext,
 };
@@ -14,6 +14,7 @@ use moa_security::{
 };
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::pipeline::ContextPipeline;
@@ -231,6 +232,22 @@ async fn run_streamed_turn_with_tools_mode(
     soft_cancel_requested: Option<&mut bool>,
     tool_loop_mode: ToolLoopMode,
 ) -> Result<StreamedTurnResult> {
+    let initial_session = session_store.get_session(session_id.clone()).await?;
+    let initial_events = session_store
+        .get_events(session_id.clone(), EventRange::all())
+        .await?;
+    let turn_number = turn_number_for_events(&initial_events);
+    let turn_span = tracing::info_span!(
+        "brain_turn",
+        moa.session.id = %session_id,
+        moa.turn.number = turn_number,
+        moa.model = %initial_session.model,
+        moa.turn.tool_calls = tracing::field::Empty,
+        moa.turn.input_tokens = tracing::field::Empty,
+        moa.turn.output_tokens = tracing::field::Empty,
+        moa.turn.result = tracing::field::Empty,
+    );
+
     let mut local_turn_requested = false;
     let turn_requested = turn_requested.unwrap_or(&mut local_turn_requested);
     let mut local_queued_messages = Vec::new();
@@ -238,234 +255,359 @@ async fn run_streamed_turn_with_tools_mode(
     let mut local_soft_cancel_requested = false;
     let soft_cancel_requested = soft_cancel_requested.unwrap_or(&mut local_soft_cancel_requested);
 
-    loop {
-        let session = session_store.get_session(session_id.clone()).await?;
-        let events = session_store
-            .get_events(session_id.clone(), EventRange::all())
-            .await?;
+    let instrument_turn_span = turn_span.clone();
+    async move {
+        let mut total_tool_calls = 0usize;
+        let mut total_input_tokens = 0usize;
+        let mut total_output_tokens = 0usize;
 
-        if let Some(router) = &tool_router {
-            if process_resolved_approval(
-                session_id.clone(),
-                &session,
-                session_store.clone(),
-                router,
-                event_tx,
-                runtime_tx,
-                &events,
-                cancel_token,
-                hard_cancel_token,
-            )
-            .await?
-            {
-                if *soft_cancel_requested {
-                    return Ok(StreamedTurnResult::Cancelled);
+        loop {
+            let session = session_store.get_session(session_id.clone()).await?;
+            let events = session_store
+                .get_events(session_id.clone(), EventRange::all())
+                .await?;
+
+            if let Some(router) = &tool_router {
+                if process_resolved_approval(
+                    session_id.clone(),
+                    &session,
+                    session_store.clone(),
+                    router,
+                    event_tx,
+                    runtime_tx,
+                    &events,
+                    cancel_token,
+                    hard_cancel_token,
+                )
+                .await?
+                {
+                    if *soft_cancel_requested {
+                        record_turn_span_metrics(
+                            &turn_span,
+                            total_tool_calls,
+                            total_input_tokens,
+                            total_output_tokens,
+                            "cancelled",
+                        );
+                        return Ok(StreamedTurnResult::Cancelled);
+                    }
+                    if matches!(tool_loop_mode, ToolLoopMode::StepAfterToolBoundary) {
+                        record_turn_span_metrics(
+                            &turn_span,
+                            total_tool_calls,
+                            total_input_tokens,
+                            total_output_tokens,
+                            "continue",
+                        );
+                        return Ok(StreamedTurnResult::Continue);
+                    }
+                    continue;
                 }
-                if matches!(tool_loop_mode, ToolLoopMode::StepAfterToolBoundary) {
-                    return Ok(StreamedTurnResult::Continue);
+
+                if let Some(pending) = find_pending_tool_approval(&events) {
+                    if let Some(receiver) = signal_rx.as_deref_mut() {
+                        let outcome = wait_for_approval(
+                            session_id.clone(),
+                            &session,
+                            session_store.clone(),
+                            router,
+                            pending,
+                            event_tx,
+                            runtime_tx,
+                            cancel_token,
+                            hard_cancel_token,
+                            receiver,
+                            turn_requested,
+                            queued_messages,
+                            soft_cancel_requested,
+                        )
+                        .await?;
+                        match outcome {
+                            ToolCallOutcome::Executed | ToolCallOutcome::Skipped => {
+                                if *soft_cancel_requested {
+                                    record_turn_span_metrics(
+                                        &turn_span,
+                                        total_tool_calls,
+                                        total_input_tokens,
+                                        total_output_tokens,
+                                        "cancelled",
+                                    );
+                                    return Ok(StreamedTurnResult::Cancelled);
+                                }
+                                if matches!(tool_loop_mode, ToolLoopMode::StepAfterToolBoundary) {
+                                    record_turn_span_metrics(
+                                        &turn_span,
+                                        total_tool_calls,
+                                        total_input_tokens,
+                                        total_output_tokens,
+                                        "continue",
+                                    );
+                                    return Ok(StreamedTurnResult::Continue);
+                                }
+                                continue;
+                            }
+                            ToolCallOutcome::NeedsApproval(request) => {
+                                record_turn_span_metrics(
+                                    &turn_span,
+                                    total_tool_calls,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    "needs_approval",
+                                );
+                                return Ok(StreamedTurnResult::NeedsApproval(request));
+                            }
+                            ToolCallOutcome::Cancelled => {
+                                record_turn_span_metrics(
+                                    &turn_span,
+                                    total_tool_calls,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    "cancelled",
+                                );
+                                return Ok(StreamedTurnResult::Cancelled);
+                            }
+                        }
+                    } else if let Some(request) = find_pending_approval_request(&events) {
+                        session_store
+                            .update_status(session_id.clone(), SessionStatus::WaitingApproval)
+                            .await?;
+                        record_turn_span_metrics(
+                            &turn_span,
+                            total_tool_calls,
+                            total_input_tokens,
+                            total_output_tokens,
+                            "needs_approval",
+                        );
+                        return Ok(StreamedTurnResult::NeedsApproval(request));
+                    }
                 }
-                continue;
             }
 
-            if let Some(pending) = find_pending_tool_approval(&events) {
-                if let Some(receiver) = signal_rx.as_deref_mut() {
-                    let outcome = wait_for_approval(
+            let mut ctx = WorkingContext::new(&session, llm_provider.capabilities());
+
+            let stage_reports = pipeline.run(&mut ctx).await?;
+            let active_canary = tool_router.as_ref().map(|_| inject_canary(&mut ctx));
+            tracing::info!(
+                session_id = %session_id,
+                compiled_messages = ctx.messages.len(),
+                total_tokens = ctx.token_count,
+                stages = stage_reports.len(),
+                "compiled context for streamed brain turn"
+            );
+
+            let mut emit_runtime = |event| {
+                let _ = runtime_tx.send(event);
+            };
+
+            let streamed = if let Some(receiver) = signal_rx.as_deref_mut() {
+                stream_completion_response(
+                    llm_provider.clone(),
+                    ctx.into_request(),
+                    cancel_token,
+                    Some(receiver),
+                    &mut emit_runtime,
+                    |signal| {
+                        handle_stream_signal(
+                            signal,
+                            runtime_tx,
+                            turn_requested,
+                            queued_messages,
+                            soft_cancel_requested,
+                        )
+                    },
+                )
+                .await?
+            } else {
+                stream_completion_response(
+                    llm_provider.clone(),
+                    ctx.into_request(),
+                    cancel_token,
+                    None,
+                    &mut emit_runtime,
+                    |_| StreamSignalDisposition::Continue,
+                )
+                .await?
+            };
+            if streamed.cancelled {
+                record_turn_span_metrics(
+                    &turn_span,
+                    total_tool_calls,
+                    total_input_tokens,
+                    total_output_tokens,
+                    "cancelled",
+                );
+                return Ok(StreamedTurnResult::Cancelled);
+            }
+            let response = streamed.response.ok_or_else(|| {
+                MoaError::ProviderError(
+                    "streamed turn finished without a provider response".to_string(),
+                )
+            })?;
+            total_input_tokens += response.input_tokens;
+            total_output_tokens += response.output_tokens;
+
+            if !streamed.streamed_text.trim().is_empty() {
+                append_event(
+                    &session_store,
+                    event_tx,
+                    session_id.clone(),
+                    Event::BrainResponse {
+                        text: streamed.streamed_text.clone(),
+                        model: response.model.clone(),
+                        input_tokens: response.input_tokens,
+                        output_tokens: response.output_tokens,
+                        cost_cents: 0,
+                        duration_ms: response.duration_ms,
+                    },
+                )
+                .await?;
+                let _ = runtime_tx.send(RuntimeEvent::AssistantFinished {
+                    text: streamed.streamed_text,
+                });
+            }
+
+            let mut emitted_tool_calls = 0usize;
+            let mut saw_tool_request = false;
+            let mut executed_tools = false;
+            for block in &response.content {
+                if let CompletionContent::ToolCall(call) = block {
+                    saw_tool_request = true;
+                    let outcome = handle_tool_call(
                         session_id.clone(),
                         &session,
                         session_store.clone(),
-                        router,
-                        pending,
+                        tool_router.as_deref(),
+                        call,
+                        active_canary.as_deref(),
                         event_tx,
                         runtime_tx,
                         cancel_token,
                         hard_cancel_token,
-                        receiver,
+                        signal_rx.as_deref_mut(),
                         turn_requested,
                         queued_messages,
                         soft_cancel_requested,
                     )
                     .await?;
+                    emitted_tool_calls += 1;
+                    total_tool_calls += 1;
                     match outcome {
-                        ToolCallOutcome::Executed | ToolCallOutcome::Skipped => {
-                            if *soft_cancel_requested {
-                                return Ok(StreamedTurnResult::Cancelled);
-                            }
-                            if matches!(tool_loop_mode, ToolLoopMode::StepAfterToolBoundary) {
-                                return Ok(StreamedTurnResult::Continue);
-                            }
-                            continue;
-                        }
+                        ToolCallOutcome::Executed => executed_tools = true,
+                        ToolCallOutcome::Skipped => {}
                         ToolCallOutcome::NeedsApproval(request) => {
+                            record_turn_span_metrics(
+                                &turn_span,
+                                total_tool_calls,
+                                total_input_tokens,
+                                total_output_tokens,
+                                "needs_approval",
+                            );
                             return Ok(StreamedTurnResult::NeedsApproval(request));
                         }
                         ToolCallOutcome::Cancelled => {
+                            record_turn_span_metrics(
+                                &turn_span,
+                                total_tool_calls,
+                                total_input_tokens,
+                                total_output_tokens,
+                                "cancelled",
+                            );
                             return Ok(StreamedTurnResult::Cancelled);
                         }
                     }
-                } else if let Some(request) = find_pending_approval_request(&events) {
-                    session_store
-                        .update_status(session_id.clone(), SessionStatus::WaitingApproval)
-                        .await?;
-                    return Ok(StreamedTurnResult::NeedsApproval(request));
-                }
-            }
-        }
-
-        let mut ctx = WorkingContext::new(&session, llm_provider.capabilities());
-
-        let stage_reports = pipeline.run(&mut ctx).await?;
-        let active_canary = tool_router.as_ref().map(|_| inject_canary(&mut ctx));
-        tracing::info!(
-            session_id = %session_id,
-            compiled_messages = ctx.messages.len(),
-            total_tokens = ctx.token_count,
-            stages = stage_reports.len(),
-            "compiled context for streamed brain turn"
-        );
-
-        let mut emit_runtime = |event| {
-            let _ = runtime_tx.send(event);
-        };
-
-        let streamed = if let Some(receiver) = signal_rx.as_deref_mut() {
-            stream_completion_response(
-                llm_provider.clone(),
-                ctx.into_request(),
-                cancel_token,
-                Some(receiver),
-                &mut emit_runtime,
-                |signal| {
-                    handle_stream_signal(
-                        signal,
-                        runtime_tx,
-                        turn_requested,
-                        queued_messages,
-                        soft_cancel_requested,
-                    )
-                },
-            )
-            .await?
-        } else {
-            stream_completion_response(
-                llm_provider.clone(),
-                ctx.into_request(),
-                cancel_token,
-                None,
-                &mut emit_runtime,
-                |_| StreamSignalDisposition::Continue,
-            )
-            .await?
-        };
-        if streamed.cancelled {
-            return Ok(StreamedTurnResult::Cancelled);
-        }
-        let response = streamed.response.ok_or_else(|| {
-            MoaError::ProviderError(
-                "streamed turn finished without a provider response".to_string(),
-            )
-        })?;
-
-        if !streamed.streamed_text.trim().is_empty() {
-            append_event(
-                &session_store,
-                event_tx,
-                session_id.clone(),
-                Event::BrainResponse {
-                    text: streamed.streamed_text.clone(),
-                    model: response.model.clone(),
-                    input_tokens: response.input_tokens,
-                    output_tokens: response.output_tokens,
-                    cost_cents: 0,
-                    duration_ms: response.duration_ms,
-                },
-            )
-            .await?;
-            let _ = runtime_tx.send(RuntimeEvent::AssistantFinished {
-                text: streamed.streamed_text,
-            });
-        }
-
-        let mut emitted_tool_calls = 0usize;
-        let mut saw_tool_request = false;
-        let mut executed_tools = false;
-        for block in &response.content {
-            if let CompletionContent::ToolCall(call) = block {
-                saw_tool_request = true;
-                let outcome = handle_tool_call(
-                    session_id.clone(),
-                    &session,
-                    session_store.clone(),
-                    tool_router.as_deref(),
-                    call,
-                    active_canary.as_deref(),
-                    event_tx,
-                    runtime_tx,
-                    cancel_token,
-                    hard_cancel_token,
-                    signal_rx.as_deref_mut(),
-                    turn_requested,
-                    queued_messages,
-                    soft_cancel_requested,
-                )
-                .await?;
-                emitted_tool_calls += 1;
-                match outcome {
-                    ToolCallOutcome::Executed => executed_tools = true,
-                    ToolCallOutcome::Skipped => {}
-                    ToolCallOutcome::NeedsApproval(request) => {
-                        return Ok(StreamedTurnResult::NeedsApproval(request));
+                    if signal_rx.is_some() {
+                        drain_signal_queue(
+                            signal_rx.as_deref_mut(),
+                            runtime_tx,
+                            turn_requested,
+                            queued_messages,
+                            soft_cancel_requested,
+                        )?;
                     }
-                    ToolCallOutcome::Cancelled => {
+                    if *soft_cancel_requested {
+                        record_turn_span_metrics(
+                            &turn_span,
+                            total_tool_calls,
+                            total_input_tokens,
+                            total_output_tokens,
+                            "cancelled",
+                        );
                         return Ok(StreamedTurnResult::Cancelled);
                     }
                 }
-                if signal_rx.is_some() {
-                    drain_signal_queue(
-                        signal_rx.as_deref_mut(),
-                        runtime_tx,
-                        turn_requested,
-                        queued_messages,
-                        soft_cancel_requested,
-                    )?;
-                }
-                if *soft_cancel_requested {
-                    return Ok(StreamedTurnResult::Cancelled);
-                }
             }
-        }
 
-        let updated_session = session_store.get_session(session_id.clone()).await?;
-        let _ = runtime_tx.send(RuntimeEvent::UsageUpdated {
-            total_tokens: updated_session.total_input_tokens + updated_session.total_output_tokens,
-        });
+            let updated_session = session_store.get_session(session_id.clone()).await?;
+            let _ = runtime_tx.send(RuntimeEvent::UsageUpdated {
+                total_tokens: updated_session.total_input_tokens
+                    + updated_session.total_output_tokens,
+            });
 
-        tracing::info!(
-            session_id = %session_id,
-            tool_calls = emitted_tool_calls,
-            stop_reason = ?response.stop_reason,
-            "streamed brain turn completed"
-        );
+            tracing::info!(
+                session_id = %session_id,
+                tool_calls = emitted_tool_calls,
+                stop_reason = ?response.stop_reason,
+                "streamed brain turn completed"
+            );
 
-        if *soft_cancel_requested {
-            return Ok(StreamedTurnResult::Cancelled);
-        }
-
-        if executed_tools || saw_tool_request || response.stop_reason == StopReason::ToolUse {
-            if tool_router.is_some() {
-                if matches!(tool_loop_mode, ToolLoopMode::StepAfterToolBoundary) {
-                    return Ok(StreamedTurnResult::Continue);
-                }
-                continue;
+            if *soft_cancel_requested {
+                record_turn_span_metrics(
+                    &turn_span,
+                    total_tool_calls,
+                    total_input_tokens,
+                    total_output_tokens,
+                    "cancelled",
+                );
+                return Ok(StreamedTurnResult::Cancelled);
             }
+
+            if executed_tools || saw_tool_request || response.stop_reason == StopReason::ToolUse {
+                if tool_router.is_some() {
+                    if matches!(tool_loop_mode, ToolLoopMode::StepAfterToolBoundary) {
+                        record_turn_span_metrics(
+                            &turn_span,
+                            total_tool_calls,
+                            total_input_tokens,
+                            total_output_tokens,
+                            "continue",
+                        );
+                        return Ok(StreamedTurnResult::Continue);
+                    }
+                    continue;
+                }
+                record_turn_span_metrics(
+                    &turn_span,
+                    total_tool_calls,
+                    total_input_tokens,
+                    total_output_tokens,
+                    "continue",
+                );
+                return Ok(StreamedTurnResult::Continue);
+            }
+
+            if response.stop_reason == StopReason::EndTurn {
+                record_turn_span_metrics(
+                    &turn_span,
+                    total_tool_calls,
+                    total_input_tokens,
+                    total_output_tokens,
+                    "complete",
+                );
+                return Ok(StreamedTurnResult::Complete);
+            }
+
+            record_turn_span_metrics(
+                &turn_span,
+                total_tool_calls,
+                total_input_tokens,
+                total_output_tokens,
+                "continue",
+            );
             return Ok(StreamedTurnResult::Continue);
         }
-
-        if response.stop_reason == StopReason::EndTurn {
-            return Ok(StreamedTurnResult::Complete);
-        }
-
-        return Ok(StreamedTurnResult::Continue);
     }
+    .instrument(instrument_turn_span)
+    .await
 }
 
 enum ToolCallOutcome {
@@ -584,6 +726,7 @@ async fn handle_tool_call(
             .await
         }
         PolicyAction::Deny => {
+            record_denied_tool_span(call);
             append_event(
                 &session_store,
                 event_tx,
@@ -668,6 +811,7 @@ async fn handle_tool_call(
                     call,
                     tool_id,
                     summary,
+                    prepared.policy_input().risk_level.clone(),
                     active_canary,
                     event_tx,
                     runtime_tx,
@@ -695,6 +839,7 @@ async fn wait_for_signal_approval(
     call: &ToolInvocation,
     tool_id: Uuid,
     summary: String,
+    risk_level: RiskLevel,
     active_canary: Option<&str>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
@@ -705,139 +850,158 @@ async fn wait_for_signal_approval(
     queued_messages: &mut Vec<UserMessage>,
     soft_cancel_requested: &mut bool,
 ) -> Result<ToolCallOutcome> {
-    loop {
-        match signal_rx.recv().await {
-            Some(SessionSignal::ApprovalDecided {
-                request_id,
-                decision,
-            }) if request_id == tool_id => {
-                append_event(
-                    &session_store,
-                    event_tx,
-                    session_id.clone(),
-                    Event::ApprovalDecided {
-                        request_id,
-                        decision: decision.clone(),
-                        decided_by: session.user_id.to_string(),
-                        decided_at: chrono::Utc::now(),
-                    },
-                )
-                .await?;
-                session_store
-                    .update_status(session_id.clone(), SessionStatus::Running)
-                    .await?;
+    let approval_span = tracing::info_span!(
+        "approval_wait",
+        moa.approval.tool = %call.name,
+        moa.approval.risk_level = ?risk_level,
+        moa.approval.decision = tracing::field::Empty,
+    );
 
-                return match decision {
-                    ApprovalDecision::AllowOnce => {
-                        let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                            tool_id,
-                            tool_name: call.name.clone(),
-                            status: ToolCardStatus::Running,
-                            summary,
-                            detail: None,
-                        }));
-                        execute_tool(
-                            session_id,
-                            session,
-                            session_store,
-                            tool_router,
-                            call,
-                            tool_id,
-                            false,
-                            active_canary,
-                            event_tx,
-                            runtime_tx,
-                            cancel_token,
-                            hard_cancel_token,
-                        )
-                        .await
-                    }
-                    ApprovalDecision::AlwaysAllow { pattern } => {
-                        tool_router
-                            .store_approval_rule(
+    let instrument_approval_span = approval_span.clone();
+    async move {
+        loop {
+            match signal_rx.recv().await {
+                Some(SessionSignal::ApprovalDecided {
+                    request_id,
+                    decision,
+                }) if request_id == tool_id => {
+                    approval_span.record(
+                        "moa.approval.decision",
+                        tracing::field::display(approval_decision_label(&decision)),
+                    );
+                    append_event(
+                        &session_store,
+                        event_tx,
+                        session_id.clone(),
+                        Event::ApprovalDecided {
+                            request_id,
+                            decision: decision.clone(),
+                            decided_by: session.user_id.to_string(),
+                            decided_at: chrono::Utc::now(),
+                        },
+                    )
+                    .await?;
+                    session_store
+                        .update_status(session_id.clone(), SessionStatus::Running)
+                        .await?;
+
+                    return match decision {
+                        ApprovalDecision::AllowOnce => {
+                            let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
+                                tool_id,
+                                tool_name: call.name.clone(),
+                                status: ToolCardStatus::Running,
+                                summary,
+                                detail: None,
+                            }));
+                            execute_tool(
+                                session_id,
                                 session,
-                                &call.name,
-                                &pattern,
-                                PolicyAction::Allow,
-                                session.user_id.clone(),
+                                session_store,
+                                tool_router,
+                                call,
+                                tool_id,
+                                false,
+                                active_canary,
+                                event_tx,
+                                runtime_tx,
+                                cancel_token,
+                                hard_cancel_token,
+                            )
+                            .await
+                        }
+                        ApprovalDecision::AlwaysAllow { pattern } => {
+                            tool_router
+                                .store_approval_rule(
+                                    session,
+                                    &call.name,
+                                    &pattern,
+                                    PolicyAction::Allow,
+                                    session.user_id.clone(),
+                                )
+                                .await?;
+                            let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
+                                tool_id,
+                                tool_name: call.name.clone(),
+                                status: ToolCardStatus::Running,
+                                summary,
+                                detail: Some(format!("Always allow rule stored: {pattern}")),
+                            }));
+                            execute_tool(
+                                session_id,
+                                session,
+                                session_store,
+                                tool_router,
+                                call,
+                                tool_id,
+                                false,
+                                active_canary,
+                                event_tx,
+                                runtime_tx,
+                                cancel_token,
+                                hard_cancel_token,
+                            )
+                            .await
+                        }
+                        ApprovalDecision::Deny { reason } => {
+                            append_event(
+                                &session_store,
+                                event_tx,
+                                session_id,
+                                Event::ToolError {
+                                    tool_id,
+                                    error: reason.clone().unwrap_or_else(|| {
+                                        "tool execution denied by user".to_string()
+                                    }),
+                                    retryable: false,
+                                },
                             )
                             .await?;
-                        let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                            tool_id,
-                            tool_name: call.name.clone(),
-                            status: ToolCardStatus::Running,
-                            summary,
-                            detail: Some(format!("Always allow rule stored: {pattern}")),
-                        }));
-                        execute_tool(
-                            session_id,
-                            session,
-                            session_store,
-                            tool_router,
-                            call,
-                            tool_id,
-                            false,
-                            active_canary,
-                            event_tx,
-                            runtime_tx,
-                            cancel_token,
-                            hard_cancel_token,
-                        )
-                        .await
-                    }
-                    ApprovalDecision::Deny { reason } => {
-                        append_event(
-                            &session_store,
-                            event_tx,
-                            session_id,
-                            Event::ToolError {
+                            let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
                                 tool_id,
-                                error: reason
-                                    .clone()
-                                    .unwrap_or_else(|| "tool execution denied by user".to_string()),
-                                retryable: false,
-                            },
-                        )
-                        .await?;
-                        let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                            tool_id,
-                            tool_name: call.name.clone(),
-                            status: ToolCardStatus::Failed,
-                            summary,
-                            detail: Some(
-                                reason.unwrap_or_else(|| "Denied by the user".to_string()),
-                            ),
-                        }));
-                        Ok(ToolCallOutcome::Skipped)
-                    }
-                };
-            }
-            Some(SessionSignal::QueueMessage(message)) => {
-                buffer_queued_message(queued_messages, message);
-                *turn_requested = true;
-                let _ = runtime_tx.send(RuntimeEvent::Notice(
-                    "Message queued. Will process after the approval decision.".to_string(),
-                ));
-            }
-            Some(SessionSignal::SoftCancel) => {
-                *soft_cancel_requested = true;
-                let _ = runtime_tx.send(RuntimeEvent::Notice(
-                    "Stop requested. MOA will stop after the current step.".to_string(),
-                ));
-                return Ok(ToolCallOutcome::Cancelled);
-            }
-            Some(SessionSignal::HardCancel) => {
-                *soft_cancel_requested = true;
-                return Ok(ToolCallOutcome::Cancelled);
-            }
-            Some(SessionSignal::ApprovalDecided { .. }) => {}
-            None => {
-                return Err(MoaError::ProviderError(
-                    "approval channel closed".to_string(),
-                ));
+                                tool_name: call.name.clone(),
+                                status: ToolCardStatus::Failed,
+                                summary,
+                                detail: Some(
+                                    reason.unwrap_or_else(|| "Denied by the user".to_string()),
+                                ),
+                            }));
+                            Ok(ToolCallOutcome::Skipped)
+                        }
+                    };
+                }
+                Some(SessionSignal::QueueMessage(message)) => {
+                    buffer_queued_message(queued_messages, message);
+                    *turn_requested = true;
+                    let _ = runtime_tx.send(RuntimeEvent::Notice(
+                        "Message queued. Will process after the approval decision.".to_string(),
+                    ));
+                }
+                Some(SessionSignal::SoftCancel) => {
+                    *soft_cancel_requested = true;
+                    approval_span.record("moa.approval.decision", "soft_cancel");
+                    let _ = runtime_tx.send(RuntimeEvent::Notice(
+                        "Stop requested. MOA will stop after the current step.".to_string(),
+                    ));
+                    return Ok(ToolCallOutcome::Cancelled);
+                }
+                Some(SessionSignal::HardCancel) => {
+                    *soft_cancel_requested = true;
+                    approval_span.record("moa.approval.decision", "hard_cancel");
+                    return Ok(ToolCallOutcome::Cancelled);
+                }
+                Some(SessionSignal::ApprovalDecided { .. }) => {}
+                None => {
+                    approval_span.record("moa.approval.decision", "channel_closed");
+                    return Err(MoaError::ProviderError(
+                        "approval channel closed".to_string(),
+                    ));
+                }
             }
         }
     }
+    .instrument(instrument_approval_span)
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -983,134 +1147,152 @@ async fn wait_for_approval(
         summary: prepared.input_summary().to_string(),
         detail: Some("Press y to allow once, a to always allow, n to deny".to_string()),
     }));
+    let approval_span = tracing::info_span!(
+        "approval_wait",
+        moa.approval.tool = %pending.tool_name,
+        moa.approval.risk_level = ?prepared.policy_input().risk_level,
+        moa.approval.decision = tracing::field::Empty,
+    );
 
-    loop {
-        match signal_rx.recv().await {
-            Some(SessionSignal::ApprovalDecided {
-                request_id,
-                decision,
-            }) if request_id == pending.tool_id => {
-                append_event(
-                    &session_store,
-                    event_tx,
-                    session_id.clone(),
-                    Event::ApprovalDecided {
-                        request_id,
-                        decision: decision.clone(),
-                        decided_by: session.user_id.to_string(),
-                        decided_at: chrono::Utc::now(),
-                    },
-                )
-                .await?;
-                return match decision {
-                    ApprovalDecision::AllowOnce => {
-                        let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                            tool_id: pending.tool_id,
-                            tool_name: pending.tool_name.clone(),
-                            status: ToolCardStatus::Running,
-                            summary: prepared.input_summary().to_string(),
-                            detail: None,
-                        }));
-                        execute_tool(
-                            session_id,
-                            session,
-                            session_store,
-                            tool_router,
-                            &invocation,
-                            pending.tool_id,
-                            false,
-                            None,
-                            event_tx,
-                            runtime_tx,
-                            cancel_token,
-                            hard_cancel_token,
-                        )
-                        .await
-                    }
-                    ApprovalDecision::AlwaysAllow { pattern } => {
-                        tool_router
-                            .store_approval_rule(
+    let instrument_approval_span = approval_span.clone();
+    async move {
+        loop {
+            match signal_rx.recv().await {
+                Some(SessionSignal::ApprovalDecided {
+                    request_id,
+                    decision,
+                }) if request_id == pending.tool_id => {
+                    approval_span.record(
+                        "moa.approval.decision",
+                        tracing::field::display(approval_decision_label(&decision)),
+                    );
+                    append_event(
+                        &session_store,
+                        event_tx,
+                        session_id.clone(),
+                        Event::ApprovalDecided {
+                            request_id,
+                            decision: decision.clone(),
+                            decided_by: session.user_id.to_string(),
+                            decided_at: chrono::Utc::now(),
+                        },
+                    )
+                    .await?;
+                    return match decision {
+                        ApprovalDecision::AllowOnce => {
+                            let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
+                                tool_id: pending.tool_id,
+                                tool_name: pending.tool_name.clone(),
+                                status: ToolCardStatus::Running,
+                                summary: prepared.input_summary().to_string(),
+                                detail: None,
+                            }));
+                            execute_tool(
+                                session_id,
                                 session,
-                                &pending.tool_name,
-                                &pattern,
-                                PolicyAction::Allow,
-                                session.user_id.clone(),
+                                session_store,
+                                tool_router,
+                                &invocation,
+                                pending.tool_id,
+                                false,
+                                None,
+                                event_tx,
+                                runtime_tx,
+                                cancel_token,
+                                hard_cancel_token,
+                            )
+                            .await
+                        }
+                        ApprovalDecision::AlwaysAllow { pattern } => {
+                            tool_router
+                                .store_approval_rule(
+                                    session,
+                                    &pending.tool_name,
+                                    &pattern,
+                                    PolicyAction::Allow,
+                                    session.user_id.clone(),
+                                )
+                                .await?;
+                            let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
+                                tool_id: pending.tool_id,
+                                tool_name: pending.tool_name.clone(),
+                                status: ToolCardStatus::Running,
+                                summary: prepared.input_summary().to_string(),
+                                detail: Some(format!("Always allow rule stored: {pattern}")),
+                            }));
+                            execute_tool(
+                                session_id,
+                                session,
+                                session_store,
+                                tool_router,
+                                &invocation,
+                                pending.tool_id,
+                                false,
+                                None,
+                                event_tx,
+                                runtime_tx,
+                                cancel_token,
+                                hard_cancel_token,
+                            )
+                            .await
+                        }
+                        ApprovalDecision::Deny { reason } => {
+                            append_event(
+                                &session_store,
+                                event_tx,
+                                session_id,
+                                Event::ToolError {
+                                    tool_id: pending.tool_id,
+                                    error: reason.clone().unwrap_or_else(|| {
+                                        "tool execution denied by user".to_string()
+                                    }),
+                                    retryable: false,
+                                },
                             )
                             .await?;
-                        let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                            tool_id: pending.tool_id,
-                            tool_name: pending.tool_name.clone(),
-                            status: ToolCardStatus::Running,
-                            summary: prepared.input_summary().to_string(),
-                            detail: Some(format!("Always allow rule stored: {pattern}")),
-                        }));
-                        execute_tool(
-                            session_id,
-                            session,
-                            session_store,
-                            tool_router,
-                            &invocation,
-                            pending.tool_id,
-                            false,
-                            None,
-                            event_tx,
-                            runtime_tx,
-                            cancel_token,
-                            hard_cancel_token,
-                        )
-                        .await
-                    }
-                    ApprovalDecision::Deny { reason } => {
-                        append_event(
-                            &session_store,
-                            event_tx,
-                            session_id,
-                            Event::ToolError {
+                            let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
                                 tool_id: pending.tool_id,
-                                error: reason
-                                    .clone()
-                                    .unwrap_or_else(|| "tool execution denied by user".to_string()),
-                                retryable: false,
-                            },
-                        )
-                        .await?;
-                        let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                            tool_id: pending.tool_id,
-                            tool_name: pending.tool_name,
-                            status: ToolCardStatus::Failed,
-                            summary: "tool denied".to_string(),
-                            detail: reason,
-                        }));
-                        Ok(ToolCallOutcome::Skipped)
-                    }
-                };
-            }
-            Some(SessionSignal::QueueMessage(message)) => {
-                buffer_queued_message(queued_messages, message);
-                *turn_requested = true;
-                let _ = runtime_tx.send(RuntimeEvent::Notice(
-                    "Message queued. Will process after the approval decision.".to_string(),
-                ));
-            }
-            Some(SessionSignal::SoftCancel) => {
-                *soft_cancel_requested = true;
-                let _ = runtime_tx.send(RuntimeEvent::Notice(
-                    "Stop requested. MOA will stop after the current step.".to_string(),
-                ));
-                return Ok(ToolCallOutcome::Cancelled);
-            }
-            Some(SessionSignal::HardCancel) => {
-                *soft_cancel_requested = true;
-                return Ok(ToolCallOutcome::Cancelled);
-            }
-            Some(SessionSignal::ApprovalDecided { .. }) => {}
-            None => {
-                return Err(MoaError::ProviderError(
-                    "approval channel closed".to_string(),
-                ));
+                                tool_name: pending.tool_name,
+                                status: ToolCardStatus::Failed,
+                                summary: "tool denied".to_string(),
+                                detail: reason,
+                            }));
+                            Ok(ToolCallOutcome::Skipped)
+                        }
+                    };
+                }
+                Some(SessionSignal::QueueMessage(message)) => {
+                    buffer_queued_message(queued_messages, message);
+                    *turn_requested = true;
+                    let _ = runtime_tx.send(RuntimeEvent::Notice(
+                        "Message queued. Will process after the approval decision.".to_string(),
+                    ));
+                }
+                Some(SessionSignal::SoftCancel) => {
+                    *soft_cancel_requested = true;
+                    approval_span.record("moa.approval.decision", "soft_cancel");
+                    let _ = runtime_tx.send(RuntimeEvent::Notice(
+                        "Stop requested. MOA will stop after the current step.".to_string(),
+                    ));
+                    return Ok(ToolCallOutcome::Cancelled);
+                }
+                Some(SessionSignal::HardCancel) => {
+                    *soft_cancel_requested = true;
+                    approval_span.record("moa.approval.decision", "hard_cancel");
+                    return Ok(ToolCallOutcome::Cancelled);
+                }
+                Some(SessionSignal::ApprovalDecided { .. }) => {}
+                None => {
+                    approval_span.record("moa.approval.decision", "channel_closed");
+                    return Err(MoaError::ProviderError(
+                        "approval channel closed".to_string(),
+                    ));
+                }
             }
         }
     }
+    .instrument(instrument_approval_span)
+    .await
 }
 
 fn drain_signal_queue(
@@ -1304,6 +1486,50 @@ async fn execute_pending_tool(
 
 fn buffer_queued_message(queued_messages: &mut Vec<UserMessage>, message: UserMessage) {
     queued_messages.push(message);
+}
+
+fn turn_number_for_events(events: &[EventRecord]) -> i64 {
+    events
+        .iter()
+        .filter(|record| matches!(record.event, Event::BrainResponse { .. }))
+        .count() as i64
+        + 1
+}
+
+fn record_turn_span_metrics(
+    span: &tracing::Span,
+    tool_calls: usize,
+    input_tokens: usize,
+    output_tokens: usize,
+    result: &str,
+) {
+    span.record("moa.turn.tool_calls", tool_calls as i64);
+    span.record("moa.turn.input_tokens", input_tokens as i64);
+    span.record("moa.turn.output_tokens", output_tokens as i64);
+    span.record("moa.turn.result", result);
+}
+
+fn approval_decision_label(decision: &ApprovalDecision) -> &'static str {
+    match decision {
+        ApprovalDecision::AllowOnce => "allow_once",
+        ApprovalDecision::AlwaysAllow { .. } => "always_allow",
+        ApprovalDecision::Deny { .. } => "deny",
+    }
+}
+
+fn record_denied_tool_span(call: &ToolInvocation) {
+    let span_name = format!("execute_tool {}", call.name);
+    let denied_span = tracing::info_span!(
+        "tool_execution",
+        otel.name = %span_name,
+        gen_ai.tool.name = %call.name,
+        gen_ai.tool.call.id = ?call.id,
+        moa.tool.success = false,
+        moa.tool.denied = true,
+        moa.tool.duration_ms = 0i64,
+    );
+    let _entered = denied_span.enter();
+    tracing::info!("tool denied by policy");
 }
 
 fn handle_stream_signal(

@@ -3231,6 +3231,7 @@ dependencies = [
  "moa-core",
  "moa-memory",
  "moa-security",
+ "opentelemetry",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -3239,6 +3240,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
  "uuid",
 ]
 

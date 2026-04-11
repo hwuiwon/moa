@@ -18,6 +18,7 @@ futures-util.workspace = true
 globset = "0.4"
 moa-core = { path = "../moa-core" }
 moa-security = { path = "../moa-security" }
+opentelemetry.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,6 +26,7 @@ shell-words = "1.1"
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+tracing-opentelemetry.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

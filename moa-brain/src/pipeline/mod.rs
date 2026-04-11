@@ -7,6 +7,7 @@ use moa_core::{
     ContextProcessor, MemoryStore, MoaConfig, ProcessorOutput, Result, SessionStore, WorkingContext,
 };
 use moa_skills::SkillRegistry;
+use tracing::Instrument;
 
 pub mod cache;
 pub mod history;
@@ -48,35 +49,95 @@ impl ContextPipeline {
 
     /// Runs the configured pipeline against a working context.
     pub async fn run(&self, ctx: &mut WorkingContext) -> Result<Vec<PipelineStageReport>> {
-        let mut reports = Vec::with_capacity(self.stages.len());
+        let pipeline_span = tracing::info_span!(
+            "context_compilation",
+            moa.session.id = %ctx.session_id,
+            moa.pipeline.stage_count = self.stages.len() as i64,
+            moa.pipeline.total_tokens = tracing::field::Empty,
+            moa.pipeline.cache_ratio = tracing::field::Empty,
+            moa.pipeline.cache_breakpoints = tracing::field::Empty,
+        );
 
-        for stage in &self.stages {
-            let started_at = Instant::now();
-            let tokens_before = ctx.token_count;
-            let mut output = stage.process(ctx).await?;
-            output.duration = started_at.elapsed();
+        let instrument_pipeline_span = pipeline_span.clone();
+        async {
+            let mut reports = Vec::with_capacity(self.stages.len());
 
-            tracing::info!(
-                stage = stage.stage(),
-                name = stage.name(),
-                tokens_before,
-                tokens_after = ctx.token_count,
-                tokens_added = output.tokens_added,
-                tokens_removed = output.tokens_removed,
-                items_included = ?output.items_included,
-                items_excluded = ?output.items_excluded,
-                duration_ms = output.duration.as_millis(),
-                "pipeline stage completed"
+            for stage in &self.stages {
+                let stage_name = stage.name().to_string();
+                let stage_span_name = format!("pipeline.stage {stage_name}");
+                let stage_span = tracing::info_span!(
+                    "pipeline_stage",
+                    otel.name = %stage_span_name,
+                    moa.pipeline.stage.number = stage.stage() as i64,
+                    moa.pipeline.stage.name = %stage_name,
+                    moa.pipeline.stage.tokens_added = tracing::field::Empty,
+                    moa.pipeline.stage.tokens_removed = tracing::field::Empty,
+                    moa.pipeline.stage.items_included = tracing::field::Empty,
+                    moa.pipeline.stage.items_excluded = tracing::field::Empty,
+                    moa.pipeline.stage.tokens_before = tracing::field::Empty,
+                    moa.pipeline.stage.tokens_after = tracing::field::Empty,
+                );
+
+                let started_at = Instant::now();
+                let tokens_before = ctx.token_count;
+                stage_span.record("moa.pipeline.stage.tokens_before", tokens_before as i64);
+                let instrument_stage_span = stage_span.clone();
+                let mut output = async { stage.process(ctx).await }
+                    .instrument(instrument_stage_span)
+                    .await?;
+                output.duration = started_at.elapsed();
+                let tokens_after = ctx.token_count;
+
+                stage_span.record(
+                    "moa.pipeline.stage.tokens_added",
+                    output.tokens_added as i64,
+                );
+                stage_span.record(
+                    "moa.pipeline.stage.tokens_removed",
+                    output.tokens_removed as i64,
+                );
+                stage_span.record(
+                    "moa.pipeline.stage.items_included",
+                    output.items_included.len() as i64,
+                );
+                stage_span.record(
+                    "moa.pipeline.stage.items_excluded",
+                    output.items_excluded.len() as i64,
+                );
+                stage_span.record("moa.pipeline.stage.tokens_after", tokens_after as i64);
+
+                tracing::info!(
+                    stage = stage.stage(),
+                    name = stage.name(),
+                    tokens_before,
+                    tokens_after,
+                    tokens_added = output.tokens_added,
+                    tokens_removed = output.tokens_removed,
+                    items_included = ?output.items_included,
+                    items_excluded = ?output.items_excluded,
+                    duration_ms = output.duration.as_millis(),
+                    "pipeline stage completed"
+                );
+
+                reports.push(PipelineStageReport {
+                    stage: stage.stage(),
+                    name: stage.name().to_string(),
+                    output,
+                });
+            }
+
+            let cache_ratio = cache_prefix_ratio(ctx);
+            pipeline_span.record("moa.pipeline.total_tokens", ctx.token_count as i64);
+            pipeline_span.record("moa.pipeline.cache_ratio", cache_ratio);
+            pipeline_span.record(
+                "moa.pipeline.cache_breakpoints",
+                ctx.cache_breakpoints.len() as i64,
             );
 
-            reports.push(PipelineStageReport {
-                stage: stage.stage(),
-                name: stage.name().to_string(),
-                output,
-            });
+            Ok(reports)
         }
-
-        Ok(reports)
+        .instrument(instrument_pipeline_span)
+        .await
     }
 }
 
@@ -143,6 +204,23 @@ pub(crate) fn sort_json_keys(value: &mut serde_json::Value) {
         }
         _ => {}
     }
+}
+
+fn cache_prefix_ratio(ctx: &WorkingContext) -> f64 {
+    if ctx.token_count == 0 {
+        return 1.0;
+    }
+
+    let Some(cache_breakpoint) = ctx.cache_breakpoints.last().copied() else {
+        return 0.0;
+    };
+
+    let prefix_tokens = ctx.messages[..cache_breakpoint.min(ctx.messages.len())]
+        .iter()
+        .map(|message| estimate_tokens(&message.content))
+        .sum::<usize>();
+
+    prefix_tokens as f64 / ctx.token_count as f64
 }
 
 #[cfg(test)]

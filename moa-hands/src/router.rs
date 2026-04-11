@@ -5,7 +5,7 @@ use std::env;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use moa_core::{
     ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, ApprovalRule, BuiltInTool,
@@ -18,10 +18,13 @@ use moa_security::{
     ApprovalRuleStore, EnvironmentCredentialVault, MCPCredentialProxy, PolicyCheck, ToolPolicies,
     ToolPolicyContext,
 };
+use opentelemetry::trace::Status;
 use serde_json::{Value, json};
 use tokio::fs;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 #[cfg(feature = "daytona")]
@@ -588,19 +591,36 @@ impl ToolRouter {
         session: &SessionMeta,
         invocation: &ToolInvocation,
     ) -> Result<(Option<String>, ToolOutput)> {
-        let prepared = self.prepare_invocation(session, invocation).await?;
-        match &prepared.policy().action {
-            PolicyAction::Allow => self.execute_authorized(session, invocation).await,
-            PolicyAction::Deny => Err(MoaError::PermissionDenied(format!(
-                "tool {} denied by policy",
-                invocation.name
-            ))),
-            PolicyAction::RequireApproval => Err(MoaError::PermissionDenied(format!(
-                "tool {} requires approval: {}",
-                invocation.name,
-                prepared.input_summary()
-            ))),
+        let tool_span = tool_execution_span(invocation);
+
+        let instrument_tool_span = tool_span.clone();
+        async move {
+            let started_at = Instant::now();
+            let prepared = self.prepare_invocation(session, invocation).await?;
+            let result = match &prepared.policy().action {
+                PolicyAction::Allow => {
+                    self.execute_authorized_inner(session, invocation, None, None)
+                        .await
+                }
+                PolicyAction::Deny => {
+                    tool_span.set_attribute("moa.tool.denied", true);
+                    Err(MoaError::PermissionDenied(format!(
+                        "tool {} denied by policy",
+                        invocation.name
+                    )))
+                }
+                PolicyAction::RequireApproval => Err(MoaError::PermissionDenied(format!(
+                    "tool {} requires approval: {}",
+                    invocation.name,
+                    prepared.input_summary()
+                ))),
+            };
+
+            record_tool_execution_result(&tool_span, started_at.elapsed(), &result);
+            result
         }
+        .instrument(instrument_tool_span)
+        .await
     }
 
     /// Executes a tool invocation after approval has already been granted.
@@ -615,6 +635,28 @@ impl ToolRouter {
 
     /// Executes a tool invocation after approval has already been granted with cancellation hooks.
     pub async fn execute_authorized_with_cancel(
+        &self,
+        session: &SessionMeta,
+        invocation: &ToolInvocation,
+        cancel_token: Option<&CancellationToken>,
+        hard_cancel_token: Option<&CancellationToken>,
+    ) -> Result<(Option<String>, ToolOutput)> {
+        let tool_span = tool_execution_span(invocation);
+
+        let instrument_tool_span = tool_span.clone();
+        async move {
+            let started_at = Instant::now();
+            let result = self
+                .execute_authorized_inner(session, invocation, cancel_token, hard_cancel_token)
+                .await;
+            record_tool_execution_result(&tool_span, started_at.elapsed(), &result);
+            result
+        }
+        .instrument(instrument_tool_span)
+        .await
+    }
+
+    async fn execute_authorized_inner(
         &self,
         session: &SessionMeta,
         invocation: &ToolInvocation,
@@ -997,4 +1039,62 @@ fn expand_local_path(path: &str) -> Result<PathBuf> {
     }
 
     Ok(PathBuf::from(path))
+}
+
+fn tool_execution_span(invocation: &ToolInvocation) -> tracing::Span {
+    let span_name = format!("execute_tool {}", invocation.name);
+    let span = tracing::info_span!("tool_execution", otel.name = %span_name);
+    span.set_attribute("gen_ai.tool.name", invocation.name.clone());
+    if let Some(tool_call_id) = invocation.id.as_ref() {
+        span.set_attribute("gen_ai.tool.call.id", tool_call_id.clone());
+    }
+    if let Ok(serialized_input) = serde_json::to_string(&invocation.input) {
+        span.set_attribute("moa.tool.input", truncate_tool_span_text(serialized_input));
+    }
+    span.set_attribute("moa.tool.denied", false);
+    span
+}
+
+fn record_tool_execution_result(
+    span: &tracing::Span,
+    duration: Duration,
+    result: &Result<(Option<String>, ToolOutput)>,
+) {
+    span.set_attribute("moa.tool.duration_ms", duration.as_millis() as i64);
+
+    match result {
+        Ok((_, output)) => {
+            let succeeded = !output.is_error;
+            span.set_attribute("moa.tool.success", succeeded);
+            span.set_attribute("moa.tool.output", truncate_tool_span_text(output.to_text()));
+            if output.is_error {
+                span.set_status(Status::error(output.to_text()));
+            }
+        }
+        Err(MoaError::PermissionDenied(_)) => {
+            span.set_attribute("moa.tool.success", false);
+        }
+        Err(MoaError::Cancelled) => {
+            span.set_attribute("moa.tool.success", false);
+        }
+        Err(error) => {
+            span.set_attribute("moa.tool.success", false);
+            span.set_status(Status::error(error.to_string()));
+        }
+    }
+}
+
+fn truncate_tool_span_text(mut value: String) -> String {
+    const LIMIT: usize = 8 * 1024;
+    if value.len() <= LIMIT {
+        return value;
+    }
+
+    let mut truncate_at = LIMIT;
+    while !value.is_char_boundary(truncate_at) {
+        truncate_at -= 1;
+    }
+    value.truncate(truncate_at);
+    value.push('…');
+    value
 }
