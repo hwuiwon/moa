@@ -5,9 +5,9 @@ use moa_providers::{AnthropicProvider, OpenAIProvider, OpenRouterProvider};
 use serde_json::json;
 
 enum LiveProvider {
-    OpenAi(OpenAIProvider),
-    Anthropic(AnthropicProvider),
-    OpenRouter(OpenRouterProvider),
+    OpenAi(Box<OpenAIProvider>),
+    Anthropic(Box<AnthropicProvider>),
+    OpenRouter(Box<OpenRouterProvider>),
 }
 
 impl LiveProvider {
@@ -34,13 +34,13 @@ impl LiveProvider {
 fn available_live_providers() -> Vec<LiveProvider> {
     let mut providers = Vec::new();
     if let Ok(provider) = OpenAIProvider::from_env("gpt-5.4") {
-        providers.push(LiveProvider::OpenAi(provider));
+        providers.push(LiveProvider::OpenAi(Box::new(provider)));
     }
     if let Ok(provider) = AnthropicProvider::from_env("claude-sonnet-4-6") {
-        providers.push(LiveProvider::Anthropic(provider));
+        providers.push(LiveProvider::Anthropic(Box::new(provider)));
     }
     if let Ok(provider) = OpenRouterProvider::from_env("openai/gpt-5.4") {
-        providers.push(LiveProvider::OpenRouter(provider));
+        providers.push(LiveProvider::OpenRouter(Box::new(provider)));
     }
     providers
 }
@@ -132,6 +132,7 @@ async fn live_providers_emit_tool_calls_across_available_keys() {
         let tool_call = response.content.iter().find_map(|content| match content {
             CompletionContent::ToolCall(invocation) => Some(invocation),
             CompletionContent::Text(_) => None,
+            CompletionContent::ProviderToolResult { .. } => None,
         });
         let Some(tool_call) = tool_call else {
             panic!(

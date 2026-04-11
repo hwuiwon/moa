@@ -253,6 +253,7 @@ impl LLMProvider for MockLlmProvider {
                 output_per_mtok: 15.0,
                 cached_input_per_mtok: Some(0.3),
             },
+            native_tools: Vec::new(),
         }
     }
 
@@ -336,6 +337,7 @@ impl LLMProvider for ToolLoopLlmProvider {
                 output_per_mtok: 15.0,
                 cached_input_per_mtok: Some(0.3),
             },
+            native_tools: Vec::new(),
         }
     }
 
@@ -407,6 +409,7 @@ impl LLMProvider for MemoryWriteLoopLlmProvider {
                 output_per_mtok: 15.0,
                 cached_input_per_mtok: Some(0.3),
             },
+            native_tools: Vec::new(),
         }
     }
 
@@ -482,6 +485,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
                 output_per_mtok: 15.0,
                 cached_input_per_mtok: Some(0.3),
             },
+            native_tools: Vec::new(),
         }
     }
 

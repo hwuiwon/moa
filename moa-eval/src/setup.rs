@@ -663,6 +663,7 @@ mod tests {
                     output_per_mtok: 2.0,
                     cached_input_per_mtok: None,
                 },
+                native_tools: Vec::new(),
             }
         }
 

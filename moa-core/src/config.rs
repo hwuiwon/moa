@@ -426,6 +426,8 @@ pub struct GeneralConfig {
     pub default_model: String,
     /// Requested reasoning effort.
     pub reasoning_effort: String,
+    /// Whether provider-native web search should be offered to supported models.
+    pub web_search_enabled: bool,
     /// Optional workspace-level instructions injected into the prompt.
     pub workspace_instructions: Option<String>,
     /// Optional user-level preferences injected into the prompt.
@@ -438,6 +440,7 @@ impl Default for GeneralConfig {
             default_provider: "openai".to_string(),
             default_model: "gpt-5.4".to_string(),
             reasoning_effort: "medium".to_string(),
+            web_search_enabled: true,
             workspace_instructions: None,
             user_instructions: None,
         }
@@ -954,11 +957,7 @@ impl Default for PermissionsConfig {
     fn default() -> Self {
         Self {
             default_posture: "approve".to_string(),
-            auto_approve: vec![
-                "file_read".to_string(),
-                "file_search".to_string(),
-                "web_search".to_string(),
-            ],
+            auto_approve: vec!["file_read".to_string(), "file_search".to_string()],
             always_deny: Vec::new(),
         }
     }

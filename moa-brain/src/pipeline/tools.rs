@@ -123,6 +123,7 @@ mod tests {
                 output_per_mtok: 15.0,
                 cached_input_per_mtok: Some(0.3),
             },
+            native_tools: Vec::new(),
         };
         let mut ctx = WorkingContext::new(&session, capabilities);
 
@@ -169,6 +170,7 @@ mod tests {
                 output_per_mtok: 15.0,
                 cached_input_per_mtok: Some(0.3),
             },
+            native_tools: Vec::new(),
         };
         let memory_store = Arc::new(StaticMemoryStore::default());
         write_workspace_tool_stats(

@@ -1192,6 +1192,18 @@ pub struct TokenPricing {
     pub cached_input_per_mtok: Option<f64>,
 }
 
+/// One tool implemented natively by the model provider instead of MOA.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderNativeTool {
+    /// Provider-specific tool type identifier.
+    pub tool_type: String,
+    /// Human-readable tool name.
+    pub name: String,
+    /// Optional provider-specific configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<Value>,
+}
+
 /// LLM model capability metadata.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelCapabilities {
@@ -1213,6 +1225,9 @@ pub struct ModelCapabilities {
     pub tool_call_format: ToolCallFormat,
     /// Token pricing metadata.
     pub pricing: TokenPricing,
+    /// Provider-native tools that the model can invoke without MOA routing them.
+    #[serde(default)]
+    pub native_tools: Vec<ProviderNativeTool>,
 }
 
 /// Single tool invocation emitted by a provider.
@@ -1234,6 +1249,13 @@ pub enum CompletionContent {
     Text(String),
     /// Tool call content.
     ToolCall(ToolInvocation),
+    /// Informational output from a provider-native tool.
+    ProviderToolResult {
+        /// Provider-native tool name.
+        tool_name: String,
+        /// Concise summary suitable for UI status output.
+        summary: String,
+    },
 }
 
 /// Completion stop reason.

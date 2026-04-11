@@ -130,6 +130,7 @@ impl LLMProvider for MockLlm {
                 output_per_mtok: 0.0,
                 cached_input_per_mtok: None,
             },
+            native_tools: Vec::new(),
         }
     }
 
@@ -176,6 +177,7 @@ impl LLMProvider for ImprovementAndEvalLlm {
                 output_per_mtok: self.output_per_mtok,
                 cached_input_per_mtok: None,
             },
+            native_tools: Vec::new(),
         }
     }
 

@@ -107,6 +107,7 @@ mod tests {
                 output_per_mtok: 15.0,
                 cached_input_per_mtok: Some(0.3),
             },
+            native_tools: Vec::new(),
         };
         let mut ctx = WorkingContext::new(&session, capabilities);
         let config = MoaConfig {

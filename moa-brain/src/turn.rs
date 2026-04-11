@@ -101,6 +101,9 @@ where
                             }
                         }
                         CompletionContent::ToolCall(_) => {}
+                        CompletionContent::ProviderToolResult { summary, .. } => {
+                            on_runtime_event(RuntimeEvent::Notice(summary));
+                        }
                     }
                 }
                 _ = async {
@@ -151,6 +154,9 @@ where
                                 }
                             }
                             CompletionContent::ToolCall(_) => {}
+                            CompletionContent::ProviderToolResult { summary, .. } => {
+                                on_runtime_event(RuntimeEvent::Notice(summary));
+                            }
                         }
                     }
                     _ = cancel_token.cancelled() => {
@@ -178,6 +184,9 @@ where
                         }
                     }
                     CompletionContent::ToolCall(_) => {}
+                    CompletionContent::ProviderToolResult { summary, .. } => {
+                        on_runtime_event(RuntimeEvent::Notice(summary));
+                    }
                 }
             }
         }
@@ -352,4 +361,84 @@ pub fn find_resolved_pending_tool_approval(events: &[EventRecord]) -> Option<Pen
         .collect::<Vec<_>>();
     pending.sort_by_key(|item| item.sequence_num);
     pending.into_iter().next()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use moa_core::{CompletionResponse, StopReason};
+
+    use super::*;
+
+    struct ProviderToolResultLlm;
+
+    #[async_trait::async_trait]
+    impl LLMProvider for ProviderToolResultLlm {
+        fn name(&self) -> &str {
+            "provider-tool-result"
+        }
+
+        fn capabilities(&self) -> moa_core::ModelCapabilities {
+            moa_core::ModelCapabilities {
+                model_id: "mock-model".to_string(),
+                context_window: 32_000,
+                max_output: 1_024,
+                supports_tools: true,
+                supports_vision: false,
+                supports_prefix_caching: false,
+                cache_ttl: None,
+                tool_call_format: moa_core::ToolCallFormat::Anthropic,
+                pricing: moa_core::TokenPricing {
+                    input_per_mtok: 0.0,
+                    output_per_mtok: 0.0,
+                    cached_input_per_mtok: None,
+                },
+                native_tools: Vec::new(),
+            }
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<moa_core::CompletionStream> {
+            Ok(moa_core::CompletionStream::from_response(
+                CompletionResponse {
+                    text: "Fresh answer".to_string(),
+                    content: vec![
+                        CompletionContent::ProviderToolResult {
+                            tool_name: "web_search".to_string(),
+                            summary: "Searching the web...".to_string(),
+                        },
+                        CompletionContent::Text("Fresh answer".to_string()),
+                    ],
+                    stop_reason: StopReason::EndTurn,
+                    model: "mock-model".to_string(),
+                    input_tokens: 4,
+                    output_tokens: 2,
+                    cached_input_tokens: 0,
+                    duration_ms: 1,
+                },
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_completion_reports_provider_tool_results_as_notices() {
+        let mut runtime_events = Vec::new();
+        let streamed = stream_completion_response(
+            Arc::new(ProviderToolResultLlm),
+            CompletionRequest::simple("latest weather"),
+            None,
+            None,
+            |event| runtime_events.push(event),
+            |_| StreamSignalDisposition::Continue,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(streamed.streamed_text, "Fresh answer");
+        assert!(runtime_events.contains(&RuntimeEvent::Notice("Searching the web...".to_string())));
+        assert!(runtime_events.contains(&RuntimeEvent::AssistantStarted));
+    }
 }

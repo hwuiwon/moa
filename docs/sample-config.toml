@@ -2,6 +2,7 @@
 default_provider = "openai"
 default_model = "gpt-5.4"
 reasoning_effort = "medium"
+web_search_enabled = true
 
 [providers.anthropic]
 api_key_env = "ANTHROPIC_API_KEY"
@@ -82,7 +83,7 @@ diff_style = "auto"
 
 [permissions]
 default_posture = "approve"
-auto_approve = ["file_read", "file_search", "web_search"]
+auto_approve = ["file_read", "file_search"]
 always_deny = []
 
 [compaction]

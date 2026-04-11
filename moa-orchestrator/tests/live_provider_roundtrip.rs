@@ -15,48 +15,34 @@ use moa_session::{SessionDatabase, create_session_store};
 use tempfile::TempDir;
 use tokio::time::{Instant, sleep};
 
-enum LiveProvider {
-    OpenAi(OpenAIProvider, &'static str),
-    Anthropic(AnthropicProvider, &'static str),
-    OpenRouter(OpenRouterProvider, &'static str),
-}
-
-impl LiveProvider {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::OpenAi(_, label) | Self::Anthropic(_, label) | Self::OpenRouter(_, label) => {
-                label
-            }
-        }
-    }
-
-    fn model(&self) -> String {
-        match self {
-            Self::OpenAi(provider, _) => provider.capabilities().model_id,
-            Self::Anthropic(provider, _) => provider.capabilities().model_id,
-            Self::OpenRouter(provider, _) => provider.capabilities().model_id,
-        }
-    }
-
-    fn into_arc(self) -> Arc<dyn LLMProvider> {
-        match self {
-            Self::OpenAi(provider, _) => Arc::new(provider),
-            Self::Anthropic(provider, _) => Arc::new(provider),
-            Self::OpenRouter(provider, _) => Arc::new(provider),
-        }
-    }
+struct LiveProvider {
+    label: &'static str,
+    model: String,
+    provider: Arc<dyn LLMProvider>,
 }
 
 fn available_live_providers() -> Vec<LiveProvider> {
     let mut providers = Vec::new();
     if let Ok(provider) = OpenAIProvider::from_env("gpt-5.4") {
-        providers.push(LiveProvider::OpenAi(provider, "openai"));
+        providers.push(LiveProvider {
+            label: "openai",
+            model: provider.capabilities().model_id,
+            provider: Arc::new(provider),
+        });
     }
     if let Ok(provider) = AnthropicProvider::from_env("claude-sonnet-4-6") {
-        providers.push(LiveProvider::Anthropic(provider, "anthropic"));
+        providers.push(LiveProvider {
+            label: "anthropic",
+            model: provider.capabilities().model_id,
+            provider: Arc::new(provider),
+        });
     }
     if let Ok(provider) = OpenRouterProvider::from_env("openai/gpt-5.4") {
-        providers.push(LiveProvider::OpenRouter(provider, "openrouter"));
+        providers.push(LiveProvider {
+            label: "openrouter",
+            model: provider.capabilities().model_id,
+            provider: Arc::new(provider),
+        });
     }
     providers
 }
@@ -196,13 +182,12 @@ async fn live_providers_complete_tool_approval_roundtrip_when_available() {
     }
 
     for provider in providers {
-        let label = provider.label().to_string();
-        let model = provider.model();
+        let label = provider.label.to_string();
+        let model = provider.model;
         let token = format!("LIVE-E2E-{}", label.to_uppercase());
-        let (dir, session_store, orchestrator) =
-            live_orchestrator_with_provider(provider.into_arc())
-                .await
-                .unwrap_or_else(|error| panic!("{label} orchestrator setup failed: {error}"));
+        let (dir, session_store, orchestrator) = live_orchestrator_with_provider(provider.provider)
+            .await
+            .unwrap_or_else(|error| panic!("{label} orchestrator setup failed: {error}"));
 
         let relative_path = format!("live/{label}.txt");
         let prompt = format!(

@@ -176,6 +176,18 @@ async fn file_search_finds_files_by_glob() {
 }
 
 #[tokio::test]
+async fn default_router_excludes_provider_native_web_tools() {
+    let dir = tempdir().unwrap();
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let router = ToolRouter::new_local(memory_store, dir.path())
+        .await
+        .unwrap();
+
+    assert!(!router.has_tool("web_search"));
+    assert!(!router.has_tool("web_fetch"));
+}
+
+#[tokio::test]
 async fn file_operations_reject_path_traversal() {
     let dir = tempdir().unwrap();
     let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);

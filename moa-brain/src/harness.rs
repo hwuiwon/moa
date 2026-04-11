@@ -493,41 +493,62 @@ async fn run_streamed_turn_with_tools_mode(
             let mut saw_tool_request = false;
             let mut executed_tools = false;
             for block in &response.content {
-                if let CompletionContent::ToolCall(call) = block {
-                    saw_tool_request = true;
-                    let outcome = handle_tool_call(
-                        session_id.clone(),
-                        &session,
-                        session_store.clone(),
-                        tool_router.as_deref(),
-                        call,
-                        active_canary.as_deref(),
-                        event_tx,
-                        runtime_tx,
-                        cancel_token,
-                        hard_cancel_token,
-                        signal_rx.as_deref_mut(),
-                        turn_requested,
-                        queued_messages,
-                        soft_cancel_requested,
-                    )
-                    .await?;
-                    emitted_tool_calls += 1;
-                    total_tool_calls += 1;
-                    match outcome {
-                        ToolCallOutcome::Executed => executed_tools = true,
-                        ToolCallOutcome::Skipped => {}
-                        ToolCallOutcome::NeedsApproval(request) => {
-                            record_turn_span_metrics(
-                                &turn_span,
-                                total_tool_calls,
-                                total_input_tokens,
-                                total_output_tokens,
-                                "needs_approval",
-                            );
-                            return Ok(StreamedTurnResult::NeedsApproval(request));
+                match block {
+                    CompletionContent::ToolCall(call) => {
+                        saw_tool_request = true;
+                        let outcome = handle_tool_call(
+                            session_id.clone(),
+                            &session,
+                            session_store.clone(),
+                            tool_router.as_deref(),
+                            call,
+                            active_canary.as_deref(),
+                            event_tx,
+                            runtime_tx,
+                            cancel_token,
+                            hard_cancel_token,
+                            signal_rx.as_deref_mut(),
+                            turn_requested,
+                            queued_messages,
+                            soft_cancel_requested,
+                        )
+                        .await?;
+                        emitted_tool_calls += 1;
+                        total_tool_calls += 1;
+                        match outcome {
+                            ToolCallOutcome::Executed => executed_tools = true,
+                            ToolCallOutcome::Skipped => {}
+                            ToolCallOutcome::NeedsApproval(request) => {
+                                record_turn_span_metrics(
+                                    &turn_span,
+                                    total_tool_calls,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    "needs_approval",
+                                );
+                                return Ok(StreamedTurnResult::NeedsApproval(request));
+                            }
+                            ToolCallOutcome::Cancelled => {
+                                record_turn_span_metrics(
+                                    &turn_span,
+                                    total_tool_calls,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    "cancelled",
+                                );
+                                return Ok(StreamedTurnResult::Cancelled);
+                            }
                         }
-                        ToolCallOutcome::Cancelled => {
+                        if signal_rx.is_some() {
+                            drain_signal_queue(
+                                signal_rx.as_deref_mut(),
+                                runtime_tx,
+                                turn_requested,
+                                queued_messages,
+                                soft_cancel_requested,
+                            )?;
+                        }
+                        if *soft_cancel_requested {
                             record_turn_span_metrics(
                                 &turn_span,
                                 total_tool_calls,
@@ -538,25 +559,7 @@ async fn run_streamed_turn_with_tools_mode(
                             return Ok(StreamedTurnResult::Cancelled);
                         }
                     }
-                    if signal_rx.is_some() {
-                        drain_signal_queue(
-                            signal_rx.as_deref_mut(),
-                            runtime_tx,
-                            turn_requested,
-                            queued_messages,
-                            soft_cancel_requested,
-                        )?;
-                    }
-                    if *soft_cancel_requested {
-                        record_turn_span_metrics(
-                            &turn_span,
-                            total_tool_calls,
-                            total_input_tokens,
-                            total_output_tokens,
-                            "cancelled",
-                        );
-                        return Ok(StreamedTurnResult::Cancelled);
-                    }
+                    CompletionContent::Text(_) | CompletionContent::ProviderToolResult { .. } => {}
                 }
             }
 
