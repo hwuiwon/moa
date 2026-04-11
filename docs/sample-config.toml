@@ -25,6 +25,23 @@ docker_enabled = true
 sandbox_dir = "~/.moa/sandbox"
 memory_dir = "~/.moa/memory"
 
+[observability]
+enabled = false
+service_name = "moa"
+# otlp_endpoint = "http://localhost:4317" # collector gRPC
+otlp_protocol = "grpc" # grpc | http
+# environment = "development"
+# release = "v0.1.0"
+sample_rate = 1.0
+
+# Custom OTLP headers are useful for direct Langfuse OTLP/HTTP export:
+# otlp_protocol = "http"
+# otlp_endpoint = "https://cloud.langfuse.com/api/public/otel"
+#
+# [observability.otlp_headers]
+# Authorization = "Basic <base64(public_key:secret_key)>"
+# x-langfuse-ingestion-version = "4"
+
 [cloud]
 enabled = false
 turso_url = ""
