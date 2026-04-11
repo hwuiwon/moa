@@ -18,7 +18,6 @@ moa-memory = { path = "../moa-memory" }
 moa-providers = { path = "../moa-providers" }
 moa-security = { path = "../moa-security" }
 moa-session = { path = "../moa-session" }
-moa-skills = { path = "../moa-skills" }
 opentelemetry.workspace = true
 regex = "1"
 reqwest = { workspace = true, optional = true }

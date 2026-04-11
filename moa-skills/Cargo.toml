@@ -7,14 +7,16 @@ license.workspace = true
 [dependencies]
 chrono.workspace = true
 moa-core = { path = "../moa-core" }
+moa-eval = { path = "../moa-eval" }
 moa-memory = { path = "../moa-memory" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
 tokio.workspace = true
+toml.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
 tempfile = "3"
-uuid.workspace = true

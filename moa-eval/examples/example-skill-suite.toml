@@ -1,0 +1,15 @@
+[suite]
+name = "deploy-to-fly-regression"
+description = "Example regression suite for a single skill"
+default_timeout_seconds = 120
+tags = ["skill", "regression"]
+
+[[cases]]
+name = "basic-staging-deploy"
+input = "Deploy the app to staging"
+timeout_seconds = 120
+tags = ["deployment", "staging"]
+expected_trajectory = ["bash", "bash", "bash"]
+
+[cases.expected_output]
+contains = ["staging", "deployed"]

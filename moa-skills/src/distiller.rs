@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_core::{
-    CompletionRequest, Event, EventRecord, LLMProvider, MemoryStore, Result, SessionMeta,
-    SkillMetadata,
+    CompletionRequest, Event, EventRecord, LLMProvider, MemoryStore, MoaConfig, Result,
+    SessionMeta, SkillMetadata,
 };
 use moa_memory::FileMemoryStore;
 
@@ -16,12 +16,14 @@ use crate::format::{
 };
 use crate::improver::{format_events_for_learning, normalize_llm_markdown, record_successful_use};
 use crate::registry::SkillRegistry;
+use crate::regression::generate_skill_test_suite;
 
 const MIN_TOOL_CALLS_FOR_DISTILLATION: usize = 5;
 const SIMILARITY_THRESHOLD: f32 = 0.5;
 
 /// Distills a successful multi-step session into a reusable workspace skill when appropriate.
 pub async fn maybe_distill_skill(
+    config: &MoaConfig,
     session: &SessionMeta,
     events: &[EventRecord],
     memory_store: Arc<FileMemoryStore>,
@@ -37,8 +39,15 @@ pub async fn maybe_distill_skill(
     let existing_skills = registry.list_for_pipeline(&session.workspace_id).await?;
 
     if let Some(existing) = find_similar_skill(&task_summary, &existing_skills) {
-        return crate::improver::maybe_improve_skill(session, existing, events, memory_store, llm)
-            .await;
+        return crate::improver::maybe_improve_skill(
+            config,
+            session,
+            existing,
+            events,
+            memory_store,
+            llm,
+        )
+        .await;
     }
 
     let prompt = build_distillation_prompt(&task_summary, events);
@@ -59,6 +68,7 @@ pub async fn maybe_distill_skill(
             page,
         )
         .await?;
+    generate_skill_test_suite(session, &skill, &path, events, memory_store.clone()).await?;
 
     Ok(Some(skill_metadata_from_document(path, &skill)))
 }

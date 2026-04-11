@@ -647,6 +647,7 @@ async fn run_session_task(
                     .get_events(context.session_id.clone(), EventRange::all())
                     .await?;
                 if let Some(skill) = maybe_distill_skill(
+                    &context.config,
                     &session,
                     &events,
                     context.memory_store.clone(),

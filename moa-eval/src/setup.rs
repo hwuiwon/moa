@@ -17,18 +17,16 @@ use moa_brain::{
     },
 };
 use moa_core::{
-    ContextProcessor, LLMProvider, MemoryPath, MemoryScope, MemoryStore, MoaConfig, SessionMeta,
-    SessionStore, UserId, WorkspaceId,
+    ContextProcessor, LLMProvider, MemoryPath, MemoryScope, MemoryStore, MoaConfig, PageType,
+    SessionMeta, SessionStore, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
+use moa_memory::wiki::parse_markdown;
 use moa_providers::{build_provider_from_selection, resolve_provider_selection};
 use moa_security::{ApprovalRuleStore, ToolPolicies};
 use moa_session::TursoSessionStore;
-use moa_skills::{
-    SkillRegistry, build_skill_path, parse_skill_markdown, skill_from_wiki_page,
-    wiki_page_from_skill,
-};
+use serde_json::Value;
 use tokio::fs;
 use uuid::Uuid;
 
@@ -253,7 +251,6 @@ async fn build_pipeline(
     let user_instructions = base_config.general.user_instructions.clone();
     let tool_schemas = tool_router.tool_schemas();
     let memory_store_dyn: Arc<dyn MemoryStore> = memory_store.clone();
-    let skill_registry = Arc::new(SkillRegistry::new(memory_store_dyn.clone()));
     let mut stages: Vec<Box<dyn ContextProcessor>> = vec![
         Box::new(IdentityProcessor::new(identity_prompt)),
         Box::new(InstructionProcessor::new(
@@ -264,7 +261,7 @@ async fn build_pipeline(
             tool_schemas,
             memory_store.clone(),
         )),
-        Box::new(SkillInjector::new(skill_registry)),
+        Box::new(SkillInjector::from_memory(memory_store_dyn.clone())),
         Box::new(MemoryRetriever::new(
             memory_store_dyn,
             session_store.clone(),
@@ -311,10 +308,13 @@ async fn apply_skill_overrides(
             .await?;
         for summary in summaries {
             let page = memory_store.read_page(scope.clone(), &summary.path).await?;
-            let skill = skill_from_wiki_page(&page)?;
-            if agent_config.skills.exclude.iter().any(|selector| {
-                skill_selector_matches(selector, &summary.path, &skill.frontmatter.name)
-            }) {
+            let skill_name = skill_name_from_page(&page).unwrap_or_else(|| page.title.clone());
+            if agent_config
+                .skills
+                .exclude
+                .iter()
+                .any(|selector| skill_selector_matches(selector, &summary.path, &skill_name))
+            {
                 memory_store
                     .delete_page(scope.clone(), &summary.path)
                     .await?;
@@ -358,15 +358,23 @@ async fn load_skill_page(selector: &str) -> Result<(MemoryPath, moa_core::WikiPa
     } else {
         resolved
     };
+    let hinted_name = file_path
+        .parent()
+        .and_then(Path::file_name)
+        .or_else(|| file_path.file_stem())
+        .and_then(|value| value.to_str())
+        .unwrap_or("skill");
+    let hinted_path = MemoryPath::new(format!("skills/{}/SKILL.md", slugify_name(hinted_name)));
     let markdown = fs::read_to_string(&file_path)
         .await
         .map_err(|source| EvalError::Io {
             path: file_path.clone(),
             source,
         })?;
-    let skill = parse_skill_markdown(&markdown)?;
-    let path = build_skill_path(&skill.frontmatter.name);
-    let page = wiki_page_from_skill(&skill, Some(path.clone()))?;
+    let mut page = parse_markdown(Some(hinted_path), &markdown).map_err(EvalError::Moa)?;
+    page.page_type = PageType::Skill;
+    let path = build_skill_memory_path(&page, &file_path);
+    page.path = Some(path.clone());
     Ok((path, page))
 }
 
@@ -573,6 +581,28 @@ fn skill_selector_matches(selector: &str, path: &MemoryPath, name: &str) -> bool
         || selector == path.as_str()
         || path.as_str().contains(selector)
         || name.contains(selector)
+}
+
+fn skill_name_from_page(page: &moa_core::WikiPage) -> Option<String> {
+    page.metadata
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn build_skill_memory_path(page: &moa_core::WikiPage, file_path: &Path) -> MemoryPath {
+    let name = skill_name_from_page(page)
+        .or_else(|| {
+            file_path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|value| value.to_str())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| page.title.clone());
+    MemoryPath::new(format!("skills/{}/SKILL.md", slugify_name(&name)))
 }
 
 fn slugify_name(name: &str) -> String {
