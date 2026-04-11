@@ -3203,6 +3203,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-eval"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "moa-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "moa-gateway"
 version = "0.1.0"
 dependencies = [
