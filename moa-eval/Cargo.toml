@@ -7,11 +7,24 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+moa-brain = { path = "../moa-brain" }
 moa-core = { path = "../moa-core" }
+moa-hands = { path = "../moa-hands" }
+moa-memory = { path = "../moa-memory" }
+moa-providers = { path = "../moa-providers" }
+moa-security = { path = "../moa-security" }
+moa-session = { path = "../moa-session" }
+moa-skills = { path = "../moa-skills" }
+opentelemetry.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 toml.workspace = true
 tracing.workspace = true
+tracing-opentelemetry.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
