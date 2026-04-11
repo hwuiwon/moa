@@ -258,7 +258,8 @@ async fn temporal_test_orchestrator_with_provider(
         ToolRouter::from_config(&config, memory_store.clone())
             .await
             .expect("tool router")
-            .with_rule_store(session_store.clone()),
+            .with_rule_store(session_store.clone())
+            .with_session_store(session_store.clone()),
     );
     let orchestrator =
         TemporalOrchestrator::new(config, session_store, memory_store, provider, tool_router)

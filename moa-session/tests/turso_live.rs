@@ -171,18 +171,6 @@ async fn embedded_replica_sync_preserves_checkpoint_wake() -> Result<(), Box<dyn
             .await?;
     }
 
-    let checkpoint_summary = format!("checkpoint {tag}");
-    remote_store
-        .emit_event(
-            session_id.clone(),
-            Event::Checkpoint {
-                summary: checkpoint_summary.clone(),
-                events_summarized: 3,
-                token_count: 42,
-            },
-        )
-        .await?;
-
     for index in 0..2 {
         remote_store
             .emit_event(
@@ -194,6 +182,22 @@ async fn embedded_replica_sync_preserves_checkpoint_wake() -> Result<(), Box<dyn
             )
             .await?;
     }
+
+    let checkpoint_summary = format!("checkpoint {tag}");
+    remote_store
+        .emit_event(
+            session_id.clone(),
+            Event::Checkpoint {
+                summary: checkpoint_summary.clone(),
+                events_summarized: 3,
+                token_count: 42,
+                model: "test-model".into(),
+                input_tokens: 12,
+                output_tokens: 8,
+                cost_cents: 1,
+            },
+        )
+        .await?;
 
     println!("syncing checkpointed session to local replica");
     local_store.sync_now().await?;

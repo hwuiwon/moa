@@ -213,6 +213,8 @@ pub struct ToolContext<'a> {
     pub session: &'a SessionMeta,
     /// Shared memory store.
     pub memory_store: &'a dyn MemoryStore,
+    /// Shared session store when the tool needs session-log access.
+    pub session_store: Option<&'a dyn SessionStore>,
     /// Cooperative cancellation token for the current session, when available.
     pub cancel_token: Option<&'a CancellationToken>,
 }

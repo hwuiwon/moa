@@ -3262,6 +3262,7 @@ dependencies = [
  "moa-core",
  "moa-memory",
  "moa-security",
+ "moa-session",
  "opentelemetry",
  "reqwest 0.13.2",
  "serde",

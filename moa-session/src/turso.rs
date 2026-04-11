@@ -88,44 +88,10 @@ impl TursoSessionStore {
     /// Reconstructs the session state needed to resume a brain.
     pub async fn wake(&self, session_id: moa_core::SessionId) -> Result<WakeContext> {
         let session = self.get_session(session_id.clone()).await?;
-
-        let last_checkpoint = {
-            let query = format!(
-                "SELECT {EVENT_COLUMNS} FROM events WHERE session_id = ? \
-                 AND event_type = 'Checkpoint' ORDER BY sequence_num DESC LIMIT 1"
-            );
-            let mut rows = self
-                .connection
-                .query(&query, [session_id.to_string()])
-                .await
-                .map_err(map_db_error)?;
-            match rows.next().await.map_err(map_db_error)? {
-                Some(row) => Some(event_record_from_row(&row)?),
-                None => None,
-            }
-        };
-
-        let from_seq = last_checkpoint
-            .as_ref()
-            .map(|checkpoint| checkpoint.sequence_num + 1)
-            .unwrap_or(0);
-
-        let recent_events = self
-            .get_events(
-                session_id.clone(),
-                EventRange {
-                    from_seq: Some(from_seq),
-                    to_seq: None,
-                    event_types: None,
-                    limit: None,
-                },
-            )
+        let all_events = self
+            .get_events(session_id.clone(), EventRange::all())
             .await?;
-
-        let checkpoint_summary = last_checkpoint.and_then(|checkpoint| match checkpoint.event {
-            Event::Checkpoint { summary, .. } => Some(summary),
-            _ => None,
-        });
+        let (checkpoint_summary, recent_events) = checkpoint_view(&all_events);
         let pending_signals = self.get_pending_signals(session_id).await?;
 
         Ok(WakeContext {
@@ -314,6 +280,33 @@ impl TursoSessionStore {
 
         Ok(())
     }
+}
+
+fn checkpoint_view(events: &[EventRecord]) -> (Option<String>, Vec<EventRecord>) {
+    let latest_checkpoint = events.iter().rev().find_map(|record| match &record.event {
+        Event::Checkpoint {
+            summary,
+            events_summarized,
+            ..
+        } => Some((summary.clone(), (*events_summarized) as usize)),
+        _ => None,
+    });
+    let summary = latest_checkpoint
+        .as_ref()
+        .map(|(summary, _)| summary.clone());
+    let summarized = latest_checkpoint.map(|(_, count)| count).unwrap_or(0);
+    let non_checkpoint = events
+        .iter()
+        .filter(|record| !matches!(record.event, Event::Checkpoint { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    let non_checkpoint_len = non_checkpoint.len();
+    let recent_events = non_checkpoint
+        .into_iter()
+        .skip(summarized.min(non_checkpoint_len))
+        .collect::<Vec<_>>();
+
+    (summary, recent_events)
 }
 
 fn resolve_turso_auth_token(config: &MoaConfig) -> Result<String> {

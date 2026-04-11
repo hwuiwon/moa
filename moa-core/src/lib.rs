@@ -9,10 +9,11 @@ pub mod traits;
 pub mod types;
 
 pub use config::{
-    CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, DaemonConfig,
-    DatabaseBackend, DatabaseConfig, DatabaseNeonConfig, GatewayConfig, GeneralConfig, LocalConfig,
-    McpCredentialConfig, McpServerConfig, McpTransportConfig, MoaConfig, ObservabilityConfig,
-    OtlpProtocol, PermissionsConfig, ProviderCredentialConfig, ProvidersConfig, TuiConfig,
+    CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, CompactionConfig,
+    DaemonConfig, DatabaseBackend, DatabaseConfig, DatabaseNeonConfig, GatewayConfig,
+    GeneralConfig, LocalConfig, McpCredentialConfig, McpServerConfig, McpTransportConfig,
+    MoaConfig, ObservabilityConfig, OtlpProtocol, PermissionsConfig, ProviderCredentialConfig,
+    ProvidersConfig, TuiConfig,
 };
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
 pub use error::{MoaError, Result};

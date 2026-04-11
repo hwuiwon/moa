@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_brain::{
-    TurnResult, build_default_pipeline_with_tools, find_pending_tool_approval,
+    TurnResult, build_default_pipeline_with_runtime, find_pending_tool_approval,
     find_resolved_pending_tool_approval, run_brain_turn_with_tools_stepwise,
 };
 use moa_core::{
@@ -310,10 +310,11 @@ impl TemporalActivities {
                 }
             }
         });
-        let pipeline = build_default_pipeline_with_tools(
+        let pipeline = build_default_pipeline_with_runtime(
             &self.config,
             self.session_store.clone(),
             self.memory_store.clone(),
+            Some(self.llm_provider.clone()),
             self.tool_router.tool_schemas(),
         );
         let turn_result = run_brain_turn_with_tools_stepwise(
@@ -508,7 +509,8 @@ impl TemporalOrchestrator {
         let tool_router = Arc::new(
             ToolRouter::from_config(&config, memory_store.clone())
                 .await?
-                .with_rule_store(session_store.clone()),
+                .with_rule_store(session_store.clone())
+                .with_session_store(session_store.clone()),
         );
         let llm_provider = build_provider_from_config(&config)?;
         Self::new(

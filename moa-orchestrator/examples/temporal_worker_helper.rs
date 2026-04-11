@@ -154,7 +154,8 @@ mod temporal_helper {
         let tool_router = Arc::new(
             ToolRouter::from_config(&config, memory_store.clone())
                 .await?
-                .with_rule_store(session_store.clone()),
+                .with_rule_store(session_store.clone())
+                .with_session_store(session_store.clone()),
         );
         eprintln!("temporal helper: creating orchestrator");
         let orchestrator = TemporalOrchestrator::new(

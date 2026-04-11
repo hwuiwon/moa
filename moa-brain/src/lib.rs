@@ -11,7 +11,8 @@ pub use harness::{
     run_brain_turn_with_tools_stepwise, run_streamed_turn, run_streamed_turn_with_signals,
 };
 pub use pipeline::{
-    ContextPipeline, PipelineStageReport, build_default_pipeline, build_default_pipeline_with_tools,
+    ContextPipeline, PipelineStageReport, build_default_pipeline,
+    build_default_pipeline_with_runtime, build_default_pipeline_with_tools,
 };
 pub use turn::{
     PendingToolApproval, StoredApprovalDecision, StreamSignalDisposition, StreamedCompletion,

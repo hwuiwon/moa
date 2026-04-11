@@ -84,3 +84,10 @@ diff_style = "auto"
 default_posture = "approve"
 auto_approve = ["file_read", "file_search", "web_search"]
 always_deny = []
+
+[compaction]
+enabled = true
+event_threshold = 100
+token_ratio_threshold = 0.7
+recent_turns_verbatim = 5
+preserve_errors = true

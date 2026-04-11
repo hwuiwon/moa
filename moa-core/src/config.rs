@@ -28,6 +28,8 @@ pub struct MoaConfig {
     pub tui: TuiConfig,
     /// Permission policy settings.
     pub permissions: PermissionsConfig,
+    /// Session-history compaction settings.
+    pub compaction: CompactionConfig,
     /// Local daemon settings.
     pub daemon: DaemonConfig,
     /// Observability and OTLP export settings.
@@ -346,6 +348,23 @@ impl MoaConfig {
             .set_default(
                 "permissions.always_deny",
                 Self::default().permissions.always_deny,
+            )?
+            .set_default("compaction.enabled", Self::default().compaction.enabled)?
+            .set_default(
+                "compaction.event_threshold",
+                Self::default().compaction.event_threshold as i64,
+            )?
+            .set_default(
+                "compaction.token_ratio_threshold",
+                Self::default().compaction.token_ratio_threshold,
+            )?
+            .set_default(
+                "compaction.recent_turns_verbatim",
+                Self::default().compaction.recent_turns_verbatim as i64,
+            )?
+            .set_default(
+                "compaction.preserve_errors",
+                Self::default().compaction.preserve_errors,
             )?
             .add_source(File::from(path).required(false))
             .add_source(Environment::with_prefix("MOA").separator("__"));
@@ -945,6 +964,34 @@ impl Default for PermissionsConfig {
     }
 }
 
+/// Session-history compaction configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompactionConfig {
+    /// Whether reversible history compaction is enabled.
+    pub enabled: bool,
+    /// Emit a checkpoint after this many unsummarized events.
+    pub event_threshold: usize,
+    /// Emit a checkpoint after unsummarized history reaches this fraction of the token budget.
+    pub token_ratio_threshold: f64,
+    /// Number of most recent user turns to keep verbatim in context.
+    pub recent_turns_verbatim: usize,
+    /// Whether old error events must stay verbatim in the compiled view.
+    pub preserve_errors: bool,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            event_threshold: 100,
+            token_ratio_threshold: 0.7,
+            recent_turns_verbatim: 5,
+            preserve_errors: true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -978,6 +1025,15 @@ mod tests {
         assert_eq!(config.general.default_provider, "openai");
         assert!(!config.local.docker_enabled);
         assert_eq!(config.database.admin_url(), "postgres://direct.example/moa");
+    }
+
+    #[test]
+    fn compaction_config_defaults_are_applied() {
+        let config = MoaConfig::default();
+        assert!(config.compaction.enabled);
+        assert_eq!(config.compaction.event_threshold, 100);
+        assert_eq!(config.compaction.recent_turns_verbatim, 5);
+        assert!(config.compaction.preserve_errors);
     }
 
     #[test]
