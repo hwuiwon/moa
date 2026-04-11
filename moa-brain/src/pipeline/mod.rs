@@ -200,7 +200,10 @@ pub fn build_default_pipeline_with_runtime(
     ContextPipeline::new(vec![
         Box::new(IdentityProcessor::default()),
         Box::new(InstructionProcessor::from_config(config)),
-        Box::new(ToolDefinitionProcessor::new(tool_schemas)),
+        Box::new(ToolDefinitionProcessor::with_memory(
+            tool_schemas,
+            memory_store.clone(),
+        )),
         Box::new(SkillInjector::new(skill_registry)),
         Box::new(MemoryRetriever::new(memory_store, session_store.clone())),
         history,

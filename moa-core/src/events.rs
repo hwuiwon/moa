@@ -104,6 +104,9 @@ pub enum Event {
     ToolError {
         /// Matching tool call identifier.
         tool_id: Uuid,
+        /// Tool name.
+        #[serde(default)]
+        tool_name: String,
         /// Error message.
         error: String,
         /// Whether the failure is retryable.

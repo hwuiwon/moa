@@ -683,6 +683,7 @@ async fn handle_tool_call(
             session_id,
             Event::ToolError {
                 tool_id,
+                tool_name: call.name.clone(),
                 error: format!(
                     "tool {} blocked because it leaked a protected canary token",
                     call.name
@@ -770,6 +771,7 @@ async fn handle_tool_call(
                 session_id,
                 Event::ToolError {
                     tool_id,
+                    tool_name: call.name.clone(),
                     error: message.clone(),
                     retryable: false,
                 },
@@ -973,6 +975,7 @@ async fn wait_for_signal_approval(
                                 session_id,
                                 Event::ToolError {
                                     tool_id,
+                                    tool_name: call.name.clone(),
                                     error: reason.clone().unwrap_or_else(|| {
                                         "tool execution denied by user".to_string()
                                     }),
@@ -1119,6 +1122,7 @@ async fn process_resolved_approval(
                 session_id,
                 Event::ToolError {
                     tool_id: pending.tool_id,
+                    tool_name: pending.tool_name.clone(),
                     error: reason
                         .clone()
                         .unwrap_or_else(|| "tool execution denied by user".to_string()),
@@ -1266,6 +1270,7 @@ async fn wait_for_approval(
                                 session_id,
                                 Event::ToolError {
                                     tool_id: pending.tool_id,
+                                    tool_name: pending.tool_name.clone(),
                                     error: reason.clone().unwrap_or_else(|| {
                                         "tool execution denied by user".to_string()
                                     }),
@@ -1433,6 +1438,7 @@ async fn execute_tool(
                 session_id,
                 Event::ToolError {
                     tool_id,
+                    tool_name: call.name.clone(),
                     error: "cancelled".to_string(),
                     retryable: false,
                 },
@@ -1454,6 +1460,7 @@ async fn execute_tool(
                 session_id,
                 Event::ToolError {
                     tool_id,
+                    tool_name: call.name.clone(),
                     error: error.to_string(),
                     retryable: false,
                 },

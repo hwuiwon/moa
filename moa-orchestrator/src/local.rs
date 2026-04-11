@@ -9,6 +9,7 @@ use chrono::Utc;
 use moa_brain::{
     StreamedTurnResult, build_default_pipeline_with_runtime, find_pending_tool_approval,
     find_resolved_pending_tool_approval, run_streamed_turn_with_signals,
+    update_workspace_tool_stats,
 };
 use moa_core::{
     BrainOrchestrator, BranchManager, CronHandle, CronSpec, Event, EventRange, EventRecord,
@@ -669,6 +670,12 @@ async fn run_session_task(
                         skill.name
                     )));
                 }
+                refresh_workspace_tool_stats(
+                    &context.session_store,
+                    &context.memory_store,
+                    &context.session_id,
+                )
+                .await;
                 update_status(
                     &context.session_store,
                     &event_tx,
@@ -694,6 +701,12 @@ async fn run_session_task(
                     &mut queued_messages,
                 )
                 .await?;
+                refresh_workspace_tool_stats(
+                    &context.session_store,
+                    &context.memory_store,
+                    &context.session_id,
+                )
+                .await;
                 update_status(
                     &context.session_store,
                     &event_tx,
@@ -723,6 +736,12 @@ async fn run_session_task(
                     &mut queued_messages,
                 )
                 .await?;
+                refresh_workspace_tool_stats(
+                    &context.session_store,
+                    &context.memory_store,
+                    &context.session_id,
+                )
+                .await;
                 update_status(
                     &context.session_store,
                     &event_tx,
@@ -849,6 +868,22 @@ async fn update_status(
     .await?;
     *status.write().await = next_status;
     Ok(())
+}
+
+async fn refresh_workspace_tool_stats(
+    session_store: &Arc<SessionDatabase>,
+    memory_store: &Arc<FileMemoryStore>,
+    session_id: &SessionId,
+) {
+    if let Err(error) =
+        update_workspace_tool_stats(session_store.as_ref(), memory_store.as_ref(), session_id).await
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            error = %error,
+            "failed to refresh workspace tool stats"
+        );
+    }
 }
 
 async fn append_event(

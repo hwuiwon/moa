@@ -10,6 +10,7 @@ use chrono::Utc;
 use moa_brain::{
     TurnResult, build_default_pipeline_with_runtime, find_pending_tool_approval,
     find_resolved_pending_tool_approval, run_brain_turn_with_tools_stepwise,
+    update_workspace_tool_stats,
 };
 use moa_core::{
     BrainOrchestrator, CronHandle, CronSpec, Event, EventRange, EventRecord, EventStream,
@@ -457,6 +458,14 @@ impl TemporalActivities {
                 .await
                 .map_err(non_retryable_activity_error)?;
         }
+
+        update_workspace_tool_stats(
+            self.session_store.as_ref(),
+            self.memory_store.as_ref(),
+            &session_id,
+        )
+        .await
+        .map_err(non_retryable_activity_error)?;
 
         self.session_store
             .update_status(session_id, SessionStatus::Completed)
