@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_brain::{
-    StreamedTurnResult, build_default_pipeline_with_tools, find_pending_tool_approval,
+    StreamedTurnResult, build_default_pipeline_with_runtime, find_pending_tool_approval,
     find_resolved_pending_tool_approval, run_streamed_turn_with_signals,
 };
 use moa_core::{
@@ -110,7 +110,8 @@ impl LocalOrchestrator {
         let tool_router = Arc::new(
             ToolRouter::from_config(&config, memory_store.clone())
                 .await?
-                .with_rule_store(session_store.clone()),
+                .with_rule_store(session_store.clone())
+                .with_session_store(session_store.clone()),
         );
         let llm_provider = build_provider_from_config(&config)?;
         Self::new(
@@ -490,10 +491,11 @@ async fn run_session_task(
     cancel_token: CancellationToken,
     hard_cancel_token: CancellationToken,
 ) -> Result<()> {
-    let pipeline = build_default_pipeline_with_tools(
+    let pipeline = build_default_pipeline_with_runtime(
         &context.config,
         context.session_store.clone(),
         context.memory_store.clone(),
+        Some(context.llm_provider.clone()),
         context.tool_router.tool_schemas(),
     );
     loop {

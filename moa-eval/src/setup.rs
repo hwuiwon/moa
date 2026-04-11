@@ -112,6 +112,7 @@ pub(crate) async fn build_agent_environment_with_provider(
         build_tool_router(
             base_config,
             memory_store_concrete.clone(),
+            session_store.clone(),
             rule_store,
             &workspace_dir,
             agent_config,
@@ -141,6 +142,7 @@ pub(crate) async fn build_agent_environment_with_provider(
         agent_config,
         session_store.clone(),
         memory_store_concrete.clone(),
+        llm_provider.clone(),
         tool_router.as_ref(),
     )
     .await?;
@@ -212,6 +214,7 @@ async fn seed_memory(
 async fn build_tool_router(
     base_config: &MoaConfig,
     memory_store: Arc<FileMemoryStore>,
+    session_store: Arc<dyn SessionStore>,
     rule_store: Arc<dyn ApprovalRuleStore>,
     workspace_dir: &Path,
     agent_config: &AgentConfig,
@@ -232,6 +235,7 @@ async fn build_tool_router(
     Ok(router
         .with_enabled_tools(enabled_tools)
         .with_rule_store(rule_store)
+        .with_session_store(session_store)
         .with_policies(policies))
 }
 
@@ -240,6 +244,7 @@ async fn build_pipeline(
     agent_config: &AgentConfig,
     session_store: Arc<dyn SessionStore>,
     memory_store: Arc<FileMemoryStore>,
+    llm_provider: Arc<dyn LLMProvider>,
     tool_router: &ToolRouter,
 ) -> Result<ContextPipeline> {
     let identity_prompt = compose_identity_prompt(&agent_config.instructions);
@@ -261,7 +266,11 @@ async fn build_pipeline(
             memory_store_dyn,
             session_store.clone(),
         )),
-        Box::new(HistoryCompiler::new(session_store)),
+        Box::new(HistoryCompiler::with_compaction(
+            session_store,
+            llm_provider,
+            base_config.compaction.clone(),
+        )),
         Box::new(CacheOptimizer),
     ];
 

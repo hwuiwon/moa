@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    ContextProcessor, MemoryStore, MoaConfig, ProcessorOutput, Result, SessionStore, WorkingContext,
+    ContextProcessor, LLMProvider, MemoryStore, MoaConfig, ProcessorOutput, Result, SessionStore,
+    WorkingContext,
 };
 use moa_skills::SkillRegistry;
 use tracing::Instrument;
@@ -174,15 +175,35 @@ pub fn build_default_pipeline_with_tools(
     memory_store: Arc<dyn MemoryStore>,
     tool_schemas: Vec<serde_json::Value>,
 ) -> ContextPipeline {
+    build_default_pipeline_with_runtime(config, session_store, memory_store, None, tool_schemas)
+}
+
+/// Builds the default seven-stage context pipeline with an optional compaction-capable LLM.
+pub fn build_default_pipeline_with_runtime(
+    config: &MoaConfig,
+    session_store: Arc<dyn SessionStore>,
+    memory_store: Arc<dyn MemoryStore>,
+    llm_provider: Option<Arc<dyn LLMProvider>>,
+    tool_schemas: Vec<serde_json::Value>,
+) -> ContextPipeline {
     let registry_memory: Arc<dyn MemoryStore> = memory_store.clone();
     let skill_registry = Arc::new(SkillRegistry::new(registry_memory));
+    let history: Box<dyn ContextProcessor> = if let Some(llm_provider) = llm_provider {
+        Box::new(HistoryCompiler::with_compaction(
+            session_store.clone(),
+            llm_provider,
+            config.compaction.clone(),
+        ))
+    } else {
+        Box::new(HistoryCompiler::new(session_store.clone()))
+    };
     ContextPipeline::new(vec![
         Box::new(IdentityProcessor::default()),
         Box::new(InstructionProcessor::from_config(config)),
         Box::new(ToolDefinitionProcessor::new(tool_schemas)),
         Box::new(SkillInjector::new(skill_registry)),
         Box::new(MemoryRetriever::new(memory_store, session_store.clone())),
-        Box::new(HistoryCompiler::new(session_store)),
+        history,
         Box::new(CacheOptimizer),
     ])
 }

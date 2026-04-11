@@ -927,7 +927,8 @@ async fn always_allow_rule_persists_and_skips_next_approval() {
         ToolRouter::new_local(memory_store.clone(), dir.path())
             .await
             .unwrap()
-            .with_rule_store(store.clone()),
+            .with_rule_store(store.clone())
+            .with_session_store(store.clone()),
     );
     let session_id = store
         .create_session(SessionMeta {

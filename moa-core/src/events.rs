@@ -182,6 +182,18 @@ pub enum Event {
         events_summarized: u64,
         /// Tokens in the summary.
         token_count: usize,
+        /// Model identifier used to generate the summary.
+        #[serde(default)]
+        model: String,
+        /// Input token count used to generate the summary.
+        #[serde(default)]
+        input_tokens: usize,
+        /// Output token count used to generate the summary.
+        #[serde(default)]
+        output_tokens: usize,
+        /// Cost in cents attributed to the summary generation.
+        #[serde(default)]
+        cost_cents: u32,
     },
     /// Recoverable or fatal error.
     Error {
@@ -253,7 +265,9 @@ impl Event {
     /// Returns input tokens attributed to the event.
     pub fn input_tokens(&self) -> usize {
         match self {
-            Self::BrainResponse { input_tokens, .. } => *input_tokens,
+            Self::BrainResponse { input_tokens, .. } | Self::Checkpoint { input_tokens, .. } => {
+                *input_tokens
+            }
             _ => 0,
         }
     }
@@ -261,7 +275,9 @@ impl Event {
     /// Returns output tokens attributed to the event.
     pub fn output_tokens(&self) -> usize {
         match self {
-            Self::BrainResponse { output_tokens, .. } => *output_tokens,
+            Self::BrainResponse { output_tokens, .. } | Self::Checkpoint { output_tokens, .. } => {
+                *output_tokens
+            }
             _ => 0,
         }
     }
@@ -269,7 +285,9 @@ impl Event {
     /// Returns cost in cents attributed to the event.
     pub fn cost_cents(&self) -> u32 {
         match self {
-            Self::BrainResponse { cost_cents, .. } => *cost_cents,
+            Self::BrainResponse { cost_cents, .. } | Self::Checkpoint { cost_cents, .. } => {
+                *cost_cents
+            }
             _ => 0,
         }
     }
@@ -381,6 +399,10 @@ mod tests {
                 summary: "test".into(),
                 events_summarized: 10,
                 token_count: 500,
+                model: "claude-sonnet-4-6".into(),
+                input_tokens: 120,
+                output_tokens: 45,
+                cost_cents: 1,
             },
             Event::Error {
                 message: "oops".into(),

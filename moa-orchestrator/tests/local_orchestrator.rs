@@ -178,7 +178,8 @@ async fn test_orchestrator_with_provider(
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())
             .await?
-            .with_rule_store(session_store.clone()),
+            .with_rule_store(session_store.clone())
+            .with_session_store(session_store.clone()),
     );
     let orchestrator =
         LocalOrchestrator::new(config, session_store, memory_store, provider, tool_router).await?;
@@ -973,7 +974,8 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
     let reopened_router = Arc::new(
         ToolRouter::from_config(&reopened_config, reopened_memory.clone())
             .await?
-            .with_rule_store(reopened_store.clone()),
+            .with_rule_store(reopened_store.clone())
+            .with_session_store(reopened_store.clone()),
     );
     let reopened = LocalOrchestrator::new(
         reopened_config,

@@ -82,18 +82,6 @@ async fn wake_finds_checkpoint_and_recent_events() {
             .expect("emit pre-checkpoint event");
     }
 
-    store
-        .emit_event(
-            session_id.clone(),
-            Event::Checkpoint {
-                summary: "checkpoint summary".into(),
-                events_summarized: 5,
-                token_count: 20,
-            },
-        )
-        .await
-        .expect("emit checkpoint");
-
     for index in 0..3 {
         store
             .emit_event(
@@ -107,12 +95,32 @@ async fn wake_finds_checkpoint_and_recent_events() {
             .expect("emit post-checkpoint event");
     }
 
+    store
+        .emit_event(
+            session_id.clone(),
+            Event::Checkpoint {
+                summary: "checkpoint summary".into(),
+                events_summarized: 5,
+                token_count: 20,
+                model: "test-model".into(),
+                input_tokens: 12,
+                output_tokens: 8,
+                cost_cents: 1,
+            },
+        )
+        .await
+        .expect("emit checkpoint");
+
     let wake_ctx = store.wake(session_id).await.expect("wake");
     assert_eq!(
         wake_ctx.checkpoint_summary.as_deref(),
         Some("checkpoint summary")
     );
     assert_eq!(wake_ctx.recent_events.len(), 3);
+    assert!(wake_ctx.recent_events.iter().all(|record| matches!(
+        &record.event,
+        Event::UserMessage { text, .. } if text.starts_with("after checkpoint")
+    )));
 }
 
 #[tokio::test]

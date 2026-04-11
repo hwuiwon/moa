@@ -3,12 +3,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
-    HandProvider, HandResources, HandSpec, MemoryPath, MemoryScope, MemorySearchResult,
-    MemoryStore, PageSummary, PageType, Result, SandboxTier, SessionMeta, ToolInvocation, UserId,
-    WikiPage, WorkspaceId,
+    Event, HandProvider, HandResources, HandSpec, MemoryPath, MemoryScope, MemorySearchResult,
+    MemoryStore, PageSummary, PageType, Result, SandboxTier, SessionMeta, SessionStore,
+    ToolInvocation, UserId, WikiPage, WorkspaceId,
 };
 use moa_hands::{LocalHandProvider, ToolRouter};
 use moa_memory::FileMemoryStore;
+use moa_session::TursoSessionStore;
 use serde_json::json;
 use tempfile::tempdir;
 use tokio::time::Instant;
@@ -248,6 +249,121 @@ async fn bash_respects_timeout() {
     assert!(
         matches!(error, moa_core::MoaError::ToolError(message) if message.contains("timed out"))
     );
+}
+
+#[tokio::test]
+async fn session_search_finds_prior_events() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("sessions.db");
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let session_store = Arc::new(TursoSessionStore::new_local(&db_path).await.unwrap());
+    let router = ToolRouter::new_local(memory_store, dir.path())
+        .await
+        .unwrap()
+        .with_session_store(session_store.clone());
+    let session = session();
+    let session_id = session_store.create_session(session.clone()).await.unwrap();
+
+    session_store
+        .emit_event(
+            session_id.clone(),
+            Event::UserMessage {
+                text: "deploy failed on port binding".to_string(),
+                attachments: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    session_store
+        .emit_event(
+            session_id,
+            Event::BrainResponse {
+                text: "I found the deploy failure".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 10,
+                output_tokens: 5,
+                cost_cents: 1,
+                duration_ms: 20,
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "session_search".to_string(),
+                input: json!({ "query": "port binding", "last_n": 3 }),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(output.to_text().contains("deploy failed on port binding"));
+    assert!(
+        output
+            .structured
+            .as_ref()
+            .and_then(|value| value.as_array())
+            .is_some_and(|items| !items.is_empty())
+    );
+}
+
+#[tokio::test]
+async fn session_search_filters_error_events() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("sessions.db");
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let session_store = Arc::new(TursoSessionStore::new_local(&db_path).await.unwrap());
+    let router = ToolRouter::new_local(memory_store, dir.path())
+        .await
+        .unwrap()
+        .with_session_store(session_store.clone());
+    let session = session();
+    let session_id = session_store.create_session(session.clone()).await.unwrap();
+
+    session_store
+        .emit_event(
+            session_id.clone(),
+            Event::Error {
+                message: "deploy error".to_string(),
+                recoverable: true,
+            },
+        )
+        .await
+        .unwrap();
+    session_store
+        .emit_event(
+            session_id,
+            Event::BrainResponse {
+                text: "deploy completed successfully".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 10,
+                output_tokens: 5,
+                cost_cents: 1,
+                duration_ms: 20,
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "session_search".to_string(),
+                input: json!({ "query": "deploy", "event_type": "error" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let rendered = output.to_text();
+    assert!(rendered.contains("deploy error"));
+    assert!(!rendered.contains("deploy completed successfully"));
 }
 
 #[tokio::test]

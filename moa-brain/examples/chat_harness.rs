@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use moa_brain::{build_default_pipeline_with_tools, run_brain_turn_with_tools};
+use moa_brain::{build_default_pipeline_with_runtime, run_brain_turn_with_tools};
 use moa_core::{
     Event, EventRange, LLMProvider, MoaConfig, Result, SessionMeta, SessionStore, UserId,
     WorkspaceId,
@@ -23,7 +23,11 @@ async fn main() -> Result<()> {
     let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
     let store = Arc::new(TursoSessionStore::new_local(Path::new(&session_db_path)).await?);
     let provider = build_provider_from_config(&config)?;
-    let tool_router = Arc::new(ToolRouter::from_config(&config, memory_store.clone()).await?);
+    let tool_router = Arc::new(
+        ToolRouter::from_config(&config, memory_store.clone())
+            .await?
+            .with_session_store(store.clone()),
+    );
     let session_id = store
         .create_session(SessionMeta {
             workspace_id: WorkspaceId::new("step-04-harness"),
@@ -32,10 +36,11 @@ async fn main() -> Result<()> {
             ..SessionMeta::default()
         })
         .await?;
-    let pipeline = build_default_pipeline_with_tools(
+    let pipeline = build_default_pipeline_with_runtime(
         &config,
         store.clone(),
         memory_store,
+        Some(provider.clone()),
         tool_router.tool_schemas(),
     );
     let cli_prompt = std::env::args().skip(1).collect::<Vec<_>>().join(" ");

@@ -75,7 +75,8 @@ async fn live_orchestrator_with_provider(
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())
             .await?
-            .with_rule_store(session_store.clone()),
+            .with_rule_store(session_store.clone())
+            .with_session_store(session_store.clone()),
     );
     let orchestrator = LocalOrchestrator::new(
         config,
