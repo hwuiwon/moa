@@ -12,10 +12,11 @@ pub fn load_suite(path: &Path) -> Result<TestSuite> {
         path: path.to_path_buf(),
         source,
     })?;
-    toml::from_str(&raw).map_err(|source| EvalError::ParseToml {
+    let suite: TestSuite = toml::from_str(&raw).map_err(|source| EvalError::ParseToml {
         path: path.to_path_buf(),
         source,
-    })
+    })?;
+    validate_suite(path, suite)
 }
 
 /// Loads an agent config from a TOML file.
@@ -24,20 +25,21 @@ pub fn load_agent_config(path: &Path) -> Result<AgentConfig> {
         path: path.to_path_buf(),
         source,
     })?;
-    toml::from_str(&raw).map_err(|source| EvalError::ParseToml {
+    let config: AgentConfig = toml::from_str(&raw).map_err(|source| EvalError::ParseToml {
         path: path.to_path_buf(),
         source,
-    })
+    })?;
+    validate_agent_config(path, config)
 }
 
 /// Discovers suite TOML files in a directory.
 pub fn discover_suites(dir: &Path) -> Result<Vec<PathBuf>> {
-    discover_toml_files(dir)
+    discover_matching_toml_files(dir, load_suite)
 }
 
 /// Discovers agent-config TOML files in a directory.
 pub fn discover_configs(dir: &Path) -> Result<Vec<PathBuf>> {
-    discover_toml_files(dir)
+    discover_matching_toml_files(dir, load_agent_config)
 }
 
 fn discover_toml_files(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -58,4 +60,35 @@ fn discover_toml_files(dir: &Path) -> Result<Vec<PathBuf>> {
     }
     paths.sort();
     Ok(paths)
+}
+
+fn discover_matching_toml_files<T>(
+    dir: &Path,
+    loader: fn(&Path) -> Result<T>,
+) -> Result<Vec<PathBuf>> {
+    let candidates = discover_toml_files(dir)?;
+    Ok(candidates
+        .into_iter()
+        .filter(|path| loader(path).is_ok())
+        .collect())
+}
+
+fn validate_suite(path: &Path, suite: TestSuite) -> Result<TestSuite> {
+    if suite.name.trim().is_empty() {
+        return Err(EvalError::InvalidConfig(format!(
+            "suite file {} is missing [suite].name",
+            path.display()
+        )));
+    }
+    Ok(suite)
+}
+
+fn validate_agent_config(path: &Path, config: AgentConfig) -> Result<AgentConfig> {
+    if config.name.trim().is_empty() {
+        return Err(EvalError::InvalidConfig(format!(
+            "agent config file {} is missing [agent].name",
+            path.display()
+        )));
+    }
+    Ok(config)
 }

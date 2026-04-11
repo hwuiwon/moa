@@ -5,6 +5,7 @@ mod daemon;
 mod exec;
 
 use std::env;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,6 +15,11 @@ use moa_core::{
     BranchManager, DatabaseBackend, MemoryPath, MemoryScope, MemoryStore, MoaConfig, OtlpProtocol,
     SessionFilter, SessionId, SessionStatus, SessionStore, TelemetryConfig, WorkspaceId,
     default_log_path, init_observability,
+};
+use moa_eval::{
+    AgentConfig, EngineOptions, EvalEngine, EvalRun, EvalStatus, EvaluatorOptions, ReporterOptions,
+    build_evaluators, build_reporters, discover_suites, evaluate_run, load_agent_config,
+    load_suite,
 };
 use moa_memory::FileMemoryStore;
 use moa_session::{NeonBranchManager, SessionDatabase, create_session_store};
@@ -91,6 +97,11 @@ enum CommandKind {
     Checkpoint {
         #[command(subcommand)]
         command: CheckpointCommand,
+    },
+    /// Runs agent evaluation suites.
+    Eval {
+        #[command(subcommand)]
+        command: EvalCommand,
     },
 }
 
@@ -180,6 +191,92 @@ enum CheckpointCommand {
     },
     /// Deletes expired checkpoint branches.
     Cleanup,
+}
+
+/// Eval CLI commands.
+#[derive(Debug, Subcommand)]
+enum EvalCommand {
+    /// Runs a suite against one or more agent configs.
+    Run(EvalRunArgs),
+    /// Shows the eval plan without executing.
+    Plan(EvalPlanArgs),
+    /// Lists discoverable eval suites in a directory.
+    List {
+        /// Directory to scan for suites.
+        #[arg(default_value = "tests/suites")]
+        dir: PathBuf,
+    },
+}
+
+/// Arguments for `moa eval run`.
+#[derive(Debug, Args)]
+struct EvalRunArgs {
+    /// Path to the test suite file.
+    #[arg(long)]
+    suite: PathBuf,
+
+    /// Paths to one or more agent config files.
+    #[arg(long, required = true)]
+    config: Vec<PathBuf>,
+
+    /// Report sink spec: `terminal`, `json:<path>`, or `langfuse`.
+    #[arg(long, default_value = "terminal")]
+    report: Vec<String>,
+
+    /// Maximum concurrent eval executions.
+    #[arg(long, default_value_t = 1)]
+    parallel: usize,
+
+    /// Exit non-zero when any run fails, errors, or times out.
+    #[arg(long)]
+    ci: bool,
+
+    /// Evaluators to run.
+    #[arg(
+        long,
+        default_values_t = vec![
+            String::from("trajectory"),
+            String::from("output"),
+            String::from("tool_success")
+        ]
+    )]
+    evaluator: Vec<String>,
+
+    /// Maximum allowed per-run cost in dollars.
+    #[arg(long)]
+    max_cost: Option<f64>,
+
+    /// Maximum allowed per-run latency in milliseconds.
+    #[arg(long)]
+    max_latency: Option<u64>,
+
+    /// Maximum allowed tokens per run.
+    #[arg(long)]
+    max_tokens: Option<usize>,
+
+    /// Maximum allowed tool calls per run.
+    #[arg(long)]
+    max_tool_calls: Option<usize>,
+
+    /// Maximum allowed turns per run.
+    #[arg(long)]
+    max_turns: Option<usize>,
+
+    /// Include per-case response and score comments in terminal output.
+    #[arg(long, short)]
+    verbose: bool,
+}
+
+/// Arguments for `moa eval plan`.
+#[derive(Debug, Args)]
+struct EvalPlanArgs {
+    /// Path to the test suite file.
+    #[arg(long)]
+    suite: PathBuf,
+
+    /// Paths to one or more agent config files.
+    #[arg(long, required = true)]
+    config: Vec<PathBuf>,
 }
 
 /// Runs the `moa` CLI binary.
@@ -308,6 +405,20 @@ async fn main() -> Result<()> {
                 print!("{}", checkpoint_cleanup_report(&config).await?);
             }
         },
+        Some(CommandKind::Eval { command }) => match command {
+            EvalCommand::Run(args) => {
+                let exit_code = handle_eval_run(args, config).await?;
+                if exit_code != 0 {
+                    std::process::exit(exit_code);
+                }
+            }
+            EvalCommand::Plan(args) => {
+                handle_eval_plan(args, config).await?;
+            }
+            EvalCommand::List { dir } => {
+                handle_eval_list(dir).await?;
+            }
+        },
     }
 
     Ok(())
@@ -316,6 +427,121 @@ async fn main() -> Result<()> {
 /// Returns a plain-text version string.
 fn version_text() -> String {
     format!("moa {}", env!("CARGO_PKG_VERSION"))
+}
+
+async fn handle_eval_run(args: EvalRunArgs, config: MoaConfig) -> Result<i32> {
+    let suite = load_suite(&args.suite).context("loading eval suite")?;
+    let configs = load_eval_configs(&args.config)?;
+    let evaluators = build_evaluators(
+        &args.evaluator,
+        &EvaluatorOptions {
+            max_cost_dollars: args.max_cost,
+            max_latency_ms: args.max_latency,
+            max_tokens: args.max_tokens,
+            max_tool_calls: args.max_tool_calls,
+            max_turns: args.max_turns,
+        },
+    )
+    .context("building evaluators")?;
+    let reporters = build_reporters(
+        &args.report,
+        &ReporterOptions {
+            verbose: args.verbose,
+            color: !args.ci && std::io::stdout().is_terminal(),
+            json_pretty: true,
+        },
+    )
+    .context("building reporters")?;
+
+    let engine = EvalEngine::new(
+        config,
+        EngineOptions {
+            parallel: args.parallel,
+            ..EngineOptions::default()
+        },
+    )
+    .context("creating eval engine")?;
+
+    let mut run = engine
+        .run_suite(&suite, &configs)
+        .await
+        .context("running eval suite")?;
+    evaluate_run(&suite, &mut run, &evaluators)
+        .await
+        .context("scoring eval results")?;
+
+    for reporter in &reporters {
+        reporter
+            .report(&suite, &configs, &run)
+            .await
+            .context("reporting eval results")?;
+    }
+
+    Ok(eval_exit_code(args.ci, &run))
+}
+
+async fn handle_eval_plan(args: EvalPlanArgs, config: MoaConfig) -> Result<()> {
+    let suite = load_suite(&args.suite).context("loading eval suite")?;
+    let configs = load_eval_configs(&args.config)?;
+    let engine =
+        EvalEngine::new(config, EngineOptions::default()).context("creating eval engine")?;
+    let plan = engine.plan(&suite, &configs);
+
+    println!("Suite: {}", plan.suite_name);
+    println!("Configs: {}", plan.configs.join(", "));
+    println!("Cases: {}", plan.cases.join(", "));
+    println!("Total runs: {}", plan.total_runs);
+    println!(
+        "Estimated cost: ${:.4} - ${:.4}",
+        plan.estimated_cost_range.0, plan.estimated_cost_range.1
+    );
+    Ok(())
+}
+
+async fn handle_eval_list(dir: PathBuf) -> Result<()> {
+    let paths = discover_suites(&dir).context("discovering eval suites")?;
+    for path in paths {
+        let suite =
+            load_suite(&path).with_context(|| format!("loading suite from {}", path.display()))?;
+        println!(
+            "{:30} | {:3} cases | {}",
+            suite.name,
+            suite.cases.len(),
+            suite.description.as_deref().unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+fn load_eval_configs(paths: &[PathBuf]) -> Result<Vec<AgentConfig>> {
+    paths
+        .iter()
+        .map(|path| {
+            load_agent_config(path)
+                .with_context(|| format!("loading config from {}", path.display()))
+        })
+        .collect()
+}
+
+fn eval_exit_code(ci: bool, run: &EvalRun) -> i32 {
+    if !ci {
+        return 0;
+    }
+    if run
+        .results
+        .iter()
+        .any(|result| matches!(result.status, EvalStatus::Error | EvalStatus::Timeout))
+    {
+        return 2;
+    }
+    if run
+        .results
+        .iter()
+        .any(|result| matches!(result.status, EvalStatus::Failed))
+    {
+        return 1;
+    }
+    0
 }
 
 async fn status_report(config: &MoaConfig) -> Result<String> {
@@ -837,10 +1063,11 @@ fn format_checkpoint_age(created_at: chrono::DateTime<chrono::Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_config_update, default_log_path, doctor_report, parse_bool, parse_database_backend,
-        version_text,
+        apply_config_update, default_log_path, doctor_report, eval_exit_code, parse_bool,
+        parse_database_backend, version_text,
     };
     use moa_core::{DatabaseBackend, MoaConfig};
+    use moa_eval::{EvalRun, EvalStatus, RunSummary};
     use tempfile::tempdir;
 
     #[test]
@@ -918,5 +1145,30 @@ mod tests {
             .await
             .expect("doctor report");
         assert!(report.contains(&format!("log_file: {}", custom_log.display())));
+    }
+
+    #[test]
+    fn ci_exit_code_distinguishes_failures_and_errors() {
+        let mut run = EvalRun {
+            suite_name: "suite".to_string(),
+            started_at: chrono::Utc::now(),
+            completed_at: chrono::Utc::now(),
+            results: Vec::new(),
+            summary: RunSummary::default(),
+        };
+
+        assert_eq!(eval_exit_code(true, &run), 0);
+
+        run.results.push(moa_eval::EvalResult {
+            status: EvalStatus::Failed,
+            ..moa_eval::EvalResult::default()
+        });
+        assert_eq!(eval_exit_code(true, &run), 1);
+
+        run.results.push(moa_eval::EvalResult {
+            status: EvalStatus::Error,
+            ..moa_eval::EvalResult::default()
+        });
+        assert_eq!(eval_exit_code(true, &run), 2);
     }
 }
