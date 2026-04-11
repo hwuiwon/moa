@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-04-10)
 
 ## Corpus Check
-- 127 files · ~124,178 words
+- 127 files · ~124,777 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 2477 nodes · 4404 edges · 86 communities detected
+- 2491 nodes · 4429 edges · 86 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -42,13 +42,13 @@ Nodes (19): ChatRuntime, daemon_connect(), daemon_expect_ack(), daemon_is_availa
 Cohesion: 0.03
 Nodes (38): centered_rect(), ensure_prefix(), extract_search_keywords(), extract_search_query(), filter_pages(), fuzzy_filter_matches_titles(), infer_page_title(), infer_page_type() (+30 more)
 
-### Community 4 - "Brain Turn Tests"
+### Community 4 - "File Memory Store"
+Cohesion: 0.04
+Nodes (46): MoaError, build_provider_from_config(), build_provider_from_selection(), explicit_provider_prefix_overrides_inference(), infer_provider_name(), infers_anthropic_for_claude_models(), infers_openai_for_gpt_models(), infers_openrouter_for_vendor_prefixed_models() (+38 more)
+
+### Community 5 - "Brain Turn Tests"
 Cohesion: 0.05
 Nodes (18): always_allow_rule_persists_and_skips_next_approval(), canary_leaks_in_tool_input_are_detected_and_blocked(), CanaryLeakLlmProvider, CapturingTextLlmProvider, FixedPageMemoryStore, malicious_tool_results_are_wrapped_as_untrusted_content(), MaliciousToolOutputLlmProvider, MemoryWriteLoopLlmProvider (+10 more)
-
-### Community 5 - "File Memory Store"
-Cohesion: 0.05
-Nodes (34): MoaError, canary_detection_works(), check_canary(), classifier_flags_known_attack_patterns(), classify_input(), contains_canary_tokens(), inject_canary(), InputClassification (+26 more)
 
 ### Community 6 - "Skill Document Format"
 Cohesion: 0.07
@@ -62,25 +62,25 @@ Nodes (18): accept_user_message(), append_event(), detect_docker(), docker_statu
 Cohesion: 0.06
 Nodes (31): build_function_tool(), build_http_client(), build_responses_request(), consume_responses_stream_once(), is_rate_limit_error(), is_rate_limit_message(), map_openai_error(), metadata_as_strings() (+23 more)
 
-### Community 9 - "Temporal Orchestrator"
+### Community 9 - "Config & Errors"
+Cohesion: 0.05
+Nodes (24): CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, config_loads_from_file(), config_rejects_zero_neon_checkpoint_limit_when_enabled(), DaemonConfig, DatabaseBackend (+16 more)
+
+### Community 10 - "Temporal Orchestrator"
 Cohesion: 0.06
 Nodes (27): activity_options(), apply_approval_decision(), ApprovalDecisionActivityInput, ApprovalSignalInput, brain_turn_activity_options(), CancelMode, connect_temporal_client(), event_to_runtime_event() (+19 more)
 
-### Community 10 - "Postgres Session Store"
+### Community 11 - "Postgres Session Store"
 Cohesion: 0.06
 Nodes (19): event_hand_id(), normalize_event_search_query(), PostgresSessionStore, qualified_name(), approval_rule_from_row(), event_record_from_row(), event_type_from_db(), pending_signal_from_row() (+11 more)
 
-### Community 11 - "Local Orchestrator Tests"
+### Community 12 - "Local Orchestrator Tests"
 Cohesion: 0.08
 Nodes (35): approval_requested_event_persists_full_prompt_details(), collect_runtime_events_until(), denied_tool_preserves_queued_follow_up(), FileWriteApprovalProvider, hard_cancel_aborts_stream_and_emits_cancelled_status(), last_user_message(), list_sessions_includes_active_session(), memory_maintenance_runs_due_workspace_consolidation() (+27 more)
 
-### Community 12 - "Tool Router & Policies"
+### Community 13 - "Tool Router & Policies"
 Cohesion: 0.08
 Nodes (19): approval_diffs_for(), approval_fields_for(), approval_pattern_for(), default_cloud_provider(), execute_tool_policy(), expand_local_path(), hand_id(), language_hint_for_path() (+11 more)
-
-### Community 13 - "Config & Errors"
-Cohesion: 0.05
-Nodes (23): CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, config_loads_from_file(), config_rejects_zero_neon_checkpoint_limit_when_enabled(), DaemonConfig, DatabaseBackend (+15 more)
 
 ### Community 14 - "Turso Session Store"
 Cohesion: 0.07
@@ -90,21 +90,21 @@ Nodes (18): event_record_from_row(), event_type_from_db(), optional_i64(), optio
 Cohesion: 0.07
 Nodes (31): anthropic_content_blocks(), anthropic_content_blocks_render_text_and_json_as_text_blocks(), anthropic_message(), anthropic_message_wraps_assistant_tool_calls_as_tool_use_blocks(), anthropic_message_wraps_tool_results_with_tool_use_id(), anthropic_tool_from_schema(), anthropic_tool_from_schema_moves_parameters_into_input_schema(), AnthropicProvider (+23 more)
 
-### Community 16 - "Settings View"
+### Community 16 - "CLI Entry Point"
+Cohesion: 0.07
+Nodes (39): apply_config_update(), checkpoint_cleanup_report(), checkpoint_create_report(), checkpoint_list_report(), checkpoint_rollback_report(), CheckpointCommand, Cli, cloud_sync_status() (+31 more)
+
+### Community 17 - "Settings View"
 Cohesion: 0.08
 Nodes (29): apply_text_edit(), bool_label(), category_label(), centered_rect(), cycle_string(), cycle_u32(), cycle_u64(), cycle_usize() (+21 more)
 
-### Community 17 - "Neon Branch Manager"
+### Community 18 - "Neon Branch Manager"
 Cohesion: 0.09
 Nodes (25): checkpoint_branch_names_follow_moa_prefix(), checkpoint_info_from_branch(), checkpoint_label_from_name(), cleanup_expired_deletes_only_old_moa_branches(), create_checkpoint_refuses_to_exceed_capacity(), create_checkpoint_sends_expected_request_and_returns_handle(), discard_checkpoint_calls_delete_endpoint(), format_checkpoint_branch_name() (+17 more)
 
-### Community 18 - "Memory Consolidation"
+### Community 19 - "Memory Consolidation"
 Cohesion: 0.08
 Nodes (40): canonical_port_claims(), confidence_rank(), consolidation_due_for_scope(), consolidation_resolves_dates_prunes_and_refreshes_index(), ConsolidationReport, decay_confidence(), extract_port_claims(), inbound_reference_counts() (+32 more)
-
-### Community 19 - "CLI Entry Point"
-Cohesion: 0.07
-Nodes (38): apply_config_update(), checkpoint_cleanup_report(), checkpoint_create_report(), checkpoint_list_report(), checkpoint_rollback_report(), CheckpointCommand, Cli, cloud_sync_status() (+30 more)
 
 ### Community 20 - "Daemon Service"
 Cohesion: 0.12
@@ -182,13 +182,13 @@ Nodes (15): approval_buttons(), approval_request(), ApprovalCallbackAction, bord
 Cohesion: 0.15
 Nodes (14): build_default_pipeline(), build_default_pipeline_with_tools(), ContextPipeline, estimate_tokens(), pipeline_runner_executes_stages_in_order(), PipelineStageReport, test_create_and_get_session(), test_emit_and_get_events() (+6 more)
 
-### Community 39 - "Session Database Backend"
-Cohesion: 0.1
-Nodes (2): create_session_store(), SessionDatabase
-
-### Community 40 - "Prompt Widget"
+### Community 39 - "Prompt Widget"
 Cohesion: 0.17
 Nodes (8): build_textarea(), byte_index_for_char_position(), offset_for_position(), position_for_offset(), PromptCompletionKind, PromptCompletionState, PromptWidget, render_completion_menu()
+
+### Community 40 - "Session Database Backend"
+Cohesion: 0.1
+Nodes (2): create_session_store(), SessionDatabase
 
 ### Community 41 - "Full Text Search"
 Cohesion: 0.19
@@ -226,29 +226,29 @@ Nodes (12): branch_reconciliation_merges_conflicting_writes(), consolidation_dec
 Cohesion: 0.21
 Nodes (11): approval_rules_round_trip(), create_session_and_emit_events(), fts_search_finds_events(), get_events_with_range_filter(), list_sessions_filters_by_workspace(), new_local_store(), pending_signal_round_trip_and_resolution(), update_status_persists_changes() (+3 more)
 
-### Community 50 - "Provider Factory"
-Cohesion: 0.25
-Nodes (15): build_provider_from_config(), build_provider_from_selection(), explicit_provider_prefix_overrides_inference(), infer_provider_name(), infers_anthropic_for_claude_models(), infers_openai_for_gpt_models(), infers_openrouter_for_vendor_prefixed_models(), is_openai_model() (+7 more)
-
-### Community 51 - "E2B Live Tests"
+### Community 50 - "E2B Live Tests"
 Cohesion: 0.17
 Nodes (8): destroy_and_wait(), e2b_live_provider_handles_roundtrip_and_lifecycle(), e2b_live_router_lazy_provisions_reuses_and_isolates_sessions(), EmptyMemoryStore, live_config(), live_provider(), session(), wait_for_destroyed()
 
-### Community 52 - "Encrypted Secret Vault"
+### Community 51 - "Encrypted Secret Vault"
 Cohesion: 0.3
 Nodes (4): decrypt_bytes(), encrypt_bytes(), file_vault_encrypts_and_decrypts_roundtrip(), FileVault
 
-### Community 53 - "Core Event Model"
+### Community 52 - "Core Event Model"
 Cohesion: 0.15
 Nodes (3): approval_requested_event_round_trips_full_prompt(), Event, sample_approval_prompt()
 
-### Community 54 - "Command Palette"
+### Community 53 - "Command Palette"
 Cohesion: 0.22
 Nodes (6): centered_rect(), filtered_actions(), palette_fuzzy_search_prefers_matching_actions(), PaletteAction, PaletteState, render_palette()
 
-### Community 55 - "MCP Router Tests"
+### Community 54 - "MCP Router Tests"
 Cohesion: 0.19
 Nodes (6): EmptyMemoryStore, router_calls_http_mcp_server_and_surfaces_jsonrpc_errors(), router_discovers_and_calls_streamable_http_tools_with_sse_responses(), router_discovers_stdio_mcp_tools_from_config(), router_injects_mcp_credentials_via_proxy(), session()
+
+### Community 55 - "Injection Detection"
+Cohesion: 0.26
+Nodes (12): canary_detection_works(), check_canary(), classifier_flags_known_attack_patterns(), classify_input(), contains_canary_tokens(), inject_canary(), InputClassification, InputInspection (+4 more)
 
 ### Community 56 - "TUI Keybindings"
 Cohesion: 0.17
@@ -403,7 +403,7 @@ _Questions this graph is uniquely positioned to answer:_
   _Cohesion score 0.03 - nodes in this community are weakly interconnected._
 - **Should `Memory Pipeline & Views` be split into smaller, more focused modules?**
   _Cohesion score 0.03 - nodes in this community are weakly interconnected._
-- **Should `Brain Turn Tests` be split into smaller, more focused modules?**
-  _Cohesion score 0.05 - nodes in this community are weakly interconnected._
 - **Should `File Memory Store` be split into smaller, more focused modules?**
+  _Cohesion score 0.04 - nodes in this community are weakly interconnected._
+- **Should `Brain Turn Tests` be split into smaller, more focused modules?**
   _Cohesion score 0.05 - nodes in this community are weakly interconnected._

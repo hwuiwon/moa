@@ -11,9 +11,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use moa_core::{
-    BranchManager, DatabaseBackend, MemoryPath, MemoryScope, MemoryStore, MoaConfig, SessionFilter,
-    SessionId, SessionStatus, SessionStore, TelemetryConfig, WorkspaceId, default_log_path,
-    init_observability,
+    BranchManager, DatabaseBackend, MemoryPath, MemoryScope, MemoryStore, MoaConfig, OtlpProtocol,
+    SessionFilter, SessionId, SessionStatus, SessionStore, TelemetryConfig, WorkspaceId,
+    default_log_path, init_observability,
 };
 use moa_memory::FileMemoryStore;
 use moa_session::{NeonBranchManager, SessionDatabase, create_session_store};
@@ -665,8 +665,18 @@ fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result
         "daemon.auto_connect" => config.daemon.auto_connect = parse_bool(value)?,
         "daemon.socket_path" => config.daemon.socket_path = value.to_string(),
         "observability.enabled" => config.observability.enabled = parse_bool(value)?,
+        "observability.service_name" => config.observability.service_name = value.to_string(),
         "observability.otlp_endpoint" => {
             config.observability.otlp_endpoint = Some(value.to_string())
+        }
+        "observability.otlp_protocol" => {
+            config.observability.otlp_protocol = parse_otlp_protocol(value)?
+        }
+        "observability.environment" => config.observability.environment = Some(value.to_string()),
+        "observability.release" => config.observability.release = Some(value.to_string()),
+        "observability.sample_rate" => {
+            config.observability.sample_rate =
+                value.parse().context("expected decimal sample rate")?
         }
         _ => bail!("unsupported config key: {key}"),
     }
@@ -679,6 +689,14 @@ fn parse_database_backend(value: &str) -> Result<DatabaseBackend> {
         "turso" => Ok(DatabaseBackend::Turso),
         "postgres" => Ok(DatabaseBackend::Postgres),
         _ => bail!("expected `turso` or `postgres`, got {value}"),
+    }
+}
+
+fn parse_otlp_protocol(value: &str) -> Result<OtlpProtocol> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "grpc" => Ok(OtlpProtocol::Grpc),
+        "http" => Ok(OtlpProtocol::Http),
+        _ => bail!("expected `grpc` or `http`, got {value}"),
     }
 }
 

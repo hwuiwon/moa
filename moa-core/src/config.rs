@@ -1,5 +1,6 @@
 //! Configuration loading and defaults for MOA.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use config::{Config, Environment, File};
@@ -8,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{MoaError, Result};
 
 /// Top-level MOA configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct MoaConfig {
     /// General runtime settings.
@@ -142,6 +143,22 @@ impl MoaConfig {
             .set_default(
                 "observability.otlp_endpoint",
                 Self::default().observability.otlp_endpoint,
+            )?
+            .set_default(
+                "observability.otlp_protocol",
+                Self::default().observability.otlp_protocol.as_str(),
+            )?
+            .set_default(
+                "observability.environment",
+                Self::default().observability.environment,
+            )?
+            .set_default(
+                "observability.release",
+                Self::default().observability.release,
+            )?
+            .set_default(
+                "observability.sample_rate",
+                Self::default().observability.sample_rate,
             )?
             .set_default("cloud.enabled", Self::default().cloud.enabled)?
             .set_default("cloud.turso_url", Self::default().cloud.turso_url.clone())?
@@ -609,7 +626,28 @@ impl Default for DaemonConfig {
 }
 
 /// Observability configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OtlpProtocol {
+    /// Export OTLP spans over gRPC.
+    #[default]
+    Grpc,
+    /// Export OTLP spans over HTTP protobuf.
+    Http,
+}
+
+impl OtlpProtocol {
+    /// Returns the serialized config string for this protocol.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Grpc => "grpc",
+            Self::Http => "http",
+        }
+    }
+}
+
+/// Observability configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ObservabilityConfig {
     /// Whether OTLP export is enabled.
@@ -618,6 +656,16 @@ pub struct ObservabilityConfig {
     pub service_name: String,
     /// Optional OTLP endpoint override.
     pub otlp_endpoint: Option<String>,
+    /// OTLP transport protocol.
+    pub otlp_protocol: OtlpProtocol,
+    /// Additional OTLP headers for exporter auth and routing.
+    pub otlp_headers: HashMap<String, String>,
+    /// Deployment environment resource attribute.
+    pub environment: Option<String>,
+    /// Application release or version resource attribute.
+    pub release: Option<String>,
+    /// Trace sampling ratio from 0.0 to 1.0.
+    pub sample_rate: f64,
 }
 
 impl Default for ObservabilityConfig {
@@ -626,6 +674,11 @@ impl Default for ObservabilityConfig {
             enabled: false,
             service_name: "moa".to_string(),
             otlp_endpoint: None,
+            otlp_protocol: OtlpProtocol::Grpc,
+            otlp_headers: HashMap::new(),
+            environment: None,
+            release: None,
+            sample_rate: 1.0,
         }
     }
 }
@@ -925,6 +978,54 @@ mod tests {
         assert_eq!(config.general.default_provider, "openai");
         assert!(!config.local.docker_enabled);
         assert_eq!(config.database.admin_url(), "postgres://direct.example/moa");
+    }
+
+    #[test]
+    fn observability_config_defaults_to_grpc() {
+        let toml = r#"
+            [observability]
+            enabled = true
+            service_name = "moa"
+        "#;
+        let config: MoaConfig = toml::from_str(toml).expect("config should deserialize");
+        assert_eq!(config.observability.otlp_protocol, OtlpProtocol::Grpc);
+        assert_eq!(config.observability.sample_rate, 1.0);
+        assert!(config.observability.otlp_headers.is_empty());
+    }
+
+    #[test]
+    fn observability_config_http_with_langfuse_headers() {
+        let toml = r#"
+            [observability]
+            enabled = true
+            otlp_protocol = "http"
+            otlp_endpoint = "http://langfuse:3000/api/public/otel"
+            environment = "staging"
+            release = "abc123"
+            sample_rate = 0.5
+
+            [observability.otlp_headers]
+            Authorization = "Basic cGstbGYteHh4eHg6c2stbGYteHh4eHg="
+            x-langfuse-ingestion-version = "4"
+        "#;
+        let config: MoaConfig = toml::from_str(toml).expect("config should deserialize");
+        assert_eq!(config.observability.otlp_protocol, OtlpProtocol::Http);
+        assert_eq!(config.observability.environment.as_deref(), Some("staging"));
+        assert_eq!(config.observability.release.as_deref(), Some("abc123"));
+        assert_eq!(config.observability.sample_rate, 0.5);
+        assert_eq!(config.observability.otlp_headers.len(), 2);
+    }
+
+    #[test]
+    fn observability_config_backward_compat() {
+        let toml = r#"
+            [observability]
+            enabled = false
+        "#;
+        let config: MoaConfig = toml::from_str(toml).expect("config should deserialize");
+        assert!(!config.observability.enabled);
+        assert_eq!(config.observability.otlp_protocol, OtlpProtocol::Grpc);
+        assert_eq!(config.observability.sample_rate, 1.0);
     }
 
     #[test]

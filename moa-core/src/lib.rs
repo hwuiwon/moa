@@ -12,7 +12,7 @@ pub use config::{
     CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, DaemonConfig,
     DatabaseBackend, DatabaseConfig, DatabaseNeonConfig, GatewayConfig, GeneralConfig, LocalConfig,
     McpCredentialConfig, McpServerConfig, McpTransportConfig, MoaConfig, ObservabilityConfig,
-    PermissionsConfig, ProviderCredentialConfig, ProvidersConfig, TuiConfig,
+    OtlpProtocol, PermissionsConfig, ProviderCredentialConfig, ProvidersConfig, TuiConfig,
 };
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
 pub use error::{MoaError, Result};

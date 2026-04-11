@@ -3186,6 +3186,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "tempfile",
@@ -3688,7 +3689,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tonic 0.14.5",
- "tracing",
 ]
 
 [[package]]
@@ -4657,7 +4657,6 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "futures-channel",
  "futures-core",
  "futures-util",
  "http 1.4.0",
