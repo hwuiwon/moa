@@ -3297,14 +3297,17 @@ version = "0.1.0"
 dependencies = [
  "async-openai",
  "async-trait",
+ "chrono",
  "eventsource-stream",
  "futures-util",
  "moa-core",
+ "opentelemetry",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
+ "tracing-opentelemetry",
 ]
 
 [[package]]

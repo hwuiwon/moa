@@ -3,6 +3,7 @@
 pub mod anthropic;
 mod common;
 mod factory;
+mod instrumentation;
 pub mod openai;
 pub mod openrouter;
 mod schema;
