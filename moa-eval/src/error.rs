@@ -36,6 +36,9 @@ pub enum EvalError {
     /// JSON serialization failed.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    /// Regex compilation failed while evaluating output expectations.
+    #[error(transparent)]
+    Regex(#[from] regex::Error),
     /// A config or fixture path was invalid for eval execution.
     #[error("invalid eval configuration: {0}")]
     InvalidConfig(String),
@@ -45,4 +48,8 @@ pub enum EvalError {
         /// Tool name that required approval.
         tool: String,
     },
+    /// HTTP reporting failed.
+    #[cfg(feature = "langfuse")]
+    #[error(transparent)]
+    Http(#[from] reqwest::Error),
 }
