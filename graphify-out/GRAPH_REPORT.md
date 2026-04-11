@@ -1,11 +1,11 @@
-# Graph Report - .  (2026-04-10)
+# Graph Report - .  (2026-04-11)
 
 ## Corpus Check
-- 128 files · ~127,990 words
+- 136 files · ~130,027 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 2544 nodes · 4544 edges · 87 communities detected
+- 2588 nodes · 4594 edges · 87 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -28,7 +28,7 @@
 
 ### Community 0 - "Core Domain Types"
 Cohesion: 0.01
-Nodes (107): ActionButton, ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, ApprovalRule, Attachment (+99 more)
+Nodes (120): ActionButton, AgentConfig, AgentConfigBody, AgentConfigDocument, ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt (+112 more)
 
 ### Community 1 - "TUI App State"
 Cohesion: 0.05
@@ -38,13 +38,13 @@ Nodes (46): App, app_state_transitions_follow_idle_composing_running_waiting_idl
 Cohesion: 0.03
 Nodes (19): ChatRuntime, daemon_connect(), daemon_expect_ack(), daemon_is_available(), daemon_request(), daemon_send_command(), DaemonChatRuntime, expand_local_path() (+11 more)
 
-### Community 3 - "Memory Pipeline & Views"
+### Community 3 - "File Memory Store"
+Cohesion: 0.03
+Nodes (60): EvalError, MoaError, Evaluator, build_provider_from_config(), build_provider_from_selection(), explicit_provider_prefix_overrides_inference(), infer_provider_name(), infers_anthropic_for_claude_models() (+52 more)
+
+### Community 4 - "Memory Pipeline & Views"
 Cohesion: 0.03
 Nodes (38): centered_rect(), ensure_prefix(), extract_search_keywords(), extract_search_query(), filter_pages(), fuzzy_filter_matches_titles(), infer_page_title(), infer_page_type() (+30 more)
-
-### Community 4 - "File Memory Store"
-Cohesion: 0.04
-Nodes (35): create_session_store(), SessionDatabase, MoaError, collect_markdown_files(), expand_local_path(), FileMemoryStore, gateway_channel_label(), gateway_receive_span() (+27 more)
 
 ### Community 5 - "Brain Turn Tests"
 Cohesion: 0.05
@@ -190,41 +190,41 @@ Nodes (15): calculate_cost(), calculate_cost_with_cached(), cost_calculation_cor
 Cohesion: 0.17
 Nodes (8): build_textarea(), byte_index_for_char_position(), offset_for_position(), position_for_offset(), PromptCompletionKind, PromptCompletionState, PromptWidget, render_completion_menu()
 
-### Community 41 - "Full Text Search"
+### Community 41 - "Session Database Backend"
+Cohesion: 0.1
+Nodes (2): create_session_store(), SessionDatabase
+
+### Community 42 - "Full Text Search"
 Cohesion: 0.19
 Nodes (10): build_fts_query(), delete_page_entries(), FtsIndex, insert_page(), migrate(), parse_confidence(), parse_page_type(), parse_scope_key() (+2 more)
 
-### Community 42 - "CLI API Server"
+### Community 43 - "CLI API Server"
 Cohesion: 0.15
 Nodes (10): ApiState, build_api_router(), health_endpoint_returns_ok(), runtime_event_stream(), session_stream(), session_stream_returns_not_found_when_runtime_is_unavailable(), session_stream_returns_sse_content_type(), start_api_server() (+2 more)
 
-### Community 43 - "Session Picker View"
+### Community 44 - "Session Picker View"
 Cohesion: 0.18
 Nodes (8): centered_rect(), filtered_sessions(), fuzzy_search_matches_title_and_last_message(), picker_haystack(), picker_selection_wraps_and_clamps(), preview(), render_session_picker(), SessionPickerState
 
-### Community 44 - "Tool Approval Policies"
+### Community 45 - "Tool Approval Policies"
 Cohesion: 0.22
 Nodes (12): ApprovalRuleStore, glob_match(), parse_and_match_bash(), persistent_rule_matching_uses_glob_patterns(), PolicyCheck, read_tools_are_auto_approved_and_bash_requires_approval(), rule_matches(), rule_visible_to_workspace() (+4 more)
 
-### Community 45 - "Skill Improver & Distiller"
+### Community 46 - "Skill Improver & Distiller"
 Cohesion: 0.21
 Nodes (15): build_distillation_prompt(), count_tool_calls(), extract_task_summary(), find_similar_skill(), maybe_distill_skill(), normalize_new_skill(), similarity_score(), tokenize() (+7 more)
 
-### Community 46 - "OpenAI Provider Tests"
+### Community 47 - "OpenAI Provider Tests"
 Cohesion: 0.22
 Nodes (15): openai_provider_does_not_retry_after_partial_stream_output(), openai_provider_drops_oversized_metadata_values(), openai_provider_retries_after_rate_limit(), openai_provider_serializes_assistant_tool_calls_as_function_call_items(), openai_provider_serializes_tool_result_messages_as_function_call_output(), openai_provider_streams_parallel_tool_calls_in_order(), openai_provider_streams_tool_calls_from_responses_events(), openai_provider_translates_requests_to_responses_api() (+7 more)
 
-### Community 47 - "Daytona Live Tests"
+### Community 48 - "Daytona Live Tests"
 Cohesion: 0.18
 Nodes (9): daytona_live_provider_handles_roundtrip_and_lifecycle(), daytona_live_router_lazy_provisions_reuses_and_isolates_sessions(), destroy_and_wait(), EmptyMemoryStore, live_config(), live_provider(), session(), wait_for_destroyed() (+1 more)
 
-### Community 48 - "Memory Maintenance Tests"
+### Community 49 - "Memory Maintenance Tests"
 Cohesion: 0.29
 Nodes (12): branch_reconciliation_merges_conflicting_writes(), consolidation_decays_confidence_once_and_is_stable_on_repeat_runs(), consolidation_normalizes_dates_and_resolves_conflicts(), ingest_source_creates_summary_and_updates_related_pages(), maintenance_operations_append_log_and_keep_results_searchable(), manual_seeded_memory_fuzz_preserves_core_invariants(), manual_stress_ingest_reconcile_and_consolidate_preserves_invariants(), reconciliation_merges_multiple_branches_and_cleans_branch_directory() (+4 more)
-
-### Community 49 - "Provider Factory"
-Cohesion: 0.25
-Nodes (15): build_provider_from_config(), build_provider_from_selection(), explicit_provider_prefix_overrides_inference(), infer_provider_name(), infers_anthropic_for_claude_models(), infers_openai_for_gpt_models(), infers_openrouter_for_vendor_prefixed_models(), is_openai_model() (+7 more)
 
 ### Community 50 - "Session Store Tests"
 Cohesion: 0.21
@@ -375,7 +375,7 @@ Cohesion: 1.0
 Nodes (0): 
 
 ## Knowledge Gaps
-- **199 isolated node(s):** `LogChange`, `LogEntry`, `IngestReport`, `PageFrontmatter`, `ChangeOperation` (+194 more)
+- **216 isolated node(s):** `LogChange`, `LogEntry`, `IngestReport`, `PageFrontmatter`, `ChangeOperation` (+211 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **Thin community `TUI Workflow Tests`** (2 nodes): `tui_workflows.rs`, `tui_manual_workflow_opens_memory_settings_and_palette()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -398,16 +398,16 @@ Nodes (0):
 _Questions this graph is uniquely positioned to answer:_
 
 - **What connects `LogChange`, `LogEntry`, `IngestReport` to the rest of the system?**
-  _199 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _216 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Core Domain Types` be split into smaller, more focused modules?**
   _Cohesion score 0.01 - nodes in this community are weakly interconnected._
 - **Should `TUI App State` be split into smaller, more focused modules?**
   _Cohesion score 0.05 - nodes in this community are weakly interconnected._
 - **Should `TUI Chat Runtime` be split into smaller, more focused modules?**
   _Cohesion score 0.03 - nodes in this community are weakly interconnected._
+- **Should `File Memory Store` be split into smaller, more focused modules?**
+  _Cohesion score 0.03 - nodes in this community are weakly interconnected._
 - **Should `Memory Pipeline & Views` be split into smaller, more focused modules?**
   _Cohesion score 0.03 - nodes in this community are weakly interconnected._
-- **Should `File Memory Store` be split into smaller, more focused modules?**
-  _Cohesion score 0.04 - nodes in this community are weakly interconnected._
 - **Should `Brain Turn Tests` be split into smaller, more focused modules?**
   _Cohesion score 0.05 - nodes in this community are weakly interconnected._
