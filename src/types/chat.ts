@@ -87,6 +87,18 @@ export type StreamEvent =
   | { event: "turnCompleted" }
   | { event: "error"; data: { message: string } };
 
+type LegacyChatMessage = {
+  id?: unknown;
+  role?: unknown;
+  content?: unknown;
+  blocks?: unknown;
+  timestamp?: unknown;
+  isStreaming?: unknown;
+  tokens?: unknown;
+  cost?: unknown;
+  duration?: unknown;
+};
+
 type SerializedEventPayload = {
   type?: string;
   data?: Record<string, unknown>;
@@ -182,6 +194,15 @@ export function eventsToMessages(events: EventRecordDto[]): ChatMessage[] {
         }
         break;
       }
+      case "ApprovalDecided": {
+        const assistant = ensureAssistant(record);
+        const requestId = asString(data?.request_id);
+        const decision = approvalDecisionFromEvent(data?.decision);
+        if (requestId && decision) {
+          applyApprovalDecision(assistant.blocks, requestId, decision);
+        }
+        break;
+      }
       case "BrainResponse": {
         const assistant = ensureAssistant(record);
         const text = asString(data?.text);
@@ -230,10 +251,55 @@ export function eventsToMessages(events: EventRecordDto[]): ChatMessage[] {
 }
 
 /**
+ * Normalizes a chat message so the render layer always receives a block-based shape.
+ */
+export function normalizeChatMessage(message: ChatMessage | LegacyChatMessage): ChatMessage {
+  const blocks = normalizeContentBlocks(
+    message.blocks,
+    "content" in message ? message.content : undefined,
+  );
+
+  return {
+    blocks,
+    cost: typeof message.cost === "number" ? message.cost : undefined,
+    duration: typeof message.duration === "number" ? message.duration : undefined,
+    id:
+      typeof message.id === "string" && message.id.length > 0
+        ? message.id
+        : "message-unknown",
+    isStreaming: message.isStreaming === true,
+    role: message.role === "user" ? "user" : "assistant",
+    timestamp:
+      typeof message.timestamp === "string" && message.timestamp.length > 0
+        ? message.timestamp
+        : new Date(0).toISOString(),
+    tokens: normalizeTokens(message.tokens),
+  };
+}
+
+/**
+ * Normalizes a transcript array so legacy cached message shapes remain renderable.
+ */
+export function normalizeChatMessages(
+  messages: Array<ChatMessage | LegacyChatMessage>,
+): ChatMessage[] {
+  return messages
+    .map((message) => normalizeChatMessage(message))
+    .filter((message) => message.blocks.length > 0);
+}
+
+/**
+ * Returns a message's content blocks in normalized form.
+ */
+export function messageBlocks(message: ChatMessage | LegacyChatMessage): ContentBlock[] {
+  return normalizeChatMessage(message).blocks;
+}
+
+/**
  * Returns the concatenated text content from a chat message.
  */
-export function messageText(message: ChatMessage): string {
-  return message.blocks
+export function messageText(message: ChatMessage | LegacyChatMessage): string {
+  return messageBlocks(message)
     .filter((block): block is TextBlock => block.type === "text")
     .map((block) => block.text)
     .join("\n\n");
@@ -352,6 +418,33 @@ function upsertApprovalBlock(blocks: ContentBlock[], next: ApprovalBlock) {
   blocks[index] = next;
 }
 
+function applyApprovalDecision(
+  blocks: ContentBlock[],
+  requestId: string,
+  decision: ApprovalBlock["decision"],
+) {
+  if (!decision) {
+    return;
+  }
+
+  const index = blocks.findIndex(
+    (block) => block.type === "approval" && block.requestId === requestId,
+  );
+  if (index === -1) {
+    return;
+  }
+
+  const existing = blocks[index];
+  if (existing?.type !== "approval") {
+    return;
+  }
+
+  blocks[index] = {
+    ...existing,
+    decision,
+  };
+}
+
 function findToolName(blocks: ContentBlock[], callId: string): string {
   const block = blocks.find(
     (entry): entry is ToolCallBlock =>
@@ -453,4 +546,151 @@ function asNumber(value: unknown): number {
 
 function asBoolean(value: unknown): boolean {
   return typeof value === "boolean" ? value : false;
+}
+
+function approvalDecisionFromEvent(value: unknown): ApprovalBlock["decision"] {
+  if (typeof value === "string") {
+    return normalizeApprovalDecision(value);
+  }
+
+  const record = asRecord(value);
+  if (!record) {
+    return undefined;
+  }
+
+  if ("always_allow" in record) {
+    return "always_allow";
+  }
+
+  if ("deny" in record) {
+    return "deny";
+  }
+
+  if ("allow_once" in record) {
+    return "allow_once";
+  }
+
+  return undefined;
+}
+
+function normalizeApprovalDecision(
+  value: string,
+): ApprovalBlock["decision"] {
+  switch (value) {
+    case "allow_once":
+    case "always_allow":
+    case "deny":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function normalizeTokens(value: unknown): ChatMessage["tokens"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const input = typeof record.input === "number" ? record.input : 0;
+  const output = typeof record.output === "number" ? record.output : 0;
+
+  if (input === 0 && output === 0) {
+    return undefined;
+  }
+
+  return { input, output };
+}
+
+function normalizeContentBlocks(blocksValue: unknown, legacyContent: unknown): ContentBlock[] {
+  if (Array.isArray(blocksValue)) {
+    const normalized = blocksValue
+      .map((block) => normalizeContentBlock(block))
+      .filter((block): block is ContentBlock => block !== null);
+
+    if (normalized.length > 0) {
+      return normalized;
+    }
+  }
+
+  if (typeof legacyContent === "string" && legacyContent.length > 0) {
+    return [{ text: legacyContent, type: "text" }];
+  }
+
+  return [];
+}
+
+function normalizeContentBlock(value: unknown): ContentBlock | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  switch (record.type) {
+    case "text": {
+      const text = typeof record.text === "string" ? record.text : "";
+      return { text, type: "text" };
+    }
+    case "thinking":
+      return { type: "thinking" };
+    case "tool-call": {
+      const callId = typeof record.callId === "string" ? record.callId : "";
+      const toolName = typeof record.toolName === "string" ? record.toolName : "tool";
+      const status = normalizeToolStatusValue(record.status);
+      return {
+        callId,
+        duration: typeof record.duration === "number" ? record.duration : undefined,
+        errorText:
+          typeof record.errorText === "string" ? record.errorText : undefined,
+        input: asUnknownRecord(record.input),
+        output: asUnknownRecord(record.output),
+        status,
+        toolName,
+        type: "tool-call",
+      };
+    }
+    case "approval": {
+      const requestId = typeof record.requestId === "string" ? record.requestId : "";
+      const toolName = typeof record.toolName === "string" ? record.toolName : "tool";
+      return {
+        decision:
+          typeof record.decision === "string" ? record.decision : undefined,
+        diffPreview:
+          typeof record.diffPreview === "string" ? record.diffPreview : undefined,
+        inputSummary:
+          typeof record.inputSummary === "string" ? record.inputSummary : "",
+        requestId,
+        riskLevel:
+          typeof record.riskLevel === "string" ? record.riskLevel : "medium",
+        toolName,
+        type: "approval",
+      };
+    }
+    case "notice": {
+      const message = typeof record.message === "string" ? record.message : "";
+      return { message, type: "notice" };
+    }
+    default:
+      return null;
+  }
+}
+
+function normalizeToolStatusValue(value: unknown): ToolStatus {
+  switch (value) {
+    case "pending":
+    case "running":
+    case "done":
+    case "error":
+      return value;
+    default:
+      return "pending";
+  }
+}
+
+function asUnknownRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  return value as Record<string, unknown>;
 }

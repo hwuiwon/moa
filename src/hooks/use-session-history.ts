@@ -9,7 +9,7 @@ import { eventsToMessages } from "@/types/chat";
 export function useSessionHistory(sessionId: string | undefined) {
   return useQuery({
     enabled: Boolean(sessionId),
-    queryKey: ["session-events", sessionId],
+    queryKey: ["session-history", sessionId],
     queryFn: async () => {
       const events = await tauriClient.getSessionEvents(sessionId!);
       return eventsToMessages(events);

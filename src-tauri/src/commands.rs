@@ -137,31 +137,37 @@ pub async fn list_model_options(state: State<'_, AppState>) -> AppResult<Vec<Mod
             value: "gpt-5.4".to_string(),
             label: "GPT-5.4".to_string(),
             provider: "openai".to_string(),
+            context_window: Some(1_050_000),
         },
         ModelOptionDto {
             value: "gpt-5.4-mini".to_string(),
             label: "GPT-5.4 Mini".to_string(),
             provider: "openai".to_string(),
+            context_window: Some(400_000),
         },
         ModelOptionDto {
             value: "gpt-5.4-nano".to_string(),
             label: "GPT-5.4 Nano".to_string(),
             provider: "openai".to_string(),
+            context_window: Some(400_000),
         },
         ModelOptionDto {
             value: "claude-sonnet-4-6".to_string(),
             label: "Claude Sonnet 4.6".to_string(),
             provider: "anthropic".to_string(),
+            context_window: Some(1_000_000),
         },
         ModelOptionDto {
             value: "openrouter:gpt-5.4".to_string(),
             label: "OpenRouter · GPT-5.4".to_string(),
             provider: "openrouter".to_string(),
+            context_window: Some(1_050_000),
         },
         ModelOptionDto {
             value: "openrouter:claude-sonnet-4-6".to_string(),
             label: "OpenRouter · Claude Sonnet 4.6".to_string(),
             provider: "openrouter".to_string(),
+            context_window: Some(1_000_000),
         },
     ];
 
@@ -170,6 +176,7 @@ pub async fn list_model_options(state: State<'_, AppState>) -> AppResult<Vec<Mod
             value: current_model.clone(),
             label: current_model.clone(),
             provider: current_provider,
+            context_window: None,
         });
     }
 

@@ -9,13 +9,20 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import { SessionInfoPanel } from "@/components/layout/session-info-panel";
+import { SessionTabBar } from "@/components/layout/session-tab-bar";
 import { tauriClient } from "@/lib/tauri";
-import { useSessionList } from "@/hooks/useSessionList";
-import { DetailPanel } from "@/components/layout/detail-panel";
+import { useSessionList } from "@/hooks/use-session-list";
 import { SessionSidebar } from "@/components/layout/session-sidebar";
 import { TopBar } from "@/components/layout/top-bar";
 import { useLayoutStore } from "@/stores/layout";
 import { useSessionStore } from "@/stores/session";
+import { useTabsStore } from "@/stores/tabs";
+
+function chatSessionIdFromPath(pathname: string) {
+  const match = pathname.match(/^\/chat\/([^/]+)$/);
+  return match?.[1] ?? null;
+}
 
 export function AppLayout() {
   const navigate = useNavigate();
@@ -40,6 +47,11 @@ export function AppLayout() {
 
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
   const setActiveSession = useSessionStore((state) => state.setActiveSession);
+  const openTabs = useTabsStore((state) => state.openTabs);
+  const openTab = useTabsStore((state) => state.openTab);
+  const closeTab = useTabsStore((state) => state.closeTab);
+  const reorderTabs = useTabsStore((state) => state.reorderTabs);
+  const cycleTab = useTabsStore((state) => state.cycleTab);
 
   const sessions = useSessionList();
   const runtimeInfo = useQuery({
@@ -50,6 +62,7 @@ export function AppLayout() {
     queryKey: ["model-options"],
     queryFn: tauriClient.listModelOptions,
   });
+  const routeSessionId = chatSessionIdFromPath(pathname);
 
   useEffect(() => {
     if (pathname.startsWith("/memory")) {
@@ -64,10 +77,22 @@ export function AppLayout() {
   }, [pathname, setActiveView]);
 
   useEffect(() => {
+    if (routeSessionId) {
+      setActiveSession(routeSessionId);
+      openTab(routeSessionId);
+      return;
+    }
+
     if (runtimeInfo.data?.sessionId && !activeSessionId) {
       setActiveSession(runtimeInfo.data.sessionId);
     }
-  }, [activeSessionId, runtimeInfo.data?.sessionId, setActiveSession]);
+  }, [
+    activeSessionId,
+    openTab,
+    routeSessionId,
+    runtimeInfo.data?.sessionId,
+    setActiveSession,
+  ]);
 
   const invalidateChromeQueries = async () => {
     await Promise.all([
@@ -81,6 +106,7 @@ export function AppLayout() {
   const createSession = useMutation({
     mutationFn: tauriClient.createSession,
     onSuccess: async (sessionId) => {
+      openTab(sessionId);
       setActiveSession(sessionId);
       await invalidateChromeQueries();
       navigate({ to: "/chat/$sessionId", params: { sessionId } });
@@ -93,6 +119,7 @@ export function AppLayout() {
       return sessionId;
     },
     onSuccess: async (sessionId) => {
+      openTab(sessionId);
       setActiveSession(sessionId);
       await invalidateChromeQueries();
       navigate({ to: "/chat/$sessionId", params: { sessionId } });
@@ -102,11 +129,37 @@ export function AppLayout() {
   const setModel = useMutation({
     mutationFn: tauriClient.setModel,
     onSuccess: async (sessionId) => {
+      openTab(sessionId);
       setActiveSession(sessionId);
       await invalidateChromeQueries();
       navigate({ to: "/chat/$sessionId", params: { sessionId } });
     },
   });
+
+  const activateSession = (sessionId: string) => {
+    openTab(sessionId);
+    selectSession.mutate(sessionId);
+  };
+
+  const handleCloseTab = (sessionId: string) => {
+    const tabIndex = openTabs.indexOf(sessionId);
+    const nextSessionId =
+      activeSessionId === sessionId
+        ? openTabs[tabIndex + 1] ?? openTabs[tabIndex - 1] ?? null
+        : null;
+
+    closeTab(sessionId);
+
+    if (nextSessionId) {
+      activateSession(nextSessionId);
+      return;
+    }
+
+    if (pathname.startsWith("/chat")) {
+      setActiveSession(null);
+      navigate({ to: "/chat" });
+    }
+  };
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -134,6 +187,17 @@ export function AppLayout() {
             createSession.mutate();
           }
           break;
+        case "tab": {
+          event.preventDefault();
+          const nextSessionId = cycleTab(
+            activeSessionId,
+            event.shiftKey ? -1 : 1,
+          );
+          if (nextSessionId) {
+            activateSession(nextSessionId);
+          }
+          break;
+        }
         default:
           break;
       }
@@ -142,7 +206,10 @@ export function AppLayout() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
+    activateSession,
+    activeSessionId,
     createSession,
+    cycleTab,
     toggleCommandPalette,
     toggleDetailPanel,
     toggleSidebar,
@@ -174,7 +241,7 @@ export function AppLayout() {
                   activeSessionId={activeSessionId}
                   isLoading={sessions.isLoading}
                   onCreateSession={() => createSession.mutate()}
-                  onSelectSession={(sessionId) => selectSession.mutate(sessionId)}
+                  onSelectSession={activateSession}
                   sessions={sessions.data ?? []}
                 />
               </div>
@@ -182,13 +249,25 @@ export function AppLayout() {
           ) : null}
 
           <main className="min-w-0 flex-1 overflow-hidden">
-            <Outlet />
+            <div className="flex h-full min-h-0 flex-col">
+              <SessionTabBar
+                activeSessionId={activeSessionId}
+                onCloseTab={handleCloseTab}
+                onReorderTabs={reorderTabs}
+                onSelectSession={activateSession}
+                openTabs={openTabs}
+                sessions={sessions.data ?? []}
+              />
+              <div className="min-h-0 flex-1 overflow-hidden">
+                <Outlet />
+              </div>
+            </div>
           </main>
 
           {detailPanelOpen ? (
             <>
               <div className="h-full w-[300px] shrink-0 overflow-hidden border-l border-border">
-                <DetailPanel activeSessionId={activeSessionId} />
+                <SessionInfoPanel activeSessionId={activeSessionId} />
               </div>
             </>
           ) : null}

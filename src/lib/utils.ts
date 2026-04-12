@@ -69,3 +69,40 @@ export function sessionDateBucket(value: string): string {
 
   return "Older";
 }
+
+export function formatDuration(milliseconds: number): string {
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) {
+    return "0s";
+  }
+
+  const totalSeconds = Math.floor(milliseconds / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+
+  return `${seconds}s`;
+}
+
+export function formatTokenCount(value: number): string {
+  return new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: value >= 1_000 ? 1 : 0,
+    notation: value >= 10_000 ? "compact" : "standard",
+  }).format(value);
+}
+
+export function formatUsdFromCents(cents: number): string {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  }).format(cents / 100);
+}
