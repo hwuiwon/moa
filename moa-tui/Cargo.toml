@@ -8,13 +8,8 @@ license.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 crossterm.workspace = true
-moa-brain = { path = "../moa-brain" }
 moa-core = { path = "../moa-core" }
-moa-hands = { path = "../moa-hands" }
-moa-memory = { path = "../moa-memory" }
-moa-orchestrator = { path = "../moa-orchestrator" }
-moa-providers = { path = "../moa-providers" }
-moa-session = { path = "../moa-session" }
+moa-runtime = { path = "../moa-runtime" }
 nucleo.workspace = true
 pulldown-cmark = "0.12"
 ratatui.workspace = true
@@ -30,4 +25,6 @@ tui-textarea.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+moa-memory = { path = "../moa-memory" }
+moa-session = { path = "../moa-session" }
 tempfile = "3"
