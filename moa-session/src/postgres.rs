@@ -1,22 +1,24 @@
 //! PostgreSQL-backed `SessionStore` implementation.
 
 use std::time::Duration;
+use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    ApprovalRule, Event, EventFilter, EventRange, EventRecord, MoaConfig, MoaError, PendingSignal,
-    PendingSignalId, Result, SessionFilter, SessionMeta, SessionStatus, SessionStore,
-    SessionSummary, WakeContext, WorkspaceId,
+    ApprovalRule, BlobStore, Event, EventFilter, EventRange, EventRecord, MoaConfig, MoaError,
+    PendingSignal, PendingSignalId, Result, SessionFilter, SessionMeta, SessionStatus,
+    SessionStore, SessionSummary, WakeContext, WorkspaceId,
 };
 use moa_security::ApprovalRuleStore;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::blob::{FileBlobStore, decode_event_from_storage, encode_event_for_storage};
 use crate::queries_postgres::{
     EVENT_COLUMNS, SESSION_COLUMNS, SESSION_SUMMARY_COLUMNS, approval_rule_from_row,
-    event_record_from_row, event_type_to_db, map_sqlx_error, pending_signal_from_row,
+    event_type_from_db, event_type_to_db, map_sqlx_error, pending_signal_from_row,
     pending_signal_type_to_db, platform_to_db, policy_action_to_db, policy_scope_to_db,
     session_meta_from_row, session_status_to_db, session_summary_from_row,
 };
@@ -27,32 +29,40 @@ use crate::schema_postgres;
 pub struct PostgresSessionStore {
     pool: PgPool,
     schema_name: Option<String>,
+    blob_store: Arc<dyn BlobStore>,
+    blob_threshold_bytes: usize,
 }
 
 impl PostgresSessionStore {
     /// Creates a session store using the default MOA PostgreSQL pool settings.
     pub async fn new(database_url: &str) -> Result<Self> {
-        Self::new_with_options(database_url, 1, 5, 10).await
+        let blob_store: Arc<dyn BlobStore> =
+            Arc::new(FileBlobStore::new(FileBlobStore::default_dir()?));
+        Self::new_with_options_and_blob_store(database_url, 1, 5, 10, blob_store, 65_536).await
     }
 
     /// Creates a session store from config using the configured PostgreSQL pool settings.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
-        Self::new_with_options(
+        Self::new_with_options_and_blob_store(
             config.database.runtime_url(),
             config.database.pool_min,
             config.database.pool_max,
             config.database.connect_timeout_secs,
+            Arc::new(FileBlobStore::from_config(config)?),
+            config.session.blob_threshold_bytes,
         )
         .await
     }
 
     /// Creates a session store from config using the direct/admin PostgreSQL URL when present.
     pub async fn from_admin_config(config: &MoaConfig) -> Result<Self> {
-        Self::new_with_options(
+        Self::new_with_options_and_blob_store(
             config.database.admin_url(),
             config.database.pool_min,
             config.database.pool_max,
             config.database.connect_timeout_secs,
+            Arc::new(FileBlobStore::from_config(config)?),
+            config.session.blob_threshold_bytes,
         )
         .await
     }
@@ -63,7 +73,18 @@ impl PostgresSessionStore {
     /// their tables without separate databases.
     pub async fn new_in_schema(database_url: &str, schema_name: &str) -> Result<Self> {
         Self::ensure_schema_exists(database_url, schema_name).await?;
-        Self::new_with_options_and_schema(database_url, 1, 5, 10, Some(schema_name)).await
+        let blob_dir = FileBlobStore::default_dir_for_database_path(Path::new(":memory:"))?;
+        let blob_store: Arc<dyn BlobStore> = Arc::new(FileBlobStore::new(blob_dir));
+        Self::new_with_options_and_schema(
+            database_url,
+            1,
+            5,
+            10,
+            Some(schema_name),
+            blob_store,
+            65_536,
+        )
+        .await
     }
 
     /// Reconstructs the session state needed to resume a brain.
@@ -99,12 +120,35 @@ impl PostgresSessionStore {
         pool_max: u32,
         connect_timeout_secs: u64,
     ) -> Result<Self> {
+        let blob_store: Arc<dyn BlobStore> =
+            Arc::new(FileBlobStore::new(FileBlobStore::default_dir()?));
+        Self::new_with_options_and_blob_store(
+            database_url,
+            pool_min,
+            pool_max,
+            connect_timeout_secs,
+            blob_store,
+            65_536,
+        )
+        .await
+    }
+
+    async fn new_with_options_and_blob_store(
+        database_url: &str,
+        pool_min: u32,
+        pool_max: u32,
+        connect_timeout_secs: u64,
+        blob_store: Arc<dyn BlobStore>,
+        blob_threshold_bytes: usize,
+    ) -> Result<Self> {
         Self::new_with_options_and_schema(
             database_url,
             pool_min,
             pool_max,
             connect_timeout_secs,
             None,
+            blob_store,
+            blob_threshold_bytes,
         )
         .await
     }
@@ -115,6 +159,8 @@ impl PostgresSessionStore {
         pool_max: u32,
         connect_timeout_secs: u64,
         schema_name: Option<&str>,
+        blob_store: Arc<dyn BlobStore>,
+        blob_threshold_bytes: usize,
     ) -> Result<Self> {
         let pool =
             Self::connect_with_retry(database_url, pool_min, pool_max, connect_timeout_secs, 3)
@@ -123,6 +169,8 @@ impl PostgresSessionStore {
         Ok(Self {
             pool,
             schema_name: schema_name.map(ToOwned::to_owned),
+            blob_store,
+            blob_threshold_bytes,
         })
     }
 
@@ -322,7 +370,13 @@ impl SessionStore for PostgresSessionStore {
     async fn emit_event(&self, session_id: moa_core::SessionId, event: Event) -> Result<u64> {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
         let event_id = Uuid::new_v4();
-        let payload = serde_json::to_value(&event)?;
+        let payload = encode_event_for_storage(
+            self.blob_store.as_ref(),
+            &session_id,
+            &event,
+            self.blob_threshold_bytes,
+        )
+        .await?;
         let now = Utc::now();
         let sessions = self.table_name("sessions");
         let events = self.table_name("events");
@@ -428,7 +482,11 @@ impl SessionStore for PostgresSessionStore {
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
-        rows.iter().map(event_record_from_row).collect()
+        let mut events = Vec::with_capacity(rows.len());
+        for row in &rows {
+            events.push(self.event_record_from_row(row).await?);
+        }
+        Ok(events)
     }
 
     /// Loads a persisted session metadata record.
@@ -623,7 +681,11 @@ impl SessionStore for PostgresSessionStore {
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
-        rows.iter().map(event_record_from_row).collect()
+        let mut events = Vec::with_capacity(rows.len());
+        for row in &rows {
+            events.push(self.event_record_from_row(row).await?);
+        }
+        Ok(events)
     }
 
     /// Lists sessions filtered by workspace, user, status, or platform.
@@ -662,6 +724,47 @@ impl SessionStore for PostgresSessionStore {
             .await
             .map_err(map_sqlx_error)?;
         rows.iter().map(session_summary_from_row).collect()
+    }
+}
+
+impl PostgresSessionStore {
+    async fn event_record_from_row(&self, row: &sqlx::postgres::PgRow) -> Result<EventRecord> {
+        let event_type_text = row
+            .try_get::<String, _>("event_type")
+            .map_err(map_sqlx_error)?;
+        let payload = row
+            .try_get::<serde_json::Value, _>("payload")
+            .map_err(map_sqlx_error)?;
+        let session_id = moa_core::SessionId(
+            row.try_get::<Uuid, _>("session_id")
+                .map_err(map_sqlx_error)?,
+        );
+        let event =
+            decode_event_from_storage(self.blob_store.as_ref(), &session_id, payload).await?;
+
+        Ok(EventRecord {
+            id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
+            session_id,
+            sequence_num: row
+                .try_get::<i64, _>("sequence_num")
+                .map_err(map_sqlx_error)? as u64,
+            event_type: event_type_from_db(&event_type_text)?,
+            event,
+            timestamp: row
+                .try_get::<chrono::DateTime<Utc>, _>("timestamp")
+                .map_err(map_sqlx_error)?,
+            brain_id: row
+                .try_get::<Option<Uuid>, _>("brain_id")
+                .map_err(map_sqlx_error)?
+                .map(moa_core::BrainId),
+            hand_id: row
+                .try_get::<Option<String>, _>("hand_id")
+                .map_err(map_sqlx_error)?,
+            token_count: row
+                .try_get::<Option<i32>, _>("token_count")
+                .map_err(map_sqlx_error)?
+                .map(|value| value as usize),
+        })
     }
 }
 

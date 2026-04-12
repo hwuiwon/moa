@@ -18,10 +18,12 @@ moa-security = { path = "../moa-security" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 sqlx = { version = "0.8", optional = true, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "json", "uuid", "chrono"] }
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+hex = "0.4"
 
 [dev-dependencies]
 axum = "0.8"

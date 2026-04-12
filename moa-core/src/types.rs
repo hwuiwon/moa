@@ -678,6 +678,50 @@ impl EventRange {
     }
 }
 
+/// Reference to a payload stored outside the session event row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimCheck {
+    /// Content-addressed blob identifier.
+    pub blob_id: String,
+    /// Original payload size in bytes.
+    pub size: usize,
+    /// Searchable inline preview of the payload.
+    pub preview: String,
+}
+
+/// String payload that may be stored inline or behind a claim check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MaybeBlob {
+    /// Payload stored directly in the event row.
+    Inline(String),
+    /// Payload stored in the blob store.
+    BlobRef(ClaimCheck),
+}
+
+impl MaybeBlob {
+    /// Returns the inline text when available, otherwise the stored preview.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Inline(value) => value,
+            Self::BlobRef(claim_check) => &claim_check.preview,
+        }
+    }
+
+    /// Returns whether the payload has been offloaded to blob storage.
+    pub fn is_blob_ref(&self) -> bool {
+        matches!(self, Self::BlobRef(_))
+    }
+
+    /// Consumes the wrapper and returns the inline text or preview.
+    pub fn into_string(self) -> String {
+        match self {
+            Self::Inline(value) => value,
+            Self::BlobRef(claim_check) => claim_check.preview,
+        }
+    }
+}
+
 /// Event search filter.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventFilter {

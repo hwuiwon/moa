@@ -5,6 +5,7 @@ compile_error!("At least one session store backend must be enabled: `turso` or `
 #[cfg(any(feature = "turso", feature = "postgres"))]
 mod backend;
 
+pub mod blob;
 pub mod neon;
 #[cfg(feature = "postgres")]
 pub mod postgres;
@@ -21,6 +22,7 @@ pub mod turso;
 
 #[cfg(any(feature = "turso", feature = "postgres"))]
 pub use backend::{SessionDatabase, create_session_store};
+pub use blob::FileBlobStore;
 pub use neon::NeonBranchManager;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresSessionStore;
