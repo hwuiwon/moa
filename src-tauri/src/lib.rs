@@ -47,6 +47,7 @@ pub fn run() {
             commands::set_workspace,
             commands::reset_session,
             commands::set_model,
+            commands::list_model_options,
             commands::get_tool_names,
             commands::queue_message,
             commands::send_message,

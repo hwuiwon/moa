@@ -371,6 +371,18 @@ impl From<&MoaConfig> for MoaConfigDto {
     }
 }
 
+/// One selectable model option for the desktop model picker.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOptionDto {
+    /// Stable value sent back to the backend when selected.
+    pub value: String,
+    /// Human-readable label shown in the UI.
+    pub label: String,
+    /// Provider slug associated with the option.
+    pub provider: String,
+}
+
 fn iso(timestamp: DateTime<Utc>) -> String {
     timestamp.to_rfc3339()
 }
