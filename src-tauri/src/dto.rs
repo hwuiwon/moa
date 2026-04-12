@@ -381,6 +381,8 @@ pub struct ModelOptionDto {
     pub label: String,
     /// Provider slug associated with the option.
     pub provider: String,
+    /// Maximum prompt context window for the model when known.
+    pub context_window: Option<usize>,
 }
 
 fn iso(timestamp: DateTime<Utc>) -> String {

@@ -71,4 +71,5 @@ export type ModelOptionDto = {
   value: string;
   label: string;
   provider: string;
+  contextWindow: number | null;
 };

@@ -4,6 +4,7 @@ import { ContentBlockRenderer } from "@/components/chat/content-block-renderer";
 import { ToolGroup } from "@/components/chat/tool-group";
 import { FeedbackBar } from "@/components/prompt-kit/feedback-bar";
 import { formatRelativeTime } from "@/lib/utils";
+import { messageBlocks } from "@/types/chat";
 import type { ChatMessage, ContentBlock, ToolCallBlock } from "@/types/chat";
 
 type AssistantMessageProps = {
@@ -26,7 +27,8 @@ export const AssistantMessage = memo(function AssistantMessage({
   const [feedbackState, setFeedbackState] = useState<"helpful" | "not-helpful" | null>(
     null,
   );
-  const groups = useMemo(() => buildRenderGroups(message.blocks), [message.blocks]);
+  const blocks = useMemo(() => messageBlocks(message), [message]);
+  const groups = useMemo(() => buildRenderGroups(blocks), [blocks]);
 
   return (
     <article className="px-1 py-1">

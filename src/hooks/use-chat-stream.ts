@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Channel } from "@tauri-apps/api/core";
 
 import { tauriClient } from "@/lib/tauri";
+import { normalizeChatMessage, normalizeChatMessages } from "@/types/chat";
 import type {
   ApprovalBlock,
   ChatMessage,
@@ -36,7 +37,9 @@ export function useChatStream({
   initialMessages,
 }: UseChatStreamOptions): UseChatStreamResult {
   const queryClient = useQueryClient();
-  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+  const [messages, setMessages] = useState<ChatMessage[]>(
+    normalizeChatMessages(initialMessages),
+  );
   const [isStreaming, setIsStreaming] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,7 +63,9 @@ export function useChatStream({
 
       setMessages((current) =>
         current.map((message) =>
-          message.id === assistantMessageIdRef.current ? updater(message) : message,
+          message.id === assistantMessageIdRef.current
+            ? updater(normalizeChatMessage(message))
+            : normalizeChatMessage(message),
         ),
       );
     },
@@ -275,7 +280,7 @@ export function useChatStream({
     assistantMessageIdRef.current = null;
     pendingDeltaRef.current = "";
     pendingFinishTextRef.current = null;
-    setMessages(nextMessages);
+    setMessages(normalizeChatMessages(nextMessages));
     setIsStreaming(false);
     setIsStopping(false);
     setError(null);
@@ -437,6 +442,7 @@ export function useChatStream({
           setIsStreaming(false);
           setIsStopping(false);
           await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ["session-history", sessionId] }),
             queryClient.invalidateQueries({ queryKey: ["session-events", sessionId] }),
             queryClient.invalidateQueries({ queryKey: ["session", sessionId] }),
             queryClient.invalidateQueries({ queryKey: ["sessions"] }),
