@@ -3,25 +3,14 @@
 use std::collections::HashSet;
 
 use chrono::Utc;
-use moa_core::{ConfidenceLevel, MemoryPath, MemoryScope, MemoryStore, PageType, Result, WikiPage};
+use moa_core::{
+    ConfidenceLevel, IngestReport, MemoryPath, MemoryScope, MemoryStore, PageType, Result, WikiPage,
+};
 
 use crate::FileMemoryStore;
 use crate::index::{LogChange, LogEntry};
 
-/// Summary of a single source-ingest operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IngestReport {
-    /// Scope receiving the new source-derived pages.
-    pub scope: MemoryScope,
-    /// Human-readable source name passed by the caller.
-    pub source_name: String,
-    /// Summary page created for the raw source.
-    pub source_path: MemoryPath,
-    /// All pages created or updated by the ingest pass.
-    pub affected_pages: Vec<MemoryPath>,
-    /// Contradiction notes detected in the source text.
-    pub contradictions: Vec<String>,
-}
+const MAX_INGEST_BYTES: usize = 100_000;
 
 /// Ingests a raw source document into a scope-local wiki summary and related pages.
 pub async fn ingest_source(
@@ -30,6 +19,7 @@ pub async fn ingest_source(
     source_name: &str,
     source: &str,
 ) -> Result<IngestReport> {
+    let source = prepare_source_for_ingest(source);
     let slug = slugify(source_name);
     let source_path = MemoryPath::new(format!("sources/{slug}.md"));
     let mut affected_pages = vec![source_path.clone()];
@@ -38,7 +28,7 @@ pub async fn ingest_source(
         path: Some(source_path.clone()),
         title: source_name.to_string(),
         page_type: PageType::Source,
-        content: build_source_page(source_name, source),
+        content: build_source_page(source_name, &source),
         created: Utc::now(),
         updated: Utc::now(),
         confidence: ConfidenceLevel::Medium,
@@ -54,7 +44,7 @@ pub async fn ingest_source(
         .write_page(scope.clone(), &source_path, source_page)
         .await?;
 
-    for entity in extract_section_items(source, "entities") {
+    for entity in extract_section_items(&source, "entities") {
         let path = MemoryPath::new(format!("entities/{}.md", slugify(&entity)));
         upsert_derived_page(
             store,
@@ -68,7 +58,7 @@ pub async fn ingest_source(
         .await?;
         affected_pages.push(path);
     }
-    for topic in extract_section_items(source, "topics") {
+    for topic in extract_section_items(&source, "topics") {
         let path = MemoryPath::new(format!("topics/{}.md", slugify(&topic)));
         upsert_derived_page(
             store,
@@ -82,7 +72,7 @@ pub async fn ingest_source(
         .await?;
         affected_pages.push(path);
     }
-    for decision in extract_section_items(source, "decisions") {
+    for decision in extract_section_items(&source, "decisions") {
         let date = Utc::now().format("%Y-%m-%d");
         let path = MemoryPath::new(format!("decisions/{date}-{}.md", slugify(&decision)));
         upsert_derived_page(
@@ -98,7 +88,7 @@ pub async fn ingest_source(
         affected_pages.push(path);
     }
 
-    let contradictions = extract_section_items(source, "contradictions");
+    let contradictions = extract_section_items(&source, "contradictions");
     store.refresh_scope_index(scope).await?;
     store
         .append_scope_log(
@@ -191,6 +181,23 @@ async fn upsert_derived_page(
 
     page.path = Some(path.clone());
     store.write_page(scope.clone(), path, page).await
+}
+
+fn prepare_source_for_ingest(source: &str) -> String {
+    if source.len() <= MAX_INGEST_BYTES {
+        return source.to_string();
+    }
+
+    let mut end = MAX_INGEST_BYTES;
+    while end > 0 && !source.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    format!(
+        "{}\n\n[Document truncated at 100KB. Original size: {} bytes]",
+        &source[..end],
+        source.len()
+    )
 }
 
 fn build_source_page(source_name: &str, source: &str) -> String {

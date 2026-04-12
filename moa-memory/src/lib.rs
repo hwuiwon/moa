@@ -24,7 +24,7 @@ use fts::FtsIndex;
 use index::{
     INDEX_FILENAME, LogEntry, append_log_entry, compile_index, load_index_file, load_log_file,
 };
-pub use ingest::IngestReport;
+pub use moa_core::IngestReport;
 use wiki::{parse_markdown, render_markdown};
 
 /// File-wiki memory store rooted at a local `.moa` data directory.
@@ -320,6 +320,16 @@ impl MemoryStore for FileMemoryStore {
     async fn get_index(&self, scope: MemoryScope) -> Result<String> {
         let index_path = self.scope_root(&scope).join(INDEX_FILENAME);
         load_index_file(&index_path).await
+    }
+
+    /// Ingests a raw source document into the scoped wiki and updates derived pages.
+    async fn ingest_source(
+        &self,
+        scope: MemoryScope,
+        source_name: &str,
+        content: &str,
+    ) -> Result<IngestReport> {
+        FileMemoryStore::ingest_source(self, &scope, source_name, content).await
     }
 
     /// Rebuilds the FTS index for a scope from markdown files on disk.

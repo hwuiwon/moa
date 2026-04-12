@@ -266,6 +266,15 @@ fn event_summary_line(record: &EventRecord) -> String {
             record.sequence_num,
             truncate(summary)
         ),
+        Event::MemoryIngest {
+            source_name,
+            source_path,
+            ..
+        } => format!(
+            "#{} memory_ingest {source_name}: {}",
+            record.sequence_num,
+            truncate(source_path)
+        ),
         Event::HandProvisioned {
             hand_id, provider, ..
         } => format!(
