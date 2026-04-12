@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import { Link } from "@tanstack/react-router";
 import { Menu, PanelRightOpen, Plus, Settings2 } from "lucide-react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -10,7 +10,8 @@ import type { ActiveView } from "@/stores/layout";
 
 type TopBarProps = {
   activeView: ActiveView;
-  activeChatHref: string;
+  activeSessionId: string | null;
+  hasActiveSession: boolean;
   runtimeInfo?: RuntimeInfoDto;
   modelOptions: ModelOptionDto[];
   modelPending: boolean;
@@ -27,7 +28,8 @@ const navItems: Array<{ href: string; label: string; view: ActiveView }> = [
 
 export function TopBar({
   activeView,
-  activeChatHref,
+  activeSessionId,
+  hasActiveSession,
   runtimeInfo,
   modelOptions,
   modelPending,
@@ -56,16 +58,43 @@ export function TopBar({
 
         <nav className="hidden items-center gap-0.5 md:flex">
           {navItems.map((item) => (
-            <Link
-              className={cn(
-                buttonVariants({ variant: "ghost", size: "sm" }),
-                activeView === item.view && "bg-accent text-accent-foreground",
-              )}
-              key={item.label}
-              to={item.view === "chat" ? activeChatHref : item.href}
-            >
-              {item.label}
-            </Link>
+            item.view === "chat" ? (
+              hasActiveSession ? (
+                <Link
+                  className={cn(
+                    buttonVariants({ variant: "ghost", size: "sm" }),
+                    activeView === item.view && "bg-accent text-accent-foreground",
+                  )}
+                  key={item.label}
+                  params={{ sessionId: activeSessionId! }}
+                  to="/chat/$sessionId"
+                >
+                  {item.label}
+                </Link>
+              ) : (
+                <Link
+                  className={cn(
+                    buttonVariants({ variant: "ghost", size: "sm" }),
+                    activeView === item.view && "bg-accent text-accent-foreground",
+                  )}
+                  key={item.label}
+                  to="/chat"
+                >
+                  {item.label}
+                </Link>
+              )
+            ) : (
+              <Link
+                className={cn(
+                  buttonVariants({ variant: "ghost", size: "sm" }),
+                  activeView === item.view && "bg-accent text-accent-foreground",
+                )}
+                key={item.label}
+                to={item.href}
+              >
+                {item.label}
+              </Link>
+            )
           ))}
         </nav>
 

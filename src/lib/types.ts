@@ -35,6 +35,16 @@ export type SessionMetaDto = {
   lastCheckpointSeq: number | null;
 };
 
+export type EventRecordDto = {
+  id: string;
+  sessionId: string;
+  sequenceNum: number;
+  eventType: string;
+  timestamp: string;
+  tokenCount: number | null;
+  payload: unknown;
+};
+
 export type RuntimeInfoDto = {
   sessionId: string;
   workspaceId: string;
