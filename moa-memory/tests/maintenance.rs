@@ -165,6 +165,22 @@ async fn ingest_source_creates_summary_and_updates_related_pages() {
 }
 
 #[tokio::test]
+async fn ingest_source_truncates_large_content() {
+    let dir = tempdir().unwrap();
+    let store = FileMemoryStore::new(dir.path()).await.unwrap();
+    let scope = MemoryScope::Workspace("ws1".into());
+    let source = format!("# Large Source\n\n{}", "A".repeat(200_000));
+
+    let report = store
+        .ingest_source(&scope, "Large Source", &source)
+        .await
+        .unwrap();
+
+    let page = store.read_page(scope, &report.source_path).await.unwrap();
+    assert!(page.content.contains("[Document truncated at 100KB."));
+}
+
+#[tokio::test]
 async fn branch_reconciliation_merges_conflicting_writes() {
     let dir = tempdir().unwrap();
     let store = FileMemoryStore::new(dir.path()).await.unwrap();

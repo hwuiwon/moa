@@ -5,9 +5,9 @@ use std::time::Instant;
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    BuiltInTool, MemoryPath, MemoryScope, MoaError, PageType, Result, ToolContext,
-    ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec, WikiPage, read_tool_policy,
-    write_tool_policy,
+    BuiltInTool, Event, IngestReport, MemoryPath, MemoryScope, MoaError, PageType, PolicyAction,
+    Result, RiskLevel, ToolContent, ToolContext, ToolDiffStrategy, ToolInputShape, ToolOutput,
+    ToolPolicySpec, WikiPage, read_tool_policy, write_tool_policy,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -276,6 +276,94 @@ impl BuiltInTool for MemoryWriteTool {
     }
 }
 
+/// Built-in memory ingest tool.
+pub struct MemoryIngestTool;
+
+#[async_trait]
+impl BuiltInTool for MemoryIngestTool {
+    fn name(&self) -> &'static str {
+        "memory_ingest"
+    }
+
+    fn description(&self) -> &'static str {
+        "Ingest a source document into workspace memory. Creates a summary page in sources/, extracts entities, topics, and decisions into related wiki pages, and refreshes the workspace index."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "source_name": {
+                    "type": "string",
+                    "description": "Optional human-readable name for the source document. Defaults to the first markdown heading."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Full text content of the document to ingest."
+                }
+            },
+            "required": ["content"],
+            "additionalProperties": false
+        })
+    }
+
+    fn policy_spec(&self) -> ToolPolicySpec {
+        ToolPolicySpec {
+            risk_level: RiskLevel::Low,
+            default_action: PolicyAction::Allow,
+            input_shape: ToolInputShape::Json,
+            diff_strategy: ToolDiffStrategy::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        input: &serde_json::Value,
+        ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput> {
+        let params: MemoryIngestInput = serde_json::from_value(input.clone())?;
+        let started_at = Instant::now();
+        let source_name = params
+            .source_name
+            .unwrap_or_else(|| derive_source_name_from_content(&params.content));
+        let report = ctx
+            .memory_store
+            .ingest_source(
+                MemoryScope::Workspace(ctx.session.workspace_id.clone()),
+                &source_name,
+                &params.content,
+            )
+            .await?;
+
+        if let Some(session_store) = ctx.session_store {
+            session_store
+                .emit_event(
+                    ctx.session.id.clone(),
+                    Event::MemoryIngest {
+                        source_name: report.source_name.clone(),
+                        source_path: report.source_path.to_string(),
+                        affected_pages: report
+                            .affected_pages
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect(),
+                        contradictions: report.contradictions.clone(),
+                    },
+                )
+                .await?;
+        }
+
+        Ok(ToolOutput {
+            content: vec![ToolContent::Text {
+                text: format_ingest_report(&report),
+            }],
+            is_error: false,
+            structured: Some(ingest_report_json(&report)),
+            duration: started_at.elapsed(),
+        })
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct MemorySearchInput {
     query: String,
@@ -332,6 +420,13 @@ struct MemoryWriteInput {
     sources: Option<Vec<String>>,
     #[serde(default)]
     tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryIngestInput {
+    content: String,
+    #[serde(default)]
+    source_name: Option<String>,
 }
 
 fn parse_page_type(value: &str) -> Result<PageType> {
@@ -443,6 +538,99 @@ fn infer_page_title(path: &MemoryPath) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn derive_source_name_from_content(content: &str) -> String {
+    if let Some(heading) = content
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with('#') && !line.trim_start_matches('#').trim().is_empty())
+    {
+        return heading.trim_start_matches('#').trim().to_string();
+    }
+
+    let first_line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("Untitled Source");
+    first_line.chars().take(80).collect()
+}
+
+fn ingest_report_json(report: &IngestReport) -> serde_json::Value {
+    let derived_pages = report
+        .affected_pages
+        .iter()
+        .skip(1)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let (entities, topics, decisions) = count_ingest_pages(report);
+
+    json!({
+        "scope": &report.scope,
+        "source_name": &report.source_name,
+        "source_path": &report.source_path,
+        "affected_pages": &report.affected_pages,
+        "derived_pages": derived_pages,
+        "counts": {
+            "entities": entities,
+            "topics": topics,
+            "decisions": decisions,
+        },
+        "contradictions": &report.contradictions,
+    })
+}
+
+fn format_ingest_report(report: &IngestReport) -> String {
+    let mut lines = vec![
+        format!("Ingested \"{}\" into workspace memory.", report.source_name),
+        String::new(),
+        format!("Created: {}", report.source_path.as_str()),
+    ];
+
+    if report.affected_pages.len() > 1 {
+        lines.push(String::new());
+        lines.push("Updated pages:".to_string());
+        for path in report.affected_pages.iter().skip(1) {
+            lines.push(format!("- {}", path.as_str()));
+        }
+    }
+
+    let (entities, topics, decisions) = count_ingest_pages(report);
+    lines.push(String::new());
+    lines.push(format!(
+        "Extracted: {} entities, {} topics, {} decisions",
+        entities, topics, decisions
+    ));
+
+    if !report.contradictions.is_empty() {
+        lines.push(String::new());
+        lines.push("Contradictions detected:".to_string());
+        for contradiction in &report.contradictions {
+            lines.push(format!("- {contradiction}"));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn count_ingest_pages(report: &IngestReport) -> (usize, usize, usize) {
+    report
+        .affected_pages
+        .iter()
+        .skip(1)
+        .fold((0, 0, 0), |(entities, topics, decisions), path| {
+            let raw = path.as_str();
+            if raw.starts_with("entities/") {
+                (entities + 1, topics, decisions)
+            } else if raw.starts_with("topics/") {
+                (entities, topics + 1, decisions)
+            } else if raw.starts_with("decisions/") {
+                (entities, topics, decisions + 1)
+            } else {
+                (entities, topics, decisions)
+            }
+        })
 }
 
 fn is_memory_not_found(error: &MoaError) -> bool {

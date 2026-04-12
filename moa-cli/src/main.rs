@@ -135,6 +135,24 @@ enum MemoryCommand {
         /// Logical memory path.
         path: String,
     },
+    /// Ingests one or more documents into workspace memory.
+    Ingest(IngestArgs),
+}
+
+/// Arguments for `moa memory ingest`.
+#[derive(Debug, Args)]
+struct IngestArgs {
+    /// File path(s) to ingest. Shell expansion can be used for batches.
+    #[arg(required = true)]
+    files: Vec<PathBuf>,
+
+    /// Optional source name override for a single file.
+    #[arg(long)]
+    name: Option<String>,
+
+    /// Workspace id override. Use `.` for the current directory workspace.
+    #[arg(long)]
+    workspace: Option<String>,
 }
 
 /// Config CLI commands.
@@ -376,6 +394,18 @@ async fn main() -> Result<()> {
             }
             MemoryCommand::Show { path } => {
                 print!("{}", memory_show_report(&config, &path).await?);
+            }
+            MemoryCommand::Ingest(args) => {
+                print!(
+                    "{}",
+                    memory_ingest_report(
+                        &config,
+                        &args.files,
+                        args.name.as_deref(),
+                        args.workspace.as_deref(),
+                    )
+                    .await?
+                );
             }
         },
         Some(CommandKind::Config { command }) => match command {
@@ -684,6 +714,52 @@ async fn memory_show_report(config: &MoaConfig, path: &str) -> Result<String> {
     Ok(format!("---\n{}---\n{}", rendered, page.content))
 }
 
+async fn memory_ingest_report(
+    config: &MoaConfig,
+    files: &[PathBuf],
+    name: Option<&str>,
+    workspace: Option<&str>,
+) -> Result<String> {
+    if files.is_empty() {
+        bail!("at least one file path is required");
+    }
+    if files.len() > 1 && name.is_some() {
+        bail!("--name can only be used when ingesting a single file");
+    }
+
+    let store = FileMemoryStore::from_config(config).await?;
+    let scope = MemoryScope::Workspace(
+        workspace
+            .map(resolve_workspace_arg)
+            .unwrap_or_else(current_workspace_id),
+    );
+
+    let mut sections = Vec::with_capacity(files.len());
+    for file in files {
+        let content = fs::read_to_string(file)
+            .await
+            .with_context(|| format!("reading {}", file.display()))?;
+        let source_name = match name {
+            Some(value) => value.to_string(),
+            None => derive_ingest_source_name(file),
+        };
+        let report =
+            MemoryStore::ingest_source(&store, scope.clone(), &source_name, &content).await?;
+        sections.push(format_cli_ingest_section(file, &report));
+    }
+
+    let mut output = String::new();
+    if files.len() > 1 {
+        output.push_str(&format!(
+            "Ingested {} documents into workspace memory.\n\n",
+            files.len()
+        ));
+    }
+    output.push_str(&sections.join("\n\n"));
+    output.push('\n');
+    Ok(output)
+}
+
 async fn doctor_report(config: &MoaConfig, log_path: &Path) -> Result<String> {
     let mut lines = vec![
         "MOA doctor".to_string(),
@@ -814,6 +890,42 @@ fn current_workspace_id() -> WorkspaceId {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("default");
     WorkspaceId::new(name)
+}
+
+fn derive_ingest_source_name(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("unnamed-source");
+    stem.split(['-', '_', ' '])
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn format_cli_ingest_section(path: &Path, report: &moa_core::IngestReport) -> String {
+    let mut lines = vec![
+        format!("Ingested \"{}\" ({})", report.source_name, path.display()),
+        format!("Created: {}", report.source_path.as_str()),
+        format!(
+            "Updated: {} pages",
+            report.affected_pages.len().saturating_sub(1)
+        ),
+    ];
+
+    if !report.contradictions.is_empty() {
+        lines.push(format!("Contradictions: {}", report.contradictions.len()));
+    }
+
+    lines.join("\n")
 }
 
 fn env_presence(key: &str) -> &'static str {
@@ -1119,12 +1231,14 @@ fn format_checkpoint_age(created_at: chrono::DateTime<chrono::Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_config_update, default_log_path, doctor_report, eval_exit_code, parse_bool,
-        parse_database_backend, version_text,
+        apply_config_update, default_log_path, doctor_report, eval_exit_code, memory_ingest_report,
+        parse_bool, parse_database_backend, version_text,
     };
-    use moa_core::{DatabaseBackend, MoaConfig};
+    use moa_core::{DatabaseBackend, MemoryPath, MemoryScope, MemoryStore, MoaConfig, WorkspaceId};
     use moa_eval::{EvalRun, EvalStatus, RunSummary};
+    use moa_memory::FileMemoryStore;
     use tempfile::tempdir;
+    use tokio::fs;
 
     #[test]
     fn version_command_uses_package_version() {
@@ -1226,5 +1340,72 @@ mod tests {
             ..moa_eval::EvalResult::default()
         });
         assert_eq!(eval_exit_code(true, &run), 2);
+    }
+
+    #[tokio::test]
+    async fn memory_ingest_report_derives_name_from_filename() {
+        let dir = tempdir().expect("temp dir");
+        let base = dir.keep();
+        let mut config = MoaConfig::default();
+        config.database.url = base.join("sessions.db").display().to_string();
+        config.local.memory_dir = base.join("memory").display().to_string();
+        config.local.sandbox_dir = base.join("sandbox").display().to_string();
+
+        let source_path = base.join("rfc-0042-auth-redesign.md");
+        fs::write(&source_path, "## Topics\n- OAuth Tokens\n")
+            .await
+            .expect("write source");
+
+        let report = memory_ingest_report(
+            &config,
+            std::slice::from_ref(&source_path),
+            None,
+            Some("workspace-ingest"),
+        )
+        .await
+        .expect("memory ingest report");
+        assert!(report.contains("Ingested \"Rfc 0042 Auth Redesign\""));
+        assert!(report.contains("Created: sources/rfc-0042-auth-redesign.md"));
+
+        let store = FileMemoryStore::from_config(&config)
+            .await
+            .expect("memory store");
+        let source_page = store
+            .read_page(
+                MemoryScope::Workspace(WorkspaceId::new("workspace-ingest")),
+                &MemoryPath::new("sources/rfc-0042-auth-redesign.md"),
+            )
+            .await
+            .expect("source page");
+        assert!(source_page.content.contains("## Raw source"));
+        let results = store
+            .search(
+                "OAuth",
+                MemoryScope::Workspace(WorkspaceId::new("workspace-ingest")),
+                5,
+            )
+            .await
+            .expect("search ingested memory");
+        assert!(!results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_ingest_report_rejects_name_for_multiple_files() {
+        let dir = tempdir().expect("temp dir");
+        let base = dir.keep();
+        let mut config = MoaConfig::default();
+        config.database.url = base.join("sessions.db").display().to_string();
+        config.local.memory_dir = base.join("memory").display().to_string();
+        config.local.sandbox_dir = base.join("sandbox").display().to_string();
+
+        let first = base.join("a.md");
+        let second = base.join("b.md");
+        fs::write(&first, "# A").await.expect("write first");
+        fs::write(&second, "# B").await.expect("write second");
+
+        let error = memory_ingest_report(&config, &[first, second], Some("Shared"), None)
+            .await
+            .expect_err("batch ingest with name should fail");
+        assert!(error.to_string().contains("--name can only be used"));
     }
 }

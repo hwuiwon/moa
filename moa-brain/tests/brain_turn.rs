@@ -460,6 +460,110 @@ impl LLMProvider for MemoryWriteLoopLlmProvider {
 }
 
 #[derive(Default)]
+struct MemoryIngestLoopLlmProvider {
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl LLMProvider for MemoryIngestLoopLlmProvider {
+    fn name(&self) -> &str {
+        "mock-memory-ingest-loop"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        MockLlmProvider.capabilities()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let mut requests = self.requests.lock().await;
+        let response = match requests.len() {
+            0 => CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(ToolInvocation {
+                    id: Some("55555555-5555-5555-5555-555555555555".to_string()),
+                    name: "memory_ingest".to_string(),
+                    input: json!({
+                        "source_name": "API Design Doc",
+                        "content": "# API Design Doc\n\nThe authentication stack rotates tokens every 24 hours.\n\n## Entities\n- Auth Service\n\n## Topics\n- API Conventions\n\n## Decisions\n- Token rotation every 24 hours\n"
+                    }),
+                })],
+                stop_reason: StopReason::ToolUse,
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 18,
+                output_tokens: 8,
+                cached_input_tokens: 0,
+                duration_ms: 11,
+            },
+            1 => {
+                assert!(request.messages.iter().any(|message| {
+                    message.content.contains("sources/api-design-doc.md")
+                        && message.content.contains("entities/auth-service.md")
+                }));
+                CompletionResponse {
+                    text: "Stored the API design doc in workspace memory.".to_string(),
+                    content: vec![CompletionContent::Text(
+                        "Stored the API design doc in workspace memory.".to_string(),
+                    )],
+                    stop_reason: StopReason::EndTurn,
+                    model: "claude-sonnet-4-6".to_string(),
+                    input_tokens: 24,
+                    output_tokens: 10,
+                    cached_input_tokens: 0,
+                    duration_ms: 12,
+                }
+            }
+            2 => CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(ToolInvocation {
+                    id: Some("66666666-6666-6666-6666-666666666666".to_string()),
+                    name: "memory_search".to_string(),
+                    input: json!({
+                        "query": "token rotation",
+                        "scope": "workspace",
+                        "limit": 3
+                    }),
+                })],
+                stop_reason: StopReason::ToolUse,
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 14,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+                duration_ms: 9,
+            },
+            3 => {
+                assert!(request.messages.iter().any(|message| {
+                    message
+                        .content
+                        .to_ascii_lowercase()
+                        .contains("token rotation")
+                }));
+                assert!(
+                    request
+                        .messages
+                        .iter()
+                        .any(|message| message.content.contains("24 hours"))
+                );
+                CompletionResponse {
+                    text: "The design doc says tokens rotate every 24 hours.".to_string(),
+                    content: vec![CompletionContent::Text(
+                        "The design doc says tokens rotate every 24 hours.".to_string(),
+                    )],
+                    stop_reason: StopReason::EndTurn,
+                    model: "claude-sonnet-4-6".to_string(),
+                    input_tokens: 22,
+                    output_tokens: 9,
+                    cached_input_tokens: 0,
+                    duration_ms: 10,
+                }
+            }
+            other => panic!("unexpected request count for ingest loop: {other}"),
+        };
+        requests.push(request);
+        Ok(CompletionStream::from_response(response))
+    }
+}
+
+#[derive(Default)]
 struct RepeatingToolLlmProvider {
     requests: Arc<Mutex<Vec<CompletionRequest>>>,
 }
@@ -673,6 +777,38 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
         };
         requests.push(request);
         Ok(CompletionStream::from_response(response))
+    }
+}
+
+struct ProviderToolResultTurnLlm;
+
+#[async_trait]
+impl LLMProvider for ProviderToolResultTurnLlm {
+    fn name(&self) -> &str {
+        "mock-provider-tool-result-turn"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        MockLlmProvider.capabilities()
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
+        Ok(CompletionStream::from_response(CompletionResponse {
+            text: "Fresh answer from web search".to_string(),
+            content: vec![
+                CompletionContent::ProviderToolResult {
+                    tool_name: "web_search".to_string(),
+                    summary: "Searching the web...".to_string(),
+                },
+                CompletionContent::Text("Fresh answer from web search".to_string()),
+            ],
+            stop_reason: StopReason::EndTurn,
+            model: "claude-sonnet-4-6".to_string(),
+            input_tokens: 8,
+            output_tokens: 5,
+            cached_input_tokens: 0,
+            duration_ms: 6,
+        }))
     }
 }
 
@@ -921,6 +1057,289 @@ async fn run_brain_turn_memory_write_creates_workspace_page_after_approval() {
         &record.event,
         Event::BrainResponse { text, .. } if text == "Saved the workspace page."
     )));
+}
+
+#[tokio::test]
+async fn run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event() {
+    let session = SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: "claude-sonnet-4-6".to_string(),
+        ..SessionMeta::default()
+    };
+    let initial_events = vec![make_event_record(
+        &session.id,
+        0,
+        Event::UserMessage {
+            text: "Add this design doc to the knowledge base.".to_string(),
+            attachments: Vec::new(),
+        },
+    )];
+    let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
+    let memory_root = tempdir().unwrap();
+    let memory_store = Arc::new(FileMemoryStore::new(memory_root.path()).await.unwrap());
+    let memory_store_trait: Arc<dyn MemoryStore> = memory_store.clone();
+    let sandbox_dir = tempdir().unwrap();
+    let tool_router = Arc::new(
+        ToolRouter::new_local(memory_store_trait.clone(), sandbox_dir.path())
+            .await
+            .unwrap()
+            .with_session_store(store.clone()),
+    );
+    let pipeline = build_default_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        memory_store_trait,
+        tool_router.tool_schemas(),
+    );
+    let llm = Arc::new(MemoryIngestLoopLlmProvider::default());
+
+    let result = run_brain_turn_with_tools(
+        session.id.clone(),
+        store.clone(),
+        llm,
+        &pipeline,
+        Some(tool_router),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result, TurnResult::Complete);
+
+    let source_page = memory_store
+        .read_page(
+            MemoryScope::Workspace(session.workspace_id.clone()),
+            &MemoryPath::new("sources/api-design-doc.md"),
+        )
+        .await
+        .unwrap();
+    assert!(
+        source_page
+            .content
+            .contains("rotates tokens every 24 hours")
+    );
+
+    let entity_page = memory_store
+        .read_page(
+            MemoryScope::Workspace(session.workspace_id.clone()),
+            &MemoryPath::new("entities/auth-service.md"),
+        )
+        .await
+        .unwrap();
+    assert!(entity_page.content.contains("Source update"));
+
+    let topic_page = memory_store
+        .read_page(
+            MemoryScope::Workspace(session.workspace_id.clone()),
+            &MemoryPath::new("topics/api-conventions.md"),
+        )
+        .await
+        .unwrap();
+    assert!(topic_page.content.contains("Source update"));
+
+    let events = store.events.lock().await.clone();
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::ToolCall { tool_name, .. } if tool_name == "memory_ingest"
+    )));
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::ToolResult { success, output, .. }
+            if *success && output.to_text().contains("sources/api-design-doc.md")
+    )));
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::MemoryIngest {
+            source_name,
+            source_path,
+            affected_pages,
+            ..
+        } if source_name == "API Design Doc"
+            && source_path == "sources/api-design-doc.md"
+            && affected_pages.iter().any(|path| path == "entities/auth-service.md")
+            && affected_pages.iter().any(|path| path == "topics/api-conventions.md")
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|record| matches!(&record.event, Event::ApprovalRequested { .. }))
+    );
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::BrainResponse { text, .. } if text == "Stored the API design doc in workspace memory."
+    )));
+}
+
+#[tokio::test]
+async fn run_brain_turn_can_search_recently_ingested_memory_on_follow_up_turn() {
+    let session = SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: "claude-sonnet-4-6".to_string(),
+        ..SessionMeta::default()
+    };
+    let initial_events = vec![make_event_record(
+        &session.id,
+        0,
+        Event::UserMessage {
+            text: "Add this design doc to the knowledge base.".to_string(),
+            attachments: Vec::new(),
+        },
+    )];
+    let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
+    let memory_root = tempdir().unwrap();
+    let memory_store = Arc::new(FileMemoryStore::new(memory_root.path()).await.unwrap());
+    let memory_store_trait: Arc<dyn MemoryStore> = memory_store.clone();
+    let sandbox_dir = tempdir().unwrap();
+    let tool_router = Arc::new(
+        ToolRouter::new_local(memory_store_trait.clone(), sandbox_dir.path())
+            .await
+            .unwrap()
+            .with_session_store(store.clone()),
+    );
+    let pipeline = build_default_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        memory_store_trait,
+        tool_router.tool_schemas(),
+    );
+    let llm = Arc::new(MemoryIngestLoopLlmProvider::default());
+
+    let first = run_brain_turn_with_tools(
+        session.id.clone(),
+        store.clone(),
+        llm.clone(),
+        &pipeline,
+        Some(tool_router.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first, TurnResult::Complete);
+
+    store
+        .emit_event(
+            session.id.clone(),
+            Event::UserMessage {
+                text: "What does the design doc say about token rotation?".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let resumed = run_brain_turn_with_tools(
+        session.id.clone(),
+        store.clone(),
+        llm,
+        &pipeline,
+        Some(tool_router),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(resumed, TurnResult::Complete);
+
+    let events = store.events.lock().await.clone();
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::ToolCall { tool_name, .. } if tool_name == "memory_search"
+    )));
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::ToolResult { success, output, .. }
+            if *success && output.to_text().contains("24 hours")
+    )));
+
+    let last_brain_response = events.iter().rev().find_map(|record| match &record.event {
+        Event::BrainResponse { text, .. } => Some(text.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        last_brain_response.as_deref(),
+        Some("The design doc says tokens rotate every 24 hours.")
+    );
+}
+
+#[tokio::test]
+async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execution() {
+    let session = SessionMeta {
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: "claude-sonnet-4-6".to_string(),
+        ..SessionMeta::default()
+    };
+    let session_id = session.id.clone();
+    let initial_events = vec![EventRecord {
+        id: uuid::Uuid::new_v4(),
+        session_id: session_id.clone(),
+        sequence_num: 0,
+        event_type: EventType::UserMessage,
+        event: Event::UserMessage {
+            text: "Find one current headline".to_string(),
+            attachments: Vec::new(),
+        },
+        timestamp: Utc::now(),
+        brain_id: None,
+        hand_id: None,
+        token_count: None,
+    }];
+    let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
+    let memory_root = tempdir().unwrap();
+    let memory_store = Arc::new(FileMemoryStore::new(memory_root.path()).await.unwrap());
+    let sandbox_dir = tempdir().unwrap();
+    let tool_router = Arc::new(
+        ToolRouter::new_local(memory_store.clone(), sandbox_dir.path())
+            .await
+            .unwrap()
+            .with_session_store(store.clone()),
+    );
+    let pipeline = build_default_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        memory_store,
+        tool_router.tool_schemas(),
+    );
+    let (runtime_tx, mut runtime_rx) = broadcast::channel(64);
+
+    let streamed_result = run_streamed_turn(
+        session_id.clone(),
+        store.clone(),
+        Arc::new(ProviderToolResultTurnLlm),
+        &pipeline,
+        Some(tool_router),
+        &runtime_tx,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(streamed_result, moa_brain::StreamedTurnResult::Complete);
+
+    let mut saw_notice = false;
+    while let Ok(event) = runtime_rx.try_recv() {
+        if matches!(event, RuntimeEvent::Notice(ref text) if text == "Searching the web...") {
+            saw_notice = true;
+        }
+    }
+    assert!(
+        saw_notice,
+        "expected provider tool notice in streamed runtime"
+    );
+
+    let events = store.events.lock().await.clone();
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::BrainResponse { text, .. } if text == "Fresh answer from web search"
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|record| matches!(&record.event, Event::ToolCall { .. }))
+    );
 }
 
 #[tokio::test]

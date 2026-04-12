@@ -154,6 +154,17 @@ pub enum Event {
         /// Human-readable summary.
         summary: String,
     },
+    /// Memory ingest operation.
+    MemoryIngest {
+        /// Human-readable source name.
+        source_name: String,
+        /// Created source page path.
+        source_path: String,
+        /// Pages created or updated during ingest.
+        affected_pages: Vec<String>,
+        /// Contradictions detected in the source text.
+        contradictions: Vec<String>,
+    },
     /// Hand was provisioned.
     HandProvisioned {
         /// Hand identifier.
@@ -230,6 +241,7 @@ impl Event {
             Self::ApprovalDecided { .. } => EventType::ApprovalDecided,
             Self::MemoryRead { .. } => EventType::MemoryRead,
             Self::MemoryWrite { .. } => EventType::MemoryWrite,
+            Self::MemoryIngest { .. } => EventType::MemoryIngest,
             Self::HandProvisioned { .. } => EventType::HandProvisioned,
             Self::HandDestroyed { .. } => EventType::HandDestroyed,
             Self::HandError { .. } => EventType::HandError,
@@ -256,6 +268,7 @@ impl Event {
             Self::ApprovalDecided { .. } => "ApprovalDecided",
             Self::MemoryRead { .. } => "MemoryRead",
             Self::MemoryWrite { .. } => "MemoryWrite",
+            Self::MemoryIngest { .. } => "MemoryIngest",
             Self::HandProvisioned { .. } => "HandProvisioned",
             Self::HandDestroyed { .. } => "HandDestroyed",
             Self::HandError { .. } => "HandError",
@@ -406,6 +419,12 @@ mod tests {
                 input_tokens: 120,
                 output_tokens: 45,
                 cost_cents: 1,
+            },
+            Event::MemoryIngest {
+                source_name: "RFC 0042".into(),
+                source_path: "sources/rfc-0042.md".into(),
+                affected_pages: vec!["sources/rfc-0042.md".into()],
+                contradictions: vec![],
             },
             Event::Error {
                 message: "oops".into(),

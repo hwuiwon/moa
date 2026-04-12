@@ -644,6 +644,99 @@ async fn memory_write_without_scope_requires_scope_for_new_page() {
 }
 
 #[tokio::test]
+async fn memory_ingest_creates_source_page_and_related_pages() {
+    let dir = tempdir().unwrap();
+    let memory_root = dir.path().join("memory-root");
+    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
+    let memory_store_trait: Arc<dyn MemoryStore> = memory_store.clone();
+    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
+        .await
+        .unwrap();
+    let session = session();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "memory_ingest".to_string(),
+                input: json!({
+                    "content": "# API Design Doc\n\n## Entities\n- Auth Service\n\n## Topics\n- OAuth Tokens\n"
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let rendered = output.to_text();
+    assert!(rendered.contains("Ingested \"API Design Doc\""));
+    assert!(rendered.contains("Created: sources/api-design-doc.md"));
+    assert!(rendered.contains("Extracted: 1 entities, 1 topics, 0 decisions"));
+
+    let source_page = memory_store
+        .read_page(
+            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryPath::new("sources/api-design-doc.md"),
+        )
+        .await
+        .unwrap();
+    assert!(source_page.content.contains("## Raw source"));
+
+    let entity_page = memory_store
+        .read_page(
+            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryPath::new("entities/auth-service.md"),
+        )
+        .await
+        .unwrap();
+    assert!(entity_page.content.contains("Source update"));
+}
+
+#[tokio::test]
+async fn memory_ingest_emits_session_event() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("sessions.db");
+    let memory_root = dir.path().join("memory-root");
+    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
+    let session_store = Arc::new(TursoSessionStore::new_local(&db_path).await.unwrap());
+    let router = ToolRouter::new_local(memory_store, dir.path().join("sandboxes"))
+        .await
+        .unwrap()
+        .with_session_store(session_store.clone());
+    let session = session();
+    session_store.create_session(session.clone()).await.unwrap();
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "memory_ingest".to_string(),
+                input: json!({
+                    "source_name": "RFC 0042 Auth Redesign",
+                    "content": "## Topics\n- Token Rotation\n"
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let events = session_store
+        .get_events(session.id.clone(), moa_core::EventRange::all())
+        .await
+        .unwrap();
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::MemoryIngest {
+            source_name,
+            source_path,
+            ..
+        } if source_name == "RFC 0042 Auth Redesign"
+            && source_path == "sources/rfc-0042-auth-redesign.md"
+    )));
+}
+
+#[tokio::test]
 async fn memory_read_without_scope_falls_back_to_user_scope() {
     let dir = tempdir().unwrap();
     let memory_root = dir.path().join("memory-root");

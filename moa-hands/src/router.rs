@@ -170,6 +170,7 @@ impl ToolRegistry {
         registry.register_builtin(Arc::new(memory::MemoryReadTool));
         registry.register_builtin(Arc::new(memory::MemorySearchTool));
         registry.register_builtin(Arc::new(memory::MemoryWriteTool));
+        registry.register_builtin(Arc::new(memory::MemoryIngestTool));
         registry.register_builtin(Arc::new(session_search::SessionSearchTool));
         registry.register_hand(
             "bash",
@@ -229,6 +230,7 @@ impl ToolRegistry {
             "memory_read".to_string(),
             "memory_search".to_string(),
             "memory_write".to_string(),
+            "memory_ingest".to_string(),
             "session_search".to_string(),
             "bash".to_string(),
             "file_read".to_string(),

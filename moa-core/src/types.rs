@@ -322,6 +322,8 @@ pub enum EventType {
     MemoryRead,
     /// `MemoryWrite`.
     MemoryWrite,
+    /// `MemoryIngest`.
+    MemoryIngest,
     /// `HandProvisioned`.
     HandProvisioned,
     /// `HandDestroyed`.
@@ -1951,6 +1953,21 @@ pub struct MemorySearchResult {
     pub updated: DateTime<Utc>,
     /// Reference count.
     pub reference_count: u64,
+}
+
+/// Summary of a single source-ingest operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IngestReport {
+    /// Scope receiving the new source-derived pages.
+    pub scope: MemoryScope,
+    /// Human-readable source name passed by the caller.
+    pub source_name: String,
+    /// Summary page created for the raw source.
+    pub source_path: MemoryPath,
+    /// All pages created or updated by the ingest pass.
+    pub affected_pages: Vec<MemoryPath>,
+    /// Contradiction notes detected in the source text.
+    pub contradictions: Vec<String>,
 }
 
 /// Compact wiki page listing.

@@ -234,6 +234,13 @@ fn event_to_context_message(record: &EventRecord) -> Option<Result<ContextMessag
         Event::MemoryWrite { path, summary, .. } => Some(Ok(ContextMessage::system(format!(
             "<memory_write path=\"{path}\">{summary}</memory_write>"
         )))),
+        Event::MemoryIngest {
+            source_name,
+            source_path,
+            ..
+        } => Some(Ok(ContextMessage::system(format!(
+            "<memory_ingest source_name=\"{source_name}\" source_path=\"{source_path}\" />"
+        )))),
         _ => None,
     }
 }

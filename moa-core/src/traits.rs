@@ -5,16 +5,16 @@ use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::Result;
+use crate::error::{MoaError, Result};
 use crate::events::Event;
 use crate::types::{
     CheckpointHandle, CheckpointInfo, CompletionRequest, CompletionStream, Credential, CronHandle,
     CronSpec, EventFilter, EventRange, EventRecord, EventStream, HandHandle, HandSpec, HandStatus,
-    InboundMessage, MemoryPath, MemoryScope, MemorySearchResult, MessageId, ModelCapabilities,
-    ObserveLevel, OutboundMessage, PageSummary, PageType, PendingSignal, PendingSignalId, Platform,
-    PlatformCapabilities, ProcessorOutput, RuntimeEvent, SequenceNum, SessionFilter, SessionHandle,
-    SessionId, SessionMeta, SessionSignal, SessionStatus, SessionSummary, StartSessionRequest,
-    ToolOutput, WikiPage, WorkingContext,
+    InboundMessage, IngestReport, MemoryPath, MemoryScope, MemorySearchResult, MessageId,
+    ModelCapabilities, ObserveLevel, OutboundMessage, PageSummary, PageType, PendingSignal,
+    PendingSignalId, Platform, PlatformCapabilities, ProcessorOutput, RuntimeEvent, SequenceNum,
+    SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
+    SessionSummary, StartSessionRequest, ToolOutput, WikiPage, WorkingContext,
 };
 
 /// Orchestrates session lifecycle and observation.
@@ -218,6 +218,18 @@ pub trait MemoryStore: Send + Sync {
 
     /// Returns the index document for a memory scope.
     async fn get_index(&self, scope: MemoryScope) -> Result<String>;
+
+    /// Ingests a raw source document into the wiki for the given scope.
+    async fn ingest_source(
+        &self,
+        _scope: MemoryScope,
+        _source_name: &str,
+        _content: &str,
+    ) -> Result<IngestReport> {
+        Err(MoaError::Unsupported(
+            "ingest_source not supported by this memory store".to_string(),
+        ))
+    }
 
     /// Rebuilds the search index for a memory scope.
     async fn rebuild_search_index(&self, scope: MemoryScope) -> Result<()>;
