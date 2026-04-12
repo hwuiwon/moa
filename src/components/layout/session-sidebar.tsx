@@ -8,6 +8,7 @@ import {
   Sparkles,
 } from "lucide-react";
 
+import type { SessionPreviewDto } from "@/lib/bindings";
 import { Button } from "@/components/ui/button";
 import {
   ContextMenu,
@@ -20,7 +21,6 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { SessionPreviewDto } from "@/lib/types";
 import {
   cn,
   formatAbsoluteDate,

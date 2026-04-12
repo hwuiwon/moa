@@ -68,3 +68,59 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running MOA desktop application");
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf};
+
+    use ts_rs::TS;
+
+    use crate::{
+        dto::{
+            EventRecordDto, MemorySearchResultDto, MoaConfigDto, ModelOptionDto, PageSummaryDto,
+            RuntimeInfoDto, SessionMetaDto, SessionPreviewDto, SessionSummaryDto, WikiPageDto,
+        },
+        error::MoaAppError,
+        stream::StreamEvent,
+    };
+
+    #[test]
+    fn export_bindings() {
+        RuntimeInfoDto::export().expect("failed to export RuntimeInfoDto");
+        SessionSummaryDto::export().expect("failed to export SessionSummaryDto");
+        SessionPreviewDto::export().expect("failed to export SessionPreviewDto");
+        SessionMetaDto::export().expect("failed to export SessionMetaDto");
+        EventRecordDto::export().expect("failed to export EventRecordDto");
+        MemorySearchResultDto::export().expect("failed to export MemorySearchResultDto");
+        PageSummaryDto::export().expect("failed to export PageSummaryDto");
+        WikiPageDto::export().expect("failed to export WikiPageDto");
+        MoaConfigDto::export().expect("failed to export MoaConfigDto");
+        ModelOptionDto::export().expect("failed to export ModelOptionDto");
+        StreamEvent::export().expect("failed to export StreamEvent");
+        MoaAppError::export().expect("failed to export MoaAppError");
+
+        write_bindings_barrel().expect("failed to write bindings barrel");
+    }
+
+    fn write_bindings_barrel() -> std::io::Result<()> {
+        let bindings_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src/lib/bindings");
+        fs::create_dir_all(&bindings_dir)?;
+
+        let contents = r#"// Auto-generated barrel for ts-rs bindings. Do not edit manually.
+export type { EventRecordDto } from "./EventRecordDto";
+export type { MemorySearchResultDto } from "./MemorySearchResultDto";
+export type { MoaAppError } from "./MoaAppError";
+export type { MoaConfigDto } from "./MoaConfigDto";
+export type { ModelOptionDto } from "./ModelOptionDto";
+export type { PageSummaryDto } from "./PageSummaryDto";
+export type { RuntimeInfoDto } from "./RuntimeInfoDto";
+export type { SessionMetaDto } from "./SessionMetaDto";
+export type { SessionPreviewDto } from "./SessionPreviewDto";
+export type { SessionSummaryDto } from "./SessionSummaryDto";
+export type { StreamEvent } from "./StreamEvent";
+export type { WikiPageDto } from "./WikiPageDto";
+"#;
+
+        fs::write(bindings_dir.join("index.ts"), contents)
+    }
+}

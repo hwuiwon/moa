@@ -5,6 +5,7 @@ import { useParams } from "@tanstack/react-router";
 import { MessageList } from "@/components/chat/message-list";
 import { PromptInput } from "@/components/chat/prompt-input";
 import { Badge } from "@/components/ui/badge";
+import { queryKeys } from "@/lib/query-keys";
 import { tauriClient } from "@/lib/tauri";
 import { formatAbsoluteDate } from "@/lib/utils";
 import { useChatStream } from "@/hooks/use-chat-stream";
@@ -24,7 +25,7 @@ export function ChatView() {
 
   const session = useQuery({
     enabled: Boolean(sessionId),
-    queryKey: ["session", sessionId],
+    queryKey: queryKeys.session(sessionId),
     queryFn: () => tauriClient.getSession(sessionId!),
   });
   const history = useSessionHistory(sessionId);

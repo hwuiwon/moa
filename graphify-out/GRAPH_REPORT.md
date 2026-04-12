@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-04-12)
 
 ## Corpus Check
-- Large corpus: 283 files · ~189,874 words. Semantic extraction will be expensive (many Claude tokens). Consider running on a subfolder, or use --no-semantic to run AST-only.
+- Large corpus: 301 files · ~195,141 words. Semantic extraction will be expensive (many Claude tokens). Consider running on a subfolder, or use --no-semantic to run AST-only.
 
 ## Summary
-- 3220 nodes · 5770 edges · 106 communities detected
-- Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS · INFERRED: 18 edges (avg confidence: 0.79)
+- 3282 nodes · 5846 edges · 126 communities detected
+- Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 31 edges (avg confidence: 0.79)
 - Token cost: 0 input · 0 output
 
 ## God Nodes (most connected - your core abstractions)
@@ -21,21 +21,21 @@
 10. `MemoryViewState` - 22 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `Stick-to-Bottom Scroll Behavior` --semantically_similar_to--> `Prompt-Kit Chat Container`  [INFERRED] [semantically similar]
-  src/components/chat/message-list.tsx → src/components/prompt-kit/chat-container.tsx
-- `Prompt-Kit Scroll Button` --semantically_similar_to--> `Stick-to-Bottom Scroll Behavior`  [INFERRED] [semantically similar]
-  src/components/prompt-kit/scroll-button.tsx → src/components/chat/message-list.tsx
-- `Virtualization Threshold (>100 messages)` --semantically_similar_to--> `Sidebar Virtualization Threshold (>50 sessions)`  [INFERRED] [semantically similar]
+- `UserMessage Component` --semantically_similar_to--> `AssistantMessage Component`  [INFERRED] [semantically similar]
+  src/components/chat/user-message.tsx → src/components/chat/assistant-message.tsx
+- `Virtualization Threshold (>100 messages)` --semantically_similar_to--> `SessionSidebar Component`  [INFERRED] [semantically similar]
   src/components/chat/message-list.tsx → src/components/layout/session-sidebar.tsx
+- `ApprovalCard Component` --semantically_similar_to--> `SessionInfoPanel Component`  [AMBIGUOUS] [semantically similar]
+  src/components/chat/approval-card.tsx → src/components/layout/session-info-panel.tsx
+- `SessionInfoPanel Component` --semantically_similar_to--> `DetailPanel Component`  [INFERRED] [semantically similar]
+  src/components/layout/session-info-panel.tsx → src/components/layout/detail-panel.tsx
 - `Prompt-Kit Prompt Suggestion` --semantically_similar_to--> `Prompt Input (Chat)`  [INFERRED] [semantically similar]
   src/components/prompt-kit/prompt-suggestion.tsx → src/components/chat/prompt-input.tsx
-- `Session Status Color Coding` --semantically_similar_to--> `Workspace Risk Levels (low/moderate/high)`  [INFERRED] [semantically similar]
-  src/components/layout/session-sidebar.tsx → src/components/chat/approval-card.tsx
 
 ## Hyperedges (group relationships)
-- **Approval Gate Flow: ApprovalBlock → ApprovalCard → tauriClient.respondToApproval** — approval_card, concept_workspace_risk, concept_approval_decisions [INFERRED 0.87]
-- **Tool Call Render Pipeline: ContentBlockRenderer → ToolGroup → Steps → Tool (prompt-kit)** — content_block_renderer, tool_group, pk_steps, pk_tool [EXTRACTED 0.95]
-- **Streaming Assembly Flow: ChatView + useChatStream + MessageList + AssistantMessage** — chat_view, message_list, assistant_message, streaming_content [INFERRED 0.88]
+- **Tool Approval Visibility Flow** — content_block_renderer, approval_card_component, session_info_panel_component [INFERRED 0.75]
+- **Session Navigation Trio** — session_sidebar_component, session_tab_bar_component, active_session_routing [INFERRED 0.85]
+- **Streaming Render Pipeline** — chat_view, message_list_component, assistant_message_component, content_block_renderer [INFERRED 0.90]
 
 ## Communities
 
@@ -45,7 +45,7 @@ Nodes (124): ActionButton, AgentConfig, AgentConfigBody, AgentConfigDocument, Ap
 
 ### Community 1 - "File Memory Store"
 Cohesion: 0.02
-Nodes (33): Evaluator, AppState, ChatRuntime, collect_markdown_files(), daemon_connect(), daemon_expect_ack(), daemon_is_available(), daemon_request() (+25 more)
+Nodes (50): Evaluator, build_provider_from_config(), build_provider_from_selection(), explicit_provider_prefix_overrides_inference(), infer_provider_name(), infers_anthropic_for_claude_models(), infers_openai_for_gpt_models(), infers_openrouter_for_vendor_prefixed_models() (+42 more)
 
 ### Community 2 - "TUI App State"
 Cohesion: 0.05
@@ -63,13 +63,13 @@ Nodes (45): daytona_live_provider_handles_roundtrip_and_lifecycle(), daytona_liv
 Cohesion: 0.04
 Nodes (25): always_allow_rule_persists_and_skips_next_approval(), canary_leaks_in_tool_input_are_detected_and_blocked(), CanaryLeakLlmProvider, CapturingTextLlmProvider, FixedPageMemoryStore, malicious_tool_results_are_wrapped_as_untrusted_content(), MaliciousToolOutputLlmProvider, MemoryIngestLoopLlmProvider (+17 more)
 
-### Community 6 - "Config & Errors"
-Cohesion: 0.04
-Nodes (39): CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, compaction_config_defaults_are_applied(), CompactionConfig, config_loads_from_file(), config_rejects_zero_neon_checkpoint_limit_when_enabled() (+31 more)
-
-### Community 7 - "Eval Loader Tests"
+### Community 6 - "Turso Session Store"
 Cohesion: 0.05
-Nodes (61): attach_runtime(), cancel_active_generation(), clone_runtime(), create_session(), delete_memory_page(), get_config(), get_runtime_info(), get_session() (+53 more)
+Nodes (29): claim_check_from_value(), collect_blob_refs(), collect_large_strings(), decode_event_from_storage(), encode_event_for_storage(), expand_local_path(), file_blob_store_deletes_session_directory(), file_blob_store_is_content_addressed() (+21 more)
+
+### Community 7 - "Tauri Session Commands"
+Cohesion: 0.06
+Nodes (52): attach_runtime(), cancel_active_generation(), clone_runtime(), create_session(), delete_memory_page(), get_config(), get_runtime_info(), get_session() (+44 more)
 
 ### Community 8 - "Skill Document Format"
 Cohesion: 0.07
@@ -79,41 +79,41 @@ Nodes (22): build_skill_path(), confidence_for_skill(), defaults_missing_moa_met
 Cohesion: 0.05
 Nodes (55): apply_config_update(), checkpoint_cleanup_report(), checkpoint_create_report(), checkpoint_list_report(), checkpoint_rollback_report(), CheckpointCommand, Cli, cloud_sync_status() (+47 more)
 
-### Community 10 - "Tool Router & Policies"
+### Community 10 - "Config & Errors"
+Cohesion: 0.04
+Nodes (28): CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, compaction_config_defaults_are_applied(), CompactionConfig, config_loads_from_file(), config_rejects_zero_neon_checkpoint_limit_when_enabled() (+20 more)
+
+### Community 11 - "Tool Router & Policies"
 Cohesion: 0.07
 Nodes (24): approval_diffs_for(), approval_fields_for(), approval_pattern_for(), default_cloud_provider(), execute_tool_policy(), expand_local_path(), hand_id(), language_hint_for_path() (+16 more)
 
-### Community 11 - "Adaptive Tool Stats"
+### Community 12 - "Adaptive Tool Stats"
 Cohesion: 0.06
 Nodes (41): annotate_schema(), annotation_warns_on_low_success(), apply_tool_rankings(), cache_stability_preserves_identical_ranked_output(), collect_session_tool_observations(), compare_f64_asc(), compare_f64_desc(), compare_failure_last() (+33 more)
 
-### Community 12 - "Anthropic Provider"
+### Community 13 - "Anthropic Provider"
 Cohesion: 0.07
 Nodes (38): anthropic_content_blocks(), anthropic_content_blocks_render_text_and_json_as_text_blocks(), anthropic_message(), anthropic_message_wraps_assistant_tool_calls_as_tool_use_blocks(), anthropic_message_wraps_tool_results_with_tool_use_id(), anthropic_tool_from_schema(), anthropic_tool_from_schema_moves_parameters_into_input_schema(), AnthropicProvider (+30 more)
 
-### Community 13 - "Postgres Session Store"
+### Community 14 - "Postgres Session Store"
 Cohesion: 0.06
 Nodes (18): checkpoint_view(), event_hand_id(), normalize_event_search_query(), PostgresSessionStore, qualified_name(), approval_rule_from_row(), pending_signal_from_row(), pending_signal_type_from_db() (+10 more)
-
-### Community 14 - "Local Orchestrator"
-Cohesion: 0.07
-Nodes (19): accept_user_message(), append_event(), detect_docker(), docker_status(), DockerSandbox, flush_next_queued_message(), flush_pending_signal(), flush_queued_messages() (+11 more)
 
 ### Community 15 - "Temporal Orchestrator"
 Cohesion: 0.06
 Nodes (27): activity_options(), apply_approval_decision(), ApprovalDecisionActivityInput, ApprovalSignalInput, brain_turn_activity_options(), CancelMode, connect_temporal_client(), event_to_runtime_event() (+19 more)
 
-### Community 16 - "Turso Session Store"
+### Community 16 - "Local Orchestrator"
 Cohesion: 0.07
-Nodes (17): optional_i64(), optional_text(), parse_timestamp(), platform_from_db(), session_meta_from_row(), session_status_from_db(), session_summary_from_row(), build_event_fts_query() (+9 more)
+Nodes (19): accept_user_message(), append_event(), detect_docker(), docker_status(), DockerSandbox, flush_next_queued_message(), flush_pending_signal(), flush_queued_messages() (+11 more)
 
 ### Community 17 - "Local Orchestrator Tests"
 Cohesion: 0.08
 Nodes (35): approval_requested_event_persists_full_prompt_details(), collect_runtime_events_until(), denied_tool_preserves_queued_follow_up(), FileWriteApprovalProvider, hard_cancel_aborts_stream_and_emits_cancelled_status(), last_user_message(), list_sessions_includes_active_session(), memory_maintenance_runs_due_workspace_consolidation() (+27 more)
 
-### Community 18 - "Chat UI Rendering Layer"
-Cohesion: 0.04
-Nodes (55): App Layout Shell, App Entry (App.tsx), Approval Card, Assistant Message, Chat View, Code Block (Chat), Approval Decision Types (allow_once/always_allow/deny), Command Palette Placeholder (Coming Next) (+47 more)
+### Community 18 - "Eval Loader Tests"
+Cohesion: 0.05
+Nodes (38): EvalError, MoaAppError, MoaError, discover_configs(), discover_matching_toml_files(), discover_suites(), discover_toml_files(), load_agent_config() (+30 more)
 
 ### Community 19 - "History Compilation Stage"
 Cohesion: 0.08
@@ -152,92 +152,92 @@ Cohesion: 0.08
 Nodes (40): canonical_port_claims(), confidence_rank(), consolidation_due_for_scope(), consolidation_resolves_dates_prunes_and_refreshes_index(), ConsolidationReport, decay_confidence(), extract_port_claims(), inbound_reference_counts() (+32 more)
 
 ### Community 28 - "Chat View"
-Cohesion: 0.08
-Nodes (35): appendTextBlock(), approvalBlockFromEvent(), asBoolean(), asNumber(), asPayload(), asRecord(), asString(), eventsToMessages() (+27 more)
+Cohesion: 0.1
+Nodes (45): appendNoticeBlock(), appendTextDelta(), applyApprovalDecision(), approvalBlockFromEvent(), approvalDecisionFromEvent(), asBoolean(), asNumber(), asPayload() (+37 more)
 
-### Community 29 - "Daemon Service"
+### Community 29 - "Chat UI Shell"
+Cohesion: 0.05
+Nodes (45): Active Session Routing (URL <-> Store sync), AppLayout Component, App Entry (App.tsx), ApprovalCard Component, Approval Risk Tone System, AssistantMessage Component, ChatView, Command Palette Placeholder (+37 more)
+
+### Community 30 - "Daemon Service"
 Cohesion: 0.12
 Nodes (39): daemon_create_session_uses_explicit_client_scope(), daemon_health_endpoint_responds_when_cloud_enabled(), daemon_info(), daemon_lists_session_previews(), daemon_log_path(), daemon_logs(), daemon_pid_path(), daemon_ping_create_and_shutdown_roundtrip() (+31 more)
 
-### Community 30 - "Message Renderer"
+### Community 31 - "Message Renderer"
 Cohesion: 0.09
 Nodes (23): append_piece(), discord_renderer_attaches_buttons_to_last_chunk_only(), discord_renderer_uses_embed_limit_for_long_text(), DiscordRenderChunk, DiscordRenderer, render_approval_request(), render_diff(), render_tool_card() (+15 more)
 
-### Community 31 - "Temporal Orchestrator Tests"
+### Community 32 - "Temporal Orchestrator Tests"
 Cohesion: 0.11
 Nodes (28): build_temporal_helper_binary(), delayed_text_stream(), last_user_message(), mock_capabilities(), spawn_temporal_helper(), temporal_helper_binary(), temporal_orchestrator_live_anthropic_smoke(), temporal_orchestrator_processes_multiple_queued_messages_fifo() (+20 more)
 
-### Community 32 - "OpenRouter Provider"
+### Community 33 - "OpenRouter Provider"
 Cohesion: 0.12
 Nodes (15): build_request_body(), canonical_model_id(), capabilities_for_model(), capability_lookup_reuses_known_model_families(), completion_response_from_response(), consume_sse_events(), error_message(), native_tools() (+7 more)
 
-### Community 33 - "Diff View"
+### Community 34 - "Diff View"
 Cohesion: 0.1
 Nodes (25): build_diff_file_view(), default_mode_for_width(), diff_line_style(), DiffFileView, DiffMode, DiffViewState, highlighted_spans(), pad_or_truncate() (+17 more)
 
-### Community 34 - "Discord Adapter"
+### Community 35 - "Discord Adapter"
 Cohesion: 0.12
 Nodes (18): approval_callback_maps_to_control_message(), attachments_from_message(), context_from_component(), discord_button(), discord_create_message(), discord_create_message_includes_buttons_for_last_chunk(), discord_edit_message(), discord_embed() (+10 more)
 
-### Community 35 - "E2B Sandbox Provider"
+### Community 36 - "E2B Sandbox Provider"
 Cohesion: 0.14
 Nodes (16): build_url(), ConnectedSandbox, decode_stream_chunk(), default_headers(), E2BHandProvider, encode_connect_request(), encode_test_envelopes(), envd_headers() (+8 more)
 
-### Community 36 - "Slack Adapter"
+### Community 37 - "Slack Adapter"
 Cohesion: 0.13
 Nodes (19): handle_interaction_event(), handle_push_event(), inbound_from_app_mention(), inbound_from_interaction_event(), inbound_from_message_event(), inbound_from_push_event(), interaction_origin(), parses_approval_callback_into_control_message() (+11 more)
 
-### Community 37 - "Pipeline & Session Helpers"
+### Community 38 - "Pipeline & Session Helpers"
 Cohesion: 0.09
 Nodes (18): build_default_pipeline(), build_default_pipeline_with_runtime(), build_default_pipeline_with_tools(), cache_prefix_ratio(), ContextPipeline, estimate_tokens(), EvaluatorOptions, pipeline_runner_executes_stages_in_order() (+10 more)
 
-### Community 38 - "Eval Agent Setup"
+### Community 39 - "Eval Agent Setup"
 Cohesion: 0.13
 Nodes (27): AgentEnvironment, apply_skill_overrides(), build_agent_environment(), build_agent_environment_with_provider(), build_eval_policies(), build_pipeline(), build_skill_memory_path(), build_tool_router() (+19 more)
 
-### Community 39 - "Wiki & Memory Branching"
+### Community 40 - "Wiki & Memory Branching"
 Cohesion: 0.12
 Nodes (28): append_change_manifest(), branch_dir(), branch_file_path(), branch_root(), ChangeOperation, ChangeRecord, list_branches(), merge_markdown() (+20 more)
 
-### Community 40 - "Local Tool Tests"
+### Community 41 - "Local Tool Tests"
 Cohesion: 0.12
 Nodes (20): bash_captures_stdout_and_stderr(), bash_respects_timeout(), EmptyMemoryStore, file_operations_reject_path_traversal(), file_read_reads_written_content(), file_search_finds_files_by_glob(), local_bash_hard_cancel_kills_running_process(), memory_ingest_creates_source_page_and_related_pages() (+12 more)
 
-### Community 41 - "MCP Client Discovery"
+### Community 42 - "MCP Client Discovery"
 Cohesion: 0.14
 Nodes (16): flatten_call_result(), flatten_tool_result_aggregates_text_items(), header_map_from_pairs(), http_client_sends_headers_and_parses_jsonrpc(), MCPClient, McpDiscoveredTool, McpTransport, parse_jsonrpc_result() (+8 more)
 
-### Community 42 - "MCP Credential Proxy"
+### Community 43 - "MCP Credential Proxy"
 Cohesion: 0.12
 Nodes (11): credential_from_env(), default_scope_for(), env_var(), environment_vault_loads_from_env_backed_server_config(), EnvironmentCredentialVault, headers_from_credential(), MCPCredentialProxy, McpSessionToken (+3 more)
 
-### Community 43 - "Daytona Workspace Provider"
+### Community 44 - "Daytona Workspace Provider"
 Cohesion: 0.17
 Nodes (10): build_url(), DaytonaHandProvider, default_headers(), derive_toolbox_url(), expect_success(), expect_success_json(), extract_workspace_id(), http_error() (+2 more)
 
-### Community 44 - "Telegram Adapter"
+### Community 45 - "Telegram Adapter"
 Cohesion: 0.16
 Nodes (13): channel_from_chat_and_reply(), handle_callback_query(), handle_message(), inbound_from_callback_query(), inbound_from_message(), inline_keyboard(), parse_message_id(), parses_approval_callback_into_control_message() (+5 more)
 
-### Community 45 - "Docker File Operations"
+### Community 46 - "Docker File Operations"
 Cohesion: 0.11
 Nodes (15): container_path_validation_accepts_workspace_absolute_paths(), container_path_validation_rejects_absolute_paths_outside_workspace(), container_path_validation_rejects_traversal(), docker_file_read(), docker_file_search(), docker_file_write(), docker_find_args(), docker_read_args() (+7 more)
 
-### Community 46 - "CLI HTTP API Server"
+### Community 47 - "CLI HTTP API Server"
 Cohesion: 0.11
 Nodes (14): ApiState, build_api_router(), health_endpoint_returns_ok(), runtime_event_stream(), session_stream(), session_stream_returns_not_found_when_runtime_is_unavailable(), session_stream_returns_sse_content_type(), start_api_server() (+6 more)
 
-### Community 47 - "Approval Card Widget"
+### Community 48 - "Approval Card Widget"
 Cohesion: 0.13
 Nodes (15): approval_buttons(), approval_request(), ApprovalCallbackAction, border_line(), callback_data_roundtrips(), content_line(), prepare_outbound_message(), prepare_outbound_message_adds_inline_buttons_when_supported() (+7 more)
 
-### Community 48 - "Session Store Tests"
+### Community 49 - "Session Store Tests"
 Cohesion: 0.14
 Nodes (17): approval_rules_round_trip(), create_session_and_emit_events(), fts_search_finds_events(), fts_search_uses_blob_preview(), get_events_with_range_filter(), identical_large_payloads_share_one_blob(), large_payload_offloaded_to_blob_store(), list_sessions_filters_by_workspace() (+9 more)
-
-### Community 49 - "File Blob Store"
-Cohesion: 0.18
-Nodes (12): claim_check_from_value(), collect_blob_refs(), collect_large_strings(), decode_event_from_storage(), encode_event_for_storage(), expand_local_path(), file_blob_store_deletes_session_directory(), file_blob_store_is_content_addressed() (+4 more)
 
 ### Community 50 - "Tauri DTO Layer"
 Cohesion: 0.14
@@ -275,37 +275,37 @@ Nodes (12): ApprovalRuleStore, glob_match(), parse_and_match_bash(), persistent_
 Cohesion: 0.27
 Nodes (13): branch_reconciliation_merges_conflicting_writes(), consolidation_decays_confidence_once_and_is_stable_on_repeat_runs(), consolidation_normalizes_dates_and_resolves_conflicts(), ingest_source_creates_summary_and_updates_related_pages(), ingest_source_truncates_large_content(), maintenance_operations_append_log_and_keep_results_searchable(), manual_seeded_memory_fuzz_preserves_core_invariants(), manual_stress_ingest_reconcile_and_consolidate_preserves_invariants() (+5 more)
 
-### Community 59 - "Provider Factory Resolution"
-Cohesion: 0.25
-Nodes (15): build_provider_from_config(), build_provider_from_selection(), explicit_provider_prefix_overrides_inference(), infer_provider_name(), infers_anthropic_for_claude_models(), infers_openai_for_gpt_models(), infers_openrouter_for_vendor_prefixed_models(), is_openai_model() (+7 more)
-
-### Community 60 - "Encrypted Secret Vault"
+### Community 59 - "Encrypted Secret Vault"
 Cohesion: 0.3
 Nodes (4): decrypt_bytes(), encrypt_bytes(), file_vault_encrypts_and_decrypts_roundtrip(), FileVault
 
-### Community 61 - "Command Palette"
+### Community 60 - "Command Palette"
 Cohesion: 0.22
 Nodes (6): centered_rect(), filtered_actions(), palette_fuzzy_search_prefers_matching_actions(), PaletteAction, PaletteState, render_palette()
 
-### Community 62 - "Prompt Injection Defense"
+### Community 61 - "Prompt Injection Defense"
 Cohesion: 0.26
 Nodes (12): canary_detection_works(), check_canary(), classifier_flags_known_attack_patterns(), classify_input(), contains_canary_tokens(), inject_canary(), InputClassification, InputInspection (+4 more)
 
-### Community 63 - "Session Search Tool"
+### Community 62 - "Session Search Tool"
 Cohesion: 0.19
 Nodes (6): event_snippet(), render_results(), SessionSearchEventType, SessionSearchInput, SessionSearchTool, truncate()
 
-### Community 64 - "TUI Keybindings"
+### Community 63 - "TUI Keybindings"
 Cohesion: 0.17
 Nodes (1): KeyAction
 
-### Community 65 - "Toolbar Widget"
+### Community 64 - "Toolbar Widget"
 Cohesion: 0.24
 Nodes (7): build_tab_spans(), render_toolbar(), short_session_id(), tab_title(), toolbar_labels_include_status_icons_and_tab_limit(), ToolbarMetrics, visible_window()
 
-### Community 66 - "Eval Terminal Reporter"
+### Community 65 - "Eval Terminal Reporter"
 Cohesion: 0.3
 Nodes (5): format_scores(), render_includes_case_names_and_summary(), render_verbose_case(), result_index(), TerminalReporter
+
+### Community 66 - "Streaming Code Display"
+Cohesion: 0.17
+Nodes (12): Code Block (Chat), Markdown Per-Block Memoization, Reasoning Auto-Open on Streaming, Shiki Syntax Highlighting (lazy-loaded), Streaming Cursor (CSS pulse after-element), Prompt-Kit Chain of Thought, Prompt-Kit Markdown, Prompt-Kit Reasoning (+4 more)
 
 ### Community 67 - "Memory Store Tests"
 Cohesion: 0.36
@@ -339,45 +339,45 @@ Nodes (2): instruction_processor_appends_config_backed_sections(), InstructionPr
 Cohesion: 0.43
 Nodes (2): identity_processor_appends_system_prompt(), IdentityProcessor
 
-### Community 75 - "Trajectory Match Evaluator"
+### Community 75 - "Tailwind Merge Util"
+Cohesion: 0.29
+Nodes (2): formatAbsoluteDate(), formatRelativeTime()
+
+### Community 76 - "Trajectory Match Evaluator"
 Cohesion: 0.43
 Nodes (4): exact_match_scores_one(), lcs_len(), partial_match_scores_below_one(), TrajectoryMatchEvaluator
 
-### Community 76 - "Output Match Evaluator"
+### Community 77 - "Output Match Evaluator"
 Cohesion: 0.43
 Nodes (4): contains_rules_pass_when_all_terms_match(), evaluate_output(), missing_contains_term_reduces_score(), OutputMatchEvaluator
 
-### Community 77 - "Bash Tool"
+### Community 78 - "Bash Tool"
 Cohesion: 0.47
 Nodes (3): BashToolInput, execute_docker(), execute_local()
 
-### Community 78 - "Cache Optimizer Stage"
+### Community 79 - "Cache Optimizer Stage"
 Cohesion: 0.4
 Nodes (2): cache_optimizer_validates_cache_breakpoint(), CacheOptimizer
 
-### Community 79 - "Threshold Evaluator"
+### Community 80 - "Threshold Evaluator"
 Cohesion: 0.53
 Nodes (3): cost_over_budget_fails_boolean_score(), limit_score(), ThresholdEvaluator
 
-### Community 80 - "CLI Exec Mode"
+### Community 81 - "CLI Exec Mode"
 Cohesion: 0.6
 Nodes (4): exec_mode_formats_tool_updates_compactly(), format_tool_update(), resolve_exec_approval(), run_exec()
 
-### Community 81 - "Sidebar Widget"
+### Community 82 - "Sidebar Widget"
 Cohesion: 0.5
 Nodes (2): render_sidebar(), section_title()
 
-### Community 82 - "Anthropic Provider Tests"
+### Community 83 - "Anthropic Provider Tests"
 Cohesion: 0.4
 Nodes (0): 
 
-### Community 83 - "File Search Tool"
+### Community 84 - "File Search Tool"
 Cohesion: 0.5
 Nodes (3): collect_matches(), execute(), FileSearchInput
-
-### Community 84 - "Tailwind Merge Util"
-Cohesion: 0.5
-Nodes (2): formatAbsoluteDate(), formatRelativeTime()
 
 ### Community 85 - "OpenRouter Live Test"
 Cohesion: 0.83
@@ -427,48 +427,130 @@ Nodes (0):
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 97 - "hooks"
+### Community 97 - "stores"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 98 - "Vite Config"
+### Community 98 - "hooks"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 99 - "TUI Runner"
+### Community 99 - "Session Preview DTOs"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 100 - "Vite Env Types"
+### Community 100 - "components"
+Cohesion: 1.0
+Nodes (2): Prompt-Kit Prompt Suggestion, Prompt Input (Chat)
+
+### Community 101 - "Vite Config"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 101 - "stores"
+### Community 102 - "TUI Runner"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 102 - "stores"
+### Community 103 - "Vite Env Types"
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 103 - "Prompt-Kit Loader"
+### Community 104 - "stores"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 105 - "stores"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 106 - "Memory Search DTO"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 107 - "App Error Type"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 108 - "Wiki Page DTO"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 109 - "Page Summary DTO"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 110 - "Runtime Info DTO"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 111 - "Session Meta DTO"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 112 - "Event Record DTO"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 113 - "App Config DTO"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 114 - "Model Option DTO"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 115 - "Layout Store State"
+Cohesion: 1.0
+Nodes (1): Layout Store (sidebarOpen, detailPanelOpen, commandPaletteOpen)
+
+### Community 116 - "Tabs Store State"
+Cohesion: 1.0
+Nodes (1): Tabs Store
+
+### Community 117 - "Session Resource View"
+Cohesion: 1.0
+Nodes (1): SessionInfoPanel Resource Usage View
+
+### Community 118 - "Prompt-Kit Chat Container"
+Cohesion: 1.0
+Nodes (1): Prompt-Kit Chat Container
+
+### Community 119 - "Prompt-Kit Tool"
+Cohesion: 1.0
+Nodes (1): Prompt-Kit Tool
+
+### Community 120 - "Prompt-Kit Loader"
 Cohesion: 1.0
 Nodes (1): Prompt-Kit Loader
 
-### Community 104 - "Text Shimmer Animation"
+### Community 121 - "Prompt-Kit System Message"
+Cohesion: 1.0
+Nodes (1): Prompt-Kit System Message
+
+### Community 122 - "Text Shimmer Animation"
 Cohesion: 1.0
 Nodes (1): Text Shimmer CSS Animation
 
-### Community 105 - "Prompt-Kit Message"
+### Community 123 - "Prompt-Kit Scroll Button"
+Cohesion: 1.0
+Nodes (1): Prompt-Kit Scroll Button
+
+### Community 124 - "Prompt-Kit Message"
 Cohesion: 1.0
 Nodes (1): Prompt-Kit Message
 
+### Community 125 - "Prompt-Kit Feedback Bar"
+Cohesion: 1.0
+Nodes (1): Prompt-Kit Feedback Bar
+
 ## Ambiguous Edges - Review These
+- `ApprovalCard Component` → `SessionInfoPanel Component`  [AMBIGUOUS]
+  src/components/layout/session-info-panel.tsx · relation: semantically_similar_to
 - `Prompt-Kit Markdown` → `Prompt-Kit Chain of Thought`  [AMBIGUOUS]
   src/components/prompt-kit/markdown.tsx · relation: references
 
 ## Knowledge Gaps
-- **275 isolated node(s):** `LogChange`, `LogEntry`, `PageFrontmatter`, `ChangeOperation`, `ChangeRecord` (+270 more)
+- **286 isolated node(s):** `LogChange`, `LogEntry`, `PageFrontmatter`, `ChangeOperation`, `ChangeRecord` (+281 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **Thin community `TUI Workflow Tests`** (2 nodes): `tui_workflows.rs`, `tui_manual_workflow_opens_memory_settings_and_palette()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -482,7 +564,13 @@ Nodes (1): Prompt-Kit Message
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Eval Live Tests`** (2 nodes): `engine_live.rs`, `live_run_single_produces_eval_result()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `stores`** (2 nodes): `tabs.ts`, `moveItem()`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `hooks`** (2 nodes): `use-mobile.ts`, `useIsMobile()`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Session Preview DTOs`** (2 nodes): `SessionPreviewDto.ts`, `SessionSummaryDto.ts`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `components`** (2 nodes): `Prompt-Kit Prompt Suggestion`, `Prompt Input (Chat)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Vite Config`** (1 nodes): `vite.config.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -494,20 +582,56 @@ Nodes (1): Prompt-Kit Message
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `stores`** (1 nodes): `layout.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Memory Search DTO`** (1 nodes): `MemorySearchResultDto.ts`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `App Error Type`** (1 nodes): `MoaAppError.ts`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Wiki Page DTO`** (1 nodes): `WikiPageDto.ts`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Page Summary DTO`** (1 nodes): `PageSummaryDto.ts`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Runtime Info DTO`** (1 nodes): `RuntimeInfoDto.ts`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Session Meta DTO`** (1 nodes): `SessionMetaDto.ts`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Event Record DTO`** (1 nodes): `EventRecordDto.ts`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `App Config DTO`** (1 nodes): `MoaConfigDto.ts`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Model Option DTO`** (1 nodes): `ModelOptionDto.ts`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Layout Store State`** (1 nodes): `Layout Store (sidebarOpen, detailPanelOpen, commandPaletteOpen)`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Tabs Store State`** (1 nodes): `Tabs Store`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Session Resource View`** (1 nodes): `SessionInfoPanel Resource Usage View`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Prompt-Kit Chat Container`** (1 nodes): `Prompt-Kit Chat Container`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Prompt-Kit Tool`** (1 nodes): `Prompt-Kit Tool`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Prompt-Kit Loader`** (1 nodes): `Prompt-Kit Loader`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Prompt-Kit System Message`** (1 nodes): `Prompt-Kit System Message`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Text Shimmer Animation`** (1 nodes): `Text Shimmer CSS Animation`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Prompt-Kit Scroll Button`** (1 nodes): `Prompt-Kit Scroll Button`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Prompt-Kit Message`** (1 nodes): `Prompt-Kit Message`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Prompt-Kit Feedback Bar`** (1 nodes): `Prompt-Kit Feedback Bar`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
+- **What is the exact relationship between `ApprovalCard Component` and `SessionInfoPanel Component`?**
+  _Edge tagged AMBIGUOUS (relation: semantically_similar_to) - confidence is low._
 - **What is the exact relationship between `Prompt-Kit Markdown` and `Prompt-Kit Chain of Thought`?**
   _Edge tagged AMBIGUOUS (relation: references) - confidence is low._
 - **What connects `LogChange`, `LogEntry`, `PageFrontmatter` to the rest of the system?**
-  _275 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _286 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Core Domain Types` be split into smaller, more focused modules?**
   _Cohesion score 0.01 - nodes in this community are weakly interconnected._
 - **Should `File Memory Store` be split into smaller, more focused modules?**
@@ -515,6 +639,4 @@ _Questions this graph is uniquely positioned to answer:_
 - **Should `TUI App State` be split into smaller, more focused modules?**
   _Cohesion score 0.05 - nodes in this community are weakly interconnected._
 - **Should `Memory Pipeline & Views` be split into smaller, more focused modules?**
-  _Cohesion score 0.03 - nodes in this community are weakly interconnected._
-- **Should `Event Taxonomy` be split into smaller, more focused modules?**
   _Cohesion score 0.03 - nodes in this community are weakly interconnected._

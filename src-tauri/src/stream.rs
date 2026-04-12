@@ -2,10 +2,17 @@
 
 use moa_core::{ApprovalPrompt, RiskLevel, RuntimeEvent, ToolCardStatus};
 use serde::Serialize;
+use ts_rs::TS;
 
 /// Tagged stream event sent over a Tauri channel.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase", tag = "event", content = "data")]
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "event",
+    content = "data"
+)]
+#[ts(export, export_to = "../../src/lib/bindings/")]
 pub enum StreamEvent {
     /// The assistant has started streaming a new response.
     AssistantStarted,

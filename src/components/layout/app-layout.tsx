@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { SessionInfoPanel } from "@/components/layout/session-info-panel";
 import { SessionTabBar } from "@/components/layout/session-tab-bar";
+import { queryKeys } from "@/lib/query-keys";
 import { tauriClient } from "@/lib/tauri";
 import { useSessionList } from "@/hooks/use-session-list";
 import { SessionSidebar } from "@/components/layout/session-sidebar";
@@ -55,11 +56,11 @@ export function AppLayout() {
 
   const sessions = useSessionList();
   const runtimeInfo = useQuery({
-    queryKey: ["runtime-info"],
+    queryKey: queryKeys.runtimeInfo(),
     queryFn: tauriClient.getRuntimeInfo,
   });
   const modelOptions = useQuery({
-    queryKey: ["model-options"],
+    queryKey: queryKeys.modelOptions(),
     queryFn: tauriClient.listModelOptions,
   });
   const routeSessionId = chatSessionIdFromPath(pathname);
@@ -96,10 +97,10 @@ export function AppLayout() {
 
   const invalidateChromeQueries = async () => {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["sessions"] }),
-      queryClient.invalidateQueries({ queryKey: ["runtime-info"] }),
-      queryClient.invalidateQueries({ queryKey: ["config"] }),
-      queryClient.invalidateQueries({ queryKey: ["model-options"] }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions() }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.runtimeInfo() }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.config() }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.modelOptions() }),
     ]);
   };
 

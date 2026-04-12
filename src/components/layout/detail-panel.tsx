@@ -5,6 +5,7 @@ import { Activity, Clock3, Layers3, Sigma } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { queryKeys } from "@/lib/query-keys";
 import { tauriClient } from "@/lib/tauri";
 import { formatAbsoluteDate } from "@/lib/utils";
 
@@ -14,7 +15,7 @@ type DetailPanelProps = {
 
 export function DetailPanel({ activeSessionId }: DetailPanelProps) {
   const session = useQuery({
-    queryKey: ["session", activeSessionId],
+    queryKey: queryKeys.session(activeSessionId),
     queryFn: () => tauriClient.getSession(activeSessionId!),
     enabled: Boolean(activeSessionId),
   });

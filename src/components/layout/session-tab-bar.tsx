@@ -14,6 +14,7 @@ import {
 } from "@dnd-kit/sortable";
 import { Circle, GripVertical, MoreHorizontal, X } from "lucide-react";
 
+import type { SessionPreviewDto } from "@/lib/bindings";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -21,7 +22,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { SessionPreviewDto } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type SessionTabBarProps = {

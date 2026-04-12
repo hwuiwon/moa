@@ -7,8 +7,8 @@ import type {
   RuntimeInfoDto,
   SessionMetaDto,
   SessionPreviewDto,
-} from "@/lib/types";
-import type { StreamEvent } from "@/types/chat";
+  StreamEvent,
+} from "@/lib/bindings";
 
 function errorMessage(error: unknown): string {
   if (typeof error === "string") {

@@ -2,13 +2,15 @@
 
 use serde::Serialize;
 use thiserror::Error;
+use ts_rs::TS;
 
 /// Result alias used by Tauri commands.
 pub type AppResult<T> = std::result::Result<T, MoaAppError>;
 
 /// Error payload returned from the desktop backend to the frontend.
-#[derive(Debug, Error, Serialize)]
+#[derive(Debug, Error, Serialize, TS)]
 #[serde(tag = "kind", content = "message", rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/lib/bindings/")]
 pub enum MoaAppError {
     /// The frontend supplied invalid input.
     #[error("{0}")]
