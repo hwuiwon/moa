@@ -6,7 +6,7 @@ use std::time::Instant;
 use async_openai::config::OpenAIConfig;
 use moa_core::{
     CompletionRequest, CompletionStream, LLMProvider, MoaConfig, MoaError, ModelCapabilities,
-    Result, TokenPricing, ToolCallFormat,
+    ProviderNativeTool, Result, TokenPricing, ToolCallFormat,
 };
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -30,6 +30,7 @@ pub struct OpenAIProvider {
     default_reasoning_effort: String,
     default_capabilities: ModelCapabilities,
     max_retries: usize,
+    web_search_enabled: bool,
 }
 
 impl OpenAIProvider {
@@ -56,6 +57,7 @@ impl OpenAIProvider {
             default_reasoning_effort: default_reasoning_effort.into(),
             default_capabilities,
             max_retries: DEFAULT_MAX_RETRIES,
+            web_search_enabled: true,
         })
     }
 
@@ -78,6 +80,7 @@ impl OpenAIProvider {
             default_model,
             config.general.reasoning_effort.clone(),
         )
+        .map(|provider| provider.with_web_search_enabled(config.general.web_search_enabled))
     }
 
     /// Creates a provider from the `OPENAI_API_KEY` environment variable.
@@ -100,6 +103,12 @@ impl OpenAIProvider {
     /// Overrides the retry budget for rate-limited requests.
     pub fn with_max_retries(mut self, max_retries: usize) -> Self {
         self.max_retries = max_retries;
+        self
+    }
+
+    /// Overrides whether provider-native web search is exposed to supported models.
+    pub fn with_web_search_enabled(mut self, enabled: bool) -> Self {
+        self.web_search_enabled = enabled;
         self
     }
 }
@@ -134,6 +143,7 @@ impl LLMProvider for OpenAIProvider {
             &request,
             &resolved_model,
             &self.default_reasoning_effort,
+            native_tools(&model_capabilities, self.web_search_enabled),
         ) {
             Ok(request) => request,
             Err(error) => {
@@ -204,6 +214,7 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
                 output_per_mtok: 4.50,
                 cached_input_per_mtok: Some(0.075),
             },
+            native_tools: native_web_search_tools(),
         });
     }
 
@@ -222,6 +233,7 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
                 output_per_mtok: 1.25,
                 cached_input_per_mtok: Some(0.02),
             },
+            native_tools: native_web_search_tools(),
         });
     }
 
@@ -240,6 +252,7 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
                 output_per_mtok: 15.0,
                 cached_input_per_mtok: Some(0.25),
             },
+            native_tools: native_web_search_tools(),
         });
     }
 
@@ -258,6 +271,7 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
                 output_per_mtok: 2.0,
                 cached_input_per_mtok: Some(0.025),
             },
+            native_tools: native_web_search_tools(),
         });
     }
 
@@ -276,12 +290,29 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
                 output_per_mtok: 0.40,
                 cached_input_per_mtok: Some(0.005),
             },
+            native_tools: native_web_search_tools(),
         });
     }
 
     Err(MoaError::Unsupported(format!(
         "unsupported OpenAI model '{model}'"
     )))
+}
+
+fn native_tools(capabilities: &ModelCapabilities, enabled: bool) -> &[ProviderNativeTool] {
+    if enabled {
+        &capabilities.native_tools
+    } else {
+        &[]
+    }
+}
+
+fn native_web_search_tools() -> Vec<ProviderNativeTool> {
+    vec![ProviderNativeTool {
+        tool_type: "web_search".to_string(),
+        name: "web_search".to_string(),
+        config: None,
+    }]
 }
 
 #[cfg(test)]

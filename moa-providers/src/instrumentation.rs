@@ -292,6 +292,7 @@ fn has_meaningful_output(block: &CompletionContent) -> bool {
     match block {
         CompletionContent::Text(text) => !text.is_empty(),
         CompletionContent::ToolCall(_) => true,
+        CompletionContent::ProviderToolResult { .. } => true,
     }
 }
 

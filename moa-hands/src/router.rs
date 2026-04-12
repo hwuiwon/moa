@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use moa_core::{
     ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, ApprovalRule, BuiltInTool,
     HandHandle, HandProvider, HandResources, HandSpec, McpServerConfig, MemoryStore, MoaConfig,
-    MoaError, PolicyAction, Result, RiskLevel, SandboxTier, SessionMeta, SessionStore, ToolContext,
+    MoaError, PolicyAction, Result, SandboxTier, SessionMeta, SessionStore, ToolContext,
     ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolInvocation, ToolOutput, ToolPolicyInput,
     ToolPolicySpec, TraceContext, UserId, read_tool_policy, write_tool_policy,
 };
@@ -34,7 +34,7 @@ use crate::e2b::E2BHandProvider;
 use crate::local::LocalHandProvider;
 use crate::mcp::{MCPClient, McpDiscoveredTool};
 use crate::tools::file_read::resolve_sandbox_path;
-use crate::tools::{memory, session_search, stub};
+use crate::tools::{memory, session_search};
 
 const DEFAULT_PROVIDER_NAME: &str = "local";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -225,16 +225,6 @@ impl ToolRegistry {
             }),
             read_tool_policy(ToolInputShape::Pattern),
         );
-        registry.register_builtin(Arc::new(stub::StubTool::new(
-            "web_search",
-            "Search the web for current information.",
-            RiskLevel::Medium,
-        )));
-        registry.register_builtin(Arc::new(stub::StubTool::new(
-            "web_fetch",
-            "Fetch and summarize a specific web page.",
-            RiskLevel::Medium,
-        )));
         registry.default_loadout = vec![
             "memory_read".to_string(),
             "memory_search".to_string(),
@@ -244,8 +234,6 @@ impl ToolRegistry {
             "file_read".to_string(),
             "file_write".to_string(),
             "file_search".to_string(),
-            "web_search".to_string(),
-            "web_fetch".to_string(),
         ];
         registry
     }

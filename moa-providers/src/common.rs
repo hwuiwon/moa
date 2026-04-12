@@ -13,13 +13,13 @@ use async_openai::types::responses::{
     FunctionCallOutputItemParam, FunctionTool, FunctionToolCall, InputContent, InputItem,
     InputParam, InputTextContent, Item, OutputItem, OutputMessageContent, Reasoning, Response,
     ResponseStream, ResponseStreamEvent, Role as OpenAiRole, Status as OpenAiStatus, Tool,
-    ToolChoiceOptions, ToolChoiceParam,
+    ToolChoiceOptions, ToolChoiceParam, WebSearchTool, WebSearchToolCallStatus,
 };
 use eventsource_stream::Event as SseEvent;
 use futures_util::StreamExt;
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, MessageRole,
-    StopReason, ToolContent, ToolInvocation,
+    ProviderNativeTool, StopReason, ToolContent, ToolInvocation,
 };
 use moa_core::{MoaError, Result};
 use reqwest::{Client, RequestBuilder, Response as HttpResponse, StatusCode};
@@ -123,6 +123,7 @@ pub(crate) fn build_responses_request(
     request: &CompletionRequest,
     default_model: &str,
     default_reasoning_effort: &str,
+    native_tools: &[ProviderNativeTool],
 ) -> Result<CreateResponse> {
     let mut instructions = Vec::new();
     let mut input_items = Vec::new();
@@ -174,17 +175,14 @@ pub(crate) fn build_responses_request(
         ));
     }
 
-    let tools = if request.tools.is_empty() {
-        None
-    } else {
-        Some(
-            request
-                .tools
-                .iter()
-                .map(openai_tool_from_schema)
-                .collect::<Result<Vec<_>>>()?,
-        )
-    };
+    let mut tools = request
+        .tools
+        .iter()
+        .map(openai_tool_from_schema)
+        .collect::<Result<Vec<_>>>()?;
+    tools.extend(openai_native_tools(native_tools)?);
+    let has_tools = !tools.is_empty();
+    let tools = if tools.is_empty() { None } else { Some(tools) };
     let reasoning = if supports_reasoning(default_model) {
         Some(Reasoning {
             effort: Some(parse_reasoning_effort(default_reasoning_effort)?),
@@ -199,12 +197,12 @@ pub(crate) fn build_responses_request(
         instructions: (!instructions.is_empty()).then(|| instructions.join("\n\n")),
         model: Some(default_model.to_string()),
         tools,
-        tool_choice: request
-            .tools
-            .is_empty()
-            .then_some(ToolChoiceParam::Mode(ToolChoiceOptions::None))
-            .or(Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto))),
-        parallel_tool_calls: (!request.tools.is_empty()).then_some(true),
+        tool_choice: Some(ToolChoiceParam::Mode(if has_tools {
+            ToolChoiceOptions::Auto
+        } else {
+            ToolChoiceOptions::None
+        })),
+        parallel_tool_calls: has_tools.then_some(true),
         max_output_tokens: request.max_output_tokens.map(|value| value as u32),
         metadata: metadata_as_strings(&request.metadata),
         reasoning,
@@ -213,6 +211,26 @@ pub(crate) fn build_responses_request(
         temperature: request.temperature,
         ..CreateResponse::default()
     })
+}
+
+fn openai_native_tools(native_tools: &[ProviderNativeTool]) -> Result<Vec<Tool>> {
+    let mut tools = Vec::with_capacity(native_tools.len());
+    for tool in native_tools {
+        match tool.tool_type.as_str() {
+            "web_search" | "web_search_preview" | "web_search_preview_2025_03_11" => {
+                tools.push(Tool::WebSearch(WebSearchTool::default()));
+            }
+            "web_search_2025_08_26" => {
+                tools.push(Tool::WebSearch20250826(WebSearchTool::default()));
+            }
+            other => {
+                return Err(MoaError::Unsupported(format!(
+                    "unsupported OpenAI native tool '{other}'"
+                )));
+            }
+        }
+    }
+    Ok(tools)
 }
 
 /// Executes one streamed Responses request with retry handling for rate limits.
@@ -305,14 +323,18 @@ async fn consume_responses_stream_once(
     let mut emitted_content = false;
 
     while let Some(event) = stream.next().await {
-        let event = event.map_err(|error| {
-            let retryable = is_rate_limit_error(&error);
-            ResponsesStreamError {
-                error: map_openai_error(error),
-                retryable,
-                emitted_content,
+        let event = match event {
+            Ok(event) => event,
+            Err(error) if is_ignorable_openai_stream_error(&error) => continue,
+            Err(error) => {
+                let retryable = is_rate_limit_error(&error);
+                return Err(ResponsesStreamError {
+                    error: map_openai_error(error),
+                    retryable,
+                    emitted_content,
+                });
             }
-        })?;
+        };
         match event {
             ResponseStreamEvent::ResponseOutputTextDelta(event) => {
                 if event.delta.is_empty() {
@@ -379,6 +401,42 @@ async fn consume_responses_stream_once(
                 span_recorder.observe_block(&call);
                 emitted_content = true;
                 if tx.send(Ok(call)).await.is_err() {
+                    break;
+                }
+            }
+            ResponseStreamEvent::ResponseWebSearchCallInProgress(_) => {
+                let block = CompletionContent::ProviderToolResult {
+                    tool_name: "web_search".to_string(),
+                    summary: "Searching the web...".to_string(),
+                };
+                content.push(block.clone());
+                span_recorder.observe_block(&block);
+                emitted_content = true;
+                if tx.send(Ok(block)).await.is_err() {
+                    break;
+                }
+            }
+            ResponseStreamEvent::ResponseWebSearchCallSearching(_) => {
+                let block = CompletionContent::ProviderToolResult {
+                    tool_name: "web_search".to_string(),
+                    summary: "Searching the web...".to_string(),
+                };
+                content.push(block.clone());
+                span_recorder.observe_block(&block);
+                emitted_content = true;
+                if tx.send(Ok(block)).await.is_err() {
+                    break;
+                }
+            }
+            ResponseStreamEvent::ResponseWebSearchCallCompleted(_) => {
+                let block = CompletionContent::ProviderToolResult {
+                    tool_name: "web_search".to_string(),
+                    summary: "Web search completed.".to_string(),
+                };
+                content.push(block.clone());
+                span_recorder.observe_block(&block);
+                emitted_content = true;
+                if tx.send(Ok(block)).await.is_err() {
                     break;
                 }
             }
@@ -524,6 +582,17 @@ fn is_rate_limit_message(message: &str) -> bool {
         || message.contains("too many requests")
 }
 
+fn is_ignorable_openai_stream_error(error: &OpenAIError) -> bool {
+    match error {
+        OpenAIError::JSONDeserialize(message, content) => {
+            message.to_string().contains("missing field `action`")
+                && content.contains("\"type\":\"response.output_item.")
+                && content.contains("\"type\":\"web_search_call\"")
+        }
+        _ => false,
+    }
+}
+
 fn responses_role(message: &ContextMessage) -> OpenAiRole {
     match message.role {
         MessageRole::System => OpenAiRole::System,
@@ -600,14 +669,14 @@ fn openai_tool_result_output(message: &ContextMessage) -> FunctionCallOutput {
     }
 }
 
-fn parse_tool_arguments(arguments: &str) -> Result<Value> {
+pub(crate) fn parse_tool_arguments(arguments: &str) -> Result<Value> {
     match serde_json::from_str(arguments) {
         Ok(value) => Ok(value),
         Err(_) => Ok(Value::String(arguments.to_string())),
     }
 }
 
-fn response_text_from_output(output: &[OutputItem]) -> String {
+pub(crate) fn response_text_from_output(output: &[OutputItem]) -> String {
     let mut text = String::new();
 
     for item in output {
@@ -624,7 +693,9 @@ fn response_text_from_output(output: &[OutputItem]) -> String {
     text
 }
 
-fn response_content_from_output(output: &[OutputItem]) -> Result<Vec<CompletionContent>> {
+pub(crate) fn response_content_from_output(
+    output: &[OutputItem],
+) -> Result<Vec<CompletionContent>> {
     let mut content = Vec::new();
 
     for item in output {
@@ -649,6 +720,12 @@ fn response_content_from_output(output: &[OutputItem]) -> Result<Vec<CompletionC
                     input: parse_tool_arguments(&call.arguments)?,
                 }));
             }
+            OutputItem::WebSearchCall(call) => {
+                content.push(CompletionContent::ProviderToolResult {
+                    tool_name: "web_search".to_string(),
+                    summary: format!("Web search {}.", web_search_status(&call.status)),
+                });
+            }
             _ => {}
         }
     }
@@ -656,7 +733,7 @@ fn response_content_from_output(output: &[OutputItem]) -> Result<Vec<CompletionC
     Ok(content)
 }
 
-fn response_stop_reason(response: &Response) -> StopReason {
+pub(crate) fn response_stop_reason(response: &Response) -> StopReason {
     match response.status {
         OpenAiStatus::Cancelled => StopReason::Cancelled,
         OpenAiStatus::Incomplete => response
@@ -679,6 +756,15 @@ fn response_stop_reason(response: &Response) -> StopReason {
                 StopReason::EndTurn
             }
         }
+    }
+}
+
+fn web_search_status(status: &WebSearchToolCallStatus) -> &'static str {
+    match status {
+        WebSearchToolCallStatus::InProgress => "started",
+        WebSearchToolCallStatus::Searching => "searching",
+        WebSearchToolCallStatus::Completed => "completed",
+        WebSearchToolCallStatus::Failed => "failed",
     }
 }
 

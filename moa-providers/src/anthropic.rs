@@ -7,8 +7,8 @@ use eventsource_stream::{Event as SseEvent, Eventsource};
 use futures_util::{Stream, StreamExt, pin_mut};
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
-    LLMProvider, MessageRole, MoaConfig, MoaError, ModelCapabilities, Result, StopReason,
-    TokenPricing, ToolCallFormat, ToolContent, ToolInvocation,
+    LLMProvider, MessageRole, MoaConfig, MoaError, ModelCapabilities, ProviderNativeTool, Result,
+    StopReason, TokenPricing, ToolCallFormat, ToolContent, ToolInvocation,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::Deserialize;
@@ -35,6 +35,7 @@ pub struct AnthropicProvider {
     default_capabilities: ModelCapabilities,
     messages_url: String,
     max_retries: usize,
+    web_search_enabled: bool,
 }
 
 impl AnthropicProvider {
@@ -51,6 +52,7 @@ impl AnthropicProvider {
             default_capabilities,
             messages_url: ANTHROPIC_MESSAGES_URL.to_string(),
             max_retries: DEFAULT_MAX_RETRIES,
+            web_search_enabled: true,
         })
     }
 
@@ -69,6 +71,7 @@ impl AnthropicProvider {
             .map_err(|_| MoaError::MissingEnvironmentVariable(api_key_env.clone()))?;
 
         Self::new(api_key, default_model)
+            .map(|provider| provider.with_web_search_enabled(config.general.web_search_enabled))
     }
 
     /// Creates a provider from the `ANTHROPIC_API_KEY` environment variable.
@@ -88,6 +91,12 @@ impl AnthropicProvider {
     /// Overrides the retry budget for rate-limited requests.
     pub fn with_max_retries(mut self, max_retries: usize) -> Self {
         self.max_retries = max_retries;
+        self
+    }
+
+    /// Overrides whether provider-native web search is exposed to supported models.
+    pub fn with_web_search_enabled(mut self, enabled: bool) -> Self {
+        self.web_search_enabled = enabled;
         self
     }
 }
@@ -124,8 +133,12 @@ impl LLMProvider for AnthropicProvider {
             model_capabilities.pricing.clone(),
         );
         let span = span_recorder.span().clone();
-        let request_body = match build_request_body(&request, &resolved_model, &model_capabilities)
-        {
+        let request_body = match build_request_body(
+            &request,
+            &resolved_model,
+            &model_capabilities,
+            self.web_search_enabled,
+        ) {
             Ok(body) => body,
             Err(error) => {
                 span_recorder.fail(&error);
@@ -217,6 +230,7 @@ fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
                 output_per_mtok: 25.0,
                 cached_input_per_mtok: Some(0.5),
             },
+            native_tools: native_web_search_tools(),
         }),
         MODEL_SONNET_4_6 => Ok(ModelCapabilities {
             model_id: MODEL_SONNET_4_6.to_string(),
@@ -232,6 +246,7 @@ fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
                 output_per_mtok: 15.0,
                 cached_input_per_mtok: Some(0.3),
             },
+            native_tools: native_web_search_tools(),
         }),
         unsupported => Err(MoaError::Unsupported(format!(
             "unsupported Anthropic model '{unsupported}'"
@@ -243,6 +258,7 @@ fn build_request_body(
     request: &CompletionRequest,
     model: &str,
     capabilities: &ModelCapabilities,
+    web_search_enabled: bool,
 ) -> Result<Value> {
     let mut system_messages = Vec::new();
     let mut messages = Vec::new();
@@ -284,20 +300,83 @@ fn build_request_body(
         body.insert("temperature".to_string(), json!(temperature));
     }
 
-    if !request.tools.is_empty() {
-        body.insert(
-            "tools".to_string(),
-            Value::Array(
-                request
-                    .tools
-                    .iter()
-                    .map(anthropic_tool_from_schema)
-                    .collect::<Vec<_>>(),
-            ),
+    let mut tools = request
+        .tools
+        .iter()
+        .map(anthropic_tool_from_schema)
+        .collect::<Vec<_>>();
+    if web_search_enabled {
+        tools.extend(
+            capabilities
+                .native_tools
+                .iter()
+                .map(provider_native_tool_json),
         );
+    }
+    if !tools.is_empty() {
+        body.insert("tools".to_string(), Value::Array(tools));
     }
 
     Ok(Value::Object(body))
+}
+
+fn native_web_search_tools() -> Vec<ProviderNativeTool> {
+    vec![ProviderNativeTool {
+        tool_type: "web_search_20250305".to_string(),
+        name: "web_search".to_string(),
+        config: None,
+    }]
+}
+
+fn provider_native_tool_json(tool: &ProviderNativeTool) -> Value {
+    let mut value = Map::new();
+    value.insert("type".to_string(), Value::String(tool.tool_type.clone()));
+    if !tool.name.is_empty() {
+        value.insert("name".to_string(), Value::String(tool.name.clone()));
+    }
+    if let Some(config) = tool.config.as_ref()
+        && let Some(object) = config.as_object()
+    {
+        for (key, entry) in object {
+            value.insert(key.clone(), entry.clone());
+        }
+    }
+    Value::Object(value)
+}
+
+fn summarize_anthropic_server_tool_use(name: &str, partial_json: &str) -> String {
+    if name == "web_search"
+        && let Ok(value) = serde_json::from_str::<Value>(partial_json)
+        && let Some(query) = value.get("query").and_then(Value::as_str)
+    {
+        return format!("Searching the web for: {query}");
+    }
+
+    format!("Running provider tool: {name}")
+}
+
+fn summarize_anthropic_search_results(content: &[WebSearchResultContent]) -> String {
+    if content.is_empty() {
+        return "Web search completed.".to_string();
+    }
+
+    let first = &content[0];
+    if !first.title.is_empty() {
+        return format!(
+            "Web search returned {} result(s). Top result: {}",
+            content.len(),
+            first.title
+        );
+    }
+    if !first.url.is_empty() {
+        return format!(
+            "Web search returned {} result(s). Top result: {}",
+            content.len(),
+            first.url
+        );
+    }
+
+    format!("Web search returned {} result(s).", content.len())
 }
 
 fn anthropic_message(message: &ContextMessage) -> Value {
@@ -526,6 +605,26 @@ impl AnthropicStreamState {
                 };
                 Ok(Vec::new())
             }
+            ContentBlockStart::ServerToolUse { _id: _, name } => {
+                self.blocks[payload.index] = BlockAccumulator::ServerTool {
+                    name,
+                    partial_json: String::new(),
+                };
+                Ok(Vec::new())
+            }
+            ContentBlockStart::WebSearchToolResult {
+                _tool_use_id: _,
+                content,
+            } => {
+                self.blocks[payload.index] = BlockAccumulator::Ignored;
+                self.ensure_completed_capacity(payload.index);
+                let block = CompletionContent::ProviderToolResult {
+                    tool_name: "web_search".to_string(),
+                    summary: summarize_anthropic_search_results(&content),
+                };
+                self.completed_content[payload.index] = Some(block.clone());
+                Ok(vec![block])
+            }
             ContentBlockStart::Unknown => {
                 self.blocks[payload.index] = BlockAccumulator::Ignored;
                 Ok(Vec::new())
@@ -545,6 +644,15 @@ impl AnthropicStreamState {
             }
             (
                 BlockAccumulator::Tool { partial_json, .. },
+                ContentBlockDelta::InputJsonDelta {
+                    partial_json: delta,
+                },
+            ) => {
+                partial_json.push_str(&delta);
+                Ok(Vec::new())
+            }
+            (
+                BlockAccumulator::ServerTool { partial_json, .. },
                 ContentBlockDelta::InputJsonDelta {
                     partial_json: delta,
                 },
@@ -596,6 +704,14 @@ impl AnthropicStreamState {
                 self.completed_content[payload.index] = Some(content.clone());
                 Ok(vec![content])
             }
+            BlockAccumulator::ServerTool { name, partial_json } => {
+                let block = CompletionContent::ProviderToolResult {
+                    tool_name: name.clone(),
+                    summary: summarize_anthropic_server_tool_use(&name, &partial_json),
+                };
+                self.completed_content[payload.index] = Some(block.clone());
+                Ok(vec![block])
+            }
             BlockAccumulator::Ignored => Ok(Vec::new()),
         }
     }
@@ -631,6 +747,15 @@ impl AnthropicStreamState {
                             }));
                     }
                 }
+                BlockAccumulator::ServerTool { name, partial_json } => {
+                    if self.completed_content[index].is_none() {
+                        self.completed_content[index] =
+                            Some(CompletionContent::ProviderToolResult {
+                                tool_name: name.clone(),
+                                summary: summarize_anthropic_server_tool_use(name, partial_json),
+                            });
+                    }
+                }
                 BlockAccumulator::Ignored => {}
             }
         }
@@ -641,6 +766,7 @@ impl AnthropicStreamState {
             .filter_map(|block| match block {
                 CompletionContent::Text(text) => Some(text.as_str()),
                 CompletionContent::ToolCall(_) => None,
+                CompletionContent::ProviderToolResult { .. } => None,
             })
             .collect::<String>();
 
@@ -674,6 +800,10 @@ enum BlockAccumulator {
     Text(String),
     Tool {
         id: String,
+        name: String,
+        partial_json: String,
+    },
+    ServerTool {
         name: String,
         partial_json: String,
     },
@@ -720,6 +850,17 @@ enum ContentBlockStart {
         #[serde(default)]
         input: Value,
     },
+    ServerToolUse {
+        #[serde(rename = "id")]
+        _id: String,
+        name: String,
+    },
+    WebSearchToolResult {
+        #[serde(rename = "tool_use_id")]
+        _tool_use_id: String,
+        #[serde(default)]
+        content: Vec<WebSearchResultContent>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -746,6 +887,14 @@ enum ContentBlockDelta {
 #[derive(Debug, Deserialize)]
 struct ContentBlockStopEvent {
     index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebSearchResultContent {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -846,6 +995,7 @@ mod tests {
             &request,
             &canonical_model_id(MODEL_SONNET_4_6).unwrap(),
             &capabilities_for_model(MODEL_SONNET_4_6).unwrap(),
+            true,
         )
         .unwrap();
 
@@ -857,6 +1007,37 @@ mod tests {
         assert_eq!(body["tools"][0]["name"], "bash");
         assert_eq!(body["tools"][0]["input_schema"]["required"], json!(["cmd"]));
         assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn completion_request_includes_native_web_search_when_enabled() {
+        let body = build_request_body(
+            &CompletionRequest::simple("What happened in the news today?"),
+            &canonical_model_id(MODEL_SONNET_4_6).unwrap(),
+            &capabilities_for_model(MODEL_SONNET_4_6).unwrap(),
+            true,
+        )
+        .unwrap();
+
+        let tools = body["tools"].as_array().unwrap();
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["type"] == "web_search_20250305" && tool["name"] == "web_search")
+        );
+    }
+
+    #[test]
+    fn completion_request_omits_native_web_search_when_disabled() {
+        let body = build_request_body(
+            &CompletionRequest::simple("What happened in the news today?"),
+            &canonical_model_id(MODEL_SONNET_4_6).unwrap(),
+            &capabilities_for_model(MODEL_SONNET_4_6).unwrap(),
+            false,
+        )
+        .unwrap();
+
+        assert!(body.get("tools").is_none());
     }
 
     #[test]

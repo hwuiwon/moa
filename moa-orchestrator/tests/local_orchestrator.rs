@@ -52,6 +52,7 @@ impl LLMProvider for MockProvider {
                 output_per_mtok: 0.0,
                 cached_input_per_mtok: None,
             },
+            native_tools: Vec::new(),
         }
     }
 
@@ -107,6 +108,7 @@ impl LLMProvider for SlowStreamingProvider {
                 output_per_mtok: 0.0,
                 cached_input_per_mtok: None,
             },
+            native_tools: Vec::new(),
         }
     }
 
@@ -215,6 +217,7 @@ impl LLMProvider for RequestGuardProvider {
                 output_per_mtok: 0.0,
                 cached_input_per_mtok: None,
             },
+            native_tools: Vec::new(),
         }
     }
 
@@ -294,6 +297,7 @@ impl LLMProvider for ToolCancelProvider {
                 output_per_mtok: 0.0,
                 cached_input_per_mtok: None,
             },
+            native_tools: Vec::new(),
         }
     }
 
@@ -361,6 +365,7 @@ impl LLMProvider for ToolThenEchoProvider {
                 output_per_mtok: 0.0,
                 cached_input_per_mtok: None,
             },
+            native_tools: Vec::new(),
         }
     }
 
@@ -428,6 +433,7 @@ impl LLMProvider for FileWriteApprovalProvider {
                 output_per_mtok: 0.0,
                 cached_input_per_mtok: None,
             },
+            native_tools: Vec::new(),
         }
     }
 
