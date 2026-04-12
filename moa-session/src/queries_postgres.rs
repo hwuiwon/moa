@@ -2,9 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ApprovalRule, BrainId, Event, EventRecord, EventType, MoaError, PendingSignal, PendingSignalId,
-    PendingSignalType, Platform, PolicyAction, PolicyScope, Result, SessionMeta, SessionStatus,
-    SessionSummary, WorkspaceId,
+    ApprovalRule, EventType, MoaError, PendingSignal, PendingSignalId, PendingSignalType, Platform,
+    PolicyAction, PolicyScope, Result, SessionMeta, SessionStatus, SessionSummary, WorkspaceId,
 };
 use sqlx::{Row, postgres::PgRow};
 use uuid::Uuid;
@@ -276,43 +275,6 @@ pub(crate) fn session_summary_from_row(row: &PgRow) -> Result<SessionSummary> {
         updated_at: row
             .try_get::<DateTime<Utc>, _>("updated_at")
             .map_err(map_sqlx_error)?,
-    })
-}
-
-/// Maps an `events` row into an `EventRecord`.
-pub(crate) fn event_record_from_row(row: &PgRow) -> Result<EventRecord> {
-    let event_type_text = row
-        .try_get::<String, _>("event_type")
-        .map_err(map_sqlx_error)?;
-    let payload = row
-        .try_get::<serde_json::Value, _>("payload")
-        .map_err(map_sqlx_error)?;
-
-    Ok(EventRecord {
-        id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
-        session_id: moa_core::SessionId(
-            row.try_get::<Uuid, _>("session_id")
-                .map_err(map_sqlx_error)?,
-        ),
-        sequence_num: row
-            .try_get::<i64, _>("sequence_num")
-            .map_err(map_sqlx_error)? as u64,
-        event_type: event_type_from_db(&event_type_text)?,
-        event: serde_json::from_value::<Event>(payload)?,
-        timestamp: row
-            .try_get::<DateTime<Utc>, _>("timestamp")
-            .map_err(map_sqlx_error)?,
-        brain_id: row
-            .try_get::<Option<Uuid>, _>("brain_id")
-            .map_err(map_sqlx_error)?
-            .map(BrainId),
-        hand_id: row
-            .try_get::<Option<String>, _>("hand_id")
-            .map_err(map_sqlx_error)?,
-        token_count: row
-            .try_get::<Option<i32>, _>("token_count")
-            .map_err(map_sqlx_error)?
-            .map(|value| value as usize),
     })
 }
 

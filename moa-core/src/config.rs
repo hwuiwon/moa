@@ -28,6 +28,8 @@ pub struct MoaConfig {
     pub tui: TuiConfig,
     /// Permission policy settings.
     pub permissions: PermissionsConfig,
+    /// Session storage settings.
+    pub session: SessionConfig,
     /// Session-history compaction settings.
     pub compaction: CompactionConfig,
     /// Local daemon settings.
@@ -134,6 +136,11 @@ impl MoaConfig {
             .set_default("daemon.pid_file", Self::default().daemon.pid_file)?
             .set_default("daemon.log_file", Self::default().daemon.log_file)?
             .set_default("daemon.auto_connect", Self::default().daemon.auto_connect)?
+            .set_default(
+                "session.blob_threshold_bytes",
+                Self::default().session.blob_threshold_bytes as i64,
+            )?
+            .set_default("session.blob_dir", Self::default().session.blob_dir)?
             .set_default(
                 "observability.enabled",
                 Self::default().observability.enabled,
@@ -622,6 +629,25 @@ impl Default for LocalConfig {
     }
 }
 
+/// Session storage configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionConfig {
+    /// Offload threshold in bytes for large event payload strings.
+    pub blob_threshold_bytes: usize,
+    /// Root directory for local blob storage.
+    pub blob_dir: String,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            blob_threshold_bytes: 65_536,
+            blob_dir: "~/.moa/blobs".to_string(),
+        }
+    }
+}
+
 /// Local daemon configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1033,6 +1059,13 @@ mod tests {
         assert_eq!(config.compaction.event_threshold, 100);
         assert_eq!(config.compaction.recent_turns_verbatim, 5);
         assert!(config.compaction.preserve_errors);
+    }
+
+    #[test]
+    fn session_blob_config_defaults_are_applied() {
+        let config = MoaConfig::default();
+        assert_eq!(config.session.blob_threshold_bytes, 65_536);
+        assert_eq!(config.session.blob_dir, "~/.moa/blobs");
     }
 
     #[test]

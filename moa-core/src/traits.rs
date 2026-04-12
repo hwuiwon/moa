@@ -89,6 +89,22 @@ pub trait SessionStore: Send + Sync {
     async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>>;
 }
 
+/// Durable blob store used by the claim-check session event pattern.
+#[async_trait]
+pub trait BlobStore: Send + Sync {
+    /// Stores a blob and returns its content-addressed identifier.
+    async fn store(&self, session_id: &SessionId, content: &[u8]) -> Result<String>;
+
+    /// Fetches a previously stored blob by identifier.
+    async fn get(&self, session_id: &SessionId, blob_id: &str) -> Result<Vec<u8>>;
+
+    /// Deletes every blob associated with the provided session.
+    async fn delete_session(&self, session_id: &SessionId) -> Result<()>;
+
+    /// Returns whether a blob already exists.
+    async fn exists(&self, session_id: &SessionId, blob_id: &str) -> Result<bool>;
+}
+
 /// Optional database-level state checkpointing.
 #[async_trait]
 pub trait BranchManager: Send + Sync {

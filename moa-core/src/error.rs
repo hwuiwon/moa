@@ -36,6 +36,10 @@ pub enum MoaError {
     #[error("storage error: {0}")]
     StorageError(String),
 
+    /// A referenced blob payload could not be found.
+    #[error("blob not found: {0}")]
+    BlobNotFound(String),
+
     /// Tool execution failed.
     #[error("tool error: {0}")]
     ToolError(String),

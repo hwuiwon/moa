@@ -26,6 +26,10 @@ docker_enabled = true
 sandbox_dir = "~/.moa/sandbox"
 memory_dir = "~/.moa/memory"
 
+[session]
+blob_threshold_bytes = 65536
+blob_dir = "~/.moa/blobs"
+
 [observability]
 enabled = false
 service_name = "moa"

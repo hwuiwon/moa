@@ -8,16 +8,18 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use libsql::{Builder, Connection, Database, TransactionBehavior, Value, params};
 use moa_core::{
-    ApprovalRule, Event, EventFilter, EventRange, EventRecord, MoaConfig, MoaError, PendingSignal,
-    PendingSignalId, PendingSignalType, PolicyAction, PolicyScope, Result, SessionFilter,
-    SessionMeta, SessionStatus, SessionStore, SessionSummary, WakeContext, WorkspaceId,
+    ApprovalRule, BlobStore, Event, EventFilter, EventRange, EventRecord, MoaConfig, MoaError,
+    PendingSignal, PendingSignalId, PendingSignalType, PolicyAction, PolicyScope, Result,
+    SessionFilter, SessionMeta, SessionStatus, SessionStore, SessionSummary, WakeContext,
+    WorkspaceId,
 };
 use moa_security::ApprovalRuleStore;
 use uuid::Uuid;
 
+use crate::blob::{FileBlobStore, decode_event_from_storage, encode_event_for_storage};
 use crate::queries_turso::{
-    EVENT_COLUMNS, SESSION_COLUMNS, SESSION_SUMMARY_COLUMNS, event_record_from_row,
-    event_type_to_db, expand_local_path, platform_to_db, session_meta_from_row,
+    EVENT_COLUMNS, SESSION_COLUMNS, SESSION_SUMMARY_COLUMNS, event_type_from_db, event_type_to_db,
+    expand_local_path, parse_timestamp, platform_to_db, session_meta_from_row,
     session_status_to_db, session_summary_from_row,
 };
 use crate::schema_turso as schema;
@@ -28,6 +30,8 @@ pub struct TursoSessionStore {
     database: Arc<Database>,
     connection: Connection,
     cloud_sync_enabled: bool,
+    blob_store: Arc<dyn BlobStore>,
+    blob_threshold_bytes: usize,
 }
 
 impl TursoSessionStore {
@@ -42,6 +46,7 @@ impl TursoSessionStore {
 
     /// Creates a session store from config, enabling embedded Turso sync when configured.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
+        let blob_store: Arc<dyn BlobStore> = Arc::new(FileBlobStore::from_config(config)?);
         if config.cloud.enabled
             && let Some(sync_url) = config.cloud.turso_url.as_deref()
         {
@@ -54,15 +59,44 @@ impl TursoSessionStore {
 
             let auth_token = resolve_turso_auth_token(config)?;
             let sync_interval = Duration::from_secs(config.cloud.turso_sync_interval_secs.max(1));
-            return Self::new_remote_replica(&local_path, sync_url, &auth_token, sync_interval)
-                .await;
+            return Self::new_remote_replica_with_blob_store(
+                &local_path,
+                sync_url,
+                &auth_token,
+                sync_interval,
+                blob_store,
+                config.session.blob_threshold_bytes,
+            )
+            .await;
         }
 
-        Self::new(&config.database.url).await
+        if is_remote_url(&config.database.url) {
+            return Self::new_remote_with_blob_store(
+                &config.database.url,
+                blob_store,
+                config.session.blob_threshold_bytes,
+            )
+            .await;
+        }
+
+        let expanded = expand_local_path(Path::new(&config.database.url))?;
+        Self::new_local_with_blob_store(&expanded, blob_store, config.session.blob_threshold_bytes)
+            .await
     }
 
     /// Creates a session store backed by a local SQLite database file.
     pub async fn new_local(path: &Path) -> Result<Self> {
+        let blob_store: Arc<dyn BlobStore> = Arc::new(FileBlobStore::new(
+            FileBlobStore::default_dir_for_database_path(path)?,
+        ));
+        Self::new_local_with_blob_store(path, blob_store, 65_536).await
+    }
+
+    async fn new_local_with_blob_store(
+        path: &Path,
+        blob_store: Arc<dyn BlobStore>,
+        blob_threshold_bytes: usize,
+    ) -> Result<Self> {
         let expanded = expand_local_path(path)?;
         if expanded != Path::new(":memory:")
             && let Some(parent) = expanded.parent()
@@ -82,6 +116,8 @@ impl TursoSessionStore {
             database: Arc::new(database),
             connection,
             cloud_sync_enabled: false,
+            blob_store,
+            blob_threshold_bytes,
         })
     }
 
@@ -103,6 +139,16 @@ impl TursoSessionStore {
     }
 
     async fn new_remote(url: &str) -> Result<Self> {
+        let blob_store: Arc<dyn BlobStore> =
+            Arc::new(FileBlobStore::new(FileBlobStore::default_dir()?));
+        Self::new_remote_with_blob_store(url, blob_store, 65_536).await
+    }
+
+    async fn new_remote_with_blob_store(
+        url: &str,
+        blob_store: Arc<dyn BlobStore>,
+        blob_threshold_bytes: usize,
+    ) -> Result<Self> {
         let auth_token = std::env::var("TURSO_AUTH_TOKEN").map_err(|_| {
             MoaError::ConfigError(
                 "TURSO_AUTH_TOKEN is required when connecting to a remote libsql URL".to_string(),
@@ -120,6 +166,8 @@ impl TursoSessionStore {
             database: Arc::new(database),
             connection,
             cloud_sync_enabled: false,
+            blob_store,
+            blob_threshold_bytes,
         })
     }
 
@@ -129,6 +177,28 @@ impl TursoSessionStore {
         sync_url: &str,
         auth_token: &str,
         sync_interval: Duration,
+    ) -> Result<Self> {
+        let blob_store: Arc<dyn BlobStore> = Arc::new(FileBlobStore::new(
+            FileBlobStore::default_dir_for_database_path(local_path)?,
+        ));
+        Self::new_remote_replica_with_blob_store(
+            local_path,
+            sync_url,
+            auth_token,
+            sync_interval,
+            blob_store,
+            65_536,
+        )
+        .await
+    }
+
+    async fn new_remote_replica_with_blob_store(
+        local_path: &Path,
+        sync_url: &str,
+        auth_token: &str,
+        sync_interval: Duration,
+        blob_store: Arc<dyn BlobStore>,
+        blob_threshold_bytes: usize,
     ) -> Result<Self> {
         let expanded = expand_local_path(local_path)?;
         if let Some(parent) = expanded.parent()
@@ -151,6 +221,8 @@ impl TursoSessionStore {
             database: Arc::new(database),
             connection,
             cloud_sync_enabled: true,
+            blob_store,
+            blob_threshold_bytes,
         })
     }
 
@@ -373,7 +445,14 @@ impl SessionStore for TursoSessionStore {
             .map_err(map_db_error)?;
         let event_id = Uuid::new_v4();
         let sequence_num = Self::next_sequence(&transaction, &session_id).await?;
-        let payload = serde_json::to_string(&event)?;
+        let payload_value = encode_event_for_storage(
+            self.blob_store.as_ref(),
+            &session_id,
+            &event,
+            self.blob_threshold_bytes,
+        )
+        .await?;
+        let payload = serde_json::to_string(&payload_value)?;
         let now = Utc::now().to_rfc3339();
         let checkpoint_seq = if matches!(event, Event::Checkpoint { .. }) {
             Some(sequence_num as i64)
@@ -480,7 +559,7 @@ impl SessionStore for TursoSessionStore {
             .map_err(map_db_error)?;
         let mut events = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_db_error)? {
-            events.push(event_record_from_row(&row)?);
+            events.push(self.event_record_from_row(&session_id, &row).await?);
         }
 
         Ok(events)
@@ -677,7 +756,11 @@ impl SessionStore for TursoSessionStore {
             .map_err(map_db_error)?;
         let mut events = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_db_error)? {
-            events.push(event_record_from_row(&row)?);
+            let row_session_id = row
+                .get::<String>(1)
+                .map_err(|error| MoaError::StorageError(error.to_string()))?;
+            let row_session_id = moa_core::SessionId(Uuid::parse_str(&row_session_id)?);
+            events.push(self.event_record_from_row(&row_session_id, &row).await?);
         }
 
         Ok(events)
@@ -722,6 +805,56 @@ impl SessionStore for TursoSessionStore {
         }
 
         Ok(sessions)
+    }
+}
+
+impl TursoSessionStore {
+    async fn event_record_from_row(
+        &self,
+        session_id: &moa_core::SessionId,
+        row: &libsql::Row,
+    ) -> Result<EventRecord> {
+        let id_text: String = row
+            .get(0)
+            .map_err(|error| MoaError::StorageError(error.to_string()))?;
+        let sequence_num: u64 = row
+            .get(2)
+            .map_err(|error| MoaError::StorageError(error.to_string()))?;
+        let event_type_text: String = row
+            .get(3)
+            .map_err(|error| MoaError::StorageError(error.to_string()))?;
+        let payload: String = row
+            .get(4)
+            .map_err(|error| MoaError::StorageError(error.to_string()))?;
+        let payload = serde_json::from_str(&payload)?;
+        let event =
+            decode_event_from_storage(self.blob_store.as_ref(), session_id, payload).await?;
+        let timestamp: String = row
+            .get(5)
+            .map_err(|error| MoaError::StorageError(error.to_string()))?;
+
+        Ok(EventRecord {
+            id: Uuid::parse_str(&id_text)?,
+            session_id: session_id.clone(),
+            sequence_num,
+            event_type: event_type_from_db(&event_type_text)?,
+            event,
+            timestamp: parse_timestamp(&timestamp)?,
+            brain_id: row
+                .get::<Option<String>>(6)
+                .map_err(|error| MoaError::StorageError(error.to_string()))?
+                .as_deref()
+                .map(Uuid::parse_str)
+                .transpose()?
+                .map(moa_core::BrainId),
+            hand_id: row
+                .get::<Option<String>>(7)
+                .map_err(|error| MoaError::StorageError(error.to_string()))?,
+            token_count: row
+                .get::<Option<i64>>(8)
+                .map_err(|error| MoaError::StorageError(error.to_string()))?
+                .map(|value| value as usize),
+        })
     }
 }
 

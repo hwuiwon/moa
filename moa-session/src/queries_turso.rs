@@ -5,8 +5,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use libsql::{Row, Value};
 use moa_core::{
-    BrainId, Event, EventRecord, EventType, MoaError, Platform, Result, SessionMeta, SessionStatus,
-    SessionSummary, WorkspaceId,
+    EventType, MoaError, Platform, Result, SessionMeta, SessionStatus, SessionSummary, WorkspaceId,
 };
 use uuid::Uuid;
 
@@ -249,44 +248,6 @@ pub(crate) fn session_summary_from_row(row: &Row) -> Result<SessionSummary> {
         platform: platform_from_db(&platform_text)?,
         model,
         updated_at: parse_timestamp(&updated_at)?,
-    })
-}
-
-/// Maps an `events` row into an `EventRecord`.
-pub(crate) fn event_record_from_row(row: &Row) -> Result<EventRecord> {
-    let id_text: String = row
-        .get(0)
-        .map_err(|error| MoaError::StorageError(error.to_string()))?;
-    let session_id_text: String = row
-        .get(1)
-        .map_err(|error| MoaError::StorageError(error.to_string()))?;
-    let sequence_num: u64 = row
-        .get(2)
-        .map_err(|error| MoaError::StorageError(error.to_string()))?;
-    let event_type_text: String = row
-        .get(3)
-        .map_err(|error| MoaError::StorageError(error.to_string()))?;
-    let payload: String = row
-        .get(4)
-        .map_err(|error| MoaError::StorageError(error.to_string()))?;
-    let timestamp: String = row
-        .get(5)
-        .map_err(|error| MoaError::StorageError(error.to_string()))?;
-
-    Ok(EventRecord {
-        id: Uuid::parse_str(&id_text)?,
-        session_id: moa_core::SessionId(Uuid::parse_str(&session_id_text)?),
-        sequence_num,
-        event_type: event_type_from_db(&event_type_text)?,
-        event: serde_json::from_str::<Event>(&payload)?,
-        timestamp: parse_timestamp(&timestamp)?,
-        brain_id: optional_text(row, 6)?
-            .as_deref()
-            .map(Uuid::parse_str)
-            .transpose()?
-            .map(BrainId),
-        hand_id: optional_text(row, 7)?,
-        token_count: optional_i64(row, 8)?.map(|value| value as usize),
     })
 }
 
