@@ -584,9 +584,8 @@ fn is_rate_limit_message(message: &str) -> bool {
 
 fn is_ignorable_openai_stream_error(error: &OpenAIError) -> bool {
     match error {
-        OpenAIError::JSONDeserialize(message, content) => {
-            message.to_string().contains("missing field `action`")
-                && content.contains("\"type\":\"response.output_item.")
+        OpenAIError::JSONDeserialize(_, content) => {
+            content.contains("\"type\":\"response.output_item.")
                 && content.contains("\"type\":\"web_search_call\"")
         }
         _ => false,
@@ -819,7 +818,11 @@ mod tests {
 
     use reqwest::StatusCode;
 
-    use super::{build_http_client, metadata_as_strings, send_with_retry};
+    use async_openai::error::OpenAIError;
+
+    use super::{
+        build_http_client, is_ignorable_openai_stream_error, metadata_as_strings, send_with_retry,
+    };
 
     #[tokio::test]
     async fn retries_on_rate_limit() {
@@ -868,5 +871,16 @@ mod tests {
 
         assert_eq!(filtered.get("visible").map(String::as_str), Some("value"));
         assert!(!filtered.contains_key("_moa.session_id"));
+    }
+
+    #[test]
+    fn ignores_web_search_output_done_incomplete_status() {
+        let decode_error = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        let error = OpenAIError::JSONDeserialize(
+            decode_error,
+            "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"status\":\"incomplete\"}}".to_string(),
+        );
+
+        assert!(is_ignorable_openai_stream_error(&error));
     }
 }

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use moa_core::{CompletionContent, CompletionRequest, LLMProvider};
 use moa_providers::{AnthropicProvider, OpenAIProvider, OpenRouterProvider};
 use serde_json::json;
+use tokio::time::timeout;
 
 enum LiveProvider {
     OpenAi(Box<OpenAIProvider>),
@@ -149,6 +151,49 @@ async fn live_providers_emit_tool_calls_across_available_keys() {
                 .get("token")
                 .and_then(|value| value.as_str()),
             Some(token.as_str())
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "manual live provider matrix test"]
+async fn live_providers_can_use_native_web_search_across_available_keys() {
+    let providers = available_live_providers();
+    if providers.is_empty() {
+        return;
+    }
+
+    for provider in providers {
+        let response = timeout(
+            Duration::from_secs(90),
+            provider.complete(CompletionRequest::simple(
+                "Use web search to find one current news headline from today and cite the source in one short sentence.",
+            )),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{} web-search request timed out", provider.label()))
+        .unwrap_or_else(|error| panic!("{} web-search request failed: {error}", provider.label()))
+        .collect()
+        .await
+        .unwrap_or_else(|error| panic!("{} web-search stream failed: {error}", provider.label()));
+
+        let has_provider_tool_result = response.content.iter().any(|content| {
+            matches!(content, CompletionContent::ProviderToolResult { tool_name, .. } if tool_name == "web_search")
+        });
+        let has_citation = response.text.contains("http://")
+            || response.text.contains("https://")
+            || response.text.contains('[');
+
+        assert!(
+            has_provider_tool_result || has_citation,
+            "{} did not show evidence of grounded web search: {:?}",
+            provider.label(),
+            response
+        );
+        assert!(
+            !response.text.trim().is_empty(),
+            "{} returned an empty response after web search",
+            provider.label()
         );
     }
 }
