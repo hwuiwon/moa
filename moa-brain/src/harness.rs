@@ -686,6 +686,7 @@ async fn handle_tool_call(
             session_id,
             Event::ToolError {
                 tool_id,
+                provider_tool_use_id: call.id.clone(),
                 tool_name: call.name.clone(),
                 error: format!(
                     "tool {} blocked because it leaked a protected canary token",
@@ -774,6 +775,7 @@ async fn handle_tool_call(
                 session_id,
                 Event::ToolError {
                     tool_id,
+                    provider_tool_use_id: call.id.clone(),
                     tool_name: call.name.clone(),
                     error: message.clone(),
                     retryable: false,
@@ -978,6 +980,7 @@ async fn wait_for_signal_approval(
                                 session_id,
                                 Event::ToolError {
                                     tool_id,
+                                    provider_tool_use_id: call.id.clone(),
                                     tool_name: call.name.clone(),
                                     error: reason.clone().unwrap_or_else(|| {
                                         "tool execution denied by user".to_string()
@@ -1052,7 +1055,7 @@ async fn process_resolved_approval(
     match pending.decision.clone() {
         StoredApprovalDecision::AllowOnce => {
             let invocation = ToolInvocation {
-                id: Some(pending.tool_id.to_string()),
+                id: resumed_tool_invocation_id(&pending),
                 name: pending.tool_name.clone(),
                 input: pending.input.clone(),
             };
@@ -1092,7 +1095,7 @@ async fn process_resolved_approval(
                 )
                 .await?;
             let invocation = ToolInvocation {
-                id: Some(pending.tool_id.to_string()),
+                id: resumed_tool_invocation_id(&pending),
                 name: pending.tool_name.clone(),
                 input: pending.input.clone(),
             };
@@ -1125,6 +1128,7 @@ async fn process_resolved_approval(
                 session_id,
                 Event::ToolError {
                     tool_id: pending.tool_id,
+                    provider_tool_use_id: pending.provider_tool_use_id.clone(),
                     tool_name: pending.tool_name.clone(),
                     error: reason
                         .clone()
@@ -1163,7 +1167,7 @@ async fn wait_for_approval(
     soft_cancel_requested: &mut bool,
 ) -> Result<ToolCallOutcome> {
     let invocation = ToolInvocation {
-        id: Some(pending.tool_id.to_string()),
+        id: resumed_tool_invocation_id(&pending),
         name: pending.tool_name.clone(),
         input: pending.input.clone(),
     };
@@ -1273,6 +1277,7 @@ async fn wait_for_approval(
                                 session_id,
                                 Event::ToolError {
                                     tool_id: pending.tool_id,
+                                    provider_tool_use_id: pending.provider_tool_use_id.clone(),
                                     tool_name: pending.tool_name.clone(),
                                     error: reason.clone().unwrap_or_else(|| {
                                         "tool execution denied by user".to_string()
@@ -1441,6 +1446,7 @@ async fn execute_tool(
                 session_id,
                 Event::ToolError {
                     tool_id,
+                    provider_tool_use_id: call.id.clone(),
                     tool_name: call.name.clone(),
                     error: "cancelled".to_string(),
                     retryable: false,
@@ -1463,6 +1469,7 @@ async fn execute_tool(
                 session_id,
                 Event::ToolError {
                     tool_id,
+                    provider_tool_use_id: call.id.clone(),
                     tool_name: call.name.clone(),
                     error: error.to_string(),
                     retryable: false,
@@ -1495,7 +1502,7 @@ async fn execute_pending_tool(
     hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<()> {
     let invocation = ToolInvocation {
-        id: Some(pending.tool_id.to_string()),
+        id: resumed_tool_invocation_id(&pending),
         name: pending.tool_name.clone(),
         input: pending.input.clone(),
     };
@@ -1651,6 +1658,13 @@ fn parse_tool_id(call: &ToolInvocation) -> Uuid {
         .as_deref()
         .and_then(|value| Uuid::parse_str(value).ok())
         .unwrap_or_else(Uuid::new_v4)
+}
+
+fn resumed_tool_invocation_id(pending: &PendingToolApproval) -> Option<String> {
+    pending
+        .provider_tool_use_id
+        .clone()
+        .or_else(|| Some(pending.tool_id.to_string()))
 }
 
 struct SecuredToolOutput {

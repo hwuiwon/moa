@@ -29,6 +29,8 @@ pub enum StreamEvent {
         status: String,
         /// Concise one-line summary when available.
         summary: Option<String>,
+        /// Optional longer detail for expanded tool rendering.
+        detail: Option<String>,
     },
     /// Approval is required before a tool may proceed.
     ApprovalRequired {
@@ -75,6 +77,7 @@ impl From<RuntimeEvent> for StreamEvent {
                 tool_name: update.tool_name,
                 status: tool_status_label(update.status).to_string(),
                 summary: Some(update.summary),
+                detail: update.detail,
             },
             RuntimeEvent::ApprovalRequested(prompt) => {
                 let diff_preview = diff_preview(&prompt);

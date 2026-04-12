@@ -58,4 +58,10 @@ export const tauriClient = {
   ) => invokeCommand<void>("send_message", { sessionId, prompt, onEvent }),
   stopSession: (sessionId: string) =>
     invokeCommand<void>("stop_session", { sessionId }),
+  respondToApproval: (requestId: string, decision: string) =>
+    invokeCommand<void>("respond_to_approval", {
+      decision,
+      requestId,
+      request_id: requestId,
+    }),
 };

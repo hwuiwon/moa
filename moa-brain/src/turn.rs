@@ -16,6 +16,8 @@ use uuid::Uuid;
 pub struct PendingToolApproval {
     /// Tool call identifier.
     pub tool_id: Uuid,
+    /// Provider-specific tool-use identifier, when available.
+    pub provider_tool_use_id: Option<String>,
     /// Tool name.
     pub tool_name: String,
     /// Original tool input payload.
@@ -252,6 +254,7 @@ pub fn find_pending_tool_approval(events: &[EventRecord]) -> Option<PendingToolA
         match &record.event {
             Event::ToolCall {
                 tool_id,
+                provider_tool_use_id,
                 tool_name,
                 input,
                 ..
@@ -260,6 +263,7 @@ pub fn find_pending_tool_approval(events: &[EventRecord]) -> Option<PendingToolA
                     *tool_id,
                     PendingToolApproval {
                         tool_id: *tool_id,
+                        provider_tool_use_id: provider_tool_use_id.clone(),
                         tool_name: tool_name.clone(),
                         input: input.clone(),
                         decision: StoredApprovalDecision::AllowOnce,
@@ -303,6 +307,7 @@ pub fn find_resolved_pending_tool_approval(events: &[EventRecord]) -> Option<Pen
         match &record.event {
             Event::ToolCall {
                 tool_id,
+                provider_tool_use_id,
                 tool_name,
                 input,
                 ..
@@ -311,6 +316,7 @@ pub fn find_resolved_pending_tool_approval(events: &[EventRecord]) -> Option<Pen
                     *tool_id,
                     PendingToolApproval {
                         tool_id: *tool_id,
+                        provider_tool_use_id: provider_tool_use_id.clone(),
                         tool_name: tool_name.clone(),
                         input: input.clone(),
                         decision: StoredApprovalDecision::AllowOnce,
@@ -367,9 +373,25 @@ pub fn find_resolved_pending_tool_approval(events: &[EventRecord]) -> Option<Pen
 mod tests {
     use std::sync::Arc;
 
-    use moa_core::{CompletionResponse, StopReason};
+    use chrono::Utc;
+    use moa_core::{CompletionResponse, SessionId, StopReason};
+    use uuid::Uuid;
 
     use super::*;
+
+    fn event_record(sequence_num: u64, event: Event) -> EventRecord {
+        EventRecord {
+            id: Uuid::new_v4(),
+            session_id: SessionId::new(),
+            sequence_num,
+            event_type: event.event_type(),
+            event,
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        }
+    }
 
     struct ProviderToolResultLlm;
 
@@ -440,5 +462,57 @@ mod tests {
         assert_eq!(streamed.streamed_text, "Fresh answer");
         assert!(runtime_events.contains(&RuntimeEvent::Notice("Searching the web...".to_string())));
         assert!(runtime_events.contains(&RuntimeEvent::AssistantStarted));
+    }
+
+    #[test]
+    fn resolved_pending_tool_approval_preserves_provider_tool_use_id() {
+        let tool_id = Uuid::new_v4();
+        let events = vec![
+            event_record(
+                0,
+                Event::ToolCall {
+                    tool_id,
+                    provider_tool_use_id: Some("fc_pending_1".to_string()),
+                    tool_name: "bash".to_string(),
+                    input: serde_json::json!({ "cmd": "pwd" }),
+                    hand_id: None,
+                },
+            ),
+            event_record(
+                1,
+                Event::ApprovalRequested {
+                    request_id: tool_id,
+                    tool_name: "bash".to_string(),
+                    input_summary: "pwd".to_string(),
+                    risk_level: moa_core::RiskLevel::Medium,
+                    prompt: moa_core::ApprovalPrompt {
+                        request: ApprovalRequest {
+                            request_id: tool_id,
+                            tool_name: "bash".to_string(),
+                            input_summary: "pwd".to_string(),
+                            risk_level: moa_core::RiskLevel::Medium,
+                        },
+                        pattern: "bash:*".to_string(),
+                        parameters: Vec::new(),
+                        file_diffs: Vec::new(),
+                    },
+                },
+            ),
+            event_record(
+                2,
+                Event::ApprovalDecided {
+                    request_id: tool_id,
+                    decision: ApprovalDecision::AllowOnce,
+                    decided_by: "user".to_string(),
+                    decided_at: Utc::now(),
+                },
+            ),
+        ];
+
+        let pending = find_resolved_pending_tool_approval(&events).expect("pending approval");
+        assert_eq!(
+            pending.provider_tool_use_id.as_deref(),
+            Some("fc_pending_1")
+        );
     }
 }
