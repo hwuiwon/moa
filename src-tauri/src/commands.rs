@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::dto::{
-    EventRecordDto, MemorySearchResultDto, MoaConfigDto, PageSummaryDto, RuntimeInfoDto,
-    SessionMetaDto, SessionPreviewDto, SessionSummaryDto, WikiPageDto,
+    EventRecordDto, MemorySearchResultDto, MoaConfigDto, ModelOptionDto, PageSummaryDto,
+    RuntimeInfoDto, SessionMetaDto, SessionPreviewDto, SessionSummaryDto, WikiPageDto,
 };
 use crate::error::{AppResult, MoaAppError};
 use crate::stream::StreamEvent;
@@ -122,6 +122,63 @@ pub async fn set_model(model: String, state: State<'_, AppState>) -> AppResult<S
     let session_id = runtime.set_model(model).await?;
     replace_runtime(&state, runtime).await;
     Ok(session_id.to_string())
+}
+
+/// Lists curated model options for the desktop model selector.
+#[tauri::command]
+pub async fn list_model_options(state: State<'_, AppState>) -> AppResult<Vec<ModelOptionDto>> {
+    let runtime = clone_runtime(&state).await;
+    let config = runtime.config();
+    let current_model = runtime.model().to_string();
+    let current_provider = config.general.default_provider.clone();
+
+    let mut options = vec![
+        ModelOptionDto {
+            value: "gpt-5.4".to_string(),
+            label: "GPT-5.4".to_string(),
+            provider: "openai".to_string(),
+        },
+        ModelOptionDto {
+            value: "gpt-5.4-mini".to_string(),
+            label: "GPT-5.4 Mini".to_string(),
+            provider: "openai".to_string(),
+        },
+        ModelOptionDto {
+            value: "gpt-5.4-nano".to_string(),
+            label: "GPT-5.4 Nano".to_string(),
+            provider: "openai".to_string(),
+        },
+        ModelOptionDto {
+            value: "claude-sonnet-4-6".to_string(),
+            label: "Claude Sonnet 4.6".to_string(),
+            provider: "anthropic".to_string(),
+        },
+        ModelOptionDto {
+            value: "openrouter:gpt-5.4".to_string(),
+            label: "OpenRouter · GPT-5.4".to_string(),
+            provider: "openrouter".to_string(),
+        },
+        ModelOptionDto {
+            value: "openrouter:claude-sonnet-4-6".to_string(),
+            label: "OpenRouter · Claude Sonnet 4.6".to_string(),
+            provider: "openrouter".to_string(),
+        },
+    ];
+
+    if !options.iter().any(|option| option.value == current_model) {
+        options.push(ModelOptionDto {
+            value: current_model.clone(),
+            label: current_model.clone(),
+            provider: current_provider,
+        });
+    }
+
+    options.sort_by_key(|option| {
+        let is_current = option.value != current_model;
+        (is_current, option.label.clone())
+    });
+
+    Ok(options)
 }
 
 /// Lists the currently available tool names.
