@@ -1,6 +1,6 @@
 import { memo } from "react";
 
-import type { ChatMessage } from "@/types/chat";
+import { messageText, type ChatMessage } from "@/types/chat";
 import { formatRelativeTime } from "@/lib/utils";
 
 type UserMessageProps = {
@@ -13,6 +13,8 @@ type UserMessageProps = {
 export const UserMessage = memo(function UserMessage({
   message,
 }: UserMessageProps) {
+  const content = messageText(message);
+
   return (
     <article className="rounded-2xl border border-border bg-muted/40 px-4 py-3">
       <header className="flex items-center justify-between gap-4">
@@ -27,7 +29,7 @@ export const UserMessage = memo(function UserMessage({
         </time>
       </header>
       <div className="mt-2 whitespace-pre-wrap break-words text-sm leading-7">
-        {message.content}
+        {content}
       </div>
     </article>
   );

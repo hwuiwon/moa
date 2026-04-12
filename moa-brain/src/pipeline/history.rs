@@ -222,9 +222,23 @@ fn event_to_context_message(record: &EventRecord) -> Option<Result<ContextMessag
             ),
             Some(output.content.clone()),
         ))),
-        Event::ToolError { error, tool_id, .. } => Some(Ok(ContextMessage::tool(format!(
-            "<tool_error id=\"{tool_id}\">{error}</tool_error>"
-        )))),
+        Event::ToolError {
+            error,
+            tool_id,
+            provider_tool_use_id,
+            ..
+        } => Some(Ok(match provider_tool_use_id.as_ref() {
+            Some(call_id) => ContextMessage::tool_result(
+                call_id.clone(),
+                format!("<tool_error id=\"{tool_id}\">{error}</tool_error>"),
+                Some(vec![moa_core::ToolContent::Text {
+                    text: error.clone(),
+                }]),
+            ),
+            None => {
+                ContextMessage::tool(format!("<tool_error id=\"{tool_id}\">{error}</tool_error>"))
+            }
+        })),
         Event::Warning { message } => Some(Ok(ContextMessage::system(format!(
             "<warning>{message}</warning>"
         )))),

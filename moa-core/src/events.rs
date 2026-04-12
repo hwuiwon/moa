@@ -104,6 +104,9 @@ pub enum Event {
     ToolError {
         /// Matching tool call identifier.
         tool_id: Uuid,
+        /// Provider-specific tool-use identifier, when available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_tool_use_id: Option<String>,
         /// Tool name.
         #[serde(default)]
         tool_name: String,

@@ -789,6 +789,7 @@ mod tests {
                 now + Duration::seconds(2),
                 Event::ToolError {
                     tool_id: Uuid::new_v4(),
+                    provider_tool_use_id: None,
                     tool_name: "web_search".to_string(),
                     error: "provider error: timeout".to_string(),
                     retryable: false,

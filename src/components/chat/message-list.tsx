@@ -11,6 +11,7 @@ type MessageListProps = {
   error: string | null;
   isLoading: boolean;
   messages: ChatMessage[];
+  onStop?: () => void;
 };
 
 /**
@@ -20,6 +21,7 @@ export function MessageList({
   error,
   isLoading,
   messages,
+  onStop,
 }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -141,7 +143,7 @@ export function MessageList({
                   ref={virtualizer.measureElement}
                   style={{ transform: `translateY(${item.start}px)` }}
                 >
-                  <MessageRow message={message} />
+                  <MessageRow message={message} onStop={onStop} />
                 </div>
               );
             })}
@@ -149,7 +151,7 @@ export function MessageList({
         ) : (
           <div className="mx-auto w-full max-w-4xl space-y-5">
             {messages.map((message) => (
-              <MessageRow key={message.id} message={message} />
+              <MessageRow key={message.id} message={message} onStop={onStop} />
             ))}
           </div>
         )}
@@ -173,10 +175,16 @@ export function MessageList({
   );
 }
 
-function MessageRow({ message }: { message: ChatMessage }) {
+function MessageRow({
+  message,
+  onStop,
+}: {
+  message: ChatMessage;
+  onStop?: () => void;
+}) {
   if (message.role === "user") {
     return <UserMessage message={message} />;
   }
 
-  return <AssistantMessage message={message} />;
+  return <AssistantMessage message={message} onStop={onStop} />;
 }

@@ -384,6 +384,87 @@ impl LLMProvider for ToolLoopLlmProvider {
 }
 
 #[derive(Default)]
+struct OpenAiApprovalLoopLlmProvider {
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl LLMProvider for OpenAiApprovalLoopLlmProvider {
+    fn name(&self) -> &str {
+        "openai-approval-loop"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: "gpt-5.4".to_string(),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::OpenAiCompatible,
+            pricing: TokenPricing {
+                input_per_mtok: 1.25,
+                output_per_mtok: 10.0,
+                cached_input_per_mtok: Some(0.125),
+            },
+            native_tools: Vec::new(),
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let mut requests = self.requests.lock().await;
+        let response = if requests.is_empty() {
+            CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(ToolInvocation {
+                    id: Some("fc_approval_1".to_string()),
+                    name: "bash".to_string(),
+                    input: json!({ "cmd": "printf 'hello from approved openai tool'" }),
+                })],
+                stop_reason: StopReason::ToolUse,
+                model: "gpt-5.4".to_string(),
+                input_tokens: 12,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+                duration_ms: 10,
+            }
+        } else {
+            let tool_result = request.messages.iter().find(|message| {
+                message.role == moa_core::MessageRole::Tool
+                    && message.tool_use_id.as_deref() == Some("fc_approval_1")
+            });
+            assert!(
+                tool_result.is_some(),
+                "expected function_call_output for fc_approval_1 after approval; request was: {request:?}"
+            );
+            assert!(
+                request
+                    .messages
+                    .iter()
+                    .any(|message| { message.content.contains("hello from approved openai tool") }),
+                "expected tool output to be preserved after approval; request was: {request:?}"
+            );
+            CompletionResponse {
+                text: "Approved tool completed".to_string(),
+                content: vec![CompletionContent::Text(
+                    "Approved tool completed".to_string(),
+                )],
+                stop_reason: StopReason::EndTurn,
+                model: "gpt-5.4".to_string(),
+                input_tokens: 20,
+                output_tokens: 7,
+                cached_input_tokens: 0,
+                duration_ms: 12,
+            }
+        };
+        requests.push(request);
+        Ok(CompletionStream::from_response(response))
+    }
+}
+
+#[derive(Default)]
 struct MemoryWriteLoopLlmProvider {
     requests: Arc<Mutex<Vec<CompletionRequest>>>,
 }
@@ -963,6 +1044,94 @@ async fn run_brain_turn_pauses_for_approval_then_executes_tool() {
     assert!(events.iter().any(|record| matches!(
         &record.event,
         Event::BrainResponse { text, .. } if text == "Tool said hello from tool"
+    )));
+}
+
+#[tokio::test]
+async fn run_brain_turn_preserves_openai_function_call_id_after_approval() {
+    let session = SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: "gpt-5.4".to_string(),
+        ..SessionMeta::default()
+    };
+    let initial_events = vec![make_event_record(
+        &session.id,
+        0,
+        Event::UserMessage {
+            text: "Use a tool that requires approval".to_string(),
+            attachments: Vec::new(),
+        },
+    )];
+    let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(MockMemoryStore);
+    let sandbox_dir = tempdir().unwrap();
+    let tool_router = Arc::new(
+        ToolRouter::new_local(memory_store.clone(), sandbox_dir.path())
+            .await
+            .unwrap(),
+    );
+    let pipeline = build_default_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        memory_store,
+        tool_router.tool_schemas(),
+    );
+    let llm = Arc::new(OpenAiApprovalLoopLlmProvider::default());
+
+    let result = run_brain_turn_with_tools(
+        session.id.clone(),
+        store.clone(),
+        llm.clone(),
+        &pipeline,
+        Some(tool_router.clone()),
+    )
+    .await
+    .unwrap();
+
+    let request = match result {
+        TurnResult::NeedsApproval(request) => request,
+        other => panic!("expected pending approval, got {other:?}"),
+    };
+
+    store
+        .emit_event(
+            session.id.clone(),
+            Event::ApprovalDecided {
+                request_id: request.request_id,
+                decision: ApprovalDecision::AllowOnce,
+                decided_by: "user".to_string(),
+                decided_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let resumed = run_brain_turn_with_tools(
+        session.id.clone(),
+        store.clone(),
+        llm.clone(),
+        &pipeline,
+        Some(tool_router),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(resumed, TurnResult::Complete);
+
+    let events = store.events.lock().await.clone();
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::ToolResult {
+            provider_tool_use_id: Some(provider_tool_use_id),
+            success,
+            ..
+        } if *success && provider_tool_use_id == "fc_approval_1"
+    )));
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::BrainResponse { text, .. } if text == "Approved tool completed"
     )));
 }
 
