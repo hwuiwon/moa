@@ -1,0 +1,16 @@
+[package]
+name = "moa-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+moa-core = { path = "../moa-core" }
+moa-hands = { path = "../moa-hands" }
+moa-memory = { path = "../moa-memory" }
+moa-orchestrator = { path = "../moa-orchestrator" }
+moa-providers = { path = "../moa-providers" }
+moa-session = { path = "../moa-session" }
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true

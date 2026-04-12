@@ -74,6 +74,7 @@ pub(crate) fn platform_to_db(platform: &Platform) -> &'static str {
         Platform::Telegram => "telegram",
         Platform::Slack => "slack",
         Platform::Discord => "discord",
+        Platform::Desktop => "desktop",
         Platform::Tui => "tui",
         Platform::Cli => "cli",
     }
@@ -85,6 +86,7 @@ pub(crate) fn platform_from_db(value: &str) -> Result<Platform> {
         "telegram" => Ok(Platform::Telegram),
         "slack" => Ok(Platform::Slack),
         "discord" => Ok(Platform::Discord),
+        "desktop" => Ok(Platform::Desktop),
         "tui" => Ok(Platform::Tui),
         "cli" => Ok(Platform::Cli),
         _ => Err(MoaError::StorageError(format!(

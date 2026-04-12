@@ -33,11 +33,13 @@ members = [
     "moa-providers",
     "moa-orchestrator",
     "moa-gateway",
+    "moa-runtime",
     "moa-tui",
     "moa-cli",
     "moa-security",
     "moa-skills",
     "moa-eval",
+    "src-tauri",
 ]
 default-members = [
     "moa-core",
@@ -48,11 +50,12 @@ default-members = [
     "moa-providers",
     "moa-orchestrator",
     "moa-gateway",
-    "moa-tui",
+    "moa-runtime",
     "moa-cli",
     "moa-security",
     "moa-skills",
     "moa-eval",
+    "src-tauri",
 ]
 
 [workspace.package]
