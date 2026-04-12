@@ -1,10 +1,10 @@
 import { Link } from "@tanstack/react-router";
 import { Menu, PanelRightOpen, Plus, Settings2 } from "lucide-react";
 
+import type { ModelOptionDto, RuntimeInfoDto } from "@/lib/bindings";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import type { ModelOptionDto, RuntimeInfoDto } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import type { ActiveView } from "@/stores/layout";
 

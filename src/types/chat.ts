@@ -1,4 +1,6 @@
-import type { EventRecordDto } from "@/lib/types";
+import type { EventRecordDto } from "@/lib/bindings";
+
+export type { StreamEvent } from "@/lib/bindings";
 
 export type ToolStatus = "pending" | "running" | "done" | "error";
 
@@ -58,35 +60,6 @@ export interface ChatMessage {
   duration?: number;
 }
 
-export type StreamEvent =
-  | { event: "assistantStarted" }
-  | { event: "assistantDelta"; data: { text: string } }
-  | { event: "assistantFinished"; data: { text: string } }
-  | {
-      event: "toolUpdate";
-      data: {
-        callId: string;
-        toolName: string;
-        status: string;
-        summary?: string | null;
-        detail?: string | null;
-      };
-    }
-  | {
-      event: "approvalRequired";
-      data: {
-        requestId: string;
-        toolName: string;
-        riskLevel: string;
-        inputSummary: string;
-        diffPreview?: string | null;
-      };
-    }
-  | { event: "usageUpdated"; data: { totalTokens: number } }
-  | { event: "notice"; data: { message: string } }
-  | { event: "turnCompleted" }
-  | { event: "error"; data: { message: string } };
-
 type LegacyChatMessage = {
   id?: unknown;
   role?: unknown;
@@ -105,35 +78,207 @@ type SerializedEventPayload = {
 };
 
 /**
+ * Mutable transcript state used by both event replay and live stream updates.
+ */
+export type TranscriptState = {
+  messages: ChatMessage[];
+  currentAssistantId: string | null;
+};
+
+export type TranscriptAction =
+  | { type: "reset"; messages: Array<ChatMessage | LegacyChatMessage> }
+  | { type: "user-message"; message: ChatMessage }
+  | { type: "assistant-thinking"; assistantId: string; timestamp: string }
+  | { type: "assistant-remove-thinking"; assistantId: string }
+  | { type: "assistant-text-delta"; assistantId: string; timestamp: string; text: string }
+  | { type: "assistant-text-set"; assistantId: string; timestamp: string; text: string }
+  | {
+      type: "assistant-tool";
+      assistantId: string;
+      timestamp: string;
+      block: ToolCallBlock;
+    }
+  | {
+      type: "assistant-approval";
+      assistantId: string;
+      timestamp: string;
+      block: ApprovalBlock;
+    }
+  | {
+      type: "assistant-approval-decision";
+      requestId: string;
+      decision: ApprovalBlock["decision"];
+    }
+  | {
+      type: "assistant-notice";
+      assistantId: string;
+      timestamp: string;
+      block: NoticeBlock;
+    }
+  | {
+      type: "assistant-metrics";
+      assistantId: string;
+      timestamp: string;
+      tokens?: ChatMessage["tokens"];
+      cost?: number;
+      duration?: number;
+    }
+  | { type: "assistant-finish"; assistantId: string };
+
+/**
+ * Creates transcript state from a message list.
+ */
+export function createTranscriptState(
+  messages: Array<ChatMessage | LegacyChatMessage> = [],
+): TranscriptState {
+  const normalized = normalizeChatMessages(messages);
+  return {
+    currentAssistantId: findOpenAssistantId(normalized),
+    messages: normalized,
+  };
+}
+
+/**
+ * Returns the current transcript messages after enforcing development invariants.
+ */
+export function transcriptMessages(state: TranscriptState): ChatMessage[] {
+  return finalizeTranscriptState(state).messages;
+}
+
+/**
+ * Applies one transcript action and returns the next state.
+ */
+export function reduceTranscript(
+  state: TranscriptState,
+  action: TranscriptAction,
+): TranscriptState {
+  if (action.type === "reset") {
+    return finalizeTranscriptState(createTranscriptState(action.messages));
+  }
+
+  const nextState: TranscriptState = {
+    currentAssistantId: state.currentAssistantId,
+    messages: state.messages.map((message) => normalizeChatMessage(message)),
+  };
+
+  switch (action.type) {
+    case "user-message":
+      nextState.messages.push(normalizeChatMessage(action.message));
+      nextState.currentAssistantId = null;
+      break;
+    case "assistant-thinking": {
+      const assistant = ensureAssistantMessage(
+        nextState,
+        action.assistantId,
+        action.timestamp,
+        [{ type: "thinking" }],
+      );
+      if (!assistant.blocks.some((block) => block.type === "thinking")) {
+        assistant.blocks.unshift({ type: "thinking" });
+      }
+      assistant.isStreaming = true;
+      break;
+    }
+    case "assistant-remove-thinking": {
+      const assistant = findAssistantMessage(nextState.messages, action.assistantId);
+      if (assistant) {
+        assistant.blocks = assistant.blocks.filter((block) => block.type !== "thinking");
+        removeAssistantIfEmpty(nextState, action.assistantId);
+      }
+      break;
+    }
+    case "assistant-text-delta": {
+      const assistant = ensureAssistantMessage(
+        nextState,
+        action.assistantId,
+        action.timestamp,
+      );
+      assistant.blocks = assistant.blocks.filter((block) => block.type !== "thinking");
+      assistant.blocks = appendTextDelta(assistant.blocks, action.text);
+      assistant.isStreaming = true;
+      break;
+    }
+    case "assistant-text-set": {
+      const assistant = ensureAssistantMessage(
+        nextState,
+        action.assistantId,
+        action.timestamp,
+      );
+      assistant.blocks = assistant.blocks.filter((block) => block.type !== "thinking");
+      assistant.blocks = upsertTrailingTextBlock(assistant.blocks, action.text);
+      assistant.isStreaming = false;
+      break;
+    }
+    case "assistant-tool": {
+      const assistant = ensureAssistantMessage(
+        nextState,
+        action.assistantId,
+        action.timestamp,
+      );
+      assistant.blocks = assistant.blocks.filter((block) => block.type !== "thinking");
+      upsertToolBlock(assistant.blocks, action.block);
+      assistant.isStreaming = true;
+      break;
+    }
+    case "assistant-approval": {
+      const assistant = ensureAssistantMessage(
+        nextState,
+        action.assistantId,
+        action.timestamp,
+      );
+      assistant.blocks = assistant.blocks.filter((block) => block.type !== "thinking");
+      upsertApprovalBlock(assistant.blocks, action.block);
+      assistant.isStreaming = true;
+      break;
+    }
+    case "assistant-approval-decision":
+      applyApprovalDecision(nextState.messages, action.requestId, action.decision);
+      break;
+    case "assistant-notice": {
+      const assistant = ensureAssistantMessage(
+        nextState,
+        action.assistantId,
+        action.timestamp,
+      );
+      assistant.blocks = assistant.blocks.filter((block) => block.type !== "thinking");
+      appendNoticeBlock(assistant.blocks, action.block);
+      assistant.isStreaming = true;
+      break;
+    }
+    case "assistant-metrics": {
+      const assistant = findAssistantMessage(nextState.messages, action.assistantId);
+      if (assistant) {
+        assistant.tokens = action.tokens;
+        assistant.cost = action.cost;
+        assistant.duration = action.duration;
+      }
+      break;
+    }
+    case "assistant-finish": {
+      const assistant = findAssistantMessage(nextState.messages, action.assistantId);
+      if (assistant) {
+        assistant.isStreaming = false;
+        assistant.blocks = assistant.blocks.filter((block) => block.type !== "thinking");
+        removeAssistantIfEmpty(nextState, action.assistantId);
+      }
+      if (nextState.currentAssistantId === action.assistantId) {
+        nextState.currentAssistantId = null;
+      }
+      break;
+    }
+    default:
+      break;
+  }
+
+  return finalizeTranscriptState(nextState);
+}
+
+/**
  * Transforms persisted session events into chat transcript messages.
  */
 export function eventsToMessages(events: EventRecordDto[]): ChatMessage[] {
-  const messages: ChatMessage[] = [];
-  let currentAssistant: ChatMessage | null = null;
-
-  const flushAssistant = () => {
-    if (!currentAssistant || currentAssistant.blocks.length === 0) {
-      currentAssistant = null;
-      return;
-    }
-
-    messages.push(currentAssistant);
-    currentAssistant = null;
-  };
-
-  const ensureAssistant = (record: EventRecordDto): ChatMessage => {
-    if (!currentAssistant) {
-      currentAssistant = {
-        blocks: [],
-        id: `assistant-${record.id}`,
-        isStreaming: false,
-        role: "assistant",
-        timestamp: record.timestamp,
-      };
-    }
-
-    return currentAssistant;
-  };
+  let state = createTranscriptState();
+  let currentAssistantId: string | null = null;
 
   for (const record of [...events].sort((left, right) => left.sequenceNum - right.sequenceNum)) {
     const payload = asPayload(record.payload);
@@ -142,100 +287,146 @@ export function eventsToMessages(events: EventRecordDto[]): ChatMessage[] {
 
     switch (type) {
       case "UserMessage": {
-        flushAssistant();
+        currentAssistantId = null;
         const message = userMessageFromEvent(record, data);
         if (message) {
-          messages.push(message);
+          state = reduceTranscript(state, {
+            message,
+            type: "user-message",
+          });
         }
         break;
       }
       case "ToolCall": {
-        const assistant = ensureAssistant(record);
-        upsertToolBlock(assistant.blocks, {
-          callId: asString(data?.tool_id) || `tool-${record.id}`,
-          input: valueToRecord(data?.input),
-          status: "pending",
-          toolName: asString(data?.tool_name) || "tool",
-          type: "tool-call",
+        currentAssistantId ??= `assistant-${record.id}`;
+        state = reduceTranscript(state, {
+          assistantId: currentAssistantId,
+          block: {
+            callId: asString(data?.tool_id) || `tool-${record.id}`,
+            input: valueToRecord(data?.input),
+            status: "pending",
+            toolName: asString(data?.tool_name) || "tool",
+            type: "tool-call",
+          },
+          timestamp: record.timestamp,
+          type: "assistant-tool",
         });
         break;
       }
       case "ToolResult": {
-        const assistant = ensureAssistant(record);
+        currentAssistantId ??= `assistant-${record.id}`;
         const callId = asString(data?.tool_id) || `tool-${record.id}`;
         const success = asBoolean(data?.success);
-        upsertToolBlock(assistant.blocks, {
-          callId,
-          duration: asNumber(data?.duration_ms),
-          errorText: success ? undefined : toolOutputErrorText(data?.output),
-          output: toolOutputToRecord(data?.output),
-          status: success ? "done" : "error",
-          toolName: findToolName(assistant.blocks, callId),
-          type: "tool-call",
+        state = reduceTranscript(state, {
+          assistantId: currentAssistantId,
+          block: {
+            callId,
+            duration: asNumber(data?.duration_ms),
+            errorText: success ? undefined : toolOutputErrorText(data?.output),
+            output: toolOutputToRecord(data?.output),
+            status: success ? "done" : "error",
+            toolName: findToolName(state.messages.flatMap((message) => message.blocks), callId),
+            type: "tool-call",
+          },
+          timestamp: record.timestamp,
+          type: "assistant-tool",
         });
         break;
       }
       case "ToolError": {
-        const assistant = ensureAssistant(record);
-        upsertToolBlock(assistant.blocks, {
-          callId: asString(data?.tool_id) || `tool-${record.id}`,
-          errorText: asString(data?.error) || "Tool execution failed.",
-          status: "error",
-          toolName: asString(data?.tool_name) || "tool",
-          type: "tool-call",
+        currentAssistantId ??= `assistant-${record.id}`;
+        state = reduceTranscript(state, {
+          assistantId: currentAssistantId,
+          block: {
+            callId: asString(data?.tool_id) || `tool-${record.id}`,
+            errorText: asString(data?.error) || "Tool execution failed.",
+            status: "error",
+            toolName: asString(data?.tool_name) || "tool",
+            type: "tool-call",
+          },
+          timestamp: record.timestamp,
+          type: "assistant-tool",
         });
         break;
       }
       case "ApprovalRequested": {
-        const assistant = ensureAssistant(record);
+        currentAssistantId ??= `assistant-${record.id}`;
         const approval = approvalBlockFromEvent(data);
         if (approval) {
-          upsertApprovalBlock(assistant.blocks, approval);
+          state = reduceTranscript(state, {
+            assistantId: currentAssistantId,
+            block: approval,
+            timestamp: record.timestamp,
+            type: "assistant-approval",
+          });
         }
         break;
       }
       case "ApprovalDecided": {
-        const assistant = ensureAssistant(record);
         const requestId = asString(data?.request_id);
         const decision = approvalDecisionFromEvent(data?.decision);
         if (requestId && decision) {
-          applyApprovalDecision(assistant.blocks, requestId, decision);
+          state = reduceTranscript(state, {
+            decision,
+            requestId,
+            type: "assistant-approval-decision",
+          });
         }
         break;
       }
       case "BrainResponse": {
-        const assistant = ensureAssistant(record);
+        currentAssistantId ??= `assistant-${record.id}`;
         const text = asString(data?.text);
         if (text) {
-          appendTextBlock(assistant.blocks, text);
+          state = reduceTranscript(state, {
+            assistantId: currentAssistantId,
+            text,
+            timestamp: record.timestamp,
+            type: "assistant-text-set",
+          });
         }
-        assistant.tokens = {
-          input: asNumber(data?.input_tokens),
-          output: asNumber(data?.output_tokens),
-        };
-        assistant.cost = asNumber(data?.cost_cents) / 100;
-        assistant.duration = asNumber(data?.duration_ms);
+        state = reduceTranscript(state, {
+          assistantId: currentAssistantId,
+          cost: asNumber(data?.cost_cents) / 100,
+          duration: asNumber(data?.duration_ms),
+          timestamp: record.timestamp,
+          tokens: {
+            input: asNumber(data?.input_tokens),
+            output: asNumber(data?.output_tokens),
+          },
+          type: "assistant-metrics",
+        });
         break;
       }
       case "BrainThinking": {
-        const assistant = ensureAssistant(record);
+        currentAssistantId ??= `assistant-${record.id}`;
         const summary = asString(data?.summary);
         if (summary) {
-          assistant.blocks.push({
-            message: summary,
-            type: "notice",
+          state = reduceTranscript(state, {
+            assistantId: currentAssistantId,
+            block: {
+              message: summary,
+              type: "notice",
+            },
+            timestamp: record.timestamp,
+            type: "assistant-notice",
           });
         }
         break;
       }
       case "Warning":
       case "Error": {
-        const assistant = ensureAssistant(record);
+        currentAssistantId ??= `assistant-${record.id}`;
         const message = asString(data?.message);
         if (message) {
-          assistant.blocks.push({
-            message,
-            type: "notice",
+          state = reduceTranscript(state, {
+            assistantId: currentAssistantId,
+            block: {
+              message,
+              type: "notice",
+            },
+            timestamp: record.timestamp,
+            type: "assistant-notice",
           });
         }
         break;
@@ -245,9 +436,7 @@ export function eventsToMessages(events: EventRecordDto[]): ChatMessage[] {
     }
   }
 
-  flushAssistant();
-
-  return messages;
+  return transcriptMessages(state);
 }
 
 /**
@@ -303,6 +492,118 @@ export function messageText(message: ChatMessage | LegacyChatMessage): string {
     .filter((block): block is TextBlock => block.type === "text")
     .map((block) => block.text)
     .join("\n\n");
+}
+
+function findOpenAssistantId(messages: ChatMessage[]): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "assistant" && message.isStreaming) {
+      return message.id;
+    }
+  }
+
+  return null;
+}
+
+function ensureAssistantMessage(
+  state: TranscriptState,
+  assistantId: string,
+  timestamp: string,
+  initialBlocks: ContentBlock[] = [],
+): ChatMessage {
+  const existing = findAssistantMessage(state.messages, assistantId);
+  if (existing) {
+    state.currentAssistantId = assistantId;
+    return existing;
+  }
+
+  const message: ChatMessage = {
+    blocks: [...initialBlocks],
+    id: assistantId,
+    isStreaming: true,
+    role: "assistant",
+    timestamp,
+  };
+  state.messages.push(message);
+  state.currentAssistantId = assistantId;
+  return message;
+}
+
+function findAssistantMessage(
+  messages: ChatMessage[],
+  assistantId: string,
+): ChatMessage | undefined {
+  return messages.find(
+    (message) => message.role === "assistant" && message.id === assistantId,
+  );
+}
+
+function removeAssistantIfEmpty(state: TranscriptState, assistantId: string) {
+  const nextMessages = state.messages.filter(
+    (message) =>
+      !(message.role === "assistant" && message.id === assistantId && message.blocks.length === 0),
+  );
+  state.messages = nextMessages;
+
+  if (!nextMessages.some((message) => message.id === assistantId)) {
+    state.currentAssistantId =
+      state.currentAssistantId === assistantId ? null : state.currentAssistantId;
+  }
+}
+
+function appendNoticeBlock(blocks: ContentBlock[], block: NoticeBlock) {
+  const lastBlock = blocks[blocks.length - 1];
+  if (lastBlock?.type === "notice" && lastBlock.message === block.message) {
+    return;
+  }
+
+  blocks.push(block);
+}
+
+function finalizeTranscriptState(state: TranscriptState): TranscriptState {
+  const normalizedMessages = normalizeChatMessages(state.messages);
+  const nextState = {
+    currentAssistantId:
+      state.currentAssistantId &&
+      normalizedMessages.some((message) => message.id === state.currentAssistantId)
+        ? state.currentAssistantId
+        : findOpenAssistantId(normalizedMessages),
+    messages: normalizedMessages,
+  };
+
+  assertTranscriptInvariants(nextState);
+  return nextState;
+}
+
+function assertTranscriptInvariants(state: TranscriptState) {
+  if (!import.meta.env.DEV) {
+    return;
+  }
+
+  for (const message of state.messages) {
+    if (message.role === "assistant" && message.blocks.length === 0) {
+      throw new Error(
+        `Transcript invariant violated: assistant message ${message.id} has no content blocks.`,
+      );
+    }
+  }
+
+  const pendingApprovalIds = new Set<string>();
+  for (const message of state.messages) {
+    for (const block of message.blocks) {
+      if (block.type !== "approval" || block.decision) {
+        continue;
+      }
+
+      if (pendingApprovalIds.has(block.requestId)) {
+        throw new Error(
+          `Transcript invariant violated: duplicate pending approval ${block.requestId}.`,
+        );
+      }
+
+      pendingApprovalIds.add(block.requestId);
+    }
+  }
 }
 
 function userMessageFromEvent(
@@ -367,14 +668,35 @@ function firstDiffPreview(prompt: unknown): string | undefined {
   return preview ? preview.slice(0, 1_000) : undefined;
 }
 
-function appendTextBlock(blocks: ContentBlock[], text: string) {
+function appendTextDelta(blocks: ContentBlock[], text: string): ContentBlock[] {
   const lastBlock = blocks[blocks.length - 1];
   if (lastBlock?.type === "text") {
     lastBlock.text = `${lastBlock.text}${text}`;
-    return;
+    return blocks;
   }
 
-  blocks.push({
+  return blocks.concat({
+    text,
+    type: "text",
+  });
+}
+
+function upsertTrailingTextBlock(blocks: ContentBlock[], text: string): ContentBlock[] {
+  const nextBlocks = blocks.filter((block) => block.type !== "thinking");
+  const lastBlock = nextBlocks[nextBlocks.length - 1];
+
+  if (lastBlock?.type === "text") {
+    return nextBlocks.map((block, index) =>
+      index === nextBlocks.length - 1
+        ? {
+            ...block,
+            text,
+          }
+        : block,
+    );
+  }
+
+  return nextBlocks.concat({
     text,
     type: "text",
   });
@@ -419,7 +741,7 @@ function upsertApprovalBlock(blocks: ContentBlock[], next: ApprovalBlock) {
 }
 
 function applyApprovalDecision(
-  blocks: ContentBlock[],
+  messages: ChatMessage[],
   requestId: string,
   decision: ApprovalBlock["decision"],
 ) {
@@ -427,22 +749,25 @@ function applyApprovalDecision(
     return;
   }
 
-  const index = blocks.findIndex(
-    (block) => block.type === "approval" && block.requestId === requestId,
-  );
-  if (index === -1) {
+  for (const message of messages) {
+    const index = message.blocks.findIndex(
+      (block) => block.type === "approval" && block.requestId === requestId,
+    );
+    if (index === -1) {
+      continue;
+    }
+
+    const existing = message.blocks[index];
+    if (existing?.type !== "approval") {
+      continue;
+    }
+
+    message.blocks[index] = {
+      ...existing,
+      decision,
+    };
     return;
   }
-
-  const existing = blocks[index];
-  if (existing?.type !== "approval") {
-    return;
-  }
-
-  blocks[index] = {
-    ...existing,
-    decision,
-  };
 }
 
 function findToolName(blocks: ContentBlock[], callId: string): string {

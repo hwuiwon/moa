@@ -2,16 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Channel } from "@tauri-apps/api/core";
 
+import { queryKeys } from "@/lib/query-keys";
 import { tauriClient } from "@/lib/tauri";
-import { normalizeChatMessage, normalizeChatMessages } from "@/types/chat";
+import {
+  createTranscriptState,
+  reduceTranscript,
+  transcriptMessages,
+} from "@/types/chat";
 import type {
   ApprovalBlock,
   ChatMessage,
-  ContentBlock,
   NoticeBlock,
   StreamEvent,
   ToolCallBlock,
   ToolStatus,
+  TranscriptAction,
 } from "@/types/chat";
 
 type UseChatStreamOptions = {
@@ -38,7 +43,12 @@ export function useChatStream({
 }: UseChatStreamOptions): UseChatStreamResult {
   const queryClient = useQueryClient();
   const [messages, setMessages] = useState<ChatMessage[]>(
-    normalizeChatMessages(initialMessages),
+    transcriptMessages(
+      reduceTranscript(createTranscriptState(), {
+        messages: initialMessages,
+        type: "reset",
+      }),
+    ),
   );
   const [isStreaming, setIsStreaming] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
@@ -52,78 +62,55 @@ export function useChatStream({
   const localMessageIndexRef = useRef(0);
   const previousSessionIdRef = useRef(sessionId);
 
-  const updateAssistantMessage = useCallback(
-    (
-      runId: number,
-      updater: (message: ChatMessage) => ChatMessage,
-    ) => {
-      if (runId !== activeRunIdRef.current || !assistantMessageIdRef.current) {
-        return;
-      }
+  const applyTranscriptAction = useCallback((action: TranscriptAction) => {
+    setMessages((current) =>
+      transcriptMessages(reduceTranscript(createTranscriptState(current), action)),
+    );
+  }, []);
 
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === assistantMessageIdRef.current
-            ? updater(normalizeChatMessage(message))
-            : normalizeChatMessage(message),
-        ),
-      );
-    },
-    [],
-  );
+  const ensureAssistantId = useCallback((runId: number) => {
+    if (runId !== activeRunIdRef.current) {
+      return null;
+    }
 
-  const ensureAssistantMessage = useCallback(
-    (runId: number, initialBlocks: ContentBlock[] = []) => {
-      if (runId !== activeRunIdRef.current) {
-        return;
-      }
+    if (assistantMessageIdRef.current) {
+      return assistantMessageIdRef.current;
+    }
 
-      if (assistantMessageIdRef.current) {
-        return;
-      }
-
-      localMessageIndexRef.current += 1;
-      const assistantId = `local-assistant-${localMessageIndexRef.current}`;
-      assistantMessageIdRef.current = assistantId;
-      setMessages((current) => [
-        ...current,
-        {
-          blocks: initialBlocks,
-          id: assistantId,
-          isStreaming: true,
-          role: "assistant",
-          timestamp: new Date().toISOString(),
-        },
-      ]);
-    },
-    [],
-  );
+    localMessageIndexRef.current += 1;
+    assistantMessageIdRef.current = `local-assistant-${localMessageIndexRef.current}`;
+    return assistantMessageIdRef.current;
+  }, []);
 
   const appendThinkingBlock = useCallback(
     (runId: number) => {
-      ensureAssistantMessage(runId, [{ type: "thinking" }]);
-      updateAssistantMessage(runId, (message) => {
-        if (message.blocks.some((block) => block.type === "thinking")) {
-          return message;
-        }
+      const assistantId = ensureAssistantId(runId);
+      if (!assistantId) {
+        return;
+      }
 
-        return {
-          ...message,
-          blocks: [{ type: "thinking" }, ...message.blocks],
-        };
+      applyTranscriptAction({
+        assistantId,
+        timestamp: new Date().toISOString(),
+        type: "assistant-thinking",
       });
     },
-    [ensureAssistantMessage, updateAssistantMessage],
+    [applyTranscriptAction, ensureAssistantId],
   );
 
   const removeThinkingBlock = useCallback(
     (runId: number) => {
-      updateAssistantMessage(runId, (message) => ({
-        ...message,
-        blocks: message.blocks.filter((block) => block.type !== "thinking"),
-      }));
+      const assistantId = assistantMessageIdRef.current;
+      if (runId !== activeRunIdRef.current || !assistantId) {
+        return;
+      }
+
+      applyTranscriptAction({
+        assistantId,
+        type: "assistant-remove-thinking",
+      });
     },
-    [updateAssistantMessage],
+    [applyTranscriptAction],
   );
 
   const flushAssistantDelta = useCallback(
@@ -139,32 +126,33 @@ export function useChatStream({
       pendingDeltaRef.current = "";
       pendingFinishTextRef.current = null;
 
-      if (!assistantMessageIdRef.current) {
-        return;
-      }
-
       if (!delta && finishedText == null) {
         return;
       }
 
-      updateAssistantMessage(runId, (message) => {
-        const blocks = message.blocks.filter((block) => block.type !== "thinking");
+      const assistantId = ensureAssistantId(runId);
+      if (!assistantId) {
+        return;
+      }
 
-        if (finishedText != null) {
-          return {
-            ...message,
-            blocks: upsertTrailingTextBlock(blocks, finishedText),
-            isStreaming: false,
-          };
-        }
+      if (finishedText != null) {
+        applyTranscriptAction({
+          assistantId,
+          text: finishedText,
+          timestamp: new Date().toISOString(),
+          type: "assistant-text-set",
+        });
+        return;
+      }
 
-        return {
-          ...message,
-          blocks: appendTextDelta(blocks, delta),
-        };
+      applyTranscriptAction({
+        assistantId,
+        text: delta,
+        timestamp: new Date().toISOString(),
+        type: "assistant-text-delta",
       });
     },
-    [updateAssistantMessage],
+    [applyTranscriptAction, ensureAssistantId],
   );
 
   const scheduleFlush = useCallback(
@@ -183,114 +171,81 @@ export function useChatStream({
 
   const upsertToolBlock = useCallback(
     (runId: number, nextBlock: ToolCallBlock) => {
-      const shouldSeedMessage = !assistantMessageIdRef.current;
-      ensureAssistantMessage(runId, shouldSeedMessage ? [nextBlock] : []);
-      if (shouldSeedMessage) {
+      const assistantId = ensureAssistantId(runId);
+      if (!assistantId) {
         return;
       }
-      updateAssistantMessage(runId, (message) => {
-        const blocks = [...message.blocks];
-        const index = blocks.findIndex(
-          (block) => block.type === "tool-call" && block.callId === nextBlock.callId,
-        );
 
-        if (index === -1) {
-          blocks.push(nextBlock);
-          return {
-            ...message,
-            blocks,
-          };
-        }
-
-        const existing = blocks[index];
-        if (existing?.type !== "tool-call") {
-          return message;
-        }
-
-        blocks[index] = {
-          ...existing,
-          ...nextBlock,
-          input: nextBlock.input ?? existing.input,
-          output: nextBlock.output ?? existing.output,
-          errorText: nextBlock.errorText ?? existing.errorText,
-          toolName: nextBlock.toolName || existing.toolName,
-        };
-
-        return {
-          ...message,
-          blocks,
-        };
+      applyTranscriptAction({
+        assistantId,
+        block: nextBlock,
+        timestamp: new Date().toISOString(),
+        type: "assistant-tool",
       });
     },
-    [ensureAssistantMessage, updateAssistantMessage],
+    [applyTranscriptAction, ensureAssistantId],
   );
 
   const addApprovalBlock = useCallback(
     (runId: number, approval: ApprovalBlock) => {
-      const shouldSeedMessage = !assistantMessageIdRef.current;
-      ensureAssistantMessage(runId, shouldSeedMessage ? [approval] : []);
-      if (shouldSeedMessage) {
+      const assistantId = ensureAssistantId(runId);
+      if (!assistantId) {
         return;
       }
-      updateAssistantMessage(runId, (message) => {
-        const blocks = [...message.blocks];
-        const index = blocks.findIndex(
-          (block) => block.type === "approval" && block.requestId === approval.requestId,
-        );
 
-        if (index === -1) {
-          blocks.push(approval);
-        } else {
-          blocks[index] = approval;
-        }
-
-        return {
-          ...message,
-          blocks,
-        };
+      applyTranscriptAction({
+        assistantId,
+        block: approval,
+        timestamp: new Date().toISOString(),
+        type: "assistant-approval",
       });
     },
-    [ensureAssistantMessage, updateAssistantMessage],
+    [applyTranscriptAction, ensureAssistantId],
   );
 
   const addNoticeBlock = useCallback(
     (runId: number, block: NoticeBlock) => {
-      const shouldSeedMessage = !assistantMessageIdRef.current;
-      ensureAssistantMessage(runId, shouldSeedMessage ? [block] : []);
-      if (shouldSeedMessage) {
+      const assistantId = ensureAssistantId(runId);
+      if (!assistantId) {
         return;
       }
-      updateAssistantMessage(runId, (message) => {
-        const lastBlock = message.blocks[message.blocks.length - 1];
-        if (lastBlock?.type === "notice" && lastBlock.message === block.message) {
-          return message;
-        }
 
-        return {
-          ...message,
-          blocks: [...message.blocks, block],
-        };
+      applyTranscriptAction({
+        assistantId,
+        block,
+        timestamp: new Date().toISOString(),
+        type: "assistant-notice",
       });
     },
-    [ensureAssistantMessage, updateAssistantMessage],
+    [applyTranscriptAction, ensureAssistantId],
   );
 
-  const resetStreamState = useCallback((nextMessages: ChatMessage[]) => {
-    activeRunIdRef.current += 1;
-    assistantMessageIdRef.current = null;
-    pendingDeltaRef.current = "";
-    pendingFinishTextRef.current = null;
-    setMessages(normalizeChatMessages(nextMessages));
-    setIsStreaming(false);
-    setIsStopping(false);
-    setError(null);
-    setTotalTokens(0);
+  const resetStreamState = useCallback(
+    (nextMessages: ChatMessage[]) => {
+      activeRunIdRef.current += 1;
+      assistantMessageIdRef.current = null;
+      pendingDeltaRef.current = "";
+      pendingFinishTextRef.current = null;
+      setMessages(
+        transcriptMessages(
+          reduceTranscript(createTranscriptState(), {
+            messages: nextMessages,
+            type: "reset",
+          }),
+        ),
+      );
+      setIsStreaming(false);
+      setIsStopping(false);
+      setError(null);
+      setTotalTokens(0);
 
-    if (rafRef.current != null) {
-      window.cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
-  }, []);
+      if (rafRef.current != null) {
+        window.cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (previousSessionIdRef.current !== sessionId) {
@@ -332,14 +287,16 @@ export function useChatStream({
       setTotalTokens(0);
 
       localMessageIndexRef.current += 1;
-      const userMessage: ChatMessage = {
-        blocks: [{ text: content, type: "text" }],
-        id: `local-user-${localMessageIndexRef.current}`,
-        isStreaming: false,
-        role: "user",
-        timestamp: new Date().toISOString(),
-      };
-      setMessages((current) => [...current, userMessage]);
+      applyTranscriptAction({
+        message: {
+          blocks: [{ text: content, type: "text" }],
+          id: `local-user-${localMessageIndexRef.current}`,
+          isStreaming: false,
+          role: "user",
+          timestamp: new Date().toISOString(),
+        },
+        type: "user-message",
+      });
 
       const channel = new Channel<StreamEvent>();
       channel.onmessage = (event) => {
@@ -353,52 +310,47 @@ export function useChatStream({
             break;
           case "assistantDelta":
             removeThinkingBlock(runId);
-            ensureAssistantMessage(runId);
             pendingDeltaRef.current += event.data.text;
             scheduleFlush(runId);
             break;
           case "assistantFinished":
             removeThinkingBlock(runId);
-            ensureAssistantMessage(runId);
             pendingFinishTextRef.current = event.data.text;
             scheduleFlush(runId);
             break;
-          case "toolUpdate":
-          {
-              const update = normalizeToolUpdateEvent(event.data);
-              if (!update) {
-                break;
-              }
-              upsertToolBlock(
-                runId,
-                streamToolBlock(
-                  update.callId,
-                  update.toolName,
-                  update.status,
-                  update.summary,
-                  update.detail,
-                ),
-              );
+          case "toolUpdate": {
+            const update = normalizeToolUpdateEvent(event.data);
+            if (!update) {
+              break;
             }
+            upsertToolBlock(
+              runId,
+              streamToolBlock(
+                update.callId,
+                update.toolName,
+                update.status,
+                update.summary,
+                update.detail,
+              ),
+            );
             break;
-          case "approvalRequired":
-          {
-              const approval = normalizeApprovalEvent(event.data);
-              if (!approval) {
-                break;
-              }
-              addApprovalBlock(runId, approval);
+          }
+          case "approvalRequired": {
+            const approval = normalizeApprovalEvent(event.data);
+            if (!approval) {
+              break;
             }
+            addApprovalBlock(runId, approval);
             break;
-          case "notice":
-          {
-              const notice = normalizeNoticeEvent(event.data);
-              if (!notice) {
-                break;
-              }
-              addNoticeBlock(runId, notice);
+          }
+          case "notice": {
+            const notice = normalizeNoticeEvent(event.data);
+            if (!notice) {
+              break;
             }
+            addNoticeBlock(runId, notice);
             break;
+          }
           case "turnCompleted":
             removeThinkingBlock(runId);
             break;
@@ -435,17 +387,25 @@ export function useChatStream({
 
           removeThinkingBlock(runId);
           flushAssistantDelta(runId);
-          updateAssistantMessage(runId, (message) => ({
-            ...message,
-            isStreaming: false,
-          }));
+          if (assistantMessageIdRef.current) {
+            applyTranscriptAction({
+              assistantId: assistantMessageIdRef.current,
+              type: "assistant-finish",
+            });
+          }
           setIsStreaming(false);
           setIsStopping(false);
           await Promise.all([
-            queryClient.invalidateQueries({ queryKey: ["session-history", sessionId] }),
-            queryClient.invalidateQueries({ queryKey: ["session-events", sessionId] }),
-            queryClient.invalidateQueries({ queryKey: ["session", sessionId] }),
-            queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+            queryClient.invalidateQueries({
+              queryKey: queryKeys.sessionHistory(sessionId),
+            }),
+            queryClient.invalidateQueries({
+              queryKey: queryKeys.sessionEvents(sessionId),
+            }),
+            queryClient.invalidateQueries({
+              queryKey: queryKeys.session(sessionId),
+            }),
+            queryClient.invalidateQueries({ queryKey: queryKeys.sessions() }),
           ]);
         }
       }
@@ -454,14 +414,13 @@ export function useChatStream({
       addApprovalBlock,
       addNoticeBlock,
       appendThinkingBlock,
-      ensureAssistantMessage,
+      applyTranscriptAction,
       flushAssistantDelta,
       isStreaming,
       queryClient,
       removeThinkingBlock,
       scheduleFlush,
       sessionId,
-      updateAssistantMessage,
       upsertToolBlock,
     ],
   );
@@ -595,56 +554,6 @@ function normalizeNoticeEvent(data: unknown): NoticeBlock | null {
     message,
     type: "notice",
   };
-}
-
-function appendTextDelta(blocks: ContentBlock[], delta: string): ContentBlock[] {
-  if (!delta) {
-    return blocks;
-  }
-
-  const nextBlocks = [...blocks];
-  const lastBlock = nextBlocks[nextBlocks.length - 1];
-  if (lastBlock?.type === "text") {
-    nextBlocks[nextBlocks.length - 1] = {
-      ...lastBlock,
-      text: `${lastBlock.text}${delta}`,
-    };
-    return nextBlocks;
-  }
-
-  nextBlocks.push({
-    text: delta,
-    type: "text",
-  });
-  return nextBlocks;
-}
-
-function upsertTrailingTextBlock(blocks: ContentBlock[], text: string): ContentBlock[] {
-  const nextBlocks = [...blocks];
-  const textIndex = findLastTextBlockIndex(nextBlocks);
-  if (textIndex >= 0) {
-    nextBlocks[textIndex] = {
-      text,
-      type: "text",
-    };
-    return nextBlocks;
-  }
-
-  nextBlocks.push({
-    text,
-    type: "text",
-  });
-  return nextBlocks;
-}
-
-function findLastTextBlockIndex(blocks: ContentBlock[]): number {
-  for (let index = blocks.length - 1; index >= 0; index -= 1) {
-    if (blocks[index]?.type === "text") {
-      return index;
-    }
-  }
-
-  return -1;
 }
 
 function isCancellationMessage(message: string): boolean {

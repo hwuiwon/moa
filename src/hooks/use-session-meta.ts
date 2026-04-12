@@ -1,8 +1,9 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 
+import type { EventRecordDto, ModelOptionDto, SessionMetaDto } from "@/lib/bindings";
+import { queryKeys } from "@/lib/query-keys";
 import { tauriClient } from "@/lib/tauri";
-import type { EventRecordDto, ModelOptionDto, SessionMetaDto } from "@/lib/types";
 
 type ToolStatus = "pending" | "running" | "done" | "error";
 
@@ -167,20 +168,20 @@ function canonicalEventType(eventType: string) {
 export function useSessionMeta(sessionId: string | null | undefined) {
   const metaQuery = useQuery({
     enabled: Boolean(sessionId),
-    queryKey: ["session", sessionId],
+    queryKey: queryKeys.session(sessionId),
     queryFn: () => tauriClient.getSession(sessionId!),
     refetchInterval: sessionId ? 1_000 : false,
   });
 
   const eventsQuery = useQuery({
     enabled: Boolean(sessionId),
-    queryKey: ["session-events", sessionId],
+    queryKey: queryKeys.sessionEvents(sessionId),
     queryFn: () => tauriClient.getSessionEvents(sessionId!),
     refetchInterval: sessionId ? 1_000 : false,
   });
 
   const modelOptionsQuery = useQuery({
-    queryKey: ["model-options"],
+    queryKey: queryKeys.modelOptions(),
     queryFn: tauriClient.listModelOptions,
     staleTime: 60_000,
   });

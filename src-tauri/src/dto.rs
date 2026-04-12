@@ -10,10 +10,12 @@ use moa_core::{
 use moa_runtime::{ChatRuntime, SessionPreview};
 use serde::Serialize;
 use serde_json::Value;
+use ts_rs::TS;
 
 /// Summary of the currently selected runtime.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/lib/bindings/")]
 pub struct RuntimeInfoDto {
     /// Active session identifier.
     pub session_id: String,
@@ -46,8 +48,9 @@ impl RuntimeInfoDto {
 }
 
 /// Compact session listing row for the frontend session list.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/lib/bindings/")]
 pub struct SessionSummaryDto {
     /// Session identifier.
     pub session_id: String,
@@ -88,8 +91,9 @@ impl SessionSummaryDto {
 }
 
 /// Session preview row used by the sidebar.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/lib/bindings/")]
 pub struct SessionPreviewDto {
     /// Persisted session summary.
     pub summary: SessionSummaryDto,
@@ -108,8 +112,9 @@ impl SessionPreviewDto {
 }
 
 /// Full session metadata snapshot.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/lib/bindings/")]
 pub struct SessionMetaDto {
     /// Session identifier.
     pub id: String,
@@ -144,6 +149,7 @@ pub struct SessionMetaDto {
     /// Persisted event count.
     pub event_count: usize,
     /// Last checkpoint sequence when present.
+    #[ts(type = "number | null")]
     pub last_checkpoint_seq: Option<u64>,
 }
 
@@ -172,14 +178,16 @@ impl From<SessionMeta> for SessionMetaDto {
 }
 
 /// Serialized event-log row for session inspection.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/lib/bindings/")]
 pub struct EventRecordDto {
     /// Event identifier.
     pub id: String,
     /// Session identifier.
     pub session_id: String,
     /// Sequence number within the session.
+    #[ts(type = "number")]
     pub sequence_num: u64,
     /// Event type label.
     pub event_type: String,
@@ -188,6 +196,7 @@ pub struct EventRecordDto {
     /// Optional token count for the event.
     pub token_count: Option<usize>,
     /// Serialized event payload.
+    #[ts(type = "unknown")]
     pub payload: Value,
 }
 
@@ -206,8 +215,9 @@ impl From<EventRecord> for EventRecordDto {
 }
 
 /// Compact memory search result row.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/lib/bindings/")]
 pub struct MemorySearchResultDto {
     /// Human-readable memory scope label.
     pub scope: String,
@@ -224,6 +234,7 @@ pub struct MemorySearchResultDto {
     /// Last update timestamp.
     pub updated: String,
     /// Reference count.
+    #[ts(type = "number")]
     pub reference_count: u64,
 }
 
@@ -243,8 +254,9 @@ impl From<MemorySearchResult> for MemorySearchResultDto {
 }
 
 /// Compact memory page listing entry.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/lib/bindings/")]
 pub struct PageSummaryDto {
     /// Logical page path.
     pub path: String,
@@ -271,8 +283,9 @@ impl From<PageSummary> for PageSummaryDto {
 }
 
 /// Full wiki page payload returned to the frontend editor.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/lib/bindings/")]
 pub struct WikiPageDto {
     /// Logical page path when one exists.
     pub path: Option<String>,
@@ -299,8 +312,10 @@ pub struct WikiPageDto {
     /// Last reference timestamp.
     pub last_referenced: String,
     /// Reference count.
+    #[ts(type = "number")]
     pub reference_count: u64,
     /// Additional preserved metadata.
+    #[ts(type = "Record<string, unknown>")]
     pub metadata: HashMap<String, Value>,
 }
 
@@ -326,8 +341,9 @@ impl From<WikiPage> for WikiPageDto {
 }
 
 /// Runtime configuration values the frontend needs to render settings.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/lib/bindings/")]
 pub struct MoaConfigDto {
     /// Default provider name.
     pub default_provider: String,
@@ -372,8 +388,9 @@ impl From<&MoaConfig> for MoaConfigDto {
 }
 
 /// One selectable model option for the desktop model picker.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/lib/bindings/")]
 pub struct ModelOptionDto {
     /// Stable value sent back to the backend when selected.
     pub value: String,
