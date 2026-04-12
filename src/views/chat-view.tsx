@@ -1,15 +1,21 @@
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { MessageSquareDashed } from "lucide-react";
-import { useParams } from "react-router-dom";
+import { useParams } from "@tanstack/react-router";
 
+import { MessageList } from "@/components/chat/message-list";
+import { PromptInput } from "@/components/chat/prompt-input";
 import { Badge } from "@/components/ui/badge";
 import { tauriClient } from "@/lib/tauri";
 import { formatAbsoluteDate } from "@/lib/utils";
+import { useChatStream } from "@/hooks/use-chat-stream";
+import { useSessionHistory } from "@/hooks/use-session-history";
 import { useSessionStore } from "@/stores/session";
 
+/**
+ * Main chat transcript view for one session.
+ */
 export function ChatView() {
-  const { sessionId } = useParams();
+  const { sessionId } = useParams({ strict: false });
   const setActiveSession = useSessionStore((state) => state.setActiveSession);
 
   useEffect(() => {
@@ -17,86 +23,60 @@ export function ChatView() {
   }, [sessionId, setActiveSession]);
 
   const session = useQuery({
+    enabled: Boolean(sessionId),
     queryKey: ["session", sessionId],
     queryFn: () => tauriClient.getSession(sessionId!),
-    enabled: Boolean(sessionId),
+  });
+  const history = useSessionHistory(sessionId);
+  const stream = useChatStream({
+    initialMessages: history.data ?? [],
+    sessionId,
   });
 
-  if (!sessionId) {
-    return (
-      <div className="flex h-full items-center justify-center px-8">
-        <div className="max-w-md text-center">
-          <MessageSquareDashed className="mx-auto h-10 w-10 text-muted-foreground" />
-          <h2 className="mt-4 text-lg font-semibold">
-            No session selected
-          </h2>
-          <p className="mt-2 text-sm text-muted-foreground">
-            Create a session from the sidebar or top bar. The chat surface will
-            render here in the next step.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="flex h-full flex-col overflow-y-auto">
-      <div className="mx-auto w-full max-w-3xl px-6 py-6">
-        <div className="flex items-center justify-between gap-4">
-          <div>
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="border-b border-border px-6 py-4">
+        <div className="mx-auto flex max-w-4xl items-center justify-between gap-6">
+          <div className="min-w-0">
             <p className="text-[11px] uppercase tracking-widest text-muted-foreground">
               Chat
             </p>
-            <h1 className="mt-1 text-xl font-semibold">
+            <h1 className="mt-1 truncate text-xl font-semibold">
               {session.data?.title ?? "Session workspace"}
             </h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {session.data
+                ? `Updated ${formatAbsoluteDate(session.data.updatedAt)}`
+                : "Select a session or create a new one to start chatting."}
+            </p>
           </div>
-          {session.data ? (
-            <Badge variant="secondary">{session.data.status}</Badge>
-          ) : null}
-        </div>
 
-        <div className="mt-6 grid gap-3 sm:grid-cols-2">
-          <div className="rounded-lg border border-border bg-card p-3">
-            <p className="text-[11px] uppercase tracking-widest text-muted-foreground">
-              Session ID
-            </p>
-            <p className="mt-1.5 break-all font-mono text-xs">
-              {sessionId}
-            </p>
+          <div className="flex items-center gap-2">
+            {session.data ? (
+              <Badge variant="secondary">{session.data.status}</Badge>
+            ) : null}
+            {stream.isStreaming ? (
+              <Badge variant="outline">Streaming</Badge>
+            ) : null}
           </div>
-          <div className="rounded-lg border border-border bg-card p-3">
-            <p className="text-[11px] uppercase tracking-widest text-muted-foreground">
-              Current model
-            </p>
-            <p className="mt-1.5 text-sm">
-              {session.data?.model ?? "Loading…"}
-            </p>
-          </div>
-          <div className="rounded-lg border border-border bg-card p-3">
-            <p className="text-[11px] uppercase tracking-widest text-muted-foreground">
-              Updated
-            </p>
-            <p className="mt-1.5 text-sm">
-              {session.data ? formatAbsoluteDate(session.data.updatedAt) : "Loading…"}
-            </p>
-          </div>
-          <div className="rounded-lg border border-border bg-card p-3">
-            <p className="text-[11px] uppercase tracking-widest text-muted-foreground">
-              Event count
-            </p>
-            <p className="mt-1.5 text-sm">
-              {session.data?.eventCount ?? "Loading…"}
-            </p>
-          </div>
-        </div>
-
-        <div className="mt-6 rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
-          Streaming chat composition, tool cards, approvals, and transcript
-          rendering land here in the next steps. The routing and session shell
-          are live now.
         </div>
       </div>
+
+      <MessageList
+        error={stream.error}
+        isLoading={history.isLoading}
+        messages={stream.messages}
+      />
+
+      <PromptInput
+        currentModel={session.data?.model}
+        disabled={!sessionId}
+        isStopping={stream.isStopping}
+        isStreaming={stream.isStreaming}
+        onSend={stream.sendMessage}
+        onStop={stream.stopMessage}
+        totalTokens={stream.totalTokens}
+      />
     </div>
   );
 }

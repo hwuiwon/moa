@@ -3,9 +3,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Navigate,
   Outlet,
-  useLocation,
   useNavigate,
-} from "react-router-dom";
+  useRouterState,
+} from "@tanstack/react-router";
 
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -19,7 +19,9 @@ import { useSessionStore } from "@/stores/session";
 
 export function AppLayout() {
   const navigate = useNavigate();
-  const location = useLocation();
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   const queryClient = useQueryClient();
 
   const sidebarOpen = useLayoutStore((state) => state.sidebarOpen);
@@ -50,16 +52,16 @@ export function AppLayout() {
   });
 
   useEffect(() => {
-    if (location.pathname.startsWith("/memory")) {
+    if (pathname.startsWith("/memory")) {
       setActiveView("memory");
       return;
     }
-    if (location.pathname.startsWith("/settings")) {
+    if (pathname.startsWith("/settings")) {
       setActiveView("settings");
       return;
     }
     setActiveView("chat");
-  }, [location.pathname, setActiveView]);
+  }, [pathname, setActiveView]);
 
   useEffect(() => {
     if (runtimeInfo.data?.sessionId && !activeSessionId) {
@@ -81,7 +83,7 @@ export function AppLayout() {
     onSuccess: async (sessionId) => {
       setActiveSession(sessionId);
       await invalidateChromeQueries();
-      navigate(`/chat/${sessionId}`);
+      navigate({ to: "/chat/$sessionId", params: { sessionId } });
     },
   });
 
@@ -93,7 +95,7 @@ export function AppLayout() {
     onSuccess: async (sessionId) => {
       setActiveSession(sessionId);
       await invalidateChromeQueries();
-      navigate(`/chat/${sessionId}`);
+      navigate({ to: "/chat/$sessionId", params: { sessionId } });
     },
   });
 
@@ -102,7 +104,7 @@ export function AppLayout() {
     onSuccess: async (sessionId) => {
       setActiveSession(sessionId);
       await invalidateChromeQueries();
-      navigate(`/chat/${sessionId}`);
+      navigate({ to: "/chat/$sessionId", params: { sessionId } });
     },
   });
 
@@ -146,16 +148,14 @@ export function AppLayout() {
     toggleSidebar,
   ]);
 
-  const activeChatHref = useMemo(
-    () => (activeSessionId ? `/chat/${activeSessionId}` : "/chat"),
-    [activeSessionId],
-  );
+  const hasActiveSession = useMemo(() => Boolean(activeSessionId), [activeSessionId]);
 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
       <TopBar
-        activeChatHref={activeChatHref}
+        activeSessionId={activeSessionId}
         activeView={activeView}
+        hasActiveSession={hasActiveSession}
         modelOptions={modelOptions.data ?? []}
         modelPending={setModel.isPending}
         onCreateSession={() => createSession.mutate()}
@@ -239,7 +239,7 @@ export function HomeRedirect() {
     sessions.data?.[0]?.summary.sessionId;
 
   if (sessionId) {
-    return <Navigate replace to={`/chat/${sessionId}`} />;
+    return <Navigate params={{ sessionId }} replace to="/chat/$sessionId" />;
   }
 
   return <Navigate replace to="/chat" />;

@@ -1,12 +1,14 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type {
+  EventRecordDto,
   MoaConfigDto,
   ModelOptionDto,
   RuntimeInfoDto,
   SessionMetaDto,
   SessionPreviewDto,
 } from "@/lib/types";
+import type { StreamEvent } from "@/types/chat";
 
 function errorMessage(error: unknown): string {
   if (typeof error === "string") {
@@ -42,9 +44,18 @@ export const tauriClient = {
     invokeCommand<SessionPreviewDto[]>("list_session_previews"),
   getSession: (sessionId: string) =>
     invokeCommand<SessionMetaDto>("get_session", { sessionId }),
+  getSessionEvents: (sessionId: string) =>
+    invokeCommand<EventRecordDto[]>("get_session_events", { sessionId }),
   getRuntimeInfo: () => invokeCommand<RuntimeInfoDto>("get_runtime_info"),
   getConfig: () => invokeCommand<MoaConfigDto>("get_config"),
   listModelOptions: () =>
     invokeCommand<ModelOptionDto[]>("list_model_options"),
   setModel: (model: string) => invokeCommand<string>("set_model", { model }),
+  sendMessage: (
+    sessionId: string,
+    prompt: string,
+    onEvent: Channel<StreamEvent>,
+  ) => invokeCommand<void>("send_message", { sessionId, prompt, onEvent }),
+  stopSession: (sessionId: string) =>
+    invokeCommand<void>("stop_session", { sessionId }),
 };
