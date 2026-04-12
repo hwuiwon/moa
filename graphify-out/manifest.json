@@ -11,7 +11,7 @@
   "moa-memory/src/branching.rs": 1775839600.85727,
   "moa-core/src/telemetry.rs": 1775876271.090949,
   "moa-core/src/types.rs": 1775971405.2880065,
-  "moa-core/src/events.rs": 1775961745.7035117,
+  "moa-core/src/events.rs": 1776007481.392638,
   "moa-core/src/error.rs": 1775955694.0917432,
   "moa-core/src/config.rs": 1775955694.0915926,
   "moa-core/src/lib.rs": 1775961745.7038953,
@@ -115,12 +115,12 @@
   "moa-hands/src/tools/file_read.rs": 1775845995.6197526,
   "moa-hands/src/tools/session_search.rs": 1775885326.9527698,
   "moa-brain/tests/live_harness.rs": 1775825706.3703468,
-  "moa-brain/tests/brain_turn.rs": 1775961745.702805,
+  "moa-brain/tests/brain_turn.rs": 1776007659.9663072,
   "moa-brain/examples/chat_harness.rs": 1775885326.9414854,
   "moa-brain/src/lib.rs": 1775887702.7777936,
-  "moa-brain/src/turn.rs": 1775954543.1546354,
-  "moa-brain/src/harness.rs": 1775954543.1527522,
-  "moa-brain/src/tool_stats.rs": 1775887702.7784507,
+  "moa-brain/src/turn.rs": 1776007639.108316,
+  "moa-brain/src/harness.rs": 1776007520.367801,
+  "moa-brain/src/tool_stats.rs": 1776007594.9600825,
   "moa-brain/src/compaction.rs": 1775961745.701834,
   "moa-brain/src/pipeline/cache.rs": 1775954543.1529124,
   "moa-brain/src/pipeline/instructions.rs": 1775954543.1536033,
@@ -129,7 +129,7 @@
   "moa-brain/src/pipeline/skills.rs": 1775954543.1542313,
   "moa-brain/src/pipeline/identity.rs": 1775961745.7025633,
   "moa-brain/src/pipeline/mod.rs": 1775954543.154016,
-  "moa-brain/src/pipeline/history.rs": 1775961745.7022073,
+  "moa-brain/src/pipeline/history.rs": 1776007659.9480274,
   "moa-eval/tests/evaluators.rs": 1775883525.9095943,
   "moa-eval/tests/engine_live.rs": 1775882365.8875828,
   "moa-eval/tests/loader.rs": 1775880336.0995395,
@@ -288,8 +288,8 @@
     "2": "TUI App State",
     "3": "Memory Pipeline & Views",
     "4": "Event Taxonomy",
-    "5": "Config & Errors",
-    "6": "Brain Turn Tests",
+    "5": "Brain Turn Tests",
+    "6": "Config & Errors",
     "7": "Eval Loader Tests",
     "8": "Skill Document Format",
     "9": "CLI Entry Point",
@@ -297,32 +297,32 @@
     "11": "Adaptive Tool Stats",
     "12": "Anthropic Provider",
     "13": "Postgres Session Store",
-    "14": "Temporal Orchestrator",
-    "15": "Local Orchestrator",
+    "14": "Local Orchestrator",
+    "15": "Temporal Orchestrator",
     "16": "Turso Session Store",
-    "17": "OpenRouter Provider",
-    "18": "Local Orchestrator Tests",
-    "19": "Chat UI Rendering Layer",
-    "20": "History Compilation Stage",
-    "21": "Eval Execution Engine",
-    "22": "Skill Regression Testing",
-    "23": "Settings View",
-    "24": "Neon Branch Manager",
-    "25": "Skill Injection Stage",
-    "26": "Memory Consolidation",
-    "27": "Brain Turn Execution",
+    "17": "Local Orchestrator Tests",
+    "18": "Chat UI Rendering Layer",
+    "19": "History Compilation Stage",
+    "20": "Eval Execution Engine",
+    "21": "Skill Regression Testing",
+    "22": "Provider Common Layer",
+    "23": "Brain Turn Execution",
+    "24": "Settings View",
+    "25": "Neon Branch Manager",
+    "26": "Skill Injection Stage",
+    "27": "Memory Consolidation",
     "28": "Chat View",
     "29": "Daemon Service",
     "30": "Message Renderer",
     "31": "Temporal Orchestrator Tests",
-    "32": "Diff View",
-    "33": "Discord Adapter",
-    "34": "E2B Sandbox Provider",
-    "35": "Slack Adapter",
-    "36": "Pipeline & Session Helpers",
-    "37": "Eval Agent Setup",
-    "38": "Wiki & Memory Branching",
-    "39": "Provider Common Layer",
+    "32": "OpenRouter Provider",
+    "33": "Diff View",
+    "34": "Discord Adapter",
+    "35": "E2B Sandbox Provider",
+    "36": "Slack Adapter",
+    "37": "Pipeline & Session Helpers",
+    "38": "Eval Agent Setup",
+    "39": "Wiki & Memory Branching",
     "40": "Local Tool Tests",
     "41": "MCP Client Discovery",
     "42": "MCP Credential Proxy",
@@ -342,52 +342,53 @@
     "56": "Session Picker View",
     "57": "Tool Approval Policies",
     "58": "Memory Maintenance Tests",
-    "59": "Encrypted Secret Vault",
-    "60": "Command Palette",
-    "61": "Prompt Injection Defense",
-    "62": "Session Search Tool",
-    "63": "TUI Keybindings",
-    "64": "Toolbar Widget",
-    "65": "Eval Terminal Reporter",
-    "66": "Memory Store Tests",
-    "67": "Postgres Store Tests",
-    "68": "Tool Card Widget",
-    "69": "Live Provider Roundtrip Tests",
-    "70": "Neon Branch Manager Tests",
-    "71": "Temporal Worker Helper",
-    "72": "Instruction Stage",
-    "73": "Identity Stage",
-    "74": "Trajectory Match Evaluator",
-    "75": "Output Match Evaluator",
-    "76": "Bash Tool",
-    "77": "Cache Optimizer Stage",
-    "78": "Threshold Evaluator",
-    "79": "CLI Exec Mode",
-    "80": "Sidebar Widget",
-    "81": "Anthropic Provider Tests",
-    "82": "File Search Tool",
-    "83": "Tailwind Merge Util",
-    "84": "OpenRouter Live Test",
-    "85": "Chat Harness Example",
-    "86": "Tool Success Evaluator",
-    "87": "OpenAI Live Test",
-    "88": "Anthropic Live Test",
-    "89": "Frontend Toolchain Assets",
-    "90": "TUI Workflow Tests",
-    "91": "Turso Schema Migration",
-    "92": "Tauri Build Entry",
-    "93": "Docker Hardening Test",
-    "94": "Brain Live Harness Test",
-    "95": "Eval Live Tests",
-    "96": "hooks",
-    "97": "Vite Config",
-    "98": "TUI Runner",
-    "99": "Vite Env Types",
-    "100": "stores",
+    "59": "Provider Factory Resolution",
+    "60": "Encrypted Secret Vault",
+    "61": "Command Palette",
+    "62": "Prompt Injection Defense",
+    "63": "Session Search Tool",
+    "64": "TUI Keybindings",
+    "65": "Toolbar Widget",
+    "66": "Eval Terminal Reporter",
+    "67": "Memory Store Tests",
+    "68": "Postgres Store Tests",
+    "69": "Tool Card Widget",
+    "70": "Live Provider Roundtrip Tests",
+    "71": "Neon Branch Manager Tests",
+    "72": "Temporal Worker Helper",
+    "73": "Instruction Stage",
+    "74": "Identity Stage",
+    "75": "Trajectory Match Evaluator",
+    "76": "Output Match Evaluator",
+    "77": "Bash Tool",
+    "78": "Cache Optimizer Stage",
+    "79": "Threshold Evaluator",
+    "80": "CLI Exec Mode",
+    "81": "Sidebar Widget",
+    "82": "Anthropic Provider Tests",
+    "83": "File Search Tool",
+    "84": "Tailwind Merge Util",
+    "85": "OpenRouter Live Test",
+    "86": "Chat Harness Example",
+    "87": "Tool Success Evaluator",
+    "88": "OpenAI Live Test",
+    "89": "Anthropic Live Test",
+    "90": "Frontend Toolchain Assets",
+    "91": "TUI Workflow Tests",
+    "92": "Turso Schema Migration",
+    "93": "Tauri Build Entry",
+    "94": "Docker Hardening Test",
+    "95": "Brain Live Harness Test",
+    "96": "Eval Live Tests",
+    "97": "hooks",
+    "98": "Vite Config",
+    "99": "TUI Runner",
+    "100": "Vite Env Types",
     "101": "stores",
-    "102": "Prompt-Kit Loader",
-    "103": "Text Shimmer Animation",
-    "104": "Prompt-Kit Message"
+    "102": "stores",
+    "103": "Prompt-Kit Loader",
+    "104": "Text Shimmer Animation",
+    "105": "Prompt-Kit Message"
   },
   "community_signatures": {
     "0": [
@@ -626,22 +627,6 @@
       "evaluators_threshold_cost_over_budget_fails",
       "evaluators_tool_success_reports_rate",
       "evaluators_trajectory_exact_match_scores_one",
-      "factory",
-      "factory_build_provider_from_config",
-      "factory_build_provider_from_selection",
-      "factory_explicit_provider_prefix_overrides_inference",
-      "factory_infer_provider_name",
-      "factory_infers_anthropic_for_claude_models",
-      "factory_infers_openai_for_gpt_models",
-      "factory_infers_openrouter_for_vendor_prefixed_models",
-      "factory_is_openai_model",
-      "factory_matches_provider_name",
-      "factory_normalize_model_for_provider",
-      "factory_normalize_openrouter_model",
-      "factory_providerselection",
-      "factory_resolve_provider_selection",
-      "factory_split_explicit_provider",
-      "factory_validate_provider_name",
       "lib",
       "lib_appstate",
       "lib_boxed_error",
@@ -1142,6 +1127,91 @@
       "schema_strip_validation_keywords"
     ],
     "5": [
+      "brain_turn",
+      "brain_turn_always_allow_rule_persists_and_skips_next_approval",
+      "brain_turn_canary_leaks_in_tool_input_are_detected_and_blocked",
+      "brain_turn_canaryleakllmprovider",
+      "brain_turn_canaryleakllmprovider_capabilities",
+      "brain_turn_canaryleakllmprovider_complete",
+      "brain_turn_canaryleakllmprovider_name",
+      "brain_turn_capturingtextllmprovider",
+      "brain_turn_capturingtextllmprovider_capabilities",
+      "brain_turn_capturingtextllmprovider_complete",
+      "brain_turn_capturingtextllmprovider_name",
+      "brain_turn_capturingtextllmprovider_new",
+      "brain_turn_fixedpagememorystore",
+      "brain_turn_fixedpagememorystore_delete_page",
+      "brain_turn_fixedpagememorystore_get_index",
+      "brain_turn_fixedpagememorystore_list_pages",
+      "brain_turn_fixedpagememorystore_read_page",
+      "brain_turn_fixedpagememorystore_rebuild_search_index",
+      "brain_turn_fixedpagememorystore_search",
+      "brain_turn_fixedpagememorystore_write_page",
+      "brain_turn_make_event_record",
+      "brain_turn_malicious_tool_results_are_wrapped_as_untrusted_content",
+      "brain_turn_malicioustooloutputllmprovider",
+      "brain_turn_malicioustooloutputllmprovider_capabilities",
+      "brain_turn_malicioustooloutputllmprovider_complete",
+      "brain_turn_malicioustooloutputllmprovider_name",
+      "brain_turn_memoryingestloopllmprovider",
+      "brain_turn_memoryingestloopllmprovider_capabilities",
+      "brain_turn_memoryingestloopllmprovider_complete",
+      "brain_turn_memoryingestloopllmprovider_name",
+      "brain_turn_memorywriteloopllmprovider",
+      "brain_turn_memorywriteloopllmprovider_capabilities",
+      "brain_turn_memorywriteloopllmprovider_complete",
+      "brain_turn_memorywriteloopllmprovider_name",
+      "brain_turn_mockllmprovider",
+      "brain_turn_mockllmprovider_capabilities",
+      "brain_turn_mockllmprovider_complete",
+      "brain_turn_mockllmprovider_name",
+      "brain_turn_mockmemorystore",
+      "brain_turn_mockmemorystore_delete_page",
+      "brain_turn_mockmemorystore_get_index",
+      "brain_turn_mockmemorystore_list_pages",
+      "brain_turn_mockmemorystore_read_page",
+      "brain_turn_mockmemorystore_rebuild_search_index",
+      "brain_turn_mockmemorystore_search",
+      "brain_turn_mockmemorystore_write_page",
+      "brain_turn_mocksessionstore",
+      "brain_turn_mocksessionstore_create_session",
+      "brain_turn_mocksessionstore_emit_event",
+      "brain_turn_mocksessionstore_get_events",
+      "brain_turn_mocksessionstore_get_pending_signals",
+      "brain_turn_mocksessionstore_get_session",
+      "brain_turn_mocksessionstore_list_sessions",
+      "brain_turn_mocksessionstore_new",
+      "brain_turn_mocksessionstore_resolve_pending_signal",
+      "brain_turn_mocksessionstore_search_events",
+      "brain_turn_mocksessionstore_store_pending_signal",
+      "brain_turn_mocksessionstore_update_status",
+      "brain_turn_openaiapprovalloopllmprovider",
+      "brain_turn_openaiapprovalloopllmprovider_capabilities",
+      "brain_turn_openaiapprovalloopllmprovider_complete",
+      "brain_turn_openaiapprovalloopllmprovider_name",
+      "brain_turn_pipeline_stage_four_injects_workspace_skill_metadata",
+      "brain_turn_providertoolresultturnllm",
+      "brain_turn_providertoolresultturnllm_capabilities",
+      "brain_turn_providertoolresultturnllm_complete",
+      "brain_turn_providertoolresultturnllm_name",
+      "brain_turn_repeatingtoolllmprovider",
+      "brain_turn_repeatingtoolllmprovider_capabilities",
+      "brain_turn_repeatingtoolllmprovider_complete",
+      "brain_turn_repeatingtoolllmprovider_name",
+      "brain_turn_run_brain_turn_can_search_recently_ingested_memory_on_follow_up_turn",
+      "brain_turn_run_brain_turn_emits_brain_response_event",
+      "brain_turn_run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event",
+      "brain_turn_run_brain_turn_memory_write_creates_workspace_page_after_approval",
+      "brain_turn_run_brain_turn_pauses_for_approval_then_executes_tool",
+      "brain_turn_run_brain_turn_preserves_openai_function_call_id_after_approval",
+      "brain_turn_streamed_turn_provider_tool_result_surfaces_notice_without_router_execution",
+      "brain_turn_streamed_turn_runtime_matches_buffered_response",
+      "brain_turn_toolloopllmprovider",
+      "brain_turn_toolloopllmprovider_capabilities",
+      "brain_turn_toolloopllmprovider_complete",
+      "brain_turn_toolloopllmprovider_name"
+    ],
+    "6": [
       "config",
       "config_cloudconfig",
       "config_cloudconfig_default",
@@ -1220,86 +1290,6 @@
       "telemetry_telemetryguard",
       "telemetry_telemetryguard_disabled",
       "telemetry_telemetryguard_drop"
-    ],
-    "6": [
-      "brain_turn",
-      "brain_turn_always_allow_rule_persists_and_skips_next_approval",
-      "brain_turn_canary_leaks_in_tool_input_are_detected_and_blocked",
-      "brain_turn_canaryleakllmprovider",
-      "brain_turn_canaryleakllmprovider_capabilities",
-      "brain_turn_canaryleakllmprovider_complete",
-      "brain_turn_canaryleakllmprovider_name",
-      "brain_turn_capturingtextllmprovider",
-      "brain_turn_capturingtextllmprovider_capabilities",
-      "brain_turn_capturingtextllmprovider_complete",
-      "brain_turn_capturingtextllmprovider_name",
-      "brain_turn_capturingtextllmprovider_new",
-      "brain_turn_fixedpagememorystore",
-      "brain_turn_fixedpagememorystore_delete_page",
-      "brain_turn_fixedpagememorystore_get_index",
-      "brain_turn_fixedpagememorystore_list_pages",
-      "brain_turn_fixedpagememorystore_read_page",
-      "brain_turn_fixedpagememorystore_rebuild_search_index",
-      "brain_turn_fixedpagememorystore_search",
-      "brain_turn_fixedpagememorystore_write_page",
-      "brain_turn_make_event_record",
-      "brain_turn_malicious_tool_results_are_wrapped_as_untrusted_content",
-      "brain_turn_malicioustooloutputllmprovider",
-      "brain_turn_malicioustooloutputllmprovider_capabilities",
-      "brain_turn_malicioustooloutputllmprovider_complete",
-      "brain_turn_malicioustooloutputllmprovider_name",
-      "brain_turn_memoryingestloopllmprovider",
-      "brain_turn_memoryingestloopllmprovider_capabilities",
-      "brain_turn_memoryingestloopllmprovider_complete",
-      "brain_turn_memoryingestloopllmprovider_name",
-      "brain_turn_memorywriteloopllmprovider",
-      "brain_turn_memorywriteloopllmprovider_capabilities",
-      "brain_turn_memorywriteloopllmprovider_complete",
-      "brain_turn_memorywriteloopllmprovider_name",
-      "brain_turn_mockllmprovider",
-      "brain_turn_mockllmprovider_capabilities",
-      "brain_turn_mockllmprovider_complete",
-      "brain_turn_mockllmprovider_name",
-      "brain_turn_mockmemorystore",
-      "brain_turn_mockmemorystore_delete_page",
-      "brain_turn_mockmemorystore_get_index",
-      "brain_turn_mockmemorystore_list_pages",
-      "brain_turn_mockmemorystore_read_page",
-      "brain_turn_mockmemorystore_rebuild_search_index",
-      "brain_turn_mockmemorystore_search",
-      "brain_turn_mockmemorystore_write_page",
-      "brain_turn_mocksessionstore",
-      "brain_turn_mocksessionstore_create_session",
-      "brain_turn_mocksessionstore_emit_event",
-      "brain_turn_mocksessionstore_get_events",
-      "brain_turn_mocksessionstore_get_pending_signals",
-      "brain_turn_mocksessionstore_get_session",
-      "brain_turn_mocksessionstore_list_sessions",
-      "brain_turn_mocksessionstore_new",
-      "brain_turn_mocksessionstore_resolve_pending_signal",
-      "brain_turn_mocksessionstore_search_events",
-      "brain_turn_mocksessionstore_store_pending_signal",
-      "brain_turn_mocksessionstore_update_status",
-      "brain_turn_pipeline_stage_four_injects_workspace_skill_metadata",
-      "brain_turn_providertoolresultturnllm",
-      "brain_turn_providertoolresultturnllm_capabilities",
-      "brain_turn_providertoolresultturnllm_complete",
-      "brain_turn_providertoolresultturnllm_name",
-      "brain_turn_repeatingtoolllmprovider",
-      "brain_turn_repeatingtoolllmprovider_capabilities",
-      "brain_turn_repeatingtoolllmprovider_complete",
-      "brain_turn_repeatingtoolllmprovider_name",
-      "brain_turn_run_brain_turn_can_search_recently_ingested_memory_on_follow_up_turn",
-      "brain_turn_run_brain_turn_emits_brain_response_event",
-      "brain_turn_run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event",
-      "brain_turn_run_brain_turn_memory_write_creates_workspace_page_after_approval",
-      "brain_turn_run_brain_turn_pauses_for_approval_then_executes_tool",
-      "brain_turn_streamed_turn_provider_tool_result_surfaces_notice_without_router_execution",
-      "brain_turn_streamed_turn_runtime_matches_buffered_response",
-      "brain_turn_toolloopllmprovider",
-      "brain_turn_toolloopllmprovider_capabilities",
-      "brain_turn_toolloopllmprovider_complete",
-      "brain_turn_toolloopllmprovider_name"
     ],
     "7": [
       "commands",
@@ -1762,65 +1752,6 @@
       "schema_postgres_quote_identifier"
     ],
     "14": [
-      "temporal",
-      "temporal_activity_options",
-      "temporal_apply_approval_decision",
-      "temporal_approvaldecisionactivityinput",
-      "temporal_approvalsignalinput",
-      "temporal_brain_turn_activity_options",
-      "temporal_cancelmode",
-      "temporal_connect_temporal_client",
-      "temporal_event_to_runtime_event",
-      "temporal_flush_all_queued_messages",
-      "temporal_flushqueuedmessagesactivityinput",
-      "temporal_mark_cancelled",
-      "temporal_non_retryable_activity_error",
-      "temporal_normalize_temporal_address",
-      "temporal_normalizes_cloud_addresses_with_https_by_default",
-      "temporal_normalizes_local_addresses_with_http",
-      "temporal_queuemessageactivityinput",
-      "temporal_raw_temporal_value",
-      "temporal_session_is_terminal",
-      "temporal_session_requires_processing",
-      "temporal_sessionstatusactivityinput",
-      "temporal_sessionworkflow",
-      "temporal_sessionworkflow_approval_decided",
-      "temporal_sessionworkflow_new",
-      "temporal_sessionworkflow_queue_message",
-      "temporal_sessionworkflow_request_soft_cancel",
-      "temporal_sessionworkflow_run",
-      "temporal_sessionworkflowinput",
-      "temporal_temporalactivities",
-      "temporal_temporalactivities_append_approval_decision",
-      "temporal_temporalactivities_append_queued_message",
-      "temporal_temporalactivities_append_queued_messages",
-      "temporal_temporalactivities_brain_turn",
-      "temporal_temporalactivities_finalize_completed_session",
-      "temporal_temporalactivities_update_status",
-      "temporal_temporalorchestrator",
-      "temporal_temporalorchestrator_ensure_workflow_started",
-      "temporal_temporalorchestrator_from_config",
-      "temporal_temporalorchestrator_list_sessions",
-      "temporal_temporalorchestrator_new",
-      "temporal_temporalorchestrator_observe",
-      "temporal_temporalorchestrator_observe_live_tail",
-      "temporal_temporalorchestrator_observe_runtime",
-      "temporal_temporalorchestrator_resume_session",
-      "temporal_temporalorchestrator_schedule_cron",
-      "temporal_temporalorchestrator_signal",
-      "temporal_temporalorchestrator_spawn_child_workflow",
-      "temporal_temporalorchestrator_start_session",
-      "temporal_temporalorchestrator_task_queue",
-      "temporal_temporalruntime",
-      "temporal_temporalruntime_connect",
-      "temporal_temporalruntime_start_session_workflow",
-      "temporal_temporalruntime_workflow_handle",
-      "temporal_temporalturnresult",
-      "temporal_workflow_activity_error",
-      "temporal_workflow_id_for_session",
-      "temporal_workflow_ids_are_stable_and_prefixed"
-    ],
-    "15": [
       "local",
       "local_accept_user_message",
       "local_append_event",
@@ -1878,6 +1809,65 @@
       "local_sessiontaskcontext",
       "local_turn_number_for_events",
       "local_update_status"
+    ],
+    "15": [
+      "temporal",
+      "temporal_activity_options",
+      "temporal_apply_approval_decision",
+      "temporal_approvaldecisionactivityinput",
+      "temporal_approvalsignalinput",
+      "temporal_brain_turn_activity_options",
+      "temporal_cancelmode",
+      "temporal_connect_temporal_client",
+      "temporal_event_to_runtime_event",
+      "temporal_flush_all_queued_messages",
+      "temporal_flushqueuedmessagesactivityinput",
+      "temporal_mark_cancelled",
+      "temporal_non_retryable_activity_error",
+      "temporal_normalize_temporal_address",
+      "temporal_normalizes_cloud_addresses_with_https_by_default",
+      "temporal_normalizes_local_addresses_with_http",
+      "temporal_queuemessageactivityinput",
+      "temporal_raw_temporal_value",
+      "temporal_session_is_terminal",
+      "temporal_session_requires_processing",
+      "temporal_sessionstatusactivityinput",
+      "temporal_sessionworkflow",
+      "temporal_sessionworkflow_approval_decided",
+      "temporal_sessionworkflow_new",
+      "temporal_sessionworkflow_queue_message",
+      "temporal_sessionworkflow_request_soft_cancel",
+      "temporal_sessionworkflow_run",
+      "temporal_sessionworkflowinput",
+      "temporal_temporalactivities",
+      "temporal_temporalactivities_append_approval_decision",
+      "temporal_temporalactivities_append_queued_message",
+      "temporal_temporalactivities_append_queued_messages",
+      "temporal_temporalactivities_brain_turn",
+      "temporal_temporalactivities_finalize_completed_session",
+      "temporal_temporalactivities_update_status",
+      "temporal_temporalorchestrator",
+      "temporal_temporalorchestrator_ensure_workflow_started",
+      "temporal_temporalorchestrator_from_config",
+      "temporal_temporalorchestrator_list_sessions",
+      "temporal_temporalorchestrator_new",
+      "temporal_temporalorchestrator_observe",
+      "temporal_temporalorchestrator_observe_live_tail",
+      "temporal_temporalorchestrator_observe_runtime",
+      "temporal_temporalorchestrator_resume_session",
+      "temporal_temporalorchestrator_schedule_cron",
+      "temporal_temporalorchestrator_signal",
+      "temporal_temporalorchestrator_spawn_child_workflow",
+      "temporal_temporalorchestrator_start_session",
+      "temporal_temporalorchestrator_task_queue",
+      "temporal_temporalruntime",
+      "temporal_temporalruntime_connect",
+      "temporal_temporalruntime_start_session_workflow",
+      "temporal_temporalruntime_workflow_handle",
+      "temporal_temporalturnresult",
+      "temporal_workflow_activity_error",
+      "temporal_workflow_id_for_session",
+      "temporal_workflow_ids_are_stable_and_prefixed"
     ],
     "16": [
       "queries_turso",
@@ -1937,63 +1927,6 @@
       "turso_tursosessionstore_wake"
     ],
     "17": [
-      "openai",
-      "openai_canonical_model_id",
-      "openai_capabilities_for_model",
-      "openai_gpt_5_4_family_reports_expected_capabilities",
-      "openai_native_tools",
-      "openai_native_web_search_tools",
-      "openai_openaiprovider",
-      "openai_openaiprovider_capabilities",
-      "openai_openaiprovider_complete",
-      "openai_openaiprovider_from_config",
-      "openai_openaiprovider_from_config_with_model",
-      "openai_openaiprovider_from_env",
-      "openai_openaiprovider_name",
-      "openai_openaiprovider_new",
-      "openai_openaiprovider_new_with_reasoning_effort",
-      "openai_openaiprovider_with_api_base",
-      "openai_openaiprovider_with_max_retries",
-      "openai_openaiprovider_with_web_search_enabled",
-      "openai_unsupported_models_are_rejected",
-      "openrouter",
-      "openrouter_build_request_body",
-      "openrouter_canonical_model_id",
-      "openrouter_capabilities_for_model",
-      "openrouter_capability_lookup_reuses_known_model_families",
-      "openrouter_completion_response_from_response",
-      "openrouter_consume_sse_events",
-      "openrouter_error_message",
-      "openrouter_native_tools",
-      "openrouter_native_web_search_tools",
-      "openrouter_normalize_openrouter_input_format",
-      "openrouter_normalizes_vendorless_models_to_provider_prefixed_routes",
-      "openrouter_openrouterprovider",
-      "openrouter_openrouterprovider_capabilities",
-      "openrouter_openrouterprovider_complete",
-      "openrouter_openrouterprovider_from_config",
-      "openrouter_openrouterprovider_from_config_with_model",
-      "openrouter_openrouterprovider_from_env",
-      "openrouter_openrouterprovider_name",
-      "openrouter_openrouterprovider_new",
-      "openrouter_openrouterprovider_new_with_reasoning_effort",
-      "openrouter_openrouterprovider_with_api_base",
-      "openrouter_openrouterprovider_with_max_retries",
-      "openrouter_openrouterprovider_with_web_search_enabled",
-      "openrouter_openroutersseframe",
-      "openrouter_openrouterstreamstate",
-      "openrouter_openrouterstreamstate_apply_event",
-      "openrouter_openrouterstreamstate_apply_function_arguments_done",
-      "openrouter_openrouterstreamstate_apply_output_item_event",
-      "openrouter_openrouterstreamstate_apply_response_event",
-      "openrouter_openrouterstreamstate_apply_text_delta",
-      "openrouter_openrouterstreamstate_finish",
-      "openrouter_openrouterstreamstate_new",
-      "openrouter_openrouterstreamstate_summarize_search_event",
-      "openrouter_provider_native_tool_json",
-      "openrouter_serializes_responses_body_with_openrouter_server_tool_shape"
-    ],
-    "18": [
       "local_orchestrator",
       "local_orchestrator_approval_requested_event_persists_full_prompt_details",
       "local_orchestrator_brain_response_texts",
@@ -2050,7 +1983,7 @@
       "local_orchestrator_wait_for_pending_signal_count",
       "local_orchestrator_wait_for_status"
     ],
-    "19": [
+    "18": [
       "app_layout",
       "app_tsx",
       "approval_card",
@@ -2107,7 +2040,7 @@
       "top_bar",
       "user_message"
     ],
-    "20": [
+    "19": [
       "compaction",
       "compaction_calculate_cost_cents",
       "compaction_checkpointstate",
@@ -2160,7 +2093,7 @@
       "history_preserved_error_messages",
       "history_session"
     ],
-    "21": [
+    "20": [
       "collector",
       "collector_collectedexecution",
       "collector_collector_tracks_tool_steps_and_metrics",
@@ -2213,7 +2146,7 @@
       "plan_plan_counts_all_runs",
       "plan_price_for_tokens"
     ],
-    "22": [
+    "21": [
       "distiller",
       "distiller_build_distillation_prompt",
       "distiller_count_tool_calls",
@@ -2266,7 +2199,111 @@
       "regression_summarize_regression_run",
       "regression_workspace_memory_root"
     ],
+    "22": [
+      "common",
+      "common_build_function_tool",
+      "common_build_http_client",
+      "common_build_openai_client",
+      "common_build_responses_request",
+      "common_consume_responses_stream_once",
+      "common_ignores_web_search_output_done_incomplete_status",
+      "common_is_ignorable_openai_stream_error",
+      "common_is_rate_limit_error",
+      "common_is_rate_limit_message",
+      "common_map_openai_error",
+      "common_metadata_as_strings",
+      "common_metadata_as_strings_drops_internal_moa_keys",
+      "common_openai_native_tools",
+      "common_openai_tool_from_schema",
+      "common_openai_tool_result_output",
+      "common_parse_reasoning_effort",
+      "common_parse_sse_json",
+      "common_parse_tool_arguments",
+      "common_response_content_from_output",
+      "common_response_stop_reason",
+      "common_response_text",
+      "common_response_text_from_output",
+      "common_responses_role",
+      "common_responsesstreamerror",
+      "common_retries_on_rate_limit",
+      "common_retry_delay",
+      "common_send_with_retry",
+      "common_stream_responses_with_retry",
+      "common_supports_reasoning",
+      "common_web_search_status",
+      "openai",
+      "openai_canonical_model_id",
+      "openai_capabilities_for_model",
+      "openai_gpt_5_4_family_reports_expected_capabilities",
+      "openai_native_tools",
+      "openai_native_web_search_tools",
+      "openai_openaiprovider",
+      "openai_openaiprovider_capabilities",
+      "openai_openaiprovider_complete",
+      "openai_openaiprovider_from_config",
+      "openai_openaiprovider_from_config_with_model",
+      "openai_openaiprovider_from_env",
+      "openai_openaiprovider_name",
+      "openai_openaiprovider_new",
+      "openai_openaiprovider_new_with_reasoning_effort",
+      "openai_openaiprovider_with_api_base",
+      "openai_openaiprovider_with_max_retries",
+      "openai_openaiprovider_with_web_search_enabled",
+      "openai_unsupported_models_are_rejected"
+    ],
     "23": [
+      "harness",
+      "harness_append_event",
+      "harness_approval_decision_label",
+      "harness_buffer_queued_message",
+      "harness_drain_signal_queue",
+      "harness_emit_tool_output_warning",
+      "harness_execute_pending_tool",
+      "harness_execute_tool",
+      "harness_format_tool_output",
+      "harness_handle_stream_signal",
+      "harness_handle_tool_call",
+      "harness_last_user_message_text",
+      "harness_parse_tool_id",
+      "harness_process_resolved_approval",
+      "harness_record_denied_tool_span",
+      "harness_record_turn_span_metrics",
+      "harness_resumed_tool_invocation_id",
+      "harness_run_brain_turn",
+      "harness_run_brain_turn_with_tools",
+      "harness_run_brain_turn_with_tools_mode",
+      "harness_run_brain_turn_with_tools_stepwise",
+      "harness_run_streamed_turn",
+      "harness_run_streamed_turn_with_signals",
+      "harness_run_streamed_turn_with_tools_mode",
+      "harness_secure_tool_output",
+      "harness_securedtooloutput",
+      "harness_streamedturnresult",
+      "harness_summarize_tool_completion",
+      "harness_toolcalloutcome",
+      "harness_toolloopmode",
+      "harness_turn_number_for_events",
+      "harness_turnresult",
+      "harness_wait_for_approval",
+      "harness_wait_for_signal_approval",
+      "turn",
+      "turn_event_record",
+      "turn_find_pending_approval_request",
+      "turn_find_pending_tool_approval",
+      "turn_find_resolved_pending_tool_approval",
+      "turn_pendingtoolapproval",
+      "turn_providertoolresultllm",
+      "turn_providertoolresultllm_capabilities",
+      "turn_providertoolresultllm_complete",
+      "turn_providertoolresultllm_name",
+      "turn_resolved_pending_tool_approval_preserves_provider_tool_use_id",
+      "turn_storedapprovaldecision",
+      "turn_stream_completion_reports_provider_tool_results_as_notices",
+      "turn_stream_completion_response",
+      "turn_streamedcompletion",
+      "turn_streamsignaldisposition"
+    ],
+    "24": [
       "settings",
       "settings_apply_text_edit",
       "settings_bool_label",
@@ -2316,7 +2353,7 @@
       "settings_summarize_optional_text",
       "settings_text_fields_enter_edit_mode_and_commit"
     ],
-    "24": [
+    "25": [
       "neon",
       "neon_checkpoint_branch_names_follow_moa_prefix",
       "neon_checkpoint_info_from_branch",
@@ -2366,7 +2403,7 @@
       "neon_test_checkpoint_branch",
       "neon_teststate"
     ],
-    "25": [
+    "26": [
       "skills",
       "skills_allowed_tools",
       "skills_budget_limit_skips_expensive_tests",
@@ -2416,7 +2453,7 @@
       "skills_tool_rich_events",
       "skills_write_skill_suite"
     ],
-    "26": [
+    "27": [
       "consolidation",
       "consolidation_canonical_port_claims",
       "consolidation_confidence_rank",
@@ -2464,55 +2501,6 @@
       "ingest_slugify",
       "ingest_split_inline_items",
       "ingest_upsert_derived_page"
-    ],
-    "27": [
-      "harness",
-      "harness_append_event",
-      "harness_approval_decision_label",
-      "harness_buffer_queued_message",
-      "harness_drain_signal_queue",
-      "harness_emit_tool_output_warning",
-      "harness_execute_pending_tool",
-      "harness_execute_tool",
-      "harness_format_tool_output",
-      "harness_handle_stream_signal",
-      "harness_handle_tool_call",
-      "harness_last_user_message_text",
-      "harness_parse_tool_id",
-      "harness_process_resolved_approval",
-      "harness_record_denied_tool_span",
-      "harness_record_turn_span_metrics",
-      "harness_run_brain_turn",
-      "harness_run_brain_turn_with_tools",
-      "harness_run_brain_turn_with_tools_mode",
-      "harness_run_brain_turn_with_tools_stepwise",
-      "harness_run_streamed_turn",
-      "harness_run_streamed_turn_with_signals",
-      "harness_run_streamed_turn_with_tools_mode",
-      "harness_secure_tool_output",
-      "harness_securedtooloutput",
-      "harness_streamedturnresult",
-      "harness_summarize_tool_completion",
-      "harness_toolcalloutcome",
-      "harness_toolloopmode",
-      "harness_turn_number_for_events",
-      "harness_turnresult",
-      "harness_wait_for_approval",
-      "harness_wait_for_signal_approval",
-      "turn",
-      "turn_find_pending_approval_request",
-      "turn_find_pending_tool_approval",
-      "turn_find_resolved_pending_tool_approval",
-      "turn_pendingtoolapproval",
-      "turn_providertoolresultllm",
-      "turn_providertoolresultllm_capabilities",
-      "turn_providertoolresultllm_complete",
-      "turn_providertoolresultllm_name",
-      "turn_storedapprovaldecision",
-      "turn_stream_completion_reports_provider_tool_results_as_notices",
-      "turn_stream_completion_response",
-      "turn_streamedcompletion",
-      "turn_streamsignaldisposition"
     ],
     "28": [
       "chat",
@@ -2688,6 +2676,44 @@
       "temporal_orchestrator_wait_for_tool_result"
     ],
     "32": [
+      "openrouter",
+      "openrouter_build_request_body",
+      "openrouter_canonical_model_id",
+      "openrouter_capabilities_for_model",
+      "openrouter_capability_lookup_reuses_known_model_families",
+      "openrouter_completion_response_from_response",
+      "openrouter_consume_sse_events",
+      "openrouter_error_message",
+      "openrouter_native_tools",
+      "openrouter_native_web_search_tools",
+      "openrouter_normalize_openrouter_input_format",
+      "openrouter_normalizes_vendorless_models_to_provider_prefixed_routes",
+      "openrouter_openrouterprovider",
+      "openrouter_openrouterprovider_capabilities",
+      "openrouter_openrouterprovider_complete",
+      "openrouter_openrouterprovider_from_config",
+      "openrouter_openrouterprovider_from_config_with_model",
+      "openrouter_openrouterprovider_from_env",
+      "openrouter_openrouterprovider_name",
+      "openrouter_openrouterprovider_new",
+      "openrouter_openrouterprovider_new_with_reasoning_effort",
+      "openrouter_openrouterprovider_with_api_base",
+      "openrouter_openrouterprovider_with_max_retries",
+      "openrouter_openrouterprovider_with_web_search_enabled",
+      "openrouter_openroutersseframe",
+      "openrouter_openrouterstreamstate",
+      "openrouter_openrouterstreamstate_apply_event",
+      "openrouter_openrouterstreamstate_apply_function_arguments_done",
+      "openrouter_openrouterstreamstate_apply_output_item_event",
+      "openrouter_openrouterstreamstate_apply_response_event",
+      "openrouter_openrouterstreamstate_apply_text_delta",
+      "openrouter_openrouterstreamstate_finish",
+      "openrouter_openrouterstreamstate_new",
+      "openrouter_openrouterstreamstate_summarize_search_event",
+      "openrouter_provider_native_tool_json",
+      "openrouter_serializes_responses_body_with_openrouter_server_tool_shape"
+    ],
+    "33": [
       "diff",
       "diff_build_diff_file_view",
       "diff_default_mode_for_width",
@@ -2724,7 +2750,7 @@
       "diff_truncate_to_width",
       "diff_unifiedline"
     ],
-    "33": [
+    "34": [
       "discord",
       "discord_approval_callback_maps_to_control_message",
       "discord_attachments_from_message",
@@ -2761,7 +2787,7 @@
       "discord_inbound_from_message",
       "discord_is_thread_kind"
     ],
-    "34": [
+    "35": [
       "e2b",
       "e2b_build_url",
       "e2b_connectedsandbox",
@@ -2798,7 +2824,7 @@
       "e2b_required_string_field",
       "e2b_shell_escape"
     ],
-    "35": [
+    "36": [
       "slack",
       "slack_handle_interaction_event",
       "slack_handle_push_event",
@@ -2834,7 +2860,7 @@
       "slack_slackmessageref_thread_anchor",
       "slack_slacktarget"
     ],
-    "36": [
+    "37": [
       "mod",
       "mod_build_default_pipeline",
       "mod_build_default_pipeline_with_runtime",
@@ -2869,7 +2895,7 @@
       "mod_teststage_process",
       "mod_teststage_stage"
     ],
-    "37": [
+    "38": [
       "setup",
       "setup_agentenvironment",
       "setup_apply_skill_overrides",
@@ -2903,7 +2929,7 @@
       "setup_slugify_preserves_eval_prefix",
       "setup_validate_named_tools"
     ],
-    "38": [
+    "39": [
       "branching",
       "branching_append_change_manifest",
       "branching_branch_dir",
@@ -2935,39 +2961,6 @@
       "wiki_split_frontmatter",
       "wiki_wiki_page_roundtrip",
       "wiki_yaml_to_json_value"
-    ],
-    "39": [
-      "common",
-      "common_build_function_tool",
-      "common_build_http_client",
-      "common_build_openai_client",
-      "common_build_responses_request",
-      "common_consume_responses_stream_once",
-      "common_ignores_web_search_output_done_incomplete_status",
-      "common_is_ignorable_openai_stream_error",
-      "common_is_rate_limit_error",
-      "common_is_rate_limit_message",
-      "common_map_openai_error",
-      "common_metadata_as_strings",
-      "common_metadata_as_strings_drops_internal_moa_keys",
-      "common_openai_native_tools",
-      "common_openai_tool_from_schema",
-      "common_openai_tool_result_output",
-      "common_parse_reasoning_effort",
-      "common_parse_sse_json",
-      "common_parse_tool_arguments",
-      "common_response_content_from_output",
-      "common_response_stop_reason",
-      "common_response_text",
-      "common_response_text_from_output",
-      "common_responses_role",
-      "common_responsesstreamerror",
-      "common_retries_on_rate_limit",
-      "common_retry_delay",
-      "common_send_with_retry",
-      "common_stream_responses_with_retry",
-      "common_supports_reasoning",
-      "common_web_search_status"
     ],
     "40": [
       "local_tools",
@@ -3460,6 +3453,24 @@
       "maintenance_validate_memory_invariants"
     ],
     "59": [
+      "factory",
+      "factory_build_provider_from_config",
+      "factory_build_provider_from_selection",
+      "factory_explicit_provider_prefix_overrides_inference",
+      "factory_infer_provider_name",
+      "factory_infers_anthropic_for_claude_models",
+      "factory_infers_openai_for_gpt_models",
+      "factory_infers_openrouter_for_vendor_prefixed_models",
+      "factory_is_openai_model",
+      "factory_matches_provider_name",
+      "factory_normalize_model_for_provider",
+      "factory_normalize_openrouter_model",
+      "factory_providerselection",
+      "factory_resolve_provider_selection",
+      "factory_split_explicit_provider",
+      "factory_validate_provider_name"
+    ],
+    "60": [
       "vault",
       "vault_decrypt_bytes",
       "vault_encrypt_bytes",
@@ -3476,7 +3487,7 @@
       "vault_filevault_persist_store",
       "vault_filevault_set"
     ],
-    "60": [
+    "61": [
       "palette",
       "palette_centered_rect",
       "palette_filtered_actions",
@@ -3492,7 +3503,7 @@
       "palette_palettestate_selected_action",
       "palette_render_palette"
     ],
-    "61": [
+    "62": [
       "injection",
       "injection_canary_detection_works",
       "injection_check_canary",
@@ -3507,7 +3518,7 @@
       "injection_working_context",
       "injection_wrap_untrusted_tool_output"
     ],
-    "62": [
+    "63": [
       "session_search",
       "session_search_event_snippet",
       "session_search_render_results",
@@ -3522,7 +3533,7 @@
       "session_search_sessionsearchtool_policy_spec",
       "session_search_truncate"
     ],
-    "63": [
+    "64": [
       "keybindings",
       "keybindings_approval_shortcuts_only_activate_while_waiting",
       "keybindings_command_palette_memory_and_settings_have_dedicated_maps",
@@ -3536,7 +3547,7 @@
       "keybindings_tab_accepts_completion_in_chat_mode",
       "keybindings_tab_and_session_shortcuts_map_correctly"
     ],
-    "64": [
+    "65": [
       "toolbar",
       "toolbar_build_tab_spans",
       "toolbar_preview",
@@ -3550,7 +3561,7 @@
       "toolbar_visible_window",
       "toolbar_visible_window_caps_tabs_to_requested_limit"
     ],
-    "65": [
+    "66": [
       "terminal",
       "terminal_format_scores",
       "terminal_render_includes_case_names_and_summary",
@@ -3564,7 +3575,7 @@
       "terminal_terminalreporter_status_label",
       "terminal_truncate"
     ],
-    "66": [
+    "67": [
       "memory_store",
       "memory_store_create_read_update_and_delete_wiki_pages",
       "memory_store_delete_page_removes_only_the_requested_scope",
@@ -3576,7 +3587,7 @@
       "memory_store_user_and_workspace_scopes_are_separate",
       "memory_store_write_page_creates_and_reads_pages_in_explicit_scopes"
     ],
-    "67": [
+    "68": [
       "postgres_store",
       "postgres_store_cleanup_schema",
       "postgres_store_create_test_store",
@@ -3588,7 +3599,7 @@
       "postgres_store_quote_identifier",
       "postgres_store_with_test_store"
     ],
-    "68": [
+    "69": [
       "tool_card",
       "tool_card_border_line",
       "tool_card_content_line",
@@ -3599,7 +3610,7 @@
       "tool_card_truncate_to_width",
       "tool_card_wrap_text"
     ],
-    "69": [
+    "70": [
       "live_provider_roundtrip",
       "live_provider_roundtrip_available_live_providers",
       "live_provider_roundtrip_live_orchestrator_with_provider",
@@ -3610,7 +3621,7 @@
       "live_provider_roundtrip_wait_for_final_response",
       "live_provider_roundtrip_wait_for_status"
     ],
-    "70": [
+    "71": [
       "neon_branch_manager",
       "neon_branch_manager_live_neon_config",
       "neon_branch_manager_live_neon_config_with_limit",
@@ -3620,7 +3631,7 @@
       "neon_branch_manager_neon_checkpoint_cleanup_without_expired_branches_returns_zero",
       "neon_branch_manager_wait_for_workspace_session_count"
     ],
-    "71": [
+    "72": [
       "temporal_worker_helper",
       "temporal_worker_helper_helper_config",
       "temporal_worker_helper_helperprovider",
@@ -3630,7 +3641,7 @@
       "temporal_worker_helper_main",
       "temporal_worker_helper_main_impl"
     ],
-    "72": [
+    "73": [
       "instructions",
       "instructions_instruction_processor_appends_config_backed_sections",
       "instructions_instructionprocessor",
@@ -3640,7 +3651,7 @@
       "instructions_instructionprocessor_process",
       "instructions_instructionprocessor_stage"
     ],
-    "73": [
+    "74": [
       "identity",
       "identity_identity_processor_appends_system_prompt",
       "identity_identityprocessor",
@@ -3650,7 +3661,7 @@
       "identity_identityprocessor_process",
       "identity_identityprocessor_stage"
     ],
-    "74": [
+    "75": [
       "trajectory_match",
       "trajectory_match_exact_match_scores_one",
       "trajectory_match_lcs_len",
@@ -3659,7 +3670,7 @@
       "trajectory_match_trajectorymatchevaluator_evaluate",
       "trajectory_match_trajectorymatchevaluator_name"
     ],
-    "75": [
+    "76": [
       "output_match",
       "output_match_contains_rules_pass_when_all_terms_match",
       "output_match_evaluate_output",
@@ -3668,7 +3679,7 @@
       "output_match_outputmatchevaluator_evaluate",
       "output_match_outputmatchevaluator_name"
     ],
-    "76": [
+    "77": [
       "bash",
       "bash_bashtoolinput",
       "bash_bashtoolinput_timeout",
@@ -3676,7 +3687,7 @@
       "bash_execute_local",
       "bash_stop_container"
     ],
-    "77": [
+    "78": [
       "cache",
       "cache_cache_optimizer_validates_cache_breakpoint",
       "cache_cacheoptimizer",
@@ -3684,7 +3695,7 @@
       "cache_cacheoptimizer_process",
       "cache_cacheoptimizer_stage"
     ],
-    "78": [
+    "79": [
       "threshold",
       "threshold_cost_over_budget_fails_boolean_score",
       "threshold_limit_score",
@@ -3692,124 +3703,124 @@
       "threshold_thresholdevaluator_evaluate",
       "threshold_thresholdevaluator_name"
     ],
-    "79": [
+    "80": [
       "exec",
       "exec_exec_mode_formats_tool_updates_compactly",
       "exec_format_tool_update",
       "exec_resolve_exec_approval",
       "exec_run_exec"
     ],
-    "80": [
+    "81": [
       "sidebar",
       "sidebar_render_sidebar",
       "sidebar_section_title",
       "sidebar_should_show_sidebar",
       "sidebar_sidebar_visibility_respects_width_and_override"
     ],
-    "81": [
+    "82": [
       "anthropic_provider",
       "anthropic_provider_provider_retries_after_rate_limit",
       "anthropic_provider_provider_returns_error_after_partial_output_without_retrying",
       "anthropic_provider_provider_streams_tokens_incrementally",
       "anthropic_provider_provider_streams_tool_use_blocks"
     ],
-    "82": [
+    "83": [
       "file_search",
       "file_search_collect_matches",
       "file_search_execute",
       "file_search_execute_docker",
       "file_search_filesearchinput"
     ],
-    "83": [
+    "84": [
       "utils",
       "utils_cn",
       "utils_formatabsolutedate",
       "utils_formatrelativetime",
       "utils_sessiondatebucket"
     ],
-    "84": [
+    "85": [
       "openrouter_live",
       "openrouter_live_openrouter_live_completion_returns_expected_answer",
       "openrouter_live_openrouter_live_model",
       "openrouter_live_openrouter_live_web_search_returns_current_information"
     ],
-    "85": [
+    "86": [
       "chat_harness",
       "chat_harness_main",
       "chat_harness_resolve_session_db_path",
       "chat_harness_run_prompt"
     ],
-    "86": [
+    "87": [
       "tool_success",
       "tool_success_toolsuccessevaluator",
       "tool_success_toolsuccessevaluator_evaluate",
       "tool_success_toolsuccessevaluator_name"
     ],
-    "87": [
+    "88": [
       "openai_live",
       "openai_live_openai_live_completion_returns_expected_answer",
       "openai_live_openai_live_web_search_emits_provider_tool_result"
     ],
-    "88": [
+    "89": [
       "anthropic_live",
       "anthropic_live_anthropic_live_completion_returns_expected_answer",
       "anthropic_live_anthropic_live_web_search_emits_provider_tool_result"
     ],
-    "89": [
+    "90": [
       "tauri_svg",
       "tauri_vite_toolchain",
       "vite_svg"
     ],
-    "90": [
+    "91": [
       "tui_workflows",
       "tui_workflows_tui_manual_workflow_opens_memory_settings_and_palette"
     ],
-    "91": [
+    "92": [
       "schema_turso",
       "schema_turso_migrate"
     ],
-    "92": [
+    "93": [
       "build",
       "build_main"
     ],
-    "93": [
+    "94": [
       "docker_hardening",
       "docker_hardening_docker_container_runs_with_hardening"
     ],
-    "94": [
+    "95": [
       "live_harness",
       "live_harness_live_brain_turn_returns_brain_response"
     ],
-    "95": [
+    "96": [
       "engine_live",
       "engine_live_live_run_single_produces_eval_result"
     ],
-    "96": [
+    "97": [
       "use_mobile",
       "use_mobile_useismobile"
     ],
-    "97": [
+    "98": [
       "vite_config"
     ],
-    "98": [
+    "99": [
       "runner"
     ],
-    "99": [
+    "100": [
       "vite_env_d"
     ],
-    "100": [
+    "101": [
       "session"
     ],
-    "101": [
+    "102": [
       "layout"
     ],
-    "102": [
+    "103": [
       "pk_loader"
     ],
-    "103": [
+    "104": [
       "concept_text_shimmer_animation"
     ],
-    "104": [
+    "105": [
       "pk_message"
     ]
   }
