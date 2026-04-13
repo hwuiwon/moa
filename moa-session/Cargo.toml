@@ -12,6 +12,7 @@ postgres = ["dep:sqlx"]
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+enum_dispatch = "0.3"
 libsql = { version = "0.9.30", optional = true, default-features = false, features = ["core", "remote", "replication", "sync", "tls"] }
 moa-core = { path = "../moa-core" }
 moa-security = { path = "../moa-security" }
