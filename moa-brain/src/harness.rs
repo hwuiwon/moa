@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use moa_core::{
-    ApprovalDecision, ApprovalRequest, CompletionContent, Event, EventRange, EventRecord,
-    LLMProvider, MoaError, PolicyAction, Result, RiskLevel, RuntimeEvent, SessionId, SessionMeta,
-    SessionSignal, SessionStatus, SessionStore, StopReason, TokenPricing, ToolCardStatus,
-    ToolInvocation, ToolUpdate, TraceContext, UserId, UserMessage, WorkingContext,
+    ApprovalDecision, ApprovalRequest, BufferedUserMessage, CompletionContent, Event, EventRange,
+    EventRecord, LLMProvider, MoaError, PolicyAction, Result, RiskLevel, RuntimeEvent, SessionId,
+    SessionMeta, SessionSignal, SessionStatus, SessionStore, StopReason, TokenPricing,
+    ToolCardStatus, ToolInvocation, ToolUpdate, TraceContext, UserId, UserMessage, WorkingContext,
 };
 use moa_hands::ToolRouter;
 use moa_security::{
@@ -154,7 +154,7 @@ pub async fn run_streamed_turn_with_signals(
     event_tx: Option<&broadcast::Sender<EventRecord>>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
-    queued_messages: &mut Vec<UserMessage>,
+    queued_messages: &mut Vec<BufferedUserMessage>,
     soft_cancel_requested: &mut bool,
     cancel_token: Option<&CancellationToken>,
     hard_cancel_token: Option<&CancellationToken>,
@@ -228,7 +228,7 @@ async fn run_streamed_turn_with_tools_mode(
     hard_cancel_token: Option<&CancellationToken>,
     mut signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
     turn_requested: Option<&mut bool>,
-    queued_messages: Option<&mut Vec<UserMessage>>,
+    queued_messages: Option<&mut Vec<BufferedUserMessage>>,
     soft_cancel_requested: Option<&mut bool>,
     tool_loop_mode: ToolLoopMode,
 ) -> Result<StreamedTurnResult> {
@@ -659,7 +659,7 @@ async fn handle_tool_call(
     hard_cancel_token: Option<&CancellationToken>,
     signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
     turn_requested: &mut bool,
-    queued_messages: &mut Vec<UserMessage>,
+    queued_messages: &mut Vec<BufferedUserMessage>,
     soft_cancel_requested: &mut bool,
 ) -> Result<ToolCallOutcome> {
     let tool_id = parse_tool_id(call);
@@ -879,7 +879,7 @@ async fn wait_for_signal_approval(
     hard_cancel_token: Option<&CancellationToken>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
-    queued_messages: &mut Vec<UserMessage>,
+    queued_messages: &mut Vec<BufferedUserMessage>,
     soft_cancel_requested: &mut bool,
 ) -> Result<ToolCallOutcome> {
     let approval_span = tracing::info_span!(
@@ -1165,7 +1165,7 @@ async fn wait_for_approval(
     hard_cancel_token: Option<&CancellationToken>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
-    queued_messages: &mut Vec<UserMessage>,
+    queued_messages: &mut Vec<BufferedUserMessage>,
     soft_cancel_requested: &mut bool,
 ) -> Result<ToolCallOutcome> {
     let invocation = ToolInvocation {
@@ -1337,7 +1337,7 @@ fn drain_signal_queue(
     signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     turn_requested: &mut bool,
-    queued_messages: &mut Vec<UserMessage>,
+    queued_messages: &mut Vec<BufferedUserMessage>,
     soft_cancel_requested: &mut bool,
 ) -> Result<()> {
     let Some(signal_rx) = signal_rx else {
@@ -1526,8 +1526,8 @@ async fn execute_pending_tool(
     Ok(())
 }
 
-fn buffer_queued_message(queued_messages: &mut Vec<UserMessage>, message: UserMessage) {
-    queued_messages.push(message);
+fn buffer_queued_message(queued_messages: &mut Vec<BufferedUserMessage>, message: UserMessage) {
+    queued_messages.push(BufferedUserMessage::direct(message));
 }
 
 fn turn_number_for_events(events: &[EventRecord]) -> i64 {
@@ -1603,7 +1603,7 @@ fn handle_stream_signal(
     signal: SessionSignal,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     turn_requested: &mut bool,
-    queued_messages: &mut Vec<UserMessage>,
+    queued_messages: &mut Vec<BufferedUserMessage>,
     soft_cancel_requested: &mut bool,
 ) -> StreamSignalDisposition {
     match signal {

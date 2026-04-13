@@ -1181,17 +1181,25 @@ fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) ->
         return true;
     }
 
-    events.last().is_some_and(|record| {
-        matches!(
-            record.event,
+    events
+        .iter()
+        .rev()
+        .find_map(|record| match record.event {
+            Event::SessionStatusChanged { .. }
+            | Event::Warning { .. }
+            | Event::MemoryWrite { .. }
+            | Event::HandDestroyed { .. }
+            | Event::HandError { .. }
+            | Event::Checkpoint { .. } => None,
             Event::UserMessage { .. }
-                | Event::QueuedMessage { .. }
-                | Event::ToolResult { .. }
-                | Event::ToolError { .. }
-                | Event::ApprovalDecided { .. }
-                | Event::ToolCall { .. }
-        )
-    })
+            | Event::QueuedMessage { .. }
+            | Event::ToolResult { .. }
+            | Event::ToolError { .. }
+            | Event::ApprovalDecided { .. }
+            | Event::ToolCall { .. } => Some(true),
+            _ => Some(false),
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

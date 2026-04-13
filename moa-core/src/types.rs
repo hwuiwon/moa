@@ -350,6 +350,33 @@ pub struct UserMessage {
     pub attachments: Vec<Attachment>,
 }
 
+/// In-memory buffered user message awaiting turn-boundary processing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BufferedUserMessage {
+    /// The user-visible message payload.
+    pub message: UserMessage,
+    /// Optional durable pending-signal identifier associated with the message.
+    pub pending_signal_id: Option<PendingSignalId>,
+}
+
+impl BufferedUserMessage {
+    /// Creates a buffered message without a durable pending-signal identifier.
+    pub fn direct(message: UserMessage) -> Self {
+        Self {
+            message,
+            pending_signal_id: None,
+        }
+    }
+
+    /// Creates a buffered message from a persisted pending signal.
+    pub fn from_pending_signal(signal: PendingSignal) -> Result<Self> {
+        Ok(Self {
+            message: signal.user_message()?,
+            pending_signal_id: Some(signal.id),
+        })
+    }
+}
+
 /// Durable but unresolved session signal awaiting turn-boundary processing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSignal {
@@ -776,6 +803,8 @@ pub struct EventStream {
     pub events: Vec<EventRecord>,
     #[serde(skip)]
     receiver: Option<broadcast::Receiver<EventRecord>>,
+    #[serde(skip)]
+    cursor: usize,
 }
 
 impl EventStream {
@@ -784,6 +813,7 @@ impl EventStream {
         Self {
             events,
             receiver: None,
+            cursor: 0,
         }
     }
 
@@ -792,6 +822,7 @@ impl EventStream {
         Self {
             events: Vec::new(),
             receiver: Some(receiver),
+            cursor: 0,
         }
     }
 
@@ -803,21 +834,31 @@ impl EventStream {
         Self {
             events,
             receiver: Some(receiver),
+            cursor: 0,
         }
     }
 
     /// Receives the next buffered or live event from the stream.
     pub async fn next(&mut self) -> Option<Result<EventRecord>> {
-        if !self.events.is_empty() {
-            return Some(Ok(self.events.remove(0)));
+        if self.cursor < self.events.len() {
+            let event = self.events[self.cursor].clone();
+            self.cursor += 1;
+            if self.cursor == self.events.len() {
+                self.events.clear();
+                self.cursor = 0;
+            }
+            return Some(Ok(event));
         }
 
         match &mut self.receiver {
-            Some(receiver) => loop {
-                match receiver.recv().await {
-                    Ok(event) => return Some(Ok(event)),
-                    Err(broadcast::error::RecvError::Closed) => return None,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Some(receiver) => match receiver.recv().await {
+                Ok(event) => Some(Ok(event)),
+                Err(broadcast::error::RecvError::Closed) => None,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(skipped, "event stream lagged behind live broadcast");
+                    Some(Err(MoaError::StreamError(format!(
+                        "event stream lagged by {skipped} messages"
+                    ))))
                 }
             },
             None => None,
@@ -830,6 +871,7 @@ impl Clone for EventStream {
         Self {
             events: self.events.clone(),
             receiver: self.receiver.as_ref().map(broadcast::Receiver::resubscribe),
+            cursor: self.cursor,
         }
     }
 }
@@ -851,7 +893,7 @@ impl fmt::Debug for EventStream {
 
 impl PartialEq for EventStream {
     fn eq(&self, other: &Self) -> bool {
-        self.events == other.events
+        self.events == other.events && self.cursor == other.cursor
     }
 }
 
@@ -2375,6 +2417,7 @@ fn normalize_environment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::broadcast;
     use tokio::time::{Duration as TokioDuration, sleep};
 
     #[test]
@@ -2635,5 +2678,49 @@ mod tests {
             .await
             .expect_err("aborted completion task should not resolve successfully");
         assert!(matches!(error, MoaError::ProviderError(message) if message.contains("join")));
+    }
+
+    #[tokio::test]
+    async fn event_stream_reports_lagged_broadcasts() {
+        let (tx, rx) = broadcast::channel(1);
+        let mut stream = EventStream::from_broadcast(rx);
+        let session_id = SessionId::new();
+
+        let first = EventRecord {
+            id: Uuid::new_v4(),
+            session_id: session_id.clone(),
+            sequence_num: 0,
+            event_type: EventType::Warning,
+            event: Event::Warning {
+                message: "first".to_string(),
+            },
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        };
+        let second = EventRecord {
+            id: Uuid::new_v4(),
+            session_id,
+            sequence_num: 1,
+            event_type: EventType::Warning,
+            event: Event::Warning {
+                message: "second".to_string(),
+            },
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        };
+
+        let _ = tx.send(first);
+        let _ = tx.send(second);
+
+        let error = stream
+            .next()
+            .await
+            .transpose()
+            .expect_err("lagged broadcast should surface an error");
+        assert!(matches!(error, MoaError::StreamError(message) if message.contains("lagged")));
     }
 }
