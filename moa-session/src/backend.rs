@@ -3,10 +3,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use enum_dispatch::enum_dispatch;
 use moa_core::{
-    ApprovalRule, DatabaseBackend, Event, EventFilter, EventRange, EventRecord, MoaConfig, Result,
-    SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
-    SessionSummary, WakeContext, WorkspaceId,
+    ApprovalRule, DatabaseBackend, Event, EventFilter, EventRange, EventRecord, MoaConfig,
+    PendingSignal, PendingSignalId, Result, SequenceNum, SessionFilter, SessionId, SessionMeta,
+    SessionStatus, SessionStore, SessionSummary, WakeContext, WorkspaceId,
 };
 use moa_security::ApprovalRuleStore;
 
@@ -15,7 +16,111 @@ use crate::postgres::PostgresSessionStore;
 #[cfg(feature = "turso")]
 use crate::turso::TursoSessionStore;
 
+#[allow(async_fn_in_trait)]
+#[enum_dispatch]
+trait SessionStoreDispatch: Send + Sync {
+    async fn create_session(&self, meta: SessionMeta) -> Result<SessionId>;
+
+    async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<SequenceNum>;
+
+    async fn get_events(
+        &self,
+        session_id: SessionId,
+        range: EventRange,
+    ) -> Result<Vec<EventRecord>>;
+
+    async fn get_session(&self, session_id: SessionId) -> Result<SessionMeta>;
+
+    async fn update_status(&self, session_id: SessionId, status: SessionStatus) -> Result<()>;
+
+    async fn store_pending_signal(
+        &self,
+        session_id: SessionId,
+        signal: PendingSignal,
+    ) -> Result<PendingSignalId>;
+
+    async fn get_pending_signals(&self, session_id: SessionId) -> Result<Vec<PendingSignal>>;
+
+    async fn resolve_pending_signal(&self, signal_id: PendingSignalId) -> Result<()>;
+
+    async fn search_events(&self, query: &str, filter: EventFilter) -> Result<Vec<EventRecord>>;
+
+    async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>>;
+}
+
+macro_rules! impl_session_store_dispatch {
+    ($store:ty) => {
+        impl SessionStoreDispatch for $store {
+            async fn create_session(&self, meta: SessionMeta) -> Result<SessionId> {
+                SessionStore::create_session(self, meta).await
+            }
+
+            async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<SequenceNum> {
+                SessionStore::emit_event(self, session_id, event).await
+            }
+
+            async fn get_events(
+                &self,
+                session_id: SessionId,
+                range: EventRange,
+            ) -> Result<Vec<EventRecord>> {
+                SessionStore::get_events(self, session_id, range).await
+            }
+
+            async fn get_session(&self, session_id: SessionId) -> Result<SessionMeta> {
+                SessionStore::get_session(self, session_id).await
+            }
+
+            async fn update_status(
+                &self,
+                session_id: SessionId,
+                status: SessionStatus,
+            ) -> Result<()> {
+                SessionStore::update_status(self, session_id, status).await
+            }
+
+            async fn store_pending_signal(
+                &self,
+                session_id: SessionId,
+                signal: PendingSignal,
+            ) -> Result<PendingSignalId> {
+                SessionStore::store_pending_signal(self, session_id, signal).await
+            }
+
+            async fn get_pending_signals(
+                &self,
+                session_id: SessionId,
+            ) -> Result<Vec<PendingSignal>> {
+                SessionStore::get_pending_signals(self, session_id).await
+            }
+
+            async fn resolve_pending_signal(&self, signal_id: PendingSignalId) -> Result<()> {
+                SessionStore::resolve_pending_signal(self, signal_id).await
+            }
+
+            async fn search_events(
+                &self,
+                query: &str,
+                filter: EventFilter,
+            ) -> Result<Vec<EventRecord>> {
+                SessionStore::search_events(self, query, filter).await
+            }
+
+            async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>> {
+                SessionStore::list_sessions(self, filter).await
+            }
+        }
+    };
+}
+
+#[cfg(feature = "turso")]
+impl_session_store_dispatch!(TursoSessionStore);
+
+#[cfg(feature = "postgres")]
+impl_session_store_dispatch!(PostgresSessionStore);
+
 /// Concrete session database backend selected from config.
+#[enum_dispatch(SessionStoreDispatch)]
 #[derive(Clone)]
 pub enum SessionDatabase {
     /// Turso/libSQL-backed session store.
@@ -104,21 +209,11 @@ pub async fn create_session_store(config: &MoaConfig) -> Result<Arc<SessionDatab
 #[async_trait]
 impl SessionStore for SessionDatabase {
     async fn create_session(&self, meta: SessionMeta) -> Result<SessionId> {
-        match self {
-            #[cfg(feature = "turso")]
-            Self::Turso(store) => store.create_session(meta).await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(store) => store.create_session(meta).await,
-        }
+        SessionStoreDispatch::create_session(self, meta).await
     }
 
     async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<SequenceNum> {
-        match self {
-            #[cfg(feature = "turso")]
-            Self::Turso(store) => store.emit_event(session_id, event).await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(store) => store.emit_event(session_id, event).await,
-        }
+        SessionStoreDispatch::emit_event(self, session_id, event).await
     }
 
     async fn get_events(
@@ -126,82 +221,39 @@ impl SessionStore for SessionDatabase {
         session_id: SessionId,
         range: EventRange,
     ) -> Result<Vec<EventRecord>> {
-        match self {
-            #[cfg(feature = "turso")]
-            Self::Turso(store) => store.get_events(session_id, range).await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(store) => store.get_events(session_id, range).await,
-        }
+        SessionStoreDispatch::get_events(self, session_id, range).await
     }
 
     async fn get_session(&self, session_id: SessionId) -> Result<SessionMeta> {
-        match self {
-            #[cfg(feature = "turso")]
-            Self::Turso(store) => store.get_session(session_id).await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(store) => store.get_session(session_id).await,
-        }
+        SessionStoreDispatch::get_session(self, session_id).await
     }
 
     async fn update_status(&self, session_id: SessionId, status: SessionStatus) -> Result<()> {
-        match self {
-            #[cfg(feature = "turso")]
-            Self::Turso(store) => store.update_status(session_id, status).await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(store) => store.update_status(session_id, status).await,
-        }
+        SessionStoreDispatch::update_status(self, session_id, status).await
     }
 
     async fn store_pending_signal(
         &self,
         session_id: SessionId,
-        signal: moa_core::PendingSignal,
-    ) -> Result<moa_core::PendingSignalId> {
-        match self {
-            #[cfg(feature = "turso")]
-            Self::Turso(store) => store.store_pending_signal(session_id, signal).await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(store) => store.store_pending_signal(session_id, signal).await,
-        }
+        signal: PendingSignal,
+    ) -> Result<PendingSignalId> {
+        SessionStoreDispatch::store_pending_signal(self, session_id, signal).await
     }
 
-    async fn get_pending_signals(
-        &self,
-        session_id: SessionId,
-    ) -> Result<Vec<moa_core::PendingSignal>> {
-        match self {
-            #[cfg(feature = "turso")]
-            Self::Turso(store) => store.get_pending_signals(session_id).await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(store) => store.get_pending_signals(session_id).await,
-        }
+    async fn get_pending_signals(&self, session_id: SessionId) -> Result<Vec<PendingSignal>> {
+        SessionStoreDispatch::get_pending_signals(self, session_id).await
     }
 
-    async fn resolve_pending_signal(&self, signal_id: moa_core::PendingSignalId) -> Result<()> {
-        match self {
-            #[cfg(feature = "turso")]
-            Self::Turso(store) => store.resolve_pending_signal(signal_id).await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(store) => store.resolve_pending_signal(signal_id).await,
-        }
+    async fn resolve_pending_signal(&self, signal_id: PendingSignalId) -> Result<()> {
+        SessionStoreDispatch::resolve_pending_signal(self, signal_id).await
     }
 
     async fn search_events(&self, query: &str, filter: EventFilter) -> Result<Vec<EventRecord>> {
-        match self {
-            #[cfg(feature = "turso")]
-            Self::Turso(store) => store.search_events(query, filter).await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(store) => store.search_events(query, filter).await,
-        }
+        SessionStoreDispatch::search_events(self, query, filter).await
     }
 
     async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>> {
-        match self {
-            #[cfg(feature = "turso")]
-            Self::Turso(store) => store.list_sessions(filter).await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(store) => store.list_sessions(filter).await,
-        }
+        SessionStoreDispatch::list_sessions(self, filter).await
     }
 }
 

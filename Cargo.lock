@@ -4308,6 +4308,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.8",
  "chrono",
+ "enum_dispatch",
  "hex",
  "libsql",
  "moa-core",
@@ -4340,13 +4341,6 @@ dependencies = [
  "toml 0.8.2",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "moa-workspace"
-version = "0.1.0"
-dependencies = [
- "moa-session",
 ]
 
 [[package]]

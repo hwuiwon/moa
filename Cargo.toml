@@ -1,26 +1,3 @@
-[package]
-name = "moa-workspace"
-version = "0.1.0"
-edition = "2024"
-publish = false
-
-[lib]
-path = "src/lib.rs"
-
-[dependencies]
-moa-session = { path = "moa-session", optional = true }
-
-[features]
-default = []
-telegram = []
-slack = []
-discord = []
-cloud = []
-temporal = []
-daytona = []
-e2b = []
-postgres = ["moa-session/postgres"]
-
 [workspace]
 resolver = "2"
 members = [
