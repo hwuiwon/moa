@@ -228,6 +228,31 @@ export function useChatStream({
     [applyTranscriptAction, ensureAssistantId],
   );
 
+  const finalizeActiveRun = useCallback(
+    (runId: number) => {
+      if (runId !== activeRunIdRef.current) {
+        return;
+      }
+
+      if (rafRef.current != null) {
+        window.cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+
+      removeThinkingBlock(runId);
+      flushAssistantDelta(runId);
+      if (assistantMessageIdRef.current) {
+        applyTranscriptAction({
+          assistantId: assistantMessageIdRef.current,
+          type: "assistant-finish",
+        });
+      }
+      setIsStreaming(false);
+      setIsStopping(false);
+    },
+    [applyTranscriptAction, flushAssistantDelta, removeThinkingBlock],
+  );
+
   const resetStreamState = useCallback(
     (nextMessages: ChatMessage[]) => {
       activeRunIdRef.current += 1;
@@ -397,13 +422,13 @@ export function useChatStream({
             break;
           }
           case "turnCompleted":
-            removeThinkingBlock(runId);
+            finalizeActiveRun(runId);
             break;
           case "usageUpdated":
             setTotalTokens(event.data.totalTokens);
             break;
           case "error":
-            removeThinkingBlock(runId);
+            finalizeActiveRun(runId);
             if (!isCancellationMessage(event.data.message)) {
               setError(event.data.message);
             }
@@ -425,21 +450,7 @@ export function useChatStream({
         }
       } finally {
         if (runId === activeRunIdRef.current) {
-          if (rafRef.current != null) {
-            window.cancelAnimationFrame(rafRef.current);
-            rafRef.current = null;
-          }
-
-          removeThinkingBlock(runId);
-          flushAssistantDelta(runId);
-          if (assistantMessageIdRef.current) {
-            applyTranscriptAction({
-              assistantId: assistantMessageIdRef.current,
-              type: "assistant-finish",
-            });
-          }
-          setIsStreaming(false);
-          setIsStopping(false);
+          finalizeActiveRun(runId);
           await Promise.all([
             queryClient.invalidateQueries({
               queryKey: queryKeys.sessionHistory(sessionId),
@@ -463,6 +474,7 @@ export function useChatStream({
       flushAssistantDelta,
       isStreaming,
       notifyApproval,
+      finalizeActiveRun,
       queryClient,
       removeThinkingBlock,
       scheduleFlush,

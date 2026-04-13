@@ -11,8 +11,11 @@ use moa_core::{
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
-use crate::common::{build_openai_client, build_responses_request, stream_responses_with_retry};
 use crate::instrumentation::LLMSpanRecorder;
+use crate::openai_responses::{
+    build_openai_client, build_responses_request, stream_responses_with_retry,
+};
+use crate::provider_tools::enabled_native_tools;
 use crate::retry::RetryPolicy;
 
 const DEFAULT_STREAM_BUFFER: usize = 128;
@@ -139,16 +142,17 @@ impl LLMProvider for OpenAIProvider {
             request.max_output_tokens,
             model_capabilities.pricing.clone(),
         );
+        span_recorder.set_phase("build_request");
         let span = span_recorder.span().clone();
         let request = match build_responses_request(
             &request,
             &resolved_model,
             &self.default_reasoning_effort,
-            native_tools(&model_capabilities, self.web_search_enabled),
+            enabled_native_tools(&model_capabilities, self.web_search_enabled),
         ) {
             Ok(request) => request,
             Err(error) => {
-                span_recorder.fail(&error);
+                span_recorder.fail_at_stage("build_request", &error);
                 return Err(error);
             }
         };
@@ -298,14 +302,6 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
     Err(MoaError::Unsupported(format!(
         "unsupported OpenAI model '{model}'"
     )))
-}
-
-fn native_tools(capabilities: &ModelCapabilities, enabled: bool) -> &[ProviderNativeTool] {
-    if enabled {
-        &capabilities.native_tools
-    } else {
-        &[]
-    }
 }
 
 fn native_web_search_tools() -> Vec<ProviderNativeTool> {

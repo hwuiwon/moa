@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_core::{
     CompactionConfig, ContextMessage, ContextProcessor, Event, EventRange, EventRecord,
-    LLMProvider, ProcessorOutput, Result, SessionStore, WorkingContext,
+    LLMProvider, ProcessorOutput, Result, SessionStore, ToolContent, ToolOutput, WorkingContext,
 };
 use moa_security::wrap_untrusted_tool_output;
 
@@ -15,6 +15,8 @@ use crate::compaction::{
 };
 
 use super::estimate_tokens;
+
+const MAX_TOOL_RESULT_REPLAY_CHARS: usize = 100_000;
 
 /// Compiles session events into conversational context.
 pub struct HistoryCompiler {
@@ -221,15 +223,13 @@ fn event_to_context_message(record: &EventRecord) -> Option<Result<ContextMessag
             tool_id,
             provider_tool_use_id,
             ..
-        } => Some(Ok(ContextMessage::tool_result(
+        } => Some(Ok(tool_result_context_message(
             provider_tool_use_id
                 .clone()
                 .unwrap_or_else(|| tool_id.to_string()),
-            format!(
-                "<tool_result id=\"{tool_id}\" success=\"{success}\">\n{}\n</tool_result>",
-                wrap_untrusted_tool_output(&output.to_text())
-            ),
-            Some(output.content.clone()),
+            *tool_id,
+            *success,
+            output,
         ))),
         Event::ToolError {
             error,
@@ -237,13 +237,16 @@ fn event_to_context_message(record: &EventRecord) -> Option<Result<ContextMessag
             provider_tool_use_id,
             ..
         } => Some(Ok(match provider_tool_use_id.as_ref() {
-            Some(call_id) => ContextMessage::tool_result(
-                call_id.clone(),
-                format!("<tool_error id=\"{tool_id}\">{error}</tool_error>"),
-                Some(vec![moa_core::ToolContent::Text {
-                    text: error.clone(),
-                }]),
-            ),
+            Some(call_id) => {
+                let replayable_error = truncate_tool_result_text(error);
+                ContextMessage::tool_result(
+                    call_id.clone(),
+                    format!("<tool_error id=\"{tool_id}\">{replayable_error}</tool_error>"),
+                    Some(vec![ToolContent::Text {
+                        text: replayable_error,
+                    }]),
+                )
+            }
             None => {
                 ContextMessage::tool(format!("<tool_error id=\"{tool_id}\">{error}</tool_error>"))
             }
@@ -266,6 +269,62 @@ fn event_to_context_message(record: &EventRecord) -> Option<Result<ContextMessag
         )))),
         _ => None,
     }
+}
+
+fn tool_result_context_message(
+    tool_use_id: String,
+    tool_id: uuid::Uuid,
+    success: bool,
+    output: &ToolOutput,
+) -> ContextMessage {
+    let replayable_text = truncate_tool_result_text(&output.to_text());
+    ContextMessage::tool_result(
+        tool_use_id,
+        format!(
+            "<tool_result id=\"{tool_id}\" success=\"{success}\">\n{}\n</tool_result>",
+            wrap_untrusted_tool_output(&replayable_text)
+        ),
+        replayable_tool_content_blocks(output, &replayable_text),
+    )
+}
+
+fn replayable_tool_content_blocks(
+    output: &ToolOutput,
+    replayable_text: &str,
+) -> Option<Vec<ToolContent>> {
+    let total_chars = output
+        .content
+        .iter()
+        .map(tool_content_char_len)
+        .sum::<usize>();
+
+    if total_chars <= MAX_TOOL_RESULT_REPLAY_CHARS {
+        return Some(output.content.clone());
+    }
+
+    Some(vec![ToolContent::Text {
+        text: replayable_text.to_string(),
+    }])
+}
+
+fn tool_content_char_len(content: &ToolContent) -> usize {
+    match content {
+        ToolContent::Text { text } => text.chars().count(),
+        ToolContent::Json { data } => data.to_string().chars().count(),
+    }
+}
+
+fn truncate_tool_result_text(text: &str) -> String {
+    const SUFFIX: &str =
+        "\n\n[tool output truncated before history replay to keep provider requests bounded]";
+    let text_len = text.chars().count();
+    if text_len <= MAX_TOOL_RESULT_REPLAY_CHARS {
+        return text.to_string();
+    }
+
+    let keep = MAX_TOOL_RESULT_REPLAY_CHARS.saturating_sub(SUFFIX.chars().count());
+    let truncated = text.chars().take(keep).collect::<String>();
+    format!("{truncated}{SUFFIX}")
 }
 
 #[cfg(test)]
@@ -525,6 +584,64 @@ mod tests {
         assert_eq!(messages[0].tool_use_id.as_deref(), Some("toolu_history"));
         assert!(messages[0].content.contains("<tool_result"));
         assert_eq!(messages[0].content_blocks.as_ref().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn history_compiler_truncates_oversized_tool_results_for_replay() {
+        let session = session();
+        let tool_id = uuid::Uuid::now_v7();
+        let giant = "src/lib.rs\n".repeat(15_000);
+        let events = vec![event_record(
+            &session.id,
+            0,
+            Event::ToolResult {
+                tool_id,
+                provider_tool_use_id: Some("toolu_large".to_string()),
+                output: ToolOutput {
+                    content: vec![
+                        ToolContent::Text {
+                            text: giant.clone(),
+                        },
+                        ToolContent::Json {
+                            data: serde_json::json!({
+                                "matches": vec![serde_json::json!({ "path": "src/lib.rs" }); 5_000],
+                            }),
+                        },
+                    ],
+                    is_error: false,
+                    structured: None,
+                    duration: Duration::from_millis(7),
+                },
+                success: true,
+                duration_ms: 7,
+            },
+        )];
+        let compiler = HistoryCompiler::new(Arc::new(MockSessionStore::new(
+            session.clone(),
+            events.clone(),
+        )));
+
+        let (messages, _) = compiler.compile_messages(&events, 1_000_000).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert!(
+            message
+                .content
+                .contains("[tool output truncated before history replay")
+        );
+        let blocks = message
+            .content_blocks
+            .as_ref()
+            .expect("bounded content blocks");
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ToolContent::Text { text } => {
+                assert!(text.contains("[tool output truncated before history replay"));
+                assert!(text.chars().count() <= MAX_TOOL_RESULT_REPLAY_CHARS);
+            }
+            ToolContent::Json { .. } => panic!("oversized replay should collapse to a text block"),
+        }
     }
 
     #[test]

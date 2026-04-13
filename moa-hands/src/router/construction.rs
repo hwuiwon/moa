@@ -35,6 +35,7 @@ impl ToolRouter {
             mcp_servers: HashMap::new(),
             mcp_proxy: None,
             active_hands: tokio::sync::RwLock::new(HashMap::new()),
+            workspace_roots: tokio::sync::RwLock::new(HashMap::new()),
             policies: ToolPolicies::default(),
             rule_store: None,
             session_store: None,

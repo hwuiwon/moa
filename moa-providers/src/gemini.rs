@@ -1,4 +1,11 @@
 //! Google Gemini provider implementation using the Gemini REST API.
+//!
+//! Internal adapter phases:
+//! 1. build one Gemini `streamGenerateContent` request body
+//! 2. execute provider transport with shared retry handling
+//! 3. normalize SSE events into `CompletionContent`
+//! 4. finalize one normalized `CompletionResponse`
+//! 5. record provider-private stream snapshots for tracing/debugging
 
 use std::collections::HashMap;
 use std::env;
@@ -13,15 +20,19 @@ use moa_core::{
     ToolContent, ToolInvocation,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
-use crate::common::{build_http_client, parse_sse_json};
+use crate::http::build_http_client;
 use crate::instrumentation::LLMSpanRecorder;
+use crate::provider_tools::{
+    enabled_native_tools, web_search_completed_block, web_search_started_block,
+};
 use crate::retry::RetryPolicy;
 use crate::schema::compile_for_gemini;
+use crate::sse::parse_sse_json;
 
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_STREAM_BUFFER: usize = 128;
@@ -147,16 +158,17 @@ impl LLMProvider for GeminiProvider {
             max_output_tokens,
             model_capabilities.pricing.clone(),
         );
+        span_recorder.set_phase("build_request");
         let span = span_recorder.span().clone();
         let request_body = match build_request_body(
             &request,
             &resolved_model,
             &self.default_reasoning_effort,
-            native_tools(&model_capabilities, self.web_search_enabled),
+            enabled_native_tools(&model_capabilities, self.web_search_enabled),
         ) {
             Ok(body) => body,
             Err(error) => {
-                span_recorder.fail(&error);
+                span_recorder.fail_at_stage("build_request", &error);
                 return Err(error);
             }
         };
@@ -177,6 +189,7 @@ impl LLMProvider for GeminiProvider {
                     resolved_model
                 );
 
+                span_recorder.set_phase("transport");
                 let response = retry_policy
                     .send(|| {
                         client
@@ -190,11 +203,12 @@ impl LLMProvider for GeminiProvider {
                 let response = match response {
                     Ok(response) => response,
                     Err(error) => {
-                        span_recorder.fail(&error);
+                        span_recorder.fail_at_stage("transport", &error);
                         return Err(error);
                     }
                 };
 
+                span_recorder.set_phase("stream");
                 let response = consume_sse_events(
                     response.bytes_stream().eventsource(),
                     tx,
@@ -206,11 +220,12 @@ impl LLMProvider for GeminiProvider {
 
                 match response {
                     Ok(response) => {
+                        span_recorder.set_phase("finalize");
                         span_recorder.finish(&response);
                         Ok(response)
                     }
                     Err(error) => {
-                        span_recorder.fail(&error);
+                        span_recorder.fail_at_stage("stream", &error);
                         Err(error)
                     }
                 }
@@ -224,9 +239,6 @@ impl LLMProvider for GeminiProvider {
 
 fn canonical_model_id(model: &str) -> Result<String> {
     let model = model.trim();
-    if model.starts_with("google/") {
-        return Ok(model.trim_start_matches("google/").to_string());
-    }
     if model.starts_with("gemini-") {
         return Ok(model.to_string());
     }
@@ -642,14 +654,6 @@ fn native_google_search_tools() -> Vec<ProviderNativeTool> {
     }]
 }
 
-fn native_tools(capabilities: &ModelCapabilities, enabled: bool) -> &[ProviderNativeTool] {
-    if enabled {
-        &capabilities.native_tools
-    } else {
-        &[]
-    }
-}
-
 fn is_standard_user_message(message: &ContextMessage) -> bool {
     message.role == MessageRole::User
         && message.tool_invocation.is_none()
@@ -685,7 +689,7 @@ async fn consume_sse_events<S>(
     tx: mpsc::Sender<Result<CompletionContent>>,
     fallback_model: String,
     started_at: Instant,
-    _span_recorder: &mut LLMSpanRecorder,
+    span_recorder: &mut LLMSpanRecorder,
 ) -> Result<CompletionResponse>
 where
     S: Stream<
@@ -706,17 +710,20 @@ where
         };
 
         for block in state.apply_event(&event)? {
+            span_recorder.observe_block(&block);
             if tx.send(Ok(block)).await.is_err() {
                 tracing::debug!("completion stream receiver dropped before the response finished");
+                span_recorder.record_raw_response(&state.debug_snapshot());
                 return Ok(state.finish(started_at));
             }
         }
     }
 
+    span_recorder.record_raw_response(&state.debug_snapshot());
     Ok(state.finish(started_at))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct GeminiGenerateContentResponse {
     #[serde(default)]
     candidates: Vec<GeminiCandidate>,
@@ -726,7 +733,7 @@ struct GeminiGenerateContentResponse {
     model_version: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct GeminiCandidate {
     #[serde(default)]
     content: Option<GeminiContent>,
@@ -736,13 +743,13 @@ struct GeminiCandidate {
     grounding_metadata: Option<Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct GeminiContent {
     #[serde(default)]
     parts: Vec<GeminiPart>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct GeminiPart {
     #[serde(default)]
     text: Option<String>,
@@ -752,7 +759,7 @@ struct GeminiPart {
     thought_signature: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct GeminiFunctionCall {
     name: String,
     #[serde(default)]
@@ -761,7 +768,7 @@ struct GeminiFunctionCall {
     id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct GeminiUsageMetadata {
     #[serde(default, rename = "promptTokenCount")]
     prompt_token_count: Option<usize>,
@@ -783,6 +790,7 @@ struct GeminiStreamState {
     thought_signature: Option<String>,
     search_started_emitted: bool,
     search_completed_emitted: bool,
+    last_raw_response: Option<GeminiGenerateContentResponse>,
 }
 
 impl GeminiStreamState {
@@ -798,11 +806,13 @@ impl GeminiStreamState {
             thought_signature: None,
             search_started_emitted: false,
             search_completed_emitted: false,
+            last_raw_response: None,
         }
     }
 
     fn apply_event(&mut self, event: &SseEvent) -> Result<Vec<CompletionContent>> {
         let response: GeminiGenerateContentResponse = parse_sse_json(event)?;
+        self.last_raw_response = Some(response.clone());
         if let Some(model_version) = response.model_version.clone()
             && !model_version.is_empty()
         {
@@ -820,10 +830,7 @@ impl GeminiStreamState {
         for candidate in response.candidates {
             if candidate.grounding_metadata.is_some() && !self.search_started_emitted {
                 self.search_started_emitted = true;
-                let block = CompletionContent::ProviderToolResult {
-                    tool_name: "web_search".to_string(),
-                    summary: "Searching the web...".to_string(),
-                };
+                let block = web_search_started_block();
                 self.content.push(block.clone());
                 emitted.push(block);
             }
@@ -867,10 +874,7 @@ impl GeminiStreamState {
                 self.stop_reason = finish_reason_to_stop_reason(finish_reason);
                 if candidate.grounding_metadata.is_some() && !self.search_completed_emitted {
                     self.search_completed_emitted = true;
-                    let block = CompletionContent::ProviderToolResult {
-                        tool_name: "web_search".to_string(),
-                        summary: "Web search completed.".to_string(),
-                    };
+                    let block = web_search_completed_block();
                     self.content.push(block.clone());
                     emitted.push(block);
                 }
@@ -906,6 +910,31 @@ impl GeminiStreamState {
             thought_signature: self.thought_signature,
         }
     }
+
+    fn debug_snapshot(&self) -> GeminiStreamDebugSnapshot {
+        GeminiStreamDebugSnapshot {
+            model: self.model.clone(),
+            stop_reason: self.stop_reason.clone(),
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cached_input_tokens: self.cached_input_tokens,
+            thought_signature: self.thought_signature.clone(),
+            content: self.content.clone(),
+            last_raw_response: self.last_raw_response.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiStreamDebugSnapshot {
+    model: String,
+    stop_reason: StopReason,
+    input_tokens: usize,
+    output_tokens: usize,
+    cached_input_tokens: usize,
+    thought_signature: Option<String>,
+    content: Vec<CompletionContent>,
+    last_raw_response: Option<GeminiGenerateContentResponse>,
 }
 
 fn finish_reason_to_stop_reason(finish_reason: &str) -> StopReason {

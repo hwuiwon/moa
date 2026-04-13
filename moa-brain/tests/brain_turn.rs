@@ -500,6 +500,95 @@ impl LLMProvider for OpenAiApprovalLoopLlmProvider {
 }
 
 #[derive(Default)]
+struct OpenAiFailedReadLoopLlmProvider {
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl LLMProvider for OpenAiFailedReadLoopLlmProvider {
+    fn name(&self) -> &str {
+        "openai-failed-read-loop"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: "gpt-5.4".to_string(),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::OpenAiCompatible,
+            pricing: TokenPricing {
+                input_per_mtok: 1.25,
+                output_per_mtok: 10.0,
+                cached_input_per_mtok: Some(0.125),
+            },
+            native_tools: Vec::new(),
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let mut requests = self.requests.lock().await;
+        let response = if requests.is_empty() {
+            CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("fc_failed_read_1".to_string()),
+                        name: "file_read".to_string(),
+                        input: json!({ "path": "../secret.txt" }),
+                    },
+                    provider_metadata: None,
+                })],
+                stop_reason: StopReason::ToolUse,
+                model: "gpt-5.4".to_string(),
+                input_tokens: 12,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+                duration_ms: 10,
+                thought_signature: None,
+            }
+        } else {
+            assert!(
+                request.messages.iter().any(|message| {
+                    message
+                        .tool_invocation
+                        .as_ref()
+                        .and_then(|invocation| invocation.id.as_deref())
+                        == Some("fc_failed_read_1")
+                }),
+                "expected assistant function_call history for fc_failed_read_1; request was: {request:?}"
+            );
+            assert!(
+                request.messages.iter().any(|message| {
+                    message.role == moa_core::MessageRole::Tool
+                        && message.tool_use_id.as_deref() == Some("fc_failed_read_1")
+                        && message.content.contains("path traversal")
+                }),
+                "expected function_call_output for fc_failed_read_1; request was: {request:?}"
+            );
+            CompletionResponse {
+                text: "Read failed as expected".to_string(),
+                content: vec![CompletionContent::Text(
+                    "Read failed as expected".to_string(),
+                )],
+                stop_reason: StopReason::EndTurn,
+                model: "gpt-5.4".to_string(),
+                input_tokens: 20,
+                output_tokens: 7,
+                cached_input_tokens: 0,
+                duration_ms: 12,
+                thought_signature: None,
+            }
+        };
+        requests.push(request);
+        Ok(CompletionStream::from_response(response))
+    }
+}
+
+#[derive(Default)]
 struct MemoryWriteLoopLlmProvider {
     requests: Arc<Mutex<Vec<CompletionRequest>>>,
 }
@@ -1310,6 +1399,91 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_approval() {
         &record.event,
         Event::BrainResponse { text, .. } if text == "Approved tool completed"
     )));
+}
+
+#[tokio::test]
+async fn run_brain_turn_records_tool_call_before_auto_allowed_tool_error() {
+    let session = SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: "gpt-5.4".to_string(),
+        ..SessionMeta::default()
+    };
+    let initial_events = vec![make_event_record(
+        &session.id,
+        0,
+        Event::UserMessage {
+            text: "Read a file that should fail".to_string(),
+            attachments: Vec::new(),
+        },
+    )];
+    let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(MockMemoryStore);
+    let sandbox_dir = tempdir().unwrap();
+    let tool_router = Arc::new(
+        ToolRouter::new_local(memory_store.clone(), sandbox_dir.path())
+            .await
+            .unwrap(),
+    );
+    let pipeline = build_default_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        memory_store,
+        tool_router.tool_schemas(),
+    );
+    let llm = Arc::new(OpenAiFailedReadLoopLlmProvider::default());
+
+    let result = run_brain_turn_with_tools(
+        session.id.clone(),
+        store.clone(),
+        llm,
+        &pipeline,
+        Some(tool_router),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result, TurnResult::Complete);
+
+    let events = store.events.lock().await.clone();
+    let call_index = events.iter().position(|record| {
+        matches!(
+            &record.event,
+            Event::ToolCall {
+                provider_tool_use_id: Some(provider_tool_use_id),
+                tool_name,
+                ..
+            } if provider_tool_use_id == "fc_failed_read_1" && tool_name == "file_read"
+        )
+    });
+    let error_index = events.iter().position(|record| {
+        matches!(
+            &record.event,
+            Event::ToolError {
+                provider_tool_use_id: Some(provider_tool_use_id),
+                error,
+                ..
+            } if provider_tool_use_id == "fc_failed_read_1" && error.contains("path traversal")
+        )
+    });
+
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::BrainResponse { text, .. } if text == "Read failed as expected"
+    )));
+    assert!(
+        call_index.is_some(),
+        "expected a persisted ToolCall event for fc_failed_read_1; events were: {events:#?}"
+    );
+    assert!(
+        error_index.is_some(),
+        "expected a persisted ToolError event for fc_failed_read_1; events were: {events:#?}"
+    );
+    assert!(
+        call_index.unwrap() < error_index.unwrap(),
+        "expected ToolCall to precede ToolError; events were: {events:#?}"
+    );
 }
 
 #[tokio::test]

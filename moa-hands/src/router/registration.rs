@@ -101,7 +101,7 @@ impl ToolRegistry {
         registry.register_builtin(Arc::new(session_search::SessionSearchTool));
         registry.register_hand(
             "bash",
-            "Run a shell command inside the active sandbox.",
+            "Run a non-interactive shell command inside the active workspace root. Each bash call starts fresh; directory changes do not persist to later tool calls.",
             json!({
                 "type": "object",
                 "properties": {
@@ -115,11 +115,11 @@ impl ToolRegistry {
         );
         registry.register_hand(
             "file_read",
-            "Read a UTF-8 text file from the sandbox.",
+            "Read a UTF-8 text file from the active workspace root. Paths must be relative and must not use `..`.",
             json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Relative path within the sandbox." }
+                    "path": { "type": "string", "description": "Relative path within the workspace root. Bash `cd` state does not carry over." }
                 },
                 "required": ["path"],
                 "additionalProperties": false
@@ -128,11 +128,11 @@ impl ToolRegistry {
         );
         registry.register_hand(
             "file_write",
-            "Create or overwrite a UTF-8 text file inside the sandbox.",
+            "Create or overwrite a UTF-8 text file inside the active workspace root. Paths must be relative and must not use `..`.",
             json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Relative path within the sandbox." },
+                    "path": { "type": "string", "description": "Relative path within the workspace root. Bash `cd` state does not carry over." },
                     "content": { "type": "string", "description": "Full file contents to write." }
                 },
                 "required": ["path", "content"],
@@ -142,11 +142,11 @@ impl ToolRegistry {
         );
         registry.register_hand(
             "file_search",
-            "Find files inside the sandbox using a glob pattern.",
+            "Find files inside the active workspace root using a glob pattern.",
             json!({
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string", "description": "Glob pattern such as **/*.rs." }
+                    "pattern": { "type": "string", "description": "Glob pattern such as **/*.rs, evaluated from the workspace root." }
                 },
                 "required": ["pattern"],
                 "additionalProperties": false

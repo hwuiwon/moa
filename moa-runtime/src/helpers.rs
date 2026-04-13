@@ -53,6 +53,34 @@ pub(crate) fn expand_local_path(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+pub(crate) fn detect_local_workspace_root() -> Result<PathBuf> {
+    let cwd = env::current_dir().map_err(|error| {
+        MoaError::ProviderError(format!("failed to resolve current directory: {error}"))
+    })?;
+    let cwd = match cwd.canonicalize() {
+        Ok(path) => path,
+        Err(_) => cwd,
+    };
+
+    for candidate in cwd.ancestors() {
+        if candidate.join(".git").exists() {
+            return Ok(candidate.to_path_buf());
+        }
+    }
+
+    Ok(cwd)
+}
+
+pub(crate) fn workspace_id_for_root(root: &Path) -> WorkspaceId {
+    let label = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(sanitize_workspace_label)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "workspace".to_string());
+    WorkspaceId::new(label)
+}
+
 pub(crate) fn local_user_id() -> UserId {
     UserId::new(
         env::var("USER")
@@ -140,6 +168,29 @@ pub(crate) fn unexpected_daemon_reply(expected: &str, reply: &moa_core::DaemonRe
     MoaError::ProviderError(format!(
         "daemon returned unexpected reply for {expected}: {reply:?}"
     ))
+}
+
+fn sanitize_workspace_label(value: &str) -> String {
+    let mut label = String::new();
+    let mut previous_was_dash = false;
+
+    for ch in value.chars() {
+        let normalized = if ch.is_ascii_alphanumeric() {
+            previous_was_dash = false;
+            Some(ch.to_ascii_lowercase())
+        } else if !previous_was_dash {
+            previous_was_dash = true;
+            Some('-')
+        } else {
+            None
+        };
+
+        if let Some(ch) = normalized {
+            label.push(ch);
+        }
+    }
+
+    label.trim_matches('-').to_string()
 }
 
 macro_rules! forward_sync_runtime_methods {
@@ -438,4 +489,25 @@ impl ChatRuntime {
         /// Requests an immediate cancellation of the active session task.
         fn cancel_active_generation(&self) -> Result<()>;
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::workspace_id_for_root;
+
+    #[test]
+    fn workspace_id_for_root_uses_sanitized_directory_name() {
+        let workspace_id = workspace_id_for_root(Path::new("/tmp/My Project!"));
+
+        assert_eq!(workspace_id.as_str(), "my-project");
+    }
+
+    #[test]
+    fn workspace_id_for_root_falls_back_when_basename_is_missing() {
+        let workspace_id = workspace_id_for_root(Path::new("/"));
+
+        assert_eq!(workspace_id.as_str(), "workspace");
+    }
 }

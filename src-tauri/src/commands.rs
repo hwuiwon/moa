@@ -2,7 +2,7 @@
 
 use moa_core::{ApprovalDecision, PageType, Platform, RuntimeEvent, SessionId, WorkspaceId};
 use moa_runtime::ChatRuntime;
-use tauri::{AppHandle, State, ipc::Channel};
+use tauri::{State, ipc::Channel};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -13,23 +13,20 @@ use crate::dto::{
 };
 use crate::error::{AppResult, MoaAppError};
 use crate::stream::StreamEvent;
-use crate::tray::{TrayStatus, update_tray_status};
 
 /// Creates a new session and switches the desktop runtime to it.
 #[tauri::command]
-pub async fn create_session(app: AppHandle, state: State<'_, AppState>) -> AppResult<String> {
+pub async fn create_session(state: State<'_, AppState>) -> AppResult<String> {
     let runtime = clone_runtime(&state).await;
     let session_id = runtime.create_session().await?;
     let next_runtime = attach_runtime(&runtime, session_id.clone()).await?;
     replace_runtime(&state, next_runtime).await;
-    update_tray_status(&app, TrayStatus::Ready);
     Ok(session_id.to_string())
 }
 
 /// Switches the desktop runtime to an existing session.
 #[tauri::command]
 pub async fn select_session(
-    app: AppHandle,
     session_id: String,
     state: State<'_, AppState>,
 ) -> AppResult<SessionMetaDto> {
@@ -38,7 +35,6 @@ pub async fn select_session(
     let next_runtime = attach_runtime(&runtime, session_id.clone()).await?;
     let meta = next_runtime.session_meta_by_id(session_id).await?;
     replace_runtime(&state, next_runtime).await;
-    update_tray_status(&app, TrayStatus::Ready);
     Ok(meta.into())
 }
 
@@ -101,41 +97,30 @@ pub async fn get_runtime_info(state: State<'_, AppState>) -> AppResult<RuntimeIn
 
 /// Changes the active workspace and starts a fresh session there.
 #[tauri::command]
-pub async fn set_workspace(
-    app: AppHandle,
-    workspace_id: String,
-    state: State<'_, AppState>,
-) -> AppResult<String> {
+pub async fn set_workspace(workspace_id: String, state: State<'_, AppState>) -> AppResult<String> {
     let mut runtime = clone_runtime(&state).await;
     let session_id = runtime
         .set_workspace(WorkspaceId::new(workspace_id))
         .await?;
     replace_runtime(&state, runtime).await;
-    update_tray_status(&app, TrayStatus::Ready);
     Ok(session_id.to_string())
 }
 
 /// Replaces the active session with a fresh empty session.
 #[tauri::command]
-pub async fn reset_session(app: AppHandle, state: State<'_, AppState>) -> AppResult<String> {
+pub async fn reset_session(state: State<'_, AppState>) -> AppResult<String> {
     let mut runtime = clone_runtime(&state).await;
     let session_id = runtime.reset_session().await?;
     replace_runtime(&state, runtime).await;
-    update_tray_status(&app, TrayStatus::Ready);
     Ok(session_id.to_string())
 }
 
 /// Switches the runtime to a different model and starts a fresh session.
 #[tauri::command]
-pub async fn set_model(
-    app: AppHandle,
-    model: String,
-    state: State<'_, AppState>,
-) -> AppResult<String> {
+pub async fn set_model(model: String, state: State<'_, AppState>) -> AppResult<String> {
     let mut runtime = clone_runtime(&state).await;
     let session_id = runtime.set_model(model).await?;
     replace_runtime(&state, runtime).await;
-    update_tray_status(&app, TrayStatus::Ready);
     Ok(session_id.to_string())
 }
 
@@ -247,7 +232,6 @@ pub async fn queue_message(
 /// Runs one streamed turn on the selected session and forwards runtime events to the frontend.
 #[tauri::command]
 pub async fn send_message(
-    app: AppHandle,
     session_id: String,
     prompt: String,
     on_event: Channel<StreamEvent>,
@@ -259,8 +243,6 @@ pub async fn send_message(
         runtime = attach_runtime(&runtime, requested_session_id).await?;
         replace_runtime(&state, runtime.clone()).await;
     }
-    update_tray_status(&app, TrayStatus::Working);
-
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let prompt_clone = prompt.clone();
     let runtime_clone = runtime.clone();
@@ -270,18 +252,6 @@ pub async fn send_message(
         );
 
     while let Some(event) = event_rx.recv().await {
-        match &event {
-            RuntimeEvent::ApprovalRequested(_) => {
-                update_tray_status(&app, TrayStatus::AwaitingApproval);
-            }
-            RuntimeEvent::TurnCompleted => {
-                update_tray_status(&app, TrayStatus::Ready);
-            }
-            RuntimeEvent::Error(_) => {
-                update_tray_status(&app, TrayStatus::Error);
-            }
-            _ => {}
-        }
         let should_stop = matches!(event, RuntimeEvent::TurnCompleted | RuntimeEvent::Error(_));
         if on_event.send(StreamEvent::from(event)).is_err() {
             break;
@@ -292,19 +262,14 @@ pub async fn send_message(
     }
 
     match run_task.await {
-        Ok(Ok(())) => {
-            update_tray_status(&app, TrayStatus::Ready);
-            Ok(())
-        }
+        Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => {
-            update_tray_status(&app, TrayStatus::Error);
             let _ = on_event.send(StreamEvent::Error {
                 message: error.to_string(),
             });
             Err(error.into())
         }
         Err(error) => {
-            update_tray_status(&app, TrayStatus::Error);
             let message = format!("stream task failed to join: {error}");
             let _ = on_event.send(StreamEvent::Error {
                 message: message.clone(),
@@ -316,50 +281,34 @@ pub async fn send_message(
 
 /// Sends an immediate stop request to the target session.
 #[tauri::command]
-pub async fn stop_session(
-    app: AppHandle,
-    session_id: String,
-    state: State<'_, AppState>,
-) -> AppResult<()> {
+pub async fn stop_session(session_id: String, state: State<'_, AppState>) -> AppResult<()> {
     let runtime = clone_runtime(&state).await;
     let session_id = parse_session_id(&session_id)?;
     runtime.hard_cancel_session(session_id).await?;
-    update_tray_status(&app, TrayStatus::Ready);
     Ok(())
 }
 
 /// Sends a graceful soft-cancel request to the target session.
 #[tauri::command]
-pub async fn soft_cancel_session(
-    app: AppHandle,
-    session_id: String,
-    state: State<'_, AppState>,
-) -> AppResult<()> {
+pub async fn soft_cancel_session(session_id: String, state: State<'_, AppState>) -> AppResult<()> {
     let runtime = clone_runtime(&state).await;
     let session_id = parse_session_id(&session_id)?;
     runtime.soft_cancel_session(session_id).await?;
-    update_tray_status(&app, TrayStatus::Ready);
     Ok(())
 }
 
 /// Sends an immediate hard-cancel request to the target session.
 #[tauri::command]
-pub async fn hard_cancel_session(
-    app: AppHandle,
-    session_id: String,
-    state: State<'_, AppState>,
-) -> AppResult<()> {
+pub async fn hard_cancel_session(session_id: String, state: State<'_, AppState>) -> AppResult<()> {
     let runtime = clone_runtime(&state).await;
     let session_id = parse_session_id(&session_id)?;
     runtime.hard_cancel_session(session_id).await?;
-    update_tray_status(&app, TrayStatus::Ready);
     Ok(())
 }
 
 /// Responds to an approval request on the active session.
 #[tauri::command]
 pub async fn respond_to_approval(
-    app: AppHandle,
     request_id: String,
     decision: String,
     pattern: Option<String>,
@@ -370,14 +319,12 @@ pub async fn respond_to_approval(
     let request_id = parse_uuid(&request_id)?;
     let decision = parse_approval_decision(&decision, pattern, reason)?;
     runtime.respond_to_approval(request_id, decision).await?;
-    update_tray_status(&app, TrayStatus::Working);
     Ok(())
 }
 
 /// Responds to an approval request on an explicitly selected session.
 #[tauri::command]
 pub async fn respond_to_session_approval(
-    app: AppHandle,
     session_id: String,
     request_id: String,
     decision: String,
@@ -392,16 +339,14 @@ pub async fn respond_to_session_approval(
     runtime
         .respond_to_session_approval(session_id, request_id, decision)
         .await?;
-    update_tray_status(&app, TrayStatus::Working);
     Ok(())
 }
 
 /// Cancels the currently active generation immediately.
 #[tauri::command]
-pub async fn cancel_active_generation(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+pub async fn cancel_active_generation(state: State<'_, AppState>) -> AppResult<()> {
     let runtime = clone_runtime(&state).await;
     runtime.cancel_active_generation().await?;
-    update_tray_status(&app, TrayStatus::Ready);
     Ok(())
 }
 

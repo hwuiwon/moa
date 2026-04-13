@@ -49,6 +49,16 @@ pub(super) async fn handle_tool_call(
             .map(|canary| check_canary(canary, &serialized_input))
             .unwrap_or(false)
     {
+        append_tool_call_event(
+            &session_store,
+            event_tx,
+            session_id.clone(),
+            tool_id,
+            invocation,
+            provider_thought_signature(call).as_deref(),
+            None,
+        )
+        .await?;
         append_event(
             &session_store,
             event_tx,
@@ -262,28 +272,24 @@ pub(super) async fn execute_tool(
     cancel_token: Option<&CancellationToken>,
     hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<ToolCallOutcome> {
+    if emit_call_event {
+        append_tool_call_event(
+            &session_store,
+            event_tx,
+            session_id.clone(),
+            tool_id,
+            call,
+            provider_thought_signature,
+            None,
+        )
+        .await?;
+    }
+
     match tool_router
         .execute_authorized_with_cancel(session, call, cancel_token, hard_cancel_token)
         .await
     {
-        Ok((resolved_hand_id, output)) => {
-            if emit_call_event {
-                append_event(
-                    &session_store,
-                    event_tx,
-                    session_id.clone(),
-                    Event::ToolCall {
-                        tool_id,
-                        provider_tool_use_id: call.id.clone(),
-                        provider_thought_signature: provider_thought_signature
-                            .map(ToOwned::to_owned),
-                        tool_name: call.name.clone(),
-                        input: call.input.clone(),
-                        hand_id: resolved_hand_id,
-                    },
-                )
-                .await?;
-            }
+        Ok((_resolved_hand_id, output)) => {
             let secured_output = secure_tool_output(&output, active_canary);
             emit_tool_output_warning(
                 session_id.clone(),
@@ -367,6 +373,31 @@ pub(super) async fn execute_tool(
             Ok(ToolCallOutcome::Skipped)
         }
     }
+}
+
+async fn append_tool_call_event(
+    session_store: &Arc<dyn SessionStore>,
+    event_tx: Option<&broadcast::Sender<EventRecord>>,
+    session_id: SessionId,
+    tool_id: Uuid,
+    invocation: &ToolInvocation,
+    provider_thought_signature: Option<&str>,
+    hand_id: Option<String>,
+) -> Result<()> {
+    append_event(
+        session_store,
+        event_tx,
+        session_id,
+        Event::ToolCall {
+            tool_id,
+            provider_tool_use_id: invocation.id.clone(),
+            provider_thought_signature: provider_thought_signature.map(ToOwned::to_owned),
+            tool_name: invocation.name.clone(),
+            input: invocation.input.clone(),
+            hand_id,
+        },
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]

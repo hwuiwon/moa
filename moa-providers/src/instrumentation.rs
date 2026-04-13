@@ -3,6 +3,7 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use moa_core::{CompletionContent, CompletionRequest, CompletionResponse, TokenPricing};
 use opentelemetry::trace::Status;
+use serde::Serialize;
 use serde_json::Value;
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -112,9 +113,28 @@ impl LLMSpanRecorder {
         &self.span
     }
 
+    /// Records the current internal provider phase on the active span.
+    pub(crate) fn set_phase(&self, phase: &'static str) {
+        self.span
+            .set_attribute("langfuse.observation.metadata.provider_phase", phase);
+    }
+
     /// Records the cached prompt token count used to price the request accurately.
     pub(crate) fn set_cached_input_tokens(&mut self, cached_input_tokens: usize) {
         self.cached_input_tokens = cached_input_tokens;
+    }
+
+    /// Records a provider-private debug payload on the active span.
+    pub(crate) fn record_raw_response<T>(&self, payload: &T)
+    where
+        T: Serialize,
+    {
+        if let Some(serialized) = serialize_provider_debug_payload(payload) {
+            self.span.set_attribute(
+                "langfuse.observation.metadata.provider_raw_response",
+                serialized,
+            );
+        }
     }
 
     /// Observes one streamed output block, capturing TTFT and partial output.
@@ -179,6 +199,12 @@ impl LLMSpanRecorder {
                 },
             );
         }
+    }
+
+    /// Marks the span as failed while also recording the provider phase.
+    pub(crate) fn fail_at_stage(&self, phase: &'static str, error: &impl std::fmt::Display) {
+        self.set_phase(phase);
+        self.fail(error);
     }
 }
 
@@ -346,11 +372,22 @@ fn truncate_attribute_value(mut value: String) -> String {
     value
 }
 
+fn serialize_provider_debug_payload<T>(payload: &T) -> Option<String>
+where
+    T: Serialize,
+{
+    serde_json::to_string(payload)
+        .ok()
+        .map(truncate_attribute_value)
+}
+
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use moa_core::TokenPricing;
 
-    use super::{calculate_cost, llm_span_name};
+    use super::{calculate_cost, llm_span_name, serialize_provider_debug_payload};
 
     #[test]
     fn llm_span_name_format() {
@@ -370,5 +407,20 @@ mod tests {
 
         let cost = calculate_cost(1_000, 500, &pricing);
         assert!((cost - 0.0105).abs() < 1e-10);
+    }
+
+    #[test]
+    fn provider_debug_payload_is_serialized_and_truncated() {
+        let payload = json!({
+            "kind": "response",
+            "body": "x".repeat(40_000),
+        });
+
+        let serialized =
+            serialize_provider_debug_payload(&payload).expect("payload should serialize");
+
+        assert!(serialized.starts_with('{'));
+        assert!(serialized.len() > 100);
+        assert!(serialized.ends_with('…'));
     }
 }

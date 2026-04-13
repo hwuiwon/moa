@@ -115,16 +115,8 @@ fn infer_provider_name(model: &str) -> Option<&'static str> {
 }
 
 fn normalize_model_for_provider(provider_name: &str, model: &str) -> String {
-    let model = model.trim();
-    match provider_name {
-        PROVIDER_ANTHROPIC => model
-            .strip_prefix("anthropic/")
-            .unwrap_or(model)
-            .to_string(),
-        PROVIDER_OPENAI => model.strip_prefix("openai/").unwrap_or(model).to_string(),
-        PROVIDER_GOOGLE => model.strip_prefix("google/").unwrap_or(model).to_string(),
-        _ => model.to_string(),
-    }
+    let _provider_name = provider_name;
+    model.trim().to_string()
 }
 
 fn is_openai_model(model: &str) -> bool {
