@@ -2,12 +2,15 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type {
   EventRecordDto,
+  MemorySearchResultDto,
   MoaConfigDto,
   ModelOptionDto,
+  PageSummaryDto,
   RuntimeInfoDto,
   SessionMetaDto,
   SessionPreviewDto,
   StreamEvent,
+  WikiPageDto,
 } from "@/lib/bindings";
 
 function errorMessage(error: unknown): string {
@@ -48,6 +51,16 @@ export const tauriClient = {
     invokeCommand<EventRecordDto[]>("get_session_events", { sessionId }),
   getRuntimeInfo: () => invokeCommand<RuntimeInfoDto>("get_runtime_info"),
   getConfig: () => invokeCommand<MoaConfigDto>("get_config"),
+  listMemoryPages: (filter?: string | null) =>
+    invokeCommand<PageSummaryDto[]>("list_memory_pages", { filter }),
+  readMemoryPage: (path: string) =>
+    invokeCommand<WikiPageDto>("read_memory_page", { path }),
+  writeMemoryPage: (page: WikiPageDto) =>
+    invokeCommand<WikiPageDto>("write_memory_page", { page }),
+  searchMemory: (query: string, limit = 20) =>
+    invokeCommand<MemorySearchResultDto[]>("search_memory", { limit, query }),
+  deleteMemoryPage: (path: string) =>
+    invokeCommand<void>("delete_memory_page", { path }),
   listModelOptions: () =>
     invokeCommand<ModelOptionDto[]>("list_model_options"),
   setModel: (model: string) => invokeCommand<string>("set_model", { model }),

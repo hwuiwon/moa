@@ -284,6 +284,26 @@ impl LocalChatRuntime {
             .await
     }
 
+    /// Creates or updates one wiki page in the current workspace.
+    pub async fn write_memory_page(&self, page: WikiPage) -> Result<WikiPage> {
+        let path = page
+            .path
+            .clone()
+            .ok_or_else(|| MoaError::ValidationError("memory page path is required".to_string()))?;
+        self.orchestrator
+            .memory_store()
+            .write_page(
+                MemoryScope::Workspace(self.workspace_id.clone()),
+                &path,
+                page,
+            )
+            .await?;
+        self.orchestrator
+            .memory_store()
+            .read_page(MemoryScope::Workspace(self.workspace_id.clone()), &path)
+            .await
+    }
+
     /// Deletes one wiki page from the current workspace.
     pub async fn delete_memory_page(&self, path: &MemoryPath) -> Result<()> {
         self.orchestrator
@@ -663,6 +683,24 @@ impl DaemonChatRuntime {
         }
     }
 
+    /// Creates or updates one wiki page in the current workspace.
+    async fn write_memory_page(&self, page: WikiPage) -> Result<WikiPage> {
+        let path = page
+            .path
+            .clone()
+            .ok_or_else(|| MoaError::ValidationError("memory page path is required".to_string()))?;
+        daemon_expect_ack(
+            &self.socket_path,
+            &DaemonCommand::WriteMemoryPage {
+                workspace_id: self.workspace_id.clone(),
+                path: path.clone(),
+                page,
+            },
+        )
+        .await?;
+        self.read_memory_page(&path).await
+    }
+
     /// Deletes one wiki page from the current workspace.
     async fn delete_memory_page(&self, path: &MemoryPath) -> Result<()> {
         daemon_expect_ack(
@@ -1000,6 +1038,14 @@ impl ChatRuntime {
         match self {
             Self::Local(runtime) => runtime.read_memory_page(path).await,
             Self::Daemon(runtime) => runtime.read_memory_page(path).await,
+        }
+    }
+
+    /// Creates or updates one wiki page in the current workspace.
+    pub async fn write_memory_page(&self, page: WikiPage) -> Result<WikiPage> {
+        match self {
+            Self::Local(runtime) => runtime.write_memory_page(page).await,
+            Self::Daemon(runtime) => runtime.write_memory_page(page).await,
         }
     }
 

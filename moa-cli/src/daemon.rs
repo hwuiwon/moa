@@ -346,6 +346,18 @@ async fn handle_unary_command_inner(
                 .read_page(MemoryScope::Workspace(workspace_id), &path)
                 .await?,
         )),
+        DaemonCommand::WriteMemoryPage {
+            workspace_id,
+            path,
+            page,
+        } => {
+            state
+                .orchestrator
+                .memory_store()
+                .write_page(MemoryScope::Workspace(workspace_id), &path, page)
+                .await?;
+            Ok(DaemonReply::Ack)
+        }
         DaemonCommand::DeleteMemoryPage { workspace_id, path } => {
             state
                 .orchestrator

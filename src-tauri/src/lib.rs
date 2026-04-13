@@ -60,6 +60,7 @@ pub fn run() {
             commands::list_memory_pages,
             commands::recent_memory_entries,
             commands::read_memory_page,
+            commands::write_memory_page,
             commands::search_memory,
             commands::delete_memory_page,
             commands::memory_index,

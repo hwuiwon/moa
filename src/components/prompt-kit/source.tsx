@@ -11,6 +11,8 @@ import { createContext, useContext } from "react"
 const SourceContext = createContext<{
     href: string
     domain: string
+    external: boolean
+    onNavigate?: (() => void) | undefined
 } | null>(null)
 
 function useSourceContext() {
@@ -21,10 +23,17 @@ function useSourceContext() {
 
 export type SourceProps = {
     href: string
+    external?: boolean
+    onNavigate?: () => void
     children: React.ReactNode
 }
 
-export function Source({ href, children }: SourceProps) {
+export function Source({
+    href,
+    external = true,
+    onNavigate,
+    children,
+}: SourceProps) {
     let domain = ""
     try {
         domain = new URL(href).hostname
@@ -33,7 +42,7 @@ export function Source({ href, children }: SourceProps) {
     }
 
     return (
-        <SourceContext.Provider value={{ href, domain }}>
+        <SourceContext.Provider value={{ href, domain, external, onNavigate }}>
             <HoverCard>
                 {children}
             </HoverCard>
@@ -52,8 +61,29 @@ export function SourceTrigger({
     showFavicon = false,
     className,
 }: SourceTriggerProps) {
-    const { href, domain } = useSourceContext()
+    const { href, domain, external, onNavigate } = useSourceContext()
     const labelToShow = label ?? domain.replace("www.", "")
+    const triggerClassName = cn(
+        "bg-muted text-muted-foreground hover:bg-muted-foreground/30 hover:text-primary inline-flex h-5 max-w-32 items-center gap-1 overflow-hidden rounded-full py-0 text-xs no-underline transition-colors duration-150",
+        showFavicon ? "pr-2 pl-1" : "px-1",
+        className
+    )
+
+    if (!external) {
+        return (
+            <HoverCardTrigger>
+                <button
+                    className={triggerClassName}
+                    onClick={onNavigate}
+                    type="button"
+                >
+                    <span className="truncate tabular-nums text-center font-normal">
+                        {labelToShow}
+                    </span>
+                </button>
+            </HoverCardTrigger>
+        )
+    }
 
     return (
         <HoverCardTrigger>
@@ -61,11 +91,7 @@ export function SourceTrigger({
                 href={href}
                 target="_blank"
                 rel="noopener noreferrer"
-                className={cn(
-                    "bg-muted text-muted-foreground hover:bg-muted-foreground/30 hover:text-primary inline-flex h-5 max-w-32 items-center gap-1 overflow-hidden rounded-full py-0 text-xs no-underline transition-colors duration-150",
-                    showFavicon ? "pr-2 pl-1" : "px-1",
-                    className
-                )}
+                className={triggerClassName}
             >
                 {showFavicon && (
                     <img
@@ -95,16 +121,29 @@ export function SourceContent({
     description,
     className,
 }: SourceContentProps) {
-    const { href, domain } = useSourceContext()
+    const { href, domain, external, onNavigate } = useSourceContext()
+
+    if (!external) {
+        return (
+            <HoverCardContent className={cn("w-80 p-0 shadow-xs", className)}>
+                <button className="w-full text-left" onClick={onNavigate} type="button">
+                    <div className="flex flex-col gap-2 p-3">
+                        <div className="text-primary truncate text-sm">
+                            {domain.replace("www.", "")}
+                        </div>
+                        <div className="line-clamp-2 text-sm font-medium">{title}</div>
+                        <div className="text-muted-foreground line-clamp-2 text-sm">
+                            {description}
+                        </div>
+                    </div>
+                </button>
+            </HoverCardContent>
+        )
+    }
 
     return (
         <HoverCardContent className={cn("w-80 p-0 shadow-xs", className)}>
-            <a
-                href={href}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex flex-col gap-2 p-3"
-            >
+            <a href={href} target="_blank" rel="noopener noreferrer" className="flex flex-col gap-2 p-3">
                 <div className="flex items-center gap-1.5">
                     <img
                         src={`https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(
@@ -115,14 +154,10 @@ export function SourceContent({
                         width={16}
                         height={16}
                     />
-                    <div className="text-primary truncate text-sm">
-                        {domain.replace("www.", "")}
-                    </div>
+                    <div className="text-primary truncate text-sm">{domain.replace("www.", "")}</div>
                 </div>
                 <div className="line-clamp-2 text-sm font-medium">{title}</div>
-                <div className="text-muted-foreground line-clamp-2 text-sm">
-                    {description}
-                </div>
+                <div className="text-muted-foreground line-clamp-2 text-sm">{description}</div>
             </a>
         </HoverCardContent>
     )
