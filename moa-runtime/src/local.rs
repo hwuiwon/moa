@@ -430,7 +430,7 @@ impl ChatRuntime {
     /// Creates a fully local runtime rooted in a unique temporary directory for tests.
     #[doc(hidden)]
     pub async fn for_test(platform: Platform) -> Result<Self> {
-        let base = std::env::temp_dir().join(format!("moa-runtime-test-{}", Uuid::new_v4()));
+        let base = std::env::temp_dir().join(format!("moa-runtime-test-{}", Uuid::now_v7()));
         tokio::fs::create_dir_all(&base).await?;
 
         let mut config = MoaConfig::default();

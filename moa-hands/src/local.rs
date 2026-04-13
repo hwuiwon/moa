@@ -68,7 +68,7 @@ impl LocalHandProvider {
     }
 
     async fn create_sandbox_dir(&self) -> Result<PathBuf> {
-        let sandbox_dir = self.work_dir.join(format!("sandbox-{}", Uuid::new_v4()));
+        let sandbox_dir = self.work_dir.join(format!("sandbox-{}", Uuid::now_v7()));
         fs::create_dir_all(&sandbox_dir).await?;
         #[cfg(unix)]
         fs::set_permissions(&sandbox_dir, std::fs::Permissions::from_mode(0o777)).await?;

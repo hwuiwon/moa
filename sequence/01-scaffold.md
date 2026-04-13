@@ -41,7 +41,7 @@ A compilable Rust workspace with 12 crates. `moa-core` contains all shared types
 
 Start with `Cargo.toml` at the workspace root. Define all 12 members. Each crate's `Cargo.toml` should list `moa-core` as a dependency (except `moa-core` itself). Add external dependencies only where needed at this stage:
 
-- `moa-core`: `serde`, `serde_json`, `uuid` (v4), `chrono`, `thiserror`, `async-trait`, `tokio` (features: full), `tracing`, `config`
+- `moa-core`: `serde`, `serde_json`, `uuid` (v7), `chrono`, `thiserror`, `async-trait`, `tokio` (features: full), `tracing`, `config`
 - All other crates: just `moa-core` as a path dependency for now
 
 For the trait definitions, copy them exactly from `docs/01-architecture-overview.md`. These are the stable interfaces — they should not change after this step.
@@ -186,8 +186,8 @@ mod tests {
         let events = vec![
             Event::SessionCreated { workspace_id: "ws1".into(), user_id: "u1".into(), model: "test".into() },
             Event::UserMessage { text: "hi".into(), attachments: vec![] },
-            Event::ToolCall { tool_id: Uuid::new_v4(), tool_name: "bash".into(), input: json!({}), hand_id: None },
-            Event::ApprovalRequested { request_id: Uuid::new_v4(), tool_name: "bash".into(), input_summary: "ls".into(), risk_level: RiskLevel::Low },
+            Event::ToolCall { tool_id: Uuid::now_v7(), tool_name: "bash".into(), input: json!({}), hand_id: None },
+            Event::ApprovalRequested { request_id: Uuid::now_v7(), tool_name: "bash".into(), input_summary: "ls".into(), risk_level: RiskLevel::Low },
             Event::Checkpoint { summary: "test".into(), events_summarized: 10, token_count: 500 },
             Event::Error { message: "oops".into(), recoverable: true },
         ];

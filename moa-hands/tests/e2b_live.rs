@@ -160,8 +160,8 @@ async fn e2b_live_provider_handles_roundtrip_and_lifecycle() {
         .await
         .expect("failed to provision E2B sandbox");
 
-    let file_path = format!("/tmp/moa-e2b-live-{}.txt", Uuid::new_v4().simple());
-    let marker = format!("marker-{}", Uuid::new_v4().simple());
+    let file_path = format!("/tmp/moa-e2b-live-{}.txt", Uuid::now_v7().simple());
+    let marker = format!("marker-{}", Uuid::now_v7().simple());
 
     let result = AssertUnwindSafe(async {
         let bash = provider
@@ -313,10 +313,10 @@ async fn e2b_live_router_lazy_provisions_reuses_and_isolates_sessions() {
 
     let session_one = session("one");
     let session_two = session("two");
-    let file_one = format!("/tmp/moa-e2b-router-one-{}.txt", Uuid::new_v4().simple());
-    let file_two = format!("/tmp/moa-e2b-router-two-{}.txt", Uuid::new_v4().simple());
-    let content_one = format!("router-one-{}", Uuid::new_v4().simple());
-    let content_two = format!("router-two-{}", Uuid::new_v4().simple());
+    let file_one = format!("/tmp/moa-e2b-router-one-{}.txt", Uuid::now_v7().simple());
+    let file_two = format!("/tmp/moa-e2b-router-two-{}.txt", Uuid::now_v7().simple());
+    let content_one = format!("router-one-{}", Uuid::now_v7().simple());
+    let content_two = format!("router-two-{}", Uuid::now_v7().simple());
 
     let handle_one_id = {
         let (hand_id, write) = router

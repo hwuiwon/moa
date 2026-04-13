@@ -11,6 +11,7 @@ use moa_core::{
 };
 use tokio::fs;
 
+pub mod bootstrap;
 pub mod branching;
 pub mod consolidation;
 pub mod fts;

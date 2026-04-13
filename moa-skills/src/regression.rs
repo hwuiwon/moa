@@ -103,7 +103,7 @@ pub async fn run_skill_suite(
     let suite_path = skill_suite_path(memory_store.as_ref(), workspace_id, &resolved.metadata.path);
     let suite = load_suite(&suite_path).map_err(map_eval_error)?;
 
-    let temp_root = std::env::temp_dir().join(format!("moa-skill-eval-{}", Uuid::new_v4()));
+    let temp_root = std::env::temp_dir().join(format!("moa-skill-eval-{}", Uuid::now_v7()));
     let skill_dir = materialize_skill_dir(
         &temp_root,
         &resolved.document.frontmatter.name,
@@ -157,7 +157,7 @@ pub async fn run_skill_regression(
         });
     }
 
-    let temp_root = std::env::temp_dir().join(format!("moa-skill-regression-{}", Uuid::new_v4()));
+    let temp_root = std::env::temp_dir().join(format!("moa-skill-regression-{}", Uuid::now_v7()));
     let previous_document = parse_skill_markdown(current_markdown)?;
     let candidate_document = parse_skill_markdown(candidate_markdown)?;
     let previous_dir = materialize_skill_dir(

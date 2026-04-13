@@ -617,7 +617,7 @@ mod tests {
 
     #[test]
     fn renderer_keeps_buttons_on_last_chunk_only() {
-        let request_id = uuid::Uuid::new_v4();
+        let request_id = uuid::Uuid::now_v7();
         let message = OutboundMessage {
             content: MessageContent::ApprovalRequest {
                 request: ApprovalRequest {
@@ -670,7 +670,7 @@ mod tests {
     #[cfg(feature = "slack")]
     #[test]
     fn slack_renderer_attaches_buttons_to_last_chunk_only() {
-        let request_id = uuid::Uuid::new_v4();
+        let request_id = uuid::Uuid::now_v7();
         let message = OutboundMessage {
             content: MessageContent::ApprovalRequest {
                 request: ApprovalRequest {
@@ -729,7 +729,7 @@ mod tests {
     #[cfg(feature = "discord")]
     #[test]
     fn discord_renderer_attaches_buttons_to_last_chunk_only() {
-        let request_id = uuid::Uuid::new_v4();
+        let request_id = uuid::Uuid::now_v7();
         let message = OutboundMessage {
             content: MessageContent::ApprovalRequest {
                 request: ApprovalRequest {

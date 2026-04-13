@@ -82,7 +82,7 @@ macro_rules! uuid_id {
         pub struct $name(pub uuid::Uuid);
 
         impl $name {
-            pub fn new() -> Self { Self(uuid::Uuid::new_v4()) }
+            pub fn new() -> Self { Self(uuid::Uuid::now_v7()) }
         }
 
         impl Default for $name {

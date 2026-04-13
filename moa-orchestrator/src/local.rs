@@ -1,6 +1,8 @@
 //! Tokio-task local orchestrator for multi-session MOA execution.
 
 use std::collections::HashMap;
+use std::env;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -13,12 +15,13 @@ use moa_brain::{
 };
 use moa_core::{
     BrainOrchestrator, BranchManager, BufferedUserMessage, CronHandle, CronSpec, Event, EventRange,
-    EventRecord, EventStream, LLMProvider, MoaConfig, MoaError, ObserveLevel, PendingSignal,
-    Result, RuntimeEvent, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
-    SessionStatus, SessionStore, SessionSummary, StartSessionRequest, TraceContext, UserMessage,
+    EventRecord, EventStream, LLMProvider, MemoryScope, MoaConfig, MoaError, ObserveLevel,
+    PendingSignal, Result, RuntimeEvent, SessionFilter, SessionHandle, SessionId, SessionMeta,
+    SessionSignal, SessionStatus, SessionStore, SessionSummary, StartSessionRequest, TraceContext,
+    UserMessage, WorkspaceId,
 };
 use moa_hands::ToolRouter;
-use moa_memory::{ConsolidationReport, FileMemoryStore};
+use moa_memory::{ConsolidationReport, FileMemoryStore, bootstrap};
 use moa_providers::{build_provider_from_config, resolve_provider_selection};
 use moa_session::{NeonBranchManager, SessionDatabase, create_session_store};
 use moa_skills::maybe_distill_skill;
@@ -353,6 +356,90 @@ impl LocalOrchestrator {
             .map_err(|error| MoaError::ProviderError(error.to_string()))?;
         Ok(())
     }
+
+    async fn maybe_bootstrap_workspace_memory(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Option<bootstrap::BootstrapReport> {
+        if !self.config.memory.auto_bootstrap {
+            return None;
+        }
+
+        let scope = MemoryScope::Workspace(workspace_id.clone());
+        let should_bootstrap =
+            match bootstrap::should_bootstrap(self.memory_store.as_ref(), &scope).await {
+                Ok(should_bootstrap) => should_bootstrap,
+                Err(error) => {
+                    tracing::warn!(
+                        workspace_id = %workspace_id,
+                        error = %error,
+                        "failed to inspect workspace memory bootstrap state"
+                    );
+                    return None;
+                }
+            };
+        if !should_bootstrap {
+            return None;
+        }
+
+        let workspace_path = match detect_workspace_path(workspace_id).await {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    error = %error,
+                    "failed to resolve workspace path for memory bootstrap"
+                );
+                return None;
+            }
+        };
+        let workspace_name = workspace_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("workspace");
+
+        tracing::info!(
+            workspace_id = %workspace_id,
+            workspace_path = %workspace_path.display(),
+            "empty workspace memory detected; bootstrapping from instruction file"
+        );
+
+        match bootstrap::run_bootstrap(
+            self.memory_store.as_ref(),
+            &scope,
+            &workspace_path,
+            workspace_name,
+        )
+        .await
+        {
+            Ok(report) => {
+                if let Some(source_file) = &report.source_file {
+                    tracing::info!(
+                        workspace_id = %workspace_id,
+                        source_file = %source_file,
+                        pages_created = report.pages_created.len(),
+                        "workspace memory bootstrapped from instruction file"
+                    );
+                } else {
+                    tracing::info!(
+                        workspace_id = %workspace_id,
+                        pages_created = report.pages_created.len(),
+                        "workspace memory bootstrapped with minimal index"
+                    );
+                }
+                Some(report)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    error = %error,
+                    "workspace memory bootstrap failed"
+                );
+                None
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -387,6 +474,9 @@ impl BrainOrchestrator for LocalOrchestrator {
             },
         )
         .await?;
+        let bootstrap_report = self
+            .maybe_bootstrap_workspace_memory(&req.workspace_id)
+            .await;
         if let Some(message) = initial_message {
             append_event(
                 &self.session_store,
@@ -405,6 +495,14 @@ impl BrainOrchestrator for LocalOrchestrator {
             Vec::new(),
         )
         .await?;
+        if bootstrap_report.is_some() {
+            let sessions = self.sessions.read().await;
+            if let Some(handle) = sessions.get(&session_id) {
+                let _ = handle.runtime_tx.send(RuntimeEvent::Notice(
+                    "Workspace memory initialized from project instructions.".to_string(),
+                ));
+            }
+        }
         Ok(SessionHandle { session_id })
     }
 
@@ -1059,6 +1157,18 @@ fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) ->
             _ => Some(false),
         })
         .unwrap_or(false)
+}
+
+async fn detect_workspace_path(workspace_id: &WorkspaceId) -> Result<PathBuf> {
+    let cwd = env::current_dir().map_err(|error| {
+        MoaError::ProviderError(format!("failed to resolve current directory: {error}"))
+    })?;
+    let candidate = cwd.join(workspace_id.as_str());
+    if tokio::fs::try_exists(&candidate).await? {
+        return Ok(candidate);
+    }
+
+    Ok(cwd)
 }
 
 async fn report_session_task_failure(

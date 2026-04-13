@@ -267,7 +267,7 @@ mod tests {
             let mut events = self.events.lock().await;
             let sequence_num = events.len() as SequenceNum;
             events.push(EventRecord {
-                id: uuid::Uuid::new_v4(),
+                id: uuid::Uuid::now_v7(),
                 session_id,
                 sequence_num,
                 event_type: event.event_type(),
@@ -457,7 +457,7 @@ mod tests {
         let session_store = StubSessionStore::new(
             session.clone(),
             vec![EventRecord {
-                id: uuid::Uuid::new_v4(),
+                id: uuid::Uuid::now_v7(),
                 session_id: session.id.clone(),
                 sequence_num: 0,
                 event_type: moa_core::EventType::UserMessage,

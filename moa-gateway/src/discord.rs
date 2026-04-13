@@ -219,7 +219,7 @@ impl PlatformAdapter for DiscordAdapter {
         let target = self.resolve_target(msg.reply_to.as_deref()).await?;
         let channel_id = self.ensure_target_channel(target).await?;
         let rendered = self.renderer.render(&msg);
-        let synthetic_id = MessageId::new(Uuid::new_v4().to_string());
+        let synthetic_id = MessageId::new(Uuid::now_v7().to_string());
         let mut sent_refs = Vec::with_capacity(rendered.len());
         for chunk in &rendered {
             let sent_ref = self.send_chunk(channel_id, chunk).await?;
@@ -616,7 +616,7 @@ mod tests {
 
     #[test]
     fn approval_callback_maps_to_control_message() {
-        let request_id = Uuid::new_v4();
+        let request_id = Uuid::now_v7();
         let interaction: ComponentInteraction = serde_json::from_value(json!({
             "id": "100",
             "application_id": "200",
@@ -714,7 +714,7 @@ mod tests {
             embed_title: Some("Approval required".to_string()),
             embed_description: Some("Review this file write.".to_string()),
             embed_color: Some(0xF59E0B),
-            buttons: crate::approval::approval_buttons(Platform::Discord, Uuid::new_v4()),
+            buttons: crate::approval::approval_buttons(Platform::Discord, Uuid::now_v7()),
         };
 
         let builder = discord_create_message(&chunk);

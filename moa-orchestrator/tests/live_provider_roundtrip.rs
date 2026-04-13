@@ -61,6 +61,7 @@ async fn live_orchestrator_with_provider(
 ) -> Result<(TempDir, Arc<SessionDatabase>, LocalOrchestrator)> {
     let dir = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
+    config.memory.auto_bootstrap = false;
     config.database.url = dir.path().join("sessions.db").display().to_string();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();

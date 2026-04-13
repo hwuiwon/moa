@@ -233,7 +233,7 @@ impl PlatformAdapter for SlackAdapter {
         let msg = prepare_outbound_message(self.platform(), &self.capabilities(), msg);
         let target = self.resolve_target(msg.reply_to.as_deref()).await?;
         let rendered = self.renderer.render(&msg);
-        let synthetic_id = MessageId::new(Uuid::new_v4().to_string());
+        let synthetic_id = MessageId::new(Uuid::now_v7().to_string());
         let mut sent_refs = Vec::with_capacity(rendered.len());
         for chunk in &rendered {
             let sent_ref = self.send_chunk(&target, chunk).await?;
@@ -463,7 +463,7 @@ async fn inbound_from_interaction_event(
             .action_ts
             .as_ref()
             .map(|ts| ts.0.clone())
-            .unwrap_or_else(|| Uuid::new_v4().to_string())
+            .unwrap_or_else(|| Uuid::now_v7().to_string())
     );
 
     inbound_contexts
@@ -657,7 +657,7 @@ mod tests {
 
     #[tokio::test]
     async fn parses_approval_callback_into_control_message() {
-        let request_id = Uuid::new_v4();
+        let request_id = Uuid::now_v7();
         let event: SlackInteractionEvent = serde_json::from_value(json!({
             "type": "block_actions",
             "team": { "id": "T123", "domain": "example" },

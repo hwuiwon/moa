@@ -13,7 +13,7 @@ use uuid::Uuid;
 async fn create_test_store() -> (PostgresSessionStore, String, String) {
     let database_url = std::env::var("TEST_DATABASE_URL")
         .expect("TEST_DATABASE_URL must be set for ignored tests");
-    let schema_name = format!("moa_test_{}", Uuid::new_v4().simple());
+    let schema_name = format!("moa_test_{}", Uuid::now_v7().simple());
     let store = PostgresSessionStore::new_in_schema(&database_url, &schema_name)
         .await
         .expect("postgres store");
@@ -112,7 +112,7 @@ async fn postgres_event_payloads_round_trip_as_jsonb() {
         .await
         .expect("create session");
 
-    let tool_id = Uuid::new_v4();
+    let tool_id = Uuid::now_v7();
     let output = ToolOutput::json(
         "structured",
         serde_json::json!({

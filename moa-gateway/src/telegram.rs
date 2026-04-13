@@ -187,7 +187,7 @@ impl PlatformAdapter for TelegramAdapter {
             sent_refs.push(sent_ref);
         }
 
-        let synthetic_id = MessageId::new(Uuid::new_v4().to_string());
+        let synthetic_id = MessageId::new(Uuid::now_v7().to_string());
         self.outbound_messages
             .lock()
             .await
@@ -521,7 +521,7 @@ mod tests {
 
     #[tokio::test]
     async fn parses_approval_callback_into_control_message() {
-        let request_id = Uuid::new_v4();
+        let request_id = Uuid::now_v7();
         let query: CallbackQuery = serde_json::from_value(json!({
             "id": "cb-1",
             "from": {

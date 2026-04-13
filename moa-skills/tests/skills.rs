@@ -236,7 +236,7 @@ fn tool_rich_events() -> Vec<EventRecord> {
                 }
             } else {
                 Event::ToolCall {
-                    tool_id: Uuid::new_v4(),
+                    tool_id: Uuid::now_v7(),
                     provider_tool_use_id: None,
                     provider_thought_signature: None,
                     tool_name: if index % 2 == 0 {
@@ -249,7 +249,7 @@ fn tool_rich_events() -> Vec<EventRecord> {
                 }
             };
             EventRecord {
-                id: Uuid::new_v4(),
+                id: Uuid::now_v7(),
                 session_id: session_id.clone(),
                 sequence_num: index as u64,
                 event_type: event.event_type(),

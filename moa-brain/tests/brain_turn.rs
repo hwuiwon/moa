@@ -50,7 +50,7 @@ impl SessionStore for MockSessionStore {
         let mut events = self.events.lock().await;
         let sequence_num = events.len() as SequenceNum;
         events.push(EventRecord {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             session_id,
             sequence_num,
             event_type: event.event_type(),
@@ -962,7 +962,7 @@ impl LLMProvider for ProviderToolResultTurnLlm {
 
 fn make_event_record(session_id: &SessionId, sequence_num: u64, event: Event) -> EventRecord {
     EventRecord {
-        id: uuid::Uuid::new_v4(),
+        id: uuid::Uuid::now_v7(),
         session_id: session_id.clone(),
         sequence_num,
         event_type: event.event_type(),
@@ -1618,7 +1618,7 @@ async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execu
     };
     let session_id = session.id.clone();
     let initial_events = vec![EventRecord {
-        id: uuid::Uuid::new_v4(),
+        id: uuid::Uuid::now_v7(),
         session_id: session_id.clone(),
         sequence_num: 0,
         event_type: EventType::UserMessage,
@@ -1914,7 +1914,7 @@ async fn canary_leaks_in_tool_input_are_detected_and_blocked() {
     let store = Arc::new(MockSessionStore::new(
         session,
         vec![EventRecord {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             session_id: session_id.clone(),
             sequence_num: 0,
             event_type: moa_core::EventType::UserMessage,
@@ -2006,7 +2006,7 @@ async fn malicious_tool_results_are_wrapped_as_untrusted_content() {
     let store = Arc::new(MockSessionStore::new(
         session,
         vec![EventRecord {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             session_id: session_id.clone(),
             sequence_num: 0,
             event_type: moa_core::EventType::UserMessage,
@@ -2074,7 +2074,7 @@ async fn streamed_turn_runtime_matches_buffered_response() {
     };
     let session_id = session.id.clone();
     let initial_events = vec![EventRecord {
-        id: uuid::Uuid::new_v4(),
+        id: uuid::Uuid::now_v7(),
         session_id: session_id.clone(),
         sequence_num: 0,
         event_type: EventType::UserMessage,

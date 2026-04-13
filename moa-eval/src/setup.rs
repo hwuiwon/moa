@@ -75,7 +75,7 @@ pub(crate) async fn build_agent_environment_with_provider(
     temp_dir: &Path,
     llm_provider: Arc<dyn LLMProvider>,
 ) -> Result<AgentEnvironment> {
-    let run_root = temp_dir.join(format!("eval-{}", Uuid::new_v4()));
+    let run_root = temp_dir.join(format!("eval-{}", Uuid::now_v7()));
     let workspace_dir = run_root.join("workspace");
     let memory_root = run_root.join("memory-store");
     fs::create_dir_all(&workspace_dir)
