@@ -440,6 +440,38 @@ impl LocalOrchestrator {
             }
         }
     }
+
+    /// Registers the filesystem root for a logical workspace with the tool router.
+    pub async fn remember_workspace_root(
+        &self,
+        workspace_id: WorkspaceId,
+        workspace_root: PathBuf,
+    ) {
+        self.tool_router
+            .remember_workspace_root(workspace_id.clone(), workspace_root.clone())
+            .await;
+        tracing::debug!(
+            workspace_id = %workspace_id,
+            workspace_path = %workspace_root.display(),
+            "registered workspace root for local tools"
+        );
+    }
+
+    async fn remember_detected_workspace_root(&self, workspace_id: &WorkspaceId) {
+        match detect_workspace_path(workspace_id).await {
+            Ok(workspace_path) => {
+                self.remember_workspace_root(workspace_id.clone(), workspace_path.clone())
+                    .await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    error = %error,
+                    "failed to resolve workspace root for local tools"
+                );
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -447,6 +479,8 @@ impl BrainOrchestrator for LocalOrchestrator {
     /// Starts a new session task and returns its handle.
     async fn start_session(&self, req: StartSessionRequest) -> Result<SessionHandle> {
         let initial_message = req.initial_message.clone();
+        self.remember_detected_workspace_root(&req.workspace_id)
+            .await;
         let session_id = SessionId::new();
         let now = Utc::now();
         let meta = SessionMeta {
@@ -513,6 +547,8 @@ impl BrainOrchestrator for LocalOrchestrator {
         }
 
         let wake = self.session_store.wake(session_id.clone()).await?;
+        self.remember_detected_workspace_root(&wake.session.workspace_id)
+            .await;
         let initial_queued_messages = wake
             .pending_signals
             .into_iter()
@@ -1163,6 +1199,27 @@ async fn detect_workspace_path(workspace_id: &WorkspaceId) -> Result<PathBuf> {
     let cwd = env::current_dir().map_err(|error| {
         MoaError::ProviderError(format!("failed to resolve current directory: {error}"))
     })?;
+    let cwd = match cwd.canonicalize() {
+        Ok(path) => path,
+        Err(_) => cwd,
+    };
+
+    for candidate in cwd.ancestors() {
+        let git_dir = candidate.join(".git");
+        if tokio::fs::try_exists(&git_dir).await? {
+            return Ok(candidate.to_path_buf());
+        }
+    }
+
+    if cwd
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == workspace_id.as_str())
+        .unwrap_or(false)
+    {
+        return Ok(cwd);
+    }
+
     let candidate = cwd.join(workspace_id.as_str());
     if tokio::fs::try_exists(&candidate).await? {
         return Ok(candidate);

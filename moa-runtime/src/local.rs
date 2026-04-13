@@ -19,8 +19,9 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::helpers::{
-    SessionPreview, SessionRuntimeEvent, impl_chat_runtime_ops, last_session_message,
-    local_user_id, relay_runtime_events, relay_session_runtime_events, start_empty_session,
+    SessionPreview, SessionRuntimeEvent, detect_local_workspace_root, impl_chat_runtime_ops,
+    last_session_message, local_user_id, relay_runtime_events, relay_session_runtime_events,
+    start_empty_session, workspace_id_for_root,
 };
 use crate::{ChatRuntime, ToolNameRuntimeOps};
 
@@ -53,10 +54,23 @@ impl LocalChatRuntime {
         config.general.default_model = selection.model_id;
         let model = config.general.default_model.clone();
         let orchestrator = Arc::new(LocalOrchestrator::from_config(config.clone()).await?);
-        let workspace_id = WorkspaceId::new("default");
+        let workspace_root = detect_local_workspace_root()?;
+        let mut workspace_id = workspace_id_for_root(&workspace_root);
+        orchestrator
+            .remember_workspace_root(workspace_id.clone(), workspace_root.clone())
+            .await;
         let user_id = local_user_id();
         let session_id = match session_id {
-            Some(session_id) => session_id,
+            Some(session_id) => {
+                let meta = orchestrator.get_session(session_id.clone()).await?;
+                if meta.workspace_id != workspace_id {
+                    workspace_id = meta.workspace_id.clone();
+                    orchestrator
+                        .remember_workspace_root(meta.workspace_id.clone(), workspace_root)
+                        .await;
+                }
+                session_id
+            }
             None => {
                 start_empty_session(&orchestrator, &workspace_id, &user_id, &platform, &model)
                     .await?
@@ -457,7 +471,11 @@ impl ChatRuntime {
             )
             .await?,
         );
-        let workspace_id = WorkspaceId::new("default");
+        let workspace_root = detect_local_workspace_root()?;
+        let workspace_id = workspace_id_for_root(&workspace_root);
+        orchestrator
+            .remember_workspace_root(workspace_id.clone(), workspace_root)
+            .await;
         let user_id = UserId::new("tester");
         let model = config.general.default_model.clone();
         let session_id =

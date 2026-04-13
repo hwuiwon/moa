@@ -18,8 +18,8 @@ use crate::daemon_ipc::{
     relay_daemon_runtime_events, relay_daemon_runtime_turn_events,
 };
 use crate::helpers::{
-    SessionPreview, SessionRuntimeEvent, expand_local_path, impl_chat_runtime_ops, local_user_id,
-    unexpected_daemon_reply,
+    SessionPreview, SessionRuntimeEvent, detect_local_workspace_root, expand_local_path,
+    impl_chat_runtime_ops, local_user_id, unexpected_daemon_reply, workspace_id_for_root,
 };
 
 /// Stateful daemon-backed chat runtime that proxies operations over a Unix socket.
@@ -49,10 +49,11 @@ impl DaemonChatRuntime {
         }
 
         let selection = resolve_provider_selection(&config, None)?;
+        let workspace_root = detect_local_workspace_root()?;
         let mut runtime = Self {
             config,
             socket_path,
-            workspace_id: WorkspaceId::new("default"),
+            workspace_id: workspace_id_for_root(&workspace_root),
             user_id: local_user_id(),
             platform,
             model: selection.model_id,

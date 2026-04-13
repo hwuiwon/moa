@@ -176,6 +176,103 @@ async fn file_search_finds_files_by_glob() {
 }
 
 #[tokio::test]
+async fn file_search_skips_git_directory_contents() {
+    let dir = tempdir().unwrap();
+    let git_dir = dir.path().join(".git").join("logs");
+    tokio::fs::create_dir_all(&git_dir).await.unwrap();
+    tokio::fs::write(git_dir.join("HEAD"), "secret history")
+        .await
+        .unwrap();
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let router = ToolRouter::new_local(memory_store, dir.path())
+        .await
+        .unwrap();
+    let session = session();
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "src/lib.rs", "content": "pub fn demo() {}" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_search".to_string(),
+                input: json!({ "pattern": "**/*" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let rendered = output.to_text();
+    assert!(rendered.contains("src/lib.rs"));
+    assert!(!rendered.contains(".git/logs/HEAD"));
+}
+
+#[tokio::test]
+async fn file_search_truncates_pathological_match_sets() {
+    let dir = tempdir().unwrap();
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let router = ToolRouter::new_local(memory_store, dir.path())
+        .await
+        .unwrap();
+    let session = session();
+
+    for index in 0..1_050 {
+        router
+            .execute_authorized(
+                &session,
+                &ToolInvocation {
+                    id: None,
+                    name: "file_write".to_string(),
+                    input: json!({
+                        "path": format!("src/file-{index:04}.rs"),
+                        "content": "pub fn demo() {}",
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_search".to_string(),
+                input: json!({ "pattern": "**/*.rs" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let rendered = output.to_text();
+    assert!(rendered.contains("[search truncated at 1000 matches"));
+    let structured = output.structured.expect("structured file search payload");
+    let matches = structured
+        .get("matches")
+        .and_then(|value| value.as_array())
+        .expect("matches array");
+    assert_eq!(matches.len(), 1_000);
+    assert_eq!(
+        structured
+            .get("truncated")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
+}
+
+#[tokio::test]
 async fn default_router_excludes_provider_native_web_tools() {
     let dir = tempdir().unwrap();
     let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
@@ -209,6 +306,44 @@ async fn file_operations_reject_path_traversal() {
         .unwrap_err();
 
     assert!(matches!(error, moa_core::MoaError::PermissionDenied(_)));
+}
+
+#[tokio::test]
+async fn approval_prompt_uses_remembered_workspace_root_for_commands() {
+    let dir = tempdir().unwrap();
+    let workspace_root = dir.path().join("workspace-root");
+    tokio::fs::create_dir_all(&workspace_root).await.unwrap();
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let router = ToolRouter::new_local(memory_store, dir.path().join("sandboxes"))
+        .await
+        .unwrap();
+    let session = session();
+    router
+        .remember_workspace_root(session.workspace_id.clone(), workspace_root.clone())
+        .await;
+
+    let prepared = router
+        .prepare_invocation(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({ "cmd": "pwd" }),
+            },
+        )
+        .await
+        .unwrap();
+    let prompt = prepared.approval_prompt(uuid::Uuid::now_v7());
+    let working_dir = prompt
+        .parameters
+        .iter()
+        .find(|field| field.label == "Working dir")
+        .map(|field| field.value.clone());
+
+    assert_eq!(
+        working_dir.as_deref(),
+        Some(workspace_root.to_str().unwrap())
+    );
 }
 
 #[tokio::test]

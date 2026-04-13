@@ -1,4 +1,11 @@
 //! Anthropic Claude provider implementation with SSE streaming support.
+//!
+//! Internal adapter phases:
+//! 1. build one Anthropic Messages request body
+//! 2. execute provider transport with shared retry handling
+//! 3. normalize SSE events into `CompletionContent`
+//! 4. finalize one normalized `CompletionResponse`
+//! 5. record provider-private stream snapshots for tracing/debugging
 
 use std::env;
 use std::time::{Duration, Instant};
@@ -11,14 +18,15 @@ use moa_core::{
     StopReason, TokenPricing, ToolCallFormat, ToolContent, ToolInvocation,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
-use crate::common::{build_http_client, parse_sse_json};
+use crate::http::build_http_client;
 use crate::instrumentation::LLMSpanRecorder;
 use crate::retry::RetryPolicy;
+use crate::sse::parse_sse_json;
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -133,6 +141,7 @@ impl LLMProvider for AnthropicProvider {
             max_output_tokens,
             model_capabilities.pricing.clone(),
         );
+        span_recorder.set_phase("build_request");
         let span = span_recorder.span().clone();
         let request_body = match build_request_body(
             &request,
@@ -142,7 +151,7 @@ impl LLMProvider for AnthropicProvider {
         ) {
             Ok(body) => body,
             Err(error) => {
-                span_recorder.fail(&error);
+                span_recorder.fail_at_stage("build_request", &error);
                 return Err(error);
             }
         };
@@ -156,6 +165,7 @@ impl LLMProvider for AnthropicProvider {
             async move {
                 let mut span_recorder = span_recorder;
                 let started_at = Instant::now();
+                span_recorder.set_phase("transport");
                 let response = retry_policy
                     .send(|| {
                         client
@@ -171,11 +181,12 @@ impl LLMProvider for AnthropicProvider {
                 let response = match response {
                     Ok(response) => response,
                     Err(error) => {
-                        span_recorder.fail(&error);
+                        span_recorder.fail_at_stage("transport", &error);
                         return Err(error);
                     }
                 };
 
+                span_recorder.set_phase("stream");
                 let response = consume_sse_events(
                     response.bytes_stream().eventsource(),
                     tx,
@@ -187,11 +198,12 @@ impl LLMProvider for AnthropicProvider {
 
                 match response {
                     Ok(response) => {
+                        span_recorder.set_phase("finalize");
                         span_recorder.finish(&response);
                         Ok(response)
                     }
                     Err(error) => {
-                        span_recorder.fail(&error);
+                        span_recorder.fail_at_stage("stream", &error);
                         Err(error)
                     }
                 }
@@ -510,7 +522,18 @@ where
         }
     }
 
+    span_recorder.record_raw_response(&state.debug_snapshot());
     Ok(state.finish(started_at))
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicStreamDebugSnapshot {
+    model: String,
+    stop_reason: StopReason,
+    input_tokens: usize,
+    output_tokens: usize,
+    cached_input_tokens: usize,
+    content: Vec<CompletionContent>,
 }
 
 #[derive(Debug)]
@@ -785,6 +808,17 @@ impl AnthropicStreamState {
             cached_input_tokens: self.cached_input_tokens,
             duration_ms: started_at.elapsed().as_millis() as u64,
             thought_signature: None,
+        }
+    }
+
+    fn debug_snapshot(&self) -> AnthropicStreamDebugSnapshot {
+        AnthropicStreamDebugSnapshot {
+            model: self.model.clone(),
+            stop_reason: self.stop_reason.clone(),
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cached_input_tokens: self.cached_input_tokens,
+            content: self.completed_content.iter().flatten().cloned().collect(),
         }
     }
 

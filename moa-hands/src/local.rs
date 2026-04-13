@@ -28,6 +28,11 @@ const DOCKER_TMPFS_OPTIONS: &str = "rw,nosuid,nodev,size=64m";
 const DEFAULT_DOCKER_WORKSPACE: &str = "/workspace";
 
 #[derive(Debug, Clone)]
+struct LocalSandbox {
+    execution_root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
 struct DockerSandbox {
     sandbox_dir: PathBuf,
     workspace_mount: String,
@@ -39,6 +44,7 @@ pub struct LocalHandProvider {
     work_dir: Arc<PathBuf>,
     docker_available: bool,
     command_timeout: Duration,
+    local_sandboxes: Arc<RwLock<HashMap<PathBuf, LocalSandbox>>>,
     docker_sandboxes: Arc<RwLock<HashMap<String, DockerSandbox>>>,
 }
 
@@ -52,6 +58,7 @@ impl LocalHandProvider {
             work_dir: Arc::new(work_dir),
             docker_available: detect_docker().await,
             command_timeout: DEFAULT_TOOL_TIMEOUT,
+            local_sandboxes: Arc::new(RwLock::new(HashMap::new())),
             docker_sandboxes: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -136,6 +143,27 @@ impl LocalHandProvider {
         Ok(HandHandle::docker(container_id))
     }
 
+    async fn provision_local(&self, spec: &HandSpec, sandbox_dir: PathBuf) -> Result<HandHandle> {
+        let execution_root = spec
+            .workspace_mount
+            .clone()
+            .unwrap_or_else(|| sandbox_dir.clone());
+        self.local_sandboxes
+            .write()
+            .await
+            .insert(sandbox_dir.clone(), LocalSandbox { execution_root });
+        Ok(HandHandle::local(sandbox_dir))
+    }
+
+    async fn resolve_local_execution_root(&self, sandbox_dir: &Path) -> PathBuf {
+        self.local_sandboxes
+            .read()
+            .await
+            .get(sandbox_dir)
+            .map(|sandbox| sandbox.execution_root.clone())
+            .unwrap_or_else(|| sandbox_dir.to_path_buf())
+    }
+
     async fn execute_local_tool(
         &self,
         sandbox_dir: &Path,
@@ -143,14 +171,20 @@ impl LocalHandProvider {
         input: &str,
         hard_cancel_token: Option<&CancellationToken>,
     ) -> Result<ToolOutput> {
+        let execution_root = self.resolve_local_execution_root(sandbox_dir).await;
         match tool {
             "bash" => {
-                bash::execute_local(sandbox_dir, input, self.command_timeout, hard_cancel_token)
-                    .await
+                bash::execute_local(
+                    &execution_root,
+                    input,
+                    self.command_timeout,
+                    hard_cancel_token,
+                )
+                .await
             }
-            "file_read" => file_read::execute(sandbox_dir, input).await,
-            "file_write" => file_write::execute(sandbox_dir, input).await,
-            "file_search" => file_search::execute(sandbox_dir, input).await,
+            "file_read" => file_read::execute(&execution_root, input).await,
+            "file_write" => file_write::execute(&execution_root, input).await,
+            "file_search" => file_search::execute(&execution_root, input).await,
             other => Err(MoaError::ToolError(format!(
                 "unsupported local hand tool: {other}"
             ))),
@@ -291,19 +325,21 @@ impl HandProvider for LocalHandProvider {
     async fn provision(&self, spec: HandSpec) -> Result<HandHandle> {
         let sandbox_dir = self.create_sandbox_dir().await?;
         match spec.sandbox_tier {
-            SandboxTier::None | SandboxTier::Local => Ok(HandHandle::local(sandbox_dir)),
+            SandboxTier::None | SandboxTier::Local => {
+                self.provision_local(&spec, sandbox_dir).await
+            }
             SandboxTier::Container if self.docker_available => {
                 match self.provision_docker(&spec, &sandbox_dir).await {
                     Ok(handle) => Ok(handle),
                     Err(error) => {
                         tracing::warn!(%error, "docker sandbox provisioning failed, falling back to local execution");
-                        Ok(HandHandle::local(sandbox_dir))
+                        self.provision_local(&spec, sandbox_dir).await
                     }
                 }
             }
             SandboxTier::Container => {
                 tracing::warn!("docker not available, falling back to local sandbox");
-                Ok(HandHandle::local(sandbox_dir))
+                self.provision_local(&spec, sandbox_dir).await
             }
             SandboxTier::MicroVM => Err(MoaError::Unsupported(
                 "microvm sandboxes are not supported by the local hand provider".to_string(),
@@ -404,7 +440,10 @@ impl HandProvider for LocalHandProvider {
 
     async fn destroy(&self, handle: &HandHandle) -> Result<()> {
         match handle {
-            HandHandle::Local { sandbox_dir } => self.destroy_local_sandbox(sandbox_dir).await,
+            HandHandle::Local { sandbox_dir } => {
+                self.local_sandboxes.write().await.remove(sandbox_dir);
+                self.destroy_local_sandbox(sandbox_dir).await
+            }
             HandHandle::Docker { container_id } => {
                 let sandbox = self.docker_sandboxes.write().await.remove(container_id);
                 let output = Command::new("docker")

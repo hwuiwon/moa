@@ -684,6 +684,16 @@ fn brain_response_texts(events: &[moa_core::EventRecord]) -> Vec<String> {
         .collect()
 }
 
+fn tool_result_texts(events: &[moa_core::EventRecord]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ToolResult { output, .. } => Some(output.to_text()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 struct PanicProvider {
     model: String,
@@ -2379,5 +2389,155 @@ async fn workspace_memory_bootstrap_can_be_disabled() -> Result<()> {
         .join("_bootstrap.json");
     assert!(!tokio::fs::try_exists(&sentinel).await?);
     assert_eq!(requests.lock().expect("request log lock poisoned").len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_bash_tools_run_in_detected_workspace_root() -> Result<()> {
+    let _cwd_guard = cwd_lock().lock().await;
+    let workspace = tempfile::tempdir()?;
+    tokio::fs::write(
+        workspace.path().join("repo-marker.txt"),
+        "workspace-visible\n",
+    )
+    .await?;
+    let _dir_guard = CurrentDirGuard::set(workspace.path())?;
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
+        model: MoaConfig::default().general.default_model,
+        first_tool_cmd: "printf 'PWD: '; pwd; echo; printf 'marker: '; cat repo-marker.txt"
+            .to_string(),
+        requests,
+    });
+    let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
+    let session = start_session(&orchestrator).await?;
+
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::QueueMessage(UserMessage {
+                text: "inspect workspace".to_string(),
+                attachments: Vec::new(),
+            }),
+        )
+        .await?;
+
+    let request_id = wait_for_approval_request(&orchestrator, session.session_id.clone()).await?;
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::ApprovalDecided {
+                request_id,
+                decision: moa_core::ApprovalDecision::AllowOnce,
+            },
+        )
+        .await?;
+
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::Completed,
+    )
+    .await?;
+
+    let events = orchestrator
+        .session_store()
+        .get_events(session.session_id, EventRange::all())
+        .await?;
+    let tool_outputs = tool_result_texts(&events);
+    let workspace_display = workspace.path().display().to_string();
+
+    assert!(
+        tool_outputs
+            .iter()
+            .any(|output| output.contains("workspace-visible")),
+        "expected tool output to include workspace marker, got: {tool_outputs:?}"
+    );
+    assert!(
+        tool_outputs
+            .iter()
+            .any(|output| output.contains(&workspace_display)),
+        "expected tool output to include workspace path {workspace_display}, got: {tool_outputs:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_bash_tools_prefer_git_root_over_nested_cwd() -> Result<()> {
+    let _cwd_guard = cwd_lock().lock().await;
+    let workspace = tempfile::tempdir()?;
+    tokio::fs::create_dir_all(workspace.path().join(".git")).await?;
+    tokio::fs::create_dir_all(workspace.path().join("src-tauri")).await?;
+    tokio::fs::write(workspace.path().join("repo-marker.txt"), "workspace-root\n").await?;
+    let nested = workspace.path().join("src-tauri");
+    let _dir_guard = CurrentDirGuard::set(&nested)?;
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
+        model: MoaConfig::default().general.default_model,
+        first_tool_cmd: "printf 'PWD: '; pwd; echo; printf 'marker: '; cat repo-marker.txt"
+            .to_string(),
+        requests,
+    });
+    let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
+    let session = start_session(&orchestrator).await?;
+
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::QueueMessage(UserMessage {
+                text: "inspect git root".to_string(),
+                attachments: Vec::new(),
+            }),
+        )
+        .await?;
+
+    let request_id = wait_for_approval_request(&orchestrator, session.session_id.clone()).await?;
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::ApprovalDecided {
+                request_id,
+                decision: moa_core::ApprovalDecision::AllowOnce,
+            },
+        )
+        .await?;
+
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::Completed,
+    )
+    .await?;
+
+    let events = orchestrator
+        .session_store()
+        .get_events(session.session_id, EventRange::all())
+        .await?;
+    let tool_outputs = tool_result_texts(&events);
+    let workspace_display = workspace.path().display().to_string();
+    let nested_display = nested.display().to_string();
+
+    assert!(
+        tool_outputs
+            .iter()
+            .any(|output| output.contains("workspace-root")),
+        "expected tool output to include repo marker, got: {tool_outputs:?}"
+    );
+    assert!(
+        tool_outputs
+            .iter()
+            .any(|output| output.contains(&workspace_display)),
+        "expected tool output to include git root {workspace_display}, got: {tool_outputs:?}"
+    );
+    assert!(
+        tool_outputs
+            .iter()
+            .all(|output| !output.contains(&nested_display)),
+        "expected tool output to avoid nested cwd {nested_display}, got: {tool_outputs:?}"
+    );
+
     Ok(())
 }

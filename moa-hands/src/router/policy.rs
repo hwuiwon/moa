@@ -98,6 +98,13 @@ impl ToolRouter {
             &moa_security::ToolPolicyContext::from_session(session),
             &rules,
         )?;
+        let approval_root = self
+            .workspace_roots
+            .read()
+            .await
+            .get(&session.workspace_id)
+            .cloned()
+            .or_else(|| self.sandbox_root.clone());
 
         Ok(PreparedToolInvocation {
             always_allow_pattern: approval_pattern_for(
@@ -105,12 +112,12 @@ impl ToolRouter {
                 &policy_input.normalized_input,
             ),
             approval_fields: approval_fields_for(
-                self.sandbox_root.as_deref(),
+                approval_root.as_deref(),
                 tool_definition.policy.input_shape,
                 invocation,
             ),
             approval_diffs: approval_diffs_for(
-                self.sandbox_root.as_deref(),
+                approval_root.as_deref(),
                 tool_definition.policy.diff_strategy,
                 invocation,
             )

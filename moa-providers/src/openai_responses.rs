@@ -1,4 +1,11 @@
-//! Shared HTTP and SSE utilities for provider implementations.
+//! OpenAI Responses API request mapping and stream aggregation helpers.
+//!
+//! Internal adapter phases:
+//! 1. build one provider request from MOA's `CompletionRequest`
+//! 2. execute provider transport with retry handling
+//! 3. normalize streamed provider events into `CompletionContent`
+//! 4. finalize one normalized `CompletionResponse`
+//! 5. record provider-private raw response details for tracing/debugging
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -14,46 +21,23 @@ use async_openai::types::responses::{
     ResponseStream, ResponseStreamEvent, Role as OpenAiRole, Status as OpenAiStatus, Tool,
     ToolChoiceOptions, ToolChoiceParam, WebSearchTool, WebSearchToolCallStatus,
 };
-use eventsource_stream::Event as SseEvent;
 use futures_util::StreamExt;
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, MessageRole,
-    ProviderNativeTool, StopReason, ToolCallContent, ToolContent, ToolInvocation,
+    MoaError, ProviderNativeTool, Result, StopReason, ToolCallContent, ToolContent, ToolInvocation,
 };
-use moa_core::{MoaError, Result};
-use reqwest::{Client, StatusCode};
-use serde::de::DeserializeOwned;
+use reqwest::StatusCode;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::instrumentation::LLMSpanRecorder;
+use crate::provider_tools::{web_search_completed_block, web_search_started_block};
 use crate::retry::RetryPolicy;
 use crate::schema::compile_for_openai_strict;
 
 const OPENAI_METADATA_VALUE_LIMIT: usize = 512;
 
-/// Builds the shared HTTP client used by provider implementations.
-pub(crate) fn build_http_client() -> Result<Client> {
-    Client::builder()
-        .user_agent(concat!("moa/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|error| MoaError::ProviderError(format!("failed to build HTTP client: {error}")))
-}
-
-/// Parses a JSON SSE payload into a strongly typed Rust value.
-pub(crate) fn parse_sse_json<T>(event: &SseEvent) -> Result<T>
-where
-    T: DeserializeOwned,
-{
-    serde_json::from_str(&event.data).map_err(|error| {
-        MoaError::SerializationError(format!(
-            "failed to parse SSE payload for event '{}': {error}",
-            event.event
-        ))
-    })
-}
-
-/// Builds an async-openai client around MOA's shared HTTP client.
+/// Builds an async-openai client around MOA's shared OpenAI configuration.
 pub(crate) fn build_openai_client(config: OpenAIConfig) -> Result<OpenAiClient<OpenAIConfig>> {
     Ok(OpenAiClient::with_config(config))
 }
@@ -153,26 +137,6 @@ pub(crate) fn build_responses_request(
     })
 }
 
-fn openai_native_tools(native_tools: &[ProviderNativeTool]) -> Result<Vec<Tool>> {
-    let mut tools = Vec::with_capacity(native_tools.len());
-    for tool in native_tools {
-        match tool.tool_type.as_str() {
-            "web_search" | "web_search_preview" | "web_search_preview_2025_03_11" => {
-                tools.push(Tool::WebSearch(WebSearchTool::default()));
-            }
-            "web_search_2025_08_26" => {
-                tools.push(Tool::WebSearch20250826(WebSearchTool::default()));
-            }
-            other => {
-                return Err(MoaError::Unsupported(format!(
-                    "unsupported OpenAI native tool '{other}'"
-                )));
-            }
-        }
-    }
-    Ok(tools)
-}
-
 /// Executes one streamed Responses request with retry handling for rate limits.
 pub(crate) async fn stream_responses_with_retry(
     client: &OpenAiClient<OpenAIConfig>,
@@ -186,47 +150,52 @@ pub(crate) async fn stream_responses_with_retry(
     let mut attempt = 0usize;
 
     loop {
+        span_recorder.set_phase("transport");
         match client.responses().create_stream(request.clone()).await {
-            Ok(stream) => match consume_responses_stream_once(
-                stream,
-                tx.clone(),
-                fallback_model.clone(),
-                started_at,
-                &mut span_recorder,
-            )
-            .await
-            {
-                Ok(response) => {
-                    span_recorder.finish(&response);
-                    return Ok(response);
-                }
-                Err(error)
-                    if error.retryable
-                        && !error.emitted_content
-                        && attempt < retry_policy.max_retries =>
+            Ok(stream) => {
+                span_recorder.set_phase("stream");
+                match consume_responses_stream_once(
+                    stream,
+                    tx.clone(),
+                    fallback_model.clone(),
+                    started_at,
+                    &mut span_recorder,
+                )
+                .await
                 {
-                    let delay = retry_policy.delay_for_attempt(attempt);
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        max_retries = retry_policy.max_retries,
-                        delay_ms = delay.as_millis(),
-                        "provider stream hit a rate limit before any content was emitted; retrying"
-                    );
-                    tokio::time::sleep(delay).await;
-                    attempt += 1;
+                    Ok(response) => {
+                        span_recorder.set_phase("finalize");
+                        span_recorder.finish(&response);
+                        return Ok(response);
+                    }
+                    Err(error)
+                        if error.retryable
+                            && !error.emitted_content
+                            && attempt < retry_policy.max_retries =>
+                    {
+                        let delay = retry_policy.delay_for_attempt(attempt);
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_retries = retry_policy.max_retries,
+                            delay_ms = delay.as_millis(),
+                            "provider stream hit a rate limit before any content was emitted; retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                        attempt += 1;
+                    }
+                    Err(error) => {
+                        span_recorder.fail_at_stage("stream", &error.error);
+                        return Err(error.error);
+                    }
                 }
-                Err(error) => {
-                    span_recorder.fail(&error.error);
-                    return Err(error.error);
-                }
-            },
+            }
             Err(error) if is_rate_limit_error(&error) => {
                 if attempt >= retry_policy.max_retries {
                     let error = MoaError::RateLimited {
                         retries: retry_policy.max_retries,
                         message: error.to_string(),
                     };
-                    span_recorder.fail(&error);
+                    span_recorder.fail_at_stage("transport", &error);
                     return Err(error);
                 }
 
@@ -242,14 +211,28 @@ pub(crate) async fn stream_responses_with_retry(
             }
             Err(error) => {
                 let error = map_openai_error(error);
-                span_recorder.fail(&error);
+                span_recorder.fail_at_stage("transport", &error);
                 return Err(error);
             }
         }
     }
 }
 
-/// Consumes a typed Responses API stream into MOA streaming blocks and a final response.
+/// Maps async-openai reasoning-effort strings onto the SDK enum.
+pub(crate) fn parse_reasoning_effort(value: &str) -> Result<ReasoningEffort> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Ok(ReasoningEffort::None),
+        "minimal" => Ok(ReasoningEffort::Minimal),
+        "low" => Ok(ReasoningEffort::Low),
+        "medium" => Ok(ReasoningEffort::Medium),
+        "high" => Ok(ReasoningEffort::High),
+        "xhigh" => Ok(ReasoningEffort::Xhigh),
+        other => Err(MoaError::ConfigError(format!(
+            "unsupported OpenAI reasoning effort '{other}'"
+        ))),
+    }
+}
+
 async fn consume_responses_stream_once(
     mut stream: ResponseStream,
     tx: mpsc::Sender<Result<CompletionContent>>,
@@ -349,23 +332,9 @@ async fn consume_responses_stream_once(
                     break;
                 }
             }
-            ResponseStreamEvent::ResponseWebSearchCallInProgress(_) => {
-                let block = CompletionContent::ProviderToolResult {
-                    tool_name: "web_search".to_string(),
-                    summary: "Searching the web...".to_string(),
-                };
-                content.push(block.clone());
-                span_recorder.observe_block(&block);
-                emitted_content = true;
-                if tx.send(Ok(block)).await.is_err() {
-                    break;
-                }
-            }
-            ResponseStreamEvent::ResponseWebSearchCallSearching(_) => {
-                let block = CompletionContent::ProviderToolResult {
-                    tool_name: "web_search".to_string(),
-                    summary: "Searching the web...".to_string(),
-                };
+            ResponseStreamEvent::ResponseWebSearchCallInProgress(_)
+            | ResponseStreamEvent::ResponseWebSearchCallSearching(_) => {
+                let block = web_search_started_block();
                 content.push(block.clone());
                 span_recorder.observe_block(&block);
                 emitted_content = true;
@@ -374,10 +343,7 @@ async fn consume_responses_stream_once(
                 }
             }
             ResponseStreamEvent::ResponseWebSearchCallCompleted(_) => {
-                let block = CompletionContent::ProviderToolResult {
-                    tool_name: "web_search".to_string(),
-                    summary: "Web search completed.".to_string(),
-                };
+                let block = web_search_completed_block();
                 content.push(block.clone());
                 span_recorder.observe_block(&block);
                 emitted_content = true;
@@ -441,6 +407,7 @@ async fn consume_responses_stream_once(
         .as_ref()
         .map(|usage| usage.output_tokens as usize)
         .unwrap_or(0);
+    span_recorder.record_raw_response(&response);
 
     Ok(CompletionResponse {
         text,
@@ -465,22 +432,27 @@ struct ResponsesStreamError {
     emitted_content: bool,
 }
 
-/// Maps async-openai reasoning-effort strings onto the SDK enum.
-pub(crate) fn parse_reasoning_effort(value: &str) -> Result<ReasoningEffort> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "none" => Ok(ReasoningEffort::None),
-        "minimal" => Ok(ReasoningEffort::Minimal),
-        "low" => Ok(ReasoningEffort::Low),
-        "medium" => Ok(ReasoningEffort::Medium),
-        "high" => Ok(ReasoningEffort::High),
-        "xhigh" => Ok(ReasoningEffort::Xhigh),
-        other => Err(MoaError::ConfigError(format!(
-            "unsupported OpenAI reasoning effort '{other}'"
-        ))),
+fn openai_native_tools(native_tools: &[ProviderNativeTool]) -> Result<Vec<Tool>> {
+    let mut tools = Vec::with_capacity(native_tools.len());
+    for tool in native_tools {
+        match tool.tool_type.as_str() {
+            "web_search" | "web_search_preview" | "web_search_preview_2025_03_11" => {
+                tools.push(Tool::WebSearch(WebSearchTool::default()));
+            }
+            "web_search_2025_08_26" => {
+                tools.push(Tool::WebSearch20250826(WebSearchTool::default()));
+            }
+            other => {
+                return Err(MoaError::Unsupported(format!(
+                    "unsupported OpenAI native tool '{other}'"
+                )));
+            }
+        }
     }
+    Ok(tools)
 }
 
-pub(crate) fn map_openai_error(error: OpenAIError) -> MoaError {
+fn map_openai_error(error: OpenAIError) -> MoaError {
     match error {
         OpenAIError::Reqwest(error) => {
             if let Some(status) = error.status() {
@@ -614,14 +586,14 @@ fn openai_tool_result_output(message: &ContextMessage) -> FunctionCallOutput {
     }
 }
 
-pub(crate) fn parse_tool_arguments(arguments: &str) -> Result<Value> {
+fn parse_tool_arguments(arguments: &str) -> Result<Value> {
     match serde_json::from_str(arguments) {
         Ok(value) => Ok(value),
         Err(_) => Ok(Value::String(arguments.to_string())),
     }
 }
 
-pub(crate) fn response_text_from_output(output: &[OutputItem]) -> String {
+fn response_text_from_output(output: &[OutputItem]) -> String {
     let mut text = String::new();
 
     for item in output {
@@ -638,9 +610,7 @@ pub(crate) fn response_text_from_output(output: &[OutputItem]) -> String {
     text
 }
 
-pub(crate) fn response_content_from_output(
-    output: &[OutputItem],
-) -> Result<Vec<CompletionContent>> {
+fn response_content_from_output(output: &[OutputItem]) -> Result<Vec<CompletionContent>> {
     let mut content = Vec::new();
 
     for item in output {
@@ -681,7 +651,7 @@ pub(crate) fn response_content_from_output(
     Ok(content)
 }
 
-pub(crate) fn response_stop_reason(response: &Response) -> StopReason {
+fn response_stop_reason(response: &Response) -> StopReason {
     match response.status {
         OpenAiStatus::Cancelled => StopReason::Cancelled,
         OpenAiStatus::Incomplete => response
@@ -757,9 +727,8 @@ fn supports_reasoning(model: &str) -> bool {
 mod tests {
     use std::collections::HashMap;
 
-    use serde_json::json;
-
     use async_openai::error::OpenAIError;
+    use serde_json::json;
 
     use super::{is_ignorable_openai_stream_error, metadata_as_strings};
 

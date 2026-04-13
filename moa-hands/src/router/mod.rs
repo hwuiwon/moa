@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use moa_core::{
     HandHandle, HandProvider, HandResources, HandSpec, McpServerConfig, MemoryStore, MoaError,
-    Result, SandboxTier, SessionMeta, SessionStore, ToolInvocation, ToolOutput,
+    Result, SandboxTier, SessionMeta, SessionStore, ToolInvocation, ToolOutput, WorkspaceId,
 };
 use moa_security::{ApprovalRuleStore, MCPCredentialProxy, ToolPolicies};
 use tokio::sync::RwLock;
@@ -43,6 +43,7 @@ pub struct ToolRouter {
     mcp_servers: HashMap<String, McpServerConfig>,
     mcp_proxy: Option<Arc<MCPCredentialProxy>>,
     active_hands: RwLock<HashMap<String, HandHandle>>,
+    workspace_roots: RwLock<HashMap<WorkspaceId, PathBuf>>,
     policies: ToolPolicies,
     rule_store: Option<Arc<dyn ApprovalRuleStore>>,
     session_store: Option<Arc<dyn SessionStore>>,
@@ -50,6 +51,18 @@ pub struct ToolRouter {
 }
 
 impl ToolRouter {
+    /// Remembers the filesystem root for a logical workspace id.
+    pub async fn remember_workspace_root(
+        &self,
+        workspace_id: WorkspaceId,
+        workspace_root: PathBuf,
+    ) {
+        self.workspace_roots
+            .write()
+            .await
+            .insert(workspace_id, workspace_root);
+    }
+
     /// Destroys and removes all cached hands associated with the provided session.
     pub async fn destroy_session_hands(&self, session_id: &moa_core::SessionId) {
         let session_prefix = format!("{session_id}:");
@@ -308,13 +321,23 @@ impl ToolRouter {
             .providers
             .get(provider)
             .ok_or_else(|| MoaError::ProviderError(format!("unknown hand provider: {provider}")))?;
+        let workspace_mount =
+            if provider == DEFAULT_PROVIDER_NAME && matches!(tier, SandboxTier::Local) {
+                self.workspace_roots
+                    .read()
+                    .await
+                    .get(&session.workspace_id)
+                    .cloned()
+            } else {
+                None
+            };
         let handle = provider_impl
             .provision(HandSpec {
                 sandbox_tier: tier,
                 image: None,
                 resources: HandResources::default(),
                 env: HashMap::new(),
-                workspace_mount: None,
+                workspace_mount,
                 idle_timeout: DEFAULT_TOOL_TIMEOUT,
                 max_lifetime: DEFAULT_TOOL_TIMEOUT,
             })
