@@ -71,6 +71,56 @@ Read `graphify-out/.update_noncode.json`. If it is `[]`, **skip Step 2** and jum
 
 ---
 
+## Step 1b — Prune orphaned cache entries + stub binary files
+
+Run immediately after Step 1 every time (regardless of whether non-code changed). This keeps the cache lean and eliminates "N files have no/stale cache" noise from binary assets.
+
+```bash
+python3 - <<'PYEOF'
+import json
+from pathlib import Path
+from graphify.detect import detect_incremental
+from graphify.cache import file_hash, cache_dir, load_cached, save_cached
+
+detect = detect_incremental(Path('.'))
+all_files = [f for files in detect.get('files', {}).values() for f in files]
+
+# Compute valid hashes for all current files
+valid_hashes = set()
+for f in all_files:
+    p = Path(f)
+    if p.exists():
+        try:
+            valid_hashes.add(file_hash(p))
+        except OSError:
+            pass
+
+# Prune orphaned entries (old hash versions of changed/deleted files)
+cdir = cache_dir()
+pruned = 0
+for c in cdir.glob('*.json'):
+    if c.stem not in valid_hashes:
+        c.unlink()
+        pruned += 1
+
+# Stub binary/image files with empty cache so fast script stops counting them
+binary_exts = {'.png', '.svg', '.ico', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.woff', '.woff2', '.ttf', '.eot'}
+stubbed = 0
+for f in all_files:
+    if Path(f).suffix.lower() in binary_exts:
+        p = Path(f)
+        if p.exists() and load_cached(p) is None:
+            save_cached(p, {"nodes": [], "edges": [], "hyperedges": []})
+            stubbed += 1
+
+print(f'Cache: pruned {pruned} orphaned entries, stubbed {stubbed} binary files, {len(list(cdir.glob("*.json")))} entries remain')
+PYEOF
+```
+
+> **Why here?** `file_hash` needs the current file contents, so pruning must happen after we have the live file list from `detect_incremental`. Doing it before the fast rebuild means Step 3 starts with a clean cache and the "N files have no/stale cache" count is accurate.
+
+---
+
 ## Step 2 — Single semantic-extraction subagent (only if non-code changed)
 
 Dispatch **exactly one** `Agent` call with `subagent_type: general-purpose`. The subagent reads each changed non-code file with the `Read` tool, extracts nodes/edges/hyperedges, and returns **JSON only** — no prose, no fences.

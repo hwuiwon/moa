@@ -77,7 +77,10 @@ impl LLMProvider for TemporalToolThenEchoProvider {
         let response = if requests.is_empty() {
             CompletionResponse {
                 text: String::new(),
-                content: vec![CompletionContent::ToolCall(self.tool_call.clone())],
+                content: vec![CompletionContent::ToolCall(moa_core::ToolCallContent {
+                    invocation: self.tool_call.clone(),
+                    provider_metadata: None,
+                })],
                 stop_reason: StopReason::ToolUse,
                 model: self.model.clone(),
                 input_tokens: 12,

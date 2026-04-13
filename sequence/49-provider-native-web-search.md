@@ -20,7 +20,7 @@ The approach: when building the `CompletionRequest`, include the provider's nati
 - **`moa-hands/src/router.rs`** — Where stubs are registered (lines 227–246). The default loadout includes `web_search` and `web_fetch`.
 - **`moa-providers/src/anthropic.rs`** — `build_request_body()` function (~line 243). Where the `tools` array is built for the API request. This is where provider-native tools need to be injected.
 - **`moa-providers/src/openai.rs`** — Same pattern for OpenAI.
-- **`moa-providers/src/openrouter.rs`** — Same pattern for OpenRouter.
+- **`moa-providers/src/gemini.rs`** — Same pattern for Google Gemini.
 - **`moa-core/src/types.rs`** — `CompletionRequest`, `ModelCapabilities`. Need to express provider-native tool support.
 - **`moa-brain/src/pipeline/tools.rs`** — `ToolDefinitionProcessor`. May need to handle native tools differently from custom tools.
 - **`moa-core/src/config.rs`** — Need a config flag for enabling/disabling web search per provider.
@@ -110,13 +110,13 @@ if config.web_search_enabled {
 
 3. In the response stream parser, handle `web_search` content blocks. Anthropic returns search results as `content_block` events with `type: "web_search_tool_result"`. These should be passed through as assistant content — the brain doesn't need to act on them.
 
-### 5d. Update `OpenAIProvider` and `OpenRouterProvider`
+### 5d. Update `OpenAIProvider` and `GeminiProvider`
 
 Same pattern — declare native search tools in capabilities, inject into request, handle response format differences.
 
 For OpenAI, the web search tool format differs. Check the current API docs and implement accordingly.
 
-For OpenRouter, it depends on the downstream provider — pass through whatever the routed model supports.
+For Gemini, use the provider-native Google Search tool format exposed by the Gemini API.
 
 ### 5e. Handle provider search tool_use blocks in the harness
 
@@ -187,7 +187,7 @@ Recommendation: **Option 2** — add `CompletionContent::ProviderToolResult { to
 - [ ] `moa-core/src/config.rs` — `web_search_enabled` config flag
 - [ ] `moa-providers/src/anthropic.rs` — Native search tool injection in `build_request_body()`, response parsing for search result blocks
 - [ ] `moa-providers/src/openai.rs` — Same for OpenAI
-- [ ] `moa-providers/src/openrouter.rs` — Same for OpenRouter (pass-through)
+- [ ] `moa-providers/src/gemini.rs` — Same for Gemini
 - [ ] `moa-brain/src/harness.rs` — Handle `ProviderToolResult` blocks (if Option 2)
 - [ ] `moa-hands/src/tools/stub.rs` — **Deleted**
 - [ ] `moa-hands/src/router.rs` — Stubs removed from registration and default loadout
@@ -229,4 +229,4 @@ Recommendation: **Option 2** — add `CompletionContent::ProviderToolResult { to
 - **Anthropic's web search format.** The tool is declared as `{"type": "web_search_20250305", "name": "web_search"}` (not `type: function`). Results come back as a content block with `type: "web_search_tool_result"` containing `search_results` array with `url`, `title`, `snippet`, and `page_content` fields. The LLM then synthesizes these into its response.
 - **Citation handling.** Anthropic's search results include citations. These appear as text in the assistant response. MOA doesn't need special citation handling — just pass through the text.
 - **web_fetch removal.** With the LLM's native search, there's no need for a separate `web_fetch` tool. The LLM can browse and read pages as part of its search capability. If a user explicitly needs to fetch a specific URL, that can be a future addition — but the stub pretending it works is worse than not having it.
-- **OpenAI/OpenRouter specifics.** Check the current API docs for each provider's native search format. The pattern is the same — declare the tool type, inject into the request, handle response blocks — but the serialization differs.
+- **OpenAI/Google specifics.** Check the current API docs for each provider's native search format. The pattern is the same — declare the tool type, inject into the request, handle response blocks — but the serialization differs.

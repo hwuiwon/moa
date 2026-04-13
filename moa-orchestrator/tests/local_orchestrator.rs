@@ -75,6 +75,7 @@ impl LLMProvider for MockProvider {
             output_tokens: 2,
             cached_input_tokens: 0,
             duration_ms: delay.as_millis() as u64,
+            thought_signature: None,
         };
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let completion = tokio::spawn(async move {
@@ -141,6 +142,7 @@ impl LLMProvider for SlowStreamingProvider {
                 output_tokens: text.len(),
                 cached_input_tokens: 0,
                 duration_ms: (delay.as_millis() as usize * text.len()) as u64,
+                thought_signature: None,
             })
         });
         Ok(CompletionStream::new(rx, completion))
@@ -258,6 +260,7 @@ impl LLMProvider for RequestGuardProvider {
             output_tokens: 2,
             cached_input_tokens: 0,
             duration_ms: delay.as_millis() as u64,
+            thought_signature: None,
         };
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let completion = tokio::spawn(async move {
@@ -307,12 +310,15 @@ impl LLMProvider for ToolCancelProvider {
         let response = if requests.is_empty() {
             CompletionResponse {
                 text: String::new(),
-                content: vec![CompletionContent::ToolCall(moa_core::ToolInvocation {
-                    id: Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()),
-                    name: "bash".to_string(),
-                    input: serde_json::json!({
-                        "cmd": "python3 -c 'import time; time.sleep(0.35); print(\"cancelled-tool\")'"
-                    }),
+                content: vec![CompletionContent::ToolCall(moa_core::ToolCallContent {
+                    invocation: moa_core::ToolInvocation {
+                        id: Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({
+                            "cmd": "python3 -c 'import time; time.sleep(0.35); print(\"cancelled-tool\")'"
+                        }),
+                    },
+                    provider_metadata: None,
                 })],
                 stop_reason: moa_core::StopReason::ToolUse,
                 model: self.model.clone(),
@@ -320,6 +326,7 @@ impl LLMProvider for ToolCancelProvider {
                 output_tokens: 4,
                 cached_input_tokens: 0,
                 duration_ms: 10,
+                thought_signature: None,
             }
         } else {
             CompletionResponse {
@@ -331,6 +338,7 @@ impl LLMProvider for ToolCancelProvider {
                 output_tokens: 4,
                 cached_input_tokens: 0,
                 duration_ms: 10,
+                thought_signature: None,
             }
         };
         requests.push(request);
@@ -375,12 +383,15 @@ impl LLMProvider for ToolThenEchoProvider {
         let response = if requests.is_empty() {
             CompletionResponse {
                 text: String::new(),
-                content: vec![CompletionContent::ToolCall(moa_core::ToolInvocation {
-                    id: Some("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".to_string()),
-                    name: "bash".to_string(),
-                    input: serde_json::json!({
-                        "cmd": self.first_tool_cmd,
-                    }),
+                content: vec![CompletionContent::ToolCall(moa_core::ToolCallContent {
+                    invocation: moa_core::ToolInvocation {
+                        id: Some("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".to_string()),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({
+                            "cmd": self.first_tool_cmd,
+                        }),
+                    },
+                    provider_metadata: None,
                 })],
                 stop_reason: moa_core::StopReason::ToolUse,
                 model: self.model.clone(),
@@ -388,6 +399,7 @@ impl LLMProvider for ToolThenEchoProvider {
                 output_tokens: 4,
                 cached_input_tokens: 0,
                 duration_ms: 10,
+                thought_signature: None,
             }
         } else {
             let prompt = last_user_message(&request.messages).unwrap_or_default();
@@ -400,6 +412,7 @@ impl LLMProvider for ToolThenEchoProvider {
                 output_tokens: 4,
                 cached_input_tokens: 0,
                 duration_ms: 10,
+                thought_signature: None,
             }
         };
         requests.push(request);
@@ -443,13 +456,16 @@ impl LLMProvider for FileWriteApprovalProvider {
         let response = if requests.is_empty() {
             CompletionResponse {
                 text: String::new(),
-                content: vec![CompletionContent::ToolCall(moa_core::ToolInvocation {
-                    id: Some("cccccccc-cccc-cccc-cccc-cccccccccccc".to_string()),
-                    name: "file_write".to_string(),
-                    input: serde_json::json!({
-                        "path": "docs/approval-check.md",
-                        "content": "approved via orchestrator\n",
-                    }),
+                content: vec![CompletionContent::ToolCall(moa_core::ToolCallContent {
+                    invocation: moa_core::ToolInvocation {
+                        id: Some("cccccccc-cccc-cccc-cccc-cccccccccccc".to_string()),
+                        name: "file_write".to_string(),
+                        input: serde_json::json!({
+                            "path": "docs/approval-check.md",
+                            "content": "approved via orchestrator\n",
+                        }),
+                    },
+                    provider_metadata: None,
                 })],
                 stop_reason: moa_core::StopReason::ToolUse,
                 model: self.model.clone(),
@@ -457,6 +473,7 @@ impl LLMProvider for FileWriteApprovalProvider {
                 output_tokens: 4,
                 cached_input_tokens: 0,
                 duration_ms: 10,
+                thought_signature: None,
             }
         } else {
             CompletionResponse {
@@ -468,6 +485,7 @@ impl LLMProvider for FileWriteApprovalProvider {
                 output_tokens: 4,
                 cached_input_tokens: 0,
                 duration_ms: 10,
+                thought_signature: None,
             }
         };
         requests.push(request);

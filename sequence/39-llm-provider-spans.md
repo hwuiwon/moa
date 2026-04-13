@@ -8,7 +8,7 @@ _Add GenAI semantic convention spans to every LLM completion call across all pro
 
 Every LLM completion call in MOA should emit an OpenTelemetry span carrying the full set of GenAI semantic convention attributes — model name, token counts, cost, latency, time-to-first-token, temperature, and input/output content. These spans are what Langfuse classifies as **generation** observations (any span with `gen_ai.request.model` is auto-detected as a generation).
 
-This step instruments `moa-providers` — the Anthropic, OpenAI, and OpenRouter provider implementations — without changing their external API. The brain harness and tool router remain untouched until Step 40.
+This step instruments `moa-providers` — the Anthropic, OpenAI, and Google provider implementations — without changing their external API. The brain harness and tool router remain untouched until Step 40.
 
 ---
 
@@ -16,7 +16,7 @@ This step instruments `moa-providers` — the Anthropic, OpenAI, and OpenRouter 
 
 - **`moa-providers/src/anthropic.rs`** — The primary provider. `complete()` method (~line 103). Understand how streaming works, where `CompletionStream` is constructed, where token counts are captured.
 - **`moa-providers/src/openai.rs`** — OpenAI provider. Same `complete()` pattern.
-- **`moa-providers/src/openrouter.rs`** — OpenRouter provider. Delegates to the OpenAI common path.
+- **`moa-providers/src/gemini.rs`** — Google Gemini provider.
 - **`moa-providers/src/common.rs`** — Shared streaming/parsing logic. `StreamState` struct, token counting, `CompletionContent` processing.
 - **`moa-core/src/types.rs`** — `CompletionRequest`, `CompletionStream`, `ModelCapabilities`, `TokenPricing`. Understand what data is available.
 - **`moa-core/src/traits.rs`** — `LLMProvider` trait, `complete()` signature.
@@ -87,7 +87,7 @@ use chrono::{DateTime, Utc};
 
 /// Sets GenAI semantic convention attributes on the current span.
 pub struct LLMSpanAttributes {
-    pub system: &'static str,        // "anthropic", "openai", "openrouter"
+    pub system: &'static str,        // "anthropic", "openai", "google"
     pub operation: &'static str,     // "chat"
     pub request_model: String,
     pub response_model: Option<String>,
@@ -126,9 +126,9 @@ Wrap the entire `complete()` method body in a tracing span. The tricky part: mos
 
 The recommended approach: wrap the streaming `CompletionStream` in a span-aware adapter that records attributes as they become available, then finalizes the span when the stream completes or errors.
 
-### 5d. Instrument `OpenAIProvider::complete()` and `OpenRouterProvider::complete()`
+### 5d. Instrument `OpenAIProvider::complete()` and `GeminiProvider::complete()`
 
-Same pattern. OpenRouter uses `system = "openrouter"` and the underlying model goes in `gen_ai.request.model`.
+Same pattern. Google uses `system = "google"` and the underlying Gemini model goes in `gen_ai.request.model`.
 
 ### 5e. Capture time-to-first-token accurately
 
@@ -214,7 +214,7 @@ span.record("gen_ai.usage.cost", cost);
 - [ ] `moa-providers/src/instrumentation.rs` — New module with `LLMSpanAttributes`, `record_llm_span_attributes()`, `llm_span_name()`, and cost calculation helpers
 - [ ] `moa-providers/src/anthropic.rs` — `complete()` instrumented with GenAI spans, TTFT capture, and cost recording
 - [ ] `moa-providers/src/openai.rs` — Same instrumentation
-- [ ] `moa-providers/src/openrouter.rs` — Same instrumentation (with `system = "openrouter"`)
+- [ ] `moa-providers/src/gemini.rs` — Same instrumentation (with `system = "google"`)
 - [ ] `moa-providers/src/lib.rs` — `mod instrumentation;` added
 - [ ] `moa-providers/Cargo.toml` — `opentelemetry.workspace = true` added
 

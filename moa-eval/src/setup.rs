@@ -680,6 +680,7 @@ mod tests {
                 output_tokens: 1,
                 cached_input_tokens: 0,
                 duration_ms: 1,
+                thought_signature: None,
             }))
         }
     }

@@ -33,8 +33,8 @@ _Crates, external services, implementation phases, build and deployment._
 
 | Crate | Purpose |
 |---|---|
-| `async-openai` | OpenAI + OpenRouter client |
-| `reqwest` | HTTP client for Anthropic API (no official Rust SDK) |
+| `async-openai` | OpenAI Responses API client |
+| `reqwest` | HTTP client for Anthropic + Google Gemini APIs |
 | `eventsource-stream` | SSE parsing for streaming responses |
 | `tiktoken-rs` | Token counting (OpenAI tokenizer) |
 
@@ -95,13 +95,13 @@ _Crates, external services, implementation phases, build and deployment._
 | Fly.io | Brain hosting | ~$2/mo per always-on machine; $0/mo if suspended |
 | Turso | Session database (cloud sync) | Free tier: 500 DBs, 9GB; Pro: $29/mo |
 | Daytona | Container hands (default) | ~$0.067/hr per container |
-| LLM API | Anthropic, OpenAI, or OpenRouter | Pay-per-token |
+| LLM API | Anthropic, OpenAI, or Google Gemini | Pay-per-token |
 
 ### Required for local mode
 
 | Service | Purpose | Cost |
 |---|---|---|
-| LLM API | Anthropic, OpenAI, or OpenRouter | Pay-per-token |
+| LLM API | Anthropic, OpenAI, or Google Gemini | Pay-per-token |
 | (Nothing else) | Everything else runs locally | Free |
 
 ### Optional
@@ -207,7 +207,7 @@ Test: Complete 3 complex tasks. Check that skills were auto-generated. Start a n
 **Goal**: Production-ready.
 
 Deliverables:
-- [ ] `moa-providers`: OpenAI + OpenRouter providers
+- [ ] `moa-providers`: OpenAI + Google Gemini providers
 - [ ] `moa-hands`: E2B provider (Tier 2 microVM)
 - [ ] `moa-hands`: MCP client + credential proxy
 - [ ] `moa-security`: Full credential vault (local + HashiCorp)
@@ -289,7 +289,7 @@ primary_region = "iad"
 # LLM providers (at least one required)
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
-OPENROUTER_API_KEY=sk-or-...
+GOOGLE_API_KEY=AIza...
 
 # Cloud mode (optional)
 TURSO_DATABASE_URL=libsql://your-db.turso.io

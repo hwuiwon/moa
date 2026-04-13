@@ -9,7 +9,7 @@ Cancellation is currently task-abort based: `HardCancel` drops the tokio task, a
 - `moa-orchestrator/src/local.rs` — signal handling for `SoftCancel`/`HardCancel`, `stream_completion_response`
 - `moa-providers/src/anthropic.rs` — streaming implementation, completion task
 - `moa-providers/src/openai.rs` — streaming implementation
-- `moa-providers/src/openrouter.rs` — streaming implementation
+- `moa-providers/src/gemini.rs` — streaming implementation
 - `moa-hands/src/local.rs` — `LocalHandProvider`, `execute_docker_tool`, `bash::execute_docker`
 - `moa-brain/src/harness.rs` — `stream_completion_response`
 
@@ -58,7 +58,7 @@ impl CompletionStream {
 In the streaming loop, when the cancel token fires, call `stream.abort()` and break. This ensures the HTTP request is actually cancelled, not just the receiver dropped.
 
 ### 4. Update provider implementations to check cancellation
-In each provider's streaming task (`anthropic.rs`, `openai.rs`, `openrouter.rs`), add a `tokio::select!` branch:
+In each provider's streaming task (`anthropic.rs`, `openai.rs`, `gemini.rs`), add a `tokio::select!` branch:
 ```rust
 tokio::select! {
     chunk = response_stream.next() => {
@@ -118,7 +118,7 @@ moa-core/src/error.rs              # + MoaError::Cancelled
 moa-orchestrator/src/local.rs      # CancellationToken per session, cooperative cancel
 moa-providers/src/anthropic.rs     # Cancel-aware streaming (if trait change)
 moa-providers/src/openai.rs        # Cancel-aware streaming (if trait change)
-moa-providers/src/openrouter.rs    # Cancel-aware streaming (if trait change)
+moa-providers/src/gemini.rs        # Cancel-aware streaming (if trait change)
 moa-hands/src/local.rs             # Process kill on cancel, docker stop on cancel
 ```
 

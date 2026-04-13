@@ -32,6 +32,9 @@ pub struct ContextMessage {
     pub role: MessageRole,
     /// Text content.
     pub content: String,
+    /// Provider-specific thought signature that must be replayed with this message when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
     /// Optional attached tool schema payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Value>,
@@ -52,6 +55,7 @@ impl ContextMessage {
         Self {
             role: MessageRole::System,
             content: content.into(),
+            thought_signature: None,
             tools: None,
             content_blocks: None,
             tool_invocation: None,
@@ -64,6 +68,7 @@ impl ContextMessage {
         Self {
             role: MessageRole::User,
             content: content.into(),
+            thought_signature: None,
             tools: None,
             content_blocks: None,
             tool_invocation: None,
@@ -73,9 +78,18 @@ impl ContextMessage {
 
     /// Creates an assistant message.
     pub fn assistant(content: impl Into<String>) -> Self {
+        Self::assistant_with_thought_signature(content, None::<String>)
+    }
+
+    /// Creates an assistant message with an optional provider-specific thought signature.
+    pub fn assistant_with_thought_signature(
+        content: impl Into<String>,
+        thought_signature: Option<impl Into<String>>,
+    ) -> Self {
         Self {
             role: MessageRole::Assistant,
             content: content.into(),
+            thought_signature: thought_signature.map(Into::into),
             tools: None,
             content_blocks: None,
             tool_invocation: None,
@@ -88,6 +102,7 @@ impl ContextMessage {
         Self {
             role: MessageRole::Tool,
             content: content.into(),
+            thought_signature: None,
             tools: None,
             content_blocks: None,
             tool_invocation: None,
@@ -97,9 +112,19 @@ impl ContextMessage {
 
     /// Creates an assistant tool-call message with both text fallback and structured invocation.
     pub fn assistant_tool_call(invocation: ToolInvocation, content: impl Into<String>) -> Self {
+        Self::assistant_tool_call_with_thought_signature(invocation, content, None::<String>)
+    }
+
+    /// Creates an assistant tool-call message with optional provider-specific replay metadata.
+    pub fn assistant_tool_call_with_thought_signature(
+        invocation: ToolInvocation,
+        content: impl Into<String>,
+        thought_signature: Option<impl Into<String>>,
+    ) -> Self {
         Self {
             role: MessageRole::Assistant,
             content: content.into(),
+            thought_signature: thought_signature.map(Into::into),
             tools: None,
             content_blocks: None,
             tool_invocation: Some(invocation),
@@ -116,6 +141,7 @@ impl ContextMessage {
         Self {
             role: MessageRole::Tool,
             content: content.into(),
+            thought_signature: None,
             tools: None,
             content_blocks,
             tool_invocation: None,

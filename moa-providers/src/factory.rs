@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use moa_core::{LLMProvider, MoaConfig, MoaError, Result};
 
-use crate::{AnthropicProvider, OpenAIProvider, OpenRouterProvider};
+use crate::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 
 const PROVIDER_ANTHROPIC: &str = "anthropic";
 const PROVIDER_OPENAI: &str = "openai";
-const PROVIDER_OPENROUTER: &str = "openrouter";
+const PROVIDER_GOOGLE: &str = "google";
 
 /// Resolved provider/model choice used to construct one provider instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +29,12 @@ pub fn resolve_provider_selection(
         .filter(|value| !value.is_empty())
         .unwrap_or(config.general.default_model.as_str());
     let default_provider = config.general.default_provider.trim();
+
+    if requested.contains('/') {
+        return Err(MoaError::ConfigError(
+            "vendor-prefixed model ids are not supported; use direct model ids for anthropic, openai, or google".to_string(),
+        ));
+    }
 
     if let Some((provider_name, model_id)) = split_explicit_provider(requested) {
         return Ok(ProviderSelection {
@@ -66,7 +72,7 @@ pub fn build_provider_from_selection(
             config,
             selection.model_id.clone(),
         )?),
-        PROVIDER_OPENROUTER => Arc::new(OpenRouterProvider::from_config_with_model(
+        PROVIDER_GOOGLE => Arc::new(GeminiProvider::from_config_with_model(
             config,
             selection.model_id.clone(),
         )?),
@@ -93,12 +99,12 @@ fn split_explicit_provider(model: &str) -> Option<(&str, &str)> {
 }
 
 fn infer_provider_name(model: &str) -> Option<&'static str> {
-    if model.contains('/') {
-        return Some(PROVIDER_OPENROUTER);
-    }
-
     if model.starts_with("claude-") {
         return Some(PROVIDER_ANTHROPIC);
+    }
+
+    if model.starts_with("gemini-") {
+        return Some(PROVIDER_GOOGLE);
     }
 
     if is_openai_model(model) {
@@ -116,25 +122,9 @@ fn normalize_model_for_provider(provider_name: &str, model: &str) -> String {
             .unwrap_or(model)
             .to_string(),
         PROVIDER_OPENAI => model.strip_prefix("openai/").unwrap_or(model).to_string(),
-        PROVIDER_OPENROUTER => normalize_openrouter_model(model),
+        PROVIDER_GOOGLE => model.strip_prefix("google/").unwrap_or(model).to_string(),
         _ => model.to_string(),
     }
-}
-
-fn normalize_openrouter_model(model: &str) -> String {
-    if model.contains('/') {
-        return model.to_string();
-    }
-
-    if model.starts_with("claude-") {
-        return format!("anthropic/{model}");
-    }
-
-    if is_openai_model(model) {
-        return format!("openai/{model}");
-    }
-
-    model.to_string()
 }
 
 fn is_openai_model(model: &str) -> bool {
@@ -158,7 +148,7 @@ fn validate_provider_name(provider_name: &str) -> Result<()> {
 fn matches_provider_name(provider_name: &str) -> bool {
     matches!(
         provider_name,
-        PROVIDER_ANTHROPIC | PROVIDER_OPENAI | PROVIDER_OPENROUTER
+        PROVIDER_ANTHROPIC | PROVIDER_OPENAI | PROVIDER_GOOGLE
     )
 }
 
@@ -166,9 +156,7 @@ fn matches_provider_name(provider_name: &str) -> bool {
 mod tests {
     use moa_core::MoaConfig;
 
-    use super::{
-        PROVIDER_ANTHROPIC, PROVIDER_OPENAI, PROVIDER_OPENROUTER, resolve_provider_selection,
-    };
+    use super::{PROVIDER_ANTHROPIC, PROVIDER_GOOGLE, PROVIDER_OPENAI, resolve_provider_selection};
 
     #[test]
     fn infers_openai_for_gpt_models() {
@@ -185,17 +173,29 @@ mod tests {
     }
 
     #[test]
-    fn infers_openrouter_for_vendor_prefixed_models() {
+    fn infers_google_for_gemini_models() {
         let selection =
-            resolve_provider_selection(&MoaConfig::default(), Some("openai/gpt-5.4")).unwrap();
-        assert_eq!(selection.provider_name, PROVIDER_OPENROUTER);
+            resolve_provider_selection(&MoaConfig::default(), Some("gemini-2.5-flash")).unwrap();
+        assert_eq!(selection.provider_name, PROVIDER_GOOGLE);
     }
 
     #[test]
     fn explicit_provider_prefix_overrides_inference() {
         let selection =
-            resolve_provider_selection(&MoaConfig::default(), Some("openrouter:gpt-5.4")).unwrap();
-        assert_eq!(selection.provider_name, PROVIDER_OPENROUTER);
-        assert_eq!(selection.model_id, "openai/gpt-5.4");
+            resolve_provider_selection(&MoaConfig::default(), Some("google:gemini-2.5-flash"))
+                .unwrap();
+        assert_eq!(selection.provider_name, PROVIDER_GOOGLE);
+        assert_eq!(selection.model_id, "gemini-2.5-flash");
+    }
+
+    #[test]
+    fn rejects_vendor_prefixed_model_ids() {
+        let error = resolve_provider_selection(&MoaConfig::default(), Some("openai/gpt-5.4"))
+            .expect_err("vendor-prefixed model ids should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("vendor-prefixed model ids are not supported")
+        );
     }
 }

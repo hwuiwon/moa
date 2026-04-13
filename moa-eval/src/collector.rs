@@ -243,6 +243,7 @@ mod tests {
         collector.process_event(&Event::ToolCall {
             tool_id,
             provider_tool_use_id: None,
+            provider_thought_signature: None,
             tool_name: "bash".to_string(),
             input: json!({ "cmd": "ls" }),
             hand_id: None,
@@ -256,6 +257,7 @@ mod tests {
         });
         collector.process_event(&Event::BrainResponse {
             text: "done".to_string(),
+            thought_signature: None,
             model: "mock".to_string(),
             input_tokens: 100,
             output_tokens: 50,

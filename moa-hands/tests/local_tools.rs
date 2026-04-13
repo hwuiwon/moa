@@ -291,6 +291,7 @@ async fn session_search_finds_prior_events() {
             session_id,
             Event::BrainResponse {
                 text: "I found the deploy failure".to_string(),
+                thought_signature: None,
                 model: "claude-sonnet-4-6".to_string(),
                 input_tokens: 10,
                 output_tokens: 5,
@@ -351,6 +352,7 @@ async fn session_search_filters_error_events() {
             session_id,
             Event::BrainResponse {
                 text: "deploy completed successfully".to_string(),
+                thought_signature: None,
                 model: "claude-sonnet-4-6".to_string(),
                 input_tokens: 10,
                 output_tokens: 5,

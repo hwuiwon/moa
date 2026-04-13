@@ -14,6 +14,8 @@ pub enum ToolCallFormat {
     Anthropic,
     /// OpenAI-compatible tool calls.
     OpenAiCompatible,
+    /// Gemini function call and function response parts.
+    Gemini,
 }
 
 /// Provider token pricing metadata.

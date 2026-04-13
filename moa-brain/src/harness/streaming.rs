@@ -289,6 +289,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                     session_id.clone(),
                     Event::BrainResponse {
                         text: streamed.streamed_text.clone(),
+                        thought_signature: response.thought_signature.clone(),
                         model: response.model.clone(),
                         input_tokens: response.input_tokens,
                         output_tokens: response.output_tokens,

@@ -1,16 +1,15 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use moa_core::{
     ApprovalDecision, BrainOrchestrator, Event, EventRange, LLMProvider, MoaConfig, Platform,
-    Result, SessionSignal, SessionStatus, SessionStore, StartSessionRequest, UserId, UserMessage,
-    WorkspaceId,
+    Result, SessionSignal, SessionStatus, SessionStore, StartSessionRequest, ToolOutput, UserId,
+    UserMessage, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
-use moa_providers::{AnthropicProvider, OpenAIProvider, OpenRouterProvider};
+use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 use moa_session::{SessionDatabase, create_session_store};
 use tempfile::TempDir;
 use tokio::time::{Instant, sleep};
@@ -37,14 +36,24 @@ fn available_live_providers() -> Vec<LiveProvider> {
             provider: Arc::new(provider),
         });
     }
-    if let Ok(provider) = OpenRouterProvider::from_env("openai/gpt-5.4") {
+    if let Ok(provider) = GeminiProvider::from_env("gemini-2.5-flash") {
         providers.push(LiveProvider {
-            label: "openrouter",
+            label: "google",
             model: provider.capabilities().model_id,
             provider: Arc::new(provider),
         });
     }
     providers
+}
+
+fn google_live_provider() -> Option<LiveProvider> {
+    GeminiProvider::from_env("gemini-2.5-flash")
+        .ok()
+        .map(|provider| LiveProvider {
+            label: "google",
+            model: provider.capabilities().model_id,
+            provider: Arc::new(provider),
+        })
 }
 
 async fn live_orchestrator_with_provider(
@@ -125,22 +134,42 @@ async fn wait_for_approval_request(
     }
 }
 
-async fn wait_for_file(root: PathBuf, relative: &str) -> PathBuf {
+async fn wait_for_successful_tool_result(
+    session_store: &SessionDatabase,
+    session_id: moa_core::SessionId,
+) -> ToolOutput {
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
-        if let Ok(mut sandboxes) = tokio::fs::read_dir(&root).await {
-            while let Ok(Some(entry)) = sandboxes.next_entry().await {
-                let candidate = entry.path().join(relative);
-                if tokio::fs::try_exists(&candidate).await.unwrap_or(false) {
-                    return candidate;
-                }
-            }
+        let events = session_store
+            .get_events(session_id.clone(), EventRange::all())
+            .await
+            .expect("events");
+        if let Some(output) = events.iter().find_map(|record| match &record.event {
+            Event::ToolResult {
+                success: true,
+                output,
+                ..
+            } => Some(output.clone()),
+            _ => None,
+        }) {
+            return output;
+        }
+        if let Some(record) = events
+            .iter()
+            .find(|record| matches!(record.event, Event::ToolError { .. }))
+        {
+            panic!(
+                "tool execution failed for session {session_id}: {:?}",
+                record.event
+            );
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for sandbox file {} beneath {}",
-            relative,
-            root.display()
+            "timed out waiting for successful tool result in session {session_id}; events: {:?}",
+            events
+                .iter()
+                .map(|record| &record.event)
+                .collect::<Vec<_>>()
         );
         sleep(Duration::from_millis(250)).await;
     }
@@ -173,6 +202,76 @@ async fn wait_for_final_response(
     }
 }
 
+async fn run_live_provider_tool_approval_roundtrip(provider: LiveProvider) {
+    let label = provider.label.to_string();
+    let model = provider.model;
+    let token = format!("LIVE-E2E-{}", label.to_uppercase());
+    let (_dir, session_store, orchestrator) = live_orchestrator_with_provider(provider.provider)
+        .await
+        .unwrap_or_else(|error| panic!("{label} orchestrator setup failed: {error}"));
+
+    let relative_path = format!("live/{label}.txt");
+    let prompt = format!(
+        "Use the file_write tool exactly once to write \"{token}\" to \"{relative_path}\". \
+         After the tool succeeds, answer with exactly {token}."
+    );
+    let session = orchestrator
+        .start_session(StartSessionRequest {
+            workspace_id: WorkspaceId::new(format!("ws-{label}")),
+            user_id: UserId::new(format!("u-{label}")),
+            platform: Platform::Cli,
+            model,
+            initial_message: Some(UserMessage {
+                text: prompt,
+                attachments: Vec::new(),
+            }),
+            title: None,
+            parent_session_id: None,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{label} start session failed: {error}"));
+
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::WaitingApproval,
+    )
+    .await;
+    let approval = wait_for_approval_request(&session_store, session.session_id.clone()).await;
+    let request_id = match approval.event {
+        Event::ApprovalRequested { request_id, .. } => request_id,
+        _ => unreachable!("approval helper returned non-approval event"),
+    };
+
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::ApprovalDecided {
+                request_id,
+                decision: ApprovalDecision::AllowOnce,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{label} approval signal failed: {error}"));
+
+    let tool_output =
+        wait_for_successful_tool_result(&session_store, session.session_id.clone()).await;
+    assert!(
+        tool_output
+            .to_text()
+            .contains(&format!("wrote {relative_path}")),
+        "{label} wrote an unexpected path: {:?}",
+        tool_output
+    );
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::Completed,
+    )
+    .await;
+    wait_for_final_response(&session_store, session.session_id, &token).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "manual live provider orchestrator test"]
 async fn live_providers_complete_tool_approval_roundtrip_when_available() {
@@ -182,68 +281,16 @@ async fn live_providers_complete_tool_approval_roundtrip_when_available() {
     }
 
     for provider in providers {
-        let label = provider.label.to_string();
-        let model = provider.model;
-        let token = format!("LIVE-E2E-{}", label.to_uppercase());
-        let (dir, session_store, orchestrator) = live_orchestrator_with_provider(provider.provider)
-            .await
-            .unwrap_or_else(|error| panic!("{label} orchestrator setup failed: {error}"));
-
-        let relative_path = format!("live/{label}.txt");
-        let prompt = format!(
-            "Use the file_write tool exactly once to write \"{token}\" to \"{relative_path}\". \
-             After the tool succeeds, answer with exactly {token}."
-        );
-        let session = orchestrator
-            .start_session(StartSessionRequest {
-                workspace_id: WorkspaceId::new(format!("ws-{label}")),
-                user_id: UserId::new(format!("u-{label}")),
-                platform: Platform::Cli,
-                model,
-                initial_message: Some(UserMessage {
-                    text: prompt,
-                    attachments: Vec::new(),
-                }),
-                title: None,
-                parent_session_id: None,
-            })
-            .await
-            .unwrap_or_else(|error| panic!("{label} start session failed: {error}"));
-
-        wait_for_status(
-            &orchestrator,
-            session.session_id.clone(),
-            SessionStatus::WaitingApproval,
-        )
-        .await;
-        let approval = wait_for_approval_request(&session_store, session.session_id.clone()).await;
-        let request_id = match approval.event {
-            Event::ApprovalRequested { request_id, .. } => request_id,
-            _ => unreachable!("approval helper returned non-approval event"),
-        };
-
-        orchestrator
-            .signal(
-                session.session_id.clone(),
-                SessionSignal::ApprovalDecided {
-                    request_id,
-                    decision: ApprovalDecision::AllowOnce,
-                },
-            )
-            .await
-            .unwrap_or_else(|error| panic!("{label} approval signal failed: {error}"));
-
-        wait_for_status(
-            &orchestrator,
-            session.session_id.clone(),
-            SessionStatus::Completed,
-        )
-        .await;
-        let written = wait_for_file(dir.path().join("sandbox"), &relative_path).await;
-        let contents = tokio::fs::read_to_string(&written)
-            .await
-            .unwrap_or_else(|error| panic!("{label} failed reading written file: {error}"));
-        assert_eq!(contents, token, "{label} wrote unexpected file contents");
-        wait_for_final_response(&session_store, session.session_id, &token).await;
+        run_live_provider_tool_approval_roundtrip(provider).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual live Gemini orchestrator test"]
+async fn live_google_provider_complete_tool_approval_roundtrip_when_available() {
+    let Some(provider) = google_live_provider() else {
+        return;
+    };
+
+    run_live_provider_tool_approval_roundtrip(provider).await;
 }

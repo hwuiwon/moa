@@ -161,6 +161,7 @@ mod tests {
             output_tokens: 10_000,
             cached_input_tokens: 50_000,
             duration_ms: 1500,
+            thought_signature: None,
         };
         let pricing = TokenPricing {
             input_per_mtok: 2.50,

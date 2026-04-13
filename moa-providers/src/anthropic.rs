@@ -16,8 +16,9 @@ use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
-use crate::common::{build_http_client, parse_sse_json, send_with_retry};
+use crate::common::{build_http_client, parse_sse_json};
 use crate::instrumentation::LLMSpanRecorder;
+use crate::retry::RetryPolicy;
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -34,7 +35,7 @@ pub struct AnthropicProvider {
     default_model: String,
     default_capabilities: ModelCapabilities,
     messages_url: String,
-    max_retries: usize,
+    retry_policy: RetryPolicy,
     web_search_enabled: bool,
 }
 
@@ -51,7 +52,7 @@ impl AnthropicProvider {
             default_model: resolved_default_model,
             default_capabilities,
             messages_url: ANTHROPIC_MESSAGES_URL.to_string(),
-            max_retries: DEFAULT_MAX_RETRIES,
+            retry_policy: RetryPolicy::default().with_max_retries(DEFAULT_MAX_RETRIES),
             web_search_enabled: true,
         })
     }
@@ -90,7 +91,7 @@ impl AnthropicProvider {
 
     /// Overrides the retry budget for rate-limited requests.
     pub fn with_max_retries(mut self, max_retries: usize) -> Self {
-        self.max_retries = max_retries;
+        self.retry_policy = self.retry_policy.with_max_retries(max_retries);
         self
     }
 
@@ -148,15 +149,15 @@ impl LLMProvider for AnthropicProvider {
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         let messages_url = self.messages_url.clone();
-        let max_retries = self.max_retries;
+        let retry_policy = self.retry_policy.clone();
         let (tx, rx) = mpsc::channel(DEFAULT_STREAM_BUFFER);
 
         let completion_task = tokio::spawn(
             async move {
                 let mut span_recorder = span_recorder;
                 let started_at = Instant::now();
-                let response = send_with_retry(
-                    || {
+                let response = retry_policy
+                    .send(|| {
                         client
                             .post(&messages_url)
                             .header("x-api-key", &api_key)
@@ -164,10 +165,8 @@ impl LLMProvider for AnthropicProvider {
                             .header(ACCEPT, "text/event-stream")
                             .header(CONTENT_TYPE, "application/json")
                             .json(&request_body)
-                    },
-                    max_retries,
-                )
-                .await;
+                    })
+                    .await;
 
                 let response = match response {
                     Ok(response) => response,
@@ -700,7 +699,10 @@ impl AnthropicStreamState {
                     name,
                     input,
                 };
-                let content = CompletionContent::ToolCall(tool_call.clone());
+                let content = CompletionContent::ToolCall(moa_core::ToolCallContent {
+                    invocation: tool_call.clone(),
+                    provider_metadata: None,
+                });
                 self.completed_content[payload.index] = Some(content.clone());
                 Ok(vec![content])
             }
@@ -740,10 +742,13 @@ impl AnthropicStreamState {
                             }
                         };
                         self.completed_content[index] =
-                            Some(CompletionContent::ToolCall(ToolInvocation {
-                                id: Some(id.clone()),
-                                name: name.clone(),
-                                input,
+                            Some(CompletionContent::ToolCall(moa_core::ToolCallContent {
+                                invocation: ToolInvocation {
+                                    id: Some(id.clone()),
+                                    name: name.clone(),
+                                    input,
+                                },
+                                provider_metadata: None,
                             }));
                     }
                 }
@@ -779,6 +784,7 @@ impl AnthropicStreamState {
             output_tokens: self.output_tokens,
             cached_input_tokens: self.cached_input_tokens,
             duration_ms: started_at.elapsed().as_millis() as u64,
+            thought_signature: None,
         }
     }
 
@@ -1175,8 +1181,8 @@ mod tests {
         );
         match &streamed_blocks[2] {
             CompletionContent::ToolCall(tool_call) => {
-                assert_eq!(tool_call.name, "bash");
-                assert_eq!(tool_call.input["cmd"], "ls");
+                assert_eq!(tool_call.invocation.name, "bash");
+                assert_eq!(tool_call.invocation.input["cmd"], "ls");
             }
             other => panic!("expected tool call, got {other:?}"),
         }

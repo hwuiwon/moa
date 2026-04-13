@@ -24,6 +24,36 @@ pub struct ToolInvocation {
     pub input: Value,
 }
 
+/// Provider-specific metadata attached to one emitted tool call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum ProviderToolCallMetadata {
+    /// Gemini thought signature that must be replayed with the original model turn.
+    Gemini {
+        /// Opaque provider-issued thought signature.
+        thought_signature: String,
+    },
+}
+
+impl ProviderToolCallMetadata {
+    /// Returns the thought signature when this metadata carries one.
+    pub fn thought_signature(&self) -> Option<&str> {
+        match self {
+            Self::Gemini { thought_signature } => Some(thought_signature.as_str()),
+        }
+    }
+}
+
+/// One structured tool call emitted in streamed or buffered provider output.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallContent {
+    /// Canonical tool invocation details.
+    pub invocation: ToolInvocation,
+    /// Optional provider-specific replay metadata for this tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderToolCallMetadata>,
+}
+
 /// Logical content blocks in a completion.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,7 +61,7 @@ pub enum CompletionContent {
     /// Text content.
     Text(String),
     /// Tool call content.
-    ToolCall(ToolInvocation),
+    ToolCall(ToolCallContent),
     /// Informational output from a provider-native tool.
     ProviderToolResult {
         /// Provider-native tool name.
@@ -112,6 +142,9 @@ pub struct CompletionResponse {
     pub cached_input_tokens: usize,
     /// Total request duration in milliseconds.
     pub duration_ms: u64,
+    /// Provider-specific thought signature that should be replayed on the next turn when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// Streaming provider response wrapper.
@@ -227,6 +260,7 @@ mod tests {
                 output_tokens: 0,
                 cached_input_tokens: 0,
                 duration_ms: 30_000,
+                thought_signature: None,
             })
         });
         let stream = CompletionStream::new(rx, completion);

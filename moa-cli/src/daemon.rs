@@ -667,9 +667,9 @@ mod tests {
             config.general.default_model = "claude-sonnet-4-6".to_string();
             return Some(config);
         }
-        if std::env::var(&config.providers.openrouter.api_key_env).is_ok() {
-            config.general.default_provider = "openrouter".to_string();
-            config.general.default_model = "openai/gpt-5.4".to_string();
+        if std::env::var(&config.providers.google.api_key_env).is_ok() {
+            config.general.default_provider = "google".to_string();
+            config.general.default_model = "gemini-2.5-flash".to_string();
             return Some(config);
         }
 
