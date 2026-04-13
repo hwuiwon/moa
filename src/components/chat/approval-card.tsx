@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, ShieldAlert, ShieldCheck } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/card";
 import { DiffViewer } from "@/components/chat/diff-viewer";
 import { tauriClient } from "@/lib/tauri";
+import { useApprovalStore } from "@/stores/approval";
 import type { ApprovalBlock } from "@/types/chat";
 import { cn } from "@/lib/utils";
 
@@ -27,27 +28,59 @@ export function ApprovalCard({ block }: ApprovalCardProps) {
   const [decision, setDecision] = useState<string | null>(block.decision ?? null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const registerApproval = useApprovalStore((state) => state.registerApproval);
+  const unregisterApproval = useApprovalStore((state) => state.unregisterApproval);
 
   const riskTone = riskToneForLevel(block.riskLevel);
 
-  const submitDecision = async (nextDecision: string) => {
-    if (isSubmitting || decision) {
+  useEffect(() => {
+    setDecision(block.decision ?? null);
+  }, [block.decision]);
+
+  const submitDecision = useCallback(
+    async (nextDecision: string) => {
+      if (isSubmitting || decision) {
+        return;
+      }
+
+      setIsSubmitting(true);
+      setError(null);
+      try {
+        await tauriClient.respondToApproval(block.requestId, nextDecision);
+        setDecision(nextDecision);
+      } catch (approvalError) {
+        setError(
+          approvalError instanceof Error ? approvalError.message : String(approvalError),
+        );
+      } finally {
+        setIsSubmitting(false);
+      }
+    },
+    [block.requestId, decision, isSubmitting],
+  );
+
+  useEffect(() => {
+    if (decision) {
+      unregisterApproval(block.requestId);
       return;
     }
 
-    setIsSubmitting(true);
-    setError(null);
-    try {
-      await tauriClient.respondToApproval(block.requestId, nextDecision);
-      setDecision(nextDecision);
-    } catch (approvalError) {
-      setError(
-        approvalError instanceof Error ? approvalError.message : String(approvalError),
-      );
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
+    registerApproval(block.requestId, {
+      allowOnce: () => {
+        void submitDecision("allow_once");
+      },
+      alwaysAllow: () => {
+        void submitDecision("always_allow");
+      },
+      deny: () => {
+        void submitDecision("deny");
+      },
+    });
+
+    return () => {
+      unregisterApproval(block.requestId);
+    };
+  }, [block.requestId, decision, registerApproval, submitDecision, unregisterApproval]);
 
   return (
     <Card className={cn("border-l-4", riskTone.borderClass)} size="sm">

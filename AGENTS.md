@@ -11,7 +11,7 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 | `docs/00-direction.md` | Product identity and philosophy |
 | `docs/01-architecture-overview.md` | System diagram, all trait definitions, workspace layout |
 | `docs/02-brain-orchestration.md` | Temporal, Fly.io, LocalOrchestrator, brain loop |
-| `docs/03-communication-layer.md` | Gateway, TUI layout, CLI, approvals, observation |
+| `docs/03-communication-layer.md` | Gateway, desktop/CLI communication, approvals, observation |
 | `docs/04-memory-architecture.md` | File-wiki, FTS5, scoping, consolidation |
 | `docs/05-session-event-log.md` | Turso/libSQL schema, event types, compaction |
 | `docs/06-hands-and-mcp.md` | HandProvider, Daytona, E2B, MCP, tool routing |
@@ -25,7 +25,7 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 1. **Use the trait definitions from `docs/01-architecture-overview.md` as the source of truth.** All component interfaces are defined there.
 2. **Every public function must have a doc comment.**
 3. **Every module must have a module-level doc comment.**
-4. **Use `thiserror` for library error types.** Use `anyhow` only in CLI/TUI binary entrypoints. In the Tauri app (`src-tauri` / `moa-app`), use the serializable `MoaAppError` IPC error shape instead of `anyhow` across the frontend boundary.
+4. **Use `thiserror` for library error types.** Use `anyhow` only in CLI binary entrypoints. In the Tauri app (`src-tauri` / `moa-app`), use the serializable `MoaAppError` IPC error shape instead of `anyhow` across the frontend boundary.
 5. **Use `tracing` for all logging.** Never `println!` or `eprintln!` in library code.
 6. **Use `tokio` as the async runtime.** All I/O must be async.
 7. **All tests go in a `tests/` directory within each crate** (integration tests) or inline `#[cfg(test)] mod tests` (unit tests).

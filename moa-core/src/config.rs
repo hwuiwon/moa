@@ -24,7 +24,7 @@ pub struct MoaConfig {
     pub cloud: CloudConfig,
     /// Messaging gateway settings.
     pub gateway: GatewayConfig,
-    /// TUI settings.
+    /// Interactive shell settings.
     pub tui: TuiConfig,
     /// Permission policy settings.
     pub permissions: PermissionsConfig,

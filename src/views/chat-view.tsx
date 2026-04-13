@@ -67,6 +67,9 @@ export function ChatView() {
         error={stream.error}
         isLoading={history.isLoading}
         messages={stream.messages}
+        onSuggestion={(prompt) => {
+          void stream.sendMessage(prompt);
+        }}
         onStop={() => {
           void stream.stopMessage();
         }}

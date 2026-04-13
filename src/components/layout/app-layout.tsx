@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Navigate,
@@ -10,6 +10,7 @@ import {
 import { CommandPalette } from "@/components/command-palette";
 import { SessionInfoPanel } from "@/components/layout/session-info-panel";
 import { SessionTabBar } from "@/components/layout/session-tab-bar";
+import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import { queryKeys } from "@/lib/query-keys";
 import { tauriClient } from "@/lib/tauri";
 import { useSessionList } from "@/hooks/use-session-list";
@@ -141,6 +142,23 @@ export function AppLayout() {
     selectSession.mutate(sessionId);
   };
 
+  const openChat = useCallback(() => {
+    if (activeSessionId) {
+      navigate({ to: "/chat/$sessionId", params: { sessionId: activeSessionId } });
+      return;
+    }
+
+    navigate({ to: "/chat" });
+  }, [activeSessionId, navigate]);
+
+  const openMemory = useCallback(() => {
+    navigate({ to: "/memory" });
+  }, [navigate]);
+
+  const openSettings = useCallback(() => {
+    navigate({ to: "/settings" });
+  }, [navigate]);
+
   const handleCloseTab = (sessionId: string) => {
     const tabIndex = openTabs.indexOf(sessionId);
     const nextSessionId =
@@ -161,59 +179,27 @@ export function AppLayout() {
     }
   };
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      const modifier = event.metaKey || event.ctrlKey;
-      if (!modifier) {
-        return;
-      }
-
-      switch (event.key.toLowerCase()) {
-        case "b":
-          event.preventDefault();
-          toggleSidebar();
-          break;
-        case "i":
-          event.preventDefault();
-          toggleDetailPanel();
-          break;
-        case "k":
-          event.preventDefault();
-          toggleCommandPalette();
-          break;
-        case "n":
-          event.preventDefault();
-          if (!createSession.isPending) {
-            createSession.mutate();
-          }
-          break;
-        case "tab": {
-          event.preventDefault();
-          const nextSessionId = cycleTab(
-            activeSessionId,
-            event.shiftKey ? -1 : 1,
-          );
-          if (nextSessionId) {
-            activateSession(nextSessionId);
-          }
-          break;
-        }
-        default:
-          break;
-      }
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [
-    activateSession,
+  useKeyboardShortcuts({
     activeSessionId,
-    createSession,
+    commandPaletteOpen,
     cycleTab,
-    toggleCommandPalette,
-    toggleDetailPanel,
-    toggleSidebar,
-  ]);
+    onActivateSession: activateSession,
+    onCloseCurrentTab: () => {
+      if (activeSessionId) {
+        handleCloseTab(activeSessionId);
+      }
+    },
+    onCreateSession: () => {
+      if (!createSession.isPending) {
+        createSession.mutate();
+      }
+    },
+    onOpenSettings: openSettings,
+    onSetCommandPaletteOpen: setCommandPaletteOpen,
+    onToggleCommandPalette: toggleCommandPalette,
+    onToggleDetailPanel: toggleDetailPanel,
+    onToggleSidebar: toggleSidebar,
+  });
 
   const hasActiveSession = useMemo(() => Boolean(activeSessionId), [activeSessionId]);
 
@@ -279,16 +265,9 @@ export function AppLayout() {
         activeView={activeView}
         onCreateSession={() => createSession.mutate()}
         onOpenChange={setCommandPaletteOpen}
-        onOpenChat={() => {
-          if (activeSessionId) {
-            navigate({ to: "/chat/$sessionId", params: { sessionId: activeSessionId } });
-            return;
-          }
-
-          navigate({ to: "/chat" });
-        }}
-        onOpenMemory={() => navigate({ to: "/memory" })}
-        onOpenSettings={() => navigate({ to: "/settings" })}
+        onOpenChat={openChat}
+        onOpenMemory={openMemory}
+        onOpenSettings={openSettings}
         onSelectSession={activateSession}
         onToggleDetailPanel={toggleDetailPanel}
         onToggleSidebar={toggleSidebar}

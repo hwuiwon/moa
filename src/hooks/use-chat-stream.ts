@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Channel } from "@tauri-apps/api/core";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
+import { toast } from "sonner";
 
 import { queryKeys } from "@/lib/query-keys";
 import { tauriClient } from "@/lib/tauri";
@@ -60,6 +66,8 @@ export function useChatStream({
   const pendingFinishTextRef = useRef<string | null>(null);
   const rafRef = useRef<number | null>(null);
   const localMessageIndexRef = useRef(0);
+  const notifiedApprovalsRef = useRef(new Set<string>());
+  const notificationPermissionRef = useRef<boolean | null>(null);
   const previousSessionIdRef = useRef(sessionId);
 
   const applyTranscriptAction = useCallback((action: TranscriptAction) => {
@@ -238,6 +246,7 @@ export function useChatStream({
       setIsStopping(false);
       setError(null);
       setTotalTokens(0);
+      notifiedApprovalsRef.current.clear();
 
       if (rafRef.current != null) {
         window.cancelAnimationFrame(rafRef.current);
@@ -246,6 +255,41 @@ export function useChatStream({
     },
     [],
   );
+
+  const notifyApproval = useCallback(async (approval: ApprovalBlock) => {
+    if (notifiedApprovalsRef.current.has(approval.requestId)) {
+      return;
+    }
+
+    notifiedApprovalsRef.current.add(approval.requestId);
+    toast.warning(`Approval required: ${approval.toolName}`, {
+      description:
+        approval.inputSummary || "Review the pending request in the transcript.",
+    });
+
+    try {
+      if (notificationPermissionRef.current == null) {
+        notificationPermissionRef.current = await isPermissionGranted();
+      }
+
+      if (!notificationPermissionRef.current) {
+        notificationPermissionRef.current =
+          (await requestPermission()) === "granted";
+      }
+
+      if (!notificationPermissionRef.current) {
+        return;
+      }
+
+      await sendNotification({
+        body:
+          approval.inputSummary || `${approval.toolName} is waiting for a decision.`,
+        title: "MOA approval required",
+      });
+    } catch {
+      // Notification delivery is best-effort only.
+    }
+  }, []);
 
   useEffect(() => {
     if (previousSessionIdRef.current !== sessionId) {
@@ -341,6 +385,7 @@ export function useChatStream({
               break;
             }
             addApprovalBlock(runId, approval);
+            void notifyApproval(approval);
             break;
           }
           case "notice": {
@@ -417,6 +462,7 @@ export function useChatStream({
       applyTranscriptAction,
       flushAssistantDelta,
       isStreaming,
+      notifyApproval,
       queryClient,
       removeThinkingBlock,
       scheduleFlush,

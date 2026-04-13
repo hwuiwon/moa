@@ -1,4 +1,4 @@
-//! CLI entry point for MOA subcommands, daemon management, and the TUI.
+//! CLI entry point for MOA subcommands and daemon management.
 
 mod api;
 mod daemon;
@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use moa_core::{
     BranchManager, DatabaseBackend, MemoryPath, MemoryScope, MemoryStore, MoaConfig, OtlpProtocol,
-    SessionFilter, SessionId, SessionStatus, SessionStore, TelemetryConfig, WorkspaceId,
-    default_log_path, init_observability,
+    SessionFilter, SessionStatus, SessionStore, TelemetryConfig, WorkspaceId, default_log_path,
+    init_observability,
 };
 use moa_eval::{
     AgentConfig, EngineOptions, EvalEngine, EvalRun, EvalStatus, EvaluatorOptions, ReporterOptions,
@@ -24,11 +24,8 @@ use moa_eval::{
 use moa_memory::FileMemoryStore;
 use moa_session::{NeonBranchManager, SessionDatabase, create_session_store};
 use moa_skills::run_skill_suite;
-use moa_tui::{RunTuiOptions, run_tui, run_tui_with_options};
 use tokio::fs;
 use tokio::process::Command;
-use uuid::Uuid;
-
 /// Top-level MOA command line interface.
 #[derive(Debug, Parser)]
 #[command(name = "moa", about = "MOA local terminal agent", version)]
@@ -41,7 +38,7 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     log_file: Option<PathBuf>,
 
-    /// Launch the TUI with a prompt already submitted.
+    /// Runs one prompt and prints the final assistant response when no subcommand is supplied.
     #[arg(value_name = "PROMPT")]
     prompt: Option<String>,
 
@@ -58,16 +55,6 @@ enum CommandKind {
     Status,
     /// Lists persisted sessions.
     Sessions(SessionsArgs),
-    /// Attaches the TUI to a specific session.
-    Attach {
-        /// Session identifier.
-        session_id: String,
-    },
-    /// Resumes the most recent session or a specific session in the TUI.
-    Resume {
-        /// Optional explicit session identifier.
-        session_id: Option<String>,
-    },
     /// Memory-related CLI operations.
     Memory {
         #[command(subcommand)]
@@ -335,16 +322,11 @@ async fn main() -> Result<()> {
     match cli.command {
         None => {
             if let Some(prompt) = cli.prompt {
-                run_tui_with_options(
-                    config,
-                    RunTuiOptions {
-                        initial_prompt: Some(prompt),
-                        ..RunTuiOptions::default()
-                    },
-                )
-                .await?;
+                exec::run_exec(config, prompt).await?;
             } else {
-                run_tui(config).await?;
+                let mut command = Cli::command();
+                command.print_long_help()?;
+                println!();
             }
         }
         Some(CommandKind::Exec(args)) => {
@@ -358,35 +340,6 @@ async fn main() -> Result<()> {
                 "{}",
                 sessions_report(&config, args.workspace.as_deref()).await?
             );
-        }
-        Some(CommandKind::Attach { session_id }) => {
-            let session_id = parse_session_id(&session_id)?;
-            let use_daemon = daemon::daemon_info(&config).await.is_ok();
-            run_tui_with_options(
-                config,
-                RunTuiOptions {
-                    attach_session_id: Some(session_id),
-                    force_daemon: use_daemon,
-                    ..RunTuiOptions::default()
-                },
-            )
-            .await?;
-        }
-        Some(CommandKind::Resume { session_id }) => {
-            let session_id = match session_id {
-                Some(session_id) => parse_session_id(&session_id)?,
-                None => most_recent_session_id(&config).await?,
-            };
-            let use_daemon = daemon::daemon_info(&config).await.is_ok();
-            run_tui_with_options(
-                config,
-                RunTuiOptions {
-                    attach_session_id: Some(session_id),
-                    force_daemon: use_daemon,
-                    ..RunTuiOptions::default()
-                },
-            )
-            .await?;
         }
         Some(CommandKind::Memory { command }) => match command {
             MemoryCommand::Search { query } => {
@@ -843,21 +796,6 @@ async fn init_workspace(config: &MoaConfig) -> Result<()> {
     Ok(())
 }
 
-async fn most_recent_session_id(config: &MoaConfig) -> Result<SessionId> {
-    let sessions = load_session_store(config)
-        .await?
-        .list_sessions(SessionFilter {
-            limit: Some(1),
-            ..SessionFilter::default()
-        })
-        .await?;
-    sessions
-        .into_iter()
-        .next()
-        .map(|session| session.session_id)
-        .context("no sessions found")
-}
-
 async fn load_session_store(config: &MoaConfig) -> Result<Arc<SessionDatabase>> {
     create_session_store(config)
         .await
@@ -866,12 +804,6 @@ async fn load_session_store(config: &MoaConfig) -> Result<Arc<SessionDatabase>> 
 
 async fn load_branch_manager(config: &MoaConfig) -> Result<NeonBranchManager> {
     NeonBranchManager::from_config(config).context("opening Neon branch manager")
-}
-
-fn parse_session_id(value: &str) -> Result<SessionId> {
-    Ok(SessionId(
-        Uuid::parse_str(value).context("invalid session id")?,
-    ))
 }
 
 fn resolve_workspace_arg(value: &str) -> WorkspaceId {

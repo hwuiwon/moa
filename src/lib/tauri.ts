@@ -71,6 +71,8 @@ export const tauriClient = {
     prompt: string,
     onEvent: Channel<StreamEvent>,
   ) => invokeCommand<void>("send_message", { sessionId, prompt, onEvent }),
+  cancelActiveGeneration: () =>
+    invokeCommand<void>("cancel_active_generation"),
   stopSession: (sessionId: string) =>
     invokeCommand<void>("stop_session", { sessionId }),
   respondToApproval: (requestId: string, decision: string) =>

@@ -9,6 +9,9 @@ import {
 } from "lucide-react";
 
 import type { SessionPreviewDto } from "@/lib/bindings";
+import { Loader } from "@/components/prompt-kit/loader";
+import { SystemMessage } from "@/components/prompt-kit/system-message";
+import { TextShimmer } from "@/components/prompt-kit/text-shimmer";
 import { Button } from "@/components/ui/button";
 import {
   ContextMenu,
@@ -125,18 +128,18 @@ export function SessionSidebar({
       <Separator />
 
       {isLoading ? (
-        <div className="px-3 py-6 text-sm text-muted-foreground">Loading sessions…</div>
+        <div className="flex items-center gap-3 px-3 py-6 text-sm text-muted-foreground">
+          <Loader size="sm" variant="dots" />
+          <TextShimmer>Loading sessions…</TextShimmer>
+        </div>
       ) : rows.length === 0 ? (
         <div className="px-3 py-6">
-          <div className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
-            <div className="flex items-center gap-2 text-foreground">
+          <SystemMessage className="rounded-lg" fill>
+            <span className="flex items-center gap-2 text-foreground">
               <Sparkles className="h-4 w-4" />
-              No sessions yet
-            </div>
-            <p className="mt-2 leading-6">
-              Create a new session to start a desktop conversation with MOA.
-            </p>
-          </div>
+              No sessions yet. Create a new session to start a desktop conversation.
+            </span>
+          </SystemMessage>
         </div>
       ) : rows.length > 50 ? (
         <ScrollArea className="flex-1" viewportRef={parentRef}>
