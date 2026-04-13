@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -8,10 +9,10 @@ use moa_core::{
     ConfidenceLevel, ContextMessage, Event, EventRange, EventType, LLMProvider, MemoryScope,
     MemoryStore, MessageRole, MoaConfig, MoaError, PageType, Platform, Result, RuntimeEvent,
     SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
-    SessionStore, StartSessionRequest, TokenPricing, ToolCallFormat, UserId, UserMessage, WikiPage,
-    WorkspaceId,
+    SessionStore, StartSessionRequest, TokenPricing, ToolCallFormat, ToolOutput, UserId,
+    UserMessage, WikiPage, WorkspaceId,
 };
-use moa_hands::ToolRouter;
+use moa_hands::{ToolRegistry, ToolRouter};
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
 use moa_session::create_session_store;
@@ -623,6 +624,90 @@ fn brain_response_texts(events: &[moa_core::EventRecord]) -> Vec<String> {
         .collect()
 }
 
+#[derive(Clone)]
+struct PanicProvider {
+    model: String,
+}
+
+#[async_trait]
+impl LLMProvider for PanicProvider {
+    fn name(&self) -> &str {
+        "panic-provider"
+    }
+
+    fn capabilities(&self) -> moa_core::ModelCapabilities {
+        moa_core::ModelCapabilities {
+            model_id: self.model.clone(),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: false,
+            supports_vision: false,
+            supports_prefix_caching: false,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 0.0,
+                output_per_mtok: 0.0,
+                cached_input_per_mtok: None,
+            },
+            native_tools: Vec::new(),
+        }
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
+        panic!("panic-provider boom");
+    }
+}
+
+#[derive(Clone)]
+struct DestroyTrackingHandProvider {
+    provisioned: Arc<AtomicUsize>,
+    destroyed: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl moa_core::HandProvider for DestroyTrackingHandProvider {
+    fn provider_name(&self) -> &str {
+        "tracked"
+    }
+
+    async fn provision(&self, _spec: moa_core::HandSpec) -> Result<moa_core::HandHandle> {
+        let id = self.provisioned.fetch_add(1, Ordering::SeqCst);
+        Ok(moa_core::HandHandle::local(std::path::PathBuf::from(
+            format!("/tmp/tracked-hand-{id}"),
+        )))
+    }
+
+    async fn execute(
+        &self,
+        _handle: &moa_core::HandHandle,
+        _tool: &str,
+        _input: &str,
+    ) -> Result<ToolOutput> {
+        Ok(ToolOutput::text(
+            "tracked-hand-output",
+            Duration::from_millis(5),
+        ))
+    }
+
+    async fn status(&self, _handle: &moa_core::HandHandle) -> Result<moa_core::HandStatus> {
+        Ok(moa_core::HandStatus::Running)
+    }
+
+    async fn pause(&self, _handle: &moa_core::HandHandle) -> Result<()> {
+        Ok(())
+    }
+
+    async fn resume(&self, _handle: &moa_core::HandHandle) -> Result<()> {
+        Ok(())
+    }
+
+    async fn destroy(&self, _handle: &moa_core::HandHandle) -> Result<()> {
+        self.destroyed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn starts_two_sessions_and_processes_both() -> Result<()> {
     let (_dir, orchestrator) = test_orchestrator().await?;
@@ -1012,6 +1097,70 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
     assert!(events.iter().any(|record| matches!(
         record.event,
         Event::BrainResponse { ref text, .. } if text.contains("recovered follow-up")
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn resume_session_processes_user_message_before_trailing_status_event() -> Result<()> {
+    let (_dir, orchestrator) = test_orchestrator_with_delay(Duration::from_millis(10)).await?;
+    let session_id = SessionId::new();
+    let now = chrono::Utc::now();
+    orchestrator
+        .session_store()
+        .create_session(SessionMeta {
+            id: session_id.clone(),
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            model: orchestrator.model().to_string(),
+            status: SessionStatus::Running,
+            created_at: now,
+            updated_at: now,
+            ..SessionMeta::default()
+        })
+        .await?;
+    orchestrator
+        .session_store()
+        .emit_event(
+            session_id.clone(),
+            Event::SessionCreated {
+                workspace_id: "workspace".to_string(),
+                user_id: "user".to_string(),
+                model: orchestrator.model().to_string(),
+            },
+        )
+        .await?;
+    orchestrator
+        .session_store()
+        .emit_event(
+            session_id.clone(),
+            Event::UserMessage {
+                text: "recover trailing status".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await?;
+    orchestrator
+        .session_store()
+        .emit_event(
+            session_id.clone(),
+            Event::SessionStatusChanged {
+                from: SessionStatus::Created,
+                to: SessionStatus::Running,
+            },
+        )
+        .await?;
+
+    orchestrator.resume_session(session_id.clone()).await?;
+    wait_for_status(&orchestrator, session_id.clone(), SessionStatus::Completed).await?;
+
+    let events = orchestrator
+        .session_store()
+        .get_events(session_id, EventRange::all())
+        .await?;
+    assert!(events.iter().any(|record| matches!(
+        record.event,
+        Event::BrainResponse { ref text, .. } if text == "assistant:recover trailing status"
     )));
     Ok(())
 }
@@ -1594,6 +1743,107 @@ async fn resume_cancelled_session_waits_for_new_input() -> Result<()> {
     );
     assert_eq!(requests.lock().expect("request log lock poisoned").len(), 2);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn panicking_provider_marks_session_failed() -> Result<()> {
+    let provider: Arc<dyn LLMProvider> = Arc::new(PanicProvider {
+        model: MoaConfig::default().general.default_model,
+    });
+    let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
+    let session = start_session(&orchestrator).await?;
+
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::QueueMessage(UserMessage {
+                text: "panic please".to_string(),
+                attachments: Vec::new(),
+            }),
+        )
+        .await?;
+
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::Failed,
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_tool_turn_destroys_cached_hand() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = MoaConfig::default();
+    config.database.url = dir.path().join("sessions.db").display().to_string();
+    config.local.memory_dir = dir.path().join("memory").display().to_string();
+    config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+
+    let session_store = create_session_store(&config).await?;
+    let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
+    let provider = Arc::new(DestroyTrackingHandProvider {
+        provisioned: Arc::new(AtomicUsize::new(0)),
+        destroyed: Arc::new(AtomicUsize::new(0)),
+    });
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        "tracked".to_string(),
+        provider.clone() as Arc<dyn moa_core::HandProvider>,
+    );
+    let mut registry = ToolRegistry::default_local();
+    registry.retarget_hand_tools("tracked", moa_core::SandboxTier::Local);
+    let tool_router = Arc::new(
+        ToolRouter::new(registry, memory_store.clone(), providers)
+            .with_rule_store(session_store.clone())
+            .with_session_store(session_store.clone()),
+    );
+    let llm_provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
+        model: config.general.default_model.clone(),
+        first_tool_cmd: "echo tracked".to_string(),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    });
+    let orchestrator = LocalOrchestrator::new(
+        config,
+        session_store,
+        memory_store,
+        llm_provider,
+        tool_router,
+    )
+    .await?;
+    let session = start_session(&orchestrator).await?;
+
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::QueueMessage(UserMessage {
+                text: "run tracked tool".to_string(),
+                attachments: Vec::new(),
+            }),
+        )
+        .await?;
+    let request_id = wait_for_approval_request(&orchestrator, session.session_id.clone()).await?;
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::ApprovalDecided {
+                request_id,
+                decision: moa_core::ApprovalDecision::AllowOnce,
+            },
+        )
+        .await?;
+
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::Completed,
+    )
+    .await?;
+
+    assert_eq!(provider.provisioned.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.destroyed.load(Ordering::SeqCst), 1);
     Ok(())
 }
 

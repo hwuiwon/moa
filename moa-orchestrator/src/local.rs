@@ -12,9 +12,9 @@ use moa_brain::{
     update_workspace_tool_stats,
 };
 use moa_core::{
-    BrainOrchestrator, BranchManager, CronHandle, CronSpec, Event, EventRange, EventRecord,
-    EventStream, LLMProvider, MoaConfig, MoaError, ObserveLevel, PendingSignal, Result,
-    RuntimeEvent, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
+    BrainOrchestrator, BranchManager, BufferedUserMessage, CronHandle, CronSpec, Event, EventRange,
+    EventRecord, EventStream, LLMProvider, MoaConfig, MoaError, ObserveLevel, PendingSignal,
+    Result, RuntimeEvent, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
     SessionStatus, SessionStore, SessionSummary, StartSessionRequest, TraceContext, UserMessage,
 };
 use moa_hands::ToolRouter;
@@ -191,7 +191,7 @@ impl LocalOrchestrator {
         &self,
         session_id: SessionId,
         initial_turn_requested: bool,
-        initial_queued_messages: Vec<UserMessage>,
+        initial_queued_messages: Vec<BufferedUserMessage>,
     ) -> Result<()> {
         let (signal_tx, signal_rx) = mpsc::channel(64);
         let (event_tx, _) = broadcast::channel(256);
@@ -215,13 +215,12 @@ impl LocalOrchestrator {
             session_id: session_id.clone(),
         };
         let task_status = status.clone();
-        let task_finished = finished.clone();
         let task_event_tx = event_tx.clone();
         let task_runtime_tx = runtime_tx.clone();
         let task_cancel_token = cancel_token.clone();
         let task_hard_cancel_token = hard_cancel_token.clone();
-        let _task = tokio::spawn(async move {
-            let result = run_session_task(
+        let task = tokio::spawn(async move {
+            run_session_task(
                 context,
                 signal_rx,
                 task_event_tx,
@@ -232,9 +231,57 @@ impl LocalOrchestrator {
                 task_cancel_token,
                 task_hard_cancel_token,
             )
-            .await;
-            task_finished.store(true, Ordering::SeqCst);
-            result
+            .await
+        });
+        let supervisor_session_store = self.session_store.clone();
+        let supervisor_tool_router = self.tool_router.clone();
+        let supervisor_status = status.clone();
+        let supervisor_finished = finished.clone();
+        let supervisor_event_tx = event_tx.clone();
+        let supervisor_session_id = session_id.clone();
+        tokio::spawn(async move {
+            match task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    if let Err(report_error) = report_session_task_failure(
+                        &supervisor_session_store,
+                        &supervisor_event_tx,
+                        &supervisor_status,
+                        supervisor_session_id.clone(),
+                        format!("session task exited with error: {error}"),
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            session_id = %supervisor_session_id,
+                            error = %report_error,
+                            "failed to persist session task error"
+                        );
+                    }
+                }
+                Err(join_error) => {
+                    if let Err(report_error) = report_session_task_failure(
+                        &supervisor_session_store,
+                        &supervisor_event_tx,
+                        &supervisor_status,
+                        supervisor_session_id.clone(),
+                        format!("session task panicked: {join_error}"),
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            session_id = %supervisor_session_id,
+                            error = %report_error,
+                            "failed to persist session task panic"
+                        );
+                    }
+                }
+            }
+
+            supervisor_tool_router
+                .destroy_session_hands(&supervisor_session_id)
+                .await;
+            supervisor_finished.store(true, Ordering::SeqCst);
         });
 
         let handle = LocalBrainHandle {
@@ -371,7 +418,7 @@ impl BrainOrchestrator for LocalOrchestrator {
         let initial_queued_messages = wake
             .pending_signals
             .into_iter()
-            .map(|signal| signal.user_message())
+            .map(BufferedUserMessage::from_pending_signal)
             .collect::<Result<Vec<_>>>()?;
         let initial_turn_requested =
             session_requires_processing(&wake.session, &wake.recent_events)
@@ -488,7 +535,7 @@ async fn run_session_task(
     runtime_tx: broadcast::Sender<RuntimeEvent>,
     status: Arc<RwLock<SessionStatus>>,
     mut turn_requested: bool,
-    mut queued_messages: Vec<UserMessage>,
+    mut queued_messages: Vec<BufferedUserMessage>,
     cancel_token: CancellationToken,
     hard_cancel_token: CancellationToken,
 ) -> Result<()> {
@@ -511,12 +558,26 @@ async fn run_session_task(
                         false,
                     )
                     .await?;
-                    let _ = resolve_matching_pending_signal(
+                    if let Some(signal_id) = resolve_matching_pending_signal(
                         &context.session_store,
                         &context.session_id,
                         &message,
                     )
-                    .await?;
+                    .await?
+                    {
+                        best_effort_resolve_pending_signal(
+                            &context.session_store,
+                            &context.session_id,
+                            signal_id,
+                        )
+                        .await?;
+                    } else {
+                        tracing::warn!(
+                            session_id = %context.session_id,
+                            text = %message.text,
+                            "live queue message did not have a matching durable pending signal"
+                        );
+                    }
                     update_status(
                         &context.session_store,
                         &event_tx,
@@ -685,6 +746,10 @@ async fn run_session_task(
                     SessionStatus::Completed,
                 )
                 .await?;
+                context
+                    .tool_router
+                    .destroy_session_hands(&context.session_id)
+                    .await;
                 let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
             }
             Ok(StreamedTurnResult::Continue) => {
@@ -716,6 +781,10 @@ async fn run_session_task(
                     SessionStatus::Cancelled,
                 )
                 .await?;
+                context
+                    .tool_router
+                    .destroy_session_hands(&context.session_id)
+                    .await;
                 let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
                 return Ok(());
             }
@@ -751,6 +820,10 @@ async fn run_session_task(
                     SessionStatus::Failed,
                 )
                 .await?;
+                context
+                    .tool_router
+                    .destroy_session_hands(&context.session_id)
+                    .await;
                 let _ = runtime_tx.send(RuntimeEvent::Error(error.to_string()));
                 let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
                 return Err(error);
@@ -785,7 +858,7 @@ async fn flush_queued_messages(
     session_store: &Arc<SessionDatabase>,
     event_tx: &broadcast::Sender<EventRecord>,
     session_id: &SessionId,
-    queued_messages: &mut Vec<UserMessage>,
+    queued_messages: &mut Vec<BufferedUserMessage>,
 ) -> Result<()> {
     for message in queued_messages.drain(..) {
         flush_pending_signal(session_store, event_tx, session_id, message).await?;
@@ -798,7 +871,7 @@ async fn flush_next_queued_message(
     session_store: &Arc<SessionDatabase>,
     event_tx: &broadcast::Sender<EventRecord>,
     session_id: &SessionId,
-    queued_messages: &mut Vec<UserMessage>,
+    queued_messages: &mut Vec<BufferedUserMessage>,
 ) -> Result<bool> {
     if queued_messages.is_empty() {
         return Ok(false);
@@ -813,18 +886,57 @@ async fn flush_pending_signal(
     session_store: &Arc<SessionDatabase>,
     event_tx: &broadcast::Sender<EventRecord>,
     session_id: &SessionId,
-    message: UserMessage,
+    buffered: BufferedUserMessage,
 ) -> Result<()> {
-    accept_user_message(session_store, event_tx, session_id, message.clone(), true).await?;
-    let signal_id = resolve_matching_pending_signal(session_store, session_id, &message)
-        .await?
-        .ok_or_else(|| {
-            MoaError::StorageError(
-                "queued message did not have a matching durable pending signal".to_string(),
-            )
-        })?;
-    session_store.resolve_pending_signal(signal_id).await?;
+    accept_user_message(
+        session_store,
+        event_tx,
+        session_id,
+        buffered.message.clone(),
+        true,
+    )
+    .await?;
+
+    if let Some(signal_id) = buffered.pending_signal_id {
+        best_effort_resolve_pending_signal(session_store, session_id, signal_id).await?;
+        return Ok(());
+    }
+
+    if let Some(signal_id) =
+        resolve_matching_pending_signal(session_store, session_id, &buffered.message).await?
+    {
+        best_effort_resolve_pending_signal(session_store, session_id, signal_id).await?;
+    } else {
+        tracing::warn!(
+            session_id = %session_id,
+            text = %buffered.message.text,
+            "queued message did not have a matching durable pending signal"
+        );
+    }
     Ok(())
+}
+
+async fn best_effort_resolve_pending_signal(
+    session_store: &Arc<SessionDatabase>,
+    session_id: &SessionId,
+    signal_id: moa_core::PendingSignalId,
+) -> Result<()> {
+    match session_store
+        .resolve_pending_signal(signal_id.clone())
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(MoaError::StorageError(message)) => {
+            tracing::warn!(
+                session_id = %session_id,
+                signal_id = %signal_id,
+                error = %message,
+                "pending signal was already resolved before flush completed"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn resolve_matching_pending_signal(
@@ -923,17 +1035,57 @@ fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) ->
         return true;
     }
 
-    events.last().is_some_and(|record| {
-        matches!(
-            record.event,
+    events
+        .iter()
+        .rev()
+        .find_map(|record| match record.event {
+            Event::SessionStatusChanged { .. }
+            | Event::Warning { .. }
+            | Event::MemoryWrite { .. }
+            | Event::HandDestroyed { .. }
+            | Event::HandError { .. }
+            | Event::Checkpoint { .. } => None,
             Event::UserMessage { .. }
-                | Event::QueuedMessage { .. }
-                | Event::ToolResult { .. }
-                | Event::ToolError { .. }
-                | Event::ApprovalDecided { .. }
-                | Event::ToolCall { .. }
-        )
-    })
+            | Event::QueuedMessage { .. }
+            | Event::ToolResult { .. }
+            | Event::ToolError { .. }
+            | Event::ApprovalDecided { .. }
+            | Event::ToolCall { .. } => Some(true),
+            _ => Some(false),
+        })
+        .unwrap_or(false)
+}
+
+async fn report_session_task_failure(
+    session_store: &Arc<SessionDatabase>,
+    event_tx: &broadcast::Sender<EventRecord>,
+    status: &Arc<RwLock<SessionStatus>>,
+    session_id: SessionId,
+    message: String,
+) -> Result<()> {
+    let current = session_store.get_session(session_id.clone()).await?;
+    if matches!(current.status, SessionStatus::Failed) {
+        return Ok(());
+    }
+
+    append_event(
+        session_store,
+        event_tx,
+        session_id.clone(),
+        Event::Error {
+            message,
+            recoverable: false,
+        },
+    )
+    .await?;
+    update_status(
+        session_store,
+        event_tx,
+        status,
+        session_id,
+        SessionStatus::Failed,
+    )
+    .await
 }
 
 fn turn_number_for_events(events: &[EventRecord]) -> i64 {

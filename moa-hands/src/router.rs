@@ -483,6 +483,59 @@ impl ToolRouter {
         names
     }
 
+    /// Destroys and removes all cached hands associated with the provided session.
+    pub async fn destroy_session_hands(&self, session_id: &moa_core::SessionId) {
+        let session_prefix = format!("{session_id}:");
+        let cached = {
+            let mut active_hands = self.active_hands.write().await;
+            let keys = active_hands
+                .keys()
+                .filter(|key| key.starts_with(&session_prefix))
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| active_hands.remove(&key).map(|handle| (key, handle)))
+                .collect::<Vec<_>>()
+        };
+
+        for (key, handle) in cached {
+            let provider_name = key
+                .strip_prefix(&session_prefix)
+                .unwrap_or_default()
+                .to_string();
+            let handle_id = hand_id(&handle);
+            let Some(provider) = self.providers.get(&provider_name) else {
+                tracing::warn!(
+                    session_id = %session_id,
+                    provider = %provider_name,
+                    hand_id = %handle_id,
+                    "cached hand provider missing during cleanup"
+                );
+                continue;
+            };
+
+            match provider.destroy(&handle).await {
+                Ok(()) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        provider = %provider_name,
+                        hand_id = %handle_id,
+                        "destroyed cached session hand"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        provider = %provider_name,
+                        hand_id = %handle_id,
+                        error = %error,
+                        "failed to destroy cached session hand"
+                    );
+                }
+            }
+        }
+    }
+
     /// Returns whether a tool is currently registered on the router.
     pub fn has_tool(&self, name: &str) -> bool {
         self.registry.tools.contains_key(name)
