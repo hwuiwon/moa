@@ -9,6 +9,8 @@ use gpui_component::{
     resizable::{h_resizable, resizable_panel},
 };
 
+use crate::services::ServiceBridgeHandle;
+
 use super::{center::CenterPanel, detail::DetailPanel, sidebar::SidebarPanel};
 
 /// Workspace owns the three panels and tracks their visibility.
@@ -22,9 +24,9 @@ pub struct Workspace {
 
 impl Workspace {
     /// Creates a workspace with all three panels visible.
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(bridge: ServiceBridgeHandle, cx: &mut Context<Self>) -> Self {
         Self {
-            sidebar: cx.new(SidebarPanel::new),
+            sidebar: cx.new(|cx| SidebarPanel::new(bridge, cx)),
             center: cx.new(CenterPanel::new),
             detail: cx.new(DetailPanel::new),
             sidebar_visible: true,

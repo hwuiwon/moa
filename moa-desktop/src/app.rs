@@ -2,7 +2,10 @@
 
 use gpui::{AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div};
 
-use crate::{layout::Workspace, statusbar::MoaStatusBar, titlebar::MoaTitleBar};
+use crate::{
+    layout::Workspace, services::ServiceBridgeHandle, statusbar::MoaStatusBar,
+    titlebar::MoaTitleBar,
+};
 
 /// Top-level application view for the MOA desktop app.
 pub struct MoaApp {
@@ -14,11 +17,12 @@ pub struct MoaApp {
 impl MoaApp {
     /// Creates the root application view.
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let workspace = cx.new(Workspace::new);
+        let bridge = ServiceBridgeHandle::global(cx);
+        let workspace = cx.new(|cx| Workspace::new(bridge.clone(), cx));
         Self {
             titlebar: cx.new(|cx| MoaTitleBar::new(workspace.clone(), cx)),
             workspace,
-            statusbar: cx.new(MoaStatusBar::new),
+            statusbar: cx.new(|cx| MoaStatusBar::new(bridge, cx)),
         }
     }
 }
