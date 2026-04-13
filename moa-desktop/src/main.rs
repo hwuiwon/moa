@@ -1,44 +1,41 @@
 // Platform requirements:
-// - macOS: Xcode Command Line Tools (Metal backend)
-// - Linux: libxkbcommon-dev, libwayland-dev, Vulkan drivers (wgpu backend)
-
-// Platform requirements:
 // - macOS: full Xcode.app (for `xcrun metal` — Command Line Tools alone is insufficient)
 // - Linux: libxkbcommon-dev, libwayland-dev, Vulkan drivers (wgpu backend)
 
+mod app;
+mod components;
+mod layout;
+mod statusbar;
+mod theme;
+mod titlebar;
+
 use gpui::{
-    App, Application, Bounds, Context, Window, WindowBounds, WindowOptions, div, prelude::*, px,
-    rgb, size,
+    App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
 };
+use gpui_component::Root;
 
-struct HelloView;
-
-impl Render for HelloView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .justify_center()
-            .items_center()
-            .bg(rgb(0x1e1e2e))
-            .text_xl()
-            .text_color(rgb(0xcdd6f4))
-            .child("Hello, MOA")
-    }
-}
+use crate::app::MoaApp;
 
 fn main() {
     Application::new().run(|cx: &mut App| {
-        gpui_component::init(cx);
+        theme::setup_theme(cx);
 
-        let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
+        let bounds = Bounds::centered(None, size(px(1400.), px(900.)), cx);
         cx.open_window(
             WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some("MOA".into()),
+                    appears_transparent: true,
+                    ..Default::default()
+                }),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(800.), px(600.))),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| HelloView),
+            |window, cx| {
+                let app = cx.new(|cx| MoaApp::new(window, cx));
+                cx.new(|cx| Root::new(app, window, cx))
+            },
         )
         .unwrap();
         cx.activate(true);
