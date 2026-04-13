@@ -3,19 +3,22 @@
 use gpui::{App, Context, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb};
 use gpui_component::ActiveTheme;
 
+use crate::services::{ServiceBridgeHandle, ServiceStatus};
+
 /// Status-bar view rendered at the bottom of the workspace.
 pub struct MoaStatusBar {
-    connected: bool,
+    bridge: ServiceBridgeHandle,
     turns: u32,
     tokens: u64,
     cumulative_cost_usd: f64,
 }
 
 impl MoaStatusBar {
-    /// Creates a status bar with placeholder values.
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    /// Creates a status bar that tracks the given service bridge.
+    pub fn new(bridge: ServiceBridgeHandle, cx: &mut Context<Self>) -> Self {
+        cx.observe(bridge.entity(), |_, _, cx| cx.notify()).detach();
         Self {
-            connected: true,
+            bridge,
             turns: 0,
             tokens: 0,
             cumulative_cost_usd: 0.0,
@@ -41,10 +44,15 @@ impl MoaStatusBar {
 impl Render for MoaStatusBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let dot_color = if self.connected {
-            rgb(0x10b981).into()
-        } else {
-            theme.danger
+        let status = self.bridge.entity().read(cx).status().clone();
+
+        let (dot_color, label_text) = match &status {
+            ServiceStatus::Initializing => (rgb(0xeab308).into(), "initializing".to_string()),
+            ServiceStatus::Ready => (rgb(0x10b981).into(), "ready".to_string()),
+            ServiceStatus::Degraded { message } => {
+                (rgb(0xf97316).into(), format!("degraded: {message}"))
+            }
+            ServiceStatus::Error(err) => (theme.danger, format!("error: {err}")),
         };
 
         div()
@@ -63,13 +71,12 @@ impl Render for MoaStatusBar {
                     .items_center()
                     .gap_2()
                     .child(div().size(px(8.)).rounded_full().bg(dot_color))
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        if self.connected {
-                            "connected"
-                        } else {
-                            "offline"
-                        },
-                    )),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(label_text),
+                    ),
             )
             .child(
                 div()

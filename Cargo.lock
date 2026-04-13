@@ -5213,8 +5213,10 @@ dependencies = [
  "gpui",
  "gpui-component",
  "moa-core",
+ "moa-runtime",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 
