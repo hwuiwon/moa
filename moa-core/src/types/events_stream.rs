@@ -178,6 +178,13 @@ pub struct EventRecord {
 }
 
 /// Lightweight event stream with optional live broadcast updates.
+///
+/// NOTE: This type wraps `tokio::sync::broadcast::Receiver` and would ideally
+/// sit closer to the orchestrator/session-store implementations that construct
+/// it. It remains in `moa-core` because `BrainOrchestrator::observe` lives in
+/// `moa-core` and returns `EventStream`, so moving it out would force a wider
+/// trait and crate-boundary redesign without removing the existing unconditional
+/// Tokio dependency from core.
 #[derive(Serialize, Deserialize)]
 pub struct EventStream {
     /// Buffered events currently available in the stream.

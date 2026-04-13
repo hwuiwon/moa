@@ -115,6 +115,13 @@ pub struct CompletionResponse {
 }
 
 /// Streaming provider response wrapper.
+///
+/// NOTE: This type wraps async runtime primitives (`tokio::sync::mpsc`,
+/// `tokio::task::JoinHandle`, and `CancellationToken`) and would ideally live
+/// alongside provider implementations. It remains in `moa-core` because the
+/// `LLMProvider` trait is also defined in `moa-core` and returns this type
+/// directly, so moving it out would either create a crate cycle or force a
+/// broader trait redesign.
 pub struct CompletionStream {
     receiver: mpsc::Receiver<Result<CompletionContent>>,
     completion: JoinHandle<Result<CompletionResponse>>,
