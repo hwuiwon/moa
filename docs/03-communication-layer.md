@@ -211,7 +211,7 @@ Discord: Thread with embed
 
 **Queue**: User sends a message while a run is active.
 - Platform detects the session is running
-- Message stored as `QueuedMessage` event
+- Message stored durably in the session log and queued for the next turn
 - Brain picks it up after current turn completes
 - User sees: "📋 Message queued. Will process after current task."
 

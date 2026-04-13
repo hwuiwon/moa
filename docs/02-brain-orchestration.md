@@ -212,15 +212,16 @@ pub struct LocalOrchestrator {
     session_store: Arc<dyn SessionStore>,
     memory_store: Arc<dyn MemoryStore>,
     llm_provider: Arc<dyn LLMProvider>,
-    hand_provider: Arc<dyn HandProvider>,
-    signal_channels: Arc<RwLock<HashMap<SessionId, mpsc::Sender<SessionSignal>>>>,
+    tool_router: Arc<ToolRouter>,
 }
 
 struct LocalBrainHandle {
-    task: JoinHandle<Result<()>>,
     signal_tx: mpsc::Sender<SessionSignal>,
-    event_rx: broadcast::Receiver<EventRecord>,
-    status: Arc<RwLock<SessionStatus>>,
+    event_tx: broadcast::Sender<EventRecord>,
+    runtime_tx: broadcast::Sender<RuntimeEvent>,
+    cancel_token: CancellationToken,
+    hard_cancel_token: CancellationToken,
+    finished: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -229,25 +230,75 @@ impl BrainOrchestrator for LocalOrchestrator {
         let session_id = self.session_store.create_session(req.into()).await?;
         let (signal_tx, signal_rx) = mpsc::channel(32);
         let (event_tx, _) = broadcast::channel(256);
+        let (runtime_tx, _) = broadcast::channel(512);
+        let cancel_token = CancellationToken::new();
+        let hard_cancel_token = CancellationToken::new();
+        let finished = Arc::new(AtomicBool::new(false));
         
-        // Spawn brain loop as a tokio task
+        // Spawn the session task, then supervise its exit.
         let task = tokio::spawn({
             let store = self.session_store.clone();
             let memory = self.memory_store.clone();
             let llm = self.llm_provider.clone();
-            let hands = self.hand_provider.clone();
+            let tools = self.tool_router.clone();
             let event_tx = event_tx.clone();
+            let runtime_tx = runtime_tx.clone();
+            let cancel_token = cancel_token.clone();
+            let hard_cancel_token = hard_cancel_token.clone();
             
             async move {
-                brain_loop(session_id, store, memory, llm, hands, signal_rx, event_tx).await
+                run_session_task(
+                    session_id,
+                    store,
+                    memory,
+                    llm,
+                    tools,
+                    signal_rx,
+                    event_tx,
+                    runtime_tx,
+                    cancel_token,
+                    hard_cancel_token,
+                ).await
+            }
+        });
+
+        tokio::spawn({
+            let store = self.session_store.clone();
+            let tools = self.tool_router.clone();
+            let finished = finished.clone();
+
+            async move {
+                match task.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        store.emit_event(session_id, Event::Error {
+                            message: error.to_string(),
+                            recoverable: false,
+                        }).await?;
+                        store.update_status(session_id, SessionStatus::Failed).await?;
+                    }
+                    Err(join_error) => {
+                        store.emit_event(session_id, Event::Error {
+                            message: join_error.to_string(),
+                            recoverable: false,
+                        }).await?;
+                        store.update_status(session_id, SessionStatus::Failed).await?;
+                    }
+                }
+
+                tools.destroy_session_hands(&session_id).await;
+                finished.store(true, Ordering::SeqCst);
+                Ok::<(), Error>(())
             }
         });
         
         let handle = LocalBrainHandle {
-            task,
             signal_tx: signal_tx.clone(),
-            event_rx: event_tx.subscribe(),
-            status: Arc::new(RwLock::new(SessionStatus::Running)),
+            event_tx: event_tx.clone(),
+            runtime_tx: runtime_tx.clone(),
+            cancel_token,
+            hard_cancel_token,
+            finished,
         };
         
         self.sessions.write().await.insert(session_id, handle);
@@ -267,10 +318,17 @@ impl BrainOrchestrator for LocalOrchestrator {
     async fn observe(&self, session_id: SessionId, _level: ObserveLevel) 
         -> Result<EventStream> 
     {
+        let history = self.session_store
+            .get_events(session_id, EventRange::all())
+            .await?;
         let sessions = self.sessions.read().await;
-        let handle = sessions.get(&session_id)
-            .ok_or(Error::SessionNotFound(session_id))?;
-        Ok(EventStream::from_broadcast(handle.event_rx.resubscribe()))
+        if let Some(handle) = sessions.get(&session_id) {
+            return Ok(EventStream::from_history_and_broadcast(
+                history,
+                handle.event_tx.subscribe(),
+            ));
+        }
+        Ok(EventStream::from_events(history))
     }
     
     async fn schedule_cron(&self, spec: CronSpec) -> Result<CronHandle> {
@@ -362,6 +420,11 @@ async fn brain_loop(
     }
 }
 ```
+
+Two local-mode details matter in practice:
+
+- `observe()` always replays durable history before attaching a live broadcast tail, so callers can safely reconnect after a restart.
+- The local orchestrator supervises each spawned session task. Panics and task errors are translated into durable `Error` + `Failed` state, and cached hands are destroyed on terminal exit.
 
 ### Local hand execution
 
