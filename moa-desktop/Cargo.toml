@@ -1,0 +1,21 @@
+[package]
+name = "moa-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "moa-desktop"
+path = "src/main.rs"
+
+[dependencies]
+gpui = "0.2"
+gpui-component = "0.5"
+
+moa-core = { path = "../moa-core" }
+
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
