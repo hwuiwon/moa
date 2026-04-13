@@ -7,7 +7,8 @@ use std::sync::Arc;
 use moa_core::{
     ApprovalDecision, BrainOrchestrator, DaemonSessionPreview, Event, EventRecord, MemoryPath,
     MemorySearchResult, MoaConfig, MoaError, PageSummary, PageType, Platform, Result, RuntimeEvent,
-    SessionId, SessionMeta, SessionSummary, StartSessionRequest, UserId, WikiPage, WorkspaceId,
+    SessionId, SessionMeta, SessionSummary, StartSessionRequest, UserId, WikiPage,
+    WorkspaceBudgetStatus, WorkspaceId,
 };
 use moa_orchestrator::LocalOrchestrator;
 use tokio::sync::{broadcast, mpsc};
@@ -282,6 +283,12 @@ macro_rules! impl_chat_runtime_ops {
                 <$ty>::memory_index(self).await
             }
 
+            async fn workspace_budget_status(
+                &self,
+            ) -> moa_core::Result<moa_core::WorkspaceBudgetStatus> {
+                <$ty>::workspace_budget_status(self).await
+            }
+
             async fn observe_session(
                 &self,
                 session_id: moa_core::SessionId,
@@ -399,6 +406,8 @@ impl ChatRuntime {
         fn delete_memory_page(&self, path: &MemoryPath) -> Result<()>;
         /// Returns the current workspace memory index document.
         fn memory_index(&self) -> Result<String>;
+        /// Returns the current workspace budget snapshot.
+        fn workspace_budget_status(&self) -> Result<WorkspaceBudgetStatus>;
         /// Relays live runtime updates for one session until the receiver closes.
         fn observe_session(
             &self,

@@ -27,23 +27,30 @@ pub struct RuntimeInfoDto {
     pub sandbox_root: String,
     /// Runtime transport kind.
     pub runtime_kind: String,
+    /// Configured daily workspace budget in cents. `0` means unlimited.
+    pub daily_budget_cents: u32,
+    /// Current workspace spend for the active UTC day in cents.
+    pub daily_spent_cents: u32,
 }
 
 impl RuntimeInfoDto {
     /// Builds a DTO from the active runtime.
-    pub fn from_runtime(runtime: &ChatRuntime) -> Self {
+    pub async fn from_runtime(runtime: &ChatRuntime) -> Result<Self, MoaError> {
         let runtime_kind = match runtime {
             ChatRuntime::Local(_) => "local",
             ChatRuntime::Daemon(_) => "daemon",
         };
+        let budget = runtime.workspace_budget_status().await?;
 
-        Self {
+        Ok(Self {
             session_id: runtime.session_id().to_string(),
             workspace_id: runtime.workspace_id().to_string(),
             model: runtime.model().to_string(),
             sandbox_root: runtime.sandbox_root().display().to_string(),
             runtime_kind: runtime_kind.to_string(),
-        }
+            daily_budget_cents: budget.daily_budget_cents,
+            daily_spent_cents: budget.daily_spent_cents,
+        })
     }
 }
 

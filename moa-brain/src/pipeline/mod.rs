@@ -39,12 +39,29 @@ pub struct PipelineStageReport {
 /// Ordered context compilation pipeline.
 pub struct ContextPipeline {
     stages: Vec<Box<dyn ContextProcessor>>,
+    daily_workspace_budget_cents: u32,
 }
 
 impl ContextPipeline {
     /// Creates a pipeline from an ordered list of processors.
     pub fn new(stages: Vec<Box<dyn ContextProcessor>>) -> Self {
-        Self { stages }
+        Self::with_daily_workspace_budget(stages, 0)
+    }
+
+    /// Creates a pipeline from an ordered list of processors and a workspace budget limit.
+    pub fn with_daily_workspace_budget(
+        stages: Vec<Box<dyn ContextProcessor>>,
+        daily_workspace_budget_cents: u32,
+    ) -> Self {
+        Self {
+            stages,
+            daily_workspace_budget_cents,
+        }
+    }
+
+    /// Returns the configured daily workspace budget limit in cents.
+    pub fn daily_workspace_budget_cents(&self) -> u32 {
+        self.daily_workspace_budget_cents
     }
 
     /// Runs the configured pipeline against a working context.
@@ -194,18 +211,21 @@ pub fn build_default_pipeline_with_runtime(
     } else {
         Box::new(HistoryCompiler::new(session_store.clone()))
     };
-    ContextPipeline::new(vec![
-        Box::new(IdentityProcessor::default()),
-        Box::new(InstructionProcessor::from_config(config)),
-        Box::new(ToolDefinitionProcessor::with_memory(
-            tool_schemas,
-            memory_store.clone(),
-        )),
-        Box::new(SkillInjector::from_memory(memory_store.clone())),
-        Box::new(MemoryRetriever::new(memory_store, session_store.clone())),
-        history,
-        Box::new(CacheOptimizer),
-    ])
+    ContextPipeline::with_daily_workspace_budget(
+        vec![
+            Box::new(IdentityProcessor::default()),
+            Box::new(InstructionProcessor::from_config(config)),
+            Box::new(ToolDefinitionProcessor::with_memory(
+                tool_schemas,
+                memory_store.clone(),
+            )),
+            Box::new(SkillInjector::from_memory(memory_store.clone())),
+            Box::new(MemoryRetriever::new(memory_store, session_store.clone())),
+            history,
+            Box::new(CacheOptimizer),
+        ],
+        config.budgets.daily_workspace_cents,
+    )
 }
 
 pub(crate) fn estimate_tokens(text: &str) -> usize {

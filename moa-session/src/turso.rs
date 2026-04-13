@@ -806,6 +806,41 @@ impl SessionStore for TursoSessionStore {
 
         Ok(sessions)
     }
+
+    /// Returns aggregate workspace spend in cents since the provided UTC timestamp.
+    async fn workspace_cost_since(
+        &self,
+        workspace_id: &WorkspaceId,
+        since: DateTime<Utc>,
+    ) -> Result<u32> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT COALESCE( \
+                     SUM(CAST(json_extract(events.payload, '$.data.cost_cents') AS INTEGER)), \
+                     0 \
+                 ) \
+                 FROM events \
+                 JOIN sessions ON sessions.id = events.session_id \
+                 WHERE sessions.workspace_id = ? \
+                   AND events.event_type = ? \
+                   AND events.timestamp >= ?",
+                params![
+                    workspace_id.to_string(),
+                    "BrainResponse".to_string(),
+                    since.to_rfc3339(),
+                ],
+            )
+            .await
+            .map_err(map_db_error)?;
+        let row =
+            rows.next().await.map_err(map_db_error)?.ok_or_else(|| {
+                MoaError::StorageError("failed to read workspace spend".to_string())
+            })?;
+        let total: i64 = row.get(0).map_err(map_db_error)?;
+        u32::try_from(total)
+            .map_err(|_| MoaError::StorageError("workspace spend exceeded u32 range".to_string()))
+    }
 }
 
 impl TursoSessionStore {

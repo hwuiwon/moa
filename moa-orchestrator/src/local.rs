@@ -789,16 +789,19 @@ async fn run_session_task(
                 return Ok(());
             }
             Err(error) => {
-                append_event(
-                    &context.session_store,
-                    &event_tx,
-                    context.session_id.clone(),
-                    Event::Error {
-                        message: error.to_string(),
-                        recoverable: false,
-                    },
-                )
-                .await?;
+                let budget_exhausted = matches!(error, MoaError::BudgetExhausted(_));
+                if !budget_exhausted {
+                    append_event(
+                        &context.session_store,
+                        &event_tx,
+                        context.session_id.clone(),
+                        Event::Error {
+                            message: error.to_string(),
+                            recoverable: false,
+                        },
+                    )
+                    .await?;
+                }
                 flush_queued_messages(
                     &context.session_store,
                     &event_tx,
@@ -824,7 +827,9 @@ async fn run_session_task(
                     .tool_router
                     .destroy_session_hands(&context.session_id)
                     .await;
-                let _ = runtime_tx.send(RuntimeEvent::Error(error.to_string()));
+                if !budget_exhausted {
+                    let _ = runtime_tx.send(RuntimeEvent::Error(error.to_string()));
+                }
                 let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
                 return Err(error);
             }

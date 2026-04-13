@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono.workspace = true
 enum_dispatch = "0.3"
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }

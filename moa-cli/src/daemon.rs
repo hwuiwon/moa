@@ -10,7 +10,7 @@ use chrono::Utc;
 use moa_core::{
     BrainOrchestrator, DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview,
     DaemonStreamEvent, EventRange, MemoryScope, MemoryStore, MoaConfig, RuntimeEvent,
-    SessionFilter, SessionStatus, SessionStore,
+    SessionFilter, SessionStatus, SessionStore, WorkspaceBudgetStatus,
 };
 use moa_orchestrator::LocalOrchestrator;
 use moa_session::SessionDatabase;
@@ -30,6 +30,7 @@ struct DaemonState {
     orchestrator: Arc<LocalOrchestrator>,
     session_store: Arc<SessionDatabase>,
     info: Arc<DaemonInfo>,
+    daily_workspace_budget_cents: u32,
 }
 
 /// Starts the MOA daemon as a background process.
@@ -152,6 +153,7 @@ pub async fn run_daemon_server(config: MoaConfig) -> Result<()> {
         orchestrator: orchestrator.clone(),
         session_store,
         info,
+        daily_workspace_budget_cents: config.budgets.daily_workspace_cents,
     };
 
     fs::write(&pid_path, format!("{}\n", std::process::id())).await?;
@@ -374,6 +376,21 @@ async fn handle_unary_command_inner(
                 .await?,
         )),
         DaemonCommand::ToolNames => Ok(DaemonReply::ToolNames(state.orchestrator.tool_names())),
+        DaemonCommand::GetWorkspaceBudgetStatus { workspace_id } => {
+            let day_start = Utc::now()
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .map(|value| value.and_utc())
+                .ok_or_else(|| anyhow::anyhow!("failed to compute UTC day boundary"))?;
+            let daily_spent_cents = state
+                .session_store
+                .workspace_cost_since(&workspace_id, day_start)
+                .await?;
+            Ok(DaemonReply::WorkspaceBudgetStatus(WorkspaceBudgetStatus {
+                daily_budget_cents: state.daily_workspace_budget_cents,
+                daily_spent_cents,
+            }))
+        }
         DaemonCommand::QueueMessage { session_id, prompt } => {
             state
                 .orchestrator

@@ -96,6 +96,12 @@ async fn list_sessions_filters_by_workspace() {
 }
 
 #[tokio::test]
+async fn workspace_cost_since_sums_brain_response_costs() {
+    let store = new_local_store().await;
+    shared::test_workspace_cost_since(&store).await;
+}
+
+#[tokio::test]
 async fn update_status_persists_changes() {
     let store = new_local_store().await;
     shared::test_session_status_update(&store).await;

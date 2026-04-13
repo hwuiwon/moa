@@ -36,6 +36,8 @@ pub struct MoaConfig {
     pub daemon: DaemonConfig,
     /// Observability and OTLP export settings.
     pub observability: ObservabilityConfig,
+    /// Workspace budget enforcement settings.
+    pub budgets: BudgetConfig,
     /// External MCP server connections.
     pub mcp_servers: Vec<McpServerConfig>,
 }
@@ -168,6 +170,10 @@ impl MoaConfig {
             .set_default(
                 "observability.sample_rate",
                 Self::default().observability.sample_rate,
+            )?
+            .set_default(
+                "budgets.daily_workspace_cents",
+                Self::default().budgets.daily_workspace_cents as i64,
             )?
             .set_default("cloud.enabled", Self::default().cloud.enabled)?
             .set_default("cloud.turso_url", Self::default().cloud.turso_url.clone())?
@@ -731,6 +737,22 @@ impl Default for ObservabilityConfig {
     }
 }
 
+/// Workspace-level cost budget settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BudgetConfig {
+    /// Maximum daily spend per workspace in cents. `0` disables budget enforcement.
+    pub daily_workspace_cents: u32,
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            daily_workspace_cents: 2_000,
+        }
+    }
+}
+
 /// Cloud runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1066,6 +1088,12 @@ mod tests {
         let config = MoaConfig::default();
         assert_eq!(config.session.blob_threshold_bytes, 65_536);
         assert_eq!(config.session.blob_dir, "~/.moa/blobs");
+    }
+
+    #[test]
+    fn budget_config_defaults_are_applied() {
+        let config = MoaConfig::default();
+        assert_eq!(config.budgets.daily_workspace_cents, 2_000);
     }
 
     #[test]

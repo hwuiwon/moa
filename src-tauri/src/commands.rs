@@ -96,7 +96,7 @@ pub async fn get_session_events(
 #[tauri::command]
 pub async fn get_runtime_info(state: State<'_, AppState>) -> AppResult<RuntimeInfoDto> {
     let runtime = clone_runtime(&state).await;
-    Ok(RuntimeInfoDto::from_runtime(&runtime))
+    Ok(RuntimeInfoDto::from_runtime(&runtime).await?)
 }
 
 /// Changes the active workspace and starts a fresh session there.

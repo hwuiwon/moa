@@ -265,7 +265,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use moa_core::{
         BrainId, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
         EventFilter, EventRecord, PendingSignal, PendingSignalId, Platform, SequenceNum,
@@ -359,6 +359,14 @@ mod tests {
 
         async fn list_sessions(&self, _filter: SessionFilter) -> Result<Vec<SessionSummary>> {
             Ok(Vec::new())
+        }
+
+        async fn workspace_cost_since(
+            &self,
+            _workspace_id: &WorkspaceId,
+            _since: DateTime<Utc>,
+        ) -> Result<u32> {
+            Ok(0)
         }
     }
 
