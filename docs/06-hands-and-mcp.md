@@ -6,7 +6,7 @@ _HandProvider trait, Daytona/E2B/Local, MCP protocol, tool routing, lazy provisi
 
 ## Core principle
 
-Hands are **cattle, not pets**. They are provisioned lazily on the first tool call, paused when idle, and destroyed when the session ends. Credentials never enter the sandbox.
+Hands are **cattle, not pets**. They are provisioned lazily on the first tool call, paused when idle, and destroyed when the session reaches a terminal state. Credentials never enter the sandbox.
 
 The brain interacts with hands exclusively through `execute(tool_name, input) → output`. The brain does not know or care whether the hand is a Docker container, a microVM, a local process, or an MCP server.
 
@@ -229,8 +229,35 @@ impl ToolRouter {
         self.active_hands.write().await.insert(key, handle.clone());
         Ok(handle)
     }
+
+    /// Destroy every cached hand owned by a session.
+    pub async fn destroy_session_hands(&self, session_id: &SessionId) {
+        let prefix = format!("{session_id}:");
+        let handles = {
+            let mut active_hands = self.active_hands.write().await;
+            let keys = active_hands.keys()
+                .filter(|key| key.starts_with(&prefix))
+                .cloned()
+                .collect::<Vec<_>>();
+
+            keys.into_iter()
+                .filter_map(|key| active_hands.remove(&key).map(|handle| (key, handle)))
+                .collect::<Vec<_>>()
+        };
+
+        for (key, handle) in handles {
+            let provider_name = key.split(':').nth(1).unwrap_or_default();
+            if let Some(provider) = self.providers.get(provider_name) {
+                if let Err(error) = provider.destroy(&handle).await {
+                    tracing::warn!(session_id = %session_id, provider = %provider_name, error = %error);
+                }
+            }
+        }
+    }
 }
 ```
+
+The orchestrator, not the brain harness, is responsible for terminal cleanup. When a session completes, is cancelled, fails, or its local task panics, the orchestrator calls `destroy_session_hands(session_id)` to tear down any cached hands for that session.
 
 ## Tool registry
 

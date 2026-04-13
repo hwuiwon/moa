@@ -94,6 +94,13 @@ pub enum ObserveLevel {
     Verbose,   // + streaming tokens, full tool results
 }
 
+// Observation semantics:
+// - `observe()` replays durable session history first
+// - then tails live events from the active orchestrator, if one exists
+// - if the live tail lags beyond its in-memory buffer, the stream returns an
+//   error so the caller can reopen from durable history instead of silently
+//   missing events
+
 // ─── Session Store ───
 
 #[async_trait]

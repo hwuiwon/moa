@@ -207,6 +207,15 @@ pub enum RiskLevel { Low, Medium, High }
 
 ## Core operations
 
+### Replay and observation
+
+Observation is history-first. Clients reconstruct a session from durable events in the store, then optionally attach a live in-memory tail from the active orchestrator.
+
+Two implications follow from that contract:
+
+- Losing the live tail must not silently lose information; callers can always reopen from durable history.
+- If a live subscriber lags beyond the in-memory broadcast buffer, the stream should surface an error so the caller can reconnect from the last durable sequence it has seen.
+
 ### emit_event
 
 ```rust
