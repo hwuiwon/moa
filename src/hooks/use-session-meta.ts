@@ -21,6 +21,8 @@ export type SessionMetaSummary = {
   meta: SessionMetaDto;
   turnCount: number;
   totalTokens: number;
+  totalCostUsd: number;
+  costIsEstimated: boolean;
   durationMs: number;
   contextWindow: number | null;
   contextUsagePercent: number;
@@ -161,6 +163,52 @@ function contextWindowForModel(
   );
 }
 
+function pricingForModel(
+  meta: SessionMetaDto,
+  modelOptions: ModelOptionDto[] | undefined,
+) {
+  const option = modelOptions?.find((candidate) => candidate.value === meta.model);
+  if (!option?.inputCostPerMtok || !option?.outputCostPerMtok) {
+    return null;
+  }
+
+  return {
+    cachedInputPerMtok: option.cachedInputCostPerMtok ?? option.inputCostPerMtok,
+    inputPerMtok: option.inputCostPerMtok,
+    outputPerMtok: option.outputCostPerMtok,
+  };
+}
+
+function computeSessionCost(
+  meta: SessionMetaDto,
+  modelOptions: ModelOptionDto[] | undefined,
+) {
+  if (meta.totalCostCents > 0) {
+    return {
+      costIsEstimated: false,
+      totalCostUsd: meta.totalCostCents / 100,
+    };
+  }
+
+  const pricing = pricingForModel(meta, modelOptions);
+  if (!pricing) {
+    return {
+      costIsEstimated: false,
+      totalCostUsd: 0,
+    };
+  }
+
+  const totalCostUsd =
+    ((meta.totalInputTokens * pricing.inputPerMtok) +
+      (meta.totalOutputTokens * pricing.outputPerMtok)) /
+    1_000_000;
+
+  return {
+    costIsEstimated: totalCostUsd > 0,
+    totalCostUsd,
+  };
+}
+
 function canonicalEventType(eventType: string) {
   return eventType.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
 }
@@ -197,6 +245,7 @@ export function useSessionMeta(sessionId: string | null | undefined) {
       metaQuery.data,
       modelOptionsQuery.data,
     );
+    const cost = computeSessionCost(metaQuery.data, modelOptionsQuery.data);
     const turnCount =
       eventsQuery.data?.filter(
         (record) => canonicalEventType(record.eventType) === "brain_response",
@@ -207,6 +256,8 @@ export function useSessionMeta(sessionId: string | null | undefined) {
       meta: metaQuery.data,
       turnCount,
       totalTokens,
+      totalCostUsd: cost.totalCostUsd,
+      costIsEstimated: cost.costIsEstimated,
       durationMs: computeDurationMs(metaQuery.data),
       contextWindow,
       contextUsagePercent: contextWindow

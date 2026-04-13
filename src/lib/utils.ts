@@ -99,10 +99,14 @@ export function formatTokenCount(value: number): string {
 }
 
 export function formatUsdFromCents(cents: number): string {
+  return formatUsd(cents / 100);
+}
+
+export function formatUsd(value: number): string {
   return new Intl.NumberFormat(undefined, {
     style: "currency",
     currency: "USD",
     minimumFractionDigits: 2,
     maximumFractionDigits: 4,
-  }).format(cents / 100);
+  }).format(value);
 }

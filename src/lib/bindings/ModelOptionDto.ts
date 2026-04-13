@@ -19,4 +19,16 @@ provider: string,
 /**
  * Maximum prompt context window for the model when known.
  */
-contextWindow: number | null, };
+contextWindow: number | null, 
+/**
+ * Input token price in USD per million tokens when known.
+ */
+inputCostPerMtok: number | null, 
+/**
+ * Output token price in USD per million tokens when known.
+ */
+outputCostPerMtok: number | null, 
+/**
+ * Cached-input token price in USD per million tokens when known.
+ */
+cachedInputCostPerMtok: number | null, };

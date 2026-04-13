@@ -17,7 +17,7 @@ import {
   formatAbsoluteDate,
   formatDuration,
   formatTokenCount,
-  formatUsdFromCents,
+  formatUsd,
 } from "@/lib/utils";
 
 type SessionInfoPanelProps = {
@@ -98,7 +98,7 @@ export function SessionInfoPanel({ activeSessionId }: SessionInfoPanelProps) {
                 />
                 <MetricCard
                   label="Cost"
-                  value={formatUsdFromCents(session.summary.meta.totalCostCents)}
+                  value={`${session.summary.costIsEstimated ? "~" : ""}${formatUsd(session.summary.totalCostUsd)}`}
                 />
               </div>
 

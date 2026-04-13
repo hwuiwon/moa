@@ -4,11 +4,11 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    Event, EventRecord, MemoryScope, MemorySearchResult, MoaConfig, PageSummary, SessionMeta,
-    SessionSummary, WikiPage,
+    ConfidenceLevel, Event, EventRecord, MemoryPath, MemoryScope, MemorySearchResult, MoaConfig,
+    MoaError, PageSummary, PageType, SessionMeta, SessionSummary, WikiPage,
 };
 use moa_runtime::{ChatRuntime, SessionPreview};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
@@ -283,7 +283,7 @@ impl From<PageSummary> for PageSummaryDto {
 }
 
 /// Full wiki page payload returned to the frontend editor.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/lib/bindings/")]
 pub struct WikiPageDto {
@@ -337,6 +337,29 @@ impl From<WikiPage> for WikiPageDto {
             reference_count: page.reference_count,
             metadata: page.metadata,
         }
+    }
+}
+
+impl TryFrom<WikiPageDto> for WikiPage {
+    type Error = MoaError;
+
+    fn try_from(page: WikiPageDto) -> Result<Self, Self::Error> {
+        Ok(Self {
+            path: page.path.map(MemoryPath::new),
+            title: page.title,
+            page_type: parse_page_type_label(&page.page_type)?,
+            content: page.content,
+            created: parse_iso_timestamp(&page.created)?,
+            updated: parse_iso_timestamp(&page.updated)?,
+            confidence: parse_confidence_label(&page.confidence)?,
+            related: page.related,
+            sources: page.sources,
+            tags: page.tags,
+            auto_generated: page.auto_generated,
+            last_referenced: parse_iso_timestamp(&page.last_referenced)?,
+            reference_count: page.reference_count,
+            metadata: page.metadata,
+        })
     }
 }
 
@@ -400,6 +423,12 @@ pub struct ModelOptionDto {
     pub provider: String,
     /// Maximum prompt context window for the model when known.
     pub context_window: Option<usize>,
+    /// Input token price in USD per million tokens when known.
+    pub input_cost_per_mtok: Option<f64>,
+    /// Output token price in USD per million tokens when known.
+    pub output_cost_per_mtok: Option<f64>,
+    /// Cached-input token price in USD per million tokens when known.
+    pub cached_input_cost_per_mtok: Option<f64>,
 }
 
 fn iso(timestamp: DateTime<Utc>) -> String {
@@ -422,4 +451,23 @@ fn memory_scope_label(scope: &MemoryScope) -> String {
 
 fn event_payload(event: Event) -> Value {
     serde_json::to_value(event).unwrap_or_else(|error| Value::String(error.to_string()))
+}
+
+fn parse_iso_timestamp(value: &str) -> Result<DateTime<Utc>, MoaError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|error| {
+            MoaError::ValidationError(format!("invalid RFC3339 timestamp `{value}`: {error}"))
+        })
+}
+
+fn parse_page_type_label(value: &str) -> Result<PageType, MoaError> {
+    serde_json::from_value(Value::String(value.to_string()))
+        .map_err(|error| MoaError::ValidationError(format!("invalid page type `{value}`: {error}")))
+}
+
+fn parse_confidence_label(value: &str) -> Result<ConfidenceLevel, MoaError> {
+    serde_json::from_value(Value::String(value.to_string())).map_err(|error| {
+        MoaError::ValidationError(format!("invalid confidence level `{value}`: {error}"))
+    })
 }

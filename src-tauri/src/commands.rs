@@ -138,36 +138,54 @@ pub async fn list_model_options(state: State<'_, AppState>) -> AppResult<Vec<Mod
             label: "GPT-5.4".to_string(),
             provider: "openai".to_string(),
             context_window: Some(1_050_000),
+            input_cost_per_mtok: Some(2.50),
+            output_cost_per_mtok: Some(15.0),
+            cached_input_cost_per_mtok: Some(0.25),
         },
         ModelOptionDto {
             value: "gpt-5.4-mini".to_string(),
             label: "GPT-5.4 Mini".to_string(),
             provider: "openai".to_string(),
             context_window: Some(400_000),
+            input_cost_per_mtok: Some(0.75),
+            output_cost_per_mtok: Some(4.50),
+            cached_input_cost_per_mtok: Some(0.075),
         },
         ModelOptionDto {
             value: "gpt-5.4-nano".to_string(),
             label: "GPT-5.4 Nano".to_string(),
             provider: "openai".to_string(),
             context_window: Some(400_000),
+            input_cost_per_mtok: Some(0.20),
+            output_cost_per_mtok: Some(1.25),
+            cached_input_cost_per_mtok: Some(0.02),
         },
         ModelOptionDto {
             value: "claude-sonnet-4-6".to_string(),
             label: "Claude Sonnet 4.6".to_string(),
             provider: "anthropic".to_string(),
             context_window: Some(1_000_000),
+            input_cost_per_mtok: Some(3.0),
+            output_cost_per_mtok: Some(15.0),
+            cached_input_cost_per_mtok: Some(0.3),
         },
         ModelOptionDto {
             value: "openrouter:gpt-5.4".to_string(),
             label: "OpenRouter · GPT-5.4".to_string(),
             provider: "openrouter".to_string(),
             context_window: Some(1_050_000),
+            input_cost_per_mtok: Some(2.50),
+            output_cost_per_mtok: Some(15.0),
+            cached_input_cost_per_mtok: Some(0.25),
         },
         ModelOptionDto {
             value: "openrouter:claude-sonnet-4-6".to_string(),
             label: "OpenRouter · Claude Sonnet 4.6".to_string(),
             provider: "openrouter".to_string(),
             context_window: Some(1_000_000),
+            input_cost_per_mtok: Some(3.0),
+            output_cost_per_mtok: Some(15.0),
+            cached_input_cost_per_mtok: Some(0.3),
         },
     ];
 
@@ -177,6 +195,9 @@ pub async fn list_model_options(state: State<'_, AppState>) -> AppResult<Vec<Mod
             label: current_model.clone(),
             provider: current_provider,
             context_window: None,
+            input_cost_per_mtok: None,
+            output_cost_per_mtok: None,
+            cached_input_cost_per_mtok: None,
         });
     }
 
@@ -361,6 +382,18 @@ pub async fn read_memory_page(path: String, state: State<'_, AppState>) -> AppRe
         .read_memory_page(&moa_core::MemoryPath::new(path))
         .await?;
     Ok(page.into())
+}
+
+/// Creates or updates one wiki page in the active workspace.
+#[tauri::command]
+pub async fn write_memory_page(
+    page: WikiPageDto,
+    state: State<'_, AppState>,
+) -> AppResult<WikiPageDto> {
+    let runtime = clone_runtime(&state).await;
+    let page = moa_core::WikiPage::try_from(page)?;
+    let saved = runtime.write_memory_page(page).await?;
+    Ok(saved.into())
 }
 
 /// Searches memory in the active workspace.

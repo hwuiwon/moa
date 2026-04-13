@@ -5,8 +5,8 @@ use std::sync::Arc;
 use moa_core::{
     ApprovalDecision, ApprovalRequest, CompletionContent, Event, EventRange, EventRecord,
     LLMProvider, MoaError, PolicyAction, Result, RiskLevel, RuntimeEvent, SessionId, SessionMeta,
-    SessionSignal, SessionStatus, SessionStore, StopReason, ToolCardStatus, ToolInvocation,
-    ToolUpdate, TraceContext, UserId, UserMessage, WorkingContext,
+    SessionSignal, SessionStatus, SessionStore, StopReason, TokenPricing, ToolCardStatus,
+    ToolInvocation, ToolUpdate, TraceContext, UserId, UserMessage, WorkingContext,
 };
 use moa_hands::ToolRouter;
 use moa_security::{
@@ -466,6 +466,8 @@ async fn run_streamed_turn_with_tools_mode(
                     "streamed turn finished without a provider response".to_string(),
                 )
             })?;
+            let response_cost_cents =
+                calculate_response_cost_cents(&response, &llm_provider.capabilities().pricing);
             total_input_tokens += response.input_tokens;
             total_output_tokens += response.output_tokens;
 
@@ -479,7 +481,7 @@ async fn run_streamed_turn_with_tools_mode(
                         model: response.model.clone(),
                         input_tokens: response.input_tokens,
                         output_tokens: response.output_tokens,
-                        cost_cents: 0,
+                        cost_cents: response_cost_cents,
                         duration_ms: response.duration_ms,
                     },
                 )
@@ -1556,6 +1558,24 @@ fn record_turn_span_metrics(
     span.record("moa.turn.result", result);
 }
 
+fn calculate_response_cost_cents(
+    response: &moa_core::CompletionResponse,
+    pricing: &TokenPricing,
+) -> u32 {
+    let cached_input_tokens = response.cached_input_tokens.min(response.input_tokens);
+    let uncached_input_tokens = response.input_tokens.saturating_sub(cached_input_tokens);
+    let cached_input_rate = pricing
+        .cached_input_per_mtok
+        .unwrap_or(pricing.input_per_mtok);
+
+    let cost_dollars = ((uncached_input_tokens as f64 * pricing.input_per_mtok)
+        + (cached_input_tokens as f64 * cached_input_rate)
+        + (response.output_tokens as f64 * pricing.output_per_mtok))
+        / 1_000_000.0;
+
+    (cost_dollars * 100.0).round() as u32
+}
+
 fn approval_decision_label(decision: &ApprovalDecision) -> &'static str {
     match decision {
         ApprovalDecision::AllowOnce => "allow_once",
@@ -1711,4 +1731,32 @@ async fn emit_tool_output_warning(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use moa_core::{CompletionResponse, StopReason, TokenPricing};
+
+    use super::calculate_response_cost_cents;
+
+    #[test]
+    fn response_cost_cents_uses_provider_pricing() {
+        let response = CompletionResponse {
+            text: "done".to_string(),
+            content: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            model: "gpt-5.4".to_string(),
+            input_tokens: 100_000,
+            output_tokens: 10_000,
+            cached_input_tokens: 50_000,
+            duration_ms: 1500,
+        };
+        let pricing = TokenPricing {
+            input_per_mtok: 2.50,
+            output_per_mtok: 15.0,
+            cached_input_per_mtok: Some(0.25),
+        };
+
+        assert_eq!(calculate_response_cost_cents(&response, &pricing), 29);
+    }
 }

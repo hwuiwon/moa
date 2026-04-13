@@ -102,6 +102,15 @@ pub enum DaemonCommand {
         /// Logical memory path to read.
         path: MemoryPath,
     },
+    /// Create or update one workspace memory page.
+    WriteMemoryPage {
+        /// Workspace to modify.
+        workspace_id: WorkspaceId,
+        /// Logical memory path to write.
+        path: MemoryPath,
+        /// Full wiki page payload to persist.
+        page: WikiPage,
+    },
     /// Delete one workspace memory page.
     DeleteMemoryPage {
         /// Workspace to modify.

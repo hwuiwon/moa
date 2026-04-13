@@ -3,6 +3,11 @@
  */
 export const queryKeys = {
   config: () => ["config"] as const,
+  memoryPage: (path: string | null | undefined) => ["memory-page", path ?? null] as const,
+  memoryPages: (filter: string | null | undefined) =>
+    ["memory-pages", filter ?? null] as const,
+  memorySearch: (query: string | null | undefined) =>
+    ["memory-search", query ?? null] as const,
   modelOptions: () => ["model-options"] as const,
   runtimeInfo: () => ["runtime-info"] as const,
   session: (sessionId: string | null | undefined) =>
