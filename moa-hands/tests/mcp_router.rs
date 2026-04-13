@@ -116,7 +116,7 @@ async fn router_discovers_stdio_mcp_tools_from_config() {
 
 #[tokio::test]
 async fn router_injects_mcp_credentials_via_proxy() {
-    let token_env = format!("MOA_TEST_MCP_TOKEN_{}", Uuid::new_v4().simple());
+    let token_env = format!("MOA_TEST_MCP_TOKEN_{}", Uuid::now_v7().simple());
     unsafe { std::env::set_var(&token_env, "proxy-secret") };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

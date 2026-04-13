@@ -145,7 +145,7 @@ mod tests {
 
     fn approval_request() -> ApprovalRequest {
         ApprovalRequest {
-            request_id: Uuid::new_v4(),
+            request_id: Uuid::now_v7(),
             tool_name: "bash".to_string(),
             input_summary: "npm test".to_string(),
             risk_level: RiskLevel::High,
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn callback_data_roundtrips() {
-        let request_id = Uuid::new_v4();
+        let request_id = Uuid::now_v7();
         for action in [
             ApprovalCallbackAction::AllowOnce { request_id },
             ApprovalCallbackAction::AlwaysAllow { request_id },
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn renderer_builds_platform_approval_buttons() {
-        let request_id = Uuid::new_v4();
+        let request_id = Uuid::now_v7();
         let telegram = approval_buttons(Platform::Telegram, request_id);
         let slack = approval_buttons(Platform::Slack, request_id);
         let discord = approval_buttons(Platform::Discord, request_id);

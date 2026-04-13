@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn collector_tracks_tool_steps_and_metrics() {
-        let tool_id = Uuid::new_v4();
+        let tool_id = Uuid::now_v7();
         let mut collector = TrajectoryCollector::new(
             Some(TokenPricing {
                 input_per_mtok: 3.0,

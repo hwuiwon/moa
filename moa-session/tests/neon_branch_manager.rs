@@ -110,7 +110,7 @@ async fn neon_checkpoint_branch_connection_is_copy_on_write() {
     let main_store = PostgresSessionStore::new(&config.database.url)
         .await
         .expect("main store");
-    let workspace_id = WorkspaceId::new(format!("neon-live-{}", Uuid::new_v4().simple()));
+    let workspace_id = WorkspaceId::new(format!("neon-live-{}", Uuid::now_v7().simple()));
     let seed_session_id = main_store
         .create_session(SessionMeta {
             workspace_id: workspace_id.clone(),
@@ -147,7 +147,7 @@ async fn neon_checkpoint_branch_connection_is_copy_on_write() {
     );
 
     let branch_only_workspace =
-        WorkspaceId::new(format!("neon-branch-{}", Uuid::new_v4().simple()));
+        WorkspaceId::new(format!("neon-branch-{}", Uuid::now_v7().simple()));
     let branch_only_session = branch_store
         .create_session(SessionMeta {
             workspace_id: branch_only_workspace.clone(),

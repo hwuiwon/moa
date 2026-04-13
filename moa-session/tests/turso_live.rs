@@ -53,7 +53,7 @@ async fn embedded_replica_roundtrips_local_and_remote_writes() -> Result<(), Box
     let remote_store = TursoSessionStore::new(&url).await?;
     assert!(local_store.cloud_sync_enabled());
 
-    let tag = Uuid::new_v4().to_string();
+    let tag = Uuid::now_v7().to_string();
     println!("writing local session {tag}");
     let local_session = local_store
         .create_session(SessionMeta {
@@ -148,7 +148,7 @@ async fn embedded_replica_sync_preserves_checkpoint_wake() -> Result<(), Box<dyn
     println!("opening remote primary for wake test");
     let remote_store = TursoSessionStore::new(&url).await?;
 
-    let tag = Uuid::new_v4().to_string();
+    let tag = Uuid::now_v7().to_string();
     println!("creating remote checkpointed session {tag}");
     let session_id = remote_store
         .create_session(SessionMeta {

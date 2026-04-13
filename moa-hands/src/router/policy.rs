@@ -137,7 +137,7 @@ impl ToolRouter {
 
         rule_store
             .upsert_approval_rule(ApprovalRule {
-                id: Uuid::new_v4(),
+                id: Uuid::now_v7(),
                 workspace_id: session.workspace_id.clone(),
                 tool: tool.to_string(),
                 pattern: pattern.to_string(),

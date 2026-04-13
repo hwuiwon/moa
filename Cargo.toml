@@ -70,7 +70,7 @@ tracing-appender = "0.2"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ts-rs = { version = "10", features = ["chrono-impl", "serde-compat", "serde-json-impl", "uuid-impl"] }
-uuid = { version = "1", features = ["serde", "v4"] }
+uuid = { version = "1", features = ["serde", "v7"] }
 
 [profile.dev]
 # 1 = Line tables only. Enough for AI to see "Error at main.rs:42"

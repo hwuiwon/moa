@@ -443,7 +443,7 @@ impl SessionStore for TursoSessionStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(map_db_error)?;
-        let event_id = Uuid::new_v4();
+        let event_id = Uuid::now_v7();
         let sequence_num = Self::next_sequence(&transaction, &session_id).await?;
         let payload_value = encode_event_for_storage(
             self.blob_store.as_ref(),

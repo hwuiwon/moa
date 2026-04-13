@@ -42,7 +42,7 @@ impl HandProvider for LocalHandProvider {
         match spec.sandbox_tier {
             SandboxTier::None | SandboxTier::Local => {
                 // Just create a working directory
-                let sandbox_dir = self.work_dir.join(format!("sandbox-{}", Uuid::new_v4()));
+                let sandbox_dir = self.work_dir.join(format!("sandbox-{}", Uuid::now_v7()));
                 fs::create_dir_all(&sandbox_dir).await?;
                 Ok(HandHandle::local(sandbox_dir))
             }
@@ -54,7 +54,7 @@ impl HandProvider for LocalHandProvider {
             SandboxTier::Container => {
                 // Docker not available, fall back to local with warning
                 tracing::warn!("Docker not available, running in local sandbox");
-                let sandbox_dir = self.work_dir.join(format!("sandbox-{}", Uuid::new_v4()));
+                let sandbox_dir = self.work_dir.join(format!("sandbox-{}", Uuid::now_v7()));
                 fs::create_dir_all(&sandbox_dir).await?;
                 Ok(HandHandle::local(sandbox_dir))
             }

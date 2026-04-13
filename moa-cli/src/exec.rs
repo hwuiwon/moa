@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn exec_mode_formats_tool_updates_compactly() {
         let rendered = format_tool_update(&ToolUpdate {
-            tool_id: Uuid::new_v4(),
+            tool_id: Uuid::now_v7(),
             tool_name: "bash".to_string(),
             status: ToolCardStatus::Succeeded,
             summary: "bash completed in 12 ms".to_string(),

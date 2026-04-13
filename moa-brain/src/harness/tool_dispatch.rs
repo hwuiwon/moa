@@ -429,7 +429,7 @@ fn parse_tool_id(call: &ToolInvocation) -> Uuid {
     call.id
         .as_deref()
         .and_then(|value| Uuid::parse_str(value).ok())
-        .unwrap_or_else(Uuid::new_v4)
+        .unwrap_or_else(Uuid::now_v7)
 }
 
 fn provider_thought_signature(call: &ToolCallContent) -> Option<String> {

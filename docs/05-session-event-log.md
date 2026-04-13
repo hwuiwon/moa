@@ -221,7 +221,7 @@ Two implications follow from that contract:
 ```rust
 impl TursoSessionStore {
     pub async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<SequenceNum> {
-        let event_id = Uuid::new_v4();
+        let event_id = Uuid::now_v7();
         let seq = self.next_sequence(session_id).await?;
         let payload = serde_json::to_string(&event)?;
         let now = Utc::now().to_rfc3339();

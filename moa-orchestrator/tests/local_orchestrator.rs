@@ -1,22 +1,23 @@
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
     BrainOrchestrator, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
-    ConfidenceLevel, ContextMessage, Event, EventRange, EventType, LLMProvider, MemoryScope,
-    MemoryStore, MessageRole, MoaConfig, MoaError, PageType, Platform, Result, RuntimeEvent,
-    SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
-    SessionStore, StartSessionRequest, TokenPricing, ToolCallFormat, ToolOutput, UserId,
-    UserMessage, WikiPage, WorkspaceId,
+    ConfidenceLevel, ContextMessage, Event, EventRange, EventType, LLMProvider, MemoryPath,
+    MemoryScope, MemoryStore, MessageRole, MoaConfig, MoaError, PageType, Platform, Result,
+    RuntimeEvent, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
+    SessionStatus, SessionStore, StartSessionRequest, TokenPricing, ToolCallFormat, ToolOutput,
+    UserId, UserMessage, WikiPage, WorkspaceId,
 };
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
 use moa_session::create_session_store;
 use tempfile::TempDir;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{Instant, sleep};
 
 #[derive(Clone)]
@@ -174,6 +175,7 @@ async fn test_orchestrator_with_provider(
 ) -> Result<(TempDir, LocalOrchestrator)> {
     let dir = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
+    config.memory.auto_bootstrap = false;
     config.database.url = dir.path().join("sessions.db").display().to_string();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
@@ -190,6 +192,46 @@ async fn test_orchestrator_with_provider(
         LocalOrchestrator::new(config, session_store, memory_store, provider, tool_router).await?;
 
     Ok((dir, orchestrator))
+}
+
+async fn test_orchestrator_with_config_and_provider(
+    config: MoaConfig,
+    provider: Arc<dyn LLMProvider>,
+) -> Result<LocalOrchestrator> {
+    let session_store = create_session_store(&config).await?;
+    let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
+    let tool_router = Arc::new(
+        ToolRouter::from_config(&config, memory_store.clone())
+            .await?
+            .with_rule_store(session_store.clone())
+            .with_session_store(session_store.clone()),
+    );
+    LocalOrchestrator::new(config, session_store, memory_store, provider, tool_router).await
+}
+
+fn cwd_lock() -> &'static AsyncMutex<()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
+struct CurrentDirGuard {
+    previous: std::path::PathBuf,
+}
+
+impl CurrentDirGuard {
+    fn set(path: &std::path::Path) -> Result<Self> {
+        let previous =
+            std::env::current_dir().map_err(|error| MoaError::ProviderError(error.to_string()))?;
+        std::env::set_current_dir(path)
+            .map_err(|error| MoaError::ProviderError(error.to_string()))?;
+        Ok(Self { previous })
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous);
+    }
 }
 
 #[derive(Clone)]
@@ -1796,6 +1838,7 @@ async fn panicking_provider_marks_session_failed() -> Result<()> {
 async fn completed_tool_turn_destroys_cached_hand() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
+    config.memory.auto_bootstrap = false;
     config.database.url = dir.path().join("sessions.db").display().to_string();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
@@ -2061,5 +2104,280 @@ async fn memory_maintenance_skips_when_threshold_or_cooldown_not_met() -> Result
     let third = orchestrator.run_memory_maintenance_once().await?;
     assert!(third.is_empty());
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_memory_bootstrap_copies_agents_file_without_provider_call() -> Result<()> {
+    let _cwd_guard = cwd_lock().lock().await;
+    let workspace = tempfile::tempdir()?;
+    tokio::fs::write(
+        workspace.path().join("AGENTS.md"),
+        "# Project Agent Instructions\n\nUse bootmarkeralpha when describing this project.\n",
+    )
+    .await?;
+    let _dir_guard = CurrentDirGuard::set(workspace.path())?;
+
+    let base = tempfile::tempdir()?;
+    let mut config = MoaConfig::default();
+    config.memory.auto_bootstrap = true;
+    config.database.url = base.path().join("sessions.db").display().to_string();
+    config.local.memory_dir = base.path().join("memory").display().to_string();
+    config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
+        model: config.general.default_model.clone(),
+        first_turn_delay: Duration::from_millis(5),
+        requests: requests.clone(),
+    });
+    let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
+
+    orchestrator
+        .start_session(StartSessionRequest {
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Cli,
+            model: orchestrator.model().to_string(),
+            initial_message: None,
+            title: None,
+            parent_session_id: None,
+        })
+        .await?;
+
+    let index = orchestrator
+        .memory_store()
+        .get_index(MemoryScope::Workspace(WorkspaceId::new("workspace")))
+        .await?;
+    assert!(index.contains("Project instructions loaded from `AGENTS.md`"));
+    let project = orchestrator
+        .memory_store()
+        .read_page(
+            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &"topics/project.md".into(),
+        )
+        .await?;
+    assert!(project.content.contains("Use bootmarkeralpha"));
+    assert_eq!(requests.lock().expect("request log lock poisoned").len(), 0);
+
+    let sentinel = base
+        .path()
+        .join("workspaces")
+        .join("workspace")
+        .join("memory")
+        .join("_bootstrap.json");
+    assert!(tokio::fs::try_exists(&sentinel).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_memory_bootstrap_informs_first_turn_from_instruction_file() -> Result<()> {
+    let _cwd_guard = cwd_lock().lock().await;
+    let workspace = tempfile::tempdir()?;
+    tokio::fs::write(
+        workspace.path().join("AGENTS.md"),
+        "# Project Agent Instructions\n\nbootmarkeralpha is the canonical bootstrap marker.\n",
+    )
+    .await?;
+    let _dir_guard = CurrentDirGuard::set(workspace.path())?;
+
+    let base = tempfile::tempdir()?;
+    let mut config = MoaConfig::default();
+    config.memory.auto_bootstrap = true;
+    config.database.url = base.path().join("sessions.db").display().to_string();
+    config.local.memory_dir = base.path().join("memory").display().to_string();
+    config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
+        model: config.general.default_model.clone(),
+        first_turn_delay: Duration::from_millis(5),
+        requests: requests.clone(),
+    });
+    let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
+
+    let session = orchestrator
+        .start_session(StartSessionRequest {
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Cli,
+            model: orchestrator.model().to_string(),
+            initial_message: Some(UserMessage {
+                text: "What is bootmarkeralpha?".to_string(),
+                attachments: Vec::new(),
+            }),
+            title: None,
+            parent_session_id: None,
+        })
+        .await?;
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::Completed,
+    )
+    .await?;
+
+    let requests = requests.lock().expect("request log lock poisoned");
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].messages.iter().any(|message| {
+        message.role == MessageRole::System && message.content.contains("bootmarkeralpha")
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> Result<()> {
+    let _cwd_guard = cwd_lock().lock().await;
+    let workspace = tempfile::tempdir()?;
+    tokio::fs::write(
+        workspace.path().join("AGENTS.md"),
+        "# Project Agent Instructions\n\nversion-one\n",
+    )
+    .await?;
+    let _dir_guard = CurrentDirGuard::set(workspace.path())?;
+
+    let base = tempfile::tempdir()?;
+    let mut config = MoaConfig::default();
+    config.database.url = base.path().join("sessions.db").display().to_string();
+    config.local.memory_dir = base.path().join("memory").display().to_string();
+    config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
+    config.memory.auto_bootstrap = true;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
+        model: config.general.default_model.clone(),
+        first_turn_delay: Duration::from_millis(5),
+        requests: requests.clone(),
+    });
+    let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
+
+    orchestrator
+        .start_session(StartSessionRequest {
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Cli,
+            model: orchestrator.model().to_string(),
+            initial_message: None,
+            title: None,
+            parent_session_id: None,
+        })
+        .await?;
+    let project_path: MemoryPath = "topics/project.md".into();
+    let project = orchestrator
+        .memory_store()
+        .read_page(
+            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &project_path,
+        )
+        .await?;
+    assert!(project.content.contains("version-one"));
+
+    let sentinel = base
+        .path()
+        .join("workspaces")
+        .join("workspace")
+        .join("memory")
+        .join("_bootstrap.json");
+    assert!(tokio::fs::try_exists(&sentinel).await?);
+
+    tokio::fs::write(
+        workspace.path().join("AGENTS.md"),
+        "# Project Agent Instructions\n\nversion-two\n",
+    )
+    .await?;
+    orchestrator
+        .start_session(StartSessionRequest {
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Cli,
+            model: orchestrator.model().to_string(),
+            initial_message: None,
+            title: None,
+            parent_session_id: None,
+        })
+        .await?;
+    let project = orchestrator
+        .memory_store()
+        .read_page(
+            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &project_path,
+        )
+        .await?;
+    assert!(project.content.contains("version-one"));
+    assert!(!project.content.contains("version-two"));
+
+    tokio::fs::remove_file(&sentinel).await?;
+    orchestrator
+        .start_session(StartSessionRequest {
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Cli,
+            model: orchestrator.model().to_string(),
+            initial_message: None,
+            title: None,
+            parent_session_id: None,
+        })
+        .await?;
+    let project = orchestrator
+        .memory_store()
+        .read_page(
+            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &project_path,
+        )
+        .await?;
+    assert!(project.content.contains("version-two"));
+    assert_eq!(requests.lock().expect("request log lock poisoned").len(), 0);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_memory_bootstrap_can_be_disabled() -> Result<()> {
+    let _cwd_guard = cwd_lock().lock().await;
+    let workspace = tempfile::tempdir()?;
+    tokio::fs::write(
+        workspace.path().join("AGENTS.md"),
+        "# Project Agent Instructions\n\nversion-one\n",
+    )
+    .await?;
+    let _dir_guard = CurrentDirGuard::set(workspace.path())?;
+
+    let base = tempfile::tempdir()?;
+    let mut config = MoaConfig::default();
+    config.memory.auto_bootstrap = false;
+    config.database.url = base.path().join("sessions.db").display().to_string();
+    config.local.memory_dir = base.path().join("memory").display().to_string();
+    config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
+        model: config.general.default_model.clone(),
+        first_turn_delay: Duration::from_millis(5),
+        requests: requests.clone(),
+    });
+    let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
+
+    orchestrator
+        .start_session(StartSessionRequest {
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Cli,
+            model: orchestrator.model().to_string(),
+            initial_message: None,
+            title: None,
+            parent_session_id: None,
+        })
+        .await?;
+
+    let index = orchestrator
+        .memory_store()
+        .get_index(MemoryScope::Workspace(WorkspaceId::new("workspace")))
+        .await?;
+    assert!(index.trim().is_empty());
+
+    let sentinel = base
+        .path()
+        .join("workspaces")
+        .join("workspace")
+        .join("memory")
+        .join("_bootstrap.json");
+    assert!(!tokio::fs::try_exists(&sentinel).await?);
+    assert_eq!(requests.lock().expect("request log lock poisoned").len(), 0);
     Ok(())
 }

@@ -353,7 +353,7 @@ where
 {
     let workspace_id = WorkspaceId::new("ws1");
     let rule = ApprovalRule {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         workspace_id: workspace_id.clone(),
         tool: "bash".to_string(),
         pattern: "git status".to_string(),

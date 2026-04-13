@@ -90,7 +90,7 @@ impl FileVault {
             MoaError::ConfigError("vault passphrase path must have a parent".to_string())
         })?;
         fs::create_dir_all(parent).await?;
-        let generated = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let generated = format!("{}{}", Uuid::now_v7().simple(), Uuid::now_v7().simple());
         fs::write(&self.passphrase_path, &generated).await?;
         #[cfg(unix)]
         fs::set_permissions(&self.passphrase_path, Permissions::from_mode(0o600)).await?;

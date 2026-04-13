@@ -259,7 +259,7 @@ mod tests {
         let policies = ToolPolicies::default();
         let ctx = ToolPolicyContext::from_session(&session());
         let rules = vec![moa_core::ApprovalRule {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             workspace_id: WorkspaceId::new("workspace"),
             tool: "file_write".to_string(),
             pattern: "src/*.rs".to_string(),

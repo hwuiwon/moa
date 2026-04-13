@@ -12,7 +12,7 @@ _Crates, external services, implementation phases, build and deployment._
 |---|---|---|
 | `tokio` | Async runtime | Latest stable |
 | `serde` + `serde_json` | Serialization | Latest stable |
-| `uuid` | ID generation | Latest stable, with `v4` feature |
+| `uuid` | ID generation | Latest stable, with `v7` feature |
 | `chrono` | DateTime handling | Latest stable |
 | `tracing` + `tracing-subscriber` | Structured logging | Latest stable |
 | `opentelemetry` + `tracing-opentelemetry` | OTel integration | Latest stable |

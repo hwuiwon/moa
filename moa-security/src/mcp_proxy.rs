@@ -63,7 +63,7 @@ impl MCPCredentialProxy {
         scope: impl Into<String>,
     ) -> Result<McpSessionToken> {
         self.prune_expired_tokens().await;
-        let token = format!("mcp_{}_{}", session_id, Uuid::new_v4());
+        let token = format!("mcp_{}_{}", session_id, Uuid::now_v7());
         self.session_tokens.write().await.insert(
             token.clone(),
             ProxyGrant {
@@ -306,7 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn environment_vault_loads_from_env_backed_server_config() {
-        let name = format!("MOA_TEST_TOKEN_{}", Uuid::new_v4());
+        let name = format!("MOA_TEST_TOKEN_{}", Uuid::now_v7());
         unsafe { std::env::set_var(&name, "env-token") };
 
         let vault = EnvironmentCredentialVault::from_mcp_servers(&[McpServerConfig {

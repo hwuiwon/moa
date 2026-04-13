@@ -369,7 +369,7 @@ impl SessionStore for PostgresSessionStore {
     /// Appends an event to the session log and updates session counters.
     async fn emit_event(&self, session_id: moa_core::SessionId, event: Event) -> Result<u64> {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let event_id = Uuid::new_v4();
+        let event_id = Uuid::now_v7();
         let payload = encode_event_for_storage(
             self.blob_store.as_ref(),
             &session_id,

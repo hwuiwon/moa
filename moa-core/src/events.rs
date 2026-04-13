@@ -408,7 +408,7 @@ mod tests {
                 attachments: vec![],
             },
             Event::ToolCall {
-                tool_id: Uuid::new_v4(),
+                tool_id: Uuid::now_v7(),
                 provider_tool_use_id: Some("toolu_123".into()),
                 provider_thought_signature: None,
                 tool_name: "bash".into(),
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn approval_requested_event_round_trips_full_prompt() {
-        let request_id = Uuid::new_v4();
+        let request_id = Uuid::now_v7();
         let event = Event::ApprovalRequested {
             request_id,
             tool_name: "file_write".to_string(),
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn tool_result_event_deserializes_without_provider_tool_use_id() {
-        let tool_id = Uuid::new_v4();
+        let tool_id = Uuid::now_v7();
         let json = serde_json::json!({
             "type": "ToolResult",
             "data": {

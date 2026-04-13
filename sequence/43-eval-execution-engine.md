@@ -164,7 +164,7 @@ pub async fn build_agent_environment(
     temp_dir: &Path,
 ) -> Result<AgentEnvironment> {
     // 1. Create temp workspace directory
-    let workspace_dir = temp_dir.join(format!("eval-{}", Uuid::new_v4()));
+    let workspace_dir = temp_dir.join(format!("eval-{}", Uuid::now_v7()));
     fs::create_dir_all(&workspace_dir).await?;
     
     // 2. Set up memory
@@ -579,13 +579,13 @@ fn trajectory_collector_captures_tool_calls() {
     let mut collector = TrajectoryCollector::new();
     
     collector.process_event(&Event::ToolCall {
-        tool_id: Uuid::new_v4(),
+        tool_id: Uuid::now_v7(),
         tool_name: "bash".into(),
         input: json!({"command": "ls"}),
         ..
     });
     collector.process_event(&Event::ToolResult {
-        tool_id: Uuid::new_v4(),
+        tool_id: Uuid::now_v7(),
         output: "file1.txt\nfile2.txt".into(),
         success: true,
         duration_ms: 50,

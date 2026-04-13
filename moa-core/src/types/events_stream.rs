@@ -302,7 +302,7 @@ mod tests {
         let session_id = SessionId::new();
 
         let first = EventRecord {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             session_id: session_id.clone(),
             sequence_num: 0,
             event_type: EventType::Warning,
@@ -315,7 +315,7 @@ mod tests {
             token_count: None,
         };
         let second = EventRecord {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             session_id,
             sequence_num: 1,
             event_type: EventType::Warning,

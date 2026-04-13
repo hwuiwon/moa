@@ -97,7 +97,7 @@ mod tests {
         );
         assert_eq!(
             RuntimeEvent::ToolUpdate(ToolUpdate {
-                tool_id: Uuid::new_v4(),
+                tool_id: Uuid::now_v7(),
                 tool_name: "bash".to_string(),
                 status: ToolCardStatus::Pending,
                 summary: "pending".to_string(),

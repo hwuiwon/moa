@@ -750,7 +750,7 @@ mod tests {
             ..SessionMeta::default()
         };
         let now = Utc::now();
-        let tool_id = Uuid::new_v4();
+        let tool_id = Uuid::now_v7();
         let events = vec![
             event_record(
                 &session,
@@ -789,7 +789,7 @@ mod tests {
                 3,
                 now + Duration::seconds(2),
                 Event::ToolError {
-                    tool_id: Uuid::new_v4(),
+                    tool_id: Uuid::now_v7(),
                     provider_tool_use_id: None,
                     tool_name: "web_search".to_string(),
                     error: "provider error: timeout".to_string(),
@@ -863,7 +863,7 @@ mod tests {
         event: Event,
     ) -> EventRecord {
         EventRecord {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             session_id: session.id.clone(),
             sequence_num,
             event_type: event.event_type(),

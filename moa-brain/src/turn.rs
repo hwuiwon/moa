@@ -387,7 +387,7 @@ mod tests {
 
     fn event_record(sequence_num: u64, event: Event) -> EventRecord {
         EventRecord {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             session_id: SessionId::new(),
             sequence_num,
             event_type: event.event_type(),
@@ -473,7 +473,7 @@ mod tests {
 
     #[test]
     fn resolved_pending_tool_approval_preserves_provider_tool_use_id() {
-        let tool_id = Uuid::new_v4();
+        let tool_id = Uuid::now_v7();
         let events = vec![
             event_record(
                 0,

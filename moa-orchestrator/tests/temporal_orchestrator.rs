@@ -243,7 +243,7 @@ async fn temporal_test_orchestrator_with_provider(
         .temporal
         .as_mut()
         .expect("temporal config")
-        .task_queue = format!("moa-test-{}", uuid::Uuid::new_v4());
+        .task_queue = format!("moa-test-{}", uuid::Uuid::now_v7());
     config
         .cloud
         .temporal
@@ -1075,7 +1075,7 @@ async fn temporal_orchestrator_live_anthropic_smoke() {
         .temporal
         .as_mut()
         .expect("temporal config")
-        .task_queue = format!("moa-live-{}", uuid::Uuid::new_v4());
+        .task_queue = format!("moa-live-{}", uuid::Uuid::now_v7());
     config
         .cloud
         .temporal
@@ -1122,7 +1122,7 @@ async fn temporal_orchestrator_recovers_after_worker_process_restart() {
     let dir = tempfile::tempdir().expect("tempdir");
     let server = TemporalDevServer::start(&dir);
     server.wait_ready().await;
-    let task_queue = format!("moa-restart-{}", uuid::Uuid::new_v4());
+    let task_queue = format!("moa-restart-{}", uuid::Uuid::now_v7());
 
     let mut starter = spawn_temporal_helper("start", dir.path(), server.port, &task_queue, 3000);
     let session_id = wait_for_session_id_file(dir.path()).await;

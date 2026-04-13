@@ -312,7 +312,7 @@ mod tests {
             let mut events = self.events.lock().await;
             let sequence_num = events.len() as SequenceNum;
             events.push(EventRecord {
-                id: uuid::Uuid::new_v4(),
+                id: uuid::Uuid::now_v7(),
                 session_id,
                 sequence_num,
                 event_type: event.event_type(),
@@ -431,7 +431,7 @@ mod tests {
 
     fn event_record(session_id: &SessionId, sequence_num: u64, event: Event) -> EventRecord {
         EventRecord {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             session_id: session_id.clone(),
             sequence_num,
             event_type: event.event_type(),
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn history_compiler_preserves_structured_tool_result_blocks() {
         let session = session();
-        let tool_id = uuid::Uuid::new_v4();
+        let tool_id = uuid::Uuid::now_v7();
         let events = vec![event_record(
             &session.id,
             0,
@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn history_compiler_preserves_structured_tool_call_invocation() {
         let session = session();
-        let tool_id = uuid::Uuid::new_v4();
+        let tool_id = uuid::Uuid::now_v7();
         let events = vec![event_record(
             &session.id,
             0,

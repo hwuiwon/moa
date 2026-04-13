@@ -20,6 +20,8 @@ pub struct MoaConfig {
     pub database: DatabaseConfig,
     /// Local runtime settings.
     pub local: LocalConfig,
+    /// Memory bootstrap and maintenance settings.
+    pub memory: MemoryConfig,
     /// Cloud runtime settings.
     pub cloud: CloudConfig,
     /// Messaging gateway settings.
@@ -134,6 +136,10 @@ impl MoaConfig {
             .set_default("local.docker_enabled", Self::default().local.docker_enabled)?
             .set_default("local.sandbox_dir", Self::default().local.sandbox_dir)?
             .set_default("local.memory_dir", Self::default().local.memory_dir)?
+            .set_default(
+                "memory.auto_bootstrap",
+                Self::default().memory.auto_bootstrap,
+            )?
             .set_default("daemon.socket_path", Self::default().daemon.socket_path)?
             .set_default("daemon.pid_file", Self::default().daemon.pid_file)?
             .set_default("daemon.log_file", Self::default().daemon.log_file)?
@@ -635,6 +641,22 @@ impl Default for LocalConfig {
     }
 }
 
+/// Memory bootstrap and maintenance configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    /// Automatically bootstrap workspace memory when it is empty.
+    pub auto_bootstrap: bool,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            auto_bootstrap: true,
+        }
+    }
+}
+
 /// Session storage configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1088,6 +1110,12 @@ mod tests {
         let config = MoaConfig::default();
         assert_eq!(config.session.blob_threshold_bytes, 65_536);
         assert_eq!(config.session.blob_dir, "~/.moa/blobs");
+    }
+
+    #[test]
+    fn memory_config_defaults_are_applied() {
+        let config = MoaConfig::default();
+        assert!(config.memory.auto_bootstrap);
     }
 
     #[test]
