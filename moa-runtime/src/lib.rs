@@ -56,7 +56,7 @@ pub enum ChatRuntime {
     Daemon(DaemonChatRuntime),
 }
 
-/// Lightweight session preview used by the multi-session TUI.
+/// Lightweight session preview used by interactive MOA clients.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPreview {
     /// Persisted session summary row.
@@ -65,7 +65,7 @@ pub struct SessionPreview {
     pub last_message: Option<String>,
 }
 
-/// Session-scoped runtime update forwarded to the multi-session TUI.
+/// Session-scoped runtime update forwarded to interactive MOA clients.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRuntimeEvent {
     /// Session that produced this runtime event.
@@ -1429,7 +1429,7 @@ impl ChatRuntime {
     /// Creates a fully local runtime rooted in a unique temporary directory for tests.
     #[doc(hidden)]
     pub async fn for_test(platform: Platform) -> Result<Self> {
-        let base = std::env::temp_dir().join(format!("moa-tui-test-{}", Uuid::new_v4()));
+        let base = std::env::temp_dir().join(format!("moa-runtime-test-{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&base).await?;
 
         let mut config = MoaConfig::default();

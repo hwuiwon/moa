@@ -3,6 +3,10 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown } from "lucide-react";
 
 import { AssistantMessage } from "@/components/chat/assistant-message";
+import { Loader } from "@/components/prompt-kit/loader";
+import { PromptSuggestion } from "@/components/prompt-kit/prompt-suggestion";
+import { SystemMessage } from "@/components/prompt-kit/system-message";
+import { TextShimmer } from "@/components/prompt-kit/text-shimmer";
 import { UserMessage } from "@/components/chat/user-message";
 import { Button } from "@/components/ui/button";
 import type { ChatMessage } from "@/types/chat";
@@ -11,8 +15,15 @@ type MessageListProps = {
   error: string | null;
   isLoading: boolean;
   messages: ChatMessage[];
+  onSuggestion?: (prompt: string) => void;
   onStop?: () => void;
 };
+
+const EMPTY_SESSION_SUGGESTIONS = [
+  "Summarize the repository structure",
+  "Search the web for the latest Rust release notes",
+  "Draft a migration plan for the current workspace",
+];
 
 /**
  * Scrollable transcript with stick-to-bottom behavior and virtualization for long sessions.
@@ -21,6 +32,7 @@ export function MessageList({
   error,
   isLoading,
   messages,
+  onSuggestion,
   onStop,
 }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -87,17 +99,10 @@ export function MessageList({
     overscan: 8,
   });
 
-  const emptyState = useMemo(() => {
-    if (isLoading) {
-      return "Loading session history…";
-    }
-
-    if (messages.length > 0) {
-      return null;
-    }
-
-    return "Start with a concrete request. MOA will stream the response here and keep the full turn history in this session.";
-  }, [isLoading, messages.length]);
+  const showEmptyState = useMemo(
+    () => !isLoading && messages.length === 0,
+    [isLoading, messages.length],
+  );
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -106,14 +111,27 @@ export function MessageList({
         ref={scrollRef}
       >
         {error ? (
-          <div className="mx-auto mb-4 max-w-4xl rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          <SystemMessage
+            className="mx-auto mb-4 max-w-4xl"
+            fill
+            variant="error"
+          >
             {error}
-          </div>
+          </SystemMessage>
         ) : null}
 
-        {emptyState ? (
+        {isLoading ? (
           <div className="mx-auto flex h-full max-w-4xl items-center justify-center">
-            <div className="max-w-xl rounded-2xl border border-dashed border-border bg-card/60 px-6 py-8 text-center">
+            <div className="flex flex-col items-center gap-4 rounded-2xl border border-dashed border-border bg-card/60 px-8 py-10 text-center">
+              <Loader variant="dots" />
+              <TextShimmer as="p" className="text-sm">
+                Loading session history…
+              </TextShimmer>
+            </div>
+          </div>
+        ) : showEmptyState ? (
+          <div className="mx-auto flex h-full max-w-4xl items-center justify-center">
+            <div className="max-w-2xl rounded-2xl border border-dashed border-border bg-card/60 px-6 py-8 text-center">
               <p className="text-[11px] uppercase tracking-widest text-muted-foreground">
                 Chat
               </p>
@@ -121,8 +139,21 @@ export function MessageList({
                 Session is ready
               </h2>
               <p className="mt-3 text-sm leading-7 text-muted-foreground">
-                {emptyState}
+                Start with a concrete request. MOA will stream the response here and keep the full turn history in this session.
               </p>
+              <div className="mt-5 flex flex-wrap justify-center gap-2">
+                {EMPTY_SESSION_SUGGESTIONS.map((suggestion) => (
+                  <PromptSuggestion
+                    key={suggestion}
+                    onClick={() => onSuggestion?.(suggestion)}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {suggestion}
+                  </PromptSuggestion>
+                ))}
+              </div>
             </div>
           </div>
         ) : shouldVirtualize ? (

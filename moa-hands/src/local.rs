@@ -33,7 +33,7 @@ struct DockerSandbox {
     workspace_mount: String,
 }
 
-/// Local zero-setup hand provider used by TUI and test harnesses.
+/// Local zero-setup hand provider used by interactive clients and test harnesses.
 #[derive(Clone)]
 pub struct LocalHandProvider {
     work_dir: Arc<PathBuf>,

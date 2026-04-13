@@ -4,7 +4,7 @@ use std::io::{self, IsTerminal, Write};
 
 use anyhow::{Context, Result, bail};
 use moa_core::{ApprovalDecision, ApprovalPrompt, MoaConfig, Platform, RuntimeEvent, ToolUpdate};
-use moa_tui::runner::ChatRuntime;
+use moa_runtime::ChatRuntime;
 use tokio::sync::mpsc;
 
 /// Runs a one-shot prompt through the shared local chat runtime.

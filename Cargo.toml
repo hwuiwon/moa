@@ -11,8 +11,7 @@ path = "src/lib.rs"
 moa-session = { path = "moa-session", optional = true }
 
 [features]
-default = ["tui"]
-tui = []
+default = []
 telegram = []
 slack = []
 discord = []
@@ -34,7 +33,6 @@ members = [
     "moa-orchestrator",
     "moa-gateway",
     "moa-runtime",
-    "moa-tui",
     "moa-cli",
     "moa-security",
     "moa-skills",
@@ -73,14 +71,11 @@ async-openai = { version = "0.34", default-features = false, features = [
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 config = { version = "0.14", default-features = true, features = ["toml"] }
-crossterm = "0.28"
 eventsource-stream = "0.2"
 futures-util = "0.3"
-nucleo = "0.5"
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-rustls"] }
 opentelemetry_sdk = "0.31"
-ratatui = "0.29"
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "multipart",
@@ -89,10 +84,6 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-similar = "2"
-syntect = { version = "5", default-features = false, features = [
-    "default-fancy",
-] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
@@ -102,7 +93,6 @@ tracing-appender = "0.2"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ts-rs = { version = "10", features = ["chrono-impl", "serde-compat", "serde-json-impl", "uuid-impl"] }
-tui-textarea = "0.7"
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [profile.dev]

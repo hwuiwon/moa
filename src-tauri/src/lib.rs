@@ -4,6 +4,7 @@ mod commands;
 mod dto;
 mod error;
 mod stream;
+mod tray;
 
 use std::error::Error as StdError;
 
@@ -26,6 +27,7 @@ fn boxed_error(error: impl StdError + Send + Sync + 'static) -> Box<dyn StdError
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let config = MoaConfig::load().map_err(boxed_error)?;
             let runtime =
@@ -34,6 +36,7 @@ pub fn run() {
             app.manage(AppState {
                 runtime: Mutex::new(runtime),
             });
+            tray::setup_system_tray(app).map_err(boxed_error)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

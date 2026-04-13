@@ -25,9 +25,9 @@ moa-core = { path = "../moa-core" }
 moa-eval = { path = "../moa-eval" }
 moa-memory = { path = "../moa-memory" }
 moa-orchestrator = { path = "../moa-orchestrator" }
+moa-runtime = { path = "../moa-runtime" }
 moa-session = { path = "../moa-session" }
 moa-skills = { path = "../moa-skills" }
-moa-tui = { path = "../moa-tui" }
 serde_json.workspace = true
 tokio.workspace = true
 toml = "0.8"
