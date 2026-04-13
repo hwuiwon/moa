@@ -11,7 +11,8 @@ pub use local::LocalChatRuntime;
 
 use enum_dispatch::enum_dispatch;
 use moa_core::{
-    ApprovalDecision, MoaConfig, Platform, Result, RuntimeEvent, SessionId, WorkspaceId,
+    ApprovalDecision, MoaConfig, Platform, Result, RuntimeEvent, SessionId, WorkspaceBudgetStatus,
+    WorkspaceId,
 };
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -50,6 +51,7 @@ trait ChatRuntimeOps {
     async fn write_memory_page(&self, page: moa_core::WikiPage) -> Result<moa_core::WikiPage>;
     async fn delete_memory_page(&self, path: &moa_core::MemoryPath) -> Result<()>;
     async fn memory_index(&self) -> Result<String>;
+    async fn workspace_budget_status(&self) -> Result<WorkspaceBudgetStatus>;
     async fn observe_session(
         &self,
         session_id: SessionId,

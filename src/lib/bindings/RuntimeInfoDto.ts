@@ -23,4 +23,12 @@ sandboxRoot: string,
 /**
  * Runtime transport kind.
  */
-runtimeKind: string, };
+runtimeKind: string, 
+/**
+ * Configured daily workspace budget in cents. `0` means unlimited.
+ */
+dailyBudgetCents: number, 
+/**
+ * Current workspace spend for the active UTC day in cents.
+ */
+dailySpentCents: number, };

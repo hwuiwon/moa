@@ -1,6 +1,6 @@
 //! Shared trait-level session store tests that run against any backend.
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use moa_core::{
     ApprovalRule, Event, EventFilter, EventRange, EventType, PendingSignal, PendingSignalType,
     PolicyAction, PolicyScope, SessionFilter, SessionMeta, SessionStatus, SessionStore, UserId,
@@ -216,6 +216,83 @@ where
         .expect("list sessions");
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].workspace_id, WorkspaceId::new("ws1"));
+}
+
+/// Verifies workspace spend aggregation since a specific timestamp.
+pub async fn test_workspace_cost_since<S>(store: &S)
+where
+    S: SessionStore + ?Sized,
+{
+    let first_session_id = store
+        .create_session(test_session_meta("ws1"))
+        .await
+        .expect("create first session");
+    let second_session_id = store
+        .create_session(test_session_meta("ws1"))
+        .await
+        .expect("create second session");
+    let other_workspace_session_id = store
+        .create_session(test_session_meta("ws2"))
+        .await
+        .expect("create other workspace session");
+
+    let since = Utc::now() - Duration::minutes(1);
+    let future_since = Utc::now() + Duration::minutes(1);
+
+    store
+        .emit_event(
+            first_session_id,
+            Event::BrainResponse {
+                text: "first".into(),
+                model: "test".into(),
+                input_tokens: 10,
+                output_tokens: 5,
+                cost_cents: 7,
+                duration_ms: 50,
+            },
+        )
+        .await
+        .expect("emit first response");
+    store
+        .emit_event(
+            second_session_id,
+            Event::BrainResponse {
+                text: "second".into(),
+                model: "test".into(),
+                input_tokens: 8,
+                output_tokens: 4,
+                cost_cents: 11,
+                duration_ms: 50,
+            },
+        )
+        .await
+        .expect("emit second response");
+    store
+        .emit_event(
+            other_workspace_session_id,
+            Event::BrainResponse {
+                text: "other".into(),
+                model: "test".into(),
+                input_tokens: 8,
+                output_tokens: 4,
+                cost_cents: 99,
+                duration_ms: 50,
+            },
+        )
+        .await
+        .expect("emit other workspace response");
+
+    let workspace_total = store
+        .workspace_cost_since(&WorkspaceId::new("ws1"), since)
+        .await
+        .expect("load workspace spend");
+    assert_eq!(workspace_total, 18);
+
+    let future_total = store
+        .workspace_cost_since(&WorkspaceId::new("ws1"), future_since)
+        .await
+        .expect("load future workspace spend");
+    assert_eq!(future_total, 0);
 }
 
 /// Verifies pending signal persistence and resolution.

@@ -193,6 +193,15 @@ pub struct SessionHandle {
     pub session_id: SessionId,
 }
 
+/// Snapshot of the active workspace budget state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceBudgetStatus {
+    /// Configured daily workspace budget in cents. `0` means unlimited.
+    pub daily_budget_cents: u32,
+    /// Total spend for the active UTC day in cents.
+    pub daily_spent_cents: u32,
+}
+
 /// Persistent session metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMeta {

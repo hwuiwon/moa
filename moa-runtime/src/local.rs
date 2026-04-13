@@ -3,11 +3,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use chrono::Utc;
 use moa_core::{
     ApprovalDecision, BrainOrchestrator, EventRange, EventRecord, MemoryPath, MemoryScope,
     MemorySearchResult, MemoryStore, MoaConfig, MoaError, PageSummary, PageType, Platform, Result,
     RuntimeEvent, SessionFilter, SessionId, SessionMeta, SessionSignal, SessionStore,
-    SessionSummary, UserId, UserMessage, WikiPage, WorkspaceId,
+    SessionSummary, UserId, UserMessage, WikiPage, WorkspaceBudgetStatus, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
@@ -274,6 +275,31 @@ impl LocalChatRuntime {
             .memory_store()
             .get_index(MemoryScope::Workspace(self.workspace_id.clone()))
             .await
+    }
+
+    /// Returns the current workspace budget snapshot.
+    pub async fn workspace_budget_status(&self) -> Result<WorkspaceBudgetStatus> {
+        let Some(day_start) = Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .map(|value| value.and_utc())
+        else {
+            return Ok(WorkspaceBudgetStatus {
+                daily_budget_cents: self.config.budgets.daily_workspace_cents,
+                daily_spent_cents: 0,
+            });
+        };
+
+        let daily_spent_cents = self
+            .orchestrator
+            .session_store()
+            .workspace_cost_since(&self.workspace_id, day_start)
+            .await?;
+
+        Ok(WorkspaceBudgetStatus {
+            daily_budget_cents: self.config.budgets.daily_workspace_cents,
+            daily_spent_cents,
+        })
     }
 
     /// Relays live runtime updates for one session until the receiver closes.

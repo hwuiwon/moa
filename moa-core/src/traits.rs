@@ -1,6 +1,7 @@
 //! Stable trait interfaces shared across MOA crates.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -14,7 +15,7 @@ use crate::types::{
     ModelCapabilities, ObserveLevel, OutboundMessage, PageSummary, PageType, PendingSignal,
     PendingSignalId, Platform, PlatformCapabilities, ProcessorOutput, RuntimeEvent, SequenceNum,
     SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
-    SessionSummary, StartSessionRequest, ToolOutput, WikiPage, WorkingContext,
+    SessionSummary, StartSessionRequest, ToolOutput, WikiPage, WorkingContext, WorkspaceId,
 };
 
 /// Orchestrates session lifecycle and observation.
@@ -87,6 +88,13 @@ pub trait SessionStore: Send + Sync {
 
     /// Lists sessions matching the provided filter.
     async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>>;
+
+    /// Returns aggregate workspace spend in cents since the provided UTC timestamp.
+    async fn workspace_cost_since(
+        &self,
+        workspace_id: &WorkspaceId,
+        since: DateTime<Utc>,
+    ) -> Result<u32>;
 }
 
 /// Durable blob store used by the claim-check session event pattern.

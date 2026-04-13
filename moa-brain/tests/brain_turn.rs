@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use moa_brain::{
     TurnResult, build_default_pipeline, build_default_pipeline_with_tools,
     pipeline::history::HistoryCompiler, run_brain_turn, run_brain_turn_with_tools,
@@ -121,6 +121,29 @@ impl SessionStore for MockSessionStore {
 
     async fn list_sessions(&self, _filter: SessionFilter) -> Result<Vec<SessionSummary>> {
         Ok(Vec::new())
+    }
+
+    async fn workspace_cost_since(
+        &self,
+        workspace_id: &WorkspaceId,
+        since: DateTime<Utc>,
+    ) -> Result<u32> {
+        let session = self.session.lock().await.clone();
+        if &session.workspace_id != workspace_id {
+            return Ok(0);
+        }
+
+        Ok(self
+            .events
+            .lock()
+            .await
+            .iter()
+            .filter(|record| record.timestamp >= since)
+            .filter_map(|record| match &record.event {
+                Event::BrainResponse { cost_cents, .. } => Some(*cost_cents),
+                _ => None,
+            })
+            .sum())
     }
 }
 
@@ -955,6 +978,114 @@ async fn run_brain_turn_emits_brain_response_event() {
         }
         other => panic!("expected brain response event, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
+    let session = SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: "claude-sonnet-4-6".to_string(),
+        ..SessionMeta::default()
+    };
+    let initial_events = vec![
+        make_event_record(
+            &session.id,
+            0,
+            Event::UserMessage {
+                text: "Hello".to_string(),
+                attachments: Vec::new(),
+            },
+        ),
+        make_event_record(
+            &session.id,
+            1,
+            Event::BrainResponse {
+                text: "Existing reply".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 20,
+                output_tokens: 10,
+                cost_cents: 5,
+                duration_ms: 25,
+            },
+        ),
+    ];
+    let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
+    let mut config = MoaConfig::default();
+    config.budgets.daily_workspace_cents = 5;
+    let pipeline = build_default_pipeline(&config, store.clone(), Arc::new(MockMemoryStore));
+    let llm = Arc::new(CapturingTextLlmProvider::new("should not run"));
+
+    let error = run_brain_turn(session.id.clone(), store.clone(), llm.clone(), &pipeline)
+        .await
+        .expect_err("budget should stop the turn");
+    match error {
+        moa_core::MoaError::BudgetExhausted(message) => {
+            assert!(message.contains("Daily workspace budget exhausted"));
+        }
+        other => panic!("expected budget exhaustion, got {other:?}"),
+    }
+
+    assert!(llm.requests.lock().await.is_empty());
+
+    let events = store.events.lock().await.clone();
+    assert_eq!(events.len(), 3);
+    match &events[2].event {
+        Event::Error {
+            message,
+            recoverable,
+        } => {
+            assert!(message.contains("Daily workspace budget exhausted"));
+            assert!(!recoverable);
+        }
+        other => panic!("expected error event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
+    let session = SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: "claude-sonnet-4-6".to_string(),
+        ..SessionMeta::default()
+    };
+    let initial_events = vec![
+        make_event_record(
+            &session.id,
+            0,
+            Event::UserMessage {
+                text: "Hello".to_string(),
+                attachments: Vec::new(),
+            },
+        ),
+        make_event_record(
+            &session.id,
+            1,
+            Event::BrainResponse {
+                text: "Existing reply".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 20,
+                output_tokens: 10,
+                cost_cents: 500,
+                duration_ms: 25,
+            },
+        ),
+    ];
+    let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
+    let mut config = MoaConfig::default();
+    config.budgets.daily_workspace_cents = 0;
+    let pipeline = build_default_pipeline(&config, store.clone(), Arc::new(MockMemoryStore));
+    let llm = Arc::new(CapturingTextLlmProvider::new("still runs"));
+
+    let result = run_brain_turn(session.id.clone(), store.clone(), llm.clone(), &pipeline)
+        .await
+        .expect("unlimited budget should allow the turn");
+
+    assert_eq!(result, TurnResult::Complete);
+    assert_eq!(llm.requests.lock().await.len(), 1);
 }
 
 #[tokio::test]

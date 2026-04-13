@@ -228,7 +228,7 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use moa_core::{
         ContextProcessor, Event, EventFilter, EventRange, EventRecord, MemoryPath, MemoryScope,
         MemorySearchResult, MemoryStore, ModelCapabilities, PageSummary, PageType, PendingSignal,
@@ -323,6 +323,14 @@ mod tests {
 
         async fn list_sessions(&self, _filter: SessionFilter) -> Result<Vec<SessionSummary>> {
             Ok(Vec::new())
+        }
+
+        async fn workspace_cost_since(
+            &self,
+            _workspace_id: &WorkspaceId,
+            _since: DateTime<Utc>,
+        ) -> Result<u32> {
+            Ok(0)
         }
     }
 

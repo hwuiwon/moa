@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use moa_core::{
     ApprovalDecision, DaemonCommand, DaemonReply, EventRecord, MemoryPath, MemorySearchResult,
     MoaConfig, MoaError, PageSummary, PageType, Platform, Result, RuntimeEvent, SessionFilter,
-    SessionId, SessionMeta, SessionSummary, StartSessionRequest, UserId, WikiPage, WorkspaceId,
+    SessionId, SessionMeta, SessionSummary, StartSessionRequest, UserId, WikiPage,
+    WorkspaceBudgetStatus, WorkspaceId,
 };
 use moa_providers::resolve_provider_selection;
 use tokio::sync::mpsc;
@@ -304,6 +305,22 @@ impl DaemonChatRuntime {
             DaemonReply::MemoryIndex(index) => Ok(index),
             DaemonReply::Error(message) => Err(MoaError::ProviderError(message)),
             other => Err(unexpected_daemon_reply("memory_index", &other)),
+        }
+    }
+
+    /// Returns the current workspace budget snapshot.
+    async fn workspace_budget_status(&self) -> Result<WorkspaceBudgetStatus> {
+        match daemon_request(
+            &self.socket_path,
+            &DaemonCommand::GetWorkspaceBudgetStatus {
+                workspace_id: self.workspace_id.clone(),
+            },
+        )
+        .await?
+        {
+            DaemonReply::WorkspaceBudgetStatus(status) => Ok(status),
+            DaemonReply::Error(message) => Err(MoaError::ProviderError(message)),
+            other => Err(unexpected_daemon_reply("workspace_budget_status", &other)),
         }
     }
 

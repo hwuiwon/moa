@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use enum_dispatch::enum_dispatch;
 use moa_core::{
     ApprovalRule, DatabaseBackend, Event, EventFilter, EventRange, EventRecord, MoaConfig,
@@ -46,6 +47,12 @@ trait SessionStoreDispatch: Send + Sync {
     async fn search_events(&self, query: &str, filter: EventFilter) -> Result<Vec<EventRecord>>;
 
     async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>>;
+
+    async fn workspace_cost_since(
+        &self,
+        workspace_id: &WorkspaceId,
+        since: DateTime<Utc>,
+    ) -> Result<u32>;
 }
 
 macro_rules! impl_session_store_dispatch {
@@ -108,6 +115,14 @@ macro_rules! impl_session_store_dispatch {
 
             async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>> {
                 SessionStore::list_sessions(self, filter).await
+            }
+
+            async fn workspace_cost_since(
+                &self,
+                workspace_id: &WorkspaceId,
+                since: DateTime<Utc>,
+            ) -> Result<u32> {
+                SessionStore::workspace_cost_since(self, workspace_id, since).await
             }
         }
     };
@@ -254,6 +269,14 @@ impl SessionStore for SessionDatabase {
 
     async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>> {
         SessionStoreDispatch::list_sessions(self, filter).await
+    }
+
+    async fn workspace_cost_since(
+        &self,
+        workspace_id: &WorkspaceId,
+        since: DateTime<Utc>,
+    ) -> Result<u32> {
+        SessionStoreDispatch::workspace_cost_since(self, workspace_id, since).await
     }
 }
 

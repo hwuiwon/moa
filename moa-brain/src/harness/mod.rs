@@ -1,6 +1,7 @@
 //! Single-turn brain harness execution and the shared streamed turn engine.
 
 mod approval_flow;
+mod budget;
 mod context_build;
 mod streaming;
 mod tool_dispatch;

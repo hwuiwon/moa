@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::types::{
     ApprovalDecision, EventRecord, MemoryPath, MemorySearchResult, PageSummary, RuntimeEvent,
     SessionFilter, SessionId, SessionMeta, SessionSummary, StartSessionRequest, WikiPage,
-    WorkspaceId,
+    WorkspaceBudgetStatus, WorkspaceId,
 };
 
 /// Compact session preview returned by the daemon for session-picker UIs.
@@ -125,6 +125,11 @@ pub enum DaemonCommand {
     },
     /// Return the registered tool names.
     ToolNames,
+    /// Return current budget status for a workspace.
+    GetWorkspaceBudgetStatus {
+        /// Workspace to query.
+        workspace_id: WorkspaceId,
+    },
     /// Queue a prompt into one session.
     QueueMessage {
         /// Session to receive the prompt.
@@ -186,6 +191,8 @@ pub enum DaemonReply {
     MemoryIndex(String),
     /// Tool-name registry listing.
     ToolNames(Vec<String>),
+    /// Current workspace budget snapshot.
+    WorkspaceBudgetStatus(WorkspaceBudgetStatus),
     /// Structured daemon error.
     Error(String),
 }

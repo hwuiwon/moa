@@ -19,6 +19,7 @@ use crate::turn::{
 };
 
 use super::approval_flow::{process_resolved_approval, wait_for_approval};
+use super::budget::enforce_workspace_budget;
 use super::context_build::{
     append_event, buffer_queued_message, build_turn_context, calculate_response_cost_cents,
     last_user_message_text, record_turn_span_metrics, turn_number_for_events,
@@ -198,6 +199,16 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 }
             }
 
+            enforce_workspace_budget(
+                &session_store,
+                &session_id,
+                &session.workspace_id,
+                pipeline.daily_workspace_budget_cents(),
+                runtime_tx,
+                event_tx,
+            )
+            .await?;
+
             let (ctx, active_canary) = build_turn_context(
                 &session_id,
                 &session,
@@ -211,6 +222,16 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             let mut emit_runtime = |event| {
                 let _ = runtime_tx.send(event);
             };
+
+            enforce_workspace_budget(
+                &session_store,
+                &session_id,
+                &session.workspace_id,
+                pipeline.daily_workspace_budget_cents(),
+                runtime_tx,
+                event_tx,
+            )
+            .await?;
 
             let streamed = if let Some(receiver) = signal_rx.as_deref_mut() {
                 stream_completion_response(

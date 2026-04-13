@@ -4,7 +4,7 @@ use std::time::Duration;
 use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use moa_core::{
     ApprovalRule, BlobStore, Event, EventFilter, EventRange, EventRecord, MoaConfig, MoaError,
     PendingSignal, PendingSignalId, Result, SessionFilter, SessionMeta, SessionStatus,
@@ -724,6 +724,36 @@ impl SessionStore for PostgresSessionStore {
             .await
             .map_err(map_sqlx_error)?;
         rows.iter().map(session_summary_from_row).collect()
+    }
+
+    /// Returns aggregate workspace spend in cents since the provided UTC timestamp.
+    async fn workspace_cost_since(
+        &self,
+        workspace_id: &WorkspaceId,
+        since: DateTime<Utc>,
+    ) -> Result<u32> {
+        let events = self.table_name("events");
+        let sessions = self.table_name("sessions");
+        let total = sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT COALESCE( \
+                 SUM((e.payload -> 'data' ->> 'cost_cents')::BIGINT), \
+                 0 \
+             ) \
+             FROM {events} e \
+             JOIN {sessions} s ON s.id = e.session_id \
+             WHERE s.workspace_id = $1 \
+               AND e.event_type = $2 \
+               AND e.timestamp >= $3"
+        ))
+        .bind(workspace_id.to_string())
+        .bind("BrainResponse")
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        u32::try_from(total)
+            .map_err(|_| MoaError::StorageError("workspace spend exceeded u32 range".to_string()))
     }
 }
 

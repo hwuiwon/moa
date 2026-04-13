@@ -85,6 +85,10 @@ async fn postgres_shared_session_store_contract() {
     })
     .await;
     with_test_store(|store| async move {
+        shared::test_workspace_cost_since(&store).await;
+    })
+    .await;
+    with_test_store(|store| async move {
         shared::test_session_status_update(&store).await;
     })
     .await;

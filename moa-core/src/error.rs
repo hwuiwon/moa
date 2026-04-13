@@ -78,6 +78,10 @@ pub enum MoaError {
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
+    /// The workspace has exhausted its configured daily spend budget.
+    #[error("daily workspace budget exhausted: {0}")]
+    BudgetExhausted(String),
+
     /// Operation was cancelled by the user.
     #[error("operation cancelled by user")]
     Cancelled,
