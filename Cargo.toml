@@ -14,7 +14,7 @@ members = [
     "moa-security",
     "moa-skills",
     "moa-eval",
-    "src-tauri",
+    "moa-desktop",
 ]
 default-members = [
     "moa-core",
@@ -30,7 +30,6 @@ default-members = [
     "moa-security",
     "moa-skills",
     "moa-eval",
-    "src-tauri",
 ]
 
 [workspace.package]
@@ -69,7 +68,6 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-ts-rs = { version = "10", features = ["chrono-impl", "serde-compat", "serde-json-impl", "uuid-impl"] }
 uuid = { version = "1", features = ["serde", "v7"] }
 
 [profile.dev]
