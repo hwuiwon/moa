@@ -51,6 +51,8 @@ export const tauriClient = {
     invokeCommand<EventRecordDto[]>("get_session_events", { sessionId }),
   getRuntimeInfo: () => invokeCommand<RuntimeInfoDto>("get_runtime_info"),
   getConfig: () => invokeCommand<MoaConfigDto>("get_config"),
+  updateConfig: (config: MoaConfigDto) =>
+    invokeCommand<MoaConfigDto>("update_config", { config }),
   listMemoryPages: (filter?: string | null) =>
     invokeCommand<PageSummaryDto[]>("list_memory_pages", { filter }),
   readMemoryPage: (path: string) =>

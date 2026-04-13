@@ -65,6 +65,7 @@ pub fn run() {
             commands::delete_memory_page,
             commands::memory_index,
             commands::get_config,
+            commands::update_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MOA desktop application");

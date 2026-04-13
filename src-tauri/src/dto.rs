@@ -364,7 +364,7 @@ impl TryFrom<WikiPageDto> for WikiPage {
 }
 
 /// Runtime configuration values the frontend needs to render settings.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/lib/bindings/")]
 pub struct MoaConfigDto {
@@ -410,6 +410,24 @@ impl From<&MoaConfig> for MoaConfigDto {
     }
 }
 
+impl MoaConfigDto {
+    /// Applies DTO fields onto an existing config snapshot.
+    pub fn apply_to_config(&self, config: &mut MoaConfig) {
+        config.general.default_provider = self.default_provider.clone();
+        config.general.default_model = self.default_model.clone();
+        config.general.reasoning_effort = self.reasoning_effort.clone();
+        config.general.web_search_enabled = self.web_search_enabled;
+        config.general.workspace_instructions =
+            non_empty_option(self.workspace_instructions.clone());
+        config.general.user_instructions = non_empty_option(self.user_instructions.clone());
+        config.local.sandbox_dir = self.sandbox_dir.clone();
+        config.local.memory_dir = self.memory_dir.clone();
+        config.daemon.auto_connect = self.daemon_auto_connect;
+        config.observability.enabled = self.observability_enabled;
+        config.observability.environment = non_empty_option(self.environment.clone());
+    }
+}
+
 /// One selectable model option for the desktop model picker.
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -447,6 +465,17 @@ fn memory_scope_label(scope: &MemoryScope) -> String {
         MemoryScope::User(user_id) => format!("user:{user_id}"),
         MemoryScope::Workspace(workspace_id) => format!("workspace:{workspace_id}"),
     }
+}
+
+fn non_empty_option(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 fn event_payload(event: Event) -> Value {

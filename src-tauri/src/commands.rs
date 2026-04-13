@@ -435,6 +435,24 @@ pub async fn get_config(state: State<'_, AppState>) -> AppResult<MoaConfigDto> {
     Ok(MoaConfigDto::from(runtime.config()))
 }
 
+/// Persists an updated desktop config snapshot and refreshes the active runtime.
+#[tauri::command]
+pub async fn update_config(
+    config: MoaConfigDto,
+    state: State<'_, AppState>,
+) -> AppResult<MoaConfigDto> {
+    let runtime = clone_runtime(&state).await;
+    let session_id = runtime.session_id().clone();
+    let mut next_config = runtime.config().clone();
+    config.apply_to_config(&mut next_config);
+
+    let next_runtime = rebuild_runtime(&runtime, next_config.clone(), session_id).await?;
+    next_config.save()?;
+    replace_runtime(&state, next_runtime).await;
+
+    Ok(MoaConfigDto::from(&next_config))
+}
+
 async fn clone_runtime(state: &State<'_, AppState>) -> ChatRuntime {
     state.runtime.lock().await.clone()
 }
@@ -444,8 +462,15 @@ async fn replace_runtime(state: &State<'_, AppState>, runtime: ChatRuntime) {
 }
 
 async fn attach_runtime(runtime: &ChatRuntime, session_id: SessionId) -> AppResult<ChatRuntime> {
-    let config = runtime.config().clone();
-    match runtime {
+    rebuild_runtime(runtime, runtime.config().clone(), session_id).await
+}
+
+async fn rebuild_runtime(
+    current_runtime: &ChatRuntime,
+    config: moa_core::MoaConfig,
+    session_id: SessionId,
+) -> AppResult<ChatRuntime> {
+    match current_runtime {
         ChatRuntime::Local(_) => {
             ChatRuntime::attach_to_local_session(config, Platform::Desktop, session_id)
                 .await

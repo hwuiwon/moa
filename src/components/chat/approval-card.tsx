@@ -11,6 +11,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { DiffViewer } from "@/components/chat/diff-viewer";
 import { tauriClient } from "@/lib/tauri";
 import type { ApprovalBlock } from "@/types/chat";
 import { cn } from "@/lib/utils";
@@ -80,9 +81,7 @@ export function ApprovalCard({ block }: ApprovalCardProps) {
             <p className="text-[11px] uppercase tracking-widest text-muted-foreground">
               Diff preview
             </p>
-            <pre className="mt-1 max-h-60 overflow-auto rounded-lg border border-border bg-muted/30 p-3 text-xs leading-5 whitespace-pre-wrap">
-              {block.diffPreview}
-            </pre>
+            <DiffViewer className="mt-2" diff={block.diffPreview} />
           </div>
         ) : null}
 
