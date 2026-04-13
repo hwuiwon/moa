@@ -13,7 +13,7 @@ use moa_core::{
     MemorySearchResult, MemoryStore, MoaConfig, ModelCapabilities, PageSummary, PageType,
     PendingSignal, PendingSignalId, Result, RuntimeEvent, SequenceNum, SessionFilter, SessionId,
     SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason, TokenPricing,
-    ToolCallFormat, ToolInvocation, UserId, WikiPage, WorkspaceId,
+    ToolCallContent, ToolCallFormat, ToolInvocation, UserId, WikiPage, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
@@ -290,6 +290,7 @@ impl LLMProvider for MockLlmProvider {
             output_tokens: 8,
             cached_input_tokens: 0,
             duration_ms: 25,
+            thought_signature: None,
         }))
     }
 }
@@ -330,6 +331,7 @@ impl LLMProvider for CapturingTextLlmProvider {
             output_tokens: 8,
             cached_input_tokens: 0,
             duration_ms: 25,
+            thought_signature: None,
         }))
     }
 }
@@ -369,10 +371,13 @@ impl LLMProvider for ToolLoopLlmProvider {
         let response = if requests.is_empty() {
             CompletionResponse {
                 text: String::new(),
-                content: vec![CompletionContent::ToolCall(ToolInvocation {
-                    id: Some("11111111-1111-1111-1111-111111111111".to_string()),
-                    name: "bash".to_string(),
-                    input: json!({ "cmd": "printf 'hello from tool'" }),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("11111111-1111-1111-1111-111111111111".to_string()),
+                        name: "bash".to_string(),
+                        input: json!({ "cmd": "printf 'hello from tool'" }),
+                    },
+                    provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
                 model: "claude-sonnet-4-6".to_string(),
@@ -380,6 +385,7 @@ impl LLMProvider for ToolLoopLlmProvider {
                 output_tokens: 5,
                 cached_input_tokens: 0,
                 duration_ms: 10,
+                thought_signature: None,
             }
         } else {
             assert!(
@@ -399,6 +405,7 @@ impl LLMProvider for ToolLoopLlmProvider {
                 output_tokens: 7,
                 cached_input_tokens: 0,
                 duration_ms: 12,
+                thought_signature: None,
             }
         };
         requests.push(request);
@@ -441,10 +448,13 @@ impl LLMProvider for OpenAiApprovalLoopLlmProvider {
         let response = if requests.is_empty() {
             CompletionResponse {
                 text: String::new(),
-                content: vec![CompletionContent::ToolCall(ToolInvocation {
-                    id: Some("fc_approval_1".to_string()),
-                    name: "bash".to_string(),
-                    input: json!({ "cmd": "printf 'hello from approved openai tool'" }),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("fc_approval_1".to_string()),
+                        name: "bash".to_string(),
+                        input: json!({ "cmd": "printf 'hello from approved openai tool'" }),
+                    },
+                    provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
                 model: "gpt-5.4".to_string(),
@@ -452,6 +462,7 @@ impl LLMProvider for OpenAiApprovalLoopLlmProvider {
                 output_tokens: 5,
                 cached_input_tokens: 0,
                 duration_ms: 10,
+                thought_signature: None,
             }
         } else {
             let tool_result = request.messages.iter().find(|message| {
@@ -480,6 +491,7 @@ impl LLMProvider for OpenAiApprovalLoopLlmProvider {
                 output_tokens: 7,
                 cached_input_tokens: 0,
                 duration_ms: 12,
+                thought_signature: None,
             }
         };
         requests.push(request);
@@ -522,15 +534,18 @@ impl LLMProvider for MemoryWriteLoopLlmProvider {
         let response = if requests.is_empty() {
             CompletionResponse {
                 text: String::new(),
-                content: vec![CompletionContent::ToolCall(ToolInvocation {
-                    id: Some("22222222-2222-2222-2222-222222222222".to_string()),
-                    name: "memory_write".to_string(),
-                    input: json!({
-                        "path": "topics/generated.md",
-                        "scope": "workspace",
-                        "title": "Generated",
-                        "content": "# Generated\nCreated by the tool."
-                    }),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("22222222-2222-2222-2222-222222222222".to_string()),
+                        name: "memory_write".to_string(),
+                        input: json!({
+                            "path": "topics/generated.md",
+                            "scope": "workspace",
+                            "title": "Generated",
+                            "content": "# Generated\nCreated by the tool."
+                        }),
+                    },
+                    provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
                 model: "claude-sonnet-4-6".to_string(),
@@ -538,6 +553,7 @@ impl LLMProvider for MemoryWriteLoopLlmProvider {
                 output_tokens: 5,
                 cached_input_tokens: 0,
                 duration_ms: 10,
+                thought_signature: None,
             }
         } else {
             assert!(request.messages.iter().any(|message| {
@@ -556,6 +572,7 @@ impl LLMProvider for MemoryWriteLoopLlmProvider {
                 output_tokens: 7,
                 cached_input_tokens: 0,
                 duration_ms: 12,
+                thought_signature: None,
             }
         };
         requests.push(request);
@@ -583,13 +600,16 @@ impl LLMProvider for MemoryIngestLoopLlmProvider {
         let response = match requests.len() {
             0 => CompletionResponse {
                 text: String::new(),
-                content: vec![CompletionContent::ToolCall(ToolInvocation {
-                    id: Some("55555555-5555-5555-5555-555555555555".to_string()),
-                    name: "memory_ingest".to_string(),
-                    input: json!({
-                        "source_name": "API Design Doc",
-                        "content": "# API Design Doc\n\nThe authentication stack rotates tokens every 24 hours.\n\n## Entities\n- Auth Service\n\n## Topics\n- API Conventions\n\n## Decisions\n- Token rotation every 24 hours\n"
-                    }),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("55555555-5555-5555-5555-555555555555".to_string()),
+                        name: "memory_ingest".to_string(),
+                        input: json!({
+                            "source_name": "API Design Doc",
+                            "content": "# API Design Doc\n\nThe authentication stack rotates tokens every 24 hours.\n\n## Entities\n- Auth Service\n\n## Topics\n- API Conventions\n\n## Decisions\n- Token rotation every 24 hours\n"
+                        }),
+                    },
+                    provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
                 model: "claude-sonnet-4-6".to_string(),
@@ -597,6 +617,7 @@ impl LLMProvider for MemoryIngestLoopLlmProvider {
                 output_tokens: 8,
                 cached_input_tokens: 0,
                 duration_ms: 11,
+                thought_signature: None,
             },
             1 => {
                 assert!(request.messages.iter().any(|message| {
@@ -614,18 +635,22 @@ impl LLMProvider for MemoryIngestLoopLlmProvider {
                     output_tokens: 10,
                     cached_input_tokens: 0,
                     duration_ms: 12,
+                    thought_signature: None,
                 }
             }
             2 => CompletionResponse {
                 text: String::new(),
-                content: vec![CompletionContent::ToolCall(ToolInvocation {
-                    id: Some("66666666-6666-6666-6666-666666666666".to_string()),
-                    name: "memory_search".to_string(),
-                    input: json!({
-                        "query": "token rotation",
-                        "scope": "workspace",
-                        "limit": 3
-                    }),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("66666666-6666-6666-6666-666666666666".to_string()),
+                        name: "memory_search".to_string(),
+                        input: json!({
+                            "query": "token rotation",
+                            "scope": "workspace",
+                            "limit": 3
+                        }),
+                    },
+                    provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
                 model: "claude-sonnet-4-6".to_string(),
@@ -633,6 +658,7 @@ impl LLMProvider for MemoryIngestLoopLlmProvider {
                 output_tokens: 5,
                 cached_input_tokens: 0,
                 duration_ms: 9,
+                thought_signature: None,
             },
             3 => {
                 assert!(request.messages.iter().any(|message| {
@@ -658,6 +684,7 @@ impl LLMProvider for MemoryIngestLoopLlmProvider {
                     output_tokens: 9,
                     cached_input_tokens: 0,
                     duration_ms: 10,
+                    thought_signature: None,
                 }
             }
             other => panic!("unexpected request count for ingest loop: {other}"),
@@ -703,13 +730,16 @@ impl LLMProvider for RepeatingToolLlmProvider {
         let response = match request_index {
             0 | 2 => CompletionResponse {
                 text: String::new(),
-                content: vec![CompletionContent::ToolCall(ToolInvocation {
-                    id: Some(format!(
-                        "00000000-0000-0000-0000-00000000000{}",
-                        request_index + 1
-                    )),
-                    name: "bash".to_string(),
-                    input: json!({ "cmd": "printf 'hello from tool'" }),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some(format!(
+                            "00000000-0000-0000-0000-00000000000{}",
+                            request_index + 1
+                        )),
+                        name: "bash".to_string(),
+                        input: json!({ "cmd": "printf 'hello from tool'" }),
+                    },
+                    provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
                 model: "claude-sonnet-4-6".to_string(),
@@ -717,6 +747,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
                 output_tokens: 5,
                 cached_input_tokens: 0,
                 duration_ms: 10,
+                thought_signature: None,
             },
             1 | 3 => {
                 assert!(
@@ -736,6 +767,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
                     output_tokens: 7,
                     cached_input_tokens: 0,
                     duration_ms: 12,
+                    thought_signature: None,
                 }
             }
             _ => CompletionResponse {
@@ -747,6 +779,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
                 output_tokens: 2,
                 cached_input_tokens: 0,
                 duration_ms: 5,
+                thought_signature: None,
             },
         };
         requests.push(request);
@@ -786,10 +819,13 @@ impl LLMProvider for CanaryLeakLlmProvider {
                 .expect("missing injected canary");
             CompletionResponse {
                 text: String::new(),
-                content: vec![CompletionContent::ToolCall(ToolInvocation {
-                    id: Some("33333333-3333-3333-3333-333333333333".to_string()),
-                    name: "memory_read".to_string(),
-                    input: json!({ "path": format!("skills/{canary}/SKILL.md") }),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("33333333-3333-3333-3333-333333333333".to_string()),
+                        name: "memory_read".to_string(),
+                        input: json!({ "path": format!("skills/{canary}/SKILL.md") }),
+                    },
+                    provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
                 model: "claude-sonnet-4-6".to_string(),
@@ -797,6 +833,7 @@ impl LLMProvider for CanaryLeakLlmProvider {
                 output_tokens: 4,
                 cached_input_tokens: 0,
                 duration_ms: 10,
+                thought_signature: None,
             }
         } else {
             assert!(request.messages.iter().any(|message| matches!(
@@ -812,6 +849,7 @@ impl LLMProvider for CanaryLeakLlmProvider {
                 output_tokens: 2,
                 cached_input_tokens: 0,
                 duration_ms: 8,
+                thought_signature: None,
             }
         };
         requests.push(request);
@@ -839,10 +877,13 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
         let response = if requests.is_empty() {
             CompletionResponse {
                 text: String::new(),
-                content: vec![CompletionContent::ToolCall(ToolInvocation {
-                    id: Some("44444444-4444-4444-4444-444444444444".to_string()),
-                    name: "memory_read".to_string(),
-                    input: json!({ "path": "skills/unsafe/SKILL.md" }),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("44444444-4444-4444-4444-444444444444".to_string()),
+                        name: "memory_read".to_string(),
+                        input: json!({ "path": "skills/unsafe/SKILL.md" }),
+                    },
+                    provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
                 model: "claude-sonnet-4-6".to_string(),
@@ -850,6 +891,7 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
                 output_tokens: 3,
                 cached_input_tokens: 0,
                 duration_ms: 12,
+                thought_signature: None,
             }
         } else {
             let tool_message = request
@@ -877,6 +919,7 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
                 output_tokens: 5,
                 cached_input_tokens: 0,
                 duration_ms: 11,
+                thought_signature: None,
             }
         };
         requests.push(request);
@@ -912,6 +955,7 @@ impl LLMProvider for ProviderToolResultTurnLlm {
             output_tokens: 5,
             cached_input_tokens: 0,
             duration_ms: 6,
+            thought_signature: None,
         }))
     }
 }
@@ -1008,6 +1052,7 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
                 output_tokens: 10,
                 cost_cents: 5,
                 duration_ms: 25,
+                thought_signature: None,
             },
         ),
     ];
@@ -1071,6 +1116,7 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
                 output_tokens: 10,
                 cost_cents: 500,
                 duration_ms: 25,
+                thought_signature: None,
             },
         ),
     ];

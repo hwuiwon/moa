@@ -2,6 +2,33 @@
 
 use serde_json::{Map, Value, json};
 
+/// Compiles a canonical tool schema into a Gemini-compatible function schema.
+pub fn compile_for_gemini(schema: &Value) -> Value {
+    let mut compiled = schema.clone();
+
+    if let Some(function) = compiled.get_mut("function").and_then(Value::as_object_mut) {
+        if let Some(parameters) = function.get_mut("parameters") {
+            make_gemini_compatible(parameters);
+        }
+        if let Some(input_schema) = function.get_mut("input_schema") {
+            make_gemini_compatible(input_schema);
+        }
+        return compiled;
+    }
+
+    if let Some(parameters) = compiled.get_mut("parameters") {
+        make_gemini_compatible(parameters);
+        return compiled;
+    }
+    if let Some(input_schema) = compiled.get_mut("input_schema") {
+        make_gemini_compatible(input_schema);
+        return compiled;
+    }
+
+    make_gemini_compatible(&mut compiled);
+    compiled
+}
+
 /// Compiles a canonical tool schema into an OpenAI strict-mode compatible schema.
 pub fn compile_for_openai_strict(schema: &Value) -> Value {
     let mut compiled = schema.clone();
@@ -24,6 +51,30 @@ pub fn compile_for_openai_strict(schema: &Value) -> Value {
 
     make_strict_compatible(&mut compiled);
     compiled
+}
+
+fn make_gemini_compatible(schema: &mut Value) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+
+    object.remove("additionalProperties");
+
+    if let Some(items) = object.get_mut("items") {
+        make_gemini_compatible(items);
+    }
+    for key in ["anyOf", "allOf", "oneOf"] {
+        if let Some(variants) = object.get_mut(key).and_then(Value::as_array_mut) {
+            for variant in variants {
+                make_gemini_compatible(variant);
+            }
+        }
+    }
+    if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+        for property in properties.values_mut() {
+            make_gemini_compatible(property);
+        }
+    }
 }
 
 fn make_strict_compatible(schema: &mut Value) {
@@ -120,7 +171,38 @@ fn strip_validation_keywords(object: &mut Map<String, Value>) {
 mod tests {
     use serde_json::json;
 
-    use super::compile_for_openai_strict;
+    use super::{compile_for_gemini, compile_for_openai_strict};
+
+    #[test]
+    fn compile_for_gemini_removes_additional_properties_recursively() {
+        let schema = json!({
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "outer": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "inner": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let compiled = compile_for_gemini(&schema);
+        let input_schema = &compiled["input_schema"];
+
+        assert!(input_schema.get("additionalProperties").is_none());
+        assert!(
+            input_schema["properties"]["outer"]
+                .get("additionalProperties")
+                .is_none()
+        );
+    }
 
     #[test]
     fn compile_for_openai_strict_makes_optional_properties_required_and_nullable() {

@@ -30,7 +30,7 @@ MOA is a **cloud-first, Rust-based, general-purpose agent platform** built on th
 
 - **Inspectability over magic.** Sessions, context compilation, tool calls, memory — all observable.
 - **Reversible collaboration.** Inspect → approve → checkpoint → revert. The human stays in control.
-- **Model/provider flexibility.** OpenAI, Anthropic, OpenRouter at launch. No vendor lock-in.
+- **Model/provider flexibility.** OpenAI, Anthropic, and Google Gemini at launch. No vendor lock-in.
 - **Complexity must justify itself.** If it doesn't improve daily use, it doesn't ship in the default path.
 - **Daily-driver UX beats impressive demos.** Predictable, low-friction, no cognitive fatigue.
 - **No "impressive demo" features that degrade the daily path.**

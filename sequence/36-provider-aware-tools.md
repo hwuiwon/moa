@@ -5,7 +5,7 @@ Two related gaps in the provider layer:
 
 1. **Tool results are always flattened to text.** The brain harness calls `to_text()` on every `ToolOutput` before feeding it back to the LLM, regardless of provider. But Anthropic's Messages API natively accepts content block arrays in `tool_result` messages (text + image), so structured results are unnecessarily degraded for Claude.
 
-2. **Tool schemas are sent with `strict: false`.** The OpenAI/OpenRouter providers send `strict: false` because MOA's canonical schemas include optional properties — incompatible with OpenAI's strict mode which requires all properties to be `required` + nullable. This disables structured output guarantees.
+2. **Tool schemas are sent with `strict: false`.** The OpenAI provider sends `strict: false` because MOA's canonical schemas include optional properties — incompatible with OpenAI's strict mode which requires all properties to be `required` + nullable. This disables structured output guarantees.
 
 This step adds a provider-aware rendering layer for tool results and a per-provider schema compiler for tool definitions.
 
@@ -16,10 +16,9 @@ This step adds a provider-aware rendering layer for tool results and a per-provi
 - `moa-providers/src/anthropic.rs` — `anthropic_message()`, tool schema formatting
 - `moa-providers/src/common.rs` — `openai_tool_from_schema()`, `build_function_tool()` with `strict: Some(false)`
 - `moa-providers/src/openai.rs` — OpenAI provider, schema handling
-- `moa-providers/src/openrouter.rs` — OpenRouter provider, shares `common.rs`
 
 ## Goal
-Anthropic sees native content blocks for tool results (not flattened text). OpenAI/OpenRouter receive strict-mode-compatible schemas. The canonical schema format in the tool registry stays unchanged — transformation happens at the provider boundary.
+Anthropic sees native content blocks for tool results (not flattened text). OpenAI receives strict-mode-compatible schemas. The canonical schema format in the tool registry stays unchanged — transformation happens at the provider boundary.
 
 ## Rules
 - The **tool registry stores one canonical schema** per tool (standard JSON Schema, optional params as genuinely optional). No provider-specific schemas stored.
@@ -124,7 +123,7 @@ fn anthropic_content_blocks(blocks: &[ToolContent]) -> Value {
 }
 ```
 
-### 4. Update OpenAI/OpenRouter providers to use text fallback
+### 4. Update string-based providers to use text fallback
 In `moa-providers/src/common.rs`, the OpenAI message formatter should use the `content` string (already the text fallback), ignoring `content_blocks`. This is already the current behavior — just verify it works with the new `ContextMessage` shape.
 
 For tool results specifically, OpenAI's Responses API needs `function_call_output` items. Make sure the `tool_use_id` is passed through.
@@ -255,7 +254,7 @@ moa-brain/src/pipeline/history.rs  # Use tool_result() constructor
 
 ## Acceptance criteria
 1. Anthropic provider sends tool results as content block arrays (not flattened text).
-2. OpenAI/OpenRouter provider sends `strict: true` with compiled schemas.
+2. OpenAI provider sends `strict: true` with compiled schemas.
 3. Optional schema properties are compiled to required + nullable for OpenAI.
 4. `additionalProperties: false` is added to all objects in OpenAI schemas.
 5. Validation-only keywords (`minimum`, `pattern`, etc.) are stripped for OpenAI.

@@ -46,6 +46,7 @@ where
             session_id.clone(),
             Event::BrainResponse {
                 text: "Hi there".into(),
+                thought_signature: None,
                 model: "test".into(),
                 input_tokens: 10,
                 output_tokens: 5,
@@ -244,6 +245,7 @@ where
             first_session_id,
             Event::BrainResponse {
                 text: "first".into(),
+                thought_signature: None,
                 model: "test".into(),
                 input_tokens: 10,
                 output_tokens: 5,
@@ -258,6 +260,7 @@ where
             second_session_id,
             Event::BrainResponse {
                 text: "second".into(),
+                thought_signature: None,
                 model: "test".into(),
                 input_tokens: 8,
                 output_tokens: 4,
@@ -272,6 +275,7 @@ where
             other_workspace_session_id,
             Event::BrainResponse {
                 text: "other".into(),
+                thought_signature: None,
                 model: "test".into(),
                 input_tokens: 8,
                 output_tokens: 4,

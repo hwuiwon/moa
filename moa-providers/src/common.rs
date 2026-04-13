@@ -1,7 +1,6 @@
 //! Shared HTTP and SSE utilities for provider implementations.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 use std::time::Instant;
 
 use async_openai::Client as OpenAiClient;
@@ -19,18 +18,18 @@ use eventsource_stream::Event as SseEvent;
 use futures_util::StreamExt;
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, MessageRole,
-    ProviderNativeTool, StopReason, ToolContent, ToolInvocation,
+    ProviderNativeTool, StopReason, ToolCallContent, ToolContent, ToolInvocation,
 };
 use moa_core::{MoaError, Result};
-use reqwest::{Client, RequestBuilder, Response as HttpResponse, StatusCode};
+use reqwest::{Client, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::instrumentation::LLMSpanRecorder;
+use crate::retry::RetryPolicy;
 use crate::schema::compile_for_openai_strict;
 
-const INITIAL_RETRY_DELAY_MS: u64 = 250;
 const OPENAI_METADATA_VALUE_LIMIT: usize = 512;
 
 /// Builds the shared HTTP client used by provider implementations.
@@ -39,52 +38,6 @@ pub(crate) fn build_http_client() -> Result<Client> {
         .user_agent(concat!("moa/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|error| MoaError::ProviderError(format!("failed to build HTTP client: {error}")))
-}
-
-/// Sends a request with retry handling for provider rate limits.
-pub(crate) async fn send_with_retry<F>(build_request: F, max_retries: usize) -> Result<HttpResponse>
-where
-    F: Fn() -> RequestBuilder,
-{
-    let mut attempt = 0usize;
-
-    loop {
-        let response = build_request().send().await.map_err(|error| {
-            MoaError::ProviderError(format!("provider request failed: {error}"))
-        })?;
-
-        let status = response.status();
-        if status == StatusCode::TOO_MANY_REQUESTS {
-            let message = response_text(response).await;
-            if attempt >= max_retries {
-                return Err(MoaError::RateLimited {
-                    retries: max_retries,
-                    message,
-                });
-            }
-
-            let delay = retry_delay(attempt);
-            tracing::warn!(
-                attempt = attempt + 1,
-                max_retries,
-                delay_ms = delay.as_millis(),
-                "provider request hit a rate limit; retrying"
-            );
-            tokio::time::sleep(delay).await;
-            attempt += 1;
-            continue;
-        }
-
-        if !status.is_success() {
-            let message = response_text(response).await;
-            return Err(MoaError::HttpStatus {
-                status: status.as_u16(),
-                message,
-            });
-        }
-
-        return Ok(response);
-    }
 }
 
 /// Parses a JSON SSE payload into a strongly typed Rust value.
@@ -98,19 +51,6 @@ where
             event.event
         ))
     })
-}
-
-/// Returns the exponential backoff delay for a retry attempt.
-pub(crate) fn retry_delay(attempt: usize) -> Duration {
-    Duration::from_millis(INITIAL_RETRY_DELAY_MS.saturating_mul(1_u64 << attempt.min(8)))
-}
-
-async fn response_text(response: HttpResponse) -> String {
-    match response.text().await {
-        Ok(text) if !text.trim().is_empty() => text,
-        Ok(_) => "request failed with an empty response body".to_string(),
-        Err(error) => format!("request failed and the response body could not be read: {error}"),
-    }
 }
 
 /// Builds an async-openai client around MOA's shared HTTP client.
@@ -240,7 +180,7 @@ pub(crate) async fn stream_responses_with_retry(
     tx: mpsc::Sender<Result<CompletionContent>>,
     fallback_model: String,
     started_at: Instant,
-    max_retries: usize,
+    retry_policy: RetryPolicy,
     mut span_recorder: LLMSpanRecorder,
 ) -> Result<CompletionResponse> {
     let mut attempt = 0usize;
@@ -261,12 +201,14 @@ pub(crate) async fn stream_responses_with_retry(
                     return Ok(response);
                 }
                 Err(error)
-                    if error.retryable && !error.emitted_content && attempt < max_retries =>
+                    if error.retryable
+                        && !error.emitted_content
+                        && attempt < retry_policy.max_retries =>
                 {
-                    let delay = retry_delay(attempt);
+                    let delay = retry_policy.delay_for_attempt(attempt);
                     tracing::warn!(
                         attempt = attempt + 1,
-                        max_retries,
+                        max_retries = retry_policy.max_retries,
                         delay_ms = delay.as_millis(),
                         "provider stream hit a rate limit before any content was emitted; retrying"
                     );
@@ -279,19 +221,19 @@ pub(crate) async fn stream_responses_with_retry(
                 }
             },
             Err(error) if is_rate_limit_error(&error) => {
-                if attempt >= max_retries {
+                if attempt >= retry_policy.max_retries {
                     let error = MoaError::RateLimited {
-                        retries: max_retries,
+                        retries: retry_policy.max_retries,
                         message: error.to_string(),
                     };
                     span_recorder.fail(&error);
                     return Err(error);
                 }
 
-                let delay = retry_delay(attempt);
+                let delay = retry_policy.delay_for_attempt(attempt);
                 tracing::warn!(
                     attempt = attempt + 1,
-                    max_retries,
+                    max_retries = retry_policy.max_retries,
                     delay_ms = delay.as_millis(),
                     "provider request hit a rate limit; retrying"
                 );
@@ -391,10 +333,13 @@ async fn consume_responses_stream_once(
                         retryable: false,
                         emitted_content,
                     })?;
-                let call = CompletionContent::ToolCall(ToolInvocation {
-                    id: Some(event.item_id.clone()),
-                    name,
-                    input,
+                let call = CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some(event.item_id.clone()),
+                        name,
+                        input,
+                    },
+                    provider_metadata: None,
                 });
                 emitted_function_items.insert(event.item_id);
                 content.push(call.clone());
@@ -510,6 +455,7 @@ async fn consume_responses_stream_once(
         output_tokens,
         cached_input_tokens,
         duration_ms: started_at.elapsed().as_millis() as u64,
+        thought_signature: None,
     })
 }
 
@@ -713,10 +659,13 @@ pub(crate) fn response_content_from_output(
                 }
             }
             OutputItem::FunctionCall(call) => {
-                content.push(CompletionContent::ToolCall(ToolInvocation {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    input: parse_tool_arguments(&call.arguments)?,
+                content.push(CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        input: parse_tool_arguments(&call.arguments)?,
+                    },
+                    provider_metadata: None,
                 }));
             }
             OutputItem::WebSearchCall(call) => {
@@ -807,58 +756,12 @@ fn supports_reasoning(model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
 
     use serde_json::json;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    use reqwest::StatusCode;
 
     use async_openai::error::OpenAIError;
 
-    use super::{
-        build_http_client, is_ignorable_openai_stream_error, metadata_as_strings, send_with_retry,
-    };
-
-    #[tokio::test]
-    async fn retries_on_rate_limit() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let request_count = Arc::new(AtomicUsize::new(0));
-        let request_count_task = Arc::clone(&request_count);
-
-        let server = tokio::spawn(async move {
-            loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    break;
-                };
-                let current = request_count_task.fetch_add(1, Ordering::SeqCst);
-                let mut buffer = vec![0_u8; 2048];
-                let _ = socket.read(&mut buffer).await;
-
-                let response = if current == 0 {
-                    "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 11\r\n\r\nrate limit"
-                } else {
-                    "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"
-                };
-
-                socket.write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-
-        let client = build_http_client().unwrap();
-        let url = format!("http://{address}/retry");
-        let response = send_with_retry(|| client.get(&url), 3).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(request_count.load(Ordering::SeqCst), 2);
-
-        server.abort();
-    }
+    use super::{is_ignorable_openai_stream_error, metadata_as_strings};
 
     #[test]
     fn metadata_as_strings_drops_internal_moa_keys() {

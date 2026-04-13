@@ -2,14 +2,14 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use moa_core::{CompletionContent, CompletionRequest, LLMProvider};
-use moa_providers::{AnthropicProvider, OpenAIProvider, OpenRouterProvider};
+use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 use serde_json::json;
 use tokio::time::timeout;
 
 enum LiveProvider {
     OpenAi(Box<OpenAIProvider>),
     Anthropic(Box<AnthropicProvider>),
-    OpenRouter(Box<OpenRouterProvider>),
+    Google(Box<GeminiProvider>),
 }
 
 impl LiveProvider {
@@ -17,7 +17,7 @@ impl LiveProvider {
         match self {
             Self::OpenAi(_) => "openai",
             Self::Anthropic(_) => "anthropic",
-            Self::OpenRouter(_) => "openrouter",
+            Self::Google(_) => "google",
         }
     }
 
@@ -28,7 +28,7 @@ impl LiveProvider {
         match self {
             Self::OpenAi(provider) => provider.complete(request).await,
             Self::Anthropic(provider) => provider.complete(request).await,
-            Self::OpenRouter(provider) => provider.complete(request).await,
+            Self::Google(provider) => provider.complete(request).await,
         }
     }
 }
@@ -41,8 +41,8 @@ fn available_live_providers() -> Vec<LiveProvider> {
     if let Ok(provider) = AnthropicProvider::from_env("claude-sonnet-4-6") {
         providers.push(LiveProvider::Anthropic(Box::new(provider)));
     }
-    if let Ok(provider) = OpenRouterProvider::from_env("openai/gpt-5.4") {
-        providers.push(LiveProvider::OpenRouter(Box::new(provider)));
+    if let Ok(provider) = GeminiProvider::from_env("gemini-2.5-flash") {
+        providers.push(LiveProvider::Google(Box::new(provider)));
     }
     providers
 }
@@ -132,7 +132,7 @@ async fn live_providers_emit_tool_calls_across_available_keys() {
             });
 
         let tool_call = response.content.iter().find_map(|content| match content {
-            CompletionContent::ToolCall(invocation) => Some(invocation),
+            CompletionContent::ToolCall(call) => Some(&call.invocation),
             CompletionContent::Text(_) => None,
             CompletionContent::ProviderToolResult { .. } => None,
         });

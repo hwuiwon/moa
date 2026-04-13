@@ -25,7 +25,7 @@ For Part B:
 - **`moa-core/src/types/completion.rs`** (from Step 61) — Contains `CompletionStream`.
 - **`moa-core/src/types/events_stream.rs`** (from Step 61) — Contains `EventStream`.
 - **`moa-providers/src/anthropic.rs`** — Creates `CompletionStream` instances.
-- **`moa-providers/src/openrouter.rs`** — Creates `CompletionStream` instances.
+- **`moa-providers/src/gemini.rs`** — Creates `CompletionStream` instances.
 - **`moa-providers/src/common.rs`** — May create or consume `CompletionStream`.
 - **`moa-core/src/traits.rs`** — `LLMProvider` trait returns `CompletionStream`. This is the key dependency.
 

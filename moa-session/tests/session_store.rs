@@ -340,6 +340,7 @@ async fn large_payload_offloaded_to_blob_store() {
             session_id.clone(),
             Event::BrainResponse {
                 text: large_text.clone(),
+                thought_signature: None,
                 model: "test-model".into(),
                 input_tokens: 1,
                 output_tokens: 1,
@@ -411,6 +412,7 @@ async fn identical_large_payloads_share_one_blob() {
                 session_id.clone(),
                 Event::BrainResponse {
                     text: payload.clone(),
+                    thought_signature: None,
                     model: "test-model".into(),
                     input_tokens: 1,
                     output_tokens: 1,
@@ -444,6 +446,7 @@ async fn fts_search_uses_blob_preview() {
             session_id.clone(),
             Event::BrainResponse {
                 text: payload.clone(),
+                thought_signature: None,
                 model: "test-model".into(),
                 input_tokens: 1,
                 output_tokens: 1,
@@ -480,6 +483,7 @@ async fn zero_threshold_disables_blob_offload() {
             session_id.clone(),
             Event::BrainResponse {
                 text: payload,
+                thought_signature: None,
                 model: "test-model".into(),
                 input_tokens: 1,
                 output_tokens: 1,

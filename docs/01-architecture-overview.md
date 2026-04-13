@@ -267,7 +267,7 @@ moa/
 ├── moa-hands/                    # Hand providers
 │   └── src/ { lib, local, daytona, e2b, mcp, router }
 ├── moa-providers/                # LLM provider implementations
-│   └── src/ { lib, anthropic, openai, openrouter, common }
+│   └── src/ { lib, anthropic, openai, gemini, common }
 ├── moa-orchestrator/             # Brain orchestration
 │   └── src/ { lib, temporal, local, cron }
 ├── moa-gateway/                  # Messaging gateway

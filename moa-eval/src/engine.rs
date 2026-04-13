@@ -561,6 +561,7 @@ mod tests {
                 output_tokens: 7,
                 cached_input_tokens: 0,
                 duration_ms: 3,
+                thought_signature: None,
             }))
         }
     }

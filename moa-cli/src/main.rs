@@ -729,9 +729,9 @@ async fn doctor_report(config: &MoaConfig, log_path: &Path) -> Result<String> {
             config.providers.openai.api_key_env
         ),
         format!(
-            "openrouter_key: {} ({})",
-            env_presence(&config.providers.openrouter.api_key_env),
-            config.providers.openrouter.api_key_env
+            "google_key: {} ({})",
+            env_presence(&config.providers.google.api_key_env),
+            config.providers.google.api_key_env
         ),
         format!("docker: {}", docker_status().await),
         format!("disk: {}", disk_status(config).await),

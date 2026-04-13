@@ -299,7 +299,7 @@ Built into the pipeline as runtime checks:
 |---|---|---|---|
 | Anthropic | Prompt prefix caching | 5 min (auto-extends) | Exact prefix match |
 | OpenAI | Automatic (50%+ prefix match) | ~5-10 min | Longest common prefix |
-| OpenRouter | Depends on downstream provider | Varies | Varies |
+| Google Gemini | 1M tokens | 64K-65K tokens | Native Google Search + function calling |
 
 The pipeline's stable prefix architecture works with all three — the first 4 stages produce an identical prefix on every turn.
 

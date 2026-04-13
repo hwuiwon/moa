@@ -13,6 +13,7 @@ use tracing::Instrument;
 
 use crate::common::{build_openai_client, build_responses_request, stream_responses_with_retry};
 use crate::instrumentation::LLMSpanRecorder;
+use crate::retry::RetryPolicy;
 
 const DEFAULT_STREAM_BUFFER: usize = 128;
 const DEFAULT_MAX_RETRIES: usize = 3;
@@ -29,7 +30,7 @@ pub struct OpenAIProvider {
     default_model: String,
     default_reasoning_effort: String,
     default_capabilities: ModelCapabilities,
-    max_retries: usize,
+    retry_policy: RetryPolicy,
     web_search_enabled: bool,
 }
 
@@ -56,7 +57,7 @@ impl OpenAIProvider {
             default_model,
             default_reasoning_effort: default_reasoning_effort.into(),
             default_capabilities,
-            max_retries: DEFAULT_MAX_RETRIES,
+            retry_policy: RetryPolicy::default().with_max_retries(DEFAULT_MAX_RETRIES),
             web_search_enabled: true,
         })
     }
@@ -102,7 +103,7 @@ impl OpenAIProvider {
 
     /// Overrides the retry budget for rate-limited requests.
     pub fn with_max_retries(mut self, max_retries: usize) -> Self {
-        self.max_retries = max_retries;
+        self.retry_policy = self.retry_policy.with_max_retries(max_retries);
         self
     }
 
@@ -152,7 +153,7 @@ impl LLMProvider for OpenAIProvider {
             }
         };
         let client = self.client.clone();
-        let max_retries = self.max_retries;
+        let retry_policy = self.retry_policy.clone();
         let (tx, rx) = mpsc::channel(DEFAULT_STREAM_BUFFER);
 
         let completion_task = tokio::spawn(
@@ -164,7 +165,7 @@ impl LLMProvider for OpenAIProvider {
                     tx,
                     resolved_model,
                     started_at,
-                    max_retries,
+                    retry_policy,
                     span_recorder,
                 )
                 .await

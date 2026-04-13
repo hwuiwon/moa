@@ -39,6 +39,6 @@ This specification is split into standalone documents. Each is self-contained bu
 | 11 | Context pipeline | 7-stage compilation with stable prefix caching |
 | 12 | Local runtime | Full local mode without any cloud providers |
 | 13 | TUI | Ratatui split-pane with memory browser |
-| 14 | LLM providers | OpenAI, Anthropic, OpenRouter at launch |
+| 14 | LLM providers | OpenAI, Anthropic, Google Gemini at launch |
 | 15 | Language | Rust |
 | 16 | Concurrent memory writes | Git-branch-per-brain with LLM reconciler cron |

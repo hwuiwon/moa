@@ -18,6 +18,8 @@ pub struct PendingToolApproval {
     pub tool_id: Uuid,
     /// Provider-specific tool-use identifier, when available.
     pub provider_tool_use_id: Option<String>,
+    /// Provider-specific thought signature that must be replayed with this tool call when present.
+    pub provider_thought_signature: Option<String>,
     /// Tool name.
     pub tool_name: String,
     /// Original tool input payload.
@@ -255,6 +257,7 @@ pub fn find_pending_tool_approval(events: &[EventRecord]) -> Option<PendingToolA
             Event::ToolCall {
                 tool_id,
                 provider_tool_use_id,
+                provider_thought_signature,
                 tool_name,
                 input,
                 ..
@@ -264,6 +267,7 @@ pub fn find_pending_tool_approval(events: &[EventRecord]) -> Option<PendingToolA
                     PendingToolApproval {
                         tool_id: *tool_id,
                         provider_tool_use_id: provider_tool_use_id.clone(),
+                        provider_thought_signature: provider_thought_signature.clone(),
                         tool_name: tool_name.clone(),
                         input: input.clone(),
                         decision: StoredApprovalDecision::AllowOnce,
@@ -308,6 +312,7 @@ pub fn find_resolved_pending_tool_approval(events: &[EventRecord]) -> Option<Pen
             Event::ToolCall {
                 tool_id,
                 provider_tool_use_id,
+                provider_thought_signature,
                 tool_name,
                 input,
                 ..
@@ -317,6 +322,7 @@ pub fn find_resolved_pending_tool_approval(events: &[EventRecord]) -> Option<Pen
                     PendingToolApproval {
                         tool_id: *tool_id,
                         provider_tool_use_id: provider_tool_use_id.clone(),
+                        provider_thought_signature: provider_thought_signature.clone(),
                         tool_name: tool_name.clone(),
                         input: input.clone(),
                         decision: StoredApprovalDecision::AllowOnce,
@@ -440,6 +446,7 @@ mod tests {
                     output_tokens: 2,
                     cached_input_tokens: 0,
                     duration_ms: 1,
+                    thought_signature: None,
                 },
             ))
         }
@@ -473,6 +480,7 @@ mod tests {
                 Event::ToolCall {
                     tool_id,
                     provider_tool_use_id: Some("fc_pending_1".to_string()),
+                    provider_thought_signature: None,
                     tool_name: "bash".to_string(),
                     input: serde_json::json!({ "cmd": "pwd" }),
                     hand_id: None,

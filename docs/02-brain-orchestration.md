@@ -545,7 +545,7 @@ scheduler.add(consolidation_job).await?;
 # ~/.moa/config.toml
 
 [general]
-default_provider = "anthropic"  # anthropic | openai | openrouter
+default_provider = "anthropic"  # anthropic | openai | google
 default_model = "claude-sonnet-4-6"
 reasoning_effort = "medium"     # low | medium | high | xhigh
 
@@ -555,8 +555,8 @@ api_key_env = "ANTHROPIC_API_KEY"  # read from env var
 [providers.openai]
 api_key_env = "OPENAI_API_KEY"
 
-[providers.openrouter]
-api_key_env = "OPENROUTER_API_KEY"
+[providers.google]
+api_key_env = "GOOGLE_API_KEY"
 
 [database]
 backend = "turso"

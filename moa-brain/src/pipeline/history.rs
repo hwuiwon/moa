@@ -181,17 +181,25 @@ fn event_to_context_message(record: &EventRecord) -> Option<Result<ContextMessag
     match &record.event {
         Event::UserMessage { text, .. } => Some(Ok(ContextMessage::user(text.clone()))),
         Event::QueuedMessage { text, .. } => Some(Ok(ContextMessage::user(text.clone()))),
-        Event::BrainResponse { text, .. } => Some(Ok(ContextMessage::assistant(text.clone()))),
+        Event::BrainResponse {
+            text,
+            thought_signature,
+            ..
+        } => Some(Ok(ContextMessage::assistant_with_thought_signature(
+            text.clone(),
+            thought_signature.clone(),
+        ))),
         Event::ToolCall {
             tool_id,
             provider_tool_use_id,
+            provider_thought_signature,
             tool_name,
             input,
             ..
         } => Some(
             serde_json::to_string(input)
                 .map(|serialized| {
-                    ContextMessage::assistant_tool_call(
+                    ContextMessage::assistant_tool_call_with_thought_signature(
                         moa_core::ToolInvocation {
                             id: Some(
                                 provider_tool_use_id
@@ -202,6 +210,7 @@ fn event_to_context_message(record: &EventRecord) -> Option<Result<ContextMessag
                             input: input.clone(),
                         },
                         format!("<tool_call name=\"{tool_name}\">{serialized}</tool_call>"),
+                        provider_thought_signature.clone(),
                     )
                 })
                 .map_err(Into::into),
@@ -396,6 +405,7 @@ mod tests {
                 output_tokens: 40,
                 cached_input_tokens: 0,
                 duration_ms: 25,
+            thought_signature: None,
             }))
         }
     }
@@ -466,6 +476,7 @@ mod tests {
                     output_tokens: 4,
                     cost_cents: 1,
                     duration_ms: 100,
+                    thought_signature: None,
                 },
             ),
         ];
@@ -526,6 +537,7 @@ mod tests {
             Event::ToolCall {
                 tool_id,
                 provider_tool_use_id: Some("toolu_history_call".to_string()),
+                provider_thought_signature: None,
                 tool_name: "bash".to_string(),
                 input: serde_json::json!({ "cmd": "pwd" }),
                 hand_id: None,

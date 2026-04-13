@@ -61,6 +61,9 @@ pub enum Event {
     BrainResponse {
         /// Response text.
         text: String,
+        /// Provider-specific thought signature that should be replayed on the next turn when present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
         /// Model identifier.
         model: String,
         /// Input token count.
@@ -79,6 +82,9 @@ pub enum Event {
         /// Provider-specific tool-use identifier, when available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_tool_use_id: Option<String>,
+        /// Provider-specific thought signature that must be replayed with this tool call when present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_thought_signature: Option<String>,
         /// Tool name.
         tool_name: String,
         /// Full tool input.
@@ -377,6 +383,7 @@ mod tests {
     fn brain_response_event_has_cost_fields() {
         let event = Event::BrainResponse {
             text: "Hi there".to_string(),
+            thought_signature: None,
             model: "claude-sonnet-4-6".to_string(),
             input_tokens: 100,
             output_tokens: 50,
@@ -403,6 +410,7 @@ mod tests {
             Event::ToolCall {
                 tool_id: Uuid::new_v4(),
                 provider_tool_use_id: Some("toolu_123".into()),
+                provider_thought_signature: None,
                 tool_name: "bash".into(),
                 input: json!({}),
                 hand_id: None,

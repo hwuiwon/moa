@@ -48,7 +48,7 @@ For the trait definitions, copy them exactly from `docs/01-architecture-overview
 
 For the `Event` enum, follow the definition in `docs/05-session-event-log.md`. Each variant carries its data inline. Use `serde_json::Value` for the `ToolCall.input` field.
 
-For config, define a `MoaConfig` struct that deserializes from TOML. It should have sections: `general`, `providers` (anthropic, openai, openrouter), `local`, `cloud`, `gateway`, `tui`, `permissions`. Use `Option<T>` for cloud-only fields. Provide `MoaConfig::load()` that reads from `~/.moa/config.toml` and merges with environment variables.
+For config, define a `MoaConfig` struct that deserializes from TOML. It should have sections: `general`, `providers` (anthropic, openai, google), `local`, `cloud`, `gateway`, `tui`, `permissions`. Use `Option<T>` for cloud-only fields. Provide `MoaConfig::load()` that reads from `~/.moa/config.toml` and merges with environment variables.
 
 ## Deliverables
 

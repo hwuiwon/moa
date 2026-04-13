@@ -213,10 +213,13 @@ async fn provider_streams_tool_use_blocks() {
     let first_block = stream.next().await.unwrap().unwrap();
     assert_eq!(
         first_block,
-        CompletionContent::ToolCall(moa_core::ToolInvocation {
-            id: Some("toolu_1".to_string()),
-            name: "bash".to_string(),
-            input: serde_json::json!({ "cmd": "pwd" }),
+        CompletionContent::ToolCall(moa_core::ToolCallContent {
+            invocation: moa_core::ToolInvocation {
+                id: Some("toolu_1".to_string()),
+                name: "bash".to_string(),
+                input: serde_json::json!({ "cmd": "pwd" }),
+            },
+            provider_metadata: None,
         })
     );
 

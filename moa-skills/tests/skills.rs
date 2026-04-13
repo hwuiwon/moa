@@ -145,6 +145,7 @@ impl LLMProvider for MockLlm {
             output_tokens: 20,
             cached_input_tokens: 0,
             duration_ms: 1,
+            thought_signature: None,
         }))
     }
 }
@@ -205,6 +206,7 @@ impl LLMProvider for ImprovementAndEvalLlm {
             output_tokens: 20,
             cached_input_tokens: 0,
             duration_ms: 1,
+            thought_signature: None,
         }))
     }
 }
@@ -236,6 +238,7 @@ fn tool_rich_events() -> Vec<EventRecord> {
                 Event::ToolCall {
                     tool_id: Uuid::new_v4(),
                     provider_tool_use_id: None,
+                    provider_thought_signature: None,
                     tool_name: if index % 2 == 0 {
                         "bash".to_string()
                     } else {

@@ -25,7 +25,7 @@ import type { SettingsSectionProps } from "@/components/settings/settings-types"
 
 const providersSettingsSchema = arktype({
   defaultModel: "string > 0",
-  defaultProvider: "'openai' | 'anthropic' | 'openrouter'",
+  defaultProvider: "'openai' | 'anthropic' | 'google'",
 });
 
 type ProvidersSettingsValues = typeof providersSettingsSchema.infer;
@@ -99,13 +99,13 @@ export function ProvidersSettings({
                         <SelectContent>
                           <SelectItem value="openai">OpenAI</SelectItem>
                           <SelectItem value="anthropic">Anthropic</SelectItem>
-                          <SelectItem value="openrouter">OpenRouter</SelectItem>
+                          <SelectItem value="google">Google</SelectItem>
                         </SelectContent>
                       </Select>
                     )}
                   />
-                  <FieldDescription>
-                    Determines which provider is inferred when the model name is ambiguous.
+                <FieldDescription>
+                    Determines which provider is used for new sessions.
                   </FieldDescription>
                   <FieldError errors={[form.formState.errors.defaultProvider]} />
                 </FieldContent>
@@ -154,7 +154,7 @@ export function ProvidersSettings({
 
 function valuesFromConfig(config: SettingsSectionProps["config"]): ProvidersSettingsValues {
   const defaultProvider =
-    config.defaultProvider === "anthropic" || config.defaultProvider === "openrouter"
+    config.defaultProvider === "anthropic" || config.defaultProvider === "google"
       ? config.defaultProvider
       : "openai";
 

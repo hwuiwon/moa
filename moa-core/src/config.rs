@@ -81,8 +81,8 @@ impl MoaConfig {
                 Self::default().providers.openai.api_key_env,
             )?
             .set_default(
-                "providers.openrouter.api_key_env",
-                Self::default().providers.openrouter.api_key_env,
+                "providers.google.api_key_env",
+                Self::default().providers.google.api_key_env,
             )?
             .set_default(
                 "database.backend",
@@ -491,8 +491,8 @@ pub struct ProvidersConfig {
     pub anthropic: ProviderCredentialConfig,
     /// OpenAI credentials.
     pub openai: ProviderCredentialConfig,
-    /// OpenRouter credentials.
-    pub openrouter: ProviderCredentialConfig,
+    /// Google Gemini credentials.
+    pub google: ProviderCredentialConfig,
 }
 
 impl Default for ProvidersConfig {
@@ -500,7 +500,7 @@ impl Default for ProvidersConfig {
         Self {
             anthropic: ProviderCredentialConfig::new("ANTHROPIC_API_KEY"),
             openai: ProviderCredentialConfig::new("OPENAI_API_KEY"),
-            openrouter: ProviderCredentialConfig::new("OPENROUTER_API_KEY"),
+            google: ProviderCredentialConfig::new("GOOGLE_API_KEY"),
         }
     }
 }

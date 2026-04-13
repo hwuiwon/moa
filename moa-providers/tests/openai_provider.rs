@@ -8,7 +8,7 @@ use std::time::Duration;
 use moa_core::{
     CompletionContent, CompletionRequest, ContextMessage, LLMProvider, StopReason, ToolContent,
 };
-use moa_providers::{OpenAIProvider, OpenRouterProvider};
+use moa_providers::OpenAIProvider;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::time::timeout;
@@ -334,10 +334,13 @@ async fn openai_provider_streams_tool_calls_from_responses_events() {
 
     assert_eq!(
         first_block,
-        CompletionContent::ToolCall(moa_core::ToolInvocation {
-            id: Some("fc_1".to_string()),
-            name: "bash".to_string(),
-            input: serde_json::json!({ "cmd": "pwd" }),
+        CompletionContent::ToolCall(moa_core::ToolCallContent {
+            invocation: moa_core::ToolInvocation {
+                id: Some("fc_1".to_string()),
+                name: "bash".to_string(),
+                input: serde_json::json!({ "cmd": "pwd" }),
+            },
+            provider_metadata: None,
         })
     );
 
@@ -409,184 +412,6 @@ async fn openai_provider_retries_after_rate_limit() {
 
     assert_eq!(response.text, "ok");
     assert_eq!(request_count.load(Ordering::SeqCst), 2);
-
-    server.abort();
-}
-
-#[tokio::test]
-async fn openrouter_provider_sets_attribution_headers() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut buffer = vec![0_u8; 8192];
-        let read = socket.read(&mut buffer).await.unwrap();
-        let request = String::from_utf8_lossy(&buffer[..read]).to_string();
-        let request_lower = request.to_ascii_lowercase();
-
-        assert!(request.contains("POST /api/v1/responses"));
-        assert!(request_lower.contains("http-referer: https://github.com/hwuiwon/moa"));
-        assert!(request_lower.contains("x-title: moa"));
-
-        socket
-            .write_all(simple_text_stream("ok", "openai/gpt-5.4", 8, 2, 0).as_bytes())
-            .await
-            .unwrap();
-        socket.flush().await.unwrap();
-    });
-
-    let provider = OpenRouterProvider::new("test-key", "openai/gpt-5.4")
-        .unwrap()
-        .with_api_base(format!("http://{address}/api/v1"))
-        .unwrap()
-        .with_max_retries(0);
-
-    let response = provider
-        .complete(CompletionRequest::simple("hello"))
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
-
-    assert_eq!(response.text, "ok");
-
-    server.abort();
-}
-
-#[tokio::test]
-async fn openrouter_provider_uses_server_web_search_tool_for_explicit_web_prompts() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut buffer = vec![0_u8; 16384];
-        let read = socket.read(&mut buffer).await.unwrap();
-        let request = String::from_utf8_lossy(&buffer[..read]).to_string();
-
-        assert!(request.contains("\"model\":\"openai/gpt-5.4\""));
-        assert!(request.contains("\"type\":\"openrouter:web_search\""));
-        assert!(request.contains("\"tool_choice\":\"auto\""));
-        assert!(request.contains("\"parallel_tool_calls\":true"));
-        assert!(request.contains("\"type\":\"input_text\""));
-
-        socket
-            .write_all(simple_text_stream("ok", "openai/gpt-5.4", 8, 2, 0).as_bytes())
-            .await
-            .unwrap();
-        socket.flush().await.unwrap();
-    });
-
-    let provider = OpenRouterProvider::new("test-key", "openai/gpt-5.4")
-        .unwrap()
-        .with_api_base(format!("http://{address}/api/v1"))
-        .unwrap()
-        .with_max_retries(0);
-
-    let response = provider
-        .complete(CompletionRequest::simple(
-            "What happened in the news today?",
-        ))
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
-    assert_eq!(response.text, "ok");
-
-    server.abort();
-}
-
-#[tokio::test]
-async fn openrouter_provider_omits_native_web_search_when_disabled() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut buffer = vec![0_u8; 16384];
-        let read = socket.read(&mut buffer).await.unwrap();
-        let request = String::from_utf8_lossy(&buffer[..read]).to_string();
-
-        assert!(!request.contains("\"type\":\"openrouter:web_search\""));
-        assert!(
-            request.contains("\"tool_choice\":\"none\"")
-                || request.contains("\"tool_choice\":{\"mode\":\"none\"")
-        );
-
-        socket
-            .write_all(simple_text_stream("ok", "openai/gpt-5.4", 8, 2, 0).as_bytes())
-            .await
-            .unwrap();
-        socket.flush().await.unwrap();
-    });
-
-    let provider = OpenRouterProvider::new("test-key", "openai/gpt-5.4")
-        .unwrap()
-        .with_api_base(format!("http://{address}/api/v1"))
-        .unwrap()
-        .with_max_retries(0)
-        .with_web_search_enabled(false);
-
-    let response = provider
-        .complete(CompletionRequest::simple(
-            "What happened in the news today?",
-        ))
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
-    assert_eq!(response.text, "ok");
-
-    server.abort();
-}
-
-#[tokio::test]
-async fn openrouter_provider_ignores_processing_heartbeats_and_streams_text() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut buffer = vec![0_u8; 16384];
-        let _ = socket.read(&mut buffer).await.unwrap();
-
-        let response = concat!(
-            "HTTP/1.1 200 OK\r\n",
-            "content-type: text/event-stream\r\n",
-            "cache-control: no-cache\r\n",
-            "connection: keep-alive\r\n\r\n",
-            ": OPENROUTER PROCESSING\r\n\r\n",
-            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1,\"model\":\"openai/gpt-5.4\",\"output\":[],\"status\":\"in_progress\"},\"sequence_number\":0}\r\n\r\n",
-            ": OPENROUTER PROCESSING\r\n\r\n",
-            "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\",\"logprobs\":null}\r\n\r\n",
-            "data: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1,\"completed_at\":2,\"model\":\"openai/gpt-5.4\",\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[],\"logprobs\":null}]}],\"status\":\"completed\",\"usage\":{\"input_tokens\":8,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":2,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":10}}}\r\n\r\n",
-        );
-
-        socket.write_all(response.as_bytes()).await.unwrap();
-        socket.flush().await.unwrap();
-    });
-
-    let provider = OpenRouterProvider::new("test-key", "openai/gpt-5.4")
-        .unwrap()
-        .with_api_base(format!("http://{address}/api/v1"))
-        .unwrap()
-        .with_max_retries(0);
-
-    let response = provider
-        .complete(CompletionRequest::simple(
-            "What happened in the news today?",
-        ))
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
-
-    assert_eq!(response.text, "ok");
-    assert_eq!(
-        response.content,
-        vec![CompletionContent::Text("ok".to_string())]
-    );
 
     server.abort();
 }
@@ -741,62 +566,30 @@ async fn openai_provider_streams_parallel_tool_calls_in_order() {
 
     assert_eq!(
         first,
-        CompletionContent::ToolCall(moa_core::ToolInvocation {
-            id: Some("fc_1".to_string()),
-            name: "bash".to_string(),
-            input: serde_json::json!({ "cmd": "pwd" }),
+        CompletionContent::ToolCall(moa_core::ToolCallContent {
+            invocation: moa_core::ToolInvocation {
+                id: Some("fc_1".to_string()),
+                name: "bash".to_string(),
+                input: serde_json::json!({ "cmd": "pwd" }),
+            },
+            provider_metadata: None,
         })
     );
     assert_eq!(
         second,
-        CompletionContent::ToolCall(moa_core::ToolInvocation {
-            id: Some("fc_2".to_string()),
-            name: "file_read".to_string(),
-            input: serde_json::json!({ "path": "Cargo.toml" }),
+        CompletionContent::ToolCall(moa_core::ToolCallContent {
+            invocation: moa_core::ToolInvocation {
+                id: Some("fc_2".to_string()),
+                name: "file_read".to_string(),
+                input: serde_json::json!({ "path": "Cargo.toml" }),
+            },
+            provider_metadata: None,
         })
     );
 
     let response = stream.collect().await.unwrap();
     assert_eq!(response.stop_reason, StopReason::ToolUse);
     assert_eq!(response.content.len(), 2);
-
-    server.abort();
-}
-
-#[tokio::test]
-async fn openrouter_provider_normalizes_bare_claude_models() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut buffer = vec![0_u8; 8192];
-        let read = socket.read(&mut buffer).await.unwrap();
-        let request = String::from_utf8_lossy(&buffer[..read]).to_string();
-
-        assert!(request.contains("\"model\":\"anthropic/claude-sonnet-4-6\""));
-
-        socket
-            .write_all(simple_text_stream("ok", "anthropic/claude-sonnet-4-6", 8, 2, 0).as_bytes())
-            .await
-            .unwrap();
-        socket.flush().await.unwrap();
-    });
-
-    let provider = OpenRouterProvider::new("test-key", "claude-sonnet-4-6")
-        .unwrap()
-        .with_api_base(format!("http://{address}/api/v1"))
-        .unwrap()
-        .with_max_retries(0);
-
-    let response = provider
-        .complete(CompletionRequest::simple("hello"))
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
-
-    assert_eq!(response.text, "ok");
 
     server.abort();
 }

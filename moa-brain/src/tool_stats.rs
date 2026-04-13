@@ -759,6 +759,7 @@ mod tests {
                 Event::ToolCall {
                     tool_id,
                     provider_tool_use_id: None,
+                    provider_thought_signature: None,
                     tool_name: "bash".to_string(),
                     input: serde_json::json!({"cmd": "npm test"}),
                     hand_id: None,
