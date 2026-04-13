@@ -19,7 +19,6 @@ target
 # Frontend
 node_modules
 dist
-pnpm-lock.yaml
 
 # Secrets
 .env

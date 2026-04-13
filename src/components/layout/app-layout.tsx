@@ -7,8 +7,7 @@ import {
   useRouterState,
 } from "@tanstack/react-router";
 
-import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
+import { CommandPalette } from "@/components/command-palette";
 import { SessionInfoPanel } from "@/components/layout/session-info-panel";
 import { SessionTabBar } from "@/components/layout/session-tab-bar";
 import { queryKeys } from "@/lib/query-keys";
@@ -275,30 +274,27 @@ export function AppLayout() {
         </div>
       </div>
 
-      {commandPaletteOpen ? (
-        <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 px-4 pt-[16vh] backdrop-blur-sm">
-          <div className="w-full max-w-xl rounded-xl border border-border bg-popover p-6 shadow-lg">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <p className="text-xs uppercase tracking-widest text-muted-foreground">
-                  Command Palette
-                </p>
-                <h2 className="mt-2 text-xl font-semibold">
-                  Coming next
-                </h2>
-              </div>
-              <Button onClick={() => setCommandPaletteOpen(false)} variant="ghost">
-                Close
-              </Button>
-            </div>
-            <Separator className="my-5" />
-            <p className="text-sm leading-6 text-muted-foreground">
-              The global shortcut is live. Palette actions land in the next UI
-              pass once chat interactions and tool controls are in place.
-            </p>
-          </div>
-        </div>
-      ) : null}
+      <CommandPalette
+        activeSessionId={activeSessionId}
+        activeView={activeView}
+        onCreateSession={() => createSession.mutate()}
+        onOpenChange={setCommandPaletteOpen}
+        onOpenChat={() => {
+          if (activeSessionId) {
+            navigate({ to: "/chat/$sessionId", params: { sessionId: activeSessionId } });
+            return;
+          }
+
+          navigate({ to: "/chat" });
+        }}
+        onOpenMemory={() => navigate({ to: "/memory" })}
+        onOpenSettings={() => navigate({ to: "/settings" })}
+        onSelectSession={activateSession}
+        onToggleDetailPanel={toggleDetailPanel}
+        onToggleSidebar={toggleSidebar}
+        open={commandPaletteOpen}
+        sessions={sessions.data ?? []}
+      />
     </div>
   );
 }
