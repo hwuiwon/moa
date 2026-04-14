@@ -711,11 +711,18 @@ impl AnthropicStreamState {
                 let input = if partial_json.trim().is_empty() {
                     Value::Object(Map::new())
                 } else {
-                    serde_json::from_str(&partial_json).map_err(|error| {
-                        MoaError::SerializationError(format!(
-                            "failed to parse Anthropic tool input JSON: {error}"
-                        ))
-                    })?
+                    match serde_json::from_str(&partial_json) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                tool_name = %name,
+                                payload_bytes = partial_json.len(),
+                                "Anthropic tool input JSON failed to parse; falling back to empty object"
+                            );
+                            Value::Object(Map::new())
+                        }
+                    }
                 };
                 let tool_call = ToolInvocation {
                     id: Some(id),
@@ -761,7 +768,15 @@ impl AnthropicStreamState {
                         } else {
                             match serde_json::from_str(partial_json) {
                                 Ok(value) => value,
-                                Err(_) => Value::Object(Map::new()),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        tool_name = %name,
+                                        payload_bytes = partial_json.len(),
+                                        "Anthropic tool input JSON failed to parse on finish; falling back to empty object"
+                                    );
+                                    Value::Object(Map::new())
+                                }
                             }
                         };
                         self.completed_content[index] =

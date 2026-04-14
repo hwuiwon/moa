@@ -1,6 +1,6 @@
 //! Bottom status bar showing connection, turn, token, and cost counters.
 
-use gpui::{App, Context, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb};
+use gpui::{App, Context, IntoElement, ParentElement, Render, Styled, Window, div, px};
 use gpui_component::ActiveTheme;
 
 use crate::services::{ServiceBridgeHandle, ServiceStatus};
@@ -47,11 +47,9 @@ impl Render for MoaStatusBar {
         let status = self.bridge.entity().read(cx).status().clone();
 
         let (dot_color, label_text) = match &status {
-            ServiceStatus::Initializing => (rgb(0xeab308).into(), "initializing".to_string()),
-            ServiceStatus::Ready => (rgb(0x10b981).into(), "ready".to_string()),
-            ServiceStatus::Degraded { message } => {
-                (rgb(0xf97316).into(), format!("degraded: {message}"))
-            }
+            ServiceStatus::Initializing => (theme.warning, "initializing".to_string()),
+            ServiceStatus::Ready => (theme.success, "ready".to_string()),
+            ServiceStatus::Degraded { message } => (theme.warning, format!("degraded: {message}")),
             ServiceStatus::Error(err) => (theme.danger, format!("error: {err}")),
         };
 

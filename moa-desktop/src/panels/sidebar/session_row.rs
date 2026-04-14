@@ -1,8 +1,10 @@
 //! Row component rendering one session in the sidebar list.
 
-use gpui::{App, ElementId, RenderOnce, SharedString, div, prelude::*, px, rgb};
+use gpui::{App, ElementId, RenderOnce, SharedString, div, prelude::*, px};
 use gpui_component::ActiveTheme;
 use moa_core::{SessionId, SessionStatus};
+
+use crate::components::badges::{status_color, status_label};
 
 use super::time::relative;
 
@@ -12,42 +14,29 @@ pub struct SessionRow {
     pub id: SessionId,
     pub title: SharedString,
     pub status: SessionStatus,
-    pub model: SharedString,
     pub last_message: Option<SharedString>,
     pub updated: chrono::DateTime<chrono::Utc>,
     pub selected: bool,
 }
 
-impl SessionRow {
-    fn status_color(status: &SessionStatus) -> u32 {
-        match status {
-            SessionStatus::Running => 0x3b82f6,
-            SessionStatus::Completed => 0x10b981,
-            SessionStatus::Failed => 0xef4444,
-            SessionStatus::WaitingApproval => 0xeab308,
-            SessionStatus::Paused => 0x9ca3af,
-            SessionStatus::Cancelled => 0x6b7280,
-            SessionStatus::Created => 0x8b5cf6,
-        }
+/// Collapses newlines and truncates a preview string to a single line.
+fn truncate_single_line(msg: SharedString, limit: usize) -> SharedString {
+    let cleaned: String = msg
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.chars().count() <= limit {
+        return SharedString::from(trimmed.to_string());
     }
-
-    fn status_label(status: &SessionStatus) -> &'static str {
-        match status {
-            SessionStatus::Running => "running",
-            SessionStatus::Completed => "done",
-            SessionStatus::Failed => "failed",
-            SessionStatus::WaitingApproval => "needs approval",
-            SessionStatus::Paused => "paused",
-            SessionStatus::Cancelled => "cancelled",
-            SessionStatus::Created => "new",
-        }
-    }
+    let short: String = trimmed.chars().take(limit).collect();
+    SharedString::from(format!("{short}…"))
 }
 
 impl RenderOnce for SessionRow {
     fn render(self, _window: &mut gpui::Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.theme();
-        let dot = rgb(Self::status_color(&self.status));
+        let theme = cx.theme().clone();
+        let dot = status_color(cx, &self.status);
         let row_bg = if self.selected {
             theme.accent
         } else {
@@ -77,7 +66,7 @@ impl RenderOnce for SessionRow {
             .bg(row_bg)
             .border_l_2()
             .border_color(if self.selected {
-                rgb(Self::status_color(&self.status)).into()
+                dot
             } else {
                 theme.transparent
             })
@@ -107,21 +96,12 @@ impl RenderOnce for SessionRow {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().size(px(8.)).rounded_full().bg(dot))
+                    .child(div().size(px(6.0)).rounded_full().bg(dot))
                     .child(
                         div()
                             .text_xs()
                             .text_color(muted_fg)
-                            .child(Self::status_label(&self.status)),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .px_1p5()
-                            .rounded_sm()
-                            .bg(theme.muted)
-                            .text_color(theme.muted_foreground)
-                            .child(self.model.clone()),
+                            .child(status_label(&self.status)),
                     ),
             )
             .when_some(self.last_message, |row, msg| {
@@ -130,7 +110,9 @@ impl RenderOnce for SessionRow {
                         .text_xs()
                         .text_color(muted_fg)
                         .overflow_hidden()
-                        .child(msg),
+                        .max_h(px(18.0))
+                        .whitespace_nowrap()
+                        .child(truncate_single_line(msg, 80)),
                 )
             })
     }

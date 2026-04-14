@@ -3,13 +3,18 @@
 use std::time::Duration;
 
 use gpui::{
-    App, Context, ElementId, EventEmitter, IntoElement, MouseButton, Render, SharedString, Task,
-    Window, div, prelude::*, px, rems,
+    Context, ElementId, EventEmitter, IntoElement, MouseButton, Render, ScrollHandle, SharedString,
+    Task, Window, div, prelude::*, px, rems,
 };
 use gpui_component::ActiveTheme;
 use moa_core::SessionId;
 use moa_runtime::SessionPreview;
 
+use crate::components::{
+    empty_state::{empty_state, with_action, with_keyboard_hint},
+    error_banner::{error_banner, with_retry},
+    skeletons,
+};
 use crate::services::{ServiceBridgeHandle, ServiceStatus, bridge::spawn_into};
 
 use super::session_row::SessionRow;
@@ -29,6 +34,11 @@ pub struct SessionList {
     loading: bool,
     last_error: Option<String>,
     pending: bool,
+    scroll: ScrollHandle,
+    /// `true` until the first successful refresh fires an auto-select of
+    /// the newest session. Prevents later refreshes from stealing focus
+    /// back to the top preview if the user has picked something else.
+    auto_select_pending: bool,
     _poll_task: Option<Task<()>>,
 }
 
@@ -59,6 +69,8 @@ impl SessionList {
             loading: false,
             last_error: None,
             pending: false,
+            scroll: ScrollHandle::default(),
+            auto_select_pending: true,
             _poll_task: Some(poll_task),
         };
         this.refresh(cx);
@@ -109,13 +121,34 @@ impl SessionList {
             handle,
             entity,
             async move { chat.list_session_previews().await },
-            |this, result, _cx| {
+            |this, result, cx| {
                 this.pending = false;
                 this.loading = false;
                 match result {
                     Ok(previews) => {
                         this.previews = previews;
                         this.last_error = None;
+                        // Drop a stale selection: if the previously
+                        // selected session was deleted/pruned, the row
+                        // is no longer in the list and the highlight
+                        // would point at nothing.
+                        if let Some(id) = this.selected.as_ref()
+                            && !this.previews.iter().any(|p| &p.summary.session_id == id)
+                        {
+                            this.selected = None;
+                        }
+                        // First successful load: auto-select the most
+                        // recent session so the chat panel isn't empty.
+                        // `list_session_previews` returns newest-first
+                        // (`ORDER BY updated_at DESC` in the store).
+                        if this.auto_select_pending && this.selected.is_none() {
+                            this.auto_select_pending = false;
+                            if let Some(first) = this.previews.first() {
+                                let id = first.summary.session_id.clone();
+                                this.selected = Some(id.clone());
+                                cx.emit(SessionSelected(id));
+                            }
+                        }
                     }
                     Err(err) => {
                         this.last_error = Some(format!("{err:#}"));
@@ -125,7 +158,8 @@ impl SessionList {
         );
     }
 
-    fn create_session(&mut self, cx: &mut Context<Self>) {
+    /// Creates a new session, selects it, and emits `SessionSelected`.
+    pub fn create_session(&mut self, cx: &mut Context<Self>) {
         let bridge = self.bridge.entity().read(cx);
         if !matches!(bridge.status(), ServiceStatus::Ready) {
             return;
@@ -157,30 +191,6 @@ impl SessionList {
         self.selected = Some(id.clone());
         cx.emit(SessionSelected(id));
         cx.notify();
-    }
-
-    fn render_empty_state(&self, cx: &App) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .flex_1()
-            .gap_2()
-            .p_4()
-            .child(
-                div()
-                    .text_color(theme.foreground)
-                    .text_size(rems(0.95))
-                    .child("No sessions yet"),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("Start your first conversation"),
-            )
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -236,33 +246,56 @@ impl Render for SessionList {
         let header = self.render_header(cx);
 
         let body: gpui::AnyElement = if let Some(err) = &self.last_error {
-            div()
-                .p_3()
-                .text_xs()
-                .text_color(theme.danger)
-                .child(format!("error: {err}"))
-                .into_any_element()
+            let detail = err.clone();
+            with_retry(
+                error_banner(cx, "Couldn't load sessions", &detail),
+                cx,
+                cx.listener(|this, _, _, cx| {
+                    this.last_error = None;
+                    this.refresh(cx);
+                }),
+            )
+            .into_any_element()
         } else if self.loading && filtered.is_empty() {
-            div()
-                .p_3()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child("Loading sessions…")
-                .into_any_element()
+            skeletons::session_rows(5).into_any_element()
         } else if filtered.is_empty() && self.query.is_empty() {
-            self.render_empty_state(cx).into_any_element()
+            with_keyboard_hint(
+                with_action(
+                    empty_state(
+                        cx,
+                        "Welcome to MOA",
+                        "No sessions yet — start your first one to begin.",
+                    ),
+                    cx,
+                    "+ New Session",
+                    "empty-new-session",
+                    cx.listener(|this, _, _, cx| this.create_session(cx)),
+                ),
+                cx,
+                if cfg!(target_os = "macos") {
+                    "⌘N"
+                } else {
+                    "Ctrl+N"
+                },
+            )
+            .into_any_element()
         } else if filtered.is_empty() {
-            div()
-                .p_3()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(format!("No matches for \"{}\"", self.query))
-                .into_any_element()
+            let q = self.query.clone();
+            empty_state(
+                cx,
+                "No matches",
+                SharedString::from(format!("Nothing matches “{q}”.")),
+            )
+            .into_any_element()
         } else {
             let mut list = div()
                 .id("session-list")
+                .track_scroll(&self.scroll)
                 .flex()
                 .flex_col()
+                .flex_1()
+                .min_h_0()
+                .size_full()
                 .overflow_y_scroll();
             for preview in filtered {
                 let session_id = preview.summary.session_id.clone();
@@ -275,7 +308,6 @@ impl Render for SessionList {
                     id: session_id.clone(),
                     title: SharedString::from(title),
                     status: preview.summary.status.clone(),
-                    model: SharedString::from(preview.summary.model.clone()),
                     last_message: preview.last_message.clone().map(SharedString::from),
                     updated: preview.summary.updated_at,
                     selected: self.is_selected(&session_id),
@@ -303,6 +335,7 @@ impl Render for SessionList {
             .flex()
             .flex_col()
             .size_full()
+            .min_h_0()
             .child(header)
             .child(
                 // Search bar

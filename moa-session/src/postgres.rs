@@ -755,6 +755,36 @@ impl SessionStore for PostgresSessionStore {
         u32::try_from(total)
             .map_err(|_| MoaError::StorageError("workspace spend exceeded u32 range".to_string()))
     }
+
+    /// Permanently removes a session and its dependent rows. See the
+    /// `TursoSessionStore` counterpart for the ordering rationale;
+    /// Postgres doesn't use an FTS5 external-content table so there's no
+    /// events_fts step.
+    async fn delete_session(&self, session_id: moa_core::SessionId) -> Result<()> {
+        let events = self.table_name("events");
+        let pending_signals = self.table_name("pending_signals");
+        let sessions = self.table_name("sessions");
+
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
+        for sql in [
+            format!("DELETE FROM {events} WHERE session_id = $1"),
+            format!("DELETE FROM {pending_signals} WHERE session_id = $1"),
+            format!("DELETE FROM {sessions} WHERE id = $1"),
+        ] {
+            sqlx::query(&sql)
+                .bind(session_id.0)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx_error)?;
+        }
+        transaction.commit().await.map_err(map_sqlx_error)?;
+
+        if let Err(err) = self.blob_store.delete_session(&session_id).await {
+            tracing::warn!(%err, session_id = %session_id, "blob cleanup failed after session delete");
+        }
+
+        Ok(())
+    }
 }
 
 impl PostgresSessionStore {

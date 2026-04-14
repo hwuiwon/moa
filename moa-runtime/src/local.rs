@@ -316,21 +316,21 @@ impl LocalChatRuntime {
         })
     }
 
-    /// Relays live runtime updates for one session until the receiver closes.
+    /// Relays live runtime updates until the receiver closes. Returns
+    /// `Ok(())` immediately when no live actor exists — historical
+    /// playback comes from `session_events`.
     pub async fn observe_session(
         &self,
         session_id: SessionId,
         event_tx: mpsc::UnboundedSender<SessionRuntimeEvent>,
     ) -> Result<()> {
-        let mut runtime_rx = self
+        let Some(mut runtime_rx) = self
             .orchestrator
             .observe_runtime(session_id.clone())
             .await?
-            .ok_or_else(|| {
-                MoaError::ProviderError(
-                    "live runtime observation is unavailable for this session".to_string(),
-                )
-            })?;
+        else {
+            return Ok(());
+        };
         relay_session_runtime_events(&mut runtime_rx, session_id, event_tx).await
     }
 

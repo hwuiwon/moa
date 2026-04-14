@@ -92,6 +92,11 @@ impl LocalOrchestrator {
         };
         orchestrator.register_memory_maintenance_job().await?;
         orchestrator.register_neon_checkpoint_cleanup_job().await?;
+        // Non-fatal: if the sweep errors out, the app still boots and the
+        // empty sessions just linger until the next startup.
+        if let Err(err) = orchestrator.prune_empty_sessions().await {
+            tracing::warn!(%err, "prune_empty_sessions skipped on startup");
+        }
         Ok(orchestrator)
     }
 
@@ -146,6 +151,63 @@ impl LocalOrchestrator {
     /// Returns the configured default model identifier.
     pub fn model(&self) -> &str {
         &self.config.general.default_model
+    }
+
+    /// Deletes sessions whose event log contains no user-authored events.
+    ///
+    /// A fresh session is created eagerly when the UI clicks `+ New Session`
+    /// — which writes a `sessions` row plus a `SessionCreated` event. If
+    /// the user never submits a prompt the session just clutters the
+    /// sidebar, so this sweep drops any session whose only events are
+    /// bookkeeping (`SessionCreated`, `SessionStatusChanged`, notices).
+    /// Invoked at orchestrator startup. Returns the number pruned.
+    pub async fn prune_empty_sessions(&self) -> Result<u32> {
+        let sessions = self
+            .session_store
+            .list_sessions(SessionFilter::default())
+            .await?;
+
+        let mut pruned: u32 = 0;
+        for summary in sessions {
+            // Skip sessions that are actively running — a brain task might
+            // be in the middle of persisting its first user message.
+            if matches!(summary.status, SessionStatus::Running) {
+                continue;
+            }
+            // The first user-authored event lands within the first few
+            // records of any session, so a small `limit` keeps the
+            // startup probe O(1)-ish per session instead of loading
+            // entire histories just to confirm activity.
+            let events = self
+                .session_store
+                .get_events(summary.session_id.clone(), EventRange::recent(16))
+                .await?;
+            let has_user_input = events.iter().any(|rec| {
+                matches!(
+                    rec.event,
+                    Event::UserMessage { .. } | Event::QueuedMessage { .. }
+                )
+            });
+            if !has_user_input {
+                if let Err(err) = self
+                    .session_store
+                    .delete_session(summary.session_id.clone())
+                    .await
+                {
+                    tracing::warn!(
+                        %err,
+                        session_id = %summary.session_id,
+                        "prune_empty_sessions: delete failed",
+                    );
+                    continue;
+                }
+                pruned = pruned.saturating_add(1);
+            }
+        }
+        if pruned > 0 {
+            tracing::info!(pruned, "prune_empty_sessions removed empty sessions");
+        }
+        Ok(pruned)
     }
 
     /// Runs the memory consolidation maintenance check immediately.
@@ -246,19 +308,38 @@ impl LocalOrchestrator {
             match task.await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    if let Err(report_error) = report_session_task_failure(
-                        &supervisor_session_store,
-                        &supervisor_event_tx,
-                        &supervisor_status,
-                        supervisor_session_id.clone(),
-                        format!("session task exited with error: {error}"),
-                    )
-                    .await
-                    {
+                    // Recoverable errors (provider quirks, single bad
+                    // payloads, transient stream problems) should not
+                    // mark the session Failed — they pause it so the
+                    // user can resume or retry. Fatal errors (auth,
+                    // config, storage) keep the old Failed path.
+                    let is_fatal = error.is_fatal();
+                    let message = format!("session task exited with error: {error}");
+                    let report_result = if is_fatal {
+                        report_session_task_failure(
+                            &supervisor_session_store,
+                            &supervisor_event_tx,
+                            &supervisor_status,
+                            supervisor_session_id.clone(),
+                            message,
+                        )
+                        .await
+                    } else {
+                        report_session_task_paused(
+                            &supervisor_session_store,
+                            &supervisor_event_tx,
+                            &supervisor_status,
+                            supervisor_session_id.clone(),
+                            message,
+                        )
+                        .await
+                    };
+                    if let Err(report_error) = report_result {
                         tracing::warn!(
                             session_id = %supervisor_session_id,
                             error = %report_error,
-                            "failed to persist session task error"
+                            fatal = is_fatal,
+                            "failed to persist session task outcome"
                         );
                     }
                 }
@@ -627,16 +708,21 @@ impl BrainOrchestrator for LocalOrchestrator {
         Ok(EventStream::from_events(history))
     }
 
-    /// Subscribes to live runtime events for a running local session.
+    /// Subscribes to live runtime events. Returns `Ok(None)` when no
+    /// actor is active; observation must not resume a dormant session
+    /// (that would spawn a brain actor on every UI session switch).
     async fn observe_runtime(
         &self,
         session_id: SessionId,
     ) -> Result<Option<broadcast::Receiver<RuntimeEvent>>> {
-        self.ensure_session_running(session_id.clone()).await?;
+        self.session_store.get_session(session_id.clone()).await?;
         let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(&session_id)
-            .ok_or_else(|| MoaError::SessionNotFound(session_id.clone()))?;
+        let Some(handle) = sessions.get(&session_id) else {
+            return Ok(None);
+        };
+        if handle.finished.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
         Ok(Some(handle.runtime_tx.subscribe()))
     }
 
@@ -1256,6 +1342,41 @@ async fn report_session_task_failure(
         status,
         session_id,
         SessionStatus::Failed,
+    )
+    .await
+}
+
+/// Reports a recoverable session-task error: writes a `Warning` event and
+/// parks the session at `Paused` so the UI can offer a Resume affordance
+/// rather than treating it as terminal.
+async fn report_session_task_paused(
+    session_store: &Arc<SessionDatabase>,
+    event_tx: &broadcast::Sender<EventRecord>,
+    status: &Arc<RwLock<SessionStatus>>,
+    session_id: SessionId,
+    message: String,
+) -> Result<()> {
+    let current = session_store.get_session(session_id.clone()).await?;
+    if matches!(
+        current.status,
+        SessionStatus::Failed | SessionStatus::Cancelled | SessionStatus::Completed
+    ) {
+        return Ok(());
+    }
+
+    append_event(
+        session_store,
+        event_tx,
+        session_id.clone(),
+        Event::Warning { message },
+    )
+    .await?;
+    update_status(
+        session_store,
+        event_tx,
+        status,
+        session_id,
+        SessionStatus::Paused,
     )
     .await
 }

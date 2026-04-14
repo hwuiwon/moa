@@ -48,6 +48,10 @@ pub enum MoaError {
     #[error("validation error: {0}")]
     ValidationError(String),
 
+    /// Recoverable provider shape mismatch — orchestrator pauses, doesn't kill.
+    #[error("provider quirk: {0}")]
+    ProviderQuirk(String),
+
     /// Serialization or deserialization failed.
     #[error("serialization error: {0}")]
     SerializationError(String),
@@ -109,4 +113,68 @@ pub enum MoaError {
     /// A UUID parsing error occurred.
     #[error(transparent)]
     Uuid(#[from] uuid::Error),
+}
+
+impl MoaError {
+    /// Whether this error should terminate the session (`true`) or is
+    /// recoverable (the orchestrator pauses the session so the user can
+    /// resume, retry, or intervene). Fatal classes are typically
+    /// configuration, auth/permission, storage, and anything that
+    /// indicates the process can't meaningfully continue.
+    ///
+    /// Recoverable classes are provider quirks, single-payload
+    /// deserialization failures, exhausted rate-limit retries, and
+    /// transient stream hiccups.
+    pub fn is_fatal(&self) -> bool {
+        match self {
+            // Configuration, identity, and infrastructure — can't be
+            // "retried" without user action.
+            Self::ConfigError(_)
+            | Self::StorageError(_)
+            | Self::MissingEnvironmentVariable(_)
+            | Self::HomeDirectoryNotFound
+            | Self::PermissionDenied(_)
+            | Self::BudgetExhausted(_)
+            | Self::Unsupported(_)
+            | Self::Io(_)
+            | Self::Config(_) => true,
+            // Single-payload/event-shaped problems — resumable.
+            Self::ProviderQuirk(_)
+            | Self::ValidationError(_)
+            | Self::SerializationError(_)
+            | Self::RateLimited { .. }
+            | Self::StreamError(_)
+            | Self::HttpStatus { .. }
+            | Self::ProviderError(_)
+            | Self::ToolError(_)
+            | Self::SerdeJson(_)
+            | Self::Uuid(_) => false,
+            // Session/blob lookups and cancellation are neither fatal
+            // in the "kill the app" sense nor recoverable within the
+            // same session — treat them as fatal so the supervisor
+            // doesn't leave a broken session in `Paused`.
+            Self::SessionNotFound(_) | Self::WorkspaceNotFound(_) | Self::BlobNotFound(_) => true,
+            Self::Cancelled => true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MoaError;
+
+    #[test]
+    fn provider_quirk_is_non_fatal() {
+        assert!(!MoaError::ProviderQuirk("new field".into()).is_fatal());
+    }
+
+    #[test]
+    fn validation_error_is_non_fatal() {
+        assert!(!MoaError::ValidationError("compatibility: ...".into()).is_fatal());
+    }
+
+    #[test]
+    fn config_error_is_fatal() {
+        assert!(MoaError::ConfigError("bad toml".into()).is_fatal());
+    }
 }
