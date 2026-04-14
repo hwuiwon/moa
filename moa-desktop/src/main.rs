@@ -40,9 +40,7 @@ fn main() {
                 // items it doesn't recognize yet (e.g. `web_search_call.added` in 0.34);
                 // those are already gracefully skipped by moa-providers, so the raw
                 // SDK log is noise — silence it.
-                tracing_subscriber::EnvFilter::new(
-                    "info,moa_desktop=debug,async_openai::error=off",
-                )
+                tracing_subscriber::EnvFilter::new("info,moa_desktop=debug,async_openai::error=off")
             }),
         )
         .init();
@@ -119,11 +117,7 @@ fn main() {
                 // app has quit when it's actually still in the tray.
                 let mut state = WindowState::load_or_default();
                 if !state.close_to_tray_shown {
-                    notifications::info(
-                        window,
-                        cx,
-                        "MOA is still running in the system tray.",
-                    );
+                    notifications::info(window, cx, "MOA is still running in the system tray.");
                     state.close_to_tray_shown = true;
                     state.save_to_default_path();
                 }

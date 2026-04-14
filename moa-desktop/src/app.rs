@@ -43,11 +43,7 @@ impl Focusable for MoaApp {
 
 impl MoaApp {
     /// Creates the root application view.
-    pub fn new(
-        window_state: WindowState,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(window_state: WindowState, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let bridge = ServiceBridgeHandle::global(cx);
         let workspace = cx.new(|cx| {
             let mut ws = Workspace::new(bridge.clone(), window, cx);
@@ -92,13 +88,10 @@ impl MoaApp {
             return;
         }
         let palette = cx.new(|cx| CommandPalette::new(window, cx));
-        cx.subscribe(
-            &palette,
-            |this, _palette, _event: &PaletteDismissed, cx| {
-                this.palette = None;
-                cx.notify();
-            },
-        )
+        cx.subscribe(&palette, |this, _palette, _event: &PaletteDismissed, cx| {
+            this.palette = None;
+            cx.notify();
+        })
         .detach();
         // Give the palette keyboard focus so its scoped keybindings apply.
         palette.read(cx).focus_handle(cx).focus(window);
@@ -106,12 +99,7 @@ impl MoaApp {
         cx.notify();
     }
 
-    fn on_open_settings(
-        &mut self,
-        _: &OpenSettings,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.open_settings(window, cx);
     }
 
@@ -150,8 +138,7 @@ impl MoaApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.workspace
-            .update(cx, |ws, cx| ws.toggle_sidebar(cx));
+        self.workspace.update(cx, |ws, cx| ws.toggle_sidebar(cx));
     }
 
     fn on_toggle_detail(
@@ -190,14 +177,7 @@ impl Render for MoaApp {
             .on_action(cx.listener(Self::on_toggle_detail))
             .on_action(cx.listener(Self::on_new_session))
             .child(self.titlebar.clone())
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .child(main),
-            )
+            .child(div().flex().flex_col().flex_1().min_h_0().child(main))
             .child(self.statusbar.clone());
 
         if let Some(palette) = self.palette.clone() {

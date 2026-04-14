@@ -14,7 +14,11 @@ use gpui_component::ActiveTheme;
 pub fn error_banner(cx: &App, heading: impl Into<SharedString>, detail: &str) -> gpui::Div {
     let theme = cx.theme();
     let detail_short: SharedString = if detail.len() > 400 {
-        format!("{}…", &detail[..400]).into()
+        let mut cut = 400;
+        while cut > 0 && !detail.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}…", &detail[..cut]).into()
     } else {
         detail.to_string().into()
     };
@@ -67,10 +71,6 @@ pub fn with_retry(
 /// Convenience that returns an `AnyElement` for callers that want to avoid
 /// an intermediate `Div` type.
 #[allow(dead_code)]
-pub fn error_banner_any(
-    cx: &App,
-    heading: impl Into<SharedString>,
-    detail: &str,
-) -> AnyElement {
+pub fn error_banner_any(cx: &App, heading: impl Into<SharedString>, detail: &str) -> AnyElement {
     error_banner(cx, heading, detail).into_any_element()
 }

@@ -1,44 +1,40 @@
 //! Shared styling for Markdown rendering via `gpui_component::TextView`.
 //!
-//! The library's default `TextViewStyle` is tuned for documentation-site
-//! output: 1 rem paragraph gap (too airy inside dense chat bubbles),
-//! 14 px headings that barely differ from body text, and light-mode
-//! syntax highlighting that washes out on our dark UI. This helper
-//! returns a style that matches the rest of the app.
+//! Mirrors Vercel Streamdown's spacing/typography conventions adapted to
+//! the smaller lever set `TextViewStyle` exposes (paragraph_gap, heading
+//! scale, code block, is_dark). Streamdown uses CSS `space-y-4` (16 px)
+//! between blocks and a tighter heading scale; we approximate both here.
 
 use gpui::{App, Pixels, StyleRefinement, Styled, px, rems};
-use gpui_component::{ActiveTheme, text::TextViewStyle};
+use gpui_component::{ActiveTheme, ThemeMode, text::TextViewStyle};
 
 /// Style applied to every markdown block (chat bubbles + memory viewer).
 pub fn markdown_style(cx: &App) -> TextViewStyle {
     let theme = cx.theme();
 
-    // Spacing + sizing targets based on web-typography conventions that
-    // carry over cleanly to desktop apps:
-    //   * paragraph gap ≈ 0.75 rem gives prose room to breathe without
-    //     feeling editorial (typographical sweet spot: 0.6–1.0 rem).
-    //   * heading scale follows a ~1.2 modular scale (22/18/16/15) so
-    //     levels are distinguishable at a glance.
-    //   * body line-height is applied on the wrapping container (see
-    //     `message_bubble.rs` and `memory_viewer.rs`) — it can't be set
-    //     here because `TextViewStyle` doesn't expose it.
+    // `paragraph_gap` is the only block-rhythm lever — it fires between
+    // every adjacent block, including consecutive list items. Streamdown
+    // uses 16 px between top-level blocks but only 4 px between list
+    // items via per-element CSS; we don't have that split, so 0.5 rem
+    // (8 px) is the compromise that keeps lists tight without crushing
+    // paragraph rhythm.
     let mut style = TextViewStyle::default()
-        .paragraph_gap(rems(0.75))
+        .paragraph_gap(rems(0.5))
+        // Heading scale matches Streamdown's text-3xl → text-sm
+        // (30/24/20/18/16/14 px). The larger top-level sizes carry the
+        // visual hierarchy that `mt-6 mb-2` would normally provide.
         .heading_font_size(|level: u8, _base: Pixels| match level {
-            1 => px(22.0),
-            2 => px(18.0),
-            3 => px(16.0),
-            4 => px(15.0),
+            1 => px(30.0),
+            2 => px(24.0),
+            3 => px(20.0),
+            4 => px(18.0),
+            5 => px(16.0),
             _ => px(14.0),
         });
 
-    // Use the active theme's highlight colors for code blocks so syntax
-    // tokens actually contrast on dark backgrounds.
     style.highlight_theme = theme.highlight_theme.clone();
+    style.is_dark = matches!(theme.mode, ThemeMode::Dark);
 
-    // Code-block container: subtle panel background, padding, rounded
-    // corners, faint border. The inner mono font size comes from the
-    // theme's `mono_font_size`, which we leave untouched.
     style.code_block = StyleRefinement::default()
         .px_3()
         .py_2()

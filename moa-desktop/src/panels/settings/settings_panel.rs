@@ -29,16 +29,12 @@ use gpui_component::{
 };
 use moa_core::MoaConfig;
 
-use crate::{
-    actions::BackToApp,
-    components::nav::nav_item,
-    services::ServiceBridgeHandle,
-};
+use crate::{actions::BackToApp, components::nav::nav_item, services::ServiceBridgeHandle};
 
 use super::{
     appearance_tab::render_appearance_tab, general_tab::render_general_tab,
-    keyboard_shortcuts_tab::render_keyboard_shortcuts_tab,
-    permissions_tab::render_permissions_tab, providers_tab::render_providers_tab,
+    keyboard_shortcuts_tab::render_keyboard_shortcuts_tab, permissions_tab::render_permissions_tab,
+    providers_tab::render_providers_tab,
 };
 
 /// Emitted when the user leaves the Settings page.
@@ -117,19 +113,20 @@ impl Focusable for SettingsPage {
 }
 
 impl SettingsPage {
-    pub fn new(
-        bridge: ServiceBridgeHandle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(bridge: ServiceBridgeHandle, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let config = bridge
             .entity()
             .read(cx)
             .config()
             .cloned()
             .unwrap_or_default();
-        let config_path =
-            MoaConfig::default_path().unwrap_or_else(|_| PathBuf::from("~/.moa/config.toml"));
+        let config_path = MoaConfig::default_path().unwrap_or_else(|_| {
+            // The literal "~/..." string would create a path with `~`
+            // as a real directory name; expand it via $HOME.
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".moa/config.toml"))
+                .unwrap_or_else(|| PathBuf::from(".moa/config.toml"))
+        });
 
         let auto_approve_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("tool name (e.g. file_read) — Enter to add")
@@ -155,22 +152,19 @@ impl SettingsPage {
         let always_deny_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("tool name — Enter to add to deny list")
         });
-        cx.subscribe(
-            &always_deny_input,
-            |this, input, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    let raw = input.read(cx).text().to_string();
-                    let value = raw.trim().to_string();
-                    if !value.is_empty() {
-                        this.mutate(cx, |cfg| {
-                            if !cfg.permissions.always_deny.contains(&value) {
-                                cfg.permissions.always_deny.push(value.clone());
-                            }
-                        });
-                    }
+        cx.subscribe(&always_deny_input, |this, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                let raw = input.read(cx).text().to_string();
+                let value = raw.trim().to_string();
+                if !value.is_empty() {
+                    this.mutate(cx, |cfg| {
+                        if !cfg.permissions.always_deny.contains(&value) {
+                            cfg.permissions.always_deny.push(value.clone());
+                        }
+                    });
                 }
-            },
-        )
+            }
+        })
         .detach();
 
         Self {
@@ -371,14 +365,7 @@ impl Render for SettingsPage {
             .bg(theme.background)
             .on_action(cx.listener(Self::on_back))
             .child(back_bar)
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(nav)
-                    .child(content),
-            )
+            .child(div().flex().flex_1().min_h_0().child(nav).child(content))
             .child(status_bar)
     }
 }

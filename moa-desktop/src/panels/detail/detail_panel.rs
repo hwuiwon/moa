@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui::{
-    ClipboardItem, Context, ElementId, IntoElement, MouseButton, Render, ScrollHandle, SharedString,
-    Styled, Task, Window, div, prelude::*, px,
+    ClipboardItem, Context, ElementId, IntoElement, MouseButton, Render, ScrollHandle,
+    SharedString, Styled, Task, Window, div, prelude::*, px,
 };
 use gpui_component::ActiveTheme;
 use moa_core::{Event, EventRecord, SessionId, SessionSummary};
@@ -166,15 +166,10 @@ impl DetailPanel {
         let handle = bridge.tokio_handle();
 
         let task = cx.spawn(async move |weak, cx| {
-            // Observation is non-resuming on the orchestrator side, so a
-            // dormant session yields an empty stream immediately. Loop
-            // with exponential backoff (capped at 3s) so the panel
-            // picks up live events once the actor is spawned (e.g. the
-            // user sends a message from the chat panel).
+            // Observation doesn't spawn the actor — backoff-poll until it exists.
             let mut retry_delay = Duration::from_millis(500);
             let max_delay = Duration::from_secs(3);
             loop {
-                // Bail if the user switched to a different session.
                 let still_current = weak
                     .update(cx, |this, _| this.session_id.as_ref() == Some(&session_id))
                     .unwrap_or(false);
@@ -185,7 +180,7 @@ impl DetailPanel {
                 let (tx, mut rx) = mpsc::unbounded_channel();
                 let observe_session = session_id.clone();
                 let chat_clone = chat.clone();
-                let _observer = handle.spawn(async move {
+                let observer = handle.spawn(async move {
                     let _ = chat_clone.observe_session(observe_session, tx).await;
                 });
 
@@ -201,18 +196,18 @@ impl DetailPanel {
                             })
                             .is_err()
                     {
+                        observer.abort();
                         return;
                     }
                 }
+                // Avoid leaking the observer task across reconnect iterations.
+                observer.abort();
 
                 if received_any {
                     retry_delay = Duration::from_millis(500);
                 } else {
                     retry_delay = (retry_delay * 2).min(max_delay);
                 }
-                // GPUI-native timer — `tokio::time::sleep` would panic
-                // here because this future runs on the GPUI executor,
-                // not inside a tokio runtime.
                 cx.background_executor().timer(retry_delay).await;
             }
         });
@@ -303,8 +298,12 @@ impl DetailPanel {
                     &theme,
                 ))
             })
-            .when_some(duration, |d, dur| d.child(metric_row("duration", &dur, &theme)))
-            .when_some(idle, |d, idle| d.child(metric_row("last activity", &idle, &theme)))
+            .when_some(duration, |d, dur| {
+                d.child(metric_row("duration", &dur, &theme))
+            })
+            .when_some(idle, |d, idle| {
+                d.child(metric_row("last activity", &idle, &theme))
+            })
             .child(metric_row(
                 "tokens",
                 &format!("in {in_tokens} · out {out_tokens}"),
@@ -330,21 +329,13 @@ impl DetailPanel {
                             .items_center()
                             .justify_between()
                             .text_xs()
-                            .child(
-                                div()
-                                    .text_color(theme.muted_foreground)
-                                    .child("context"),
-                            )
-                            .child(
-                                div()
-                                    .text_color(theme.foreground)
-                                    .child(format!(
-                                        "{} / {} ({}%)",
-                                        fmt_compact(latest_input),
-                                        fmt_compact(context_window),
-                                        (ctx_pct * 100.0) as u32
-                                    )),
-                            ),
+                            .child(div().text_color(theme.muted_foreground).child("context"))
+                            .child(div().text_color(theme.foreground).child(format!(
+                                "{} / {} ({}%)",
+                                fmt_compact(latest_input),
+                                fmt_compact(context_window),
+                                (ctx_pct * 100.0) as u32
+                            ))),
                     )
                     .child(
                         div()
@@ -437,9 +428,7 @@ impl DetailPanel {
             .border_1()
             .border_color(theme.border)
             .hover(|s| s.bg(theme.muted))
-            .on_click(
-                cx.listener(move |this, _, _, cx| this.toggle_expand(turn_id, cx)),
-            )
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_expand(turn_id, cx)))
             .child(
                 div()
                     .w(px(10.))
@@ -473,21 +462,11 @@ impl DetailPanel {
                     ),
             );
 
-        let mut outer = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(header);
+        let mut outer = div().flex().flex_col().gap_1().child(header);
 
         if expanded {
             // Waterfall body.
-            let mut body = div()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .px_2()
-                .pt_1()
-                .pb_2();
+            let mut body = div().flex().flex_col().gap_0p5().px_2().pt_1().pb_2();
             for child in &turn.children {
                 body = body.child(render_span_row(
                     child,
@@ -537,12 +516,7 @@ fn render_span_row(
         .gap_1()
         .w(px(200.))
         .pl(px(f32::from(depth) * 12.0))
-        .child(
-            div()
-                .size(px(6.))
-                .rounded_full()
-                .bg(color),
-        )
+        .child(div().size(px(6.)).rounded_full().bg(color))
         .child(
             div()
                 .text_xs()
@@ -949,7 +923,12 @@ fn metric_row(label: &str, value: &str, theme: &gpui_component::Theme) -> impl I
 fn count_turns(events: &[EventRecord]) -> usize {
     events
         .iter()
-        .filter(|rec| matches!(&rec.event, Event::UserMessage { .. } | Event::QueuedMessage { .. }))
+        .filter(|rec| {
+            matches!(
+                &rec.event,
+                Event::UserMessage { .. } | Event::QueuedMessage { .. }
+            )
+        })
         .count()
 }
 
@@ -1067,4 +1046,3 @@ fn fmt_compact(n: usize) -> String {
         n.to_string()
     }
 }
-

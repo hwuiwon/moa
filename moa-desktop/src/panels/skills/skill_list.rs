@@ -9,8 +9,8 @@
 use gpui::{
     Context, EventEmitter, IntoElement, Render, SharedString, Styled, Window, div, prelude::*,
 };
-use moa_core::{MemoryPath, PageSummary, PageType};
 use gpui_component::ActiveTheme;
+use moa_core::{MemoryPath, PageSummary, PageType};
 
 use crate::panels::memory::MemoryPageSelected;
 use crate::services::{ServiceBridgeHandle, ServiceStatus, bridge::spawn_into};
@@ -65,7 +65,7 @@ impl SkillList {
             handle,
             entity,
             async move { chat.list_memory_pages(Some(PageType::Skill)).await },
-            |this, result, _cx| {
+            |this, result, cx| {
                 this.loading = false;
                 match result {
                     Ok(pages) => {
@@ -74,6 +74,7 @@ impl SkillList {
                     }
                     Err(err) => this.last_error = Some(format!("{err:#}")),
                 }
+                cx.notify();
             },
         );
     }
@@ -125,50 +126,51 @@ impl Render for SkillList {
         for (idx, summary) in self.pages.iter().enumerate() {
             let path = summary.path.clone();
             let selected = self.selected_path.as_ref() == Some(&path);
-            list = list.child(
-                div()
-                    .id(gpui::ElementId::NamedInteger("skill-row".into(), idx as u64))
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(theme.sidebar_border)
-                    .bg(if selected { theme.accent } else { theme.sidebar })
-                    .hover(|s| s.bg(theme.muted))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select_path(path.clone(), cx);
-                    }))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.foreground)
-                            .child(SharedString::from(summary.title.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(crate::components::badges::confidence_badge(
-                                cx,
-                                &summary.confidence,
-                            ))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!(
-                                        "updated {}",
-                                        summary.updated.format("%Y-%m-%d")
-                                    )),
-                            ),
-                    ),
-            );
+            list =
+                list.child(
+                    div()
+                        .id(gpui::ElementId::NamedInteger(
+                            "skill-row".into(),
+                            idx as u64,
+                        ))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .px_3()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(theme.sidebar_border)
+                        .bg(if selected {
+                            theme.accent
+                        } else {
+                            theme.sidebar
+                        })
+                        .hover(|s| s.bg(theme.muted))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.select_path(path.clone(), cx);
+                        }))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.foreground)
+                                .child(SharedString::from(summary.title.clone())),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(crate::components::badges::confidence_badge(
+                                    cx,
+                                    &summary.confidence,
+                                ))
+                                .child(div().text_xs().text_color(theme.muted_foreground).child(
+                                    format!("updated {}", summary.updated.format("%Y-%m-%d")),
+                                )),
+                        ),
+                );
         }
 
         list.into_any_element()
     }
 }
-

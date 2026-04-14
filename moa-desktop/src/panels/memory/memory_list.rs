@@ -11,7 +11,9 @@ use gpui_component::{
 use moa_core::{MemoryPath, PageSummary, PageType};
 
 use crate::components::{
-    empty_state::empty_state, error_banner::{error_banner, with_retry}, skeletons,
+    empty_state::empty_state,
+    error_banner::{error_banner, with_retry},
+    skeletons,
 };
 use crate::services::{ServiceBridgeHandle, ServiceStatus, bridge::spawn_into};
 
@@ -29,19 +31,18 @@ pub struct MemoryList {
     loading: bool,
     last_error: Option<String>,
     search_input: Entity<InputState>,
+    /// True from `run_search` start until the async search completes.
+    /// Without this, the render path would briefly show "No matches"
+    /// for any non-instant query.
+    search_pending: bool,
 }
 
 impl EventEmitter<MemoryPageSelected> for MemoryList {}
 
 impl MemoryList {
-    pub fn new(
-        bridge: ServiceBridgeHandle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let search_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Search memory… (Enter)")
-        });
+    pub fn new(bridge: ServiceBridgeHandle, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search memory… (Enter)"));
         cx.subscribe(&search_input, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.run_search(cx);
@@ -62,6 +63,7 @@ impl MemoryList {
             loading: false,
             last_error: None,
             search_input,
+            search_pending: false,
         };
         this.refresh(cx);
         this
@@ -108,6 +110,7 @@ impl MemoryList {
         self.search_query = query.clone();
         if query.trim().is_empty() {
             self.search_results.clear();
+            self.search_pending = false;
             cx.notify();
             return;
         }
@@ -117,17 +120,21 @@ impl MemoryList {
         };
         let handle = bridge.tokio_handle();
         let entity = cx.entity().clone();
+        self.search_pending = true;
         spawn_into(
             cx,
             handle,
             entity,
             async move { chat.search_memory(&query, 30).await },
-            |this, result, _cx| match result {
-                Ok(results) => {
-                    this.search_results = results;
-                    this.last_error = None;
+            |this, result, _cx| {
+                this.search_pending = false;
+                match result {
+                    Ok(results) => {
+                        this.search_results = results;
+                        this.last_error = None;
+                    }
+                    Err(err) => this.last_error = Some(format!("{err:#}")),
                 }
-                Err(err) => this.last_error = Some(format!("{err:#}")),
             },
         );
     }
@@ -155,13 +162,17 @@ impl Render for MemoryList {
             )
             .into_any_element()
         } else if showing_search && self.search_results.is_empty() {
-            let q = self.search_query.clone();
-            empty_state(
-                cx,
-                "No matches",
-                SharedString::from(format!("Nothing matches “{q}”.")),
-            )
-            .into_any_element()
+            if self.search_pending {
+                skeletons::memory_rows(4).into_any_element()
+            } else {
+                let q = self.search_query.clone();
+                empty_state(
+                    cx,
+                    "No matches",
+                    SharedString::from(format!("Nothing matches “{q}”.")),
+                )
+                .into_any_element()
+            }
         } else if !showing_search && self.pages.is_empty() {
             if self.loading {
                 skeletons::memory_rows(8).into_any_element()
@@ -246,7 +257,7 @@ impl Render for MemoryList {
                             div()
                                 .id(gpui::ElementId::NamedInteger(
                                     "memory-row".into(),
-                                    hash_title(&summary.title),
+                                    hash_path(&summary.path),
                                 ))
                                 .flex()
                                 .flex_col()
@@ -268,15 +279,12 @@ impl Render for MemoryList {
                                         .text_color(theme.foreground)
                                         .child(SharedString::from(summary.title.clone())),
                                 )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .gap_2()
-                                        .child(crate::components::badges::confidence_badge(
-                                            cx,
-                                            &summary.confidence,
-                                        )),
-                                ),
+                                .child(div().flex().gap_2().child(
+                                    crate::components::badges::confidence_badge(
+                                        cx,
+                                        &summary.confidence,
+                                    ),
+                                )),
                         );
                     }
                 }
@@ -345,9 +353,9 @@ fn type_badge(page_type: &PageType, theme: &gpui_component::Theme) -> impl IntoE
         .child(type_label(page_type).to_string())
 }
 
-fn hash_title(title: &str) -> u64 {
+fn hash_path(path: &moa_core::MemoryPath) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    title.hash(&mut hasher);
+    path.hash(&mut hasher);
     hasher.finish()
 }

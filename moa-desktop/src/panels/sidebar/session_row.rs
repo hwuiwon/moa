@@ -14,11 +14,6 @@ pub struct SessionRow {
     pub id: SessionId,
     pub title: SharedString,
     pub status: SessionStatus,
-    /// Retained on the struct for future use (e.g. filter-by-model) even
-    /// though the row no longer renders a model chip — the model is shown
-    /// on each assistant bubble instead.
-    #[allow(dead_code)]
-    pub model: SharedString,
     pub last_message: Option<SharedString>,
     pub updated: chrono::DateTime<chrono::Utc>,
     pub selected: bool,
@@ -70,7 +65,11 @@ impl RenderOnce for SessionRow {
             .py_2()
             .bg(row_bg)
             .border_l_2()
-            .border_color(if self.selected { dot } else { theme.transparent })
+            .border_color(if self.selected {
+                dot
+            } else {
+                theme.transparent
+            })
             .hover(|s| s.bg(theme.muted))
             .child(
                 div()
@@ -93,9 +92,6 @@ impl RenderOnce for SessionRow {
                     ),
             )
             .child(
-                // Status dot + label. The short session-id chip now
-                // lives in the right-hand detail panel when a session
-                // is selected — keep the sidebar row visually clean.
                 div()
                     .flex()
                     .items_center()

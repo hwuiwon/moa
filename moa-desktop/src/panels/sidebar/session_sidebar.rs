@@ -22,11 +22,7 @@ pub struct SessionSidebar {
 
 impl SessionSidebar {
     /// Creates the sidebar with the given service bridge.
-    pub fn new(
-        bridge: ServiceBridgeHandle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(bridge: ServiceBridgeHandle, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let session_list = cx.new(|cx| SessionList::new(bridge.clone(), cx));
         let memory_list = cx.new(|cx| MemoryList::new(bridge.clone(), window, cx));
         let skill_list = cx.new(|cx| SkillList::new(bridge, cx));

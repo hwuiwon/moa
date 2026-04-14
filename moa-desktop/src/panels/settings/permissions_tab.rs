@@ -9,17 +9,12 @@ use gpui_component::{
     input::{Input, InputState},
 };
 
-use crate::components::{
-    row::settings_row, section::section_card, segmented::segmented,
-};
+use crate::components::{row::settings_row, section::section_card, segmented::segmented};
 
 use super::settings_panel::SettingsPage;
 
-const POSTURE_OPTIONS: &[(&str, &str)] = &[
-    ("approve", "Approve"),
-    ("auto", "Auto"),
-    ("full", "Full"),
-];
+const POSTURE_OPTIONS: &[(&str, &str)] =
+    &[("approve", "Approve"), ("auto", "Auto"), ("full", "Full")];
 
 pub fn render_permissions_tab(
     panel: &SettingsPage,

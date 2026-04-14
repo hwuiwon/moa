@@ -21,6 +21,7 @@ pub enum EventColor {
     ApprovalDecided,
     Checkpoint,
     Notice,
+    Error,
     Hand,
     Session,
 }
@@ -34,11 +35,12 @@ impl EventColor {
             Event::ToolError { .. } => Self::ToolError,
             Event::ApprovalRequested { .. } => Self::Approval,
             Event::ApprovalDecided { .. } => Self::ApprovalDecided,
-            Event::MemoryRead { .. }
-            | Event::MemoryWrite { .. }
-            | Event::MemoryIngest { .. } => Self::Memory,
+            Event::MemoryRead { .. } | Event::MemoryWrite { .. } | Event::MemoryIngest { .. } => {
+                Self::Memory
+            }
             Event::Checkpoint { .. } => Self::Checkpoint,
-            Event::Error { .. } | Event::Warning { .. } => Self::Notice,
+            Event::Error { .. } => Self::Error,
+            Event::Warning { .. } => Self::Notice,
             Event::HandProvisioned { .. }
             | Event::HandDestroyed { .. }
             | Event::HandError { .. } => Self::Hand,
@@ -63,6 +65,7 @@ impl EventColor {
             Self::ApprovalDecided => theme.success,
             Self::Checkpoint => theme.warning,
             Self::Notice => theme.warning,
+            Self::Error => theme.danger,
             Self::Hand => theme.muted_foreground,
             Self::Session => theme.muted_foreground,
         }

@@ -3,24 +3,16 @@
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div};
 use gpui_component::ActiveTheme;
 
-use crate::components::{
-    row::settings_row, section::section_card, segmented::segmented,
-};
+use crate::components::{row::settings_row, section::section_card, segmented::segmented};
 use crate::density::Density;
 use crate::theme::{apply_theme_name, canonical_theme_key};
 
 use super::settings_panel::SettingsPage;
 
 const THEME_OPTIONS: &[(&str, &str)] = &[("dark", "Dark"), ("light", "Light")];
-const DENSITY_OPTIONS: &[(&str, &str)] = &[
-    ("comfortable", "Comfortable"),
-    ("compact", "Compact"),
-];
+const DENSITY_OPTIONS: &[(&str, &str)] = &[("comfortable", "Comfortable"), ("compact", "Compact")];
 
-pub fn render_appearance_tab(
-    panel: &SettingsPage,
-    cx: &mut Context<SettingsPage>,
-) -> AnyElement {
+pub fn render_appearance_tab(panel: &SettingsPage, cx: &mut Context<SettingsPage>) -> AnyElement {
     let theme = cx.theme().clone();
     let current = canonical_theme_key(&panel.config().tui.theme);
 
@@ -51,7 +43,7 @@ pub fn render_appearance_tab(
 
     let theme_row = settings_row(
         cx,
-        "Appearance",
+        "Theme",
         Some("Pick the color palette."),
         theme_control,
         true,

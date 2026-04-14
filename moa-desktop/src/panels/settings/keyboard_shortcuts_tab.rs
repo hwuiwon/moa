@@ -2,7 +2,9 @@
 //! `keybindings::DISPLAY_BINDINGS`, so adding a binding there
 //! automatically updates this page.
 
-use gpui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::*};
+use gpui::{
+    AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::*,
+};
 use gpui_component::ActiveTheme;
 
 use crate::components::section::section_card;

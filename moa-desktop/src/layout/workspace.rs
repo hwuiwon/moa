@@ -63,15 +63,12 @@ impl Workspace {
         .detach();
 
         let viewer_for_memory = memory_viewer.clone();
-        cx.subscribe(
-            &memory_list,
-            move |_, _, event: &MemoryPageSelected, cx| {
-                let path = event.0.clone();
-                tracing::info!(path = ?path, "memory page selected");
-                viewer_for_memory.update(cx, |viewer, cx| viewer.open(path, cx));
-                cx.notify();
-            },
-        )
+        cx.subscribe(&memory_list, move |_, _, event: &MemoryPageSelected, cx| {
+            let path = event.0.clone();
+            tracing::info!(path = ?path, "memory page selected");
+            viewer_for_memory.update(cx, |viewer, cx| viewer.open(path, cx));
+            cx.notify();
+        })
         .detach();
 
         let viewer_for_skill = memory_viewer.clone();

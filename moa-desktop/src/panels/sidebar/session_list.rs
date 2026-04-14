@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use gpui::{
-    Context, ElementId, EventEmitter, IntoElement, MouseButton, Render, ScrollHandle,
-    SharedString, Task, Window, div, prelude::*, px, rems,
+    Context, ElementId, EventEmitter, IntoElement, MouseButton, Render, ScrollHandle, SharedString,
+    Task, Window, div, prelude::*, px, rems,
 };
 use gpui_component::ActiveTheme;
 use moa_core::SessionId;
@@ -128,6 +128,15 @@ impl SessionList {
                     Ok(previews) => {
                         this.previews = previews;
                         this.last_error = None;
+                        // Drop a stale selection: if the previously
+                        // selected session was deleted/pruned, the row
+                        // is no longer in the list and the highlight
+                        // would point at nothing.
+                        if let Some(id) = this.selected.as_ref()
+                            && !this.previews.iter().any(|p| &p.summary.session_id == id)
+                        {
+                            this.selected = None;
+                        }
                         // First successful load: auto-select the most
                         // recent session so the chat panel isn't empty.
                         // `list_session_previews` returns newest-first
@@ -263,7 +272,11 @@ impl Render for SessionList {
                     cx.listener(|this, _, _, cx| this.create_session(cx)),
                 ),
                 cx,
-                "⌘N",
+                if cfg!(target_os = "macos") {
+                    "⌘N"
+                } else {
+                    "Ctrl+N"
+                },
             )
             .into_any_element()
         } else if filtered.is_empty() {
@@ -295,7 +308,6 @@ impl Render for SessionList {
                     id: session_id.clone(),
                     title: SharedString::from(title),
                     status: preview.summary.status.clone(),
-                    model: SharedString::from(preview.summary.model.clone()),
                     last_message: preview.last_message.clone().map(SharedString::from),
                     updated: preview.summary.updated_at,
                     selected: self.is_selected(&session_id),

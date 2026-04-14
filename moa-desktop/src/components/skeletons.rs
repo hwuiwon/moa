@@ -100,15 +100,9 @@ pub fn timeline_nodes(count: usize) -> impl IntoElement {
                         .gap_0p5()
                         .flex_1()
                         .child(Skeleton::new().w(px(180.0)).h(px(10.0)))
-                        .child(
-                            Skeleton::new()
-                                .secondary()
-                                .w(px(140.0))
-                                .h(px(8.0)),
-                        ),
+                        .child(Skeleton::new().secondary().w(px(140.0)).h(px(8.0))),
                 ),
         );
     }
     list
 }
-

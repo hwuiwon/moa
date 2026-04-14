@@ -90,11 +90,7 @@ fn removing_from_auto_approve_persists() {
     let path = tmp.join("config.toml");
 
     let mut config = MoaConfig::default();
-    config.permissions.auto_approve = vec![
-        "a".to_string(),
-        "b".to_string(),
-        "c".to_string(),
-    ];
+    config.permissions.auto_approve = vec!["a".to_string(), "b".to_string(), "c".to_string()];
     config.save_to_path(&path).expect("save");
 
     // Simulate the UI removing "b".

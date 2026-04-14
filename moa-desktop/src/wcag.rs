@@ -80,10 +80,11 @@ mod tests {
             classify(hsla(0.0, 0.0, 0.0, 1.0), hsla(0.0, 0.0, 1.0, 1.0)),
             WcagPass::AaNormal
         );
-        // Mid grey on white (~3.95:1) → large only.
+        // Mid grey on white (~3.95:1) → AA-large only. Allowing
+        // `Fail` here would silently mask a regression below the
+        // 3.0:1 threshold, so pin the assertion exactly.
         let mid = hsla(0.0, 0.0, 0.5, 1.0);
         let white = hsla(0.0, 0.0, 1.0, 1.0);
-        let pass = classify(mid, white);
-        assert!(matches!(pass, WcagPass::AaLargeOnly | WcagPass::Fail));
+        assert_eq!(classify(mid, white), WcagPass::AaLargeOnly);
     }
 }

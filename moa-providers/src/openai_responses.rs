@@ -504,10 +504,7 @@ fn is_rate_limit_message(message: &str) -> bool {
 /// async-openai 0.34 doesn't yet model. We log + skip the chunk instead
 /// of letting one quirk tear down the whole session. Add to this list
 /// when a new field shows up in production traces.
-const IGNORABLE_DESERIALIZE_FIELD_HINTS: &[&str] = &[
-    "compatibility",
-    "model_compatibility",
-];
+const IGNORABLE_DESERIALIZE_FIELD_HINTS: &[&str] = &["compatibility", "model_compatibility"];
 
 /// Returns `true` when a streaming or response error is safe to skip
 /// past — either an already-known shape (`web_search_call` output items)
@@ -521,13 +518,15 @@ const IGNORABLE_DESERIALIZE_FIELD_HINTS: &[&str] = &[
 /// We inspect both; the allow-list match is on the human-readable
 /// message so either shape is covered.
 fn is_ignorable_openai_stream_error(error: &OpenAIError) -> bool {
-    let field_hint_matches = |text: &str, chunk_preview: Option<&str>| -> bool {
+    // Logs the matched field + payload length only — the raw chunk and
+    // serde error string can include user prompts, model output, or
+    // tool arguments and must not be persisted to logs.
+    let field_hint_matches = |text: &str, payload_bytes: Option<usize>| -> bool {
         for hint in IGNORABLE_DESERIALIZE_FIELD_HINTS {
             if text.contains(hint) {
                 tracing::warn!(
                     field = hint,
-                    err = text,
-                    chunk_preview = chunk_preview.unwrap_or(""),
+                    payload_bytes = payload_bytes.unwrap_or(0),
                     "openai error skipped due to allow-listed field hint"
                 );
                 return true;
@@ -545,9 +544,8 @@ fn is_ignorable_openai_stream_error(error: &OpenAIError) -> bool {
                 return true;
             }
             let err_msg = serde_err.to_string();
-            let preview = &content[..content.len().min(240)];
-            field_hint_matches(&err_msg, Some(preview))
-                || field_hint_matches(content, Some(preview))
+            let bytes = Some(content.len());
+            field_hint_matches(&err_msg, bytes) || field_hint_matches(content, bytes)
         }
         OpenAIError::InvalidArgument(msg) => field_hint_matches(msg, None),
         _ => false,
@@ -562,7 +560,8 @@ mod ignorable_error_tests {
     fn web_search_call_output_item_is_ignorable() {
         // Build a JSONDeserialize error by deliberately failing to
         // deserialize a payload with the web_search_call shape.
-        let payload = r#"{"type":"response.output_item.added","item":{"type":"web_search_call","id":"x"}}"#;
+        let payload =
+            r#"{"type":"response.output_item.added","item":{"type":"web_search_call","id":"x"}}"#;
         let serde_err: serde_json::Error =
             serde_json::from_str::<i32>(payload).expect_err("must fail");
         let err = OpenAIError::JSONDeserialize(serde_err, payload.to_string());
@@ -588,8 +587,8 @@ mod ignorable_error_tests {
     fn invalid_argument_with_allow_listed_field_is_ignorable() {
         // Mirrors the exact error the user hit: async-openai's
         // path-aware string surfaces as InvalidArgument.
-        let msg = "compatibility: invalid type: map, expected a string at line 4 column 3"
-            .to_string();
+        let msg =
+            "compatibility: invalid type: map, expected a string at line 4 column 3".to_string();
         let err = OpenAIError::InvalidArgument(msg);
         assert!(is_ignorable_openai_stream_error(&err));
     }

@@ -18,7 +18,9 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::components::{
-    empty_state::empty_state, error_banner::{error_banner, with_retry}, skeletons,
+    empty_state::empty_state,
+    error_banner::{error_banner, with_retry},
+    skeletons,
 };
 use crate::services::{ServiceBridgeHandle, ServiceStatus, bridge::spawn_into};
 use crate::streaming::StreamBatcher;
@@ -45,10 +47,8 @@ pub struct ChatPanel {
     // async runtime-event handlers enqueue them here and the next render
     // drains the queue.
     pending_toasts: Vec<PendingToast>,
-    // Drag-and-drop: `drop_hover` toggles the composer's highlight while
-    // files are dragged over the window; `attachments` collects paths that
+    // `attachments` collects file paths dragged onto the panel; they
     // get prepended to the next prompt submission.
-    drop_hover: bool,
     attachments: Vec<PathBuf>,
     _stream_task: Option<Task<()>>,
 }
@@ -63,10 +63,9 @@ enum PendingToast {
 impl ChatPanel {
     /// Creates an empty chat panel (no session selected yet).
     pub fn new(bridge: ServiceBridgeHandle, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx
-            .new(|cx| {
-                InputState::new(window, cx).placeholder("Send a message… (⌘L to focus, ⏎ to submit)")
-            });
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Send a message… (⌘L to focus, ⏎ to submit)")
+        });
         cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.submit_prompt(cx);
@@ -87,7 +86,6 @@ impl ChatPanel {
             clear_input_pending: false,
             expanded_tools: HashSet::new(),
             pending_toasts: Vec::new(),
-            drop_hover: false,
             attachments: Vec::new(),
             _stream_task: None,
         }
@@ -196,11 +194,7 @@ impl ChatPanel {
         self._stream_task = Some(task);
     }
 
-    fn apply_runtime_event(
-        &mut self,
-        event: RuntimeEvent,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_runtime_event(&mut self, event: RuntimeEvent, cx: &mut Context<Self>) {
         match event {
             RuntimeEvent::AssistantStarted => {
                 self.streaming_text.clear();
@@ -281,6 +275,14 @@ impl ChatPanel {
         let handle = bridge.tokio_handle();
         let entity = cx.entity().clone();
 
+        // Optimistically render the user's bubble so it appears before
+        // the actor persists `Event::UserMessage`. Subsequent reloads
+        // (driven by stream events) replace this with the persisted
+        // record from the store.
+        self.messages.push(ChatMessage::User {
+            text: prompt.clone(),
+            timestamp: chrono::Utc::now(),
+        });
         self.running = true;
         self.clear_input_pending = true;
         self.scroll.scroll_to_bottom();
@@ -293,11 +295,10 @@ impl ChatPanel {
             async move { chat.queue_message(session_id, prompt).await },
             move |this, result, cx| match result {
                 Ok(()) => {
-                    // queue_message spawns the session actor as a side
-                    // effect, so reconnect the live stream — our old
-                    // stream task may have exited when observation was
-                    // skipped for a dormant session.
-                    this.reload(cx);
+                    // queue_message (re)spawns the actor; re-subscribe.
+                    // Skip immediate reload — it would race the actor's
+                    // persistence and momentarily wipe the optimistic
+                    // user bubble. Stream events drive the next reload.
                     this.start_stream(cx);
                 }
                 Err(err) => {
@@ -511,6 +512,27 @@ impl Render for ChatPanel {
                 list = list.child(render_message(idx, message, &expanded_tools, window, cx));
             }
             if self.streaming_active {
+                // Heal the streaming text first — close any unterminated
+                // **/`/_/* markers before handing it to the markdown
+                // renderer. Without this, a half-typed `**bold` would
+                // consume the rest of the bubble until the model emits
+                // the closer.
+                let healed = crate::streaming::heal(&self.streaming_text);
+                let md_id = (
+                    "streaming-md",
+                    self.session_id
+                        .as_ref()
+                        .map(|s| s.0.as_u128() as u64)
+                        .unwrap_or(0),
+                );
+                let md = gpui_component::text::TextView::markdown(
+                    md_id,
+                    SharedString::from(healed),
+                    window,
+                    cx,
+                )
+                .style(crate::components::markdown::markdown_style(cx))
+                .selectable(true);
                 list = list.child(
                     div()
                         .flex()
@@ -527,12 +549,7 @@ impl Render for ChatPanel {
                                 .text_color(theme.muted_foreground)
                                 .child("Assistant · streaming"),
                         )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.foreground)
-                                .child(SharedString::from(self.streaming_text.clone())),
-                        ),
+                        .child(div().text_sm().text_color(theme.foreground).child(md)),
                 );
             }
             list.into_any_element()
@@ -592,6 +609,7 @@ impl Render for ChatPanel {
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| path.to_string_lossy().to_string());
                 let chip_id = format!("attach-chip-{idx}");
+                let path_for_remove = path.clone();
                 row = row.child(
                     div()
                         .id(gpui::ElementId::Name(chip_id.into()))
@@ -612,11 +630,14 @@ impl Render for ChatPanel {
                                 .child("×")
                                 .on_mouse_down(
                                     MouseButton::Left,
+                                    // Remove by path equality, not by
+                                    // captured index — rapid clicks
+                                    // could otherwise misfire after the
+                                    // first removal shifts subsequent
+                                    // indices.
                                     cx.listener(move |this, _, _, cx| {
-                                        if idx < this.attachments.len() {
-                                            this.attachments.remove(idx);
-                                            cx.notify();
-                                        }
+                                        this.attachments.retain(|p| p != &path_for_remove);
+                                        cx.notify();
                                     }),
                                 ),
                         ),
@@ -632,11 +653,7 @@ impl Render for ChatPanel {
             .flex_shrink_0()
             .p_3()
             .border_t_1()
-            .border_color(if self.drop_hover {
-                theme.primary
-            } else {
-                theme.border
-            })
+            .border_color(theme.border)
             .bg(theme.background)
             .child(
                 div()
@@ -658,7 +675,6 @@ impl Render for ChatPanel {
                             this.attachments.push(path.clone());
                         }
                     }
-                    this.drop_hover = false;
                     cx.notify();
                 },
             ))

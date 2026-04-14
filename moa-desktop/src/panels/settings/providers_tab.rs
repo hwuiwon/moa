@@ -43,10 +43,7 @@ fn describe_provider(label: &'static str, cred: &ProviderCredentialConfig) -> Pr
     }
 }
 
-pub fn render_providers_tab(
-    panel: &SettingsPage,
-    cx: &mut Context<SettingsPage>,
-) -> AnyElement {
+pub fn render_providers_tab(panel: &SettingsPage, cx: &mut Context<SettingsPage>) -> AnyElement {
     let theme = cx.theme().clone();
     let providers = collect_providers(panel);
 
@@ -105,22 +102,28 @@ fn provider_control(
                 .text_xs()
                 .child(badge_text),
         )
-        .child(
-            div()
-                .id("test-provider")
+        .child({
+            // Element id must be unique per provider — the same card
+            // renders multiple `Test` controls so a shared id would
+            // confuse GPUI's interaction state.
+            let id = gpui::ElementId::Name(format!("test-provider-{env_var}").into());
+            let mut control = div()
+                .id(id)
                 .px_2()
                 .py_1()
                 .rounded_md()
                 .bg(theme.muted)
                 .text_color(theme.muted_foreground)
                 .text_xs()
-                .when(key_present, |d| {
-                    d.hover(|s| s.bg(theme.accent).text_color(theme.accent_foreground))
-                })
-                .child("Test")
-                .on_mouse_down(MouseButton::Left, |_, _, _| {
-                    tracing::info!("provider test requested (stub — no backend yet)");
-                }),
-        )
+                .child("Test");
+            if key_present {
+                control = control
+                    .hover(|s| s.bg(theme.accent).text_color(theme.accent_foreground))
+                    .on_mouse_down(MouseButton::Left, |_, _, _| {
+                        tracing::info!("provider test requested (stub — no backend yet)");
+                    });
+            }
+            control
+        })
         .into_any_element()
 }

@@ -269,14 +269,17 @@ fn preview_tool_output(output: &moa_core::ToolOutput) -> String {
     let joined = output
         .content
         .iter()
-        .filter_map(|c| match c {
-            ToolContent::Text { text } => Some(text.as_str()),
-            ToolContent::Json { .. } => None,
+        .map(|c| match c {
+            ToolContent::Text { text } => text.clone(),
+            // Tools that return only structured payloads (e.g. JSON
+            // search results) would otherwise render as "(no text
+            // output)" — show a compact JSON preview instead.
+            ToolContent::Json { data } => serde_json::to_string(data).unwrap_or_default(),
         })
         .collect::<Vec<_>>()
         .join("\n");
     if joined.is_empty() {
-        return "(no text output)".to_string();
+        return "(no output)".to_string();
     }
     truncate(&joined, 2000)
 }

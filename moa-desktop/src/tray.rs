@@ -71,7 +71,9 @@ pub fn install(cx: &mut App) -> anyhow::Result<TrayHandle> {
     // naturally when the app shuts down and `cx.update` fails.
     cx.spawn(async move |cx| {
         loop {
-            cx.background_executor().timer(Duration::from_millis(120)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(120))
+                .await;
             while let Ok(event) = MenuEvent::receiver().try_recv() {
                 let ids = &ids;
                 let id = event.id.clone();
@@ -85,10 +87,7 @@ pub fn install(cx: &mut App) -> anyhow::Result<TrayHandle> {
                         if let Some(window) = cx.windows().first().copied() {
                             let _ = window.update(cx, |_, window, cx| {
                                 use crate::actions::OpenSettings;
-                                window.dispatch_action(
-                                    Box::new(OpenSettings),
-                                    cx,
-                                );
+                                window.dispatch_action(Box::new(OpenSettings), cx);
                             });
                         }
                     } else if id == ids.quit {

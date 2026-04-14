@@ -2,8 +2,7 @@
 //! column selects right-side content. See `design.md` → "Left-nav item".
 
 use gpui::{
-    App, MouseButton, MouseDownEvent, ParentElement, SharedString, Styled, Window, div,
-    prelude::*,
+    App, MouseButton, MouseDownEvent, ParentElement, SharedString, Styled, Window, div, prelude::*,
 };
 use gpui_component::ActiveTheme;
 

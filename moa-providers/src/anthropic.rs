@@ -355,22 +355,6 @@ fn provider_native_tool_json(tool: &ProviderNativeTool) -> Value {
     Value::Object(value)
 }
 
-const PARTIAL_JSON_PREVIEW_MAX: usize = 240;
-
-/// Bounds-safe char-boundary preview of a (possibly partial) JSON payload
-/// so we can emit tracing breadcrumbs without risking a mid-codepoint slice.
-fn preview_partial_json(raw: &str) -> &str {
-    if raw.len() <= PARTIAL_JSON_PREVIEW_MAX {
-        raw
-    } else {
-        let mut cut = PARTIAL_JSON_PREVIEW_MAX;
-        while cut > 0 && !raw.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        &raw[..cut]
-    }
-}
-
 fn summarize_anthropic_server_tool_use(name: &str, partial_json: &str) -> String {
     if name == "web_search"
         && let Ok(value) = serde_json::from_str::<Value>(partial_json)
@@ -733,7 +717,7 @@ impl AnthropicStreamState {
                             tracing::warn!(
                                 %error,
                                 tool_name = %name,
-                                raw_preview = %preview_partial_json(&partial_json),
+                                payload_bytes = partial_json.len(),
                                 "Anthropic tool input JSON failed to parse; falling back to empty object"
                             );
                             Value::Object(Map::new())
@@ -788,7 +772,7 @@ impl AnthropicStreamState {
                                     tracing::warn!(
                                         %error,
                                         tool_name = %name,
-                                        raw_preview = %preview_partial_json(partial_json),
+                                        payload_bytes = partial_json.len(),
                                         "Anthropic tool input JSON failed to parse on finish; falling back to empty object"
                                     );
                                     Value::Object(Map::new())

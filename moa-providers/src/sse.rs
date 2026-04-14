@@ -4,25 +4,23 @@ use eventsource_stream::Event as SseEvent;
 use moa_core::{MoaError, Result};
 use serde::de::DeserializeOwned;
 
-const RAW_PREVIEW_MAX: usize = 240;
-
-/// Parses a JSON SSE payload into a strongly typed Rust value.
+/// Parses a JSON SSE payload. Decode failures become recoverable
+/// [`MoaError::ProviderQuirk`] so the orchestrator pauses the session
+/// instead of killing it. Provider modules may still pre-filter via
+/// their `is_ignorable_*` helpers before the quirk reaches the supervisor.
 ///
-/// A decode failure here is treated as a provider quirk: the raw chunk is
-/// logged at WARN and surfaced as [`MoaError::ProviderQuirk`] so the
-/// orchestrator can pause the session instead of killing it. Individual
-/// providers may still choose to `is_ignorable_*` filter these quirks
-/// before they reach the supervisor.
+/// We deliberately log only metadata (event name, payload length, error)
+/// — the raw payload may contain user prompts, tool arguments, or
+/// other sensitive content and must not land in logs.
 pub(crate) fn parse_sse_json<T>(event: &SseEvent) -> Result<T>
 where
     T: DeserializeOwned,
 {
     serde_json::from_str(&event.data).map_err(|error| {
-        let preview = preview(&event.data);
         tracing::warn!(
             %error,
             event = %event.event,
-            raw_preview = %preview,
+            payload_bytes = event.data.len(),
             "SSE payload failed to deserialize; returning ProviderQuirk"
         );
         MoaError::ProviderQuirk(format!(
@@ -30,20 +28,6 @@ where
             event.event
         ))
     })
-}
-
-fn preview(raw: &str) -> &str {
-    if raw.len() <= RAW_PREVIEW_MAX {
-        raw
-    } else {
-        // Find the largest char boundary <= RAW_PREVIEW_MAX to avoid slicing
-        // in the middle of a multi-byte character.
-        let mut cut = RAW_PREVIEW_MAX;
-        while cut > 0 && !raw.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        &raw[..cut]
-    }
 }
 
 #[cfg(test)]
@@ -75,14 +59,5 @@ mod tests {
             "expected ProviderQuirk, got {err:?}"
         );
         assert!(!err.is_fatal(), "ProviderQuirk must be non-fatal");
-    }
-
-    #[test]
-    fn preview_respects_char_boundaries() {
-        // 3-byte UTF-8 character ("…") straddling the cut point.
-        let long: String = "…".repeat(100);
-        let p = preview(&long);
-        assert!(p.is_char_boundary(p.len()));
-        assert!(p.len() <= RAW_PREVIEW_MAX);
     }
 }

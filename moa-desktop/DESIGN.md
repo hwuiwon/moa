@@ -49,8 +49,11 @@ to light, but every component must work in both.
 
 ## Spacing
 
-Use only `4 / 8 / 12 / 16 / 24` px (gpui: `gap_1 / gap_2 / gap_3 / gap_4 / gap_6`,
-`p_*`, `px_*`, `py_*`). Anything in between is a smell.
+Allowed scale: `2 / 4 / 6 / 8 / 12 / 16 / 24` px (gpui: `*_0p5 / *_1 / *_1p5 /
+*_2 / *_3 / *_4 / *_6` — applies to `gap`, `p`, `px`, `py`, `m*`). The
+half-step values (`0p5`, `1p5`) exist for chip / badge padding where a
+full step would feel oversized; outside chip-scale UI, prefer the
+integer steps. Anything off this scale is a smell.
 
 | Situation | Value |
 |---|---|

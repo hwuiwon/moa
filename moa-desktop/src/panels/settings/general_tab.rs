@@ -13,9 +13,7 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme, switch::Switch};
 
-use crate::components::{
-    row::settings_row, section::section_card, segmented::segmented,
-};
+use crate::components::{row::settings_row, section::section_card, segmented::segmented};
 
 use super::settings_panel::SettingsPage;
 
@@ -44,7 +42,20 @@ pub fn render_general_tab(
         PROVIDER_OPTIONS,
         &general.default_provider,
         |this, value, cx| {
-            this.mutate(cx, |cfg| cfg.general.default_provider = value.to_string());
+            // Reset the default model alongside the provider — the old
+            // model id is unlikely to belong to the new provider's
+            // catalog, so leaving it would persist an invalid pair.
+            // Pick the first catalogued model for the new provider.
+            let new_provider = value.to_string();
+            let next_model = moa_providers::by_provider(&new_provider)
+                .next()
+                .map(|m| m.id.to_string());
+            this.mutate(cx, |cfg| {
+                cfg.general.default_provider = new_provider;
+                if let Some(model) = next_model {
+                    cfg.general.default_model = model;
+                }
+            });
         },
     );
 
@@ -61,10 +72,12 @@ pub fn render_general_tab(
     let web_search_checked = general.web_search_enabled;
     let web_search_control = Switch::new("web-search-toggle")
         .checked(web_search_checked)
-        .on_click(cx.listener(move |this: &mut SettingsPage, checked: &bool, _, cx| {
-            let new_value = *checked;
-            this.mutate(cx, |cfg| cfg.general.web_search_enabled = new_value);
-        }))
+        .on_click(
+            cx.listener(move |this: &mut SettingsPage, checked: &bool, _, cx| {
+                let new_value = *checked;
+                this.mutate(cx, |cfg| cfg.general.web_search_enabled = new_value);
+            }),
+        )
         .into_any_element();
 
     // First card: provider + reasoning (+ web search).
@@ -194,7 +207,9 @@ fn render_model_card(
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
-                    this.mutate(cx, |cfg| cfg.general.default_model = id_for_click.to_string());
+                    this.mutate(cx, |cfg| {
+                        cfg.general.default_model = id_for_click.to_string()
+                    });
                 }),
             )
             .child(indicator)

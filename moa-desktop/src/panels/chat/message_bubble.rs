@@ -110,20 +110,16 @@ fn agent_bubble(
         .child(
             // Header: just the model name as a small subdued pill at top-
             // left of the bubble.
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .text_xs()
-                        .px_1p5()
-                        .py_0p5()
-                        .rounded_sm()
-                        .bg(theme.muted)
-                        .text_color(theme.muted_foreground)
-                        .child(SharedString::from(model.to_string())),
-                ),
+            div().flex().items_center().gap_2().child(
+                div()
+                    .text_xs()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(theme.muted)
+                    .text_color(theme.muted_foreground)
+                    .child(SharedString::from(model.to_string())),
+            ),
         )
         .child(
             // Line-height tracks the active density (1.55 comfortable, 1.4
@@ -359,11 +355,10 @@ fn tool_card(
     column
 }
 
-/// Builds an indented markdown-rendered card used for expanded tool I/O.
-///
-/// JSON-looking content is wrapped in a ```json fence so the shared
-/// markdown style picks up syntax highlighting; plain text falls back to
-/// a preformatted code block (single-language fenceless block).
+/// Builds an indented preformatted card used for expanded tool I/O.
+/// Renders the body as plain text — markdown rendering would require
+/// threading a `Window` into this helper, which the call sites don't
+/// currently provide.
 fn detail_card(
     cx: &mut gpui::App,
     heading: &'static str,
@@ -371,18 +366,7 @@ fn detail_card(
     id: (&'static str, u64),
 ) -> gpui::AnyElement {
     let theme = cx.theme().clone();
-    let fenced = if body.trim_start().starts_with('{') || body.trim_start().starts_with('[') {
-        format!("```json\n{body}\n```")
-    } else {
-        format!("```\n{body}\n```")
-    };
-    // We need a window ref for the TextView; the caller paths that reach
-    // here already have access. Since `tool_card` is called during
-    // render, use `gpui::Window::prepaint_deferred` pattern isn't
-    // needed — TextView::markdown accepts `cx.window()` indirectly.
-    // In practice we take an `App` here because markdown wants `Window`
-    // too, so we fall back to plain text rendering if no window.
-    let _ = id; // silence unused on the fallback path
+    let _ = id;
     div()
         .ml(px(16.0))
         .p_3()
@@ -400,14 +384,12 @@ fn detail_card(
                 .child(heading),
         )
         .child(
-            // Plain preformatted block — we can't thread a `Window` into
-            // `detail_card` without reshaping the API, so keep this as
-            // non-interactive text. Syntax highlighting for tool I/O is
-            // a future pass once the tool card owns its own state.
             div()
                 .text_xs()
                 .text_color(theme.foreground)
-                .child(SharedString::from(fenced)),
+                .font_family("monospace")
+                .whitespace_normal()
+                .child(SharedString::from(body.to_string())),
         )
         .into_any_element()
 }
@@ -574,4 +556,3 @@ fn decision_button(
         .child(label.to_string())
         .on_click(on_click)
 }
-

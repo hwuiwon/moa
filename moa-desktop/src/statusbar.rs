@@ -49,9 +49,7 @@ impl Render for MoaStatusBar {
         let (dot_color, label_text) = match &status {
             ServiceStatus::Initializing => (theme.warning, "initializing".to_string()),
             ServiceStatus::Ready => (theme.success, "ready".to_string()),
-            ServiceStatus::Degraded { message } => {
-                (theme.warning, format!("degraded: {message}"))
-            }
+            ServiceStatus::Degraded { message } => (theme.warning, format!("degraded: {message}")),
             ServiceStatus::Error(err) => (theme.danger, format!("error: {err}")),
         };
 

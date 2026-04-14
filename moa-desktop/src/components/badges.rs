@@ -135,10 +135,6 @@ pub fn risk_badge(cx: &App, level: &RiskLevel) -> impl IntoElement + use<> {
 #[allow(dead_code)]
 pub fn tool_outcome_dot(cx: &App, success: bool) -> impl IntoElement + use<> {
     let theme = cx.theme();
-    let color = if success {
-        theme.success
-    } else {
-        theme.danger
-    };
+    let color = if success { theme.success } else { theme.danger };
     div().size(px(6.0)).rounded_full().bg(color)
 }

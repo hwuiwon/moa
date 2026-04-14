@@ -177,8 +177,7 @@ impl Focusable for CommandPalette {
 
 impl CommandPalette {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let query_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Type a command…"));
+        let query_input = cx.new(|cx| InputState::new(window, cx).placeholder("Type a command…"));
 
         // Rerun the filter on every keystroke by re-rendering.
         cx.subscribe(&query_input, |this, _, _event: &InputEvent, cx| {
@@ -285,10 +284,7 @@ impl CommandPalette {
 /// Builds the default (empty-query) match ordering: history-ranked
 /// commands first (in most-recent-first order), then any remaining
 /// commands in their originally-defined order.
-fn initial_ordering(
-    commands: &[CommandEntry],
-    history: &PaletteHistory,
-) -> Vec<(usize, i32)> {
+fn initial_ordering(commands: &[CommandEntry], history: &PaletteHistory) -> Vec<(usize, i32)> {
     let mut ranked: Vec<(usize, i32)> = commands
         .iter()
         .enumerate()
@@ -387,12 +383,7 @@ impl Render for CommandPalette {
                                 }),
                         )
                         .when_some(shortcut, |d, sc| {
-                            d.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(sc),
-                            )
+                            d.child(div().text_xs().text_color(theme.muted_foreground).child(sc))
                         }),
                 );
             }

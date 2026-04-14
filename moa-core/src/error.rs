@@ -48,10 +48,7 @@ pub enum MoaError {
     #[error("validation error: {0}")]
     ValidationError(String),
 
-    /// An upstream provider returned something unexpected (e.g. a field
-    /// shape that changed without notice) but the session can continue
-    /// after we skip the offending chunk. Non-fatal — the orchestrator
-    /// pauses the session instead of killing it.
+    /// Recoverable provider shape mismatch — orchestrator pauses, doesn't kill.
     #[error("provider quirk: {0}")]
     ProviderQuirk(String),
 

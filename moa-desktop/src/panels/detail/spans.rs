@@ -100,7 +100,9 @@ impl Span {
 
     /// Duration in ms, counting the latest descendant.
     pub fn duration_ms(&self) -> i64 {
-        (self.effective_end() - self.start).num_milliseconds().max(0)
+        (self.effective_end() - self.start)
+            .num_milliseconds()
+            .max(0)
     }
 }
 

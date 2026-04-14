@@ -1,8 +1,6 @@
 //! Center-panel viewer that renders a selected memory page as Markdown.
 
-use gpui::{
-    Context, IntoElement, Render, SharedString, Styled, Window, div, prelude::*, px, rems,
-};
+use gpui::{Context, IntoElement, Render, SharedString, Styled, Window, div, prelude::*, px, rems};
 use gpui_component::{ActiveTheme, text::TextView};
 use moa_core::{MemoryPath, WikiPage};
 
@@ -44,24 +42,40 @@ impl MemoryViewer {
 
     /// Loads and displays the page at the given path.
     pub fn open(&mut self, path: MemoryPath, cx: &mut Context<Self>) {
+        let (chat, handle) = {
+            let bridge = self.bridge.entity().read(cx);
+            (bridge.chat_runtime(), bridge.tokio_handle())
+        };
+        let Some(chat) = chat else {
+            // Bridge isn't ready — surface the failure instead of
+            // leaving the viewer wedged in a loading state.
+            self.path = Some(path);
+            self.page = None;
+            self.loading = false;
+            self.last_error = Some("memory service not ready".to_string());
+            cx.notify();
+            return;
+        };
         self.path = Some(path.clone());
         self.page = None;
         self.loading = true;
         self.last_error = None;
         cx.notify();
 
-        let bridge = self.bridge.entity().read(cx);
-        let Some(chat) = bridge.chat_runtime() else {
-            return;
-        };
-        let handle = bridge.tokio_handle();
         let entity = cx.entity().clone();
+        let requested = path.clone();
         spawn_into(
             cx,
             handle,
             entity,
             async move { chat.read_memory_page(&path).await },
-            |this, result, _cx| {
+            move |this, result, _cx| {
+                // Drop stale completions: the user may have selected a
+                // different page (or closed the viewer) between request
+                // and response — only apply when the path still matches.
+                if this.path.as_ref() != Some(&requested) {
+                    return;
+                }
                 this.loading = false;
                 match result {
                     Ok(page) => this.page = Some(page),
@@ -135,15 +149,9 @@ impl Render for MemoryViewer {
                                     cx,
                                     &page.confidence,
                                 ))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(format!(
-                                            "updated {}",
-                                            page.updated.format("%Y-%m-%d %H:%M")
-                                        )),
-                                ),
+                                .child(div().text_xs().text_color(theme.muted_foreground).child(
+                                    format!("updated {}", page.updated.format("%Y-%m-%d %H:%M")),
+                                )),
                         ),
                 )
                 .child(

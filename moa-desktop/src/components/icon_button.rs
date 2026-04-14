@@ -5,8 +5,8 @@
 //! text arrow like `◀`). 28×28 hit target, 14 px glyph, muted until hover.
 
 use gpui::{
-    App, MouseButton, MouseDownEvent, ParentElement, SharedString, Styled, Window, div,
-    prelude::*, px,
+    App, MouseButton, MouseDownEvent, ParentElement, SharedString, Styled, Window, div, prelude::*,
+    px,
 };
 use gpui_component::ActiveTheme;
 

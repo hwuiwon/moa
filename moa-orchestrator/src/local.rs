@@ -174,9 +174,13 @@ impl LocalOrchestrator {
             if matches!(summary.status, SessionStatus::Running) {
                 continue;
             }
+            // The first user-authored event lands within the first few
+            // records of any session, so a small `limit` keeps the
+            // startup probe O(1)-ish per session instead of loading
+            // entire histories just to confirm activity.
             let events = self
                 .session_store
-                .get_events(summary.session_id.clone(), EventRange::default())
+                .get_events(summary.session_id.clone(), EventRange::recent(16))
                 .await?;
             let has_user_input = events.iter().any(|rec| {
                 matches!(
@@ -704,20 +708,13 @@ impl BrainOrchestrator for LocalOrchestrator {
         Ok(EventStream::from_events(history))
     }
 
-    /// Subscribes to live runtime events for a running local session.
-    ///
-    /// Returns `Ok(None)` when the session is not currently running.
-    /// Observation must not *resume* a dormant session: doing so forced
-    /// a full brain-actor spin-up on every UI session switch, which
-    /// manifested as a noticeable lag. Live events only exist while an
-    /// actor is active; historical events come from the session store
-    /// via `session_events`.
+    /// Subscribes to live runtime events. Returns `Ok(None)` when no
+    /// actor is active; observation must not resume a dormant session
+    /// (that would spawn a brain actor on every UI session switch).
     async fn observe_runtime(
         &self,
         session_id: SessionId,
     ) -> Result<Option<broadcast::Receiver<RuntimeEvent>>> {
-        // Still validate the session exists — a missing session id is a
-        // real error, not a "no live events" case.
         self.session_store.get_session(session_id.clone()).await?;
         let sessions = self.sessions.read().await;
         let Some(handle) = sessions.get(&session_id) else {
