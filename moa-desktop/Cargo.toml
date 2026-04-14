@@ -17,6 +17,7 @@ moa-core = { path = "../moa-core" }
 moa-runtime = { path = "../moa-runtime" }
 
 anyhow.workspace = true
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
