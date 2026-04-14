@@ -5,6 +5,7 @@
 mod app;
 mod components;
 mod layout;
+mod panels;
 mod services;
 mod statusbar;
 mod theme;

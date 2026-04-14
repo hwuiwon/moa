@@ -8,29 +8,44 @@ use gpui_component::{
     ActiveTheme,
     resizable::{h_resizable, resizable_panel},
 };
+use moa_core::SessionId;
 
-use crate::services::ServiceBridgeHandle;
+use crate::{
+    panels::sidebar::{SessionSelected, SessionSidebar},
+    services::ServiceBridgeHandle,
+};
 
-use super::{center::CenterPanel, detail::DetailPanel, sidebar::SidebarPanel};
+use super::{center::CenterPanel, detail::DetailPanel};
 
 /// Workspace owns the three panels and tracks their visibility.
 pub struct Workspace {
-    sidebar: Entity<SidebarPanel>,
+    sidebar: Entity<SessionSidebar>,
     center: Entity<CenterPanel>,
     detail: Entity<DetailPanel>,
     sidebar_visible: bool,
     detail_visible: bool,
+    selected_session: Option<SessionId>,
 }
 
 impl Workspace {
     /// Creates a workspace with all three panels visible.
     pub fn new(bridge: ServiceBridgeHandle, cx: &mut Context<Self>) -> Self {
+        let sidebar = cx.new(|cx| SessionSidebar::new(bridge, cx));
+        let list = sidebar.read(cx).session_list().clone();
+        cx.subscribe(&list, |this, _, event: &SessionSelected, cx| {
+            this.selected_session = Some(event.0.clone());
+            tracing::info!(session_id = %event.0, "session selected");
+            cx.notify();
+        })
+        .detach();
+
         Self {
-            sidebar: cx.new(|cx| SidebarPanel::new(bridge, cx)),
+            sidebar,
             center: cx.new(CenterPanel::new),
             detail: cx.new(DetailPanel::new),
             sidebar_visible: true,
             detail_visible: true,
+            selected_session: None,
         }
     }
 
@@ -42,6 +57,12 @@ impl Workspace {
     /// Whether the detail panel is currently shown.
     pub fn detail_visible(&self) -> bool {
         self.detail_visible
+    }
+
+    /// Currently selected session, if any.
+    #[allow(dead_code)]
+    pub fn selected_session(&self) -> Option<&SessionId> {
+        self.selected_session.as_ref()
     }
 
     /// Toggles sidebar visibility.
