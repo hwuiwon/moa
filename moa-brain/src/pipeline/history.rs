@@ -436,6 +436,10 @@ mod tests {
         ) -> Result<u32> {
             Ok(0)
         }
+
+        async fn delete_session(&self, _session_id: SessionId) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[derive(Clone)]

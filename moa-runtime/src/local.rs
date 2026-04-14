@@ -317,20 +317,20 @@ impl LocalChatRuntime {
     }
 
     /// Relays live runtime updates for one session until the receiver closes.
+    ///
+    /// If no live actor is currently running, returns `Ok(())` immediately.
+    /// The caller (usually the desktop UI) should rely on
+    /// `session_events` for historical playback and start the actor by
+    /// queuing a user message when the user actually wants to interact.
     pub async fn observe_session(
         &self,
         session_id: SessionId,
         event_tx: mpsc::UnboundedSender<SessionRuntimeEvent>,
     ) -> Result<()> {
-        let mut runtime_rx = self
-            .orchestrator
-            .observe_runtime(session_id.clone())
-            .await?
-            .ok_or_else(|| {
-                MoaError::ProviderError(
-                    "live runtime observation is unavailable for this session".to_string(),
-                )
-            })?;
+        let Some(mut runtime_rx) = self.orchestrator.observe_runtime(session_id.clone()).await?
+        else {
+            return Ok(());
+        };
         relay_session_runtime_events(&mut runtime_rx, session_id, event_tx).await
     }
 

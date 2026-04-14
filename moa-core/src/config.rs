@@ -356,6 +356,7 @@ impl MoaConfig {
             .set_default("tui.sidebar_auto", Self::default().tui.sidebar_auto)?
             .set_default("tui.tab_limit", Self::default().tui.tab_limit as i64)?
             .set_default("tui.diff_style", Self::default().tui.diff_style)?
+            .set_default("tui.density", Self::default().tui.density)?
             .set_default(
                 "permissions.default_posture",
                 Self::default().permissions.default_posture,
@@ -998,6 +999,13 @@ pub struct TuiConfig {
     pub tab_limit: usize,
     /// Diff rendering mode.
     pub diff_style: String,
+    /// UI density: "comfortable" (default) or "compact".
+    #[serde(default = "default_density")]
+    pub density: String,
+}
+
+fn default_density() -> String {
+    "comfortable".to_string()
 }
 
 impl Default for TuiConfig {
@@ -1007,6 +1015,7 @@ impl Default for TuiConfig {
             sidebar_auto: true,
             tab_limit: 8,
             diff_style: "auto".to_string(),
+            density: default_density(),
         }
     }
 }

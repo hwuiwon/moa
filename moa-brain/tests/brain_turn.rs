@@ -145,6 +145,10 @@ impl SessionStore for MockSessionStore {
             })
             .sum())
     }
+
+    async fn delete_session(&self, _session_id: SessionId) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Default)]

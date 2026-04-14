@@ -53,6 +53,8 @@ trait SessionStoreDispatch: Send + Sync {
         workspace_id: &WorkspaceId,
         since: DateTime<Utc>,
     ) -> Result<u32>;
+
+    async fn delete_session(&self, session_id: SessionId) -> Result<()>;
 }
 
 macro_rules! impl_session_store_dispatch {
@@ -123,6 +125,10 @@ macro_rules! impl_session_store_dispatch {
                 since: DateTime<Utc>,
             ) -> Result<u32> {
                 SessionStore::workspace_cost_since(self, workspace_id, since).await
+            }
+
+            async fn delete_session(&self, session_id: SessionId) -> Result<()> {
+                SessionStore::delete_session(self, session_id).await
             }
         }
     };
@@ -277,6 +283,10 @@ impl SessionStore for SessionDatabase {
         since: DateTime<Utc>,
     ) -> Result<u32> {
         SessionStoreDispatch::workspace_cost_since(self, workspace_id, since).await
+    }
+
+    async fn delete_session(&self, session_id: SessionId) -> Result<()> {
+        SessionStoreDispatch::delete_session(self, session_id).await
     }
 }
 

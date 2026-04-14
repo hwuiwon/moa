@@ -841,6 +841,49 @@ impl SessionStore for TursoSessionStore {
         u32::try_from(total)
             .map_err(|_| MoaError::StorageError("workspace spend exceeded u32 range".to_string()))
     }
+
+    /// Permanently removes a session and all rows referencing it.
+    ///
+    /// Deletes in this order inside a single IMMEDIATE transaction so
+    /// foreign-key constraints stay satisfied throughout:
+    ///   1. `events_fts` rows (FTS5 external-content table — rows must be
+    ///      removed explicitly; there's no `ON DELETE CASCADE` for FTS).
+    ///   2. `events` rows (FK-protected by `sessions.id`).
+    ///   3. `pending_signals` rows.
+    ///   4. The `sessions` row itself.
+    ///
+    /// Any blob-store contents are dropped outside the transaction since
+    /// they live in a separate store.
+    async fn delete_session(&self, session_id: moa_core::SessionId) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(map_db_error)?;
+
+        let session_text = session_id.to_string();
+        for sql in [
+            "DELETE FROM events_fts WHERE session_id = ?",
+            "DELETE FROM events WHERE session_id = ?",
+            "DELETE FROM pending_signals WHERE session_id = ?",
+            "DELETE FROM sessions WHERE id = ?",
+        ] {
+            transaction
+                .execute(sql, params![session_text.clone()])
+                .await
+                .map_err(map_db_error)?;
+        }
+        transaction.commit().await.map_err(map_db_error)?;
+
+        // Blob cleanup is best-effort — the session row is already gone,
+        // and a stale blob directory is harmless (claim-checks are
+        // content-addressed). Log on failure but don't surface an error.
+        if let Err(err) = self.blob_store.delete_session(&session_id).await {
+            tracing::warn!(%err, session_id = %session_id, "blob cleanup failed after session delete");
+        }
+
+        Ok(())
+    }
 }
 
 impl TursoSessionStore {

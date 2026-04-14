@@ -95,6 +95,12 @@ pub trait SessionStore: Send + Sync {
         workspace_id: &WorkspaceId,
         since: DateTime<Utc>,
     ) -> Result<u32>;
+
+    /// Permanently deletes a session along with its events and any
+    /// dependent rows (pending signals, FTS index entries). Used by the
+    /// orchestrator to sweep empty sessions at startup so clicking
+    /// `+ New Session` without sending a prompt doesn't persist a row.
+    async fn delete_session(&self, session_id: SessionId) -> Result<()>;
 }
 
 /// Durable blob store used by the claim-check session event pattern.

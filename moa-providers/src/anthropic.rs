@@ -355,6 +355,22 @@ fn provider_native_tool_json(tool: &ProviderNativeTool) -> Value {
     Value::Object(value)
 }
 
+const PARTIAL_JSON_PREVIEW_MAX: usize = 240;
+
+/// Bounds-safe char-boundary preview of a (possibly partial) JSON payload
+/// so we can emit tracing breadcrumbs without risking a mid-codepoint slice.
+fn preview_partial_json(raw: &str) -> &str {
+    if raw.len() <= PARTIAL_JSON_PREVIEW_MAX {
+        raw
+    } else {
+        let mut cut = PARTIAL_JSON_PREVIEW_MAX;
+        while cut > 0 && !raw.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        &raw[..cut]
+    }
+}
+
 fn summarize_anthropic_server_tool_use(name: &str, partial_json: &str) -> String {
     if name == "web_search"
         && let Ok(value) = serde_json::from_str::<Value>(partial_json)
@@ -711,11 +727,18 @@ impl AnthropicStreamState {
                 let input = if partial_json.trim().is_empty() {
                     Value::Object(Map::new())
                 } else {
-                    serde_json::from_str(&partial_json).map_err(|error| {
-                        MoaError::SerializationError(format!(
-                            "failed to parse Anthropic tool input JSON: {error}"
-                        ))
-                    })?
+                    match serde_json::from_str(&partial_json) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                tool_name = %name,
+                                raw_preview = %preview_partial_json(&partial_json),
+                                "Anthropic tool input JSON failed to parse; falling back to empty object"
+                            );
+                            Value::Object(Map::new())
+                        }
+                    }
                 };
                 let tool_call = ToolInvocation {
                     id: Some(id),
@@ -761,7 +784,15 @@ impl AnthropicStreamState {
                         } else {
                             match serde_json::from_str(partial_json) {
                                 Ok(value) => value,
-                                Err(_) => Value::Object(Map::new()),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        tool_name = %name,
+                                        raw_preview = %preview_partial_json(partial_json),
+                                        "Anthropic tool input JSON failed to parse on finish; falling back to empty object"
+                                    );
+                                    Value::Object(Map::new())
+                                }
                             }
                         };
                         self.completed_content[index] =
