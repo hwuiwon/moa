@@ -219,6 +219,98 @@ async fn file_search_skips_git_directory_contents() {
 }
 
 #[tokio::test]
+async fn file_search_skips_python_virtualenvs_in_remembered_workspace() {
+    let dir = tempdir().unwrap();
+    let workspace_root = dir.path().join("workspace-root");
+    tokio::fs::create_dir_all(workspace_root.join(".venv/lib"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(workspace_root.join("server/core"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        workspace_root.join(".venv/lib/ignored.py"),
+        "print('ignore')",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(workspace_root.join("server/core/views.py"), "print('keep')")
+        .await
+        .unwrap();
+
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let router = ToolRouter::new_local(memory_store, dir.path().join("sandboxes"))
+        .await
+        .unwrap();
+    let session = session();
+    router
+        .remember_workspace_root(session.workspace_id.clone(), workspace_root)
+        .await;
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_search".to_string(),
+                input: json!({ "pattern": "**/*.py" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let rendered = output.to_text();
+    assert!(rendered.contains("server/core/views.py"));
+    assert!(!rendered.contains(".venv/lib/ignored.py"));
+}
+
+#[tokio::test]
+async fn file_search_respects_moaignore_in_remembered_workspace() {
+    let dir = tempdir().unwrap();
+    let workspace_root = dir.path().join("workspace-root");
+    tokio::fs::create_dir_all(workspace_root.join("data"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(workspace_root.join("src"))
+        .await
+        .unwrap();
+    tokio::fs::write(workspace_root.join(".moaignore"), "data\n")
+        .await
+        .unwrap();
+    tokio::fs::write(workspace_root.join("data/fixtures.json"), "{}")
+        .await
+        .unwrap();
+    tokio::fs::write(workspace_root.join("src/lib.rs"), "pub fn demo() {}")
+        .await
+        .unwrap();
+
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let router = ToolRouter::new_local(memory_store, dir.path().join("sandboxes"))
+        .await
+        .unwrap();
+    let session = session();
+    router
+        .remember_workspace_root(session.workspace_id.clone(), workspace_root)
+        .await;
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_search".to_string(),
+                input: json!({ "pattern": "**/*" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let rendered = output.to_text();
+    assert!(rendered.contains("src/lib.rs"));
+    assert!(!rendered.contains("data/fixtures.json"));
+}
+
+#[tokio::test]
 async fn file_search_truncates_pathological_match_sets() {
     let dir = tempdir().unwrap();
     let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
