@@ -5,11 +5,12 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_brain::{
-    StreamedTurnResult, build_default_pipeline_with_runtime_and_instructions,
+    LoopDetector, StreamedTurnResult, build_default_pipeline_with_runtime_and_instructions,
     find_pending_tool_approval, find_resolved_pending_tool_approval,
     run_streamed_turn_with_signals, update_workspace_tool_stats,
 };
@@ -254,6 +255,15 @@ impl LocalOrchestrator {
             .get(session_id)
             .map(|handle| !handle.finished.load(Ordering::SeqCst))
             .unwrap_or(false)
+    }
+
+    async fn wait_for_handle_shutdown(&self, session_id: &SessionId) {
+        for _ in 0..300 {
+            if !self.handle_is_active(session_id).await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     async fn spawn_session(
@@ -656,8 +666,19 @@ impl BrainOrchestrator for LocalOrchestrator {
 
     /// Resumes an existing persisted session by spawning a new background task if needed.
     async fn resume_session(&self, session_id: SessionId) -> Result<SessionHandle> {
+        let session = self.session_store.get_session(session_id.clone()).await?;
         if self.handle_is_active(&session_id).await {
-            return Ok(SessionHandle { session_id });
+            if matches!(
+                session.status,
+                SessionStatus::Running | SessionStatus::WaitingApproval
+            ) {
+                return Ok(SessionHandle { session_id });
+            }
+
+            self.wait_for_handle_shutdown(&session_id).await;
+            if self.handle_is_active(&session_id).await {
+                return Ok(SessionHandle { session_id });
+            }
         }
 
         let wake = self.session_store.wake(session_id.clone()).await?;
@@ -800,6 +821,10 @@ async fn run_session_task(
         context.discovered_workspace_instructions.clone(),
         context.tool_router.tool_schemas(),
     );
+    let max_turns = context.config.session_limits.max_turns;
+    let loop_detection_threshold = context.config.session_limits.loop_detection_threshold;
+    let mut turn_count = 0u32;
+    let mut loop_detector = LoopDetector::new(loop_detection_threshold);
     loop {
         if !turn_requested {
             match signal_rx.recv().await {
@@ -888,6 +913,19 @@ async fn run_session_task(
             .session_store
             .get_events(context.session_id.clone(), EventRange::all())
             .await?;
+        if max_turns > 0 && turn_count >= max_turns {
+            pause_active_session(
+                &context,
+                &event_tx,
+                &runtime_tx,
+                &status,
+                &context.session_id,
+                &mut queued_messages,
+                turn_limit_pause_message(turn_count, &events),
+            )
+            .await?;
+            return Ok(());
+        }
         if !session_requires_processing(&session, &events)
             && !queued_messages.is_empty()
             && flush_next_queued_message(
@@ -904,6 +942,7 @@ async fn run_session_task(
 
         turn_requested = false;
         let mut soft_cancel_requested = false;
+        let turn_start_sequence_num = events.last().map(|record| record.sequence_num).unwrap_or(0);
         let turn_number = turn_number_for_events(&events);
         let trace_context =
             TraceContext::from_session_meta(&session, last_user_message_text(&events))
@@ -940,6 +979,35 @@ async fn run_session_task(
 
         match turn_result {
             Ok(StreamedTurnResult::Complete) => {
+                turn_count = turn_count.saturating_add(1);
+                let completed_turn_events = context
+                    .session_store
+                    .get_events(
+                        context.session_id.clone(),
+                        EventRange {
+                            from_seq: Some(turn_start_sequence_num.saturating_add(1)),
+                            ..EventRange::default()
+                        },
+                    )
+                    .await?;
+                let tool_summaries = collect_turn_tool_summaries(&completed_turn_events);
+                if !tool_summaries.is_empty() && loop_detector.record_turn(&tool_summaries) {
+                    let updated_events = context
+                        .session_store
+                        .get_events(context.session_id.clone(), EventRange::all())
+                        .await?;
+                    pause_active_session(
+                        &context,
+                        &event_tx,
+                        &runtime_tx,
+                        &status,
+                        &context.session_id,
+                        &mut queued_messages,
+                        loop_detected_pause_message(loop_detection_threshold, &updated_events),
+                    )
+                    .await?;
+                    return Ok(());
+                }
                 if flush_next_queued_message(
                     &context.session_store,
                     &event_tx,
@@ -1415,6 +1483,69 @@ async fn report_session_task_paused(
     .await
 }
 
+async fn pause_active_session(
+    context: &SessionTaskContext,
+    event_tx: &broadcast::Sender<EventRecord>,
+    runtime_tx: &broadcast::Sender<RuntimeEvent>,
+    status: &Arc<RwLock<SessionStatus>>,
+    session_id: &SessionId,
+    queued_messages: &mut Vec<BufferedUserMessage>,
+    message: String,
+) -> Result<()> {
+    flush_queued_messages(
+        &context.session_store,
+        event_tx,
+        session_id,
+        queued_messages,
+    )
+    .await?;
+    refresh_workspace_tool_stats(&context.session_store, &context.memory_store, session_id).await;
+    pause_session_task(
+        &context.session_store,
+        event_tx,
+        status,
+        session_id.clone(),
+        message.clone(),
+    )
+    .await?;
+    context.tool_router.destroy_session_hands(session_id).await;
+    let _ = runtime_tx.send(RuntimeEvent::Notice(message));
+    let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
+    Ok(())
+}
+
+async fn pause_session_task(
+    session_store: &Arc<SessionDatabase>,
+    event_tx: &broadcast::Sender<EventRecord>,
+    status: &Arc<RwLock<SessionStatus>>,
+    session_id: SessionId,
+    message: String,
+) -> Result<()> {
+    let current = session_store.get_session(session_id.clone()).await?;
+    if matches!(
+        current.status,
+        SessionStatus::Failed | SessionStatus::Cancelled
+    ) {
+        return Ok(());
+    }
+
+    append_event(
+        session_store,
+        event_tx,
+        session_id.clone(),
+        Event::Warning { message },
+    )
+    .await?;
+    update_status(
+        session_store,
+        event_tx,
+        status,
+        session_id,
+        SessionStatus::Paused,
+    )
+    .await
+}
+
 fn turn_number_for_events(events: &[EventRecord]) -> i64 {
     events
         .iter()
@@ -1428,4 +1559,79 @@ fn last_user_message_text(events: &[EventRecord]) -> Option<&str> {
         Event::UserMessage { text, .. } | Event::QueuedMessage { text, .. } => Some(text.as_str()),
         _ => None,
     })
+}
+
+fn collect_turn_tool_summaries(events: &[EventRecord]) -> Vec<(String, String)> {
+    let mut tool_calls = Vec::new();
+    let mut outputs = HashMap::new();
+
+    for record in events {
+        match &record.event {
+            Event::ToolCall {
+                tool_id, tool_name, ..
+            } => tool_calls.push((*tool_id, tool_name.clone())),
+            Event::ToolResult {
+                tool_id, output, ..
+            } => {
+                outputs.insert(*tool_id, truncate_loop_output(&output.to_text()));
+            }
+            Event::ToolError { tool_id, error, .. } => {
+                outputs.insert(*tool_id, truncate_loop_output(error));
+            }
+            _ => {}
+        }
+    }
+
+    tool_calls
+        .into_iter()
+        .map(|(tool_id, tool_name)| {
+            let output = outputs.remove(&tool_id).unwrap_or_default();
+            (tool_name, output)
+        })
+        .collect()
+}
+
+fn turn_limit_pause_message(turn_count: u32, events: &[EventRecord]) -> String {
+    let noun = if turn_count == 1 { "turn" } else { "turns" };
+    let base = format!("Session paused after {turn_count} {noun}. Use /resume to continue.");
+    append_pause_summary(base, events)
+}
+
+fn loop_detected_pause_message(threshold: u32, events: &[EventRecord]) -> String {
+    let noun = if threshold == 1 { "turn" } else { "turns" };
+    let base = format!(
+        "Loop detected after {threshold} consecutive {noun} with identical tool call patterns. Session paused. Use /resume to continue."
+    );
+    append_pause_summary(base, events)
+}
+
+fn append_pause_summary(base: String, events: &[EventRecord]) -> String {
+    let Some(summary) = latest_brain_response_summary(events) else {
+        return base;
+    };
+    format!("{base} Latest assistant response: {summary}")
+}
+
+fn latest_brain_response_summary(events: &[EventRecord]) -> Option<String> {
+    events.iter().rev().find_map(|record| match &record.event {
+        Event::BrainResponse { text, .. } => {
+            let line = text.lines().find(|line| !line.trim().is_empty())?.trim();
+            if line.is_empty() {
+                None
+            } else {
+                Some(truncate_loop_output(line))
+            }
+        }
+        _ => None,
+    })
+}
+
+fn truncate_loop_output(value: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let truncated = value.chars().take(MAX_CHARS).collect::<String>();
+    if value.chars().count() > MAX_CHARS {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }

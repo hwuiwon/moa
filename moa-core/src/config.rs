@@ -40,6 +40,8 @@ pub struct MoaConfig {
     pub observability: ObservabilityConfig,
     /// Workspace budget enforcement settings.
     pub budgets: BudgetConfig,
+    /// Per-session turn and loop guardrails.
+    pub session_limits: SessionLimitsConfig,
     /// External MCP server connections.
     pub mcp_servers: Vec<McpServerConfig>,
 }
@@ -180,6 +182,14 @@ impl MoaConfig {
             .set_default(
                 "budgets.daily_workspace_cents",
                 Self::default().budgets.daily_workspace_cents as i64,
+            )?
+            .set_default(
+                "session_limits.max_turns",
+                Self::default().session_limits.max_turns as i64,
+            )?
+            .set_default(
+                "session_limits.loop_detection_threshold",
+                Self::default().session_limits.loop_detection_threshold as i64,
             )?
             .set_default("cloud.enabled", Self::default().cloud.enabled)?
             .set_default("cloud.turso_url", Self::default().cloud.turso_url.clone())?
@@ -776,6 +786,25 @@ impl Default for BudgetConfig {
     }
 }
 
+/// Per-session turn and loop guardrails.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionLimitsConfig {
+    /// Maximum completed turns per session before pausing. `0` disables the limit.
+    pub max_turns: u32,
+    /// Number of identical consecutive turn fingerprints that triggers a loop pause. `0` disables detection.
+    pub loop_detection_threshold: u32,
+}
+
+impl Default for SessionLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_turns: 50,
+            loop_detection_threshold: 3,
+        }
+    }
+}
+
 /// Cloud runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1134,6 +1163,13 @@ mod tests {
     }
 
     #[test]
+    fn session_limits_config_defaults_are_applied() {
+        let config = MoaConfig::default();
+        assert_eq!(config.session_limits.max_turns, 50);
+        assert_eq!(config.session_limits.loop_detection_threshold, 3);
+    }
+
+    #[test]
     fn observability_config_defaults_to_grpc() {
         let toml = r#"
             [observability]
@@ -1216,6 +1252,8 @@ mod tests {
         let config = MoaConfig::load_from_path(file.path()).unwrap();
         assert_eq!(config.general.default_provider, "openai");
         assert_eq!(config.tui.tab_limit, 8);
+        assert_eq!(config.session_limits.max_turns, 50);
+        assert_eq!(config.session_limits.loop_detection_threshold, 3);
     }
 
     #[test]
