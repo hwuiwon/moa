@@ -90,6 +90,10 @@ default_posture = "approve"
 auto_approve = ["file_read", "file_search"]
 always_deny = []
 
+[session_limits]
+max_turns = 50 # 0 = unlimited
+loop_detection_threshold = 3 # 0 = disabled
+
 [compaction]
 enabled = true
 event_threshold = 100

@@ -2,6 +2,7 @@
 
 pub mod compaction;
 pub mod harness;
+pub mod loop_detector;
 pub mod pipeline;
 pub mod tool_stats;
 pub mod turn;
@@ -11,6 +12,7 @@ pub use harness::{
     StreamedTurnResult, TurnResult, run_brain_turn, run_brain_turn_with_tools,
     run_brain_turn_with_tools_stepwise, run_streamed_turn, run_streamed_turn_with_signals,
 };
+pub use loop_detector::LoopDetector;
 pub use pipeline::{
     ContextPipeline, PipelineStageReport, build_default_pipeline,
     build_default_pipeline_with_runtime, build_default_pipeline_with_runtime_and_instructions,

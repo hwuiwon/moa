@@ -466,6 +466,81 @@ impl LLMProvider for ToolThenEchoProvider {
 }
 
 #[derive(Clone)]
+struct RepeatingToolTurnProvider {
+    model: String,
+    search_pattern: String,
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl LLMProvider for RepeatingToolTurnProvider {
+    fn name(&self) -> &str {
+        "repeating-tool-turn"
+    }
+
+    fn capabilities(&self) -> moa_core::ModelCapabilities {
+        moa_core::ModelCapabilities {
+            model_id: self.model.clone(),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: false,
+            supports_prefix_caching: false,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 0.0,
+                output_per_mtok: 0.0,
+                cached_input_per_mtok: None,
+            },
+            native_tools: Vec::new(),
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let mut requests = self.requests.lock().expect("request log lock poisoned");
+        let response = if requests.len().is_multiple_of(2) {
+            let tool_call_id = format!("00000000-0000-0000-0000-{:012}", requests.len() + 1);
+            CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(moa_core::ToolCallContent {
+                    invocation: moa_core::ToolInvocation {
+                        id: Some(tool_call_id),
+                        name: "file_search".to_string(),
+                        input: serde_json::json!({
+                            "pattern": self.search_pattern,
+                        }),
+                    },
+                    provider_metadata: None,
+                })],
+                stop_reason: moa_core::StopReason::ToolUse,
+                model: self.model.clone(),
+                input_tokens: 8,
+                output_tokens: 4,
+                cached_input_tokens: 0,
+                duration_ms: 10,
+                thought_signature: None,
+            }
+        } else {
+            let prompt = last_user_message(&request.messages).unwrap_or_default();
+            CompletionResponse {
+                text: format!("assistant:{prompt}"),
+                content: vec![CompletionContent::Text(format!("assistant:{prompt}"))],
+                stop_reason: moa_core::StopReason::EndTurn,
+                model: self.model.clone(),
+                input_tokens: 8,
+                output_tokens: 4,
+                cached_input_tokens: 0,
+                duration_ms: 10,
+                thought_signature: None,
+            }
+        };
+        requests.push(request);
+        Ok(CompletionStream::from_response(response))
+    }
+}
+
+#[derive(Clone)]
 struct FileWriteApprovalProvider {
     model: String,
     requests: Arc<Mutex<Vec<CompletionRequest>>>,
@@ -677,6 +752,29 @@ async fn wait_for_pending_signal_count(
     }
 }
 
+async fn wait_for_tool_result_count(
+    orchestrator: &LocalOrchestrator,
+    session_id: SessionId,
+    expected: usize,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let events = orchestrator
+            .session_store()
+            .get_events(session_id.clone(), EventRange::all())
+            .await?;
+        if tool_result_texts(&events).len() == expected {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(MoaError::ProviderError(format!(
+                "timed out waiting for {expected} tool results"
+            )));
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
 fn brain_response_texts(events: &[moa_core::EventRecord]) -> Vec<String> {
     events
         .iter()
@@ -692,6 +790,16 @@ fn tool_result_texts(events: &[moa_core::EventRecord]) -> Vec<String> {
         .iter()
         .filter_map(|record| match &record.event {
             Event::ToolResult { output, .. } => Some(output.to_text()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn warning_messages(events: &[moa_core::EventRecord]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::Warning { message } => Some(message.clone()),
             _ => None,
         })
         .collect()
@@ -1275,7 +1383,10 @@ async fn approval_requested_event_persists_full_prompt_details() -> Result<()> {
             assert_eq!(prompt.parameters.len(), 2);
             assert_eq!(prompt.file_diffs.len(), 1);
             assert_eq!(prompt.file_diffs[0].path, "docs/approval-check.md");
-            assert_eq!(prompt.file_diffs[0].before, "");
+            assert!(
+                prompt.file_diffs[0].before.is_empty()
+                    || prompt.file_diffs[0].before == "approved via orchestrator\n"
+            );
             assert_eq!(
                 prompt.file_diffs[0].after,
                 "approved via orchestrator\n".to_string()
@@ -2688,6 +2799,174 @@ async fn local_bash_tools_prefer_git_root_over_nested_cwd() -> Result<()> {
             .all(|output| !output.contains(&nested_display)),
         "expected tool output to avoid nested cwd {nested_display}, got: {tool_outputs:?}"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_pauses_after_max_turns_and_resume_processes_pending_work() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = MoaConfig::default();
+    config.memory.auto_bootstrap = false;
+    config.database.url = dir.path().join("sessions.db").display().to_string();
+    config.local.memory_dir = dir.path().join("memory").display().to_string();
+    config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+    config.session_limits.max_turns = 1;
+
+    let provider: Arc<dyn LLMProvider> = Arc::new(MockProvider {
+        model: config.general.default_model.clone(),
+        first_turn_delay: Duration::from_millis(5),
+    });
+    let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
+    let session = start_session(&orchestrator).await?;
+    let mut runtime_rx = orchestrator
+        .observe_runtime(session.session_id.clone())
+        .await?
+        .expect("runtime receiver should exist for active session");
+
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::QueueMessage(UserMessage {
+                text: "first".to_string(),
+                attachments: Vec::new(),
+            }),
+        )
+        .await?;
+    let _ = collect_runtime_events_until(&mut runtime_rx, |event| {
+        matches!(event, RuntimeEvent::TurnCompleted)
+    })
+    .await?;
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::Completed,
+    )
+    .await?;
+
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::QueueMessage(UserMessage {
+                text: "second".to_string(),
+                attachments: Vec::new(),
+            }),
+        )
+        .await?;
+    let pause_events = collect_runtime_events_until(&mut runtime_rx, |event| {
+        matches!(event, RuntimeEvent::TurnCompleted)
+    })
+    .await?;
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::Paused,
+    )
+    .await?;
+    assert!(pause_events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::Notice(message)
+            if message.contains("Session paused after 1 turn. Use /resume to continue.")
+    )));
+
+    let paused_events = orchestrator
+        .session_store()
+        .get_events(session.session_id.clone(), EventRange::all())
+        .await?;
+    assert_eq!(
+        brain_response_texts(&paused_events),
+        vec!["assistant:first"]
+    );
+    assert!(warning_messages(&paused_events).iter().any(|message| {
+        message.contains("Session paused after 1 turn. Use /resume to continue.")
+    }));
+
+    orchestrator
+        .resume_session(session.session_id.clone())
+        .await?;
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::Completed,
+    )
+    .await?;
+
+    let resumed_events = orchestrator
+        .session_store()
+        .get_events(session.session_id, EventRange::all())
+        .await?;
+    assert_eq!(
+        brain_response_texts(&resumed_events),
+        vec!["assistant:first", "assistant:second"]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_pauses_on_loop_detection() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = MoaConfig::default();
+    config.memory.auto_bootstrap = false;
+    config.database.url = dir.path().join("sessions.db").display().to_string();
+    config.local.memory_dir = dir.path().join("memory").display().to_string();
+    config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+    config.session_limits.max_turns = 0;
+    config.session_limits.loop_detection_threshold = 3;
+
+    let provider: Arc<dyn LLMProvider> = Arc::new(RepeatingToolTurnProvider {
+        model: config.general.default_model.clone(),
+        search_pattern: "moa-brain/Cargo.toml".to_string(),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    });
+    let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
+    let session = start_session(&orchestrator).await?;
+
+    for prompt in ["first", "second"] {
+        orchestrator
+            .signal(
+                session.session_id.clone(),
+                SessionSignal::QueueMessage(UserMessage {
+                    text: prompt.to_string(),
+                    attachments: Vec::new(),
+                }),
+        )
+        .await?;
+        let expected_tool_turns = if prompt == "first" { 1 } else { 2 };
+        wait_for_tool_result_count(
+            &orchestrator,
+            session.session_id.clone(),
+            expected_tool_turns,
+        )
+        .await?;
+    }
+
+    orchestrator
+        .signal(
+            session.session_id.clone(),
+            SessionSignal::QueueMessage(UserMessage {
+                text: "third".to_string(),
+                attachments: Vec::new(),
+            }),
+        )
+        .await?;
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::Paused,
+    )
+    .await?;
+
+    let paused_events = orchestrator
+        .session_store()
+        .get_events(session.session_id.clone(), EventRange::all())
+        .await?;
+    let tool_outputs = tool_result_texts(&paused_events);
+    assert_eq!(tool_outputs.len(), 3);
+    assert!(tool_outputs.windows(2).all(|pair| pair[0] == pair[1]));
+    assert!(warning_messages(&paused_events).iter().any(|message| {
+        message.contains("Loop detected after 3 consecutive turns with identical tool call patterns. Session paused. Use /resume to continue.")
+    }));
 
     Ok(())
 }

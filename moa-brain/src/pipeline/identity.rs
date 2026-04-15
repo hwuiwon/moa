@@ -22,7 +22,24 @@ When the user gives you a document or reference material and asks you to \
 remember it or add it to the knowledge base, use the memory_ingest tool to \
 store it in workspace memory.\n\n\
 When you make changes, explain what you did and why. When you encounter \
-errors, preserve them in context so they are not repeated.";
+errors, preserve them in context so they are not repeated.\n\n\
+When working in code repositories, unless project instructions say \
+otherwise:\n\
+- Skip vendored and generated directories (.venv, node_modules, \
+__pycache__, target, vendor, .git, etc.) when searching. The file_search \
+tool excludes these automatically. When using bash with grep or ripgrep, add \
+exclusion flags yourself.\n\
+- Prefer the file_write tool for targeted code edits. Avoid bash-based text \
+manipulation (sed, python -c, heredocs) for modifying source files.\n\
+- After making code changes, always run the project's test suite or relevant \
+tests to verify correctness. A linter or formatter pass alone is not \
+sufficient verification. Look for test commands in AGENTS.md, Makefile, \
+package.json, or pyproject.toml.\n\
+- Keep changes scoped to what was requested. Do not run whole-file \
+formatters that rewrite unrelated code.\n\
+- If you encounter errors in your own edits, fix them immediately. If you \
+cannot converge after 3 attempts at the same fix, stop and report what went \
+wrong instead of continuing to thrash.";
 
 /// Injects the brain identity prompt into the working context.
 #[derive(Debug, Clone)]
@@ -110,5 +127,45 @@ mod tests {
         assert_eq!(ctx.messages.len(), 1);
         assert_eq!(ctx.messages[0].role, moa_core::MessageRole::System);
         assert!(output.tokens_added > 0);
+    }
+
+    #[tokio::test]
+    async fn identity_prompt_includes_coding_guardrails() {
+        let session = SessionMeta {
+            id: SessionId::new(),
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Tui,
+            model: "claude-sonnet-4-6".to_string(),
+            ..SessionMeta::default()
+        };
+        let capabilities = ModelCapabilities {
+            model_id: "claude-sonnet-4-6".to_string(),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+            },
+            native_tools: Vec::new(),
+        };
+        let mut ctx = WorkingContext::new(&session, capabilities);
+
+        IdentityProcessor::default()
+            .process(&mut ctx)
+            .await
+            .unwrap();
+
+        let content = &ctx.messages[0].content;
+        assert!(content.contains("file_write tool for targeted code edits"));
+        assert!(content.contains("test suite"));
+        assert!(content.contains("3 attempts"));
+        assert!(content.contains(".venv"));
     }
 }
