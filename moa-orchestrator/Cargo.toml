@@ -28,6 +28,7 @@ moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
 moa-memory = { path = "../moa-memory" }
 moa-providers = { path = "../moa-providers" }
+moa-security = { path = "../moa-security" }
 moa-session = { path = "../moa-session" }
 moa-skills = { path = "../moa-skills" }
 serde = { workspace = true, optional = true }

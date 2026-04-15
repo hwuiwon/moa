@@ -23,6 +23,7 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::{ConsolidationReport, FileMemoryStore, bootstrap};
 use moa_providers::{build_provider_from_config, resolve_provider_selection};
+use moa_security::cleanup_overly_broad_shell_rules;
 use moa_session::{NeonBranchManager, SessionDatabase, create_session_store};
 use moa_skills::maybe_distill_skill;
 use tokio::sync::{RwLock, broadcast, mpsc};
@@ -528,6 +529,23 @@ impl LocalOrchestrator {
         workspace_id: WorkspaceId,
         workspace_root: PathBuf,
     ) {
+        match cleanup_overly_broad_shell_rules(self.session_store.as_ref(), &workspace_id).await {
+            Ok(cleaned) if cleaned > 0 => {
+                tracing::info!(
+                    workspace_id = %workspace_id,
+                    cleaned,
+                    "removed legacy shell approval rules during workspace initialization"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    %error,
+                    "failed to clean up legacy shell approval rules during workspace initialization"
+                );
+            }
+        }
         self.tool_router
             .remember_workspace_root(workspace_id.clone(), workspace_root.clone())
             .await;

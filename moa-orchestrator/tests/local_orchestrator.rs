@@ -4,21 +4,24 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use moa_core::{
-    BrainOrchestrator, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
-    ConfidenceLevel, ContextMessage, Event, EventRange, EventType, LLMProvider, MemoryPath,
-    MemoryScope, MemoryStore, MessageRole, MoaConfig, MoaError, PageType, Platform, Result,
-    RuntimeEvent, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
-    SessionStatus, SessionStore, StartSessionRequest, TokenPricing, ToolCallFormat, ToolOutput,
-    UserId, UserMessage, WikiPage, WorkspaceId,
+    ApprovalRule, BrainOrchestrator, CompletionContent, CompletionRequest, CompletionResponse,
+    CompletionStream, ConfidenceLevel, ContextMessage, Event, EventRange, EventType, LLMProvider,
+    MemoryPath, MemoryScope, MemoryStore, MessageRole, MoaConfig, MoaError, PageType, Platform,
+    PolicyAction, PolicyScope, Result, RuntimeEvent, SessionFilter, SessionHandle, SessionId,
+    SessionMeta, SessionSignal, SessionStatus, SessionStore, StartSessionRequest, TokenPricing,
+    ToolCallFormat, ToolOutput, UserId, UserMessage, WikiPage, WorkspaceId,
 };
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
+use moa_security::ApprovalRuleStore;
 use moa_session::create_session_store;
 use tempfile::TempDir;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{Instant, sleep};
+use uuid::Uuid;
 
 #[derive(Clone)]
 struct MockProvider {
@@ -2537,6 +2540,56 @@ async fn local_bash_tools_prefer_git_root_over_nested_cwd() -> Result<()> {
             .iter()
             .all(|output| !output.contains(&nested_display)),
         "expected tool output to avoid nested cwd {nested_display}, got: {tool_outputs:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn remember_workspace_root_cleans_up_legacy_shell_approval_rules() -> Result<()> {
+    let (dir, orchestrator) = test_orchestrator().await?;
+    let workspace_id = WorkspaceId::new("workspace");
+    let store = orchestrator.session_store();
+
+    for rule in [
+        ApprovalRule {
+            id: Uuid::now_v7(),
+            workspace_id: workspace_id.clone(),
+            tool: "bash".to_string(),
+            pattern: "zsh *".to_string(),
+            action: PolicyAction::Allow,
+            scope: PolicyScope::Workspace,
+            created_by: UserId::new("tester"),
+            created_at: Utc::now(),
+        },
+        ApprovalRule {
+            id: Uuid::now_v7(),
+            workspace_id: workspace_id.clone(),
+            tool: "bash".to_string(),
+            pattern: "npm *".to_string(),
+            action: PolicyAction::Allow,
+            scope: PolicyScope::Workspace,
+            created_by: UserId::new("tester"),
+            created_at: Utc::now(),
+        },
+    ] {
+        store.upsert_approval_rule(rule).await?;
+    }
+
+    orchestrator
+        .remember_workspace_root(workspace_id.clone(), dir.path().to_path_buf())
+        .await;
+
+    let rules = store.list_approval_rules(&workspace_id).await?;
+    assert!(
+        rules
+            .iter()
+            .all(|rule| !(rule.tool == "bash" && rule.pattern == "zsh *"))
+    );
+    assert!(
+        rules
+            .iter()
+            .any(|rule| rule.tool == "bash" && rule.pattern == "npm *")
     );
 
     Ok(())
