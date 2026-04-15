@@ -8,6 +8,7 @@ pub mod shell;
 pub mod telemetry;
 pub mod traits;
 pub mod types;
+pub mod workspace;
 
 pub use config::{
     CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, CompactionConfig,

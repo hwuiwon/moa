@@ -256,6 +256,7 @@ async fn build_pipeline(
         Box::new(InstructionProcessor::new(
             workspace_instructions,
             user_instructions,
+            None,
         )),
         Box::new(ToolDefinitionProcessor::with_memory(
             tool_schemas,

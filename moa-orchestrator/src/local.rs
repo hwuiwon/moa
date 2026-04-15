@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_brain::{
-    StreamedTurnResult, build_default_pipeline_with_runtime, find_pending_tool_approval,
-    find_resolved_pending_tool_approval, run_streamed_turn_with_signals,
-    update_workspace_tool_stats,
+    StreamedTurnResult, build_default_pipeline_with_runtime_and_instructions,
+    find_pending_tool_approval, find_resolved_pending_tool_approval,
+    run_streamed_turn_with_signals, update_workspace_tool_stats,
 };
 use moa_core::{
     BrainOrchestrator, BranchManager, BufferedUserMessage, CronHandle, CronSpec, Event, EventRange,
@@ -42,6 +42,7 @@ pub struct LocalOrchestrator {
     scheduler: Arc<JobScheduler>,
     branch_manager: Option<Arc<NeonBranchManager>>,
     sessions: Arc<RwLock<HashMap<SessionId, LocalBrainHandle>>>,
+    discovered_workspace_instructions: Arc<RwLock<HashMap<WorkspaceId, String>>>,
 }
 
 struct LocalBrainHandle {
@@ -61,6 +62,7 @@ struct SessionTaskContext {
     llm_provider: Arc<dyn LLMProvider>,
     tool_router: Arc<ToolRouter>,
     session_id: SessionId,
+    discovered_workspace_instructions: Option<String>,
 }
 
 impl LocalOrchestrator {
@@ -90,6 +92,7 @@ impl LocalOrchestrator {
             scheduler: Arc::new(scheduler),
             branch_manager,
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            discovered_workspace_instructions: Arc::new(RwLock::new(HashMap::new())),
         };
         orchestrator.register_memory_maintenance_job().await?;
         orchestrator.register_neon_checkpoint_cleanup_job().await?;
@@ -264,13 +267,8 @@ impl LocalOrchestrator {
         let (runtime_tx, _) = broadcast::channel(512);
         let cancel_token = CancellationToken::new();
         let hard_cancel_token = CancellationToken::new();
-        let status = Arc::new(RwLock::new(
-            self.session_store
-                .get_session(session_id.clone())
-                .await?
-                .status
-                .clone(),
-        ));
+        let session = self.session_store.get_session(session_id.clone()).await?;
+        let status = Arc::new(RwLock::new(session.status.clone()));
         let finished = Arc::new(AtomicBool::new(false));
         let context = SessionTaskContext {
             config: self.config.clone(),
@@ -279,6 +277,12 @@ impl LocalOrchestrator {
             llm_provider: self.llm_provider.clone(),
             tool_router: self.tool_router.clone(),
             session_id: session_id.clone(),
+            discovered_workspace_instructions: self
+                .discovered_workspace_instructions
+                .read()
+                .await
+                .get(&session.workspace_id)
+                .cloned(),
         };
         let task_status = status.clone();
         let task_event_tx = event_tx.clone();
@@ -529,6 +533,17 @@ impl LocalOrchestrator {
         workspace_id: WorkspaceId,
         workspace_root: PathBuf,
     ) {
+        let discovered_instructions =
+            moa_core::workspace::discover_workspace_instructions(&workspace_root);
+        let mut discovered_workspace_instructions =
+            self.discovered_workspace_instructions.write().await;
+        if let Some(instructions) = discovered_instructions {
+            discovered_workspace_instructions.insert(workspace_id.clone(), instructions);
+        } else {
+            discovered_workspace_instructions.remove(&workspace_id);
+        }
+        drop(discovered_workspace_instructions);
+
         match cleanup_overly_broad_shell_rules(self.session_store.as_ref(), &workspace_id).await {
             Ok(cleaned) if cleaned > 0 => {
                 tracing::info!(
@@ -777,11 +792,12 @@ async fn run_session_task(
     cancel_token: CancellationToken,
     hard_cancel_token: CancellationToken,
 ) -> Result<()> {
-    let pipeline = build_default_pipeline_with_runtime(
+    let pipeline = build_default_pipeline_with_runtime_and_instructions(
         &context.config,
         context.session_store.clone(),
         context.memory_store.clone(),
         Some(context.llm_provider.clone()),
+        context.discovered_workspace_instructions.clone(),
         context.tool_router.tool_schemas(),
     );
     loop {

@@ -1240,6 +1240,9 @@ async fn resume_session_processes_user_message_before_trailing_status_event() ->
 
 #[tokio::test]
 async fn approval_requested_event_persists_full_prompt_details() -> Result<()> {
+    let _cwd_guard = cwd_lock().lock().await;
+    let workspace = tempfile::tempdir()?;
+    let _dir_guard = CurrentDirGuard::set(workspace.path())?;
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = MoaConfig::default().general.default_model;
     let provider: Arc<dyn LLMProvider> = Arc::new(FileWriteApprovalProvider { model, requests });
@@ -2121,11 +2124,11 @@ async fn memory_maintenance_skips_when_threshold_or_cooldown_not_met() -> Result
 }
 
 #[tokio::test]
-async fn workspace_memory_bootstrap_copies_agents_file_without_provider_call() -> Result<()> {
+async fn workspace_memory_bootstrap_copies_contributing_file_without_provider_call() -> Result<()> {
     let _cwd_guard = cwd_lock().lock().await;
     let workspace = tempfile::tempdir()?;
     tokio::fs::write(
-        workspace.path().join("AGENTS.md"),
+        workspace.path().join("CONTRIBUTING.md"),
         "# Project Agent Instructions\n\nUse bootmarkeralpha when describing this project.\n",
     )
     .await?;
@@ -2161,7 +2164,7 @@ async fn workspace_memory_bootstrap_copies_agents_file_without_provider_call() -
         .memory_store()
         .get_index(MemoryScope::Workspace(WorkspaceId::new("workspace")))
         .await?;
-    assert!(index.contains("Project instructions loaded from `AGENTS.md`"));
+    assert!(index.contains("Project instructions loaded from `CONTRIBUTING.md`"));
     let project = orchestrator
         .memory_store()
         .read_page(
@@ -2187,7 +2190,7 @@ async fn workspace_memory_bootstrap_informs_first_turn_from_instruction_file() -
     let _cwd_guard = cwd_lock().lock().await;
     let workspace = tempfile::tempdir()?;
     tokio::fs::write(
-        workspace.path().join("AGENTS.md"),
+        workspace.path().join("CONTRIBUTING.md"),
         "# Project Agent Instructions\n\nbootmarkeralpha is the canonical bootstrap marker.\n",
     )
     .await?;
@@ -2241,7 +2244,7 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
     let _cwd_guard = cwd_lock().lock().await;
     let workspace = tempfile::tempdir()?;
     tokio::fs::write(
-        workspace.path().join("AGENTS.md"),
+        workspace.path().join("CONTRIBUTING.md"),
         "# Project Agent Instructions\n\nversion-one\n",
     )
     .await?;
@@ -2291,7 +2294,7 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
     assert!(tokio::fs::try_exists(&sentinel).await?);
 
     tokio::fs::write(
-        workspace.path().join("AGENTS.md"),
+        workspace.path().join("CONTRIBUTING.md"),
         "# Project Agent Instructions\n\nversion-two\n",
     )
     .await?;
@@ -2346,7 +2349,7 @@ async fn workspace_memory_bootstrap_can_be_disabled() -> Result<()> {
     let _cwd_guard = cwd_lock().lock().await;
     let workspace = tempfile::tempdir()?;
     tokio::fs::write(
-        workspace.path().join("AGENTS.md"),
+        workspace.path().join("CONTRIBUTING.md"),
         "# Project Agent Instructions\n\nversion-one\n",
     )
     .await?;
@@ -2392,6 +2395,150 @@ async fn workspace_memory_bootstrap_can_be_disabled() -> Result<()> {
         .join("_bootstrap.json");
     assert!(!tokio::fs::try_exists(&sentinel).await?);
     assert_eq!(requests.lock().expect("request log lock poisoned").len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_instruction_file_is_injected_into_prompt_with_config_instructions() -> Result<()>
+{
+    let _cwd_guard = cwd_lock().lock().await;
+    let workspace = tempfile::tempdir()?;
+    tokio::fs::write(
+        workspace.path().join("AGENTS.md"),
+        "# Project Instructions\n\nUse pytest for testing.\n",
+    )
+    .await?;
+    let _dir_guard = CurrentDirGuard::set(workspace.path())?;
+
+    let base = tempfile::tempdir()?;
+    let mut config = MoaConfig::default();
+    config.database.url = base.path().join("sessions.db").display().to_string();
+    config.local.memory_dir = base.path().join("memory").display().to_string();
+    config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
+    config.general.workspace_instructions = Some("Config workspace guidance.".to_string());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
+        model: config.general.default_model.clone(),
+        first_turn_delay: Duration::from_millis(5),
+        requests: requests.clone(),
+    });
+    let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
+
+    let session = orchestrator
+        .start_session(StartSessionRequest {
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Cli,
+            model: orchestrator.model().to_string(),
+            initial_message: Some(UserMessage {
+                text: "How should I run tests?".to_string(),
+                attachments: Vec::new(),
+            }),
+            title: None,
+            parent_session_id: None,
+        })
+        .await?;
+    wait_for_status(
+        &orchestrator,
+        session.session_id.clone(),
+        SessionStatus::Completed,
+    )
+    .await?;
+
+    let requests = requests.lock().expect("request log lock poisoned");
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].messages.iter().any(|message| {
+        message.role == MessageRole::System
+            && message.content.contains("<workspace_instructions>")
+            && message
+                .content
+                .contains("Config workspace guidance.\n\n---\n\n# Project Instructions")
+            && message.content.contains("Use pytest for testing.")
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_instruction_file_is_reloaded_for_each_new_session() -> Result<()> {
+    let _cwd_guard = cwd_lock().lock().await;
+    let workspace = tempfile::tempdir()?;
+    tokio::fs::write(
+        workspace.path().join("AGENTS.md"),
+        "# Project Instructions\n\nversion-one\n",
+    )
+    .await?;
+    let _dir_guard = CurrentDirGuard::set(workspace.path())?;
+
+    let base = tempfile::tempdir()?;
+    let mut config = MoaConfig::default();
+    config.database.url = base.path().join("sessions.db").display().to_string();
+    config.local.memory_dir = base.path().join("memory").display().to_string();
+    config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
+    config.memory.auto_bootstrap = false;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
+        model: config.general.default_model.clone(),
+        first_turn_delay: Duration::from_millis(5),
+        requests: requests.clone(),
+    });
+    let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
+
+    let first_session = orchestrator
+        .start_session(StartSessionRequest {
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Cli,
+            model: orchestrator.model().to_string(),
+            initial_message: Some(UserMessage {
+                text: "first session".to_string(),
+                attachments: Vec::new(),
+            }),
+            title: None,
+            parent_session_id: None,
+        })
+        .await?;
+    wait_for_status(
+        &orchestrator,
+        first_session.session_id.clone(),
+        SessionStatus::Completed,
+    )
+    .await?;
+
+    tokio::fs::write(
+        workspace.path().join("AGENTS.md"),
+        "# Project Instructions\n\nversion-two\n",
+    )
+    .await?;
+
+    let second_session = orchestrator
+        .start_session(StartSessionRequest {
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Cli,
+            model: orchestrator.model().to_string(),
+            initial_message: Some(UserMessage {
+                text: "second session".to_string(),
+                attachments: Vec::new(),
+            }),
+            title: None,
+            parent_session_id: None,
+        })
+        .await?;
+    wait_for_status(
+        &orchestrator,
+        second_session.session_id.clone(),
+        SessionStatus::Completed,
+    )
+    .await?;
+
+    let requests = requests.lock().expect("request log lock poisoned");
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].messages.iter().any(|message| {
+        message.role == MessageRole::System && message.content.contains("version-one")
+    }));
+    assert!(requests[1].messages.iter().any(|message| {
+        message.role == MessageRole::System && message.content.contains("version-two")
+    }));
     Ok(())
 }
 
