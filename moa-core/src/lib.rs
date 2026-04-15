@@ -4,6 +4,7 @@ pub mod config;
 pub mod daemon;
 pub mod error;
 pub mod events;
+pub mod shell;
 pub mod telemetry;
 pub mod traits;
 pub mod types;

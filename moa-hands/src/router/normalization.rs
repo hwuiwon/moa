@@ -4,6 +4,7 @@ use std::env;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use moa_core::shell::split_shell_chain;
 use moa_core::{
     ApprovalField, ApprovalFileDiff, MoaError, Result, ToolDiffStrategy, ToolInputShape,
     ToolInvocation,
@@ -12,6 +13,15 @@ use serde_json::Value;
 use tokio::fs;
 
 use crate::tools::file_read::resolve_sandbox_path;
+
+/// Recognized login shell wrapper prefixes used by the bash tool.
+const SHELL_WRAPPERS: &[(&str, &[&str])] = &[
+    ("zsh", &["-lc", "-c"]),
+    ("bash", &["-lc", "-c"]),
+    ("sh", &["-c"]),
+];
+
+const BARE_SHELL_NAMES: &[&str] = &["zsh", "bash", "sh", "dash", "fish"];
 
 pub(super) fn normalized_input_for(input_shape: ToolInputShape, input: &Value) -> Result<String> {
     let value = match input_shape {
@@ -50,10 +60,50 @@ pub(super) fn summary_for(
     }
 }
 
+/// Attempts to extract the inner command from a recognized shell wrapper invocation.
+///
+/// Only one wrapper layer is unwrapped. Unrecognized or malformed wrapper forms return `None`.
+pub(super) fn unwrap_shell_wrapper(normalized_input: &str) -> Option<String> {
+    let tokens = shell_words::split(normalized_input).ok()?;
+
+    for (shell, flags) in SHELL_WRAPPERS {
+        let inner = match tokens.as_slice() {
+            [command, flag, inner]
+                if command == shell && flags.iter().any(|candidate| flag == candidate) =>
+            {
+                inner
+            }
+            [command, login_flag, command_flag, inner]
+                if command == shell
+                    && *login_flag == "-l"
+                    && *command_flag == "-c"
+                    && flags.contains(&"-lc") =>
+            {
+                inner
+            }
+            _ => continue,
+        };
+
+        return Some(inner.clone());
+    }
+
+    None
+}
+
 pub(super) fn approval_pattern_for(input_shape: ToolInputShape, normalized_input: &str) -> String {
     if matches!(input_shape, ToolInputShape::Command) {
-        let tokens = shell_words::split(normalized_input).unwrap_or_default();
+        let effective_command =
+            unwrap_shell_wrapper(normalized_input).unwrap_or_else(|| normalized_input.to_string());
+        let sub_commands = split_shell_chain(&effective_command);
+        let target = sub_commands
+            .first()
+            .map(|sub_command| sub_command.as_str())
+            .unwrap_or(effective_command.as_str());
+        let tokens = shell_words::split(target).unwrap_or_default();
         if let Some(command) = tokens.first() {
+            if BARE_SHELL_NAMES.contains(&command.as_str()) {
+                return normalized_input.to_string();
+            }
             return if tokens.len() == 1 {
                 command.clone()
             } else {
@@ -196,4 +246,85 @@ pub(super) fn expand_local_path(path: &str) -> Result<PathBuf> {
     }
 
     Ok(PathBuf::from(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use moa_core::ToolInputShape;
+
+    use super::{approval_pattern_for, unwrap_shell_wrapper};
+
+    #[test]
+    fn unwrap_shell_wrapper_recognizes_supported_forms() {
+        let cases = [
+            (
+                r#"zsh -lc "cd server && rg -n 'class CallViewSet' .""#,
+                "cd server && rg -n 'class CallViewSet' .",
+            ),
+            (r#"zsh -l -c "npm test""#, "npm test"),
+            (r#"bash -lc "cargo test""#, "cargo test"),
+            (r#"bash -c "npm test""#, "npm test"),
+            (r#"sh -c "pwd""#, "pwd"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(unwrap_shell_wrapper(input).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn no_unwrap_for_plain_command() {
+        assert!(unwrap_shell_wrapper("npm test").is_none());
+        assert!(unwrap_shell_wrapper("rg -n pattern .").is_none());
+    }
+
+    #[test]
+    fn approval_pattern_unwraps_zsh_wrapper() {
+        let pattern = approval_pattern_for(
+            ToolInputShape::Command,
+            r#"zsh -lc "cd server && rg -n 'class' .""#,
+        );
+
+        assert_eq!(pattern, "cd *");
+        assert_ne!(pattern, "zsh *");
+    }
+
+    #[test]
+    fn approval_pattern_simple_command() {
+        let pattern = approval_pattern_for(ToolInputShape::Command, "npm test");
+        assert_eq!(pattern, "npm *");
+    }
+
+    #[test]
+    fn approval_pattern_single_token() {
+        let pattern = approval_pattern_for(ToolInputShape::Command, "pwd");
+        assert_eq!(pattern, "pwd");
+    }
+
+    #[test]
+    fn approval_pattern_nested_shell_not_recursed() {
+        let input = r#"bash -c "bash -c 'rm -rf /'""#;
+        let pattern = approval_pattern_for(ToolInputShape::Command, input);
+
+        assert_eq!(pattern, input);
+        assert!(!pattern.starts_with("rm"));
+    }
+
+    #[test]
+    fn approval_pattern_chained_inner_uses_first_subcommand() {
+        let pattern = approval_pattern_for(
+            ToolInputShape::Command,
+            r#"zsh -lc "npm install && npm test""#,
+        );
+
+        assert_eq!(pattern, "npm *");
+    }
+
+    #[test]
+    fn approval_pattern_malformed_wrapper_falls_back_to_full_input() {
+        let input = r#"zsh -lc "unterminated"#;
+        let pattern = approval_pattern_for(ToolInputShape::Command, input);
+
+        assert_eq!(pattern, input);
+    }
 }
