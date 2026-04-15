@@ -202,6 +202,25 @@ pub fn build_default_pipeline_with_runtime(
     llm_provider: Option<Arc<dyn LLMProvider>>,
     tool_schemas: Vec<serde_json::Value>,
 ) -> ContextPipeline {
+    build_default_pipeline_with_runtime_and_instructions(
+        config,
+        session_store,
+        memory_store,
+        llm_provider,
+        None,
+        tool_schemas,
+    )
+}
+
+/// Builds the default seven-stage context pipeline with optional discovered workspace instructions.
+pub fn build_default_pipeline_with_runtime_and_instructions(
+    config: &MoaConfig,
+    session_store: Arc<dyn SessionStore>,
+    memory_store: Arc<dyn MemoryStore>,
+    llm_provider: Option<Arc<dyn LLMProvider>>,
+    discovered_workspace_instructions: Option<String>,
+    tool_schemas: Vec<serde_json::Value>,
+) -> ContextPipeline {
     let history: Box<dyn ContextProcessor> = if let Some(llm_provider) = llm_provider {
         Box::new(HistoryCompiler::with_compaction(
             session_store.clone(),
@@ -214,7 +233,11 @@ pub fn build_default_pipeline_with_runtime(
     ContextPipeline::with_daily_workspace_budget(
         vec![
             Box::new(IdentityProcessor::default()),
-            Box::new(InstructionProcessor::from_config(config)),
+            Box::new(InstructionProcessor::new(
+                config.general.workspace_instructions.clone(),
+                config.general.user_instructions.clone(),
+                discovered_workspace_instructions,
+            )),
             Box::new(ToolDefinitionProcessor::with_memory(
                 tool_schemas,
                 memory_store.clone(),

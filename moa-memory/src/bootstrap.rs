@@ -10,7 +10,7 @@ use tokio::fs;
 use crate::FileMemoryStore;
 use crate::index::INDEX_FILENAME;
 
-const INSTRUCTION_FILES: &[&str] = &["AGENTS.md", "CONTRIBUTING.md"];
+const INSTRUCTION_FILES: &[&str] = &["CONTRIBUTING.md"];
 const BOOTSTRAP_PAGE_PATHS: &[&str] = &[INDEX_FILENAME, "topics/project.md"];
 const SENTINEL_FILENAME: &str = "_bootstrap.json";
 const MAX_INSTRUCTION_SIZE: usize = 50 * 1024;
@@ -263,11 +263,11 @@ mod tests {
     use crate::FileMemoryStore;
 
     #[tokio::test]
-    async fn run_bootstrap_prefers_agents_file_and_can_rerun_after_sentinel_delete() {
+    async fn run_bootstrap_uses_contributing_file_and_can_rerun_after_sentinel_delete() {
         let workspace = tempdir().unwrap();
         fs::write(
-            workspace.path().join("AGENTS.md"),
-            "# AGENTS\n\npreferred instructions\n",
+            workspace.path().join("CONTRIBUTING.md"),
+            "# CONTRIBUTING\n\npreferred instructions\n",
         )
         .await
         .unwrap();
@@ -279,7 +279,7 @@ mod tests {
         let report = run_bootstrap(&store, &scope, workspace.path(), "workspace")
             .await
             .unwrap();
-        assert_eq!(report.source_file.as_deref(), Some("AGENTS.md"));
+        assert_eq!(report.source_file.as_deref(), Some("CONTRIBUTING.md"));
         assert_eq!(
             report.pages_created,
             vec!["MEMORY.md".to_string(), "topics/project.md".to_string()]
