@@ -30,12 +30,14 @@ const DEFAULT_DOCKER_WORKSPACE: &str = "/workspace";
 #[derive(Debug, Clone)]
 struct LocalSandbox {
     execution_root: PathBuf,
+    extra_search_skips: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 struct DockerSandbox {
     sandbox_dir: PathBuf,
     workspace_mount: String,
+    extra_search_skips: Vec<String>,
 }
 
 /// Local zero-setup hand provider used by interactive clients and test harnesses.
@@ -83,6 +85,7 @@ impl LocalHandProvider {
     }
 
     async fn provision_docker(&self, spec: &HandSpec, sandbox_dir: &Path) -> Result<HandHandle> {
+        let extra_search_skips = file_search::load_moaignore(sandbox_dir).await;
         let image = spec
             .image
             .clone()
@@ -138,6 +141,7 @@ impl LocalHandProvider {
             DockerSandbox {
                 sandbox_dir: sandbox_dir.to_path_buf(),
                 workspace_mount: workspace_mount.to_string_lossy().into_owned(),
+                extra_search_skips,
             },
         );
         Ok(HandHandle::docker(container_id))
@@ -148,20 +152,27 @@ impl LocalHandProvider {
             .workspace_mount
             .clone()
             .unwrap_or_else(|| sandbox_dir.clone());
-        self.local_sandboxes
-            .write()
-            .await
-            .insert(sandbox_dir.clone(), LocalSandbox { execution_root });
+        let extra_search_skips = file_search::load_moaignore(&execution_root).await;
+        self.local_sandboxes.write().await.insert(
+            sandbox_dir.clone(),
+            LocalSandbox {
+                execution_root,
+                extra_search_skips,
+            },
+        );
         Ok(HandHandle::local(sandbox_dir))
     }
 
-    async fn resolve_local_execution_root(&self, sandbox_dir: &Path) -> PathBuf {
+    async fn resolve_local_sandbox(&self, sandbox_dir: &Path) -> LocalSandbox {
         self.local_sandboxes
             .read()
             .await
             .get(sandbox_dir)
-            .map(|sandbox| sandbox.execution_root.clone())
-            .unwrap_or_else(|| sandbox_dir.to_path_buf())
+            .cloned()
+            .unwrap_or_else(|| LocalSandbox {
+                execution_root: sandbox_dir.to_path_buf(),
+                extra_search_skips: Vec::new(),
+            })
     }
 
     async fn execute_local_tool(
@@ -171,20 +182,23 @@ impl LocalHandProvider {
         input: &str,
         hard_cancel_token: Option<&CancellationToken>,
     ) -> Result<ToolOutput> {
-        let execution_root = self.resolve_local_execution_root(sandbox_dir).await;
+        let sandbox = self.resolve_local_sandbox(sandbox_dir).await;
         match tool {
             "bash" => {
                 bash::execute_local(
-                    &execution_root,
+                    &sandbox.execution_root,
                     input,
                     self.command_timeout,
                     hard_cancel_token,
                 )
                 .await
             }
-            "file_read" => file_read::execute(&execution_root, input).await,
-            "file_write" => file_write::execute(&execution_root, input).await,
-            "file_search" => file_search::execute(&execution_root, input).await,
+            "file_read" => file_read::execute(&sandbox.execution_root, input).await,
+            "file_write" => file_write::execute(&sandbox.execution_root, input).await,
+            "file_search" => {
+                file_search::execute(&sandbox.execution_root, input, &sandbox.extra_search_skips)
+                    .await
+            }
             other => Err(MoaError::ToolError(format!(
                 "unsupported local hand tool: {other}"
             ))),
@@ -245,6 +259,7 @@ impl LocalHandProvider {
                     container_id,
                     &sandbox.workspace_mount,
                     input,
+                    &sandbox.extra_search_skips,
                     self.command_timeout,
                     hard_cancel_token,
                 )
