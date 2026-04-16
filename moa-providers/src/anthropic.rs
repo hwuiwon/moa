@@ -15,7 +15,7 @@ use futures_util::{Stream, StreamExt, pin_mut};
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
     LLMProvider, MessageRole, MoaConfig, MoaError, ModelCapabilities, ProviderNativeTool, Result,
-    StopReason, TokenPricing, ToolCallFormat, ToolContent, ToolInvocation,
+    StopReason, TokenPricing, ToolCallFormat, ToolContent, ToolInvocation, estimate_text_tokens,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -33,8 +33,16 @@ const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const DEFAULT_STREAM_BUFFER: usize = 64;
 const DEFAULT_MAX_RETRIES: usize = 3;
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4_096;
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+const MIN_CACHEABLE_TOKENS: usize = 1_024;
 const MODEL_OPUS_4_6: &str = "claude-opus-4-6";
 const MODEL_SONNET_4_6: &str = "claude-sonnet-4-6";
+
+#[derive(Debug, Clone, Copy)]
+enum CacheTarget {
+    System(usize),
+    Message(usize),
+}
 
 /// Anthropic Claude provider backed by the Messages API.
 pub struct AnthropicProvider {
@@ -273,14 +281,19 @@ fn build_request_body(
 ) -> Result<Value> {
     let mut system_messages = Vec::new();
     let mut messages = Vec::new();
+    let mut cache_targets = Vec::with_capacity(request.messages.len());
 
     for message in &request.messages {
         if message.role == MessageRole::System {
-            system_messages.push(message.content.clone());
+            let system_index = system_messages.len();
+            system_messages.push(anthropic_text_block(message.content.clone()));
+            cache_targets.push(CacheTarget::System(system_index));
             continue;
         }
 
+        let message_index = messages.len();
         messages.push(anthropic_message(message));
+        cache_targets.push(CacheTarget::Message(message_index));
     }
 
     if messages.is_empty() {
@@ -297,15 +310,7 @@ fn build_request_body(
     let mut body = Map::new();
     body.insert("model".to_string(), Value::String(model.to_string()));
     body.insert("max_tokens".to_string(), json!(max_tokens));
-    body.insert("messages".to_string(), Value::Array(messages));
     body.insert("stream".to_string(), Value::Bool(true));
-
-    if !system_messages.is_empty() {
-        body.insert(
-            "system".to_string(),
-            Value::String(system_messages.join("\n\n")),
-        );
-    }
 
     if let Some(temperature) = request.temperature {
         body.insert("temperature".to_string(), json!(temperature));
@@ -324,11 +329,143 @@ fn build_request_body(
                 .map(provider_native_tool_json),
         );
     }
+
+    apply_cache_breakpoints(
+        request,
+        &cache_targets,
+        &mut system_messages,
+        &mut messages,
+        &mut tools,
+    );
+
+    body.insert("messages".to_string(), Value::Array(messages));
+    if !system_messages.is_empty() {
+        body.insert("system".to_string(), Value::Array(system_messages));
+    }
     if !tools.is_empty() {
         body.insert("tools".to_string(), Value::Array(tools));
     }
 
     Ok(Value::Object(body))
+}
+
+fn anthropic_text_block(text: impl Into<String>) -> Value {
+    json!({
+        "type": "text",
+        "text": text.into(),
+    })
+}
+
+fn apply_cache_breakpoints(
+    request: &CompletionRequest,
+    cache_targets: &[CacheTarget],
+    system_messages: &mut [Value],
+    messages: &mut [Value],
+    tools: &mut [Value],
+) {
+    if let Some(last_tool) = tools.last_mut() {
+        annotate_cache_control(last_tool);
+    }
+
+    let tool_slots = usize::from(!tools.is_empty());
+    let remaining_slots = MAX_CACHE_BREAKPOINTS.saturating_sub(tool_slots);
+    if remaining_slots == 0 {
+        return;
+    }
+
+    for breakpoint in eligible_cache_breakpoints(request, remaining_slots) {
+        let Some(target_index) = breakpoint.checked_sub(1) else {
+            continue;
+        };
+        let Some(target) = cache_targets.get(target_index).copied() else {
+            continue;
+        };
+
+        match target {
+            CacheTarget::System(index) => {
+                if let Some(block) = system_messages.get_mut(index) {
+                    annotate_cache_control(block);
+                }
+            }
+            CacheTarget::Message(index) => {
+                if let Some(message) = messages.get_mut(index) {
+                    annotate_message_cache_control(message);
+                }
+            }
+        }
+    }
+}
+
+fn eligible_cache_breakpoints(request: &CompletionRequest, max_breakpoints: usize) -> Vec<usize> {
+    let mut requested = request
+        .cache_breakpoints
+        .iter()
+        .copied()
+        .filter(|breakpoint| *breakpoint > 0)
+        .collect::<Vec<_>>();
+    requested.sort_unstable();
+    requested.dedup();
+
+    if requested.is_empty() || max_breakpoints == 0 {
+        return Vec::new();
+    }
+
+    let mut eligible = Vec::new();
+    let mut prefix_tokens = 0;
+    let mut next_breakpoint = 0;
+
+    for (index, message) in request.messages.iter().enumerate() {
+        prefix_tokens += estimate_text_tokens(&message.content);
+
+        while let Some(breakpoint) = requested.get(next_breakpoint).copied() {
+            if breakpoint != index + 1 {
+                break;
+            }
+            if prefix_tokens >= MIN_CACHEABLE_TOKENS {
+                eligible.push(breakpoint);
+            }
+            next_breakpoint += 1;
+        }
+    }
+
+    eligible
+        .into_iter()
+        .rev()
+        .take(max_breakpoints)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn annotate_cache_control(value: &mut Value) {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
+    }
+}
+
+fn annotate_message_cache_control(message: &mut Value) {
+    let Some(content) = message.get_mut("content") else {
+        return;
+    };
+
+    match content {
+        Value::String(text) => {
+            let text = std::mem::take(text);
+            *content = Value::Array(vec![anthropic_text_block(text)]);
+            if let Some(blocks) = content.as_array_mut()
+                && let Some(last_block) = blocks.last_mut()
+            {
+                annotate_cache_control(last_block);
+            }
+        }
+        Value::Array(blocks) => {
+            if let Some(last_block) = blocks.last_mut() {
+                annotate_cache_control(last_block);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn native_web_search_tools() -> Vec<ProviderNativeTool> {
@@ -523,6 +660,8 @@ where
     }
 
     span_recorder.record_raw_response(&state.debug_snapshot());
+    span_recorder.set_cached_input_tokens(state.cached_input_tokens);
+    span_recorder.set_cache_creation_input_tokens(state.cache_creation_input_tokens);
     Ok(state.finish(started_at))
 }
 
@@ -533,6 +672,7 @@ struct AnthropicStreamDebugSnapshot {
     input_tokens: usize,
     output_tokens: usize,
     cached_input_tokens: usize,
+    cache_creation_input_tokens: usize,
     content: Vec<CompletionContent>,
 }
 
@@ -543,6 +683,7 @@ struct AnthropicStreamState {
     input_tokens: usize,
     output_tokens: usize,
     cached_input_tokens: usize,
+    cache_creation_input_tokens: usize,
     blocks: Vec<BlockAccumulator>,
     completed_content: Vec<Option<CompletionContent>>,
 }
@@ -555,6 +696,7 @@ impl AnthropicStreamState {
             input_tokens: 0,
             output_tokens: 0,
             cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
             blocks: Vec::new(),
             completed_content: Vec::new(),
         }
@@ -568,6 +710,7 @@ impl AnthropicStreamState {
                 if let Some(usage) = payload.message.usage {
                     self.input_tokens = usage.input_tokens;
                     self.cached_input_tokens = usage.cache_read_input_tokens;
+                    self.cache_creation_input_tokens = usage.cache_creation_input_tokens;
                 }
                 Ok(Vec::new())
             }
@@ -585,6 +728,9 @@ impl AnthropicStreamState {
                     self.output_tokens = usage.output_tokens;
                     if usage.cache_read_input_tokens > 0 {
                         self.cached_input_tokens = usage.cache_read_input_tokens;
+                    }
+                    if usage.cache_creation_input_tokens > 0 {
+                        self.cache_creation_input_tokens = usage.cache_creation_input_tokens;
                     }
                 }
                 Ok(Vec::new())
@@ -833,6 +979,7 @@ impl AnthropicStreamState {
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
             cached_input_tokens: self.cached_input_tokens,
+            cache_creation_input_tokens: self.cache_creation_input_tokens,
             content: self.completed_content.iter().flatten().cloned().collect(),
         }
     }
@@ -885,6 +1032,8 @@ struct Usage {
     output_tokens: usize,
     #[serde(default)]
     cache_read_input_tokens: usize,
+    #[serde(default)]
+    cache_creation_input_tokens: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1043,6 +1192,7 @@ mod tests {
             })],
             max_output_tokens: Some(512),
             temperature: Some(0.2),
+            cache_breakpoints: Vec::new(),
             metadata: Default::default(),
         };
 
@@ -1055,13 +1205,133 @@ mod tests {
         .unwrap();
 
         assert_eq!(body["model"], MODEL_SONNET_4_6);
-        assert_eq!(body["system"], "System one\n\nSystem two");
+        assert_eq!(body["system"][0]["text"], "System one");
+        assert_eq!(body["system"][1]["text"], "System two");
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "Hello");
         assert_eq!(body["messages"][1]["role"], "assistant");
         assert_eq!(body["tools"][0]["name"], "bash");
         assert_eq!(body["tools"][0]["input_schema"]["required"], json!(["cmd"]));
         assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn completion_request_applies_cache_control_to_system_and_tools() {
+        let request = CompletionRequest {
+            model: Some(MODEL_SONNET_4_6.to_string()),
+            messages: vec![
+                ContextMessage::system("S".repeat(5_000)),
+                ContextMessage::user("Hello"),
+            ],
+            tools: vec![json!({
+                "name": "bash",
+                "description": "Run shell commands",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "cmd": { "type": "string" }
+                    },
+                    "required": ["cmd"]
+                }
+            })],
+            max_output_tokens: Some(512),
+            temperature: None,
+            cache_breakpoints: vec![1],
+            metadata: Default::default(),
+        };
+
+        let body = build_request_body(
+            &request,
+            &canonical_model_id(MODEL_SONNET_4_6).expect("valid model"),
+            &capabilities_for_model(MODEL_SONNET_4_6).expect("valid capabilities"),
+            false,
+        )
+        .expect("request should build");
+
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn completion_request_applies_cache_control_to_message_breakpoints() {
+        let request = CompletionRequest {
+            model: Some(MODEL_SONNET_4_6.to_string()),
+            messages: vec![
+                ContextMessage::user("U".repeat(5_000)),
+                ContextMessage::assistant("ack"),
+            ],
+            tools: Vec::new(),
+            max_output_tokens: Some(512),
+            temperature: None,
+            cache_breakpoints: vec![1],
+            metadata: Default::default(),
+        };
+
+        let body = build_request_body(
+            &request,
+            &canonical_model_id(MODEL_SONNET_4_6).expect("valid model"),
+            &capabilities_for_model(MODEL_SONNET_4_6).expect("valid capabilities"),
+            false,
+        )
+        .expect("request should build");
+
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn completion_request_limits_cache_control_markers_to_four_total() {
+        let request = CompletionRequest {
+            model: Some(MODEL_SONNET_4_6.to_string()),
+            messages: vec![
+                ContextMessage::user("A".repeat(5_000)),
+                ContextMessage::user("B".repeat(5_000)),
+                ContextMessage::user("C".repeat(5_000)),
+                ContextMessage::user("D".repeat(5_000)),
+                ContextMessage::user("E".repeat(5_000)),
+                ContextMessage::assistant("done"),
+            ],
+            tools: vec![json!({
+                "name": "bash",
+                "description": "Run shell commands",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "cmd": { "type": "string" }
+                    },
+                    "required": ["cmd"]
+                }
+            })],
+            max_output_tokens: Some(512),
+            temperature: None,
+            cache_breakpoints: vec![1, 2, 3, 4, 5],
+            metadata: Default::default(),
+        };
+
+        let body = build_request_body(
+            &request,
+            &canonical_model_id(MODEL_SONNET_4_6).expect("valid model"),
+            &capabilities_for_model(MODEL_SONNET_4_6).expect("valid capabilities"),
+            false,
+        )
+        .expect("request should build");
+
+        let message_markers = body["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .filter(|message| message["content"][0].get("cache_control").is_some())
+            .count();
+        let tool_markers = body["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter(|tool| tool.get("cache_control").is_some())
+            .count();
+
+        assert_eq!(message_markers + tool_markers, 4);
     }
 
     #[test]

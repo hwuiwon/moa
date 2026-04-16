@@ -275,6 +275,7 @@ impl WorkingContext {
             tools: self.tool_schemas,
             max_output_tokens: Some(self.model_capabilities.max_output),
             temperature: None,
+            cache_breakpoints: self.cache_breakpoints,
             metadata: self.metadata,
         }
     }
@@ -307,8 +308,13 @@ pub fn estimate_text_tokens(text: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{ContextMessage, MessageRole};
-    use crate::types::{ToolContent, ToolInvocation};
+    use crate::types::{
+        ModelCapabilities, Platform, SessionId, SessionMeta, TokenPricing, ToolCallFormat,
+        ToolContent, ToolInvocation, UserId, WorkingContext, WorkspaceId,
+    };
 
     #[test]
     fn context_message_tool_result_preserves_text_and_blocks() {
@@ -358,5 +364,41 @@ mod tests {
         assert_eq!(message.tool_invocation, Some(invocation));
         assert!(message.content_blocks.is_none());
         assert!(message.tool_use_id.is_none());
+    }
+
+    #[test]
+    fn working_context_into_request_preserves_cache_breakpoints() {
+        let session = SessionMeta {
+            id: SessionId::new(),
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Tui,
+            model: "claude-sonnet-4-6".to_string(),
+            ..SessionMeta::default()
+        };
+        let capabilities = ModelCapabilities {
+            model_id: "claude-sonnet-4-6".to_string(),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: Some(Duration::from_secs(300)),
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+            },
+            native_tools: Vec::new(),
+        };
+        let mut ctx = WorkingContext::new(&session, capabilities);
+        ctx.append_system("identity");
+        ctx.mark_cache_breakpoint();
+        ctx.append_message(ContextMessage::user("hello"));
+
+        let request = ctx.into_request();
+
+        assert_eq!(request.cache_breakpoints, vec![1]);
     }
 }

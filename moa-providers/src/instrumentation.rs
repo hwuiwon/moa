@@ -54,6 +54,12 @@ pub(crate) struct LLMSpanAttributes {
     pub context_tokens: Option<usize>,
     /// Prefix cache hit ratio for the request.
     pub cache_hit_ratio: Option<f64>,
+    /// Explicit prompt cache read tokens reported by the provider.
+    pub cache_read_tokens: Option<usize>,
+    /// Explicit prompt cache creation tokens reported by the provider.
+    pub cache_creation_tokens: Option<usize>,
+    /// Actual provider-reported prompt cache hit rate.
+    pub provider_cache_hit_rate: Option<f64>,
 }
 
 /// Per-request span recorder used by provider streaming tasks.
@@ -62,6 +68,7 @@ pub(crate) struct LLMSpanRecorder {
     span: Span,
     pricing: TokenPricing,
     cached_input_tokens: usize,
+    cache_creation_input_tokens: usize,
     first_output_at: Option<DateTime<Utc>>,
     streamed_output: Vec<CompletionContent>,
 }
@@ -103,6 +110,7 @@ impl LLMSpanRecorder {
             span,
             pricing,
             cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
             first_output_at: None,
             streamed_output: Vec::new(),
         }
@@ -122,6 +130,11 @@ impl LLMSpanRecorder {
     /// Records the cached prompt token count used to price the request accurately.
     pub(crate) fn set_cached_input_tokens(&mut self, cached_input_tokens: usize) {
         self.cached_input_tokens = cached_input_tokens;
+    }
+
+    /// Records the prompt cache write tokens used to create or refresh a provider cache entry.
+    pub(crate) fn set_cache_creation_input_tokens(&mut self, cache_creation_input_tokens: usize) {
+        self.cache_creation_input_tokens = cache_creation_input_tokens;
     }
 
     /// Records a provider-private debug payload on the active span.
@@ -172,6 +185,12 @@ impl LLMSpanRecorder {
             response.output_tokens,
             &self.pricing,
         );
+        let cached_input_tokens = self.cached_input_tokens.max(response.cached_input_tokens);
+        let provider_cache_hit_rate = if response.input_tokens == 0 {
+            0.0
+        } else {
+            cached_input_tokens as f64 / response.input_tokens as f64
+        };
 
         record_llm_span_attributes(
             &self.span,
@@ -181,9 +200,19 @@ impl LLMSpanRecorder {
                 output_tokens: Some(response.output_tokens),
                 total_tokens: Some(total_tokens),
                 cost: Some(cost),
+                cache_read_tokens: Some(cached_input_tokens),
+                cache_creation_tokens: Some(self.cache_creation_input_tokens),
+                provider_cache_hit_rate: Some(provider_cache_hit_rate),
                 output_content,
                 ..LLMSpanAttributes::default()
             },
+        );
+
+        tracing::info!(
+            cache_read = cached_input_tokens,
+            cache_creation = self.cache_creation_input_tokens,
+            cache_hit_rate = %format!("{:.1}%", provider_cache_hit_rate * 100.0),
+            "provider cache metrics"
         );
     }
 
@@ -278,6 +307,18 @@ pub(crate) fn record_llm_span_attributes(span: &Span, attrs: &LLMSpanAttributes)
             "langfuse.observation.metadata.cache_hit_ratio",
             cache_hit_ratio,
         );
+    }
+    if let Some(cache_read_tokens) = attrs.cache_read_tokens {
+        span.set_attribute("gen_ai.usage.cache_read_tokens", cache_read_tokens as i64);
+    }
+    if let Some(cache_creation_tokens) = attrs.cache_creation_tokens {
+        span.set_attribute(
+            "gen_ai.usage.cache_creation_tokens",
+            cache_creation_tokens as i64,
+        );
+    }
+    if let Some(provider_cache_hit_rate) = attrs.provider_cache_hit_rate {
+        span.set_attribute("moa.cache.hit_rate", provider_cache_hit_rate);
     }
 }
 

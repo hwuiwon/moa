@@ -119,6 +119,7 @@ async fn live_providers_emit_tool_calls_across_available_keys() {
                 tools: vec![emit_token_tool()],
                 max_output_tokens: Some(256),
                 temperature: None,
+                cache_breakpoints: Vec::new(),
                 metadata,
             })
             .await
