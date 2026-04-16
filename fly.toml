@@ -9,7 +9,6 @@ kill_timeout = "30s"
 [env]
   MOA__CLOUD__ENABLED = "true"
   MOA__CLOUD__HANDS__DEFAULT_PROVIDER = "local"
-  MOA__LOCAL__SESSION_DB = "/data/sessions.db"
   MOA__LOCAL__MEMORY_DIR = "/data/memory"
   MOA__LOCAL__SANDBOX_DIR = "/data/sandbox"
   MOA__CLOUD__MEMORY_DIR = "/data/memory"

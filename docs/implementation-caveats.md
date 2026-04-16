@@ -137,8 +137,8 @@ The Temporal integration works for the current prototype but is not yet producti
 
 - `moa-cli/src/daemon.rs` exposes a cloud-friendly daemon entrypoint with an HTTP `/health` endpoint and graceful shutdown handling.
 - `Dockerfile`, `fly.toml`, and `.github/workflows/deploy.yml` build and launch `moa` with the `cloud` feature set and Fly health-check wiring.
-- `moa-session/src/turso.rs` supports libSQL embedded replicas when `cloud.turso_url` is configured.
-- This is still the local daemon/runtime shape running in a cloud container, not a dedicated Temporal worker/service topology. A Fly deployment today is effectively "local orchestrator plus cloud-backed session storage."
+- `moa-session` now speaks Postgres only; local development assumes Docker-backed Postgres and cloud deployments use managed Postgres / Neon.
+- This is still the local daemon/runtime shape running in a cloud container, not a dedicated Temporal worker/service topology. A Fly deployment today is effectively "local orchestrator plus cloud-backed Postgres storage."
 
 ---
 
@@ -156,6 +156,6 @@ These caveats relate to the gap between "cloud build succeeds" and "cloud deploy
 
 - `Dockerfile` installs `libprotobuf-dev` in addition to `protobuf-compiler` (required for `prost-wkt-types` standard Google protobuf include files).
 - `Dockerfile` and `fly.toml` set `MOA__CLOUD__HANDS__DEFAULT_PROVIDER=local`, so the cloud image can boot without the optional `daytona` or `e2b` features enabled.
-- A live Fly deployment to `moa-brains.fly.dev` succeeded after staging `OPENAI_API_KEY`, `MOA__CLOUD__TURSO_URL`, and `TURSO_AUTH_TOKEN` as Fly secrets.
+- A live Fly deployment to `moa-brains.fly.dev` succeeded after staging `OPENAI_API_KEY` and `MOA__DATABASE__URL` as Fly secrets.
 - The daemon constructs the default LLM provider during boot, so health-only startup requires a valid provider API key secret even before the first user request.
 - In live validation, a manually stopped machine took roughly 6 seconds to answer the next `/health` request, while a suspended machine resumed in about 1.29 seconds — close to, but not consistently below, the sub-second resume target from the step spec.

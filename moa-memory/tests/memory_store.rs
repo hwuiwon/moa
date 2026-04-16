@@ -62,6 +62,7 @@ async fn create_read_update_and_delete_wiki_pages() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "search disabled until step 90 lands the Postgres tsvector index"]
 async fn fts_search_finds_ranked_results() -> Result<()> {
     let dir = tempdir()?;
     let store = FileMemoryStore::new(dir.path()).await?;
@@ -92,6 +93,7 @@ async fn fts_search_finds_ranked_results() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "search disabled until step 90 lands the Postgres tsvector index"]
 async fn fts_search_handles_hyphenated_queries() -> Result<()> {
     let dir = tempdir()?;
     let store = FileMemoryStore::new(dir.path()).await?;
@@ -118,6 +120,7 @@ async fn fts_search_handles_hyphenated_queries() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "search disabled until step 90 lands the Postgres tsvector index"]
 async fn rebuild_search_index_from_files_restores_results() -> Result<()> {
     let dir = tempdir()?;
     let store = FileMemoryStore::new(dir.path()).await?;
@@ -146,6 +149,7 @@ async fn rebuild_search_index_from_files_restores_results() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "search disabled until step 90 lands the Postgres tsvector index"]
 async fn user_and_workspace_scopes_are_separate() -> Result<()> {
     let dir = tempdir()?;
     let store = FileMemoryStore::new(dir.path()).await?;

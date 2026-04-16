@@ -4,25 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = ["turso"]
-turso = ["dep:libsql"]
-postgres = ["dep:sqlx"]
-
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
-enum_dispatch = "0.3"
-libsql = { version = "0.9.30", optional = true, default-features = false, features = ["core", "remote", "replication", "sync", "tls"] }
 moa-core = { path = "../moa-core" }
 moa-security = { path = "../moa-security" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
-sqlx = { version = "0.8", optional = true, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "json", "uuid", "chrono"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros", "json", "uuid", "chrono"] }
 tokio.workspace = true
 tracing.workspace = true
+url = "2"
 uuid.workspace = true
 hex = "0.4"
 

@@ -12,8 +12,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use moa_core::{
-    BranchManager, DatabaseBackend, MemoryPath, MemoryScope, MemoryStore, MoaConfig, OtlpProtocol,
-    SessionFilter, SessionStatus, SessionStore, TelemetryConfig, WorkspaceId, default_log_path,
+    BranchManager, MemoryPath, MemoryScope, MemoryStore, MoaConfig, OtlpProtocol, SessionFilter,
+    SessionStatus, SessionStore, TelemetryConfig, WorkspaceId, default_log_path,
     init_observability,
 };
 use moa_eval::{
@@ -22,7 +22,7 @@ use moa_eval::{
     load_suite,
 };
 use moa_memory::FileMemoryStore;
-use moa_session::{NeonBranchManager, SessionDatabase, create_session_store};
+use moa_session::{NeonBranchManager, PostgresSessionStore, create_session_store};
 use moa_skills::run_skill_suite;
 use tokio::fs;
 use tokio::process::Command;
@@ -75,11 +75,6 @@ enum CommandKind {
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
-    },
-    /// Enables or inspects cloud sync configuration.
-    Sync {
-        #[command(subcommand)]
-        command: SyncCommand,
     },
     /// Manages Neon checkpoint branches.
     Checkpoint {
@@ -168,16 +163,6 @@ enum DaemonCommand {
     /// Runs the daemon server in the foreground.
     #[command(hide = true)]
     Serve,
-}
-
-/// Sync CLI commands.
-#[derive(Debug, Subcommand)]
-enum SyncCommand {
-    /// Enables Turso-backed cloud sync using an embedded replica.
-    Enable {
-        /// Turso database URL. Falls back to `TURSO_DATABASE_URL`.
-        turso_url: Option<String>,
-    },
 }
 
 /// Checkpoint CLI commands.
@@ -390,11 +375,6 @@ async fn main() -> Result<()> {
             DaemonCommand::Status => print!("{}", daemon_status_report(&config).await?),
             DaemonCommand::Logs => print!("{}", daemon::daemon_logs(&config).await?),
             DaemonCommand::Serve => daemon::run_daemon_server(config).await?,
-        },
-        Some(CommandKind::Sync { command }) => match command {
-            SyncCommand::Enable { turso_url } => {
-                print!("{}", sync_enable_report(config, turso_url).await?);
-            }
         },
         Some(CommandKind::Checkpoint { command }) => match command {
             CheckpointCommand::Create { label } => {
@@ -714,6 +694,7 @@ async fn memory_ingest_report(
 }
 
 async fn doctor_report(config: &MoaConfig, log_path: &Path) -> Result<String> {
+    let database_line = doctor_database(config).await;
     let mut lines = vec![
         "MOA doctor".to_string(),
         format!("provider: {}", config.general.default_provider),
@@ -735,8 +716,7 @@ async fn doctor_report(config: &MoaConfig, log_path: &Path) -> Result<String> {
         ),
         format!("docker: {}", docker_status().await),
         format!("disk: {}", disk_status(config).await),
-        format!("session_db: {}", session_db_status(config).await),
-        format!("cloud_sync: {}", cloud_sync_status(config).await),
+        format!("database: {database_line}"),
         format!("memory_index: {}", memory_index_status(config).await),
         format!(
             "log_file: {}{}",
@@ -796,7 +776,7 @@ async fn init_workspace(config: &MoaConfig) -> Result<()> {
     Ok(())
 }
 
-async fn load_session_store(config: &MoaConfig) -> Result<Arc<SessionDatabase>> {
+async fn load_session_store(config: &MoaConfig) -> Result<Arc<PostgresSessionStore>> {
     create_session_store(config)
         .await
         .context("opening session store")
@@ -892,33 +872,26 @@ async fn disk_status(config: &MoaConfig) -> String {
     }
 }
 
-async fn session_db_status(config: &MoaConfig) -> String {
-    match load_session_store(config).await {
-        Ok(store) => match store
-            .list_sessions(SessionFilter {
-                limit: Some(1),
-                ..SessionFilter::default()
-            })
-            .await
-        {
-            Ok(_) => "healthy".to_string(),
-            Err(error) => format!("unhealthy ({error})"),
-        },
-        Err(error) => format!("unhealthy ({error})"),
-    }
-}
-
-async fn cloud_sync_status(config: &MoaConfig) -> String {
-    if !(config.cloud.enabled && config.cloud.turso_url.is_some()) {
-        return "disabled".to_string();
-    }
-
+async fn doctor_database(config: &MoaConfig) -> String {
     match load_session_store(config).await {
         Ok(store) => {
-            if let Err(error) = store.sync_now().await {
-                format!("unhealthy ({error})")
-            } else {
-                "enabled".to_string()
+            let version = sqlx::query_scalar::<_, String>("SELECT version()")
+                .fetch_one(store.pool())
+                .await;
+            let pgvector = sqlx::query_scalar::<_, String>(
+                "SELECT extversion FROM pg_extension WHERE extname = 'vector'",
+            )
+            .fetch_optional(store.pool())
+            .await;
+
+            match (version, pgvector) {
+                (Ok(version), Ok(pgvector)) => format!(
+                    "{}; pgvector={}",
+                    version.lines().next().unwrap_or("unknown"),
+                    pgvector.unwrap_or_else(|| "NOT INSTALLED".to_string())
+                ),
+                (Err(error), _) => format!("unhealthy ({error})"),
+                (_, Err(error)) => format!("pgvector check failed ({error})"),
             }
         }
         Err(error) => format!("unhealthy ({error})"),
@@ -944,27 +917,16 @@ fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result
         "general.default_model" => config.general.default_model = value.to_string(),
         "general.reasoning_effort" => config.general.reasoning_effort = value.to_string(),
         "cloud.enabled" => config.cloud.enabled = parse_bool(value)?,
-        "cloud.turso_url" => config.cloud.turso_url = Some(value.to_string()),
         "cloud.memory_dir" => config.cloud.memory_dir = Some(value.to_string()),
-        "cloud.turso_sync_interval_secs" => {
-            config.cloud.turso_sync_interval_secs =
-                value.parse().context("expected integer sync interval")?
-        }
         "local.docker_enabled" => config.local.docker_enabled = parse_bool(value)?,
         "local.sandbox_dir" => config.local.sandbox_dir = value.to_string(),
-        "local.session_db" | "database.url" => config.database.url = value.to_string(),
+        "database.url" => config.database.url = value.to_string(),
         "database.admin_url" => config.database.admin_url = Some(value.to_string()),
-        "database.backend" => {
-            config.database.backend = parse_database_backend(value)?;
+        "database.max_connections" => {
+            config.database.max_connections = value.parse().context("expected integer pool size")?
         }
-        "database.pool_min" => {
-            config.database.pool_min = value.parse().context("expected integer pool size")?
-        }
-        "database.pool_max" => {
-            config.database.pool_max = value.parse().context("expected integer pool size")?
-        }
-        "database.connect_timeout_secs" => {
-            config.database.connect_timeout_secs =
+        "database.connect_timeout_seconds" => {
+            config.database.connect_timeout_seconds =
                 value.parse().context("expected integer timeout")?
         }
         "database.neon.enabled" => config.database.neon.enabled = parse_bool(value)?,
@@ -1009,15 +971,6 @@ fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result
 
     Ok(())
 }
-
-fn parse_database_backend(value: &str) -> Result<DatabaseBackend> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "turso" => Ok(DatabaseBackend::Turso),
-        "postgres" => Ok(DatabaseBackend::Postgres),
-        _ => bail!("expected `turso` or `postgres`, got {value}"),
-    }
-}
-
 fn parse_otlp_protocol(value: &str) -> Result<OtlpProtocol> {
     match value.trim().to_ascii_lowercase().as_str() {
         "grpc" => Ok(OtlpProtocol::Grpc),
@@ -1041,42 +994,6 @@ fn expand_tilde(path: &str) -> PathBuf {
         return Path::new(&home).join(relative);
     }
     PathBuf::from(path)
-}
-
-async fn sync_enable_report(mut config: MoaConfig, turso_url: Option<String>) -> Result<String> {
-    let sync_url = match turso_url {
-        Some(url) => url,
-        None => env::var("TURSO_DATABASE_URL")
-            .context("missing Turso database URL; pass one explicitly or set TURSO_DATABASE_URL")?,
-    };
-    let token_env = config
-        .cloud
-        .turso_auth_token_env
-        .clone()
-        .unwrap_or_else(|| "TURSO_AUTH_TOKEN".to_string());
-    if env::var(&token_env).is_err() {
-        bail!(
-            "missing Turso auth token; set {} before enabling sync",
-            token_env
-        );
-    }
-
-    config.cloud.enabled = true;
-    config.database.backend = DatabaseBackend::Turso;
-    config.cloud.turso_url = Some(sync_url.clone());
-    let store = create_session_store(&config)
-        .await
-        .context("opening cloud-synced session store")?;
-    store
-        .sync_now()
-        .await
-        .context("performing initial Turso sync")?;
-    config.save()?;
-
-    Ok(format!(
-        "cloud sync enabled\nurl: {}\nlocal_db: {}\nsync_interval_secs: {}\n",
-        sync_url, config.database.url, config.cloud.turso_sync_interval_secs
-    ))
 }
 
 async fn checkpoint_create_report(config: &MoaConfig, label: &str) -> Result<String> {
@@ -1131,7 +1048,6 @@ async fn checkpoint_rollback_report(mut config: MoaConfig, id: &str) -> Result<S
         .rollback_to(&checkpoint.handle)
         .await
         .context("preparing checkpoint rollback")?;
-    config.database.backend = DatabaseBackend::Postgres;
     config.database.url = checkpoint.handle.connection_url.clone();
     config.save().context("saving config")?;
     Ok(format!(
@@ -1164,9 +1080,9 @@ fn format_checkpoint_age(created_at: chrono::DateTime<chrono::Utc>) -> String {
 mod tests {
     use super::{
         apply_config_update, default_log_path, doctor_report, eval_exit_code, memory_ingest_report,
-        parse_bool, parse_database_backend, version_text,
+        parse_bool, version_text,
     };
-    use moa_core::{DatabaseBackend, MemoryPath, MemoryScope, MemoryStore, MoaConfig, WorkspaceId};
+    use moa_core::{MemoryPath, MemoryScope, MemoryStore, MoaConfig, WorkspaceId};
     use moa_eval::{EvalRun, EvalStatus, RunSummary};
     use moa_memory::FileMemoryStore;
     use tempfile::tempdir;
@@ -1183,9 +1099,9 @@ mod tests {
         apply_config_update(&mut config, "general.default_model", "claude-sonnet-4-6")
             .expect("update config");
         assert_eq!(config.general.default_model, "claude-sonnet-4-6");
-        apply_config_update(&mut config, "cloud.turso_sync_interval_secs", "5")
-            .expect("update sync interval");
-        assert_eq!(config.cloud.turso_sync_interval_secs, 5);
+        apply_config_update(&mut config, "database.max_connections", "5")
+            .expect("update max connections");
+        assert_eq!(config.database.max_connections, 5);
     }
 
     #[test]
@@ -1194,24 +1110,11 @@ mod tests {
         assert!(!parse_bool("0").expect("bool"));
     }
 
-    #[test]
-    fn parse_database_backend_accepts_supported_values() {
-        assert_eq!(
-            parse_database_backend("turso").expect("backend"),
-            DatabaseBackend::Turso
-        );
-        assert_eq!(
-            parse_database_backend("postgres").expect("backend"),
-            DatabaseBackend::Postgres
-        );
-    }
-
     #[tokio::test]
     async fn doctor_report_includes_log_file_path() {
         let dir = tempdir().expect("temp dir");
         let base = dir.keep();
         let mut config = MoaConfig::default();
-        config.database.url = base.join("sessions.db").display().to_string();
         config.local.memory_dir = base.join("memory").display().to_string();
         config.local.sandbox_dir = base.join("sandbox").display().to_string();
         config.daemon.socket_path = base.join("daemon.sock").display().to_string();
@@ -1234,7 +1137,6 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         let base = dir.keep();
         let mut config = MoaConfig::default();
-        config.database.url = base.join("sessions.db").display().to_string();
         config.local.memory_dir = base.join("memory").display().to_string();
         config.local.sandbox_dir = base.join("sandbox").display().to_string();
         config.daemon.socket_path = base.join("daemon.sock").display().to_string();
@@ -1279,7 +1181,7 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         let base = dir.keep();
         let mut config = MoaConfig::default();
-        config.database.url = base.join("sessions.db").display().to_string();
+        config.database.url = moa_session::testing::test_database_url();
         config.local.memory_dir = base.join("memory").display().to_string();
         config.local.sandbox_dir = base.join("sandbox").display().to_string();
 
@@ -1310,15 +1212,6 @@ mod tests {
             .await
             .expect("source page");
         assert!(source_page.content.contains("## Raw source"));
-        let results = store
-            .search(
-                "OAuth",
-                MemoryScope::Workspace(WorkspaceId::new("workspace-ingest")),
-                5,
-            )
-            .await
-            .expect("search ingested memory");
-        assert!(!results.is_empty());
     }
 
     #[tokio::test]
@@ -1326,7 +1219,7 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         let base = dir.keep();
         let mut config = MoaConfig::default();
-        config.database.url = base.join("sessions.db").display().to_string();
+        config.database.url = moa_session::testing::test_database_url();
         config.local.memory_dir = base.join("memory").display().to_string();
         config.local.sandbox_dir = base.join("sandbox").display().to_string();
 

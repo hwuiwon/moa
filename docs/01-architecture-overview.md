@@ -50,14 +50,14 @@ _System diagram, component interactions, trait hierarchy, Rust workspace layout.
          ▼               ▼               ▼
 ┌──────────────────────────────────────────────────────┐
 │                 DURABLE SESSION LOG                   │
-│            Turso/libSQL (append-only events)          │
+│             Postgres (append-only events)             │
 │            getEvents() │ emitEvent() │ wake()        │
 └──────────────────────────────────────────────────────┘
          │
          ▼
 ┌──────────────────────────────────────────────────────┐
 │                   MEMORY (file-wiki)                  │
-│  User wiki │ Workspace wiki │ FTS5 index │ Skills    │
+│  User wiki │ Workspace wiki │ Search index │ Skills  │
 │  Consolidation cron │ Git-branch concurrent writes   │
 └──────────────────────────────────────────────────────┘
 ```
@@ -260,8 +260,8 @@ moa/
 │   └── src/ { lib, types, traits, config, error }
 ├── moa-brain/                    # Brain harness loop + context pipeline
 │   └── src/ { lib, harness, pipeline/*, compaction }
-├── moa-session/                  # Session store (Turso/libSQL)
-│   └── src/ { lib, turso, schema, queries }
+├── moa-session/                  # Session store (Postgres)
+│   └── src/ { lib, store, schema, queries }
 ├── moa-memory/                   # File-wiki memory system
 │   └── src/ { lib, wiki, index, fts, consolidation, branching, ingest }
 ├── moa-hands/                    # Hand providers
@@ -292,7 +292,7 @@ The same trait hierarchy supports both cloud and local operation:
 
 ```
 BrainOrchestrator  →  TemporalOrchestrator
-SessionStore       →  TursoSessionStore (cloud URL)
+SessionStore       →  PostgresSessionStore
 HandProvider       →  DaytonaHandProvider / E2BHandProvider
 PlatformAdapter    →  TelegramAdapter, SlackAdapter, DiscordAdapter
 CredentialVault    →  VaultCredentialStore (HashiCorp Vault)
@@ -302,7 +302,7 @@ CredentialVault    →  VaultCredentialStore (HashiCorp Vault)
 
 ```
 BrainOrchestrator  →  LocalOrchestrator (tokio tasks + mpsc channels)
-SessionStore       →  TursoSessionStore (local file: ~/.moa/sessions.db)
+SessionStore       →  PostgresSessionStore
 HandProvider       →  LocalHandProvider (direct exec or local Docker)
 Local client       →  Desktop app or CLI
 CredentialVault    →  FileCredentialStore (~/.moa/vault.enc)

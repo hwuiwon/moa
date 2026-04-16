@@ -159,6 +159,13 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                         )
                         .instrument(waiting_dispatch_span.clone())
                         .await?;
+                        drain_signal_queue(
+                            Some(receiver),
+                            runtime_tx,
+                            turn_requested,
+                            queued_messages,
+                            soft_cancel_requested,
+                        )?;
                         record_turn_tool_dispatch_duration(waiting_dispatch_started.elapsed(), 1);
                         match outcome {
                             ToolCallOutcome::Executed | ToolCallOutcome::Skipped => {

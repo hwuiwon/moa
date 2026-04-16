@@ -501,7 +501,7 @@ scheduler.add(consolidation_job).await?;
 2. Load config from ~/.moa/config.toml (create defaults if missing)
 3. Detect Docker availability
 4. Initialize:
-   - SessionStore → TursoSessionStore("~/.moa/sessions.db")
+   - SessionStore → PostgresSessionStore("postgres://moa:moa@localhost:5432/moa")
    - MemoryStore → FileMemoryStore("~/.moa/memory/")
    - LLMProvider → from config (default: Anthropic)
    - HandProvider → LocalHandProvider
@@ -516,8 +516,8 @@ scheduler.add(consolidation_job).await?;
 1. Parse CLI args (--cloud → connect to Temporal)
 2. Load config from ~/.moa/config.toml
 3. Initialize:
-   - SessionStore → TursoSessionStore(config.turso.url)
-   - MemoryStore → FileMemoryStore with Turso sync
+   - SessionStore → PostgresSessionStore(config.database.url)
+   - MemoryStore → FileMemoryStore
    - LLMProvider → from config
    - HandProvider → DaytonaHandProvider
    - Orchestrator → TemporalOrchestrator
@@ -558,12 +558,10 @@ api_key_env = "OPENAI_API_KEY"
 api_key_env = "GOOGLE_API_KEY"
 
 [database]
-backend = "turso"
-url = "~/.moa/sessions.db"
+url = "postgres://moa:moa@localhost:5432/moa"
 # admin_url = "postgresql://..." # optional direct URL for migrations/admin tasks
-pool_min = 1
-pool_max = 5
-connect_timeout_secs = 10
+max_connections = 20
+connect_timeout_seconds = 10
 
 [local]
 docker_enabled = true           # use Docker for local hands if available
@@ -572,8 +570,7 @@ memory_dir = "~/.moa/memory"
 
 [cloud]
 enabled = false                 # set to true for cloud mode
-turso_url = ""                  # Turso Cloud database URL
-turso_auth_token_env = "TURSO_AUTH_TOKEN"
+# memory_dir = "/data/memory"
 
 [cloud.temporal]
 address = ""

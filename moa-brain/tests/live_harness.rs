@@ -9,20 +9,20 @@ use moa_core::{
 };
 use moa_memory::FileMemoryStore;
 use moa_providers::{build_provider_from_config, resolve_provider_selection};
-use moa_session::TursoSessionStore;
+use moa_session::testing;
 use tempfile::tempdir;
 
 #[tokio::test]
 #[ignore = "requires provider API key env"]
 async fn live_brain_turn_returns_brain_response() -> Result<()> {
     let dir = tempdir()?;
-    let db_path = dir.path().join("brain-harness.db");
     let mut config = MoaConfig::default();
     let selection = resolve_provider_selection(&config, None)?;
     config.general.default_provider = selection.provider_name;
     config.general.default_model = selection.model_id.clone();
     let memory_store = Arc::new(FileMemoryStore::new(dir.path()).await?);
-    let store = Arc::new(TursoSessionStore::new_local(&db_path).await?);
+    let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
+    let store = Arc::new(store);
     let provider: Arc<dyn LLMProvider> = build_provider_from_config(&config)?;
     let session_id = store
         .create_session(SessionMeta {

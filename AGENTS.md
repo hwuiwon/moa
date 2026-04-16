@@ -12,8 +12,8 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 | `docs/01-architecture-overview.md` | System diagram, all trait definitions, workspace layout |
 | `docs/02-brain-orchestration.md` | Temporal, Fly.io, LocalOrchestrator, brain loop |
 | `docs/03-communication-layer.md` | Gateway, desktop/CLI communication, approvals, observation |
-| `docs/04-memory-architecture.md` | File-wiki, FTS5, scoping, consolidation |
-| `docs/05-session-event-log.md` | Turso/libSQL schema, event types, compaction |
+| `docs/04-memory-architecture.md` | File-wiki, search indexing, scoping, consolidation |
+| `docs/05-session-event-log.md` | Postgres event schema, event types, compaction |
 | `docs/06-hands-and-mcp.md` | HandProvider, Daytona, E2B, MCP, tool routing |
 | `docs/07-context-pipeline.md` | 7-stage compilation, cache optimization |
 | `docs/08-security.md` | Credential vault, sandbox, prompt injection |

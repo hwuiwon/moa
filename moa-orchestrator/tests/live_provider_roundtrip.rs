@@ -10,7 +10,7 @@ use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
 use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
-use moa_session::{SessionDatabase, create_session_store};
+use moa_session::{PostgresSessionStore, testing};
 use tempfile::TempDir;
 use tokio::time::{Instant, sleep};
 
@@ -58,15 +58,16 @@ fn google_live_provider() -> Option<LiveProvider> {
 
 async fn live_orchestrator_with_provider(
     provider: Arc<dyn LLMProvider>,
-) -> Result<(TempDir, Arc<SessionDatabase>, LocalOrchestrator)> {
+) -> Result<(TempDir, Arc<PostgresSessionStore>, LocalOrchestrator)> {
     let dir = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
     config.memory.auto_bootstrap = false;
-    config.database.url = dir.path().join("sessions.db").display().to_string();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
-    let session_store = create_session_store(&config).await?;
+    let (session_store, _database_url, _schema_name) =
+        testing::create_isolated_test_store().await?;
+    let session_store = Arc::new(session_store);
     let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())
@@ -111,7 +112,7 @@ async fn wait_for_status(
 }
 
 async fn wait_for_approval_request(
-    session_store: &SessionDatabase,
+    session_store: &PostgresSessionStore,
     session_id: moa_core::SessionId,
 ) -> moa_core::EventRecord {
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -136,7 +137,7 @@ async fn wait_for_approval_request(
 }
 
 async fn wait_for_successful_tool_result(
-    session_store: &SessionDatabase,
+    session_store: &PostgresSessionStore,
     session_id: moa_core::SessionId,
 ) -> ToolOutput {
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -177,7 +178,7 @@ async fn wait_for_successful_tool_result(
 }
 
 async fn wait_for_final_response(
-    session_store: &SessionDatabase,
+    session_store: &PostgresSessionStore,
     session_id: moa_core::SessionId,
     token: &str,
 ) {

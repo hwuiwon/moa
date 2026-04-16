@@ -71,7 +71,10 @@ pub fn init_observability(
     let console_layer = tracing_subscriber::fmt::layer()
         .with_target(true)
         .with_filter(LevelFilter::WARN);
-    let env_filter = EnvFilter::try_from_default_env().ok();
+    let env_filter = Some(
+        EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new(default_env_filter_directive())),
+    );
 
     let (file_layer, log_writer_guard) = if telemetry.debug || telemetry.log_file.is_some() {
         let path = telemetry.log_file.clone().unwrap_or_else(default_log_path);
@@ -136,6 +139,14 @@ pub fn init_observability(
         provider: Some(provider),
         _log_writer_guard: log_writer_guard,
     })
+}
+
+fn default_env_filter_directive() -> &'static str {
+    // async-openai logs deserialization failures for stream event types it
+    // does not model yet. moa-providers already handles known-safe unknown
+    // events defensively, so surfacing those SDK internals as process-level
+    // errors creates false negatives in real CLI runs.
+    "warn,async_openai::error=off"
 }
 
 fn build_span_exporter(config: &ObservabilityConfig) -> Result<SpanExporter> {

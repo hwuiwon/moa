@@ -1,18 +1,15 @@
 # 05 — Session & Event Log
 
-_Turso/libSQL, event schema, compaction, Temporal integration, replay._
+_Postgres event schema, compaction, Temporal integration, replay._
 
 ---
 
-## Storage: Turso/libSQL
+## Storage: Postgres
 
-Same dialect everywhere. No migration between local and cloud.
+Same dialect everywhere. Local development uses Docker Compose with Postgres 18 + pgvector on
+`localhost:5432`. Cloud deployments use managed Postgres / Neon.
 
-- **Local**: `~/.moa/sessions.db` (SQLite file via libSQL)
-- **Cloud**: Turso Cloud URL with embedded replica sync
-- **Migration**: `moa sync enable` → adds `syncUrl` to config. Done.
-
-Crate: `libsql` (Turso's Rust client) or `sqlx` with SQLite driver.
+Crate: `sqlx` with the Postgres driver.
 
 ---
 
@@ -219,7 +216,7 @@ Two implications follow from that contract:
 ### emit_event
 
 ```rust
-impl TursoSessionStore {
+impl PostgresSessionStore {
     pub async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<SequenceNum> {
         let event_id = Uuid::now_v7();
         let seq = self.next_sequence(session_id).await?;
@@ -431,18 +428,18 @@ Errors are ALWAYS preserved regardless of compaction.
 
 ---
 
-## Temporal dual-persistence
+## Temporal persistence model
 
 Events persist in two places:
 
 | Store | Purpose | Guarantees |
 |---|---|---|
 | Temporal event history | Crash recovery, workflow replay | Exactly-once, ordered |
-| Turso/libSQL | Fast querying, observation, cross-session search | Eventually consistent |
+| Postgres | Querying, observation, session replay, cross-session search | Durable, queryable source of truth |
 
-The brain emits to Turso within each Temporal activity. If the activity fails and retries, the Turso write is idempotent (UNIQUE constraint on session_id + sequence_num).
+The brain emits to Postgres within each Temporal activity. If the activity fails and retries, the Postgres write is idempotent (UNIQUE constraint on session_id + sequence_num).
 
-In local mode (no Temporal), Turso is the only store. Crash recovery works by reading the last event and resuming from there.
+In local mode (no Temporal), Postgres is still the only store. Crash recovery works by reading the last event and resuming from there.
 
 ---
 

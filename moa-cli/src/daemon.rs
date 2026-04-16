@@ -14,7 +14,7 @@ use moa_core::{
     WorkspaceBudgetStatus, recv_with_lag_handling,
 };
 use moa_orchestrator::LocalOrchestrator;
-use moa_session::SessionDatabase;
+use moa_session::PostgresSessionStore;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use tokio::fs;
@@ -29,7 +29,7 @@ use crate::api::start_api_server;
 #[derive(Clone)]
 struct DaemonState {
     orchestrator: Arc<LocalOrchestrator>,
-    session_store: Arc<SessionDatabase>,
+    session_store: Arc<PostgresSessionStore>,
     info: Arc<DaemonInfo>,
     daily_workspace_budget_cents: u32,
 }
@@ -456,7 +456,7 @@ async fn handle_unary_command_inner(
 }
 
 async fn list_session_previews(
-    session_store: &SessionDatabase,
+    session_store: &PostgresSessionStore,
     filter: SessionFilter,
 ) -> Result<Vec<DaemonSessionPreview>> {
     let mut previews = Vec::new();
@@ -586,7 +586,10 @@ fn graceful_shutdown_timeout(config: &MoaConfig) -> Duration {
     Duration::from_secs(seconds)
 }
 
-async fn wait_for_active_turns(session_store: &SessionDatabase, timeout: Duration) -> Result<()> {
+async fn wait_for_active_turns(
+    session_store: &PostgresSessionStore,
+    timeout: Duration,
+) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
         let active = session_store
@@ -653,21 +656,23 @@ mod tests {
     use std::time::Duration;
 
     use anyhow::Result;
+    use moa_session::testing;
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
+    use uuid::Uuid;
 
     use super::{daemon_info, request, run_daemon_server, stop_daemon, wait_for_daemon};
     use moa_core::{
         DaemonCommand, DaemonReply, MoaConfig, Platform, SessionFilter, SessionId,
-        StartSessionRequest, UserId, WorkspaceId,
+        StartSessionRequest, UserId, UserMessage, WorkspaceId,
     };
 
     fn test_config() -> Option<MoaConfig> {
         let dir = tempdir().ok()?;
         let base = dir.keep();
         let mut config = MoaConfig::default();
-        config.database.url = base.join("sessions.db").display().to_string();
+        config.database.url = testing::test_database_url();
         config.local.memory_dir = base.join("memory").display().to_string();
         config.local.sandbox_dir = base.join("sandbox").display().to_string();
         config.daemon.socket_path = base.join("daemon.sock").display().to_string();
@@ -719,7 +724,10 @@ mod tests {
                     user_id: UserId::new("tester"),
                     platform: Platform::Cli,
                     model: config.general.default_model.clone(),
-                    initial_message: None,
+                    initial_message: Some(UserMessage {
+                        text: "start".to_string(),
+                        attachments: Vec::new(),
+                    }),
                     title: None,
                     parent_session_id: None,
                 },
@@ -742,13 +750,17 @@ mod tests {
         let Some(config) = test_config() else {
             return Ok(());
         };
+        let workspace_id = WorkspaceId::new(format!("preview-{}", Uuid::now_v7()));
         let server = tokio::spawn(run_daemon_server(config.clone()));
         wait_for_daemon(&config, std::time::Duration::from_secs(5)).await?;
 
         let empty_previews = match request(
             &config,
             &DaemonCommand::ListSessionPreviews {
-                filter: SessionFilter::default(),
+                filter: SessionFilter {
+                    workspace_id: Some(workspace_id.clone()),
+                    ..SessionFilter::default()
+                },
             },
         )
         .await?
@@ -762,11 +774,14 @@ mod tests {
             &config,
             &DaemonCommand::CreateSession {
                 request: StartSessionRequest {
-                    workspace_id: WorkspaceId::new("default"),
+                    workspace_id: workspace_id.clone(),
                     user_id: UserId::new("tester"),
                     platform: Platform::Cli,
                     model: config.general.default_model.clone(),
-                    initial_message: None,
+                    initial_message: Some(UserMessage {
+                        text: "preview".to_string(),
+                        attachments: Vec::new(),
+                    }),
                     title: None,
                     parent_session_id: None,
                 },
@@ -776,7 +791,10 @@ mod tests {
         let previews = match request(
             &config,
             &DaemonCommand::ListSessionPreviews {
-                filter: SessionFilter::default(),
+                filter: SessionFilter {
+                    workspace_id: Some(workspace_id),
+                    ..SessionFilter::default()
+                },
             },
         )
         .await?
@@ -796,19 +814,25 @@ mod tests {
         let Some(config) = test_config() else {
             return Ok(());
         };
+        let scope_suffix = Uuid::now_v7().simple().to_string();
+        let alpha_workspace = WorkspaceId::new(format!("alpha-{scope_suffix}"));
+        let beta_workspace = WorkspaceId::new(format!("beta-{scope_suffix}"));
         let server = tokio::spawn(run_daemon_server(config.clone()));
         wait_for_daemon(&config, std::time::Duration::from_secs(5)).await?;
 
-        for workspace in ["alpha", "beta"] {
+        for workspace_id in [alpha_workspace.clone(), beta_workspace.clone()] {
             let reply = request(
                 &config,
                 &DaemonCommand::CreateSession {
                     request: StartSessionRequest {
-                        workspace_id: WorkspaceId::new(workspace),
+                        workspace_id,
                         user_id: UserId::new("tester"),
                         platform: Platform::Cli,
                         model: config.general.default_model.clone(),
-                        initial_message: None,
+                        initial_message: Some(UserMessage {
+                            text: "scoped".to_string(),
+                            attachments: Vec::new(),
+                        }),
                         title: None,
                         parent_session_id: None,
                     },
@@ -822,7 +846,7 @@ mod tests {
             &config,
             &DaemonCommand::ListSessions {
                 filter: SessionFilter {
-                    workspace_id: Some(WorkspaceId::new("alpha")),
+                    workspace_id: Some(alpha_workspace.clone()),
                     ..SessionFilter::default()
                 },
             },
@@ -836,7 +860,7 @@ mod tests {
             &config,
             &DaemonCommand::ListSessions {
                 filter: SessionFilter {
-                    workspace_id: Some(WorkspaceId::new("beta")),
+                    workspace_id: Some(beta_workspace.clone()),
                     ..SessionFilter::default()
                 },
             },
@@ -849,8 +873,8 @@ mod tests {
 
         assert_eq!(alpha_sessions.len(), 1);
         assert_eq!(beta_sessions.len(), 1);
-        assert_eq!(alpha_sessions[0].workspace_id, WorkspaceId::new("alpha"));
-        assert_eq!(beta_sessions[0].workspace_id, WorkspaceId::new("beta"));
+        assert_eq!(alpha_sessions[0].workspace_id, alpha_workspace);
+        assert_eq!(beta_sessions[0].workspace_id, beta_workspace);
 
         stop_daemon(&config).await?;
         server.await.expect("daemon task join")?;

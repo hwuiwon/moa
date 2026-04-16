@@ -1,4 +1,4 @@
-//! File-backed wiki memory store with an FTS5-derived search index.
+//! File-backed wiki memory store with a Postgres-backed search stub.
 
 use std::env;
 use std::path::{Component, Path, PathBuf};
@@ -14,25 +14,25 @@ use tokio::fs;
 pub mod bootstrap;
 pub mod branching;
 pub mod consolidation;
-pub mod fts;
 pub mod index;
 pub mod ingest;
+pub mod search;
 pub mod wiki;
 
 pub use branching::{ChangeOperation, ReconcileReport};
 pub use consolidation::ConsolidationReport;
-use fts::FtsIndex;
 use index::{
     INDEX_FILENAME, LogEntry, append_log_entry, compile_index, load_index_file, load_log_file,
 };
 pub use moa_core::IngestReport;
+use search::WikiSearchIndex;
 use wiki::{parse_markdown, render_markdown};
 
 /// File-wiki memory store rooted at a local `.moa` data directory.
 #[derive(Clone)]
 pub struct FileMemoryStore {
     base_dir: Arc<PathBuf>,
-    search_index: FtsIndex,
+    search_index: WikiSearchIndex,
 }
 
 impl FileMemoryStore {
@@ -41,11 +41,10 @@ impl FileMemoryStore {
         let base_dir = base_dir.as_ref().to_path_buf();
         fs::create_dir_all(base_dir.join("memory")).await?;
         fs::create_dir_all(base_dir.join("workspaces")).await?;
-        let search_index = FtsIndex::new(&base_dir.join("search.db")).await?;
 
         Ok(Self {
             base_dir: Arc::new(base_dir),
-            search_index,
+            search_index: WikiSearchIndex::new(),
         })
     }
 

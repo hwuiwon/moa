@@ -20,7 +20,7 @@ mod temporal_helper {
     use moa_hands::ToolRouter;
     use moa_memory::FileMemoryStore;
     use moa_orchestrator::TemporalOrchestrator;
-    use moa_session::create_session_store;
+    use moa_session::{create_session_store, testing};
     use tokio::time::sleep;
 
     #[derive(Clone)]
@@ -87,7 +87,7 @@ mod temporal_helper {
 
     fn helper_config(root: &std::path::Path, port: u16, task_queue: &str) -> MoaConfig {
         let mut config = MoaConfig::default();
-        config.database.url = root.join("sessions.db").display().to_string();
+        config.database.url = testing::test_database_url();
         config.local.memory_dir = root.join("memory").display().to_string();
         config.local.sandbox_dir = root.join("sandbox").display().to_string();
         config.cloud.enabled = true;

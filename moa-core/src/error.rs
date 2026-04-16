@@ -94,6 +94,10 @@ pub enum MoaError {
     #[error("unsupported operation: {0}")]
     Unsupported(String),
 
+    /// The requested functionality has not been implemented yet.
+    #[error("not implemented: {0}")]
+    NotImplemented(String),
+
     /// The user's home directory could not be resolved.
     #[error("home directory not found")]
     HomeDirectoryNotFound,
@@ -136,6 +140,7 @@ impl MoaError {
             | Self::PermissionDenied(_)
             | Self::BudgetExhausted(_)
             | Self::Unsupported(_)
+            | Self::NotImplemented(_)
             | Self::Io(_)
             | Self::Config(_) => true,
             // Single-payload/event-shaped problems — resumable.

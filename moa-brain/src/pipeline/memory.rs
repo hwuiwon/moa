@@ -4,13 +4,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    ContextProcessor, Event, EventRange, EventRecord, MemoryScope, MemoryStore, ProcessorOutput,
-    Result, SessionStore, WorkingContext,
+    ContextProcessor, Event, EventRange, EventRecord, MemoryPath, MemoryScope, MemoryStore,
+    ProcessorOutput, Result, SessionStore, WorkingContext,
 };
 
 const MEMORY_BUDGET_DIVISOR: usize = 5;
 const MEMORY_RESULTS_PER_SCOPE: usize = 2;
 const MIN_PAGE_EXCERPT_TOKENS: usize = 96;
+const WORKSPACE_BOOTSTRAP_PAGE_PATH: &str = "topics/project.md";
 
 /// In-memory stage data fetched during processing.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -64,10 +65,28 @@ impl MemoryRetriever {
 
         if let Some(query) = extract_search_query(&events) {
             for scope in [user_scope, workspace_scope] {
-                let results = self
+                let scope_label = scope_label_for(&scope);
+                let results = match self
                     .memory_store
-                    .search(&query, scope, MEMORY_RESULTS_PER_SCOPE)
-                    .await?;
+                    .search(&query, scope.clone(), MEMORY_RESULTS_PER_SCOPE)
+                    .await
+                {
+                    Ok(results) => results,
+                    Err(moa_core::MoaError::NotImplemented(message)) => {
+                        tracing::debug!(
+                            query,
+                            scope = %scope_label,
+                            error = %message,
+                            "memory search unavailable; skipping relevant page retrieval"
+                        );
+                        relevant_pages.extend(
+                            self.load_bootstrap_fallback_pages(&query, &scope, &scope_label)
+                                .await?,
+                        );
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 for result in results {
                     let result_scope = result.scope.clone();
                     let excerpt = match self
@@ -101,6 +120,33 @@ impl MemoryRetriever {
             workspace_index,
             relevant_pages,
         })
+    }
+
+    async fn load_bootstrap_fallback_pages(
+        &self,
+        query: &str,
+        scope: &MemoryScope,
+        scope_label: &str,
+    ) -> Result<Vec<RelevantMemoryPage>> {
+        if !matches!(scope, MemoryScope::Workspace(_)) {
+            return Ok(Vec::new());
+        }
+
+        let path = MemoryPath::new(WORKSPACE_BOOTSTRAP_PAGE_PATH);
+        let page = match self.memory_store.read_page(scope.clone(), &path).await {
+            Ok(page) => page,
+            Err(_) => return Ok(Vec::new()),
+        };
+        if !query_matches_page(query, &page.title, &page.content) {
+            return Ok(Vec::new());
+        }
+
+        Ok(vec![RelevantMemoryPage {
+            scope_label: scope_label.to_string(),
+            path: path.as_str().to_string(),
+            title: page.title,
+            excerpt: page.content,
+        }])
     }
 }
 
@@ -220,6 +266,18 @@ fn scope_label_for(scope: &MemoryScope) -> String {
         MemoryScope::User(_) => "user".to_string(),
         MemoryScope::Workspace(_) => "workspace".to_string(),
     }
+}
+
+fn query_matches_page(query: &str, title: &str, content: &str) -> bool {
+    let normalized_title = title.to_ascii_lowercase();
+    let normalized_content = content.to_ascii_lowercase();
+
+    query
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .any(|token| normalized_title.contains(&token) || normalized_content.contains(&token))
 }
 
 #[cfg(test)]
@@ -433,7 +491,7 @@ mod tests {
                     path: Some(shared_path.clone()),
                     title: "Storage".to_string(),
                     page_type: PageType::Topic,
-                    content: "Use libsql for durable session state.".to_string(),
+                    content: "Use Postgres for durable session state.".to_string(),
                     created: Utc::now(),
                     updated: Utc::now(),
                     confidence: moa_core::ConfidenceLevel::High,
@@ -487,7 +545,7 @@ mod tests {
         assert!(ctx.messages[2].content.contains("<relevant_memory>"));
         assert!(
             output.tokens_added
-                >= super::super::estimate_tokens("Use libsql for durable session state.")
+                >= super::super::estimate_tokens("Use Postgres for durable session state.")
         );
     }
 

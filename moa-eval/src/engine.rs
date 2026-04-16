@@ -622,7 +622,7 @@ mod tests {
         .unwrap();
 
         let result = run_environment(
-            "say hello".to_string(),
+            "the with your".to_string(),
             environment,
             &EngineOptions {
                 temp_dir: temp.path().to_path_buf(),

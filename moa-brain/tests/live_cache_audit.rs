@@ -17,7 +17,7 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_providers::build_provider_from_config;
-use moa_session::TursoSessionStore;
+use moa_session::testing;
 use serde::Serialize;
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -272,7 +272,6 @@ impl LLMProvider for AuditedProvider {
 async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -> Result<()> {
     let repo_root = repo_root()?;
     let dir = tempdir()?;
-    let db_path = dir.path().join("cache-audit.db");
 
     let workspace_id = WorkspaceId::new("cache-audit");
     let user_id = UserId::new("cache-audit-user");
@@ -284,7 +283,8 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     sonnet_config.local.sandbox_dir = repo_root.display().to_string();
 
     let memory_store = Arc::new(FileMemoryStore::new(dir.path()).await?);
-    let store = Arc::new(TursoSessionStore::new_local(&db_path).await?);
+    let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
+    let store = Arc::new(store);
     let tool_router = Arc::new(
         ToolRouter::from_config(&sonnet_config, memory_store.clone())
             .await?

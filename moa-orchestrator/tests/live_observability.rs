@@ -14,7 +14,7 @@ use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
 use moa_providers::build_provider_from_config;
-use moa_session::{SessionDatabase, create_session_store};
+use moa_session::{PostgresSessionStore, testing};
 use tempfile::TempDir;
 use tokio::time::{Instant, sleep};
 use tracing::field::{Field, Visit};
@@ -194,17 +194,18 @@ fn global_trace_recorder() -> Arc<TraceRecorder> {
 
 async fn live_orchestrator(
     repo_root: &Path,
-) -> Result<(TempDir, Arc<SessionDatabase>, LocalOrchestrator)> {
+) -> Result<(TempDir, Arc<PostgresSessionStore>, LocalOrchestrator)> {
     let dir = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
     config.memory.auto_bootstrap = false;
     config.general.default_provider = "anthropic".to_string();
     config.general.default_model = "claude-sonnet-4-6".to_string();
-    config.database.url = dir.path().join("sessions.db").display().to_string();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = repo_root.display().to_string();
 
-    let session_store = create_session_store(&config).await?;
+    let (session_store, _database_url, _schema_name) =
+        testing::create_isolated_test_store().await?;
+    let session_store = Arc::new(session_store);
     let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())

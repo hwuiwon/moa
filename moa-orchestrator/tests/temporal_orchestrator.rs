@@ -17,7 +17,7 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::TemporalOrchestrator;
-use moa_session::{SessionDatabase, create_session_store};
+use moa_session::{PostgresSessionStore, testing};
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::net::TcpStream;
@@ -219,7 +219,6 @@ async fn temporal_test_orchestrator_with_provider(
     server.wait_ready().await;
 
     let mut config = MoaConfig::default();
-    config.database.url = dir.path().join("sessions.db").display().to_string();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     config.cloud.enabled = true;
@@ -251,7 +250,10 @@ async fn temporal_test_orchestrator_with_provider(
         .expect("temporal config")
         .api_key_env = None;
 
-    let session_store = create_session_store(&config).await.expect("session store");
+    let (session_store, _database_url, _schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("session store");
+    let session_store = Arc::new(session_store);
     let memory_store = Arc::new(
         FileMemoryStore::from_config(&config)
             .await
@@ -414,7 +416,7 @@ async fn wait_for_event_text(
 }
 
 async fn wait_for_store_status(
-    session_store: &SessionDatabase,
+    session_store: &PostgresSessionStore,
     session_id: SessionId,
     expected: SessionStatus,
 ) {
@@ -438,7 +440,7 @@ async fn wait_for_store_status(
 }
 
 async fn wait_for_store_event_text(
-    session_store: &SessionDatabase,
+    session_store: &PostgresSessionStore,
     session_id: SessionId,
     expected_text: &str,
 ) {
@@ -1051,7 +1053,7 @@ async fn temporal_orchestrator_live_anthropic_smoke() {
     server.wait_ready().await;
 
     let mut config = MoaConfig::default();
-    config.database.url = dir.path().join("sessions.db").display().to_string();
+    config.database.url = testing::test_database_url();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     config.cloud.enabled = true;
@@ -1132,8 +1134,9 @@ async fn temporal_orchestrator_recovers_after_worker_process_restart() {
 
     let mut restarted = spawn_temporal_helper("worker", dir.path(), server.port, &task_queue, 200);
     let mut config = MoaConfig::default();
-    config.database.url = dir.path().join("sessions.db").display().to_string();
-    let session_store = create_session_store(&config).await.expect("session store");
+    let (session_store, _database_url, _schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("session store");
     wait_for_store_status(&session_store, session_id.clone(), SessionStatus::Completed).await;
     wait_for_store_event_text(&session_store, session_id, "assistant:recover me").await;
 
