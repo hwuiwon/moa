@@ -1,5 +1,6 @@
 //! Stage 6: compiles session history into context messages.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -9,6 +10,7 @@ use moa_core::{
     WorkingContext, truncate_head_tail,
 };
 use moa_security::wrap_untrusted_tool_output;
+use serde_json::json;
 
 use crate::compaction::{
     latest_checkpoint_state, maybe_compact_events, non_checkpoint_events, recent_turn_boundary,
@@ -16,6 +18,8 @@ use crate::compaction::{
 };
 
 use super::estimate_tokens;
+
+const FILE_READ_DEDUP_PLACEHOLDER: &str = "[file previously read — see latest version below]";
 
 /// Compiles session events into conversational context.
 pub struct HistoryCompiler {
@@ -62,12 +66,23 @@ impl HistoryCompiler {
         events: &[EventRecord],
         remaining_budget: usize,
     ) -> Result<(Vec<ContextMessage>, usize)> {
+        let compiled = self.compile_messages_with_stats(events, remaining_budget)?;
+        Ok((compiled.messages, compiled.tokens_used))
+    }
+
+    fn compile_messages_with_stats(
+        &self,
+        events: &[EventRecord],
+        remaining_budget: usize,
+    ) -> Result<CompiledHistory> {
         let checkpoint = latest_checkpoint_state(events);
         let all_non_checkpoint = non_checkpoint_events(events);
         let visible_events = unsummarized_events(events);
         let recent_start =
             recent_turn_boundary(&visible_events, self.compaction.recent_turns_verbatim);
         let (older_events, recent_events) = visible_events.split_at(recent_start);
+        let file_read_paths = build_full_file_read_path_map(&visible_events);
+        let latest_file_reads = latest_full_file_read_results(&visible_events, &file_read_paths);
 
         let mut messages = Vec::new();
         let mut tokens_used = 0usize;
@@ -92,25 +107,32 @@ impl HistoryCompiler {
             messages.push(checkpoint_message);
         }
 
-        let recent_messages = compile_records(recent_events, &self.tool_output)?;
-        let older_messages = compile_records(older_events, &self.tool_output)?;
-        for message in &recent_messages {
-            tokens_used += estimate_tokens(&message.content);
-            messages.push(message.clone());
+        let recent_messages = compile_records(recent_events, &self.tool_output, &file_read_paths)?;
+        let mut older_messages =
+            compile_records(older_events, &self.tool_output, &file_read_paths)?;
+        let deduplication = deduplicate_file_reads(&mut older_messages, &latest_file_reads);
+
+        for compiled in &recent_messages {
+            tokens_used += estimate_tokens(&compiled.message.content);
+            messages.push(compiled.message.clone());
         }
 
-        for message in older_messages.iter().rev() {
-            let message_tokens = estimate_tokens(&message.content);
+        for compiled in older_messages.iter().rev() {
+            let message_tokens = estimate_tokens(&compiled.message.content);
             if tokens_used + message_tokens > remaining_budget {
                 break;
             }
 
             tokens_used += message_tokens;
             let insert_at = messages.len().saturating_sub(recent_messages.len());
-            messages.insert(insert_at, message.clone());
+            messages.insert(insert_at, compiled.message.clone());
         }
 
-        Ok((messages, tokens_used))
+        Ok(CompiledHistory {
+            messages,
+            tokens_used,
+            deduplication,
+        })
     }
 }
 
@@ -148,7 +170,16 @@ impl ContextProcessor for HistoryCompiler {
         }
 
         let remaining_budget = ctx.token_budget.saturating_sub(ctx.token_count);
-        let (messages, tokens_added) = self.compile_messages(&events, remaining_budget)?;
+        let compiled = self.compile_messages_with_stats(&events, remaining_budget)?;
+        if compiled.deduplication.deduplicated_count > 0 {
+            tracing::info!(
+                deduplicated = compiled.deduplication.deduplicated_count,
+                tokens_saved = compiled.deduplication.tokens_saved,
+                "deduplicated file read results in history compilation"
+            );
+        }
+        let messages = compiled.messages;
+        let tokens_added = compiled.tokens_used;
         let items_included = messages
             .iter()
             .map(|message| format!("{:?}", message.role))
@@ -156,9 +187,20 @@ impl ContextProcessor for HistoryCompiler {
 
         ctx.extend_messages(messages);
 
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "file_reads_deduplicated".to_string(),
+            json!(compiled.deduplication.deduplicated_count),
+        );
+        metadata.insert(
+            "tokens_saved_by_dedup".to_string(),
+            json!(compiled.deduplication.tokens_saved),
+        );
+
         Ok(ProcessorOutput {
             tokens_added,
             items_included,
+            metadata,
             ..ProcessorOutput::default()
         })
     }
@@ -167,10 +209,11 @@ impl ContextProcessor for HistoryCompiler {
 fn compile_records(
     records: &[&EventRecord],
     tool_output: &ToolOutputConfig,
-) -> Result<Vec<ContextMessage>> {
+    file_read_paths: &HashMap<uuid::Uuid, String>,
+) -> Result<Vec<CompiledRecordMessage>> {
     records
         .iter()
-        .filter_map(|record| event_to_context_message(record, tool_output))
+        .filter_map(|record| event_to_context_message(record, tool_output, file_read_paths))
         .collect::<Result<Vec<_>>>()
 }
 
@@ -193,17 +236,24 @@ fn preserved_error_messages(events: &[&EventRecord]) -> Vec<ContextMessage> {
 fn event_to_context_message(
     record: &EventRecord,
     tool_output: &ToolOutputConfig,
-) -> Option<Result<ContextMessage>> {
+    file_read_paths: &HashMap<uuid::Uuid, String>,
+) -> Option<Result<CompiledRecordMessage>> {
     match &record.event {
-        Event::UserMessage { text, .. } => Some(Ok(ContextMessage::user(text.clone()))),
-        Event::QueuedMessage { text, .. } => Some(Ok(ContextMessage::user(text.clone()))),
+        Event::UserMessage { text, .. } => Some(Ok(CompiledRecordMessage::plain(
+            ContextMessage::user(text.clone()),
+        ))),
+        Event::QueuedMessage { text, .. } => Some(Ok(CompiledRecordMessage::plain(
+            ContextMessage::user(text.clone()),
+        ))),
         Event::BrainResponse {
             text,
             thought_signature,
             ..
-        } => Some(Ok(ContextMessage::assistant_with_thought_signature(
-            text.clone(),
-            thought_signature.clone(),
+        } => Some(Ok(CompiledRecordMessage::plain(
+            ContextMessage::assistant_with_thought_signature(
+                text.clone(),
+                thought_signature.clone(),
+            ),
         ))),
         Event::ToolCall {
             tool_id,
@@ -215,18 +265,20 @@ fn event_to_context_message(
         } => Some(
             serde_json::to_string(input)
                 .map(|serialized| {
-                    ContextMessage::assistant_tool_call_with_thought_signature(
-                        moa_core::ToolInvocation {
-                            id: Some(
-                                provider_tool_use_id
-                                    .clone()
-                                    .unwrap_or_else(|| tool_id.to_string()),
-                            ),
-                            name: tool_name.clone(),
-                            input: input.clone(),
-                        },
-                        format!("<tool_call name=\"{tool_name}\">{serialized}</tool_call>"),
-                        provider_thought_signature.clone(),
+                    CompiledRecordMessage::plain(
+                        ContextMessage::assistant_tool_call_with_thought_signature(
+                            moa_core::ToolInvocation {
+                                id: Some(
+                                    provider_tool_use_id
+                                        .clone()
+                                        .unwrap_or_else(|| tool_id.to_string()),
+                                ),
+                                name: tool_name.clone(),
+                                input: input.clone(),
+                            },
+                            format!("<tool_call name=\"{tool_name}\">{serialized}</tool_call>"),
+                            provider_thought_signature.clone(),
+                        ),
                     )
                 })
                 .map_err(Into::into),
@@ -245,42 +297,51 @@ fn event_to_context_message(
             *success,
             output,
             tool_output,
+            file_read_paths.get(tool_id).cloned(),
         ))),
         Event::ToolError {
             error,
             tool_id,
             provider_tool_use_id,
             ..
-        } => Some(Ok(match provider_tool_use_id.as_ref() {
-            Some(call_id) => {
-                let replayable_error = truncate_tool_result_text(error, tool_output);
-                ContextMessage::tool_result(
-                    call_id.clone(),
-                    format!("<tool_error id=\"{tool_id}\">{replayable_error}</tool_error>"),
-                    Some(vec![ToolContent::Text {
-                        text: replayable_error,
-                    }]),
-                )
-            }
-            None => {
-                ContextMessage::tool(format!("<tool_error id=\"{tool_id}\">{error}</tool_error>"))
-            }
-        })),
-        Event::Warning { message } => Some(Ok(ContextMessage::system(format!(
-            "<warning>{message}</warning>"
-        )))),
-        Event::MemoryRead { path, scope } => Some(Ok(ContextMessage::system(format!(
-            "<memory_read scope=\"{scope}\">{path}</memory_read>"
-        )))),
-        Event::MemoryWrite { path, summary, .. } => Some(Ok(ContextMessage::system(format!(
-            "<memory_write path=\"{path}\">{summary}</memory_write>"
-        )))),
+        } => Some(Ok(CompiledRecordMessage::plain(
+            match provider_tool_use_id.as_ref() {
+                Some(call_id) => {
+                    let replayable_error = truncate_tool_result_text(error, tool_output);
+                    ContextMessage::tool_result(
+                        call_id.clone(),
+                        format!("<tool_error id=\"{tool_id}\">{replayable_error}</tool_error>"),
+                        Some(vec![ToolContent::Text {
+                            text: replayable_error,
+                        }]),
+                    )
+                }
+                None => ContextMessage::tool(format!(
+                    "<tool_error id=\"{tool_id}\">{error}</tool_error>"
+                )),
+            },
+        ))),
+        Event::Warning { message } => Some(Ok(CompiledRecordMessage::plain(
+            ContextMessage::system(format!("<warning>{message}</warning>")),
+        ))),
+        Event::MemoryRead { path, scope } => {
+            Some(Ok(CompiledRecordMessage::plain(ContextMessage::system(
+                format!("<memory_read scope=\"{scope}\">{path}</memory_read>"),
+            ))))
+        }
+        Event::MemoryWrite { path, summary, .. } => {
+            Some(Ok(CompiledRecordMessage::plain(ContextMessage::system(
+                format!("<memory_write path=\"{path}\">{summary}</memory_write>"),
+            ))))
+        }
         Event::MemoryIngest {
             source_name,
             source_path,
             ..
-        } => Some(Ok(ContextMessage::system(format!(
-            "<memory_ingest source_name=\"{source_name}\" source_path=\"{source_path}\" />"
+        } => Some(Ok(CompiledRecordMessage::plain(ContextMessage::system(
+            format!(
+                "<memory_ingest source_name=\"{source_name}\" source_path=\"{source_path}\" />"
+            ),
         )))),
         _ => None,
     }
@@ -292,15 +353,119 @@ fn tool_result_context_message(
     success: bool,
     output: &ToolOutput,
     tool_output: &ToolOutputConfig,
-) -> ContextMessage {
+    file_read_path: Option<String>,
+) -> CompiledRecordMessage {
     let replayable_text = truncate_tool_result_text(&output.to_text(), tool_output);
-    ContextMessage::tool_result(
-        tool_use_id,
-        format!(
-            "<tool_result id=\"{tool_id}\" success=\"{success}\">\n{}\n</tool_result>",
-            wrap_untrusted_tool_output(&replayable_text)
+    CompiledRecordMessage {
+        message: ContextMessage::tool_result(
+            tool_use_id.clone(),
+            format!(
+                "<tool_result id=\"{tool_id}\" success=\"{success}\">\n{}\n</tool_result>",
+                wrap_untrusted_tool_output(&replayable_text)
+            ),
+            replayable_tool_content_blocks(output, &replayable_text, tool_output),
         ),
-        replayable_tool_content_blocks(output, &replayable_text, tool_output),
+        tool_result: file_read_path.as_ref().map(|path| ToolResultReplayMeta {
+            tool_use_id,
+            tool_id,
+            success,
+            file_read_path: path.clone(),
+        }),
+    }
+}
+
+fn build_full_file_read_path_map(events: &[&EventRecord]) -> HashMap<uuid::Uuid, String> {
+    let mut file_reads = HashMap::new();
+
+    for record in events {
+        let Event::ToolCall {
+            tool_id,
+            tool_name,
+            input,
+            ..
+        } = &record.event
+        else {
+            continue;
+        };
+
+        if tool_name != "file_read" {
+            continue;
+        }
+
+        let Some(path) = input.get("path").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+
+        if input.get("start_line").is_some() || input.get("end_line").is_some() {
+            continue;
+        }
+
+        file_reads.insert(*tool_id, path.to_string());
+    }
+
+    file_reads
+}
+
+fn latest_full_file_read_results(
+    events: &[&EventRecord],
+    file_read_paths: &HashMap<uuid::Uuid, String>,
+) -> HashMap<String, uuid::Uuid> {
+    let mut latest_results = HashMap::new();
+
+    for record in events {
+        let Event::ToolResult { tool_id, .. } = &record.event else {
+            continue;
+        };
+
+        let Some(path) = file_read_paths.get(tool_id) else {
+            continue;
+        };
+
+        latest_results.insert(path.clone(), *tool_id);
+    }
+
+    latest_results
+}
+
+fn deduplicate_file_reads(
+    messages: &mut [CompiledRecordMessage],
+    latest_file_reads: &HashMap<String, uuid::Uuid>,
+) -> DeduplicationStats {
+    let mut stats = DeduplicationStats::default();
+
+    for compiled in messages {
+        let Some(tool_result) = compiled.tool_result.as_ref() else {
+            continue;
+        };
+        let Some(latest_tool_id) = latest_file_reads.get(&tool_result.file_read_path) else {
+            continue;
+        };
+        if tool_result.tool_id == *latest_tool_id {
+            continue;
+        }
+
+        let previous_tokens = estimate_tokens(&compiled.message.content);
+        compiled.message = placeholder_tool_result_message(tool_result);
+        let placeholder_tokens = estimate_tokens(&compiled.message.content);
+        stats.deduplicated_count += 1;
+        stats.tokens_saved += previous_tokens.saturating_sub(placeholder_tokens);
+    }
+
+    stats
+}
+
+fn placeholder_tool_result_message(tool_result: &ToolResultReplayMeta) -> ContextMessage {
+    let placeholder = FILE_READ_DEDUP_PLACEHOLDER.to_string();
+
+    ContextMessage::tool_result(
+        tool_result.tool_use_id.clone(),
+        format!(
+            "<tool_result id=\"{}\" success=\"{}\">\n{}\n</tool_result>",
+            tool_result.tool_id,
+            tool_result.success,
+            wrap_untrusted_tool_output(&placeholder)
+        ),
+        Some(vec![ToolContent::Text { text: placeholder }]),
     )
 }
 
@@ -335,6 +500,41 @@ fn truncate_tool_result_text(text: &str, tool_output: &ToolOutputConfig) -> Stri
     truncate_head_tail(text, tool_output.max_replay_chars, tool_output.head_ratio).0
 }
 
+struct CompiledHistory {
+    messages: Vec<ContextMessage>,
+    tokens_used: usize,
+    deduplication: DeduplicationStats,
+}
+
+#[derive(Debug, Clone)]
+struct CompiledRecordMessage {
+    message: ContextMessage,
+    tool_result: Option<ToolResultReplayMeta>,
+}
+
+impl CompiledRecordMessage {
+    fn plain(message: ContextMessage) -> Self {
+        Self {
+            message,
+            tool_result: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ToolResultReplayMeta {
+    tool_use_id: String,
+    tool_id: uuid::Uuid,
+    success: bool,
+    file_read_path: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DeduplicationStats {
+    deduplicated_count: usize,
+    tokens_saved: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -343,11 +543,13 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use moa_core::{
-        BrainId, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
-        EventFilter, EventRecord, PendingSignal, PendingSignalId, Platform, SequenceNum,
-        SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary,
-        StopReason, TokenPricing, ToolCallFormat, ToolOutputConfig, UserId, WorkspaceId,
+        BrainId, CompactionConfig, CompletionContent, CompletionRequest, CompletionResponse,
+        CompletionStream, EventFilter, EventRecord, PendingSignal, PendingSignalId, Platform,
+        SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
+        SessionSummary, StopReason, TokenPricing, ToolCallFormat, ToolOutputConfig, UserId,
+        WorkspaceId,
     };
+    use serde_json::json;
     use tokio::sync::Mutex;
 
     use super::*;
@@ -525,6 +727,63 @@ mod tests {
         }
     }
 
+    fn compiler_with_recent_turns(
+        session: &SessionMeta,
+        events: &[EventRecord],
+        recent_turns_verbatim: usize,
+    ) -> HistoryCompiler {
+        HistoryCompiler {
+            session_store: Arc::new(MockSessionStore::new(session.clone(), events.to_vec())),
+            llm_provider: None,
+            compaction: CompactionConfig {
+                recent_turns_verbatim,
+                ..CompactionConfig::default()
+            },
+            tool_output: ToolOutputConfig::default(),
+        }
+    }
+
+    fn file_read_tool_call(
+        session_id: &SessionId,
+        sequence_num: u64,
+        tool_id: uuid::Uuid,
+        provider_tool_use_id: &str,
+        input: serde_json::Value,
+    ) -> EventRecord {
+        event_record(
+            session_id,
+            sequence_num,
+            Event::ToolCall {
+                tool_id,
+                provider_tool_use_id: Some(provider_tool_use_id.to_string()),
+                provider_thought_signature: None,
+                tool_name: "file_read".to_string(),
+                input,
+                hand_id: None,
+            },
+        )
+    }
+
+    fn file_read_tool_result(
+        session_id: &SessionId,
+        sequence_num: u64,
+        tool_id: uuid::Uuid,
+        provider_tool_use_id: &str,
+        text: &str,
+    ) -> EventRecord {
+        event_record(
+            session_id,
+            sequence_num,
+            Event::ToolResult {
+                tool_id,
+                provider_tool_use_id: Some(provider_tool_use_id.to_string()),
+                output: ToolOutput::text(text, Duration::from_millis(5)),
+                success: true,
+                duration_ms: 5,
+            },
+        )
+    }
+
     #[test]
     fn history_compiler_formats_user_and_assistant_turns() {
         let session = session();
@@ -690,6 +949,341 @@ mod tests {
             Some("bash")
         );
         assert!(messages[0].content.contains("<tool_call"));
+    }
+
+    #[test]
+    fn history_compiler_deduplicates_repeated_full_file_reads() {
+        let session = session();
+        let foo_first = uuid::Uuid::now_v7();
+        let bar = uuid::Uuid::now_v7();
+        let foo_second = uuid::Uuid::now_v7();
+        let first_read = (1..=80)
+            .map(|line| format!("fn first_version_{line}() {{}}\n"))
+            .collect::<String>();
+        let second_read = (1..=80)
+            .map(|line| format!("fn latest_version_{line}() {{}}\n"))
+            .collect::<String>();
+        let events = vec![
+            event_record(
+                &session.id,
+                0,
+                Event::UserMessage {
+                    text: "first read".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            file_read_tool_call(
+                &session.id,
+                1,
+                foo_first,
+                "toolu_foo_first",
+                json!({ "path": "src/foo.rs" }),
+            ),
+            file_read_tool_result(&session.id, 2, foo_first, "toolu_foo_first", &first_read),
+            event_record(
+                &session.id,
+                3,
+                Event::UserMessage {
+                    text: "bar read".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            file_read_tool_call(
+                &session.id,
+                4,
+                bar,
+                "toolu_bar",
+                json!({ "path": "src/bar.rs" }),
+            ),
+            file_read_tool_result(
+                &session.id,
+                5,
+                bar,
+                "toolu_bar",
+                "fn bar() {\n    keep_me();\n}",
+            ),
+            event_record(
+                &session.id,
+                6,
+                Event::UserMessage {
+                    text: "second foo read".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            file_read_tool_call(
+                &session.id,
+                7,
+                foo_second,
+                "toolu_foo_second",
+                json!({ "path": "src/foo.rs" }),
+            ),
+            file_read_tool_result(&session.id, 8, foo_second, "toolu_foo_second", &second_read),
+        ];
+        let compiler = compiler_with_recent_turns(&session, &events, 0);
+
+        let compiled = compiler
+            .compile_messages_with_stats(&events, 100_000)
+            .expect("history should compile");
+
+        let first_foo_result = compiled
+            .messages
+            .iter()
+            .find(|message| message.tool_use_id.as_deref() == Some("toolu_foo_first"))
+            .expect("first foo result present");
+        let second_foo_result = compiled
+            .messages
+            .iter()
+            .find(|message| message.tool_use_id.as_deref() == Some("toolu_foo_second"))
+            .expect("second foo result present");
+        let bar_result = compiled
+            .messages
+            .iter()
+            .find(|message| message.tool_use_id.as_deref() == Some("toolu_bar"))
+            .expect("bar result present");
+
+        assert_eq!(
+            first_foo_result.content_blocks,
+            Some(vec![ToolContent::Text {
+                text: FILE_READ_DEDUP_PLACEHOLDER.to_string(),
+            }])
+        );
+        assert_eq!(
+            first_foo_result.tool_use_id.as_deref(),
+            Some("toolu_foo_first")
+        );
+        assert!(second_foo_result.content.contains("latest_version_80"));
+        assert!(bar_result.content.contains("keep_me"));
+        assert_eq!(compiled.deduplication.deduplicated_count, 1);
+        assert!(compiled.deduplication.tokens_saved > 0);
+    }
+
+    #[test]
+    fn history_compiler_does_not_deduplicate_recent_turn_file_reads() {
+        let session = session();
+        let foo_first = uuid::Uuid::now_v7();
+        let foo_second = uuid::Uuid::now_v7();
+        let events = vec![
+            event_record(
+                &session.id,
+                0,
+                Event::UserMessage {
+                    text: "setup".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            event_record(
+                &session.id,
+                1,
+                Event::UserMessage {
+                    text: "first foo read".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            file_read_tool_call(
+                &session.id,
+                2,
+                foo_first,
+                "toolu_foo_first",
+                json!({ "path": "src/foo.rs" }),
+            ),
+            file_read_tool_result(
+                &session.id,
+                3,
+                foo_first,
+                "toolu_foo_first",
+                "fn foo() {\n    first_recent();\n}",
+            ),
+            event_record(
+                &session.id,
+                4,
+                Event::UserMessage {
+                    text: "second foo read".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            file_read_tool_call(
+                &session.id,
+                5,
+                foo_second,
+                "toolu_foo_second",
+                json!({ "path": "src/foo.rs" }),
+            ),
+            file_read_tool_result(
+                &session.id,
+                6,
+                foo_second,
+                "toolu_foo_second",
+                "fn foo() {\n    second_recent();\n}",
+            ),
+        ];
+        let compiler = compiler_with_recent_turns(&session, &events, 2);
+
+        let compiled = compiler
+            .compile_messages_with_stats(&events, 100_000)
+            .expect("history should compile");
+
+        assert_eq!(compiled.deduplication.deduplicated_count, 0);
+        assert!(
+            compiled
+                .messages
+                .iter()
+                .any(|message| message.content.contains("first_recent"))
+        );
+        assert!(
+            compiled
+                .messages
+                .iter()
+                .any(|message| message.content.contains("second_recent"))
+        );
+        assert!(
+            compiled
+                .messages
+                .iter()
+                .all(|message| !message.content.contains(FILE_READ_DEDUP_PLACEHOLDER))
+        );
+    }
+
+    #[test]
+    fn history_compiler_does_not_deduplicate_partial_file_reads() {
+        let session = session();
+        let partial_one = uuid::Uuid::now_v7();
+        let partial_two = uuid::Uuid::now_v7();
+        let events = vec![
+            event_record(
+                &session.id,
+                0,
+                Event::UserMessage {
+                    text: "first partial".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            file_read_tool_call(
+                &session.id,
+                1,
+                partial_one,
+                "toolu_partial_one",
+                json!({ "path": "src/foo.rs", "start_line": 1, "end_line": 40 }),
+            ),
+            file_read_tool_result(
+                &session.id,
+                2,
+                partial_one,
+                "toolu_partial_one",
+                "[showing lines 1-40 of 200 total in src/foo.rs]\n     1\tfn foo() {}",
+            ),
+            event_record(
+                &session.id,
+                3,
+                Event::UserMessage {
+                    text: "second partial".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            file_read_tool_call(
+                &session.id,
+                4,
+                partial_two,
+                "toolu_partial_two",
+                json!({ "path": "src/foo.rs", "start_line": 41, "end_line": 80 }),
+            ),
+            file_read_tool_result(
+                &session.id,
+                5,
+                partial_two,
+                "toolu_partial_two",
+                "[showing lines 41-80 of 200 total in src/foo.rs]\n    41\tfn bar() {}",
+            ),
+        ];
+        let compiler = compiler_with_recent_turns(&session, &events, 0);
+
+        let compiled = compiler
+            .compile_messages_with_stats(&events, 100_000)
+            .expect("history should compile");
+
+        assert_eq!(compiled.deduplication.deduplicated_count, 0);
+        assert!(
+            compiled
+                .messages
+                .iter()
+                .any(|message| message.content.contains("showing lines 1-40"))
+        );
+        assert!(
+            compiled
+                .messages
+                .iter()
+                .any(|message| message.content.contains("showing lines 41-80"))
+        );
+    }
+
+    #[tokio::test]
+    async fn history_processor_reports_file_read_deduplication_metadata() {
+        let session = session();
+        let foo_first = uuid::Uuid::now_v7();
+        let foo_second = uuid::Uuid::now_v7();
+        let first_read = (1..=80)
+            .map(|line| format!("fn first_version_{line}() {{}}\n"))
+            .collect::<String>();
+        let second_read = (1..=80)
+            .map(|line| format!("fn latest_version_{line}() {{}}\n"))
+            .collect::<String>();
+        let events = vec![
+            event_record(
+                &session.id,
+                0,
+                Event::UserMessage {
+                    text: "first foo read".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            file_read_tool_call(
+                &session.id,
+                1,
+                foo_first,
+                "toolu_foo_first",
+                json!({ "path": "src/foo.rs" }),
+            ),
+            file_read_tool_result(&session.id, 2, foo_first, "toolu_foo_first", &first_read),
+            event_record(
+                &session.id,
+                3,
+                Event::UserMessage {
+                    text: "second foo read".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            file_read_tool_call(
+                &session.id,
+                4,
+                foo_second,
+                "toolu_foo_second",
+                json!({ "path": "src/foo.rs" }),
+            ),
+            file_read_tool_result(&session.id, 5, foo_second, "toolu_foo_second", &second_read),
+        ];
+        let mut ctx = WorkingContext::new(&session, capabilities());
+        let compiler = compiler_with_recent_turns(&session, &events, 0);
+
+        let output = compiler
+            .process(&mut ctx)
+            .await
+            .expect("history should process");
+
+        assert_eq!(
+            output.metadata.get("file_reads_deduplicated"),
+            Some(&json!(1))
+        );
+        assert!(
+            output
+                .metadata
+                .get("tokens_saved_by_dedup")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|value| value > 0)
+        );
+        assert!(
+            ctx.messages
+                .iter()
+                .any(|message| message.content.contains(FILE_READ_DEDUP_PLACEHOLDER))
+        );
     }
 
     #[tokio::test]
