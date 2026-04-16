@@ -103,6 +103,9 @@ pub struct CompletionRequest {
     /// Message-boundary cache breakpoints used by providers that support explicit prompt caching.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_breakpoints: Vec<usize>,
+    /// Detailed explicit cache-control markers for providers that support TTL-aware prompt caching.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cache_controls: Vec<CacheBreakpoint>,
     /// Request-scoped metadata.
     pub metadata: HashMap<String, Value>,
 }
@@ -117,6 +120,7 @@ impl CompletionRequest {
             max_output_tokens: None,
             temperature: None,
             cache_breakpoints: Vec::new(),
+            cache_controls: Vec::new(),
             metadata: HashMap::new(),
         }
     }
@@ -124,6 +128,74 @@ impl CompletionRequest {
     /// Creates a minimal request alias for simple prompt-only completions.
     pub fn simple(prompt: impl Into<String>) -> Self {
         Self::new(prompt)
+    }
+}
+
+/// Supported explicit prompt-cache TTL classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheTtl {
+    /// Anthropic's default short-lived prompt cache.
+    FiveMinutes,
+    /// Anthropic's long-lived prompt cache for stable prefixes.
+    OneHour,
+}
+
+impl CacheTtl {
+    /// Returns the provider wire-format TTL string for Anthropic-compatible requests.
+    pub fn as_anthropic_ttl(self) -> &'static str {
+        match self {
+            Self::FiveMinutes => "5m",
+            Self::OneHour => "1h",
+        }
+    }
+}
+
+/// Explicit cache-control target for one prompt prefix boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "target", rename_all = "snake_case")]
+pub enum CacheBreakpointTarget {
+    /// Cache everything through the tool definitions block.
+    ToolDefinitions,
+    /// Cache everything through the indexed message boundary.
+    MessageBoundary {
+        /// Count of request messages included in the cached prefix.
+        index: usize,
+    },
+}
+
+/// Explicit prompt-cache marker with a target and TTL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheBreakpoint {
+    /// Target boundary for the cached prompt prefix.
+    pub target: CacheBreakpointTarget,
+    /// Requested cache TTL for providers that support it.
+    pub ttl: CacheTtl,
+}
+
+impl CacheBreakpoint {
+    /// Creates a cache breakpoint on a message boundary.
+    pub fn message(index: usize, ttl: CacheTtl) -> Self {
+        Self {
+            target: CacheBreakpointTarget::MessageBoundary { index },
+            ttl,
+        }
+    }
+
+    /// Creates a cache breakpoint on the tool definitions block.
+    pub fn tools(ttl: CacheTtl) -> Self {
+        Self {
+            target: CacheBreakpointTarget::ToolDefinitions,
+            ttl,
+        }
+    }
+
+    /// Returns the message-boundary index when this breakpoint targets messages.
+    pub fn message_index(&self) -> Option<usize> {
+        match self.target {
+            CacheBreakpointTarget::MessageBoundary { index } => Some(index),
+            CacheBreakpointTarget::ToolDefinitions => None,
+        }
     }
 }
 

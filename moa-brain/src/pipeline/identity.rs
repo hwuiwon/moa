@@ -1,7 +1,7 @@
 //! Stage 1: injects the static MOA identity prompt.
 
 use async_trait::async_trait;
-use moa_core::{ContextProcessor, ProcessorOutput, Result, WorkingContext};
+use moa_core::{CacheTtl, ContextProcessor, ProcessorOutput, Result, WorkingContext};
 
 use super::estimate_tokens;
 
@@ -103,6 +103,7 @@ impl ContextProcessor for IdentityProcessor {
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
         ctx.append_system(self.prompt.clone());
+        ctx.mark_cache_breakpoint_with_ttl(CacheTtl::OneHour);
         Ok(ProcessorOutput {
             tokens_added: estimate_tokens(&self.prompt),
             items_included: vec!["moa_identity".to_string()],

@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use moa_brain::{build_default_pipeline_with_runtime_and_instructions, run_brain_turn_with_tools};
 use moa_core::workspace::discover_workspace_instructions;
 use moa_core::{
-    CompletionRequest, CompletionResponse, CompletionStream, ContextMessage, Event, EventRange,
-    LLMProvider, MessageRole, MoaConfig, Result, SessionMeta, SessionStore, ToolContent, UserId,
-    WorkspaceId, estimate_text_tokens,
+    CacheTtl, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage, Event,
+    EventRange, LLMProvider, MessageRole, MoaConfig, Result, SessionMeta, SessionStore,
+    ToolContent, UserId, WorkspaceId, estimate_text_tokens,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
@@ -36,6 +36,7 @@ struct MessageSummary {
     tokens_estimate: usize,
     in_stable_prefix: bool,
     fingerprint: u64,
+    preview: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,12 +98,7 @@ impl CacheTurnPlan {
             .model
             .clone()
             .unwrap_or_else(|| "unspecified".to_string());
-        let stable_message_count = request
-            .cache_breakpoints
-            .last()
-            .copied()
-            .unwrap_or_default()
-            .min(request.messages.len());
+        let stable_message_count = static_prefix_message_count(request);
         let request_tools = request
             .tools
             .iter()
@@ -123,6 +119,7 @@ impl CacheTurnPlan {
                 tokens_estimate: estimate_text_tokens(&message.content),
                 in_stable_prefix: index < stable_message_count,
                 fingerprint: stable_fingerprint(&serialized_message(message)),
+                preview: preview_text(&message.content),
             })
             .collect::<Vec<_>>();
         let tool_tokens_estimate = request_tools
@@ -210,6 +207,117 @@ struct AuditedProvider {
     labels: Arc<Vec<String>>,
     audits: Arc<tokio::sync::Mutex<Vec<CacheTurnAudit>>>,
     previous_stable_prefix: Arc<tokio::sync::Mutex<Option<u64>>>,
+}
+
+#[tokio::test]
+#[ignore = "requires provider API key env and performs live cache audits"]
+async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
+    let repo_root = repo_root()?;
+    let dir = tempdir()?;
+
+    let workspace_id = WorkspaceId::new("cache-audit-matrix");
+    let user_id = UserId::new("cache-audit-user");
+    let discovered_instructions = discover_workspace_instructions(&repo_root);
+
+    let memory_store = Arc::new(FileMemoryStore::new(dir.path()).await?);
+    let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
+    let store = Arc::new(store);
+
+    let provider_configs = available_live_cache_provider_configs(&repo_root);
+    if provider_configs.is_empty() {
+        return Ok(());
+    }
+
+    let mut audits_by_provider = serde_json::Map::new();
+
+    for (provider_name, config) in provider_configs {
+        let audits = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let provider: Arc<dyn LLMProvider> = Arc::new(AuditedProvider::new(
+            build_provider_from_config(&config)?,
+            format!("same_session_{provider_name}"),
+            vec![
+                "warm_1".to_string(),
+                "warm_2".to_string(),
+                "warm_3".to_string(),
+            ],
+            audits.clone(),
+        ));
+        let pipeline = build_default_pipeline_with_runtime_and_instructions(
+            &config,
+            store.clone(),
+            memory_store.clone(),
+            Some(provider.clone()),
+            discovered_instructions.clone(),
+            Vec::new(),
+        );
+
+        let session_id = create_session(
+            store.clone(),
+            &workspace_id,
+            &user_id,
+            &config.general.default_model,
+        )
+        .await?;
+        run_turn(
+            store.clone(),
+            session_id.clone(),
+            provider.clone(),
+            &pipeline,
+            None,
+            "Reply with READY and nothing else.",
+        )
+        .await?;
+        run_turn(
+            store.clone(),
+            session_id.clone(),
+            provider.clone(),
+            &pipeline,
+            None,
+            "Reply with STEADY and nothing else.",
+        )
+        .await?;
+        run_turn(
+            store.clone(),
+            session_id,
+            provider,
+            &pipeline,
+            None,
+            "Reply with STABLE and nothing else.",
+        )
+        .await?;
+
+        let provider_audits = audits.lock().await.clone();
+        audits_by_provider.insert(
+            provider_name.clone(),
+            serde_json::to_value(&provider_audits)?,
+        );
+
+        assert_eq!(
+            provider_audits.len(),
+            3,
+            "expected three audit samples for {provider_name}"
+        );
+        assert!(
+            provider_audits
+                .get(1)
+                .is_some_and(|audit| audit.stable_prefix_reused_from_previous_request),
+            "expected turn 2 static-prefix reuse for {provider_name}"
+        );
+        assert!(
+            provider_audits
+                .iter()
+                .skip(1)
+                .any(|audit| audit.cached_input_tokens > 0),
+            "expected a cache hit on turn 2 or 3 for {provider_name}: {provider_audits:#?}"
+        );
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::Value::Object(audits_by_provider))?
+    );
+
+    Ok(())
 }
 
 impl AuditedProvider {
@@ -322,7 +430,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         session_a.clone(),
         sonnet_provider.clone(),
         &sonnet_pipeline,
-        tool_router.clone(),
+        Some(tool_router.clone()),
         "Reply with READY and nothing else.",
     )
     .await?;
@@ -331,7 +439,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         session_a.clone(),
         sonnet_provider.clone(),
         &sonnet_pipeline,
-        tool_router.clone(),
+        Some(tool_router.clone()),
         "Reply with STEADY and nothing else.",
     )
     .await?;
@@ -340,7 +448,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         session_a.clone(),
         sonnet_provider.clone(),
         &sonnet_pipeline,
-        tool_router.clone(),
+        Some(tool_router.clone()),
         "In this repository, what is the package name in moa-brain/Cargo.toml? Use tools if needed and answer with just the value.",
     )
     .await?;
@@ -367,7 +475,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         session_b,
         cross_session_provider.clone(),
         &cross_session_pipeline,
-        tool_router.clone(),
+        Some(tool_router.clone()),
         "Reply with READY and nothing else.",
     )
     .await?;
@@ -398,7 +506,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         session_c.clone(),
         cold_session_provider.clone(),
         &cold_session_pipeline,
-        tool_router.clone(),
+        Some(tool_router.clone()),
         "Reply with COLD and nothing else.",
     )
     .await?;
@@ -407,7 +515,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         session_c,
         cold_session_provider.clone(),
         &cold_session_pipeline,
-        tool_router.clone(),
+        Some(tool_router.clone()),
         "Reply with WARM and nothing else.",
     )
     .await?;
@@ -434,7 +542,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         session_a.clone(),
         opus_provider.clone(),
         &opus_pipeline,
-        tool_router.clone(),
+        Some(tool_router.clone()),
         "Reply with SWITCHED and nothing else.",
     )
     .await?;
@@ -443,7 +551,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         session_a,
         opus_provider.clone(),
         &opus_pipeline,
-        tool_router,
+        Some(tool_router),
         "Reply with SWITCHED2 and nothing else.",
     )
     .await?;
@@ -527,7 +635,7 @@ async fn run_turn(
     session_id: moa_core::SessionId,
     provider: Arc<dyn LLMProvider>,
     pipeline: &moa_brain::ContextPipeline,
-    tool_router: Arc<ToolRouter>,
+    tool_router: Option<Arc<ToolRouter>>,
     prompt: &str,
 ) -> Result<()> {
     store
@@ -545,7 +653,7 @@ async fn run_turn(
         store.clone(),
         provider,
         pipeline,
-        Some(tool_router),
+        tool_router,
     )
     .await?;
 
@@ -587,6 +695,38 @@ fn role_label(role: MessageRole) -> String {
         MessageRole::Assistant => "assistant".to_string(),
         MessageRole::Tool => "tool".to_string(),
     }
+}
+
+fn available_live_cache_provider_configs(repo_root: &Path) -> Vec<(String, MoaConfig)> {
+    let mut configs = Vec::new();
+
+    if env::var("ANTHROPIC_API_KEY").is_ok() {
+        let mut config = live_cache_config("anthropic", "claude-sonnet-4-6", repo_root);
+        config.providers.anthropic.api_key_env = "ANTHROPIC_API_KEY".to_string();
+        configs.push(("anthropic".to_string(), config));
+    }
+    if env::var("OPENAI_API_KEY").is_ok() {
+        let mut config = live_cache_config("openai", "gpt-5.4", repo_root);
+        config.providers.openai.api_key_env = "OPENAI_API_KEY".to_string();
+        configs.push(("openai".to_string(), config));
+    }
+    if env::var("GOOGLE_API_KEY").is_ok() {
+        let mut config = live_cache_config("google", "gemini-2.5-flash", repo_root);
+        config.providers.google.api_key_env = "GOOGLE_API_KEY".to_string();
+        configs.push(("google".to_string(), config));
+    }
+
+    configs
+}
+
+fn live_cache_config(provider: &str, model: &str, repo_root: &Path) -> MoaConfig {
+    let mut config = MoaConfig::default();
+    config.general.default_provider = provider.to_string();
+    config.general.default_model = model.to_string();
+    config.general.workspace_instructions =
+        Some("Cache audit static padding. Keep this prefix identical across turns.\n".repeat(220));
+    config.local.sandbox_dir = repo_root.display().to_string();
+    config
 }
 
 fn serialized_message(message: &ContextMessage) -> String {
@@ -634,6 +774,18 @@ fn stable_prefix_payload(request: &CompletionRequest, stable_message_count: usiz
     segments.join("\n")
 }
 
+fn static_prefix_message_count(request: &CompletionRequest) -> usize {
+    request
+        .cache_controls
+        .iter()
+        .filter(|breakpoint| breakpoint.ttl == CacheTtl::OneHour)
+        .filter_map(|breakpoint| breakpoint.message_index())
+        .max()
+        .or_else(|| request.cache_breakpoints.last().copied())
+        .unwrap_or_default()
+        .min(request.messages.len())
+}
+
 fn full_request_payload(request: &CompletionRequest) -> String {
     let mut segments = request
         .tools
@@ -654,4 +806,16 @@ fn stable_fingerprint(text: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
     hasher.finish()
+}
+
+fn preview_text(text: &str) -> String {
+    const MAX_PREVIEW_CHARS: usize = 96;
+
+    let preview = text.trim().replace('\n', "\\n");
+    if preview.chars().count() <= MAX_PREVIEW_CHARS {
+        return preview;
+    }
+
+    let truncated = preview.chars().take(MAX_PREVIEW_CHARS).collect::<String>();
+    format!("{truncated}...")
 }

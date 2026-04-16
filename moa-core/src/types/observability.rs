@@ -8,7 +8,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CompletionRequest, Platform, SessionId, SessionMeta, UserId, WorkspaceId, estimate_text_tokens,
+    CacheTtl, CompletionRequest, Platform, SessionId, SessionMeta, UserId, WorkspaceId,
+    estimate_text_tokens,
 };
 
 /// Durable summary of one provider request's cache plan and observed cache usage.
@@ -63,12 +64,7 @@ impl CacheReport {
         cached_input_tokens: usize,
         output_tokens: usize,
     ) -> Self {
-        let stable_message_count = request
-            .cache_breakpoints
-            .last()
-            .copied()
-            .unwrap_or_default()
-            .min(request.messages.len());
+        let stable_message_count = stable_prefix_message_count(request);
         let tool_tokens_estimate = request
             .tools
             .iter()
@@ -123,12 +119,7 @@ impl CacheReport {
 
 /// Returns a stable fingerprint for the cacheable prefix of a completion request.
 pub fn stable_prefix_fingerprint(request: &CompletionRequest) -> u64 {
-    let stable_message_count = request
-        .cache_breakpoints
-        .last()
-        .copied()
-        .unwrap_or_default()
-        .min(request.messages.len());
+    let stable_message_count = stable_prefix_message_count(request);
     fingerprint_json(&(
         request.tools.clone(),
         request.messages[..stable_message_count].to_vec(),
@@ -148,6 +139,18 @@ where
     let mut hasher = DefaultHasher::new();
     serialized.hash(&mut hasher);
     hasher.finish()
+}
+
+fn stable_prefix_message_count(request: &CompletionRequest) -> usize {
+    request
+        .cache_controls
+        .iter()
+        .filter(|breakpoint| breakpoint.ttl == CacheTtl::OneHour)
+        .filter_map(|breakpoint| breakpoint.message_index())
+        .max()
+        .or_else(|| request.cache_breakpoints.last().copied())
+        .unwrap_or_default()
+        .min(request.messages.len())
 }
 
 /// Context attributes propagated across spans in one logical turn trace.

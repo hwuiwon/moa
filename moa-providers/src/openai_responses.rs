@@ -17,15 +17,16 @@ use async_openai::types::responses::ReasoningEffort;
 use async_openai::types::responses::{
     CreateResponse, EasyInputContent, EasyInputMessage, FunctionCallOutput,
     FunctionCallOutputItemParam, FunctionTool, FunctionToolCall, InputContent, InputItem,
-    InputParam, InputTextContent, Item, OutputItem, OutputMessageContent, Reasoning, Response,
-    ResponseStream, ResponseStreamEvent, ResponseUsage, Role as OpenAiRole, Status as OpenAiStatus,
-    Tool, ToolChoiceOptions, ToolChoiceParam, WebSearchTool, WebSearchToolCallStatus,
+    InputParam, InputTextContent, Item, OutputItem, OutputMessageContent, PromptCacheRetention,
+    Reasoning, Response, ResponseStream, ResponseStreamEvent, ResponseUsage, Role as OpenAiRole,
+    Status as OpenAiStatus, Tool, ToolChoiceOptions, ToolChoiceParam, WebSearchTool,
+    WebSearchToolCallStatus,
 };
 use futures_util::StreamExt;
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, MessageRole,
     MoaError, ProviderNativeTool, Result, StopReason, TokenUsage, ToolCallContent, ToolContent,
-    ToolInvocation,
+    ToolInvocation, stable_prefix_fingerprint,
 };
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -121,6 +122,8 @@ pub(crate) fn build_responses_request(
         input: InputParam::Items(input_items),
         instructions: (!instructions.is_empty()).then(|| instructions.join("\n\n")),
         model: Some(default_model.to_string()),
+        prompt_cache_key: prompt_cache_key(request, default_model),
+        prompt_cache_retention: Some(PromptCacheRetention::InMemory),
         tools,
         tool_choice: Some(ToolChoiceParam::Mode(if has_tools {
             ToolChoiceOptions::Auto
@@ -136,6 +139,15 @@ pub(crate) fn build_responses_request(
         temperature: request.temperature,
         ..CreateResponse::default()
     })
+}
+
+fn prompt_cache_key(request: &CompletionRequest, model: &str) -> Option<String> {
+    let prefix_fingerprint = stable_prefix_fingerprint(request);
+    if prefix_fingerprint == 0 {
+        return None;
+    }
+
+    Some(format!("moa:{model}:{prefix_fingerprint:016x}"))
 }
 
 /// Executes one streamed Responses request with retry handling for rate limits.
@@ -867,11 +879,13 @@ mod tests {
     use std::collections::HashMap;
 
     use async_openai::error::OpenAIError;
-    use async_openai::types::responses::ResponseUsage;
+    use async_openai::types::responses::{PromptCacheRetention, ResponseUsage};
+    use moa_core::{CacheBreakpoint, CacheTtl, CompletionRequest, ContextMessage};
     use serde_json::json;
 
     use super::{
-        is_ignorable_openai_stream_error, metadata_as_strings, token_usage_from_openai_usage,
+        build_responses_request, is_ignorable_openai_stream_error, metadata_as_strings,
+        token_usage_from_openai_usage,
     };
 
     #[test]
@@ -918,5 +932,77 @@ mod tests {
         assert_eq!(token_usage.input_tokens_cache_write, 0);
         assert_eq!(token_usage.input_tokens_cache_read, 1536);
         assert_eq!(token_usage.output_tokens, 512);
+    }
+
+    #[test]
+    fn build_responses_request_sets_prompt_cache_key_and_retention() {
+        let request = CompletionRequest {
+            model: None,
+            messages: vec![
+                ContextMessage::system("Static instructions".to_string()),
+                ContextMessage::user("Current task".to_string()),
+            ],
+            tools: vec![json!({
+                "name": "echo",
+                "description": "Echo tool",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "string" }
+                    }
+                }
+            })],
+            max_output_tokens: Some(128),
+            temperature: None,
+            cache_breakpoints: vec![1],
+            cache_controls: vec![CacheBreakpoint::message(1, CacheTtl::OneHour)],
+            metadata: HashMap::new(),
+        };
+
+        let built = build_responses_request(&request, "gpt-5.4", "medium", &[])
+            .expect("request should build");
+
+        assert_eq!(
+            built.prompt_cache_retention,
+            Some(PromptCacheRetention::InMemory)
+        );
+        assert!(
+            built
+                .prompt_cache_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("moa:gpt-5.4:")),
+            "expected a stable OpenAI prompt cache key"
+        );
+    }
+
+    #[test]
+    fn prompt_cache_key_ignores_dynamic_tail_messages() {
+        let mut first = CompletionRequest {
+            model: None,
+            messages: vec![
+                ContextMessage::system("Static instructions".to_string()),
+                ContextMessage::user("Tail one".to_string()),
+            ],
+            tools: Vec::new(),
+            max_output_tokens: Some(128),
+            temperature: None,
+            cache_breakpoints: vec![1],
+            cache_controls: vec![CacheBreakpoint::message(1, CacheTtl::OneHour)],
+            metadata: HashMap::new(),
+        };
+        let mut second = first.clone();
+        first
+            .messages
+            .push(ContextMessage::assistant("Dynamic assistant A"));
+        second
+            .messages
+            .push(ContextMessage::assistant("Dynamic assistant B"));
+
+        let first_built =
+            build_responses_request(&first, "gpt-5.4", "medium", &[]).expect("first request");
+        let second_built =
+            build_responses_request(&second, "gpt-5.4", "medium", &[]).expect("second request");
+
+        assert_eq!(first_built.prompt_cache_key, second_built.prompt_cache_key);
     }
 }

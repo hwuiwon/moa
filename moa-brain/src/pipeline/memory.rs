@@ -1,17 +1,18 @@
-//! Stage 5: memory retrieval and prompt injection.
+//! Stage 6: memory retrieval and prompt injection.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    ContextProcessor, Event, EventRange, EventRecord, MemoryPath, MemoryScope, MemoryStore,
-    ProcessorOutput, Result, SessionStore, WorkingContext,
+    ContextMessage, ContextProcessor, Event, EventRange, EventRecord, MemoryPath, MemoryScope,
+    MemoryStore, ProcessorOutput, Result, SessionStore, WorkingContext,
 };
 
 const MEMORY_BUDGET_DIVISOR: usize = 5;
 const MEMORY_RESULTS_PER_SCOPE: usize = 2;
 const MIN_PAGE_EXCERPT_TOKENS: usize = 96;
 const WORKSPACE_BOOTSTRAP_PAGE_PATH: &str = "topics/project.md";
+pub(crate) const MEMORY_REMINDER_PREFIX: &str = "<memory-reminder>";
 
 /// In-memory stage data fetched during processing.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -157,16 +158,17 @@ impl ContextProcessor for MemoryRetriever {
     }
 
     fn stage(&self) -> u8 {
-        5
+        6
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
         let data = self.load_stage_data(ctx).await?;
         let tokens_before = ctx.token_count;
         let mut items_included = Vec::new();
+        let mut sections = Vec::new();
 
         if !data.user_index.trim().is_empty() {
-            ctx.append_system(format!(
+            sections.push(format!(
                 "<user_memory>\n{}\n</user_memory>",
                 data.user_index.trim()
             ));
@@ -174,7 +176,7 @@ impl ContextProcessor for MemoryRetriever {
         }
 
         if !data.workspace_index.trim().is_empty() {
-            ctx.append_system(format!(
+            sections.push(format!(
                 "<workspace_memory>\n{}\n</workspace_memory>",
                 data.workspace_index.trim()
             ));
@@ -198,7 +200,16 @@ impl ContextProcessor for MemoryRetriever {
             }
             section.push_str("</relevant_memory>");
 
-            ctx.append_system(section);
+            sections.push(section);
+        }
+
+        if !sections.is_empty() {
+            let reminder = format!(
+                "{MEMORY_REMINDER_PREFIX}\n{}\n</memory-reminder>",
+                sections.join("\n\n")
+            );
+            let insertion_index = trailing_user_insertion_index(&ctx.messages);
+            ctx.insert_message(insertion_index, ContextMessage::user(reminder));
         }
 
         Ok(ProcessorOutput {
@@ -207,6 +218,19 @@ impl ContextProcessor for MemoryRetriever {
             ..ProcessorOutput::default()
         })
     }
+}
+
+fn trailing_user_insertion_index(messages: &[ContextMessage]) -> usize {
+    let mut insertion_index = messages.len();
+    while insertion_index > 0
+        && matches!(
+            messages[insertion_index - 1].role,
+            moa_core::MessageRole::User
+        )
+    {
+        insertion_index -= 1;
+    }
+    insertion_index
 }
 
 pub(crate) fn extract_search_query(events: &[EventRecord]) -> Option<String> {
@@ -296,7 +320,7 @@ mod tests {
     };
     use tokio::sync::Mutex;
 
-    use super::{MemoryRetriever, extract_search_keywords};
+    use super::{MEMORY_REMINDER_PREFIX, MemoryRetriever, extract_search_keywords};
 
     #[derive(Clone)]
     struct StubSessionStore {
@@ -539,10 +563,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(ctx.messages.len(), 3);
+        assert_eq!(ctx.messages.len(), 1);
+        assert_eq!(ctx.messages[0].role, moa_core::MessageRole::User);
+        assert!(ctx.messages[0].content.contains(MEMORY_REMINDER_PREFIX));
         assert!(ctx.messages[0].content.contains("<user_memory>"));
-        assert!(ctx.messages[1].content.contains("<workspace_memory>"));
-        assert!(ctx.messages[2].content.contains("<relevant_memory>"));
+        assert!(ctx.messages[0].content.contains("<workspace_memory>"));
+        assert!(ctx.messages[0].content.contains("<relevant_memory>"));
         assert!(
             output.tokens_added
                 >= super::super::estimate_tokens("Use Postgres for durable session state.")

@@ -1,4 +1,4 @@
-//! Stage 6: compiles session history into context messages.
+//! Stage 5: compiles session history into context messages.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,6 +20,7 @@ use crate::compaction::{
 use super::estimate_tokens;
 
 const FILE_READ_DEDUP_PLACEHOLDER: &str = "[file previously read — see latest version below]";
+pub(crate) const HISTORY_END_INDEX_METADATA_KEY: &str = "_moa.history.end_index";
 
 /// Compiles session events into conversational context.
 pub struct HistoryCompiler {
@@ -149,7 +150,7 @@ impl ContextProcessor for HistoryCompiler {
     }
 
     fn stage(&self) -> u8 {
-        6
+        5
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
@@ -192,6 +193,7 @@ impl ContextProcessor for HistoryCompiler {
             .collect::<Vec<_>>();
 
         ctx.extend_messages(messages);
+        ctx.insert_metadata(HISTORY_END_INDEX_METADATA_KEY, json!(ctx.messages.len()));
 
         let mut metadata = HashMap::new();
         metadata.insert(
