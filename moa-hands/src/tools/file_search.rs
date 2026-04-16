@@ -1,6 +1,7 @@
 //! `file_search` tool implementation.
 
 use std::ffi::OsStr;
+use std::io::ErrorKind;
 use std::path::Component;
 use std::path::Path;
 use std::time::Duration;
@@ -148,10 +149,24 @@ async fn collect_matches(
     extra_skips: &[String],
     matches: &mut Vec<String>,
 ) -> Result<bool> {
-    let mut entries = fs::read_dir(current).await?;
-    while let Some(entry) = entries.next_entry().await? {
+    let mut entries = match fs::read_dir(current).await {
+        Ok(entries) => entries,
+        Err(error) if should_ignore_search_io_error(&error) => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) if should_ignore_search_io_error(&error) => break,
+            Err(error) => return Err(error.into()),
+        };
         let path = entry.path();
-        let file_type = entry.file_type().await?;
+        let file_type = match entry.file_type().await {
+            Ok(file_type) => file_type,
+            Err(error) if should_ignore_search_io_error(&error) => continue,
+            Err(error) => return Err(error.into()),
+        };
         let relative_path = match path.strip_prefix(root) {
             Ok(relative) => relative,
             Err(_) => continue,
@@ -182,6 +197,10 @@ async fn collect_matches(
     }
 
     Ok(false)
+}
+
+fn should_ignore_search_io_error(error: &std::io::Error) -> bool {
+    matches!(error.kind(), ErrorKind::NotFound)
 }
 
 fn should_skip_search_path(path: &Path, extra_skips: &[String]) -> bool {
@@ -274,6 +293,7 @@ fn skipped_directory_names(extra_skips: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::ErrorKind;
     use std::path::Path;
 
     use serde_json::json;
@@ -281,8 +301,8 @@ mod tests {
     use tokio::fs;
 
     use super::{
-        default_skipped_dirs, execute, load_moaignore, should_skip_search_path,
-        skipped_directory_names,
+        default_skipped_dirs, execute, load_moaignore, should_ignore_search_io_error,
+        should_skip_search_path, skipped_directory_names,
     };
 
     #[test]
@@ -328,6 +348,12 @@ mod tests {
         assert!(skipped.contains(&".venv"));
         assert!(skipped.contains(&".gradle"));
         assert!(skipped.contains(&"vendor"));
+    }
+
+    #[test]
+    fn missing_entries_are_ignored_during_search() {
+        let error = std::io::Error::new(ErrorKind::NotFound, "disappeared");
+        assert!(should_ignore_search_io_error(&error));
     }
 
     #[tokio::test]

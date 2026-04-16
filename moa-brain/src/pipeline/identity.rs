@@ -25,6 +25,11 @@ When you make changes, explain what you did and why. When you encounter \
 errors, preserve them in context so they are not repeated.\n\n\
 When working in code repositories, unless project instructions say \
 otherwise:\n\
+- Use native file tools for repository navigation and source inspection. The \
+preferred flow is file_search to find files, file_grep to search contents, \
+file_outline to find symbols, file_read to inspect only the relevant range, \
+and str_replace to edit. Use bash for tests, builds, or commands the native \
+file tools cannot express.\n\
 - Skip vendored and generated directories (.venv, node_modules, \
 __pycache__, target, vendor, .git, etc.) when searching. The file_search \
 tool excludes these automatically. When using bash with grep or ripgrep, add \
@@ -34,9 +39,20 @@ unique string match per call, so include enough surrounding context \
 (indentation, nearby lines) to make old_str match exactly once. Use \
 file_write only when creating new files from scratch. Avoid bash-based text \
 manipulation (sed, python -c, heredocs) for modifying source files.\n\
-- When a file is large, locate the relevant symbol or line number first, \
-then use file_read with start_line and end_line. Do not read a multi-\
-thousand-line file into context when a narrow range will do.\n\
+- Workspace-root AGENTS.md instructions are already loaded for the current \
+session. Do not recursively search for AGENTS.md unless you have already \
+narrowed work to a specific subdirectory and need its local instructions.\n\
+- For large Python source files, prefer file_outline before file_read. Use it \
+to list the target class or method names and line numbers, then read only the \
+relevant section.\n\
+- Prefer file_grep over bash rg/grep for repository content search.\n\
+- When reading large files (>200 lines), prefer partial reads with \
+start_line and end_line to avoid flooding context. Use file_search or grep \
+first to find the relevant line range, then read only that section.\n\
+- When using bash for recursive search, keep it targeted. Prefer file_search \
+or rg scoped to a subdirectory. Avoid broad repo walks like `find ..` and \
+add exclusion flags for skipped directories yourself when recursion is \
+necessary.\n\
 - After making code changes, always run the project's test suite or relevant \
 tests to verify correctness. A linter or formatter pass alone is not \
 sufficient verification. Look for test commands in AGENTS.md, Makefile, \
@@ -169,8 +185,16 @@ mod tests {
             .unwrap();
 
         let content = &ctx.messages[0].content;
+        assert!(
+            content.contains(
+                "preferred flow is file_search to find files, file_grep to search contents"
+            )
+        );
         assert!(content.contains("Prefer the str_replace tool for editing existing files"));
-        assert!(content.contains("file_read with start_line and end_line"));
+        assert!(content.contains("Workspace-root AGENTS.md instructions are already loaded"));
+        assert!(content.contains("prefer file_outline before file_read"));
+        assert!(content.contains("Prefer file_grep over bash rg/grep"));
+        assert!(content.contains("partial reads with start_line and end_line"));
         assert!(content.contains("test suite"));
         assert!(content.contains("3 attempts"));
         assert!(content.contains(".venv"));

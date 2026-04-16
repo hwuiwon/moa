@@ -19,6 +19,7 @@ globset = "0.4"
 moa-core = { path = "../moa-core" }
 moa-security = { path = "../moa-security" }
 opentelemetry.workspace = true
+regex = "1"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

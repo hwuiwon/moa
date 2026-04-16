@@ -2,6 +2,8 @@
 
 pub mod bash;
 pub mod docker_file;
+pub mod file_grep;
+pub mod file_outline;
 pub mod file_read;
 pub mod file_search;
 pub mod file_write;
