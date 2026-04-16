@@ -766,6 +766,7 @@ impl BrainOrchestrator for LocalOrchestrator {
             && !handle.finished.load(Ordering::SeqCst)
         {
             return Ok(EventStream::from_history_and_broadcast(
+                session_id,
                 history,
                 handle.event_tx.subscribe(),
             ));

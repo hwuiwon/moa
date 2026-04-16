@@ -894,8 +894,10 @@ impl BrainOrchestrator for TemporalOrchestrator {
             .session_store
             .get_events(session_id.clone(), EventRange::all())
             .await?;
-        let receiver = self.observe_live_tail(session_id, &history).await;
-        Ok(EventStream::from_history_and_broadcast(history, receiver))
+        let receiver = self.observe_live_tail(session_id.clone(), &history).await;
+        Ok(EventStream::from_history_and_broadcast(
+            session_id, history, receiver,
+        ))
     }
 
     /// Returns a polling runtime stream synthesized from persisted session events.

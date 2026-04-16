@@ -3,7 +3,8 @@
 use std::path::Path;
 
 use moa_core::{
-    DaemonCommand, DaemonReply, DaemonStreamEvent, MoaError, Result, RuntimeEvent, SessionId,
+    DaemonCommand, DaemonReply, DaemonStreamEvent, LiveEvent, MoaError, Result, RuntimeEvent,
+    SessionId,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[cfg(unix)]
@@ -131,7 +132,22 @@ pub(crate) async fn relay_daemon_runtime_events(
                 if event_tx
                     .send(SessionRuntimeEvent {
                         session_id: session_id.clone(),
-                        event,
+                        event: LiveEvent::Event(event),
+                    })
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
+            DaemonStreamEvent::Gap { count, channel } => {
+                if event_tx
+                    .send(SessionRuntimeEvent {
+                        session_id: session_id.clone(),
+                        event: LiveEvent::Gap {
+                            count,
+                            channel,
+                            since_seq: None,
+                        },
                     })
                     .is_err()
                 {
@@ -162,6 +178,14 @@ pub(crate) async fn relay_daemon_runtime_turn_events(
             DaemonStreamEvent::Runtime(event) => {
                 let should_stop = matches!(event, RuntimeEvent::TurnCompleted);
                 if event_tx.send(event).is_err() || should_stop {
+                    return Ok(());
+                }
+            }
+            DaemonStreamEvent::Gap { count, .. } => {
+                let message = format!(
+                    "… {count} runtime events missed (subscriber was behind; live preview resumed) …"
+                );
+                if event_tx.send(RuntimeEvent::Notice(message)).is_err() {
                     return Ok(());
                 }
             }

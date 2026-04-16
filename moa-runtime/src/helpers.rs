@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use moa_core::{
-    ApprovalDecision, BrainOrchestrator, DaemonSessionPreview, Event, EventRecord, MemoryPath,
-    MemorySearchResult, MoaConfig, MoaError, PageSummary, PageType, Platform, Result, RuntimeEvent,
-    SessionId, SessionMeta, SessionSummary, StartSessionRequest, UserId, WikiPage,
-    WorkspaceBudgetStatus, WorkspaceId,
+    ApprovalDecision, BrainOrchestrator, BroadcastChannel, DaemonSessionPreview, Event,
+    EventRecord, LagPolicy, LiveEvent, MemoryPath, MemorySearchResult, MoaConfig, MoaError,
+    PageSummary, PageType, Platform, RecvResult, Result, RuntimeEvent, SessionId, SessionMeta,
+    SessionSummary, StartSessionRequest, UserId, WikiPage, WorkspaceBudgetStatus, WorkspaceId,
+    recv_with_lag_handling,
 };
 use moa_orchestrator::LocalOrchestrator;
 use tokio::sync::{broadcast, mpsc};
@@ -30,8 +31,8 @@ pub struct SessionPreview {
 pub struct SessionRuntimeEvent {
     /// Session that produced this runtime event.
     pub session_id: SessionId,
-    /// Runtime event payload.
-    pub event: RuntimeEvent,
+    /// Runtime event or typed lag marker.
+    pub event: LiveEvent<RuntimeEvent>,
 }
 
 impl From<DaemonSessionPreview> for SessionPreview {
@@ -122,12 +123,20 @@ pub(crate) async fn start_empty_session(
 
 pub(crate) async fn relay_runtime_events(
     runtime_rx: &mut broadcast::Receiver<RuntimeEvent>,
+    session_id: &SessionId,
     event_tx: mpsc::UnboundedSender<RuntimeEvent>,
     stop_on_turn_completed: bool,
 ) -> Result<()> {
     loop {
-        match runtime_rx.recv().await {
-            Ok(event) => {
+        match recv_with_lag_handling(
+            runtime_rx,
+            BroadcastChannel::Runtime,
+            session_id,
+            LagPolicy::SkipWithGap,
+        )
+        .await
+        {
+            RecvResult::Message(event) => {
                 let should_stop = matches!(event, RuntimeEvent::TurnCompleted);
                 if event_tx.send(event).is_err() {
                     return Ok(());
@@ -136,8 +145,21 @@ pub(crate) async fn relay_runtime_events(
                     return Ok(());
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => return Ok(()),
+            RecvResult::Gap { count } => {
+                let message = format!(
+                    "… {count} runtime events missed (subscriber was behind; live preview resumed) …"
+                );
+                if event_tx.send(RuntimeEvent::Notice(message)).is_err() {
+                    return Ok(());
+                }
+            }
+            RecvResult::BackfillRequested { count } => {
+                let message = format!("… {count} runtime events missed and need backfill …");
+                if event_tx.send(RuntimeEvent::Notice(message)).is_err() {
+                    return Ok(());
+                }
+            }
+            RecvResult::AbortRequested | RecvResult::Closed => return Ok(()),
         }
     }
 }
@@ -148,18 +170,54 @@ pub(crate) async fn relay_session_runtime_events(
     event_tx: mpsc::UnboundedSender<SessionRuntimeEvent>,
 ) -> Result<()> {
     loop {
-        match runtime_rx.recv().await {
-            Ok(event) => {
+        match recv_with_lag_handling(
+            runtime_rx,
+            BroadcastChannel::Runtime,
+            &session_id,
+            LagPolicy::SkipWithGap,
+        )
+        .await
+        {
+            RecvResult::Message(event) => {
                 let payload = SessionRuntimeEvent {
                     session_id: session_id.clone(),
-                    event,
+                    event: LiveEvent::Event(event),
                 };
                 if event_tx.send(payload).is_err() {
                     return Ok(());
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => return Ok(()),
+            RecvResult::Gap { count } => {
+                if event_tx
+                    .send(SessionRuntimeEvent {
+                        session_id: session_id.clone(),
+                        event: LiveEvent::Gap {
+                            count,
+                            channel: BroadcastChannel::Runtime,
+                            since_seq: None,
+                        },
+                    })
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
+            RecvResult::BackfillRequested { count } => {
+                if event_tx
+                    .send(SessionRuntimeEvent {
+                        session_id: session_id.clone(),
+                        event: LiveEvent::Gap {
+                            count,
+                            channel: BroadcastChannel::Runtime,
+                            since_seq: None,
+                        },
+                    })
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
+            RecvResult::AbortRequested | RecvResult::Closed => return Ok(()),
         }
     }
 }
@@ -495,7 +553,10 @@ impl ChatRuntime {
 mod tests {
     use std::path::Path;
 
-    use super::workspace_id_for_root;
+    use tokio::sync::{broadcast, mpsc};
+
+    use super::{relay_runtime_events, relay_session_runtime_events, workspace_id_for_root};
+    use moa_core::{BroadcastChannel, LiveEvent, RuntimeEvent, SessionId};
 
     #[test]
     fn workspace_id_for_root_uses_sanitized_directory_name() {
@@ -509,5 +570,53 @@ mod tests {
         let workspace_id = workspace_id_for_root(Path::new("/"));
 
         assert_eq!(workspace_id.as_str(), "workspace");
+    }
+
+    #[tokio::test]
+    async fn relay_session_runtime_events_emits_gap_marker_after_lag() {
+        let (runtime_tx, mut runtime_rx) = broadcast::channel(4);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let session_id = SessionId::new();
+
+        for _ in 0..20 {
+            let _ = runtime_tx.send(RuntimeEvent::AssistantStarted);
+        }
+        drop(runtime_tx);
+
+        relay_session_runtime_events(&mut runtime_rx, session_id.clone(), event_tx)
+            .await
+            .expect("relay should finish cleanly");
+
+        let first = event_rx.recv().await.expect("gap marker should be emitted");
+        assert_eq!(first.session_id, session_id);
+        assert_eq!(
+            first.event,
+            LiveEvent::Gap {
+                count: 16,
+                channel: BroadcastChannel::Runtime,
+                since_seq: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_runtime_events_emits_notice_after_lag() {
+        let (runtime_tx, mut runtime_rx) = broadcast::channel(4);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let session_id = SessionId::new();
+
+        for _ in 0..20 {
+            let _ = runtime_tx.send(RuntimeEvent::AssistantStarted);
+        }
+        drop(runtime_tx);
+
+        relay_runtime_events(&mut runtime_rx, &session_id, event_tx, false)
+            .await
+            .expect("relay should finish cleanly");
+
+        let first = event_rx.recv().await.expect("notice should be emitted");
+        assert!(
+            matches!(first, RuntimeEvent::Notice(text) if text.contains("16 runtime events missed"))
+        );
     }
 }

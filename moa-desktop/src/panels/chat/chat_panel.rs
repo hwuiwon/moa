@@ -13,7 +13,7 @@ use gpui_component::{
     ActiveTheme,
     input::{Input, InputEvent, InputState},
 };
-use moa_core::{ApprovalDecision, RuntimeEvent, SessionId};
+use moa_core::{ApprovalDecision, LiveEvent, RuntimeEvent, SessionId};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -168,17 +168,32 @@ impl ChatPanel {
 
             let mut batcher = StreamBatcher::new(BATCH_INTERVAL);
             while let Some(session_event) = rx.recv().await {
-                if let Some(batch) = batcher.push(session_event.event)
-                    && weak
-                        .update(cx, |this, cx| {
-                            for evt in batch {
-                                this.apply_runtime_event(evt, cx);
-                            }
-                            cx.notify();
-                        })
-                        .is_err()
-                {
-                    break;
+                match session_event.event {
+                    LiveEvent::Event(event) => {
+                        if let Some(batch) = batcher.push(event)
+                            && weak
+                                .update(cx, |this, cx| {
+                                    for evt in batch {
+                                        this.apply_runtime_event(evt, cx);
+                                    }
+                                    cx.notify();
+                                })
+                                .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    LiveEvent::Gap { count, .. } => {
+                        if weak
+                            .update(cx, |this, cx| {
+                                this.apply_runtime_gap(count, cx);
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                 }
             }
             let remaining = batcher.flush();
@@ -192,6 +207,11 @@ impl ChatPanel {
             }
         });
         self._stream_task = Some(task);
+    }
+
+    fn apply_runtime_gap(&mut self, count: u64, _cx: &mut Context<Self>) {
+        self.messages.push(super::messages::gap_message(count));
+        self.scroll.scroll_to_bottom();
     }
 
     fn apply_runtime_event(&mut self, event: RuntimeEvent, cx: &mut Context<Self>) {
