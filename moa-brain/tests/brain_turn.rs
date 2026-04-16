@@ -1099,8 +1099,17 @@ async fn run_brain_turn_emits_brain_response_event() {
     assert_eq!(result, TurnResult::Complete);
 
     let events = store.events.lock().await.clone();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 3);
     match &events[1].event {
+        Event::CacheReport { report } => {
+            assert_eq!(report.provider, "mock");
+            assert_eq!(report.model, "claude-sonnet-4-6");
+            assert_eq!(report.cached_input_tokens, 0);
+            assert!(!report.stable_prefix_reused);
+        }
+        other => panic!("expected cache report event, got {other:?}"),
+    }
+    match &events[2].event {
         Event::BrainResponse {
             text,
             model,
@@ -1115,6 +1124,60 @@ async fn run_brain_turn_emits_brain_response_event() {
         }
         other => panic!("expected brain response event, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn run_brain_turn_marks_cache_prefix_reuse_on_second_request() {
+    let session = SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: "claude-sonnet-4-6".to_string(),
+        ..SessionMeta::default()
+    };
+    let initial_events = vec![make_event_record(
+        &session.id,
+        0,
+        Event::UserMessage {
+            text: "Hello".to_string(),
+            attachments: Vec::new(),
+        },
+    )];
+    let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
+    let pipeline = build_default_pipeline(
+        &MoaConfig::default(),
+        store.clone(),
+        Arc::new(MockMemoryStore),
+    );
+    let llm = Arc::new(MockLlmProvider);
+
+    run_brain_turn(session.id.clone(), store.clone(), llm.clone(), &pipeline)
+        .await
+        .unwrap();
+    store
+        .emit_event(
+            session.id.clone(),
+            Event::UserMessage {
+                text: "Hello again".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    run_brain_turn(session.id.clone(), store.clone(), llm, &pipeline)
+        .await
+        .unwrap();
+
+    let events = store.events.lock().await.clone();
+    let second_report = events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::CacheReport { report } => Some(report),
+            _ => None,
+        })
+        .nth(1)
+        .expect("expected second cache report");
+    assert!(second_report.stable_prefix_reused);
 }
 
 #[tokio::test]

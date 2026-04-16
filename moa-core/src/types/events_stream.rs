@@ -57,6 +57,8 @@ pub enum EventType {
     HandError,
     /// `Checkpoint`.
     Checkpoint,
+    /// `CacheReport`.
+    CacheReport,
     /// `Error`.
     Error,
     /// `Warning`.

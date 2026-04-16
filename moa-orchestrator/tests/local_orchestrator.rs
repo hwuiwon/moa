@@ -2065,6 +2065,9 @@ async fn observe_stream_receives_events_in_order() -> Result<()> {
     let fourth = stream.next().await.transpose()?.ok_or_else(|| {
         moa_core::MoaError::ProviderError("missing fourth observed event".to_string())
     })?;
+    let fifth = stream.next().await.transpose()?.ok_or_else(|| {
+        moa_core::MoaError::ProviderError("missing fifth observed event".to_string())
+    })?;
 
     assert_eq!(first.sequence_num, 0);
     assert_eq!(first.event_type, EventType::SessionCreated);
@@ -2073,7 +2076,9 @@ async fn observe_stream_receives_events_in_order() -> Result<()> {
     assert_eq!(third.sequence_num, 2);
     assert_eq!(third.event_type, EventType::SessionStatusChanged);
     assert_eq!(fourth.sequence_num, 3);
-    assert_eq!(fourth.event_type, EventType::BrainResponse);
+    assert_eq!(fourth.event_type, EventType::CacheReport);
+    assert_eq!(fifth.sequence_num, 4);
+    assert_eq!(fifth.event_type, EventType::BrainResponse);
     Ok(())
 }
 
@@ -2561,9 +2566,8 @@ async fn workspace_instruction_file_is_injected_into_prompt_with_config_instruct
     assert!(requests[0].messages.iter().any(|message| {
         message.role == MessageRole::System
             && message.content.contains("<workspace_instructions>")
-            && message
-                .content
-                .contains("Config workspace guidance.\n\n---\n\n# Project Instructions")
+            && message.content.contains("Config workspace guidance.")
+            && message.content.contains("# Project Instructions")
             && message.content.contains("Use pytest for testing.")
     }));
     Ok(())

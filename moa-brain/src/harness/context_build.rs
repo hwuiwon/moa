@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use moa_core::{
-    ApprovalDecision, BufferedUserMessage, Event, EventRange, EventRecord, LLMProvider, MoaError,
-    Result, SessionId, SessionMeta, TokenPricing, TraceContext, UserMessage, WorkingContext,
+    ApprovalDecision, BufferedUserMessage, CacheReport, CompletionRequest, CompletionResponse,
+    Event, EventRange, EventRecord, LLMProvider, MoaError, Result, SessionId, SessionMeta,
+    TokenPricing, TraceContext, UserMessage, WorkingContext, stable_prefix_fingerprint,
 };
 use moa_security::inject_canary;
 use tokio::sync::broadcast;
@@ -107,6 +108,32 @@ pub(super) fn calculate_response_cost_cents(
         / 1_000_000.0;
 
     (cost_dollars * 100.0).round() as u32
+}
+
+pub(super) fn build_cache_report(
+    events: &[EventRecord],
+    provider: &str,
+    request: &CompletionRequest,
+    response: &CompletionResponse,
+) -> CacheReport {
+    let previous_stable_prefix = events.iter().rev().find_map(|record| match &record.event {
+        Event::CacheReport { report } => Some(report.stable_prefix_fingerprint),
+        _ => None,
+    });
+    let stable_prefix_fingerprint = stable_prefix_fingerprint(request);
+    let stable_prefix_reused = previous_stable_prefix
+        .map(|fingerprint| fingerprint == stable_prefix_fingerprint)
+        .unwrap_or(false);
+
+    CacheReport::from_request(
+        request,
+        provider.to_string(),
+        response.model.clone(),
+        stable_prefix_reused,
+        response.input_tokens,
+        response.cached_input_tokens,
+        response.output_tokens,
+    )
 }
 
 pub(super) fn approval_decision_label(decision: &ApprovalDecision) -> &'static str {

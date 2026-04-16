@@ -363,17 +363,22 @@ fn apply_cache_breakpoints(
     messages: &mut [Value],
     tools: &mut [Value],
 ) {
-    if let Some(last_tool) = tools.last_mut() {
+    let eligible_breakpoints = eligible_cache_breakpoints(request, MAX_CACHE_BREAKPOINTS);
+    let should_mark_tool_boundary =
+        should_annotate_tool_breakpoint(tools.len(), eligible_breakpoints.last().copied());
+    let tool_slots = usize::from(should_mark_tool_boundary);
+    let remaining_slots = MAX_CACHE_BREAKPOINTS.saturating_sub(tool_slots);
+
+    if should_mark_tool_boundary && let Some(last_tool) = tools.last_mut() {
         annotate_cache_control(last_tool);
     }
 
-    let tool_slots = usize::from(!tools.is_empty());
-    let remaining_slots = MAX_CACHE_BREAKPOINTS.saturating_sub(tool_slots);
-    if remaining_slots == 0 {
-        return;
-    }
-
-    for breakpoint in eligible_cache_breakpoints(request, remaining_slots) {
+    for breakpoint in eligible_breakpoints
+        .into_iter()
+        .rev()
+        .take(remaining_slots)
+        .rev()
+    {
         let Some(target_index) = breakpoint.checked_sub(1) else {
             continue;
         };
@@ -411,7 +416,11 @@ fn eligible_cache_breakpoints(request: &CompletionRequest, max_breakpoints: usiz
     }
 
     let mut eligible = Vec::new();
-    let mut prefix_tokens = 0;
+    let mut prefix_tokens = request
+        .tools
+        .iter()
+        .map(|tool| estimate_text_tokens(&tool.to_string()))
+        .sum::<usize>();
     let mut next_breakpoint = 0;
 
     for (index, message) in request.messages.iter().enumerate() {
@@ -436,6 +445,18 @@ fn eligible_cache_breakpoints(request: &CompletionRequest, max_breakpoints: usiz
         .into_iter()
         .rev()
         .collect()
+}
+
+fn should_annotate_tool_breakpoint(tool_count: usize, deepest_breakpoint: Option<usize>) -> bool {
+    if tool_count == 0 {
+        return false;
+    }
+
+    let Some(deepest_breakpoint) = deepest_breakpoint else {
+        return true;
+    };
+
+    tool_count + deepest_breakpoint > 20
 }
 
 fn annotate_cache_control(value: &mut Value) {
@@ -1216,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_request_applies_cache_control_to_system_and_tools() {
+    fn completion_request_prefers_deepest_breakpoint_when_static_prefix_fits_window() {
         let request = CompletionRequest {
             model: Some(MODEL_SONNET_4_6.to_string()),
             messages: vec![
@@ -1249,7 +1270,7 @@ mod tests {
         .expect("request should build");
 
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
+        assert!(body["tools"][0].get("cache_control").is_none());
     }
 
     #[test]
@@ -1332,6 +1353,79 @@ mod tests {
             .count();
 
         assert_eq!(message_markers + tool_markers, 4);
+    }
+
+    #[test]
+    fn completion_request_counts_tool_tokens_toward_breakpoint_eligibility() {
+        let request = CompletionRequest {
+            model: Some(MODEL_SONNET_4_6.to_string()),
+            messages: vec![
+                ContextMessage::system("brief"),
+                ContextMessage::user("Hello"),
+            ],
+            tools: vec![json!({
+                "name": "tool_a",
+                "description": "A".repeat(6_000),
+                "input_schema": { "type": "object" }
+            })],
+            max_output_tokens: Some(512),
+            temperature: None,
+            cache_breakpoints: vec![1],
+            metadata: Default::default(),
+        };
+
+        let body = build_request_body(
+            &request,
+            &canonical_model_id(MODEL_SONNET_4_6).expect("valid model"),
+            &capabilities_for_model(MODEL_SONNET_4_6).expect("valid capabilities"),
+            false,
+        )
+        .expect("request should build");
+
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn completion_request_marks_tool_boundary_when_static_prefix_exceeds_twenty_blocks() {
+        let request = CompletionRequest {
+            model: Some(MODEL_SONNET_4_6.to_string()),
+            messages: vec![
+                ContextMessage::system("S".repeat(5_000)),
+                ContextMessage::user("Hello"),
+            ],
+            tools: (0..25)
+                .map(|index| {
+                    json!({
+                        "name": format!("tool_{index}"),
+                        "description": "Run shell commands",
+                        "input_schema": { "type": "object" }
+                    })
+                })
+                .collect(),
+            max_output_tokens: Some(512),
+            temperature: None,
+            cache_breakpoints: vec![1],
+            metadata: Default::default(),
+        };
+
+        let body = build_request_body(
+            &request,
+            &canonical_model_id(MODEL_SONNET_4_6).expect("valid model"),
+            &capabilities_for_model(MODEL_SONNET_4_6).expect("valid capabilities"),
+            false,
+        )
+        .expect("request should build");
+
+        let tools = body["tools"].as_array().expect("tools array");
+        assert_eq!(
+            tools
+                .last()
+                .and_then(|tool| tool.get("cache_control"))
+                .and_then(|value| value.get("type"))
+                .and_then(serde_json::Value::as_str),
+            Some("ephemeral")
+        );
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
     }
 
     #[test]
