@@ -1,16 +1,18 @@
 //! Context compilation and shared harness support utilities.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use moa_core::{
     ApprovalDecision, BufferedUserMessage, CacheReport, CompletionRequest, CompletionResponse,
     Event, EventRange, EventRecord, LLMProvider, MoaError, Result, SessionId, SessionMeta,
-    TokenPricing, TraceContext, UserMessage, WorkingContext, record_pipeline_compile_duration,
-    stable_prefix_fingerprint,
+    TokenPricing, TraceContext, UserMessage, WorkingContext, current_turn_root_span,
+    record_pipeline_compile_duration, record_turn_event_persist_duration,
+    record_turn_pipeline_compile_duration, stable_prefix_fingerprint,
 };
 use moa_security::inject_canary;
 use tokio::sync::broadcast;
+use tracing::Instrument;
 
 use crate::pipeline::ContextPipeline;
 
@@ -28,6 +30,7 @@ pub(super) async fn build_turn_context(
         total + report.output.duration
     });
     record_pipeline_compile_duration(pipeline_compile_duration);
+    record_turn_pipeline_compile_duration(pipeline_compile_duration);
     let active_canary = if enable_canary {
         Some(inject_canary(&mut ctx))
     } else {
@@ -158,25 +161,38 @@ pub(super) async fn append_event(
     session_id: SessionId,
     event: Event,
 ) -> Result<()> {
-    let sequence_num = session_store.emit_event(session_id.clone(), event).await?;
-    if let Some(event_tx) = event_tx {
-        let mut records = session_store
-            .get_events(
-                session_id,
-                EventRange {
-                    from_seq: Some(sequence_num),
-                    to_seq: Some(sequence_num),
-                    event_types: None,
-                    limit: Some(1),
-                },
-            )
-            .await?;
-        let record = records
-            .pop()
-            .ok_or_else(|| MoaError::StorageError("failed to reload appended event".to_string()))?;
-        let _ = event_tx.send(record);
+    let root_turn_span = current_turn_root_span().unwrap_or_else(tracing::Span::current);
+    let persist_span = tracing::info_span!(
+        parent: &root_turn_span,
+        "event_persist",
+        moa.persist.events_written = 1i64,
+    );
+    let started_at = Instant::now();
+    let result = async {
+        let sequence_num = session_store.emit_event(session_id.clone(), event).await?;
+        if let Some(event_tx) = event_tx {
+            let mut records = session_store
+                .get_events(
+                    session_id,
+                    EventRange {
+                        from_seq: Some(sequence_num),
+                        to_seq: Some(sequence_num),
+                        event_types: None,
+                        limit: Some(1),
+                    },
+                )
+                .await?;
+            let record = records.pop().ok_or_else(|| {
+                MoaError::StorageError("failed to reload appended event".to_string())
+            })?;
+            let _ = event_tx.send(record);
+        }
+        Ok(())
     }
-    Ok(())
+    .instrument(persist_span)
+    .await;
+    record_turn_event_persist_duration(started_at.elapsed(), 1);
+    result
 }
 
 #[cfg(test)]

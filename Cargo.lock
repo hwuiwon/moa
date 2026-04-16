@@ -5485,6 +5485,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-opentelemetry",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -5684,6 +5685,7 @@ dependencies = [
  "tokio-cron-scheduler",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
 ]

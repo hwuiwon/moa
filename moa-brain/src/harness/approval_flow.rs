@@ -38,6 +38,7 @@ pub(super) async fn wait_for_signal_approval(
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     cancel_token: Option<&CancellationToken>,
     hard_cancel_token: Option<&CancellationToken>,
+    tool_dispatch_span: Option<&tracing::Span>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
     queued_messages: &mut Vec<BufferedUserMessage>,
@@ -101,6 +102,7 @@ pub(super) async fn wait_for_signal_approval(
                                 runtime_tx,
                                 cancel_token,
                                 hard_cancel_token,
+                                tool_dispatch_span,
                             )
                             .await
                         }
@@ -135,6 +137,7 @@ pub(super) async fn wait_for_signal_approval(
                                 runtime_tx,
                                 cancel_token,
                                 hard_cancel_token,
+                                tool_dispatch_span,
                             )
                             .await
                         }
@@ -212,6 +215,7 @@ pub(super) async fn process_resolved_approval(
     events: &[EventRecord],
     cancel_token: Option<&CancellationToken>,
     hard_cancel_token: Option<&CancellationToken>,
+    tool_dispatch_span: Option<&tracing::Span>,
 ) -> Result<bool> {
     let Some(pending) = find_resolved_pending_tool_approval(events) else {
         return Ok(false);
@@ -243,6 +247,7 @@ pub(super) async fn process_resolved_approval(
                 None,
                 cancel_token,
                 hard_cancel_token,
+                tool_dispatch_span,
             )
             .await?;
         }
@@ -283,6 +288,7 @@ pub(super) async fn process_resolved_approval(
                 None,
                 cancel_token,
                 hard_cancel_token,
+                tool_dispatch_span,
             )
             .await?;
         }
@@ -326,6 +332,7 @@ pub(super) async fn wait_for_approval(
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     cancel_token: Option<&CancellationToken>,
     hard_cancel_token: Option<&CancellationToken>,
+    tool_dispatch_span: Option<&tracing::Span>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
     queued_messages: &mut Vec<BufferedUserMessage>,
@@ -400,6 +407,7 @@ pub(super) async fn wait_for_approval(
                                 runtime_tx,
                                 cancel_token,
                                 hard_cancel_token,
+                                tool_dispatch_span,
                             )
                             .await
                         }
@@ -434,6 +442,7 @@ pub(super) async fn wait_for_approval(
                                 runtime_tx,
                                 cancel_token,
                                 hard_cancel_token,
+                                tool_dispatch_span,
                             )
                             .await
                         }

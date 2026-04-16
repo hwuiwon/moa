@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use moa_brain::{TurnResult, build_default_pipeline_with_tools, run_brain_turn_with_tools};
 use moa_core::{
@@ -16,6 +17,11 @@ use moa_security::ToolPolicies;
 use moa_session::TursoSessionStore;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracing::Id;
+use tracing::Subscriber;
+use tracing::span::Attributes;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::{Context, SubscriberExt};
 use uuid::Uuid;
 
 const PARTIAL_READ_HEADER: &str = "[showing lines 118-125 of 260 total in auth.rs]";
@@ -27,6 +33,10 @@ const NEW_SNIPPET: &str = "    let issued_refresh_token = issue_refresh_token(us
 
 #[tokio::test]
 async fn steps_72_77_e2e() -> Result<()> {
+    let span_recorder = SpanRecorder::default();
+    let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
     let root = TempDir::new()?;
     let workspace = root.path().join("workspace");
     let state_dir = root.path().join("state");
@@ -328,6 +338,7 @@ async fn steps_72_77_e2e() -> Result<()> {
         "session cache hit rate should be non-zero"
     );
     assert_replay_growth(&replay_snapshots);
+    assert_turn_latency_spans(&span_recorder);
 
     Ok(())
 }
@@ -524,4 +535,47 @@ fn assert_replay_growth(replay_snapshots: &[TurnReplaySnapshot]) {
         replay_snapshots[6].events_bytes > replay_snapshots[0].events_bytes,
         "later turns should deserialize more event bytes than early turns"
     );
+}
+
+fn assert_turn_latency_spans(span_recorder: &SpanRecorder) {
+    for name in [
+        "pipeline_compile",
+        "llm_call",
+        "tool_dispatch",
+        "event_persist",
+    ] {
+        assert!(
+            span_recorder.count(name) >= 7,
+            "expected at least one {name} span per scripted turn, got {}",
+            span_recorder.count(name),
+        );
+    }
+}
+
+#[derive(Clone, Default)]
+struct SpanRecorder {
+    span_names: Arc<Mutex<Vec<String>>>,
+}
+
+impl SpanRecorder {
+    fn count(&self, name: &str) -> usize {
+        self.span_names
+            .lock()
+            .expect("span recorder lock should succeed")
+            .iter()
+            .filter(|span_name| span_name.as_str() == name)
+            .count()
+    }
+}
+
+impl<S> Layer<S> for SpanRecorder
+where
+    S: Subscriber,
+{
+    fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
+        self.span_names
+            .lock()
+            .expect("span recorder lock should succeed")
+            .push(attrs.metadata().name().to_string());
+    }
 }
