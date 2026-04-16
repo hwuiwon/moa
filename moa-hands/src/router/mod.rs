@@ -63,6 +63,11 @@ impl ToolRouter {
             .insert(workspace_id, workspace_root);
     }
 
+    /// Returns the remembered filesystem root for a logical workspace id.
+    pub async fn workspace_root(&self, workspace_id: &WorkspaceId) -> Option<PathBuf> {
+        self.workspace_roots.read().await.get(workspace_id).cloned()
+    }
+
     /// Destroys and removes all cached hands associated with the provided session.
     pub async fn destroy_session_hands(&self, session_id: &moa_core::SessionId) {
         let session_prefix = format!("{session_id}:");

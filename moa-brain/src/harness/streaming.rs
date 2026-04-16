@@ -240,14 +240,19 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
 
             let pipeline_compile_span = tracing::info_span!(
                 "pipeline_compile",
-                moa.pipeline.stages = 7i64,
+                moa.pipeline.stages = pipeline.stage_count() as i64,
                 moa.pipeline.total_tokens = tracing::field::Empty,
             );
+            let workspace_root = match &tool_router {
+                Some(router) => router.workspace_root(&session.workspace_id).await,
+                None => None,
+            };
             let (ctx, active_canary) = build_turn_context(
                 &session_id,
                 &session,
                 pipeline,
                 &llm_provider,
+                workspace_root,
                 tool_router.is_some(),
                 &trace_context,
             )

@@ -1,5 +1,6 @@
 //! Context compilation and shared harness support utilities.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,16 +16,24 @@ use tokio::sync::broadcast;
 use tracing::Instrument;
 
 use crate::pipeline::ContextPipeline;
+use crate::pipeline::runtime_context::WORKSPACE_ROOT_METADATA_KEY;
 
 pub(super) async fn build_turn_context(
     session_id: &SessionId,
     session: &SessionMeta,
     pipeline: &ContextPipeline,
     llm_provider: &Arc<dyn LLMProvider>,
+    workspace_root: Option<PathBuf>,
     enable_canary: bool,
     trace_context: &TraceContext,
 ) -> Result<(WorkingContext, Option<String>)> {
     let mut ctx = WorkingContext::new(session, llm_provider.capabilities());
+    if let Some(workspace_root) = workspace_root {
+        ctx.insert_metadata(
+            WORKSPACE_ROOT_METADATA_KEY,
+            serde_json::json!(workspace_root.display().to_string()),
+        );
+    }
     let stage_reports = pipeline.run(&mut ctx).await?;
     let pipeline_compile_duration = stage_reports.iter().fold(Duration::ZERO, |total, report| {
         total + report.output.duration

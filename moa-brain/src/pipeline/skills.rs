@@ -8,6 +8,9 @@ use moa_core::{
 };
 use serde_json::Value;
 
+// WARNING: Rendered skill metadata lives in the cached prompt prefix.
+// Do not include turn-dependent counters or sort by usage; keep this section byte-stable.
+
 /// Injects workspace skill metadata into the stable prompt prefix.
 pub struct SkillInjector {
     memory_store: Arc<dyn MemoryStore>,
@@ -47,15 +50,13 @@ If one of these skills is clearly relevant and you need the exact workflow, call
             );
             for skill in &skills {
                 section.push_str(&format!(
-                    "- {name}: {description} | path: {path} | tags: {tags} | tools: {tools} | est_tokens: {estimated_tokens} | uses: {use_count} | success_rate: {success_rate:.2}\n",
+                    "- {name}: {description} | path: {path} | tags: {tags} | tools: {tools} | est_tokens: {estimated_tokens}\n",
                     name = skill.name,
                     description = skill.description,
                     path = skill.path,
                     tags = skill.tags.join(", "),
                     tools = skill.allowed_tools.join(", "),
                     estimated_tokens = skill.estimated_tokens,
-                    use_count = skill.use_count,
-                    success_rate = skill.success_rate,
                 ));
                 items_included.push(skill.name.clone());
             }
@@ -88,12 +89,7 @@ async fn load_skills(
         skills.push(skill_metadata_from_page(summary.path, &page));
     }
 
-    skills.sort_by(|left, right| {
-        right
-            .use_count
-            .cmp(&left.use_count)
-            .then_with(|| left.name.cmp(&right.name))
-    });
+    skills.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(skills)
 }
 
@@ -220,6 +216,7 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use chrono::{TimeZone, Utc};
     use moa_core::{
         ContextProcessor, MemoryPath, MemoryScope, MemoryStore, ModelCapabilities, PageSummary,
         PageType, Platform, Result, SessionId, SessionMeta, TokenPricing, ToolCallFormat, UserId,
@@ -227,6 +224,12 @@ mod tests {
     };
 
     use super::SkillInjector;
+
+    fn fixed_time() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 4, 16, 12, 0, 0)
+            .single()
+            .expect("fixed skill timestamp should be valid")
+    }
 
     #[derive(Clone)]
     struct StubSkillMemoryStore {
@@ -318,14 +321,14 @@ mod tests {
                     title: "debug-oauth".to_string(),
                     page_type: PageType::Skill,
                     content: "## When to use\nUse it for OAuth refresh token issues.".to_string(),
-                    created: chrono::Utc::now(),
-                    updated: chrono::Utc::now(),
+                    created: fixed_time(),
+                    updated: fixed_time(),
                     confidence: moa_core::ConfidenceLevel::High,
                     related: Vec::new(),
                     sources: Vec::new(),
                     tags: vec!["oauth".to_string(), "auth".to_string()],
                     auto_generated: true,
-                    last_referenced: chrono::Utc::now(),
+                    last_referenced: fixed_time(),
                     reference_count: 3,
                     metadata: HashMap::from([
                         ("name".to_string(), serde_json::json!("debug-oauth")),
@@ -353,7 +356,7 @@ mod tests {
                 path: skill_path,
                 title: "debug-oauth".to_string(),
                 page_type: PageType::Skill,
-                updated: chrono::Utc::now(),
+                updated: fixed_time(),
                 confidence: moa_core::ConfidenceLevel::High,
             }],
         };
@@ -420,5 +423,132 @@ mod tests {
         assert!(ctx.messages.is_empty());
         assert_eq!(output.tokens_added, 0);
         assert!(output.items_included.is_empty());
+    }
+
+    #[tokio::test]
+    async fn skill_injector_orders_skills_by_name_without_dynamic_stats() {
+        let session = SessionMeta {
+            id: SessionId::new(),
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Desktop,
+            model: "claude-sonnet-4-6".to_string(),
+            ..SessionMeta::default()
+        };
+        let capabilities = ModelCapabilities {
+            model_id: "claude-sonnet-4-6".to_string(),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+            },
+            native_tools: Vec::new(),
+        };
+        let mut ctx = moa_core::WorkingContext::new(&session, capabilities);
+        let alpha_path = MemoryPath::new("skills/alpha/SKILL.md");
+        let beta_path = MemoryPath::new("skills/beta/SKILL.md");
+        let store = StubSkillMemoryStore {
+            pages: HashMap::from([
+                (
+                    alpha_path.clone(),
+                    WikiPage {
+                        path: Some(alpha_path.clone()),
+                        title: "alpha".to_string(),
+                        page_type: PageType::Skill,
+                        content: "alpha".to_string(),
+                        created: fixed_time(),
+                        updated: fixed_time(),
+                        confidence: moa_core::ConfidenceLevel::High,
+                        related: Vec::new(),
+                        sources: Vec::new(),
+                        tags: vec!["a".to_string()],
+                        auto_generated: false,
+                        last_referenced: fixed_time(),
+                        reference_count: 100,
+                        metadata: HashMap::from([
+                            ("name".to_string(), serde_json::json!("alpha")),
+                            (
+                                "description".to_string(),
+                                serde_json::json!("Alpha workflow"),
+                            ),
+                            (
+                                "metadata".to_string(),
+                                serde_json::json!({
+                                    "moa-use-count": "999",
+                                    "moa-success-rate": "0.1",
+                                }),
+                            ),
+                        ]),
+                    },
+                ),
+                (
+                    beta_path.clone(),
+                    WikiPage {
+                        path: Some(beta_path.clone()),
+                        title: "beta".to_string(),
+                        page_type: PageType::Skill,
+                        content: "beta".to_string(),
+                        created: fixed_time(),
+                        updated: fixed_time(),
+                        confidence: moa_core::ConfidenceLevel::High,
+                        related: Vec::new(),
+                        sources: Vec::new(),
+                        tags: vec!["b".to_string()],
+                        auto_generated: false,
+                        last_referenced: fixed_time(),
+                        reference_count: 1,
+                        metadata: HashMap::from([
+                            ("name".to_string(), serde_json::json!("beta")),
+                            (
+                                "description".to_string(),
+                                serde_json::json!("Beta workflow"),
+                            ),
+                            (
+                                "metadata".to_string(),
+                                serde_json::json!({
+                                    "moa-use-count": "1",
+                                    "moa-success-rate": "0.99",
+                                }),
+                            ),
+                        ]),
+                    },
+                ),
+            ]),
+            summaries: vec![
+                PageSummary {
+                    path: beta_path,
+                    title: "beta".to_string(),
+                    page_type: PageType::Skill,
+                    updated: fixed_time(),
+                    confidence: moa_core::ConfidenceLevel::High,
+                },
+                PageSummary {
+                    path: alpha_path,
+                    title: "alpha".to_string(),
+                    page_type: PageType::Skill,
+                    updated: fixed_time(),
+                    confidence: moa_core::ConfidenceLevel::High,
+                },
+            ],
+        };
+
+        SkillInjector::from_memory(Arc::new(store))
+            .process(&mut ctx)
+            .await
+            .expect("skills should compile");
+
+        let content = &ctx.messages[0].content;
+        let alpha_index = content.find("- alpha:").expect("alpha should be rendered");
+        let beta_index = content.find("- beta:").expect("beta should be rendered");
+        assert!(alpha_index < beta_index);
+        assert!(!content.contains("uses:"));
+        assert!(!content.contains("success_rate:"));
     }
 }
