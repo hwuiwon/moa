@@ -222,13 +222,19 @@ pub fn build_default_pipeline_with_runtime_and_instructions(
     tool_schemas: Vec<serde_json::Value>,
 ) -> ContextPipeline {
     let history: Box<dyn ContextProcessor> = if let Some(llm_provider) = llm_provider {
-        Box::new(HistoryCompiler::with_compaction(
-            session_store.clone(),
-            llm_provider,
-            config.compaction.clone(),
-        ))
+        Box::new(
+            HistoryCompiler::with_compaction(
+                session_store.clone(),
+                llm_provider,
+                config.compaction.clone(),
+            )
+            .with_tool_output_config(config.tool_output.clone()),
+        )
     } else {
-        Box::new(HistoryCompiler::new(session_store.clone()))
+        Box::new(
+            HistoryCompiler::new(session_store.clone())
+                .with_tool_output_config(config.tool_output.clone()),
+        )
     };
     ContextPipeline::with_daily_workspace_budget(
         vec![

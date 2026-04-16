@@ -100,6 +100,9 @@ pub struct ToolOutput {
     pub structured: Option<Value>,
     /// Execution duration.
     pub duration: Duration,
+    /// Whether the tool output was truncated before storage or replay.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 impl ToolOutput {
@@ -110,6 +113,7 @@ impl ToolOutput {
             is_error: false,
             structured: None,
             duration,
+            truncated: false,
         }
     }
 
@@ -146,6 +150,7 @@ impl ToolOutput {
                 "exit_code": exit_code,
             })),
             duration,
+            truncated: false,
         }
     }
 
@@ -161,6 +166,7 @@ impl ToolOutput {
             is_error: false,
             structured: Some(data),
             duration,
+            truncated: false,
         }
     }
 
@@ -173,7 +179,14 @@ impl ToolOutput {
             is_error: true,
             structured: None,
             duration,
+            truncated: false,
         }
+    }
+
+    /// Marks this tool output as truncated or untruncated.
+    pub fn with_truncated(mut self, truncated: bool) -> Self {
+        self.truncated = truncated;
+        self
     }
 
     /// Returns the preserved process exit code when this output came from a shell-like tool.
@@ -283,6 +296,7 @@ mod tests {
                 text: "hello".to_string()
             }]
         );
+        assert!(!output.truncated);
         assert_eq!(output.to_text(), "hello");
     }
 
@@ -296,6 +310,7 @@ mod tests {
         );
 
         assert!(!output.is_error);
+        assert!(!output.truncated);
         assert_eq!(output.process_exit_code(), Some(0));
         assert_eq!(output.process_stdout(), Some("hello\n"));
         assert_eq!(output.to_text(), "hello");
@@ -311,6 +326,7 @@ mod tests {
         );
 
         assert!(output.is_error);
+        assert!(!output.truncated);
         assert_eq!(output.process_exit_code(), Some(7));
         assert_eq!(output.process_stderr(), Some("boom"));
         assert!(output.to_text().contains("stderr:\nboom"));
@@ -328,6 +344,7 @@ mod tests {
         assert!(!output.is_error);
         assert!(matches!(output.content[0], ToolContent::Text { .. }));
         assert!(matches!(output.content[1], ToolContent::Json { .. }));
+        assert!(!output.truncated);
         assert!(output.to_text().contains("2 matches"));
         assert!(output.to_text().contains("\"path\": \"a.txt\""));
     }
@@ -337,6 +354,7 @@ mod tests {
         let output = ToolOutput::error("failed", Duration::from_secs(1));
 
         assert!(output.is_error);
+        assert!(!output.truncated);
         assert_eq!(output.to_text(), "failed");
     }
 

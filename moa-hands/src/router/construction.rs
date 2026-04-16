@@ -51,7 +51,8 @@ impl ToolRouter {
         let local_provider = Arc::new(
             LocalHandProvider::new(sandbox_root.as_ref())
                 .await?
-                .with_command_timeout(DEFAULT_TOOL_TIMEOUT),
+                .with_command_timeout(DEFAULT_TOOL_TIMEOUT)
+                .with_tool_output_config(MoaConfig::default().tool_output),
         );
         let provider: Arc<dyn HandProvider> = local_provider.clone();
         let mut providers = HashMap::new();
@@ -73,7 +74,8 @@ impl ToolRouter {
         let local_provider = Arc::new(
             LocalHandProvider::new(&sandbox_root)
                 .await?
-                .with_command_timeout(DEFAULT_TOOL_TIMEOUT),
+                .with_command_timeout(DEFAULT_TOOL_TIMEOUT)
+                .with_tool_output_config(config.tool_output.clone()),
         );
         let local_provider_trait: Arc<dyn HandProvider> = local_provider.clone();
         let mut providers = HashMap::new();
