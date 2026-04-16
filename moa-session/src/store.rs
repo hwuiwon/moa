@@ -16,6 +16,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::blob::{FileBlobStore, decode_event_from_storage, encode_event_for_storage};
+use crate::listener::{GLOBAL_EVENTS_CHANNEL, session_channel_name};
 use crate::queries::{
     EVENT_COLUMNS, SESSION_COLUMNS, SESSION_SUMMARY_COLUMNS, approval_rule_from_row,
     event_type_from_db, event_type_to_db, map_sqlx_error, pending_signal_from_row,
@@ -445,6 +446,23 @@ impl SessionStore for PostgresSessionStore {
         .execute(&mut *transaction)
         .await
         .map_err(map_sqlx_error)?;
+
+        let session_channel = session_channel_name(&session_id);
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(&session_channel)
+            .bind(format!(r#"{{"seq":{sequence_num}}}"#))
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?;
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(GLOBAL_EVENTS_CHANNEL)
+            .bind(format!(
+                r#"{{"session_id":"{}","seq":{sequence_num}}}"#,
+                session_id
+            ))
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?;
 
         transaction.commit().await.map_err(map_sqlx_error)?;
         Ok(sequence_num)

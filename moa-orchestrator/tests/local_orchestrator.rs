@@ -222,6 +222,14 @@ async fn test_orchestrator_with_config_and_provider(
     provider: Arc<dyn LLMProvider>,
 ) -> Result<LocalOrchestrator> {
     let session_store = create_test_store().await?;
+    test_orchestrator_with_config_provider_and_store(config, provider, session_store).await
+}
+
+async fn test_orchestrator_with_config_provider_and_store(
+    config: MoaConfig,
+    provider: Arc<dyn LLMProvider>,
+    session_store: Arc<PostgresSessionStore>,
+) -> Result<LocalOrchestrator> {
     let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())
@@ -2228,6 +2236,80 @@ async fn observe_stream_receives_events_in_order() -> Result<()> {
     assert_eq!(fourth.event_type, EventType::CacheReport);
     assert_eq!(fifth.sequence_num, 4);
     assert_eq!(fifth.event_type, EventType::BrainResponse);
+    Ok(())
+}
+
+#[tokio::test]
+async fn observe_uses_postgres_listener_for_remote_active_sessions() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = MoaConfig::default();
+    config.memory.auto_bootstrap = false;
+    config.local.memory_dir = dir.path().join("memory").display().to_string();
+    config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+
+    let provider: Arc<dyn LLMProvider> = Arc::new(MockProvider {
+        model: config.general.default_model.clone(),
+        first_turn_delay: Duration::from_millis(20),
+    });
+    let session_store = create_test_store().await?;
+    let observer = test_orchestrator_with_config_provider_and_store(
+        config.clone(),
+        provider,
+        session_store.clone(),
+    )
+    .await?;
+
+    let now = Utc::now();
+    let session_id = SessionId::new();
+    session_store
+        .create_session(SessionMeta {
+            id: session_id.clone(),
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            status: SessionStatus::Running,
+            platform: Platform::Desktop,
+            model: observer.model().to_string(),
+            created_at: now,
+            updated_at: now,
+            ..SessionMeta::default()
+        })
+        .await?;
+
+    let mut stream = observer
+        .observe(session_id.clone(), moa_core::ObserveLevel::Normal)
+        .await?;
+
+    session_store
+        .emit_event(
+            session_id,
+            Event::Warning {
+                message: "remote-listener".to_string(),
+            },
+        )
+        .await?;
+
+    let observed = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .map_err(|_| {
+            MoaError::ProviderError(
+                "timed out waiting for Postgres LISTEN-backed observation".to_string(),
+            )
+        })?
+        .transpose()?
+        .ok_or_else(|| {
+            MoaError::ProviderError("missing observed event from Postgres listener".to_string())
+        })?;
+
+    let LiveEvent::Event(record) = observed else {
+        return Err(MoaError::ProviderError(
+            "expected concrete event from Postgres listener path".to_string(),
+        ));
+    };
+    assert!(matches!(
+        record.event,
+        Event::Warning { ref message } if message == "remote-listener"
+    ));
+
     Ok(())
 }
 
