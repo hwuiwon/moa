@@ -27,7 +27,9 @@ use moa_hands::ToolRouter;
 use moa_memory::{ConsolidationReport, FileMemoryStore, bootstrap};
 use moa_providers::{build_provider_from_config, resolve_provider_selection};
 use moa_security::cleanup_overly_broad_shell_rules;
-use moa_session::{NeonBranchManager, PostgresSessionStore, create_session_store};
+use moa_session::{
+    NeonBranchManager, PostgresSessionStore, SessionEventStream, create_session_store,
+};
 use moa_skills::maybe_distill_skill;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -281,8 +283,8 @@ impl LocalOrchestrator {
         initial_queued_messages: Vec<BufferedUserMessage>,
     ) -> Result<()> {
         let (signal_tx, signal_rx) = mpsc::channel(64);
-        let (event_tx, _) = broadcast::channel(256);
-        let (runtime_tx, _) = broadcast::channel(512);
+        let (event_tx, _) = broadcast::channel(64);
+        let (runtime_tx, _) = broadcast::channel(128);
         let cancel_token = CancellationToken::new();
         let hard_cancel_token = CancellationToken::new();
         let session = self.session_store.get_session(session_id.clone()).await?;
@@ -763,8 +765,9 @@ impl BrainOrchestrator for LocalOrchestrator {
         self.session_store.list_sessions(filter).await
     }
 
-    /// Returns buffered history plus optional live event updates for a session.
+    /// Returns buffered history plus live updates via local broadcast or Postgres LISTEN.
     async fn observe(&self, session_id: SessionId, _level: ObserveLevel) -> Result<EventStream> {
+        let session = self.session_store.get_session(session_id.clone()).await?;
         let history = self
             .session_store
             .get_events(session_id.clone(), EventRange::all())
@@ -777,6 +780,27 @@ impl BrainOrchestrator for LocalOrchestrator {
                 session_id,
                 history,
                 handle.event_tx.subscribe(),
+            ));
+        }
+
+        if matches!(
+            session.status,
+            SessionStatus::Running | SessionStatus::WaitingApproval
+        ) {
+            let next_seq = history
+                .last()
+                .map(|record| record.sequence_num.saturating_add(1))
+                .unwrap_or(0);
+            let live = SessionEventStream::subscribe(
+                self.session_store.clone(),
+                session_id.clone(),
+                Some(next_seq),
+            )
+            .await?;
+            return Ok(EventStream::from_history_and_channel(
+                session_id,
+                history,
+                live.into_receiver(),
             ));
         }
 

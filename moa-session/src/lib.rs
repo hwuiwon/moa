@@ -4,6 +4,7 @@
 //! test session storage.
 
 pub mod blob;
+pub mod listener;
 pub mod neon;
 pub mod queries;
 pub mod schema;
@@ -15,6 +16,7 @@ use std::sync::Arc;
 use moa_core::{MoaConfig, Result};
 
 pub use blob::FileBlobStore;
+pub use listener::{GLOBAL_EVENTS_CHANNEL, SessionEventStream, session_channel_name};
 pub use neon::NeonBranchManager;
 pub use store::PostgresSessionStore;
 

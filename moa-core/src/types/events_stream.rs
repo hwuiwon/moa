@@ -4,7 +4,7 @@ use std::fmt::{self, Formatter};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 use crate::broadcast_recv::{RecvResult, recv_with_lag_handling};
@@ -180,14 +180,14 @@ pub struct EventRecord {
     pub token_count: Option<usize>,
 }
 
-/// Lightweight event stream with optional live broadcast updates.
+/// Lightweight event stream with optional live updates.
 ///
-/// NOTE: This type wraps `tokio::sync::broadcast::Receiver` and would ideally
-/// sit closer to the orchestrator/session-store implementations that construct
-/// it. It remains in `moa-core` because `BrainOrchestrator::observe` lives in
-/// `moa-core` and returns `EventStream`, so moving it out would force a wider
-/// trait and crate-boundary redesign without removing the existing unconditional
-/// Tokio dependency from core.
+/// NOTE: This type wraps either a Tokio broadcast receiver or an async channel
+/// receiver and would ideally sit closer to the orchestrator/session-store
+/// implementations that construct it. It remains in `moa-core` because
+/// `BrainOrchestrator::observe` lives in `moa-core` and returns `EventStream`,
+/// so moving it out would force a wider trait and crate-boundary redesign
+/// without removing the existing unconditional Tokio dependency from core.
 #[derive(Serialize, Deserialize)]
 pub struct EventStream {
     /// Buffered events currently available in the stream.
@@ -195,13 +195,18 @@ pub struct EventStream {
     #[serde(skip)]
     session_id: Option<SessionId>,
     #[serde(skip)]
-    receiver: Option<broadcast::Receiver<EventRecord>>,
+    receiver: Option<LiveReceiver>,
     #[serde(skip)]
     cursor: usize,
     #[serde(skip)]
     last_sequence_num: Option<SequenceNum>,
     #[serde(skip)]
     lag_policy: LagPolicy,
+}
+
+enum LiveReceiver {
+    Broadcast(broadcast::Receiver<EventRecord>),
+    Channel(mpsc::Receiver<EventRecord>),
 }
 
 /// Policy used when a broadcast subscriber falls behind the live buffer.
@@ -276,7 +281,19 @@ impl EventStream {
         Self {
             events: Vec::new(),
             session_id: Some(session_id),
-            receiver: Some(receiver),
+            receiver: Some(LiveReceiver::Broadcast(receiver)),
+            cursor: 0,
+            last_sequence_num: None,
+            lag_policy: LagPolicy::default(),
+        }
+    }
+
+    /// Creates an event stream backed by a live async channel receiver.
+    pub fn from_channel(session_id: SessionId, receiver: mpsc::Receiver<EventRecord>) -> Self {
+        Self {
+            events: Vec::new(),
+            session_id: Some(session_id),
+            receiver: Some(LiveReceiver::Channel(receiver)),
             cursor: 0,
             last_sequence_num: None,
             lag_policy: LagPolicy::default(),
@@ -292,7 +309,23 @@ impl EventStream {
         Self {
             events,
             session_id: Some(session_id),
-            receiver: Some(receiver),
+            receiver: Some(LiveReceiver::Broadcast(receiver)),
+            cursor: 0,
+            last_sequence_num: None,
+            lag_policy: LagPolicy::default(),
+        }
+    }
+
+    /// Creates an event stream from buffered history plus async-channel updates.
+    pub fn from_history_and_channel(
+        session_id: SessionId,
+        events: Vec<EventRecord>,
+        receiver: mpsc::Receiver<EventRecord>,
+    ) -> Self {
+        Self {
+            events,
+            session_id: Some(session_id),
+            receiver: Some(LiveReceiver::Channel(receiver)),
             cursor: 0,
             last_sequence_num: None,
             lag_policy: LagPolicy::default(),
@@ -319,7 +352,7 @@ impl EventStream {
         }
 
         match &mut self.receiver {
-            Some(receiver) => {
+            Some(LiveReceiver::Broadcast(receiver)) => {
                 let session_id = self.session_id.clone().unwrap_or_default();
                 match recv_with_lag_handling(
                     receiver,
@@ -346,6 +379,13 @@ impl EventStream {
                     RecvResult::Closed => None,
                 }
             }
+            Some(LiveReceiver::Channel(receiver)) => match receiver.recv().await {
+                Some(event) => {
+                    self.last_sequence_num = Some(event.sequence_num);
+                    Some(Ok(LiveEvent::Event(event)))
+                }
+                None => None,
+            },
             None => None,
         }
     }
@@ -356,7 +396,12 @@ impl Clone for EventStream {
         Self {
             events: self.events.clone(),
             session_id: self.session_id.clone(),
-            receiver: self.receiver.as_ref().map(broadcast::Receiver::resubscribe),
+            receiver: self.receiver.as_ref().and_then(|receiver| match receiver {
+                LiveReceiver::Broadcast(receiver) => {
+                    Some(LiveReceiver::Broadcast(receiver.resubscribe()))
+                }
+                LiveReceiver::Channel(_) => None,
+            }),
             cursor: self.cursor,
             last_sequence_num: self.last_sequence_num,
             lag_policy: self.lag_policy,
