@@ -44,6 +44,8 @@ pub struct MoaConfig {
     pub session_limits: SessionLimitsConfig,
     /// Tool-output truncation settings for storage and replay.
     pub tool_output: ToolOutputConfig,
+    /// Incremental context snapshot settings.
+    pub context_snapshot: ContextSnapshotConfig,
     /// External MCP server connections.
     pub mcp_servers: Vec<McpServerConfig>,
 }
@@ -196,6 +198,14 @@ impl MoaConfig {
             .set_default(
                 "tool_output.head_ratio",
                 Self::default().tool_output.head_ratio,
+            )?
+            .set_default(
+                "context_snapshot.enabled",
+                Self::default().context_snapshot.enabled,
+            )?
+            .set_default(
+                "context_snapshot.max_size_bytes",
+                Self::default().context_snapshot.max_size_bytes as i64,
             )?
             .set_default("cloud.enabled", Self::default().cloud.enabled)?
             .set_default("cloud.memory_dir", Self::default().cloud.memory_dir.clone())?
@@ -788,6 +798,25 @@ impl Default for ToolOutputConfig {
             max_replay_chars: 20_000,
             max_bash_lines: 200,
             head_ratio: 0.4,
+        }
+    }
+}
+
+/// Incremental context snapshot configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextSnapshotConfig {
+    /// Whether compiled context snapshots are enabled.
+    pub enabled: bool,
+    /// Warn when a serialized snapshot exceeds this size.
+    pub max_size_bytes: usize,
+}
+
+impl Default for ContextSnapshotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_size_bytes: 10_000_000,
         }
     }
 }

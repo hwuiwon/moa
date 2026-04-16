@@ -9,13 +9,14 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{MoaError, Result};
 use crate::events::Event;
 use crate::types::{
-    CheckpointHandle, CheckpointInfo, CompletionRequest, CompletionStream, Credential, CronHandle,
-    CronSpec, EventFilter, EventRange, EventRecord, EventStream, HandHandle, HandSpec, HandStatus,
-    InboundMessage, IngestReport, MemoryPath, MemoryScope, MemorySearchResult, MessageId,
-    ModelCapabilities, ObserveLevel, OutboundMessage, PageSummary, PageType, PendingSignal,
-    PendingSignalId, Platform, PlatformCapabilities, ProcessorOutput, RuntimeEvent, SequenceNum,
-    SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
-    SessionSummary, StartSessionRequest, ToolOutput, WikiPage, WorkingContext, WorkspaceId,
+    CheckpointHandle, CheckpointInfo, CompletionRequest, CompletionStream, ContextSnapshot,
+    Credential, CronHandle, CronSpec, EventFilter, EventRange, EventRecord, EventStream,
+    HandHandle, HandSpec, HandStatus, InboundMessage, IngestReport, MemoryPath, MemoryScope,
+    MemorySearchResult, MessageId, ModelCapabilities, ObserveLevel, OutboundMessage, PageSummary,
+    PageType, PendingSignal, PendingSignalId, Platform, PlatformCapabilities, ProcessorOutput,
+    RuntimeEvent, SequenceNum, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
+    SessionStatus, SessionSummary, StartSessionRequest, ToolOutput, WikiPage, WorkingContext,
+    WorkspaceId,
 };
 
 /// Orchestrates session lifecycle and observation.
@@ -69,6 +70,21 @@ pub trait SessionStore: Send + Sync {
 
     /// Updates the status of an existing session.
     async fn update_status(&self, session_id: SessionId, status: SessionStatus) -> Result<()>;
+
+    /// Stores the latest compiled-context snapshot for a session.
+    async fn put_snapshot(&self, _session_id: SessionId, _snapshot: ContextSnapshot) -> Result<()> {
+        Ok(())
+    }
+
+    /// Loads the most recent compiled-context snapshot for a session when available.
+    async fn get_snapshot(&self, _session_id: SessionId) -> Result<Option<ContextSnapshot>> {
+        Ok(None)
+    }
+
+    /// Deletes the stored compiled-context snapshot for a session.
+    async fn delete_snapshot(&self, _session_id: SessionId) -> Result<()> {
+        Ok(())
+    }
 
     /// Stores a durable pending signal that should be resolved later.
     async fn store_pending_signal(

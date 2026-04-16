@@ -13,6 +13,12 @@ tokio::task_local! {
 /// Snapshot of per-turn latency breakdown metrics.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnLatencySnapshot {
+    /// Time spent loading and deserializing the turn-start snapshot.
+    pub snapshot_load_duration: Duration,
+    /// Whether the current turn successfully reused a stored snapshot.
+    pub snapshot_hit: bool,
+    /// Time spent serializing and persisting the refreshed snapshot.
+    pub snapshot_write_duration: Duration,
     /// Aggregate time spent compiling context for the turn.
     pub pipeline_compile_duration: Duration,
     /// Aggregate time spent in provider completion/stream handling.
@@ -30,6 +36,16 @@ pub struct TurnLatencySnapshot {
 }
 
 impl TurnLatencySnapshot {
+    /// Returns snapshot load time in whole milliseconds.
+    pub fn snapshot_load_ms(&self) -> u64 {
+        display_duration_ms(self.snapshot_load_duration)
+    }
+
+    /// Returns snapshot write time in whole milliseconds.
+    pub fn snapshot_write_ms(&self) -> u64 {
+        display_duration_ms(self.snapshot_write_duration)
+    }
+
     /// Returns pipeline compile time in whole milliseconds.
     pub fn pipeline_compile_ms(&self) -> u64 {
         display_duration_ms(self.pipeline_compile_duration)
@@ -60,6 +76,9 @@ impl TurnLatencySnapshot {
 #[derive(Debug)]
 pub struct TurnLatencyCounters {
     root_turn_span: tracing::Span,
+    snapshot_load_us: AtomicU64,
+    snapshot_hit: AtomicU64,
+    snapshot_write_us: AtomicU64,
     pipeline_compile_us: AtomicU64,
     llm_call_us: AtomicU64,
     tool_dispatch_us: AtomicU64,
@@ -74,6 +93,9 @@ impl TurnLatencyCounters {
     pub fn new(root_turn_span: tracing::Span) -> Self {
         Self {
             root_turn_span,
+            snapshot_load_us: AtomicU64::new(0),
+            snapshot_hit: AtomicU64::new(0),
+            snapshot_write_us: AtomicU64::new(0),
             pipeline_compile_us: AtomicU64::new(0),
             llm_call_us: AtomicU64::new(0),
             tool_dispatch_us: AtomicU64::new(0),
@@ -93,6 +115,13 @@ impl TurnLatencyCounters {
             .and_then(|guard| *guard)
             .map(Duration::from_micros);
         TurnLatencySnapshot {
+            snapshot_load_duration: Duration::from_micros(
+                self.snapshot_load_us.load(Ordering::Relaxed),
+            ),
+            snapshot_hit: self.snapshot_hit.load(Ordering::Relaxed) > 0,
+            snapshot_write_duration: Duration::from_micros(
+                self.snapshot_write_us.load(Ordering::Relaxed),
+            ),
             pipeline_compile_duration: Duration::from_micros(
                 self.pipeline_compile_us.load(Ordering::Relaxed),
             ),
@@ -115,6 +144,19 @@ impl TurnLatencyCounters {
 
     fn record_pipeline_compile_duration(&self, duration: Duration) {
         self.pipeline_compile_us
+            .fetch_add(duration.as_micros() as u64, Ordering::Relaxed);
+    }
+
+    fn record_snapshot_load(&self, duration: Duration, hit: bool) {
+        self.snapshot_load_us
+            .fetch_add(duration.as_micros() as u64, Ordering::Relaxed);
+        if hit {
+            self.snapshot_hit.store(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record_snapshot_write_duration(&self, duration: Duration) {
+        self.snapshot_write_us
             .fetch_add(duration.as_micros() as u64, Ordering::Relaxed);
     }
 
@@ -168,6 +210,20 @@ pub fn record_turn_pipeline_compile_duration(duration: Duration) {
     });
 }
 
+/// Records snapshot load duration and whether the snapshot was a usable hit.
+pub fn record_turn_snapshot_load(duration: Duration, hit: bool) {
+    let _ = TURN_LATENCY_COUNTERS.try_with(|counters| {
+        counters.record_snapshot_load(duration, hit);
+    });
+}
+
+/// Records snapshot serialization and persistence time for the current turn.
+pub fn record_turn_snapshot_write_duration(duration: Duration) {
+    let _ = TURN_LATENCY_COUNTERS.try_with(|counters| {
+        counters.record_snapshot_write_duration(duration);
+    });
+}
+
 /// Records LLM call duration for the current turn.
 pub fn record_turn_llm_call_duration(duration: Duration) {
     let _ = TURN_LATENCY_COUNTERS.try_with(|counters| {
@@ -214,6 +270,8 @@ mod tests {
         let counters = Arc::new(TurnLatencyCounters::new(tracing::Span::none()));
 
         scope_turn_latency_counters(counters.clone(), async {
+            record_turn_snapshot_load(Duration::from_millis(2), true);
+            record_turn_snapshot_write_duration(Duration::from_millis(4));
             record_turn_pipeline_compile_duration(Duration::from_millis(12));
             record_turn_llm_call_duration(Duration::from_millis(33));
             record_turn_tool_dispatch_duration(Duration::from_millis(7), 2);
@@ -224,6 +282,9 @@ mod tests {
         .await;
 
         let snapshot = counters.snapshot();
+        assert_eq!(snapshot.snapshot_load_ms(), 2);
+        assert!(snapshot.snapshot_hit);
+        assert_eq!(snapshot.snapshot_write_ms(), 4);
         assert_eq!(snapshot.pipeline_compile_ms(), 12);
         assert_eq!(snapshot.llm_call_ms(), 33);
         assert_eq!(snapshot.tool_dispatch_ms(), 7);

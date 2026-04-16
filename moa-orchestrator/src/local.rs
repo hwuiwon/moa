@@ -34,6 +34,8 @@ use tokio_cron_scheduler::{Job, JobScheduler};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+const TURN_EVENT_TAIL_LIMIT: usize = 16;
+
 /// Local orchestrator backed by Tokio tasks and broadcast channels.
 #[derive(Clone)]
 pub struct LocalOrchestrator {
@@ -932,7 +934,10 @@ async fn run_session_task(
                 .await?;
             let events = context
                 .session_store
-                .get_events(context.session_id.clone(), EventRange::all())
+                .get_events(
+                    context.session_id.clone(),
+                    EventRange::recent(TURN_EVENT_TAIL_LIMIT),
+                )
                 .await?;
             let turn_number = turn_count as i64 + 1;
             let trace_context =
@@ -950,6 +955,9 @@ async fn run_session_task(
                 moa.turn.events_replayed = tracing::field::Empty,
                 moa.turn.events_bytes = tracing::field::Empty,
                 moa.turn.get_events_total_ms = tracing::field::Empty,
+                moa.turn.snapshot_load_ms = tracing::field::Empty,
+                moa.turn.snapshot_hit = tracing::field::Empty,
+                moa.turn.snapshot_write_ms = tracing::field::Empty,
                 moa.turn.pipeline_compile_ms = tracing::field::Empty,
                 moa.turn.llm_call_ms = tracing::field::Empty,
                 moa.turn.tool_dispatch_ms = tracing::field::Empty,
@@ -1389,6 +1397,9 @@ async fn update_status(
     session_store
         .update_status(session_id.clone(), next_status.clone())
         .await?;
+    if matches!(next_status, SessionStatus::Cancelled) {
+        session_store.delete_snapshot(session_id.clone()).await?;
+    }
     append_event(
         session_store,
         event_tx,
@@ -1723,6 +1734,15 @@ fn emit_turn_latency_summary(
     snapshot: &TurnLatencySnapshot,
 ) {
     turn_root_span.record(
+        "moa.turn.snapshot_load_ms",
+        snapshot.snapshot_load_ms() as i64,
+    );
+    turn_root_span.record("moa.turn.snapshot_hit", snapshot.snapshot_hit);
+    turn_root_span.record(
+        "moa.turn.snapshot_write_ms",
+        snapshot.snapshot_write_ms() as i64,
+    );
+    turn_root_span.record(
         "moa.turn.pipeline_compile_ms",
         snapshot.pipeline_compile_ms() as i64,
     );
@@ -1742,6 +1762,9 @@ fn emit_turn_latency_summary(
     tracing::info!(
         parent: turn_root_span,
         turn_number,
+        snapshot_load_ms = snapshot.snapshot_load_ms(),
+        snapshot_hit = snapshot.snapshot_hit,
+        snapshot_write_ms = snapshot.snapshot_write_ms(),
         pipeline_compile_ms = snapshot.pipeline_compile_ms(),
         llm_call_ms = snapshot.llm_call_ms(),
         tool_dispatch_ms = snapshot.tool_dispatch_ms(),

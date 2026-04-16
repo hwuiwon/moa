@@ -113,7 +113,7 @@ where
 
     let filtered = store
         .get_events(
-            session_id,
+            session_id.clone(),
             EventRange {
                 event_types: Some(vec![EventType::UserMessage]),
                 ..Default::default()
@@ -127,6 +127,14 @@ where
             .iter()
             .all(|record| record.event_type == EventType::UserMessage)
     );
+
+    let recent = store
+        .get_events(session_id.clone(), EventRange::recent(3))
+        .await
+        .expect("get recent events");
+    assert_eq!(recent.len(), 3);
+    assert_eq!(recent[0].sequence_num, 7);
+    assert_eq!(recent[2].sequence_num, 9);
 }
 
 /// Verifies event search, including hyphenated queries.

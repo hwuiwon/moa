@@ -6,9 +6,9 @@ use std::{path::Path, sync::Arc};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ApprovalRule, BlobStore, Event, EventFilter, EventRange, EventRecord, MoaConfig, MoaError,
-    PendingSignal, PendingSignalId, Result, SessionFilter, SessionMeta, SessionStatus,
-    SessionStore, SessionSummary, WakeContext, WorkspaceId,
+    ApprovalRule, BlobStore, ContextSnapshot, Event, EventFilter, EventRange, EventRecord,
+    MoaConfig, MoaError, PendingSignal, PendingSignalId, Result, SessionFilter, SessionMeta,
+    SessionStatus, SessionStore, SessionSummary, WakeContext, WorkspaceId,
 };
 use moa_security::ApprovalRuleStore;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};
@@ -79,8 +79,8 @@ impl PostgresSessionStore {
         Self::new_with_options_and_schema(
             database_url,
             1,
-            5,
-            10,
+            100,
+            60,
             Some(schema_name),
             blob_store,
             65_536,
@@ -461,6 +461,9 @@ impl SessionStore for PostgresSessionStore {
         }
         let events = self.table_name("events");
 
+        let use_recent_order =
+            range.limit.is_some() && range.from_seq.is_none() && range.to_seq.is_none();
+
         let mut query = QueryBuilder::<Postgres>::new(format!(
             "SELECT {EVENT_COLUMNS} FROM {events} WHERE session_id = "
         ));
@@ -483,7 +486,11 @@ impl SessionStore for PostgresSessionStore {
             separated.push_unseparated(")");
         }
 
-        query.push(" ORDER BY sequence_num ASC");
+        if use_recent_order {
+            query.push(" ORDER BY sequence_num DESC");
+        } else {
+            query.push(" ORDER BY sequence_num ASC");
+        }
         if let Some(limit) = range.limit {
             query.push(" LIMIT ");
             query.push_bind(limit as i64);
@@ -497,6 +504,9 @@ impl SessionStore for PostgresSessionStore {
         let mut events = Vec::with_capacity(rows.len());
         for row in &rows {
             events.push(self.event_record_from_row(row).await?);
+        }
+        if use_recent_order {
+            events.reverse();
         }
         Ok(events)
     }
@@ -546,6 +556,70 @@ impl SessionStore for PostgresSessionStore {
         if affected == 0 {
             return Err(MoaError::SessionNotFound(session_id));
         }
+
+        Ok(())
+    }
+
+    /// Stores the latest context snapshot for a session.
+    async fn put_snapshot(
+        &self,
+        session_id: moa_core::SessionId,
+        snapshot: ContextSnapshot,
+    ) -> Result<()> {
+        let context_snapshots = self.table_name("context_snapshots");
+        sqlx::query(&format!(
+            "INSERT INTO {context_snapshots} (session_id, format_version, last_sequence_num, payload, created_at) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (session_id) DO UPDATE SET \
+                 format_version = EXCLUDED.format_version, \
+                 last_sequence_num = EXCLUDED.last_sequence_num, \
+                 payload = EXCLUDED.payload, \
+                 created_at = EXCLUDED.created_at"
+        ))
+        .bind(session_id.0)
+        .bind(snapshot.format_version as i32)
+        .bind(snapshot.last_sequence_num as i64)
+        .bind(Json(snapshot))
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        Ok(())
+    }
+
+    /// Loads the latest context snapshot for a session when one exists.
+    async fn get_snapshot(
+        &self,
+        session_id: moa_core::SessionId,
+    ) -> Result<Option<ContextSnapshot>> {
+        let context_snapshots = self.table_name("context_snapshots");
+        let row = sqlx::query(&format!(
+            "SELECT payload FROM {context_snapshots} WHERE session_id = $1 LIMIT 1"
+        ))
+        .bind(session_id.0)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        row.map(|row| {
+            row.try_get::<Json<ContextSnapshot>, _>("payload")
+                .map(|payload| payload.0)
+                .map_err(map_sqlx_error)
+        })
+        .transpose()
+    }
+
+    /// Deletes the stored context snapshot for a session.
+    async fn delete_snapshot(&self, session_id: moa_core::SessionId) -> Result<()> {
+        let context_snapshots = self.table_name("context_snapshots");
+        sqlx::query(&format!(
+            "DELETE FROM {context_snapshots} WHERE session_id = $1"
+        ))
+        .bind(session_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
 
         Ok(())
     }
@@ -772,12 +846,14 @@ impl SessionStore for PostgresSessionStore {
     async fn delete_session(&self, session_id: moa_core::SessionId) -> Result<()> {
         let events = self.table_name("events");
         let pending_signals = self.table_name("pending_signals");
+        let context_snapshots = self.table_name("context_snapshots");
         let sessions = self.table_name("sessions");
 
         let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
         for sql in [
             format!("DELETE FROM {events} WHERE session_id = $1"),
             format!("DELETE FROM {pending_signals} WHERE session_id = $1"),
+            format!("DELETE FROM {context_snapshots} WHERE session_id = $1"),
             format!("DELETE FROM {sessions} WHERE id = $1"),
         ] {
             sqlx::query(&sql)

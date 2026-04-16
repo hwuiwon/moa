@@ -1,13 +1,17 @@
 //! Stage 5: compiles session history into context messages.
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use moa_core::{
-    CompactionConfig, ContextMessage, ContextProcessor, Event, EventRange, EventRecord,
-    LLMProvider, ProcessorOutput, Result, SessionStore, ToolContent, ToolOutput, ToolOutputConfig,
-    WorkingContext, truncate_head_tail,
+    CONTEXT_SNAPSHOT_FORMAT_VERSION, CompactionConfig, ContextMessage, ContextProcessor,
+    ContextSnapshot, ContextSnapshotConfig, Event, EventRange, EventRecord, FileReadDedupState,
+    LLMProvider, ProcessorOutput, Result, SessionStore, SnapshotFileReadState, ToolContent,
+    ToolOutput, ToolOutputConfig, WorkingContext, record_turn_snapshot_load, truncate_head_tail,
 };
 use moa_security::wrap_untrusted_tool_output;
 use serde_json::json;
@@ -20,7 +24,9 @@ use crate::compaction::{
 use super::estimate_tokens;
 
 const FILE_READ_DEDUP_PLACEHOLDER: &str = "[file previously read — see latest version below]";
+pub(crate) const HISTORY_START_INDEX_METADATA_KEY: &str = "_moa.history.start_index";
 pub(crate) const HISTORY_END_INDEX_METADATA_KEY: &str = "_moa.history.end_index";
+pub(crate) const HISTORY_SNAPSHOT_METADATA_KEY: &str = "_moa.history.snapshot";
 
 /// Compiles session events into conversational context.
 pub struct HistoryCompiler {
@@ -28,6 +34,7 @@ pub struct HistoryCompiler {
     llm_provider: Option<Arc<dyn LLMProvider>>,
     compaction: CompactionConfig,
     tool_output: ToolOutputConfig,
+    snapshot_config: ContextSnapshotConfig,
 }
 
 impl HistoryCompiler {
@@ -38,6 +45,7 @@ impl HistoryCompiler {
             llm_provider: None,
             compaction: CompactionConfig::default(),
             tool_output: ToolOutputConfig::default(),
+            snapshot_config: ContextSnapshotConfig::default(),
         }
     }
 
@@ -58,12 +66,19 @@ impl HistoryCompiler {
             llm_provider: Some(llm_provider),
             compaction,
             tool_output: ToolOutputConfig::default(),
+            snapshot_config: ContextSnapshotConfig::default(),
         }
     }
 
     /// Overrides the tool-output truncation settings used during history replay.
     pub fn with_tool_output_config(mut self, tool_output: ToolOutputConfig) -> Self {
         self.tool_output = tool_output;
+        self
+    }
+
+    /// Overrides the snapshot settings used for incremental history replay.
+    pub fn with_snapshot_config(mut self, snapshot_config: ContextSnapshotConfig) -> Self {
+        self.snapshot_config = snapshot_config;
         self
     }
 
@@ -91,7 +106,7 @@ impl HistoryCompiler {
         let file_read_paths = build_full_file_read_path_map(&visible_events);
         let latest_file_reads = latest_full_file_read_results(&visible_events, &file_read_paths);
 
-        let mut messages = Vec::new();
+        let mut final_records = Vec::new();
         let mut tokens_used = 0usize;
 
         if self.compaction.preserve_errors {
@@ -101,7 +116,7 @@ impl HistoryCompiler {
                 .unwrap_or(0);
             for message in preserved_error_messages(&all_non_checkpoint[..summarized_end]) {
                 tokens_used += estimate_tokens(&message.content);
-                messages.push(message);
+                final_records.push(CompiledRecordMessage::plain(message));
             }
         }
 
@@ -111,7 +126,7 @@ impl HistoryCompiler {
                 checkpoint.events_summarized, checkpoint.summary
             ));
             tokens_used += estimate_tokens(&checkpoint_message.content);
-            messages.push(checkpoint_message);
+            final_records.push(CompiledRecordMessage::plain(checkpoint_message));
         }
 
         let recent_messages = compile_records(recent_events, &self.tool_output, &file_read_paths)?;
@@ -121,7 +136,7 @@ impl HistoryCompiler {
 
         for compiled in &recent_messages {
             tokens_used += estimate_tokens(&compiled.message.content);
-            messages.push(compiled.message.clone());
+            final_records.push(compiled.clone());
         }
 
         for compiled in older_messages.iter().rev() {
@@ -131,15 +146,137 @@ impl HistoryCompiler {
             }
 
             tokens_used += message_tokens;
-            let insert_at = messages.len().saturating_sub(recent_messages.len());
-            messages.insert(insert_at, compiled.message.clone());
+            let insert_at = final_records.len().saturating_sub(recent_messages.len());
+            final_records.insert(insert_at, compiled.clone());
         }
+
+        let file_read_dedup_state = build_file_read_dedup_state(&final_records);
+        let messages = final_records
+            .into_iter()
+            .map(|compiled| compiled.message)
+            .collect();
 
         Ok(CompiledHistory {
             messages,
             tokens_used,
             deduplication,
+            file_read_dedup_state,
         })
+    }
+
+    async fn load_snapshot(
+        &self,
+        ctx: &WorkingContext,
+        stage_inputs_hash: u64,
+    ) -> Result<Option<ContextSnapshot>> {
+        if !self.snapshot_config.enabled {
+            return Ok(None);
+        }
+
+        let started_at = Instant::now();
+        let snapshot = self
+            .session_store
+            .get_snapshot(ctx.session_id.clone())
+            .await;
+        match snapshot {
+            Ok(Some(snapshot))
+                if snapshot.is_current_version()
+                    && snapshot.stage_inputs_hash == stage_inputs_hash =>
+            {
+                record_turn_snapshot_load(started_at.elapsed(), true);
+                Ok(Some(snapshot))
+            }
+            Ok(Some(snapshot)) => {
+                record_turn_snapshot_load(started_at.elapsed(), false);
+                tracing::warn!(
+                    session_id = %ctx.session_id,
+                    snapshot_version = snapshot.format_version,
+                    expected_version = CONTEXT_SNAPSHOT_FORMAT_VERSION,
+                    stored_hash = snapshot.stage_inputs_hash,
+                    expected_hash = stage_inputs_hash,
+                    "context snapshot drift detected; falling back to full replay"
+                );
+                Ok(None)
+            }
+            Ok(None) => {
+                record_turn_snapshot_load(started_at.elapsed(), false);
+                Ok(None)
+            }
+            Err(error) => {
+                record_turn_snapshot_load(started_at.elapsed(), false);
+                tracing::warn!(
+                    session_id = %ctx.session_id,
+                    error = %error,
+                    "context snapshot load failed; falling back to full replay"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    fn compile_messages_from_snapshot(
+        &self,
+        snapshot: &ContextSnapshot,
+        delta_events: &[EventRecord],
+        remaining_budget: usize,
+    ) -> Option<Result<CompiledHistory>> {
+        if delta_events
+            .iter()
+            .any(|record| matches!(record.event, Event::Checkpoint { .. }))
+        {
+            return None;
+        }
+
+        let delta_refs = delta_events.iter().collect::<Vec<_>>();
+        let file_read_paths = build_full_file_read_path_map(&delta_refs);
+        let compiled_delta = match compile_records(&delta_refs, &self.tool_output, &file_read_paths)
+        {
+            Ok(records) => records,
+            Err(error) => return Some(Err(error)),
+        };
+
+        let mut messages = snapshot.messages.clone();
+        let mut dedup_state = snapshot.file_read_dedup_state.clone();
+
+        for compiled in &compiled_delta {
+            if let Some(tool_result) = compiled.tool_result.as_ref() {
+                if let Some(previous) = dedup_state.latest_reads.get(&tool_result.file_read_path)
+                    && previous.message_index < messages.len()
+                {
+                    messages[previous.message_index] = placeholder_tool_result_from_snapshot(
+                        &tool_result.file_read_path,
+                        previous,
+                    );
+                }
+
+                dedup_state.latest_reads.insert(
+                    tool_result.file_read_path.clone(),
+                    SnapshotFileReadState {
+                        message_index: messages.len(),
+                        tool_use_id: tool_result.tool_use_id.clone(),
+                        tool_id: tool_result.tool_id,
+                        success: tool_result.success,
+                    },
+                );
+            }
+
+            messages.push(compiled.message.clone());
+        }
+
+        let tokens_used = messages
+            .iter()
+            .map(|message| estimate_tokens(&message.content))
+            .sum::<usize>();
+        if tokens_used > remaining_budget {
+            return None;
+        }
+
+        Some(Ok(CompiledHistory {
+            messages,
+            tokens_used,
+            deduplication: DeduplicationStats::default(),
+            file_read_dedup_state: dedup_state,
+        }))
     }
 }
 
@@ -154,6 +291,93 @@ impl ContextProcessor for HistoryCompiler {
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+        let history_start_index = ctx.messages.len();
+        let remaining_budget = ctx.token_budget.saturating_sub(ctx.token_count);
+        let stage_inputs_hash = snapshot_stage_inputs_hash(ctx);
+
+        let compiled = if let Some(snapshot) = self.load_snapshot(ctx, stage_inputs_hash).await? {
+            let delta_events = self
+                .session_store
+                .get_events(
+                    ctx.session_id.clone(),
+                    EventRange {
+                        from_seq: Some(snapshot.last_sequence_num.saturating_add(1)),
+                        ..EventRange::default()
+                    },
+                )
+                .await?;
+            match self.compile_messages_from_snapshot(&snapshot, &delta_events, remaining_budget) {
+                Some(result) => result?,
+                None => self.compile_full_messages(ctx, remaining_budget).await?,
+            }
+        } else {
+            self.compile_full_messages(ctx, remaining_budget).await?
+        };
+
+        if compiled.deduplication.deduplicated_count > 0 {
+            tracing::info!(
+                deduplicated = compiled.deduplication.deduplicated_count,
+                tokens_saved = compiled.deduplication.tokens_saved,
+                "deduplicated file read results in history compilation"
+            );
+        }
+        let messages = compiled.messages;
+        let tokens_added = compiled.tokens_used;
+        let items_included = messages
+            .iter()
+            .map(|message| format!("{:?}", message.role))
+            .collect::<Vec<_>>();
+
+        ctx.extend_messages(messages);
+        ctx.insert_metadata(HISTORY_START_INDEX_METADATA_KEY, json!(history_start_index));
+        ctx.insert_metadata(HISTORY_END_INDEX_METADATA_KEY, json!(ctx.messages.len()));
+        let last_sequence_num = self
+            .session_store
+            .get_events(ctx.session_id.clone(), EventRange::recent(1))
+            .await?
+            .last()
+            .map(|record| record.sequence_num)
+            .unwrap_or(0);
+        ctx.insert_metadata(
+            HISTORY_SNAPSHOT_METADATA_KEY,
+            serde_json::to_value(ContextSnapshot {
+                format_version: CONTEXT_SNAPSHOT_FORMAT_VERSION,
+                session_id: ctx.session_id.clone(),
+                last_sequence_num,
+                created_at: chrono::Utc::now(),
+                messages: ctx.messages[history_start_index..ctx.messages.len()].to_vec(),
+                file_read_dedup_state: compiled.file_read_dedup_state.clone(),
+                token_count: tokens_added,
+                cache_controls: Vec::new(),
+                stage_inputs_hash,
+            })?,
+        );
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "file_reads_deduplicated".to_string(),
+            json!(compiled.deduplication.deduplicated_count),
+        );
+        metadata.insert(
+            "tokens_saved_by_dedup".to_string(),
+            json!(compiled.deduplication.tokens_saved),
+        );
+
+        Ok(ProcessorOutput {
+            tokens_added,
+            items_included,
+            metadata,
+            ..ProcessorOutput::default()
+        })
+    }
+}
+
+impl HistoryCompiler {
+    async fn compile_full_messages(
+        &self,
+        ctx: &WorkingContext,
+        remaining_budget: usize,
+    ) -> Result<CompiledHistory> {
         let mut events = self
             .session_store
             .get_events(ctx.session_id.clone(), EventRange::all())
@@ -176,42 +400,21 @@ impl ContextProcessor for HistoryCompiler {
                 .await?;
         }
 
-        let remaining_budget = ctx.token_budget.saturating_sub(ctx.token_count);
-        let compiled = self.compile_messages_with_stats(&events, remaining_budget)?;
-        if compiled.deduplication.deduplicated_count > 0 {
-            tracing::info!(
-                deduplicated = compiled.deduplication.deduplicated_count,
-                tokens_saved = compiled.deduplication.tokens_saved,
-                "deduplicated file read results in history compilation"
-            );
-        }
-        let messages = compiled.messages;
-        let tokens_added = compiled.tokens_used;
-        let items_included = messages
-            .iter()
-            .map(|message| format!("{:?}", message.role))
-            .collect::<Vec<_>>();
-
-        ctx.extend_messages(messages);
-        ctx.insert_metadata(HISTORY_END_INDEX_METADATA_KEY, json!(ctx.messages.len()));
-
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "file_reads_deduplicated".to_string(),
-            json!(compiled.deduplication.deduplicated_count),
-        );
-        metadata.insert(
-            "tokens_saved_by_dedup".to_string(),
-            json!(compiled.deduplication.tokens_saved),
-        );
-
-        Ok(ProcessorOutput {
-            tokens_added,
-            items_included,
-            metadata,
-            ..ProcessorOutput::default()
-        })
+        self.compile_messages_with_stats(&events, remaining_budget)
     }
+}
+
+fn snapshot_stage_inputs_hash(ctx: &WorkingContext) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    if let Ok(messages) = serde_json::to_string(&ctx.messages) {
+        messages.hash(&mut hasher);
+    }
+    if let Ok(tools) = serde_json::to_string(ctx.tools()) {
+        tools.hash(&mut hasher);
+    }
+    ctx.model_capabilities.model_id.hash(&mut hasher);
+    ctx.token_budget.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn compile_records(
@@ -462,6 +665,35 @@ fn deduplicate_file_reads(
     stats
 }
 
+fn build_file_read_dedup_state(messages: &[CompiledRecordMessage]) -> FileReadDedupState {
+    let mut latest_reads = HashMap::new();
+
+    for (index, compiled) in messages.iter().enumerate() {
+        let Some(tool_result) = compiled.tool_result.as_ref() else {
+            continue;
+        };
+        if compiled
+            .message
+            .content
+            .contains(FILE_READ_DEDUP_PLACEHOLDER)
+        {
+            continue;
+        }
+
+        latest_reads.insert(
+            tool_result.file_read_path.clone(),
+            SnapshotFileReadState {
+                message_index: index,
+                tool_use_id: tool_result.tool_use_id.clone(),
+                tool_id: tool_result.tool_id,
+                success: tool_result.success,
+            },
+        );
+    }
+
+    FileReadDedupState { latest_reads }
+}
+
 fn placeholder_tool_result_message(tool_result: &ToolResultReplayMeta) -> ContextMessage {
     let placeholder = FILE_READ_DEDUP_PLACEHOLDER.to_string();
 
@@ -475,6 +707,19 @@ fn placeholder_tool_result_message(tool_result: &ToolResultReplayMeta) -> Contex
         ),
         Some(vec![ToolContent::Text { text: placeholder }]),
     )
+}
+
+fn placeholder_tool_result_from_snapshot(
+    file_read_path: &str,
+    tool_result: &SnapshotFileReadState,
+) -> ContextMessage {
+    let replay_meta = ToolResultReplayMeta {
+        tool_use_id: tool_result.tool_use_id.clone(),
+        tool_id: tool_result.tool_id,
+        success: tool_result.success,
+        file_read_path: file_read_path.to_string(),
+    };
+    placeholder_tool_result_message(&replay_meta)
 }
 
 fn replayable_tool_content_blocks(
@@ -512,6 +757,7 @@ struct CompiledHistory {
     messages: Vec<ContextMessage>,
     tokens_used: usize,
     deduplication: DeduplicationStats,
+    file_read_dedup_state: FileReadDedupState,
 }
 
 #[derive(Debug, Clone)]
@@ -575,6 +821,7 @@ mod tests {
     struct MockSessionStore {
         session: Arc<Mutex<SessionMeta>>,
         events: Arc<Mutex<Vec<EventRecord>>>,
+        snapshot: Arc<Mutex<Option<ContextSnapshot>>>,
     }
 
     impl MockSessionStore {
@@ -582,6 +829,7 @@ mod tests {
             Self {
                 session: Arc::new(Mutex::new(session)),
                 events: Arc::new(Mutex::new(events)),
+                snapshot: Arc::new(Mutex::new(None)),
             }
         }
     }
@@ -625,6 +873,24 @@ mod tests {
 
         async fn update_status(&self, _session_id: SessionId, status: SessionStatus) -> Result<()> {
             self.session.lock().await.status = status;
+            Ok(())
+        }
+
+        async fn put_snapshot(
+            &self,
+            _session_id: SessionId,
+            snapshot: ContextSnapshot,
+        ) -> Result<()> {
+            *self.snapshot.lock().await = Some(snapshot);
+            Ok(())
+        }
+
+        async fn get_snapshot(&self, _session_id: SessionId) -> Result<Option<ContextSnapshot>> {
+            Ok(self.snapshot.lock().await.clone())
+        }
+
+        async fn delete_snapshot(&self, _session_id: SessionId) -> Result<()> {
+            *self.snapshot.lock().await = None;
             Ok(())
         }
 
@@ -758,6 +1024,7 @@ mod tests {
                 ..CompactionConfig::default()
             },
             tool_output: ToolOutputConfig::default(),
+            snapshot_config: ContextSnapshotConfig::default(),
         }
     }
 

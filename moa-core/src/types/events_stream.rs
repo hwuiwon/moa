@@ -85,7 +85,7 @@ impl EventRange {
         Self::default()
     }
 
-    /// Returns a range constrained only by a result limit.
+    /// Returns the latest `limit` events in chronological order.
     pub fn recent(limit: usize) -> Self {
         Self {
             limit: Some(limit),

@@ -6,66 +6,79 @@ use std::time::{Duration, Instant};
 
 use moa_core::{
     ApprovalDecision, BufferedUserMessage, CacheReport, CompletionRequest, CompletionResponse,
-    Event, EventRange, EventRecord, LLMProvider, MoaError, Result, SessionId, SessionMeta,
-    TokenPricing, TraceContext, UserMessage, WorkingContext, current_turn_root_span,
-    record_pipeline_compile_duration, record_turn_event_persist_duration,
-    record_turn_pipeline_compile_duration, stable_prefix_fingerprint,
+    ContextSnapshot, Event, EventRange, EventRecord, LLMProvider, MoaError, Result, SessionId,
+    SessionMeta, SessionStore, TokenPricing, TraceContext, UserMessage, WorkingContext,
+    current_turn_root_span, record_pipeline_compile_duration, record_turn_event_persist_duration,
+    record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
+    stable_prefix_fingerprint,
 };
 use moa_security::inject_canary;
 use tokio::sync::broadcast;
 use tracing::Instrument;
 
 use crate::pipeline::ContextPipeline;
+use crate::pipeline::history::HISTORY_SNAPSHOT_METADATA_KEY;
 use crate::pipeline::runtime_context::WORKSPACE_ROOT_METADATA_KEY;
 
+/// Inputs required to compile one turn's working context.
+pub(super) struct BuildTurnContextOptions<'a> {
+    pub session_id: &'a SessionId,
+    pub session: &'a SessionMeta,
+    pub session_store: &'a Arc<dyn SessionStore>,
+    pub pipeline: &'a ContextPipeline,
+    pub llm_provider: &'a Arc<dyn LLMProvider>,
+    pub workspace_root: Option<PathBuf>,
+    pub enable_canary: bool,
+    pub trace_context: &'a TraceContext,
+    pub snapshot_max_size_bytes: usize,
+}
+
+/// Runs the context pipeline and persists the latest reusable history snapshot.
 pub(super) async fn build_turn_context(
-    session_id: &SessionId,
-    session: &SessionMeta,
-    pipeline: &ContextPipeline,
-    llm_provider: &Arc<dyn LLMProvider>,
-    workspace_root: Option<PathBuf>,
-    enable_canary: bool,
-    trace_context: &TraceContext,
+    options: BuildTurnContextOptions<'_>,
 ) -> Result<(WorkingContext, Option<String>)> {
-    let mut ctx = WorkingContext::new(session, llm_provider.capabilities());
-    if let Some(workspace_root) = workspace_root {
+    let mut ctx = WorkingContext::new(options.session, options.llm_provider.capabilities());
+    if let Some(workspace_root) = options.workspace_root {
         ctx.insert_metadata(
             WORKSPACE_ROOT_METADATA_KEY,
             serde_json::json!(workspace_root.display().to_string()),
         );
     }
-    let stage_reports = pipeline.run(&mut ctx).await?;
+    let stage_reports = options.pipeline.run(&mut ctx).await?;
     let pipeline_compile_duration = stage_reports.iter().fold(Duration::ZERO, |total, report| {
         total + report.output.duration
     });
     record_pipeline_compile_duration(pipeline_compile_duration);
     record_turn_pipeline_compile_duration(pipeline_compile_duration);
-    let active_canary = if enable_canary {
+    let active_canary = if options.enable_canary {
         Some(inject_canary(&mut ctx))
     } else {
         None
     };
     ctx.insert_metadata(
         "_moa.session_id",
-        serde_json::json!(trace_context.session_id.to_string()),
+        serde_json::json!(options.trace_context.session_id.to_string()),
     );
     ctx.insert_metadata(
         "_moa.user_id",
-        serde_json::json!(trace_context.user_id.to_string()),
+        serde_json::json!(options.trace_context.user_id.to_string()),
     );
     ctx.insert_metadata(
         "_moa.workspace_id",
-        serde_json::json!(trace_context.workspace_id.to_string()),
+        serde_json::json!(options.trace_context.workspace_id.to_string()),
     );
-    ctx.insert_metadata("_moa.model", serde_json::json!(trace_context.model.clone()));
-    if let Some(platform) = trace_context.platform.as_ref() {
+    ctx.insert_metadata(
+        "_moa.model",
+        serde_json::json!(options.trace_context.model.clone()),
+    );
+    if let Some(platform) = options.trace_context.platform.as_ref() {
         ctx.insert_metadata("_moa.platform", serde_json::json!(platform.to_string()));
     }
-    if let Some(trace_name) = trace_context.trace_name.as_ref() {
+    if let Some(trace_name) = options.trace_context.trace_name.as_ref() {
         ctx.insert_metadata("_moa.trace_name", serde_json::json!(trace_name));
     }
     tracing::info!(
-        session_id = %session_id,
+        session_id = %options.session_id,
         compiled_messages = ctx.messages.len(),
         total_tokens = ctx.token_count,
         stages = stage_reports.len(),
@@ -73,7 +86,67 @@ pub(super) async fn build_turn_context(
         "compiled context for streamed brain turn"
     );
 
+    persist_context_snapshot(options.session_store, &ctx, options.snapshot_max_size_bytes).await;
+
     Ok((ctx, active_canary))
+}
+
+async fn persist_context_snapshot(
+    session_store: &Arc<dyn SessionStore>,
+    ctx: &WorkingContext,
+    snapshot_max_size_bytes: usize,
+) {
+    let Some(snapshot_value) = ctx.metadata().get(HISTORY_SNAPSHOT_METADATA_KEY).cloned() else {
+        return;
+    };
+
+    let mut snapshot = match serde_json::from_value::<ContextSnapshot>(snapshot_value) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %ctx.session_id,
+                error = %error,
+                "failed to deserialize compiled context snapshot metadata"
+            );
+            return;
+        }
+    };
+    snapshot.cache_controls = ctx.cache_controls.clone();
+
+    let serialized = match serde_json::to_vec(&snapshot) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %ctx.session_id,
+                error = %error,
+                "failed to serialize compiled context snapshot"
+            );
+            return;
+        }
+    };
+    if serialized.len() > snapshot_max_size_bytes {
+        tracing::warn!(
+            session_id = %ctx.session_id,
+            snapshot_bytes = serialized.len(),
+            max_snapshot_bytes = snapshot_max_size_bytes,
+            "compiled context snapshot exceeded expected size"
+        );
+    }
+
+    let started_at = Instant::now();
+    if let Err(error) = session_store
+        .put_snapshot(ctx.session_id.clone(), snapshot)
+        .await
+    {
+        tracing::warn!(
+            session_id = %ctx.session_id,
+            error = %error,
+            "compiled context snapshot persist failed; next turn will fall back to replay"
+        );
+        return;
+    }
+
+    record_turn_snapshot_write_duration(started_at.elapsed());
 }
 
 pub(super) fn buffer_queued_message(
