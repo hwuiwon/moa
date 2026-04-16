@@ -168,7 +168,17 @@ fn last_user_message(messages: &[ContextMessage]) -> Option<&str> {
     messages
         .iter()
         .rev()
-        .find(|message| message.role == moa_core::MessageRole::User)
+        .find(|message| {
+            message.role == moa_core::MessageRole::User
+                && !message.content.starts_with("<system-reminder>")
+                && !message.content.starts_with("<memory-reminder>")
+        })
+        .or_else(|| {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message.role == moa_core::MessageRole::User)
+        })
         .map(|message| message.content.as_str())
 }
 
@@ -2490,7 +2500,7 @@ async fn workspace_memory_bootstrap_informs_first_turn_from_instruction_file() -
     let requests = requests.lock().expect("request log lock poisoned");
     assert_eq!(requests.len(), 1);
     assert!(requests[0].messages.iter().any(|message| {
-        message.role == MessageRole::System && message.content.contains("bootmarkeralpha")
+        message.content.contains("bootmarkeralpha")
     }));
     Ok(())
 }

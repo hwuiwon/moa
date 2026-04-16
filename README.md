@@ -1,6 +1,8 @@
 # MOA
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/hwuiwon/moa)
 
 **A cloud-first, learning, general-purpose AI agent platform — written in Rust.**
+
 
 MOA is a persistent agent that lives in the cloud, reaches you through the messaging apps you already use, and gets better the longer it runs. Think **many brains, many hands**: stateless reasoning loops recover from a durable event log, and pluggable execution environments (Docker, Daytona, E2B microVMs, MCP servers) carry out the work.
 

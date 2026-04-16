@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::{CacheBreakpoint, ContextMessage, SequenceNum, SessionId};
 
 /// Current serialized context snapshot format version.
-pub const CONTEXT_SNAPSHOT_FORMAT_VERSION: u32 = 1;
+pub const CONTEXT_SNAPSHOT_FORMAT_VERSION: u32 = 2;
 
 /// Serializable cache of compiled history state for one session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -816,7 +816,7 @@ impl Default for ContextSnapshotConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_size_bytes: 10_000_000,
+            max_size_bytes: 5_000_000,
         }
     }
 }
