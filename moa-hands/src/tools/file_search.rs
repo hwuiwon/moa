@@ -203,7 +203,8 @@ fn should_ignore_search_io_error(error: &std::io::Error) -> bool {
     matches!(error.kind(), ErrorKind::NotFound)
 }
 
-fn should_skip_search_path(path: &Path, extra_skips: &[String]) -> bool {
+/// Returns whether a path should be skipped during repository searches.
+pub fn should_skip_search_path_static(path: &Path, extra_skips: &[String]) -> bool {
     path.components().any(|component| match component {
         Component::Normal(segment) => {
             SKIPPED_SEARCH_DIRS
@@ -215,6 +216,10 @@ fn should_skip_search_path(path: &Path, extra_skips: &[String]) -> bool {
         }
         _ => false,
     })
+}
+
+fn should_skip_search_path(path: &Path, extra_skips: &[String]) -> bool {
+    should_skip_search_path_static(path, extra_skips)
 }
 
 fn build_file_search_output(
@@ -302,44 +307,44 @@ mod tests {
 
     use super::{
         default_skipped_dirs, execute, load_moaignore, should_ignore_search_io_error,
-        should_skip_search_path, skipped_directory_names,
+        should_skip_search_path_static, skipped_directory_names,
     };
 
     #[test]
     fn skips_python_venv_directory() {
         let path = Path::new(".venv/lib/python3.12/site-packages/requests/api.py");
-        assert!(should_skip_search_path(path, &[]));
+        assert!(should_skip_search_path_static(path, &[]));
     }
 
     #[test]
     fn skips_pycache_directory() {
         let path = Path::new("server/core/__pycache__/views.cpython-312.pyc");
-        assert!(should_skip_search_path(path, &[]));
+        assert!(should_skip_search_path_static(path, &[]));
     }
 
     #[test]
     fn skips_custom_moaignore_entry() {
         let path = Path::new("data/fixtures/large-dataset.json");
         let extra = vec!["data".to_string()];
-        assert!(should_skip_search_path(path, &extra));
+        assert!(should_skip_search_path_static(path, &extra));
     }
 
     #[test]
     fn does_not_skip_normal_source_files() {
         let path = Path::new("server/core/views.py");
-        assert!(!should_skip_search_path(path, &[]));
+        assert!(!should_skip_search_path_static(path, &[]));
     }
 
     #[test]
     fn skips_gradle_directory() {
         let path = Path::new(".gradle/caches/modules-2/files-2.1/com.google/guava.jar");
-        assert!(should_skip_search_path(path, &[]));
+        assert!(should_skip_search_path_static(path, &[]));
     }
 
     #[test]
     fn skips_vendor_directory() {
         let path = Path::new("vendor/github.com/pkg/errors/errors.go");
-        assert!(should_skip_search_path(path, &[]));
+        assert!(should_skip_search_path_static(path, &[]));
     }
 
     #[test]
