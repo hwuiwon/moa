@@ -5,6 +5,11 @@ use moa_core::{ContextProcessor, MoaConfig, ProcessorOutput, Result, WorkingCont
 
 use super::estimate_tokens;
 
+const DISCOVERED_AGENTS_NOTICE: &str = "\
+The workspace root AGENTS.md has already been loaded for this session. \
+Do not spend turns searching for it again unless you have already narrowed work \
+to a specific subdirectory and intentionally need that local AGENTS.md.";
+
 /// Injects optional workspace and user instructions into the prompt.
 #[derive(Debug, Clone, Default)]
 pub struct InstructionProcessor {
@@ -41,6 +46,9 @@ fn combine_workspace_instructions(
     workspace_instructions: Option<String>,
     discovered_instructions: Option<String>,
 ) -> Option<String> {
+    let discovered_instructions = discovered_instructions
+        .map(|instructions| format!("{DISCOVERED_AGENTS_NOTICE}\n\n{instructions}"));
+
     match (workspace_instructions, discovered_instructions) {
         (Some(config), Some(discovered)) => Some(format!("{config}\n\n---\n\n{discovered}")),
         (Some(config), None) => Some(config),
@@ -190,7 +198,12 @@ mod tests {
         assert!(
             ctx.messages[0]
                 .content
-                .contains("Config guidance.\n\n---\n\nDiscovered project instructions.")
+                .contains("Config guidance.\n\n---\n\nThe workspace root AGENTS.md has already been loaded for this session.")
+        );
+        assert!(
+            ctx.messages[0]
+                .content
+                .contains("Discovered project instructions.")
         );
         assert!(ctx.messages[0].content.contains("<user_preferences>"));
         assert_eq!(output.items_included.len(), 2);

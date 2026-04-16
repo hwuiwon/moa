@@ -101,7 +101,7 @@ impl ToolRegistry {
         registry.register_builtin(Arc::new(session_search::SessionSearchTool));
         registry.register_hand(
             "bash",
-            "Run a non-interactive shell command inside the active workspace root. Prefer the native file tools for file reads and edits; use bash when you need shell capabilities such as symbol search, test execution, or other commands.",
+            "Run a non-interactive shell command inside the active workspace root. Use bash for tests, builds, and commands the native file tools cannot express. Do not use bash for routine repository navigation or source inspection when file_search, file_grep, file_outline, file_read, or str_replace can handle the task.",
             json!({
                 "type": "object",
                 "properties": {
@@ -114,14 +114,44 @@ impl ToolRegistry {
             execute_tool_policy(ToolInputShape::Command),
         );
         registry.register_hand(
+            "file_outline",
+            "Preferred navigation tool for large Python source files. Use symbol to focus on one class, function, or method and list its direct methods with line numbers. Use this instead of bash/rg/python AST scripts when locating methods.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path within the workspace root. Currently supports Python files." },
+                    "symbol": { "type": "string", "description": "Optional class, function, or method name to focus on." }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            read_tool_policy(ToolInputShape::Path),
+        );
+        registry.register_hand(
+            "file_grep",
+            "Preferred content-search tool for code repositories. Search UTF-8 files by regex or fixed string without shelling out to rg or grep.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Regex pattern to search for, or a literal string when fixed_string is true." },
+                    "path_glob": { "type": "string", "description": "Optional glob to limit which files are searched, e.g. server/**/*.py." },
+                    "fixed_string": { "type": "boolean", "description": "Treat pattern as a literal string instead of a regex." },
+                    "max_matches": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum matching lines to return." }
+                },
+                "required": ["pattern"],
+                "additionalProperties": false
+            }),
+            read_tool_policy(ToolInputShape::Pattern),
+        );
+        registry.register_hand(
             "file_read",
-            "Read a UTF-8 text file from the active workspace root. For large files, first locate the relevant symbol or line number, then read a bounded range with start_line and end_line.",
+            "Read a UTF-8 text file from the active workspace root. Supports optional line ranges; large unscoped reads return only the first chunk with line numbers and a truncation notice. Pair this with file_outline on large Python files.",
             json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Relative path within the workspace root. Bash `cd` state does not carry over." },
-                    "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based first line to read." },
-                    "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based last line to read. Large files should be read in bounded ranges." }
+                    "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based first line to read, inclusive." },
+                    "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based last line to read, inclusive. Ranges are clamped and truncated to 200 lines." }
                 },
                 "required": ["path"],
                 "additionalProperties": false
@@ -177,6 +207,8 @@ impl ToolRegistry {
             "memory_write".to_string(),
             "memory_ingest".to_string(),
             "session_search".to_string(),
+            "file_grep".to_string(),
+            "file_outline".to_string(),
             "file_read".to_string(),
             "str_replace".to_string(),
             "file_write".to_string(),
