@@ -39,6 +39,7 @@ impl EventColor {
                 Self::Memory
             }
             Event::Checkpoint { .. } => Self::Checkpoint,
+            Event::CacheReport { .. } => Self::Notice,
             Event::Error { .. } => Self::Error,
             Event::Warning { .. } => Self::Notice,
             Event::HandProvisioned { .. }

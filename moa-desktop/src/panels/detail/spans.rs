@@ -326,6 +326,27 @@ pub fn build_spans(events: &[EventRecord]) -> Vec<Span> {
                     },
                 );
             }
+            Event::CacheReport { report } => {
+                push_child(
+                    &mut current_turn,
+                    &mut roots,
+                    Span {
+                        id: record.id,
+                        kind: SpanKind::Notice,
+                        name: format!("cache · {}", report.provider),
+                        detail: format!(
+                            "{} cached / {} input · {:.0}% stable",
+                            report.cached_input_tokens,
+                            report.input_tokens,
+                            report.cache_ratio_estimate * 100.0
+                        ),
+                        start: ts,
+                        end: ts,
+                        children: Vec::new(),
+                        source: record.clone(),
+                    },
+                );
+            }
             Event::Error { message, .. } => {
                 push_child(
                     &mut current_turn,

@@ -6,7 +6,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::types::{
-    ApprovalDecision, ApprovalPrompt, Attachment, EventType, RiskLevel, SessionStatus, ToolOutput,
+    ApprovalDecision, ApprovalPrompt, Attachment, CacheReport, EventType, RiskLevel, SessionStatus,
+    ToolOutput,
 };
 
 /// Append-only session event payload.
@@ -218,6 +219,11 @@ pub enum Event {
         #[serde(default)]
         cost_cents: u32,
     },
+    /// Durable cache-planning and cache-usage report for one provider request.
+    CacheReport {
+        /// Structured cache audit payload.
+        report: CacheReport,
+    },
     /// Recoverable or fatal error.
     Error {
         /// Error message.
@@ -255,6 +261,7 @@ impl Event {
             Self::HandDestroyed { .. } => EventType::HandDestroyed,
             Self::HandError { .. } => EventType::HandError,
             Self::Checkpoint { .. } => EventType::Checkpoint,
+            Self::CacheReport { .. } => EventType::CacheReport,
             Self::Error { .. } => EventType::Error,
             Self::Warning { .. } => EventType::Warning,
         }
@@ -282,6 +289,7 @@ impl Event {
             Self::HandDestroyed { .. } => "HandDestroyed",
             Self::HandError { .. } => "HandError",
             Self::Checkpoint { .. } => "Checkpoint",
+            Self::CacheReport { .. } => "CacheReport",
             Self::Error { .. } => "Error",
             Self::Warning { .. } => "Warning",
         }
@@ -323,6 +331,7 @@ impl Event {
             Self::BrainThinking { token_count, .. } | Self::Checkpoint { token_count, .. } => {
                 *token_count
             }
+            Self::CacheReport { report } => report.total_tokens_estimate,
             Self::BrainResponse {
                 input_tokens,
                 output_tokens,
@@ -377,6 +386,37 @@ mod tests {
         let parsed: Event = serde_json::from_str(&json).unwrap();
         assert_eq!(event, parsed);
         assert!(json.contains("UserMessage"));
+    }
+
+    #[test]
+    fn cache_report_roundtrip() {
+        let event = Event::CacheReport {
+            report: CacheReport {
+                provider: "anthropic".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                message_count: 3,
+                tool_count: 2,
+                cache_breakpoints: vec![2],
+                tool_tokens_estimate: 100,
+                stable_message_tokens_estimate: 200,
+                stable_total_tokens_estimate: 300,
+                total_tokens_estimate: 360,
+                dynamic_tokens_estimate: 60,
+                cache_ratio_estimate: 0.833,
+                stable_prefix_fingerprint: 123,
+                full_request_fingerprint: 456,
+                stable_prefix_reused: true,
+                input_tokens: 40,
+                cached_input_tokens: 25,
+                output_tokens: 8,
+                cached_vs_stable_estimate_ratio: 0.083,
+            },
+        };
+
+        let json = serde_json::to_string(&event).expect("cache report serializes");
+        let parsed: Event = serde_json::from_str(&json).expect("cache report deserializes");
+        assert_eq!(event, parsed);
+        assert!(json.contains("CacheReport"));
     }
 
     #[test]

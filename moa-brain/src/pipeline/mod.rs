@@ -294,7 +294,14 @@ pub(crate) fn sort_json_keys(value: &mut serde_json::Value) {
 }
 
 fn cache_prefix_ratio(ctx: &WorkingContext) -> f64 {
-    if ctx.token_count == 0 {
+    let tool_tokens = ctx
+        .tools()
+        .iter()
+        .map(|tool| estimate_tokens(&tool.to_string()))
+        .sum::<usize>();
+    let total_tokens = ctx.token_count + tool_tokens;
+
+    if total_tokens == 0 {
         return 1.0;
     }
 
@@ -305,17 +312,19 @@ fn cache_prefix_ratio(ctx: &WorkingContext) -> f64 {
     let prefix_tokens = ctx.messages[..cache_breakpoint.min(ctx.messages.len())]
         .iter()
         .map(|message| estimate_tokens(&message.content))
-        .sum::<usize>();
+        .sum::<usize>()
+        + tool_tokens;
 
-    prefix_tokens as f64 / ctx.token_count as f64
+    prefix_tokens as f64 / total_tokens as f64
 }
 
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
     use moa_core::{
-        ContextProcessor, MoaError, ModelCapabilities, Platform, ProcessorOutput, Result,
-        SessionId, SessionMeta, TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
+        ContextMessage, ContextProcessor, MoaError, ModelCapabilities, Platform, ProcessorOutput,
+        Result, SessionId, SessionMeta, TokenPricing, ToolCallFormat, UserId, WorkingContext,
+        WorkspaceId,
     };
     use serde_json::json;
 
@@ -408,6 +417,55 @@ mod tests {
         assert_eq!(
             ctx.metadata().get("stage_order"),
             Some(&json!(["identity", "instructions", "tools"]))
+        );
+    }
+
+    #[test]
+    fn cache_prefix_ratio_includes_tool_tokens() {
+        let session = SessionMeta {
+            id: SessionId::new(),
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Tui,
+            model: "claude-sonnet-4-6".to_string(),
+            ..SessionMeta::default()
+        };
+        let capabilities = ModelCapabilities {
+            model_id: "claude-sonnet-4-6".to_string(),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+            },
+            native_tools: Vec::new(),
+        };
+        let mut ctx = WorkingContext::new(&session, capabilities);
+        ctx.set_tools(vec![json!({
+            "name": "bash",
+            "description": "Run shell commands",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "cmd": {"type": "string"}
+                }
+            }
+        })]);
+        ctx.append_system("identity");
+        ctx.mark_cache_breakpoint();
+        ctx.append_message(ContextMessage::user("hello"));
+
+        let ratio = super::cache_prefix_ratio(&ctx);
+
+        assert!(
+            ratio > 0.5,
+            "tool tokens should contribute to the cached prefix"
         );
     }
 }

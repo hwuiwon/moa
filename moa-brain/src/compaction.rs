@@ -316,6 +316,10 @@ fn event_summary_line(record: &EventRecord) -> String {
         Event::Checkpoint { summary, .. } => {
             format!("#{} checkpoint: {}", record.sequence_num, truncate(summary))
         }
+        Event::CacheReport { report } => format!(
+            "#{} cache_report provider={} model={} cached_input_tokens={}",
+            record.sequence_num, report.provider, report.model, report.cached_input_tokens
+        ),
     }
 }
 

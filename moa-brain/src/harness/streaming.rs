@@ -21,8 +21,9 @@ use crate::turn::{
 use super::approval_flow::{process_resolved_approval, wait_for_approval};
 use super::budget::enforce_workspace_budget;
 use super::context_build::{
-    append_event, buffer_queued_message, build_turn_context, calculate_response_cost_cents,
-    last_user_message_text, record_turn_span_metrics, turn_number_for_events,
+    append_event, buffer_queued_message, build_cache_report, build_turn_context,
+    calculate_response_cost_cents, last_user_message_text, record_turn_span_metrics,
+    turn_number_for_events,
 };
 use super::tool_dispatch::{ToolCallOutcome, handle_tool_call};
 use super::{StreamedTurnResult, ToolLoopMode};
@@ -233,10 +234,11 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             )
             .await?;
 
+            let request = ctx.into_request();
             let streamed = if let Some(receiver) = signal_rx.as_deref_mut() {
                 stream_completion_response(
                     llm_provider.clone(),
-                    ctx.into_request(),
+                    request.clone(),
                     cancel_token,
                     Some(receiver),
                     &mut emit_runtime,
@@ -254,7 +256,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             } else {
                 stream_completion_response(
                     llm_provider.clone(),
-                    ctx.into_request(),
+                    request.clone(),
                     cancel_token,
                     None,
                     &mut emit_runtime,
@@ -281,6 +283,15 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 calculate_response_cost_cents(&response, &llm_provider.capabilities().pricing);
             total_input_tokens += response.input_tokens;
             total_output_tokens += response.output_tokens;
+            append_event(
+                &session_store,
+                event_tx,
+                session_id.clone(),
+                Event::CacheReport {
+                    report: build_cache_report(&events, llm_provider.name(), &request, &response),
+                },
+            )
+            .await?;
 
             if !streamed.streamed_text.trim().is_empty() {
                 append_event(

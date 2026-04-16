@@ -1,10 +1,154 @@
 //! Observability and trace context helpers.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Platform, SessionId, SessionMeta, UserId, WorkspaceId};
+use super::{
+    CompletionRequest, Platform, SessionId, SessionMeta, UserId, WorkspaceId, estimate_text_tokens,
+};
+
+/// Durable summary of one provider request's cache plan and observed cache usage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CacheReport {
+    /// Provider identifier, for example `anthropic` or `openai`.
+    pub provider: String,
+    /// Model identifier used for the request.
+    pub model: String,
+    /// Number of context messages sent to the provider.
+    pub message_count: usize,
+    /// Number of tool schemas sent to the provider.
+    pub tool_count: usize,
+    /// Explicit cache breakpoint indexes included in the request.
+    pub cache_breakpoints: Vec<usize>,
+    /// Estimated tokens contributed by tool schemas.
+    pub tool_tokens_estimate: usize,
+    /// Estimated tokens contributed by stable-prefix messages.
+    pub stable_message_tokens_estimate: usize,
+    /// Estimated tokens in the stable prefix, including tools.
+    pub stable_total_tokens_estimate: usize,
+    /// Estimated total request tokens, including tools and dynamic messages.
+    pub total_tokens_estimate: usize,
+    /// Estimated dynamic suffix tokens outside the stable prefix.
+    pub dynamic_tokens_estimate: usize,
+    /// Estimated stable-prefix ratio within the full request.
+    pub cache_ratio_estimate: f64,
+    /// Stable fingerprint of the cacheable prompt prefix.
+    pub stable_prefix_fingerprint: u64,
+    /// Stable fingerprint of the full request payload.
+    pub full_request_fingerprint: u64,
+    /// Whether the previous request in the same session reused the same stable prefix.
+    pub stable_prefix_reused: bool,
+    /// Provider-reported prompt input tokens.
+    pub input_tokens: usize,
+    /// Provider-reported cached input tokens.
+    pub cached_input_tokens: usize,
+    /// Provider-reported output tokens.
+    pub output_tokens: usize,
+    /// Ratio of cached provider tokens vs. the estimated stable prefix.
+    pub cached_vs_stable_estimate_ratio: f64,
+}
+
+impl CacheReport {
+    /// Builds a cache report from one completion request and its provider response metrics.
+    pub fn from_request(
+        request: &CompletionRequest,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        stable_prefix_reused: bool,
+        input_tokens: usize,
+        cached_input_tokens: usize,
+        output_tokens: usize,
+    ) -> Self {
+        let stable_message_count = request
+            .cache_breakpoints
+            .last()
+            .copied()
+            .unwrap_or_default()
+            .min(request.messages.len());
+        let tool_tokens_estimate = request
+            .tools
+            .iter()
+            .map(|tool| estimate_text_tokens(&tool.to_string()))
+            .sum::<usize>();
+        let stable_message_tokens_estimate = request.messages[..stable_message_count]
+            .iter()
+            .map(|message| estimate_text_tokens(&message.content))
+            .sum::<usize>();
+        let total_message_tokens_estimate = request
+            .messages
+            .iter()
+            .map(|message| estimate_text_tokens(&message.content))
+            .sum::<usize>();
+        let stable_total_tokens_estimate = tool_tokens_estimate + stable_message_tokens_estimate;
+        let total_tokens_estimate = tool_tokens_estimate + total_message_tokens_estimate;
+        let dynamic_tokens_estimate =
+            total_tokens_estimate.saturating_sub(stable_total_tokens_estimate);
+        let cache_ratio_estimate = if total_tokens_estimate == 0 {
+            0.0
+        } else {
+            stable_total_tokens_estimate as f64 / total_tokens_estimate as f64
+        };
+        let cached_vs_stable_estimate_ratio = if stable_total_tokens_estimate == 0 {
+            0.0
+        } else {
+            cached_input_tokens as f64 / stable_total_tokens_estimate as f64
+        };
+
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+            message_count: request.messages.len(),
+            tool_count: request.tools.len(),
+            cache_breakpoints: request.cache_breakpoints.clone(),
+            tool_tokens_estimate,
+            stable_message_tokens_estimate,
+            stable_total_tokens_estimate,
+            total_tokens_estimate,
+            dynamic_tokens_estimate,
+            cache_ratio_estimate,
+            stable_prefix_fingerprint: stable_prefix_fingerprint(request),
+            full_request_fingerprint: full_request_fingerprint(request),
+            stable_prefix_reused,
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            cached_vs_stable_estimate_ratio,
+        }
+    }
+}
+
+/// Returns a stable fingerprint for the cacheable prefix of a completion request.
+pub fn stable_prefix_fingerprint(request: &CompletionRequest) -> u64 {
+    let stable_message_count = request
+        .cache_breakpoints
+        .last()
+        .copied()
+        .unwrap_or_default()
+        .min(request.messages.len());
+    fingerprint_json(&(
+        request.tools.clone(),
+        request.messages[..stable_message_count].to_vec(),
+    ))
+}
+
+/// Returns a stable fingerprint for the full completion request payload.
+pub fn full_request_fingerprint(request: &CompletionRequest) -> u64 {
+    fingerprint_json(&(request.tools.clone(), request.messages.clone()))
+}
+
+fn fingerprint_json<T>(value: &T) -> u64
+where
+    T: Serialize,
+{
+    let serialized = serde_json::to_string(value).unwrap_or_default();
+    let mut hasher = DefaultHasher::new();
+    serialized.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Context attributes propagated across spans in one logical turn trace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

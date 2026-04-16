@@ -101,6 +101,7 @@ pub(crate) fn event_type_to_db(event_type: &EventType) -> &'static str {
         EventType::HandDestroyed => "HandDestroyed",
         EventType::HandError => "HandError",
         EventType::Checkpoint => "Checkpoint",
+        EventType::CacheReport => "CacheReport",
         EventType::Error => "Error",
         EventType::Warning => "Warning",
     }
@@ -128,6 +129,7 @@ pub(crate) fn event_type_from_db(value: &str) -> Result<EventType> {
         "HandDestroyed" => Ok(EventType::HandDestroyed),
         "HandError" => Ok(EventType::HandError),
         "Checkpoint" => Ok(EventType::Checkpoint),
+        "CacheReport" => Ok(EventType::CacheReport),
         "Error" => Ok(EventType::Error),
         "Warning" => Ok(EventType::Warning),
         _ => Err(MoaError::StorageError(format!(
