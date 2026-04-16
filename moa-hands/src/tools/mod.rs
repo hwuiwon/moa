@@ -7,3 +7,4 @@ pub mod file_search;
 pub mod file_write;
 pub mod memory;
 pub mod session_search;
+pub mod str_replace;

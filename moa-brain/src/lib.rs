@@ -11,6 +11,7 @@ pub use compaction::maybe_compact;
 pub use harness::{
     StreamedTurnResult, TurnResult, run_brain_turn, run_brain_turn_with_tools,
     run_brain_turn_with_tools_stepwise, run_streamed_turn, run_streamed_turn_with_signals,
+    run_streamed_turn_with_signals_stepwise,
 };
 pub use loop_detector::LoopDetector;
 pub use pipeline::{

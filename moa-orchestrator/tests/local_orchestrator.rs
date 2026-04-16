@@ -2930,8 +2930,8 @@ async fn session_pauses_on_loop_detection() -> Result<()> {
                     text: prompt.to_string(),
                     attachments: Vec::new(),
                 }),
-        )
-        .await?;
+            )
+            .await?;
         let expected_tool_turns = if prompt == "first" { 1 } else { 2 };
         wait_for_tool_result_count(
             &orchestrator,

@@ -3,9 +3,13 @@
 use std::io::{self, IsTerminal, Write};
 
 use anyhow::{Context, Result, bail};
-use moa_core::{ApprovalDecision, ApprovalPrompt, MoaConfig, Platform, RuntimeEvent, ToolUpdate};
+use moa_core::{
+    ApprovalDecision, ApprovalPrompt, MoaConfig, Platform, RuntimeEvent, SessionStatus, ToolUpdate,
+};
 use moa_runtime::ChatRuntime;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
+use tokio::time::{Duration, sleep};
 
 /// Runs a one-shot prompt through the shared local chat runtime.
 pub async fn run_exec(config: MoaConfig, prompt: String) -> Result<()> {
@@ -23,27 +27,56 @@ pub async fn run_exec(config: MoaConfig, prompt: String) -> Result<()> {
     });
 
     let mut final_output = String::new();
-    while let Some(event) = event_rx.recv().await {
-        match event {
-            RuntimeEvent::AssistantStarted => {}
-            RuntimeEvent::AssistantDelta(ch) => final_output.push(ch),
-            RuntimeEvent::AssistantFinished { .. } => {}
-            RuntimeEvent::ToolUpdate(update) => {
-                eprintln!("{}", format_tool_update(&update));
+    let mut interrupt_state = InterruptState::Idle;
+    let mut terminated_after_interrupt = false;
+    loop {
+        if interrupt_state.awaiting_shutdown() {
+            tokio::select! {
+                event = event_rx.recv() => {
+                    let Some(event) = event else {
+                        break;
+                    };
+                    if handle_exec_event(event, &runtime, &mut final_output, &mut interrupt_state).await? {
+                        break;
+                    }
+                }
+                signal = tokio::signal::ctrl_c() => {
+                    signal.context("failed to listen for ctrl-c")?;
+                    handle_exec_interrupt(&runtime, &mut interrupt_state).await?;
+                }
+                _ = sleep(Duration::from_millis(250)) => {
+                    if session_has_terminated(&runtime).await? {
+                        terminated_after_interrupt = true;
+                        break;
+                    }
+                }
             }
-            RuntimeEvent::ApprovalRequested(prompt) => {
-                resolve_exec_approval(&runtime, prompt).await?;
+        } else {
+            tokio::select! {
+                event = event_rx.recv() => {
+                    let Some(event) = event else {
+                        break;
+                    };
+                    if handle_exec_event(event, &runtime, &mut final_output, &mut interrupt_state).await? {
+                        break;
+                    }
+                }
+                signal = tokio::signal::ctrl_c() => {
+                    signal.context("failed to listen for ctrl-c")?;
+                    handle_exec_interrupt(&runtime, &mut interrupt_state).await?;
+                }
             }
-            RuntimeEvent::UsageUpdated { total_tokens } => {
-                eprintln!("tokens: {total_tokens}");
-            }
-            RuntimeEvent::Notice(text) => eprintln!("{text}"),
-            RuntimeEvent::Error(text) => eprintln!("error: {text}"),
-            RuntimeEvent::TurnCompleted => break,
         }
     }
 
-    task.await.context("exec task join failure")?;
+    if terminated_after_interrupt && !task.is_finished() {
+        task.abort();
+    }
+    match task.await {
+        Ok(()) => {}
+        Err(error) if terminated_after_interrupt && error.is_cancelled() => {}
+        Err(error) => return Err(error).context("exec task join failure"),
+    }
 
     if io::stdout().is_terminal() {
         println!("{final_output}");
@@ -55,7 +88,38 @@ pub async fn run_exec(config: MoaConfig, prompt: String) -> Result<()> {
     Ok(())
 }
 
-async fn resolve_exec_approval(runtime: &ChatRuntime, prompt: ApprovalPrompt) -> Result<()> {
+async fn handle_exec_event(
+    event: RuntimeEvent,
+    runtime: &ChatRuntime,
+    final_output: &mut String,
+    interrupt_state: &mut InterruptState,
+) -> Result<bool> {
+    match event {
+        RuntimeEvent::AssistantStarted => {}
+        RuntimeEvent::AssistantDelta(ch) => final_output.push(ch),
+        RuntimeEvent::AssistantFinished { .. } => {}
+        RuntimeEvent::ToolUpdate(update) => {
+            eprintln!("{}", format_tool_update(&update));
+        }
+        RuntimeEvent::ApprovalRequested(prompt) => {
+            resolve_exec_approval(runtime, prompt, interrupt_state).await?;
+        }
+        RuntimeEvent::UsageUpdated { total_tokens } => {
+            eprintln!("tokens: {total_tokens}");
+        }
+        RuntimeEvent::Notice(text) => eprintln!("{text}"),
+        RuntimeEvent::Error(text) => eprintln!("error: {text}"),
+        RuntimeEvent::TurnCompleted => return Ok(true),
+    }
+
+    Ok(false)
+}
+
+async fn resolve_exec_approval(
+    runtime: &ChatRuntime,
+    prompt: ApprovalPrompt,
+    interrupt_state: &mut InterruptState,
+) -> Result<()> {
     if !io::stdin().is_terminal() {
         bail!(
             "approval required for {} but stdin is not interactive",
@@ -71,17 +135,23 @@ async fn resolve_exec_approval(runtime: &ChatRuntime, prompt: ApprovalPrompt) ->
         io::stderr().flush()?;
 
         let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let decision = match input.trim().to_ascii_lowercase().as_str() {
-            "y" | "yes" => ApprovalDecision::AllowOnce,
-            "a" | "always" => ApprovalDecision::AlwaysAllow {
-                pattern: prompt.pattern.clone(),
-            },
-            "n" | "no" => ApprovalDecision::Deny { reason: None },
-            _ => {
-                eprintln!("expected y, a, or n");
-                continue;
+        let mut stdin = BufReader::new(tokio::io::stdin());
+        tokio::select! {
+            read = stdin.read_line(&mut input) => {
+                let bytes_read = read.context("failed to read approval input")?;
+                if bytes_read == 0 {
+                    bail!("approval input closed unexpectedly");
+                }
             }
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("failed to listen for ctrl-c")?;
+                handle_exec_interrupt(runtime, interrupt_state).await?;
+                return Ok(());
+            }
+        }
+        let Some(decision) = parse_approval_decision(input.trim(), &prompt.pattern) else {
+            eprintln!("expected y, a, or n");
+            continue;
         };
         runtime
             .respond_to_approval(prompt.request.request_id, decision)
@@ -108,12 +178,83 @@ fn format_tool_update(update: &ToolUpdate) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptState {
+    Idle,
+    SoftCancelRequested,
+    HardCancelRequested,
+}
+
+impl InterruptState {
+    fn awaiting_shutdown(self) -> bool {
+        !matches!(self, Self::Idle)
+    }
+}
+
+async fn handle_exec_interrupt(
+    runtime: &ChatRuntime,
+    interrupt_state: &mut InterruptState,
+) -> Result<()> {
+    match interrupt_state {
+        InterruptState::Idle => {
+            eprintln!("interrupt received, requesting stop...");
+            runtime
+                .soft_cancel_session(runtime.session_id().clone())
+                .await
+                .context("failed to request soft cancel")?;
+            *interrupt_state = InterruptState::SoftCancelRequested;
+        }
+        InterruptState::SoftCancelRequested => {
+            eprintln!("interrupt received again, cancelling immediately...");
+            runtime
+                .cancel_active_generation()
+                .await
+                .context("failed to request hard cancel")?;
+            *interrupt_state = InterruptState::HardCancelRequested;
+        }
+        InterruptState::HardCancelRequested => {
+            eprintln!("interrupt already requested; waiting for shutdown...");
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_approval_decision(input: &str, pattern: &str) -> Option<ApprovalDecision> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Some(ApprovalDecision::AllowOnce),
+        "a" | "always" => Some(ApprovalDecision::AlwaysAllow {
+            pattern: pattern.to_string(),
+        }),
+        "n" | "no" => Some(ApprovalDecision::Deny { reason: None }),
+        _ => None,
+    }
+}
+
+async fn session_has_terminated(runtime: &ChatRuntime) -> Result<bool> {
+    Ok(is_terminal_session_status(
+        &runtime.session_meta().await?.status,
+    ))
+}
+
+fn is_terminal_session_status(status: &SessionStatus) -> bool {
+    matches!(
+        status,
+        SessionStatus::Paused
+            | SessionStatus::Completed
+            | SessionStatus::Cancelled
+            | SessionStatus::Failed
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use moa_core::{ToolCardStatus, ToolUpdate};
+    use moa_core::{ApprovalDecision, SessionStatus, ToolCardStatus, ToolUpdate};
     use uuid::Uuid;
 
-    use super::format_tool_update;
+    use super::{
+        InterruptState, format_tool_update, is_terminal_session_status, parse_approval_decision,
+    };
 
     #[test]
     fn exec_mode_formats_tool_updates_compactly() {
@@ -127,5 +268,46 @@ mod tests {
 
         assert!(rendered.contains("tool [succeeded] bash"));
         assert!(rendered.contains("hello"));
+    }
+
+    #[test]
+    fn approval_input_parser_supports_allow_once() {
+        assert_eq!(
+            parse_approval_decision("y", "bash *"),
+            Some(ApprovalDecision::AllowOnce)
+        );
+    }
+
+    #[test]
+    fn approval_input_parser_supports_always_allow() {
+        assert_eq!(
+            parse_approval_decision("always", "bash *"),
+            Some(ApprovalDecision::AlwaysAllow {
+                pattern: "bash *".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn approval_input_parser_rejects_unknown_values() {
+        assert_eq!(parse_approval_decision("maybe", "bash *"), None);
+    }
+
+    #[test]
+    fn interrupt_state_only_polls_for_shutdown_after_interrupt() {
+        assert!(!InterruptState::Idle.awaiting_shutdown());
+        assert!(InterruptState::SoftCancelRequested.awaiting_shutdown());
+        assert!(InterruptState::HardCancelRequested.awaiting_shutdown());
+    }
+
+    #[test]
+    fn terminal_session_status_helper_matches_expected_states() {
+        assert!(!is_terminal_session_status(&SessionStatus::Created));
+        assert!(!is_terminal_session_status(&SessionStatus::Running));
+        assert!(!is_terminal_session_status(&SessionStatus::WaitingApproval));
+        assert!(is_terminal_session_status(&SessionStatus::Paused));
+        assert!(is_terminal_session_status(&SessionStatus::Completed));
+        assert!(is_terminal_session_status(&SessionStatus::Cancelled));
+        assert!(is_terminal_session_status(&SessionStatus::Failed));
     }
 }

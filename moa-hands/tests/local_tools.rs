@@ -127,6 +127,64 @@ async fn file_read_reads_written_content() {
 }
 
 #[tokio::test]
+async fn str_replace_updates_only_the_target_region() {
+    let dir = tempdir().unwrap();
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let router = ToolRouter::new_local(memory_store, dir.path())
+        .await
+        .unwrap();
+    let session = session();
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({
+                    "path": "src/lib.rs",
+                    "content": "fn demo() {\n    alpha();\n    beta();\n}\n",
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "str_replace".to_string(),
+                input: json!({
+                    "path": "src/lib.rs",
+                    "old_str": "    alpha();\n",
+                    "new_str": "    gamma();\n",
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_read".to_string(),
+                input: json!({ "path": "src/lib.rs" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        output.to_text(),
+        "fn demo() {\n    gamma();\n    beta();\n}"
+    );
+}
+
+#[tokio::test]
 async fn file_search_finds_files_by_glob() {
     let dir = tempdir().unwrap();
     let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
@@ -436,6 +494,65 @@ async fn approval_prompt_uses_remembered_workspace_root_for_commands() {
         working_dir.as_deref(),
         Some(workspace_root.to_str().unwrap())
     );
+}
+
+#[tokio::test]
+async fn approval_prompt_str_replace_diff_is_surgical() {
+    let dir = tempdir().unwrap();
+    let workspace_root = dir.path().join("workspace-root");
+    tokio::fs::create_dir_all(workspace_root.join("src"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        workspace_root.join("src/lib.rs"),
+        concat!(
+            "line01\n",
+            "line02\n",
+            "line03\n",
+            "line04\n",
+            "line05\n",
+            "target_line();\n",
+            "line07\n",
+            "line08\n",
+            "line09\n",
+            "line10\n",
+            "line11\n",
+            "line12\n",
+        ),
+    )
+    .await
+    .unwrap();
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let router = ToolRouter::new_local(memory_store, dir.path().join("sandboxes"))
+        .await
+        .unwrap();
+    let session = session();
+    router
+        .remember_workspace_root(session.workspace_id.clone(), workspace_root)
+        .await;
+
+    let prepared = router
+        .prepare_invocation(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "str_replace".to_string(),
+                input: json!({
+                    "path": "src/lib.rs",
+                    "old_str": "target_line();\n",
+                    "new_str": "renamed_line();\n",
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    let prompt = prepared.approval_prompt(uuid::Uuid::now_v7());
+
+    assert_eq!(prompt.file_diffs.len(), 1);
+    assert!(prompt.file_diffs[0].before.contains("target_line();"));
+    assert!(prompt.file_diffs[0].after.contains("renamed_line();"));
+    assert!(!prompt.file_diffs[0].before.contains("line01"));
+    assert!(!prompt.file_diffs[0].after.contains("line12"));
 }
 
 #[tokio::test]
@@ -1106,6 +1223,35 @@ async fn docker_file_tools_roundtrip_inside_container_workspace() {
             .await
             .unwrap();
         assert_eq!(read.to_text(), "hello from docker file tool");
+
+        let replace = provider
+            .execute(
+                &handle,
+                "str_replace",
+                &json!({
+                    "path": "nested/demo.txt",
+                    "old_str": "hello from docker file tool",
+                    "new_str": "hello from docker str_replace",
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            replace
+                .to_text()
+                .contains("replaced 1 lines with 1 lines in nested/demo.txt")
+        );
+
+        let replaced = provider
+            .execute(
+                &handle,
+                "file_read",
+                &json!({ "path": "nested/demo.txt" }).to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replaced.to_text(), "hello from docker str_replace");
 
         let search = provider
             .execute(

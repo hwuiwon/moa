@@ -101,7 +101,7 @@ impl ToolRegistry {
         registry.register_builtin(Arc::new(session_search::SessionSearchTool));
         registry.register_hand(
             "bash",
-            "Run a non-interactive shell command inside the active workspace root. Each bash call starts fresh; directory changes do not persist to later tool calls.",
+            "Run a non-interactive shell command inside the active workspace root. Prefer the native file tools for file reads and edits; use bash when you need shell capabilities such as symbol search, test execution, or other commands.",
             json!({
                 "type": "object",
                 "properties": {
@@ -115,16 +115,34 @@ impl ToolRegistry {
         );
         registry.register_hand(
             "file_read",
-            "Read a UTF-8 text file from the active workspace root. Paths must be relative and must not use `..`.",
+            "Read a UTF-8 text file from the active workspace root. For large files, first locate the relevant symbol or line number, then read a bounded range with start_line and end_line.",
             json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Relative path within the workspace root. Bash `cd` state does not carry over." }
+                    "path": { "type": "string", "description": "Relative path within the workspace root. Bash `cd` state does not carry over." },
+                    "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based first line to read." },
+                    "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based last line to read. Large files should be read in bounded ranges." }
                 },
                 "required": ["path"],
                 "additionalProperties": false
             }),
             read_tool_policy(ToolInputShape::Path),
+        );
+        registry.register_hand(
+            "str_replace",
+            "Replace one unique string match in a UTF-8 text file. Use this for edits to existing files; include enough surrounding context in old_str to make the match unique.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path within the workspace root. Bash `cd` state does not carry over." },
+                    "old_str": { "type": "string", "description": "Exact string to replace. Must match exactly once unless empty for insertion or creation." },
+                    "new_str": { "type": "string", "description": "Replacement string. Empty deletes the matched region." },
+                    "insert_after_line": { "type": "integer", "minimum": 0, "description": "Required when old_str is empty and you want to insert after a specific line." }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            write_tool_policy(ToolInputShape::Path, ToolDiffStrategy::StrReplace),
         );
         registry.register_hand(
             "file_write",
@@ -159,10 +177,11 @@ impl ToolRegistry {
             "memory_write".to_string(),
             "memory_ingest".to_string(),
             "session_search".to_string(),
-            "bash".to_string(),
             "file_read".to_string(),
+            "str_replace".to_string(),
             "file_write".to_string(),
             "file_search".to_string(),
+            "bash".to_string(),
         ];
         registry
     }

@@ -13,6 +13,7 @@ use serde_json::Value;
 use tokio::fs;
 
 use crate::tools::file_read::resolve_sandbox_path;
+use crate::tools::str_replace::plan_str_replace;
 
 /// Recognized login shell wrapper prefixes used by the bash tool.
 const SHELL_WRAPPERS: &[(&str, &[&str])] = &[
@@ -154,6 +155,38 @@ pub(super) fn approval_fields_for(
                     value: format!("{content_len} chars"),
                 });
             }
+            if invocation.name == "str_replace" {
+                let old_len = invocation
+                    .input
+                    .get("old_str")
+                    .and_then(Value::as_str)
+                    .map(|content| content.chars().count())
+                    .unwrap_or_default();
+                let new_len = invocation
+                    .input
+                    .get("new_str")
+                    .and_then(Value::as_str)
+                    .map(|content| content.chars().count())
+                    .unwrap_or_default();
+                fields.push(ApprovalField {
+                    label: "Old string".to_string(),
+                    value: format!("{old_len} chars"),
+                });
+                fields.push(ApprovalField {
+                    label: "New string".to_string(),
+                    value: format!("{new_len} chars"),
+                });
+                if let Some(insert_after_line) = invocation
+                    .input
+                    .get("insert_after_line")
+                    .and_then(Value::as_u64)
+                {
+                    fields.push(ApprovalField {
+                        label: "Insert after line".to_string(),
+                        value: insert_after_line.to_string(),
+                    });
+                }
+            }
             fields
         }
         ToolInputShape::Pattern => single_approval_field("Pattern", &invocation.input, "pattern"),
@@ -187,35 +220,76 @@ pub(super) async fn approval_diffs_for(
     diff_strategy: ToolDiffStrategy,
     invocation: &ToolInvocation,
 ) -> Result<Vec<ApprovalFileDiff>> {
-    if !matches!(diff_strategy, ToolDiffStrategy::FileWrite) {
-        return Ok(Vec::new());
-    }
-
     let Some(sandbox_root) = sandbox_root else {
         return Ok(Vec::new());
     };
-    let Some(path) = invocation.input.get("path").and_then(Value::as_str) else {
-        return Ok(Vec::new());
-    };
-    let Some(content) = invocation.input.get("content").and_then(Value::as_str) else {
-        return Ok(Vec::new());
-    };
+    match diff_strategy {
+        ToolDiffStrategy::None => Ok(Vec::new()),
+        ToolDiffStrategy::FileWrite => {
+            let Some(path) = invocation.input.get("path").and_then(Value::as_str) else {
+                return Ok(Vec::new());
+            };
+            let Some(content) = invocation.input.get("content").and_then(Value::as_str) else {
+                return Ok(Vec::new());
+            };
 
-    let file_path = resolve_sandbox_path(sandbox_root, path)?;
-    let before = read_existing_text_file(&file_path).await?;
+            let file_path = resolve_sandbox_path(sandbox_root, path)?;
+            let before = read_existing_text_file(&file_path)
+                .await?
+                .unwrap_or_default();
 
-    Ok(vec![ApprovalFileDiff {
-        path: path.to_string(),
-        before,
-        after: content.to_string(),
-        language_hint: language_hint_for_path(path),
-    }])
+            Ok(vec![ApprovalFileDiff {
+                path: path.to_string(),
+                before,
+                after: content.to_string(),
+                language_hint: language_hint_for_path(path),
+            }])
+        }
+        ToolDiffStrategy::StrReplace => {
+            let Some(path) = invocation.input.get("path").and_then(Value::as_str) else {
+                return Ok(Vec::new());
+            };
+            let file_path = resolve_sandbox_path(sandbox_root, path)?;
+            let before = read_existing_text_file(&file_path).await?;
+            let input = serde_json::to_string(&invocation.input)?;
+            let planned = match plan_str_replace(input.as_str(), before.as_deref(), path, 4) {
+                Ok(planned) => planned,
+                Err(_) => {
+                    let fallback_before = invocation
+                        .input
+                        .get("old_str")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let fallback_after = invocation
+                        .input
+                        .get("new_str")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    crate::tools::str_replace::PlannedStrReplace {
+                        updated_content: String::new(),
+                        message: String::new(),
+                        preview_before: fallback_before,
+                        preview_after: fallback_after,
+                    }
+                }
+            };
+
+            Ok(vec![ApprovalFileDiff {
+                path: path.to_string(),
+                before: planned.preview_before,
+                after: planned.preview_after,
+                language_hint: language_hint_for_path(path),
+            }])
+        }
+    }
 }
 
-async fn read_existing_text_file(path: &Path) -> Result<String> {
+async fn read_existing_text_file(path: &Path) -> Result<Option<String>> {
     match fs::read(path).await {
-        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(String::new()),
+        Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
