@@ -11,6 +11,8 @@ mod openai_responses;
 mod provider_tools;
 mod retry;
 mod schema;
+#[cfg(any(test, feature = "test-util"))]
+pub mod scripted;
 mod sse;
 
 pub use anthropic::AnthropicProvider;
@@ -21,3 +23,5 @@ pub use factory::{
 pub use gemini::GeminiProvider;
 pub use models::{CATALOG, ProviderModel, by_provider, context_window, find};
 pub use openai::OpenAIProvider;
+#[cfg(any(test, feature = "test-util"))]
+pub use scripted::{ScriptedBlock, ScriptedProvider, ScriptedResponse};

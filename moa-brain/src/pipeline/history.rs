@@ -40,6 +40,12 @@ impl HistoryCompiler {
         }
     }
 
+    /// Overrides the compaction and replay-window settings used during history compilation.
+    pub fn with_compaction_config(mut self, compaction: CompactionConfig) -> Self {
+        self.compaction = compaction;
+        self
+    }
+
     /// Creates a history compiler that can emit reversible checkpoint summaries.
     pub fn with_compaction(
         session_store: Arc<dyn SessionStore>,

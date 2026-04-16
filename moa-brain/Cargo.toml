@@ -20,6 +20,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 moa-memory = { path = "../moa-memory" }
-moa-providers = { path = "../moa-providers" }
+moa-providers = { path = "../moa-providers", features = ["test-util"] }
 moa-session = { path = "../moa-session" }
 tempfile = "3"

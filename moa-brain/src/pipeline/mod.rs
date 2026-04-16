@@ -233,6 +233,7 @@ pub fn build_default_pipeline_with_runtime_and_instructions(
     } else {
         Box::new(
             HistoryCompiler::new(session_store.clone())
+                .with_compaction_config(config.compaction.clone())
                 .with_tool_output_config(config.tool_output.clone()),
         )
     };

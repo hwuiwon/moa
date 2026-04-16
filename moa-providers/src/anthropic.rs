@@ -349,6 +349,18 @@ fn build_request_body(
     Ok(Value::Object(body))
 }
 
+#[cfg(any(test, feature = "test-util"))]
+/// Builds the Anthropic request body for inspection in integration tests without sending it.
+pub fn debug_build_request_body(
+    request: &CompletionRequest,
+    web_search_enabled: bool,
+) -> Result<Value> {
+    let requested_model = request.model.as_deref().unwrap_or(MODEL_SONNET_4_6);
+    let resolved_model = canonical_model_id(requested_model)?;
+    let capabilities = capabilities_for_model(&resolved_model)?;
+    build_request_body(request, &resolved_model, &capabilities, web_search_enabled)
+}
+
 fn anthropic_text_block(text: impl Into<String>) -> Value {
     json!({
         "type": "text",
