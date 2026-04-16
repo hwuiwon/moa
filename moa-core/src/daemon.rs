@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::types::{
-    ApprovalDecision, EventRecord, MemoryPath, MemorySearchResult, PageSummary, RuntimeEvent,
-    SessionFilter, SessionId, SessionMeta, SessionSummary, StartSessionRequest, WikiPage,
-    WorkspaceBudgetStatus, WorkspaceId,
+    ApprovalDecision, BroadcastChannel, EventRecord, MemoryPath, MemorySearchResult, PageSummary,
+    RuntimeEvent, SessionFilter, SessionId, SessionMeta, SessionSummary, StartSessionRequest,
+    WikiPage, WorkspaceBudgetStatus, WorkspaceId,
 };
 
 /// Compact session preview returned by the daemon for session-picker UIs.
@@ -205,6 +205,13 @@ pub enum DaemonStreamEvent {
     Ready,
     /// One runtime event for the observed session.
     Runtime(RuntimeEvent),
+    /// Runtime events were dropped because the subscriber lagged behind.
+    Gap {
+        /// Number of dropped messages.
+        count: u64,
+        /// Channel that lagged.
+        channel: BroadcastChannel,
+    },
     /// Observation stream failed server-side.
     Error(String),
 }

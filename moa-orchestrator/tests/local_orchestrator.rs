@@ -8,10 +8,11 @@ use chrono::Utc;
 use moa_core::{
     ApprovalRule, BrainOrchestrator, CompletionContent, CompletionRequest, CompletionResponse,
     CompletionStream, ConfidenceLevel, ContextMessage, Event, EventRange, EventType, LLMProvider,
-    MemoryPath, MemoryScope, MemoryStore, MessageRole, MoaConfig, MoaError, PageType, Platform,
-    PolicyAction, PolicyScope, Result, RuntimeEvent, SessionFilter, SessionHandle, SessionId,
-    SessionMeta, SessionSignal, SessionStatus, SessionStore, StartSessionRequest, TokenPricing,
-    TokenUsage, ToolCallFormat, ToolOutput, UserId, UserMessage, WikiPage, WorkspaceId,
+    LiveEvent, MemoryPath, MemoryScope, MemoryStore, MessageRole, MoaConfig, MoaError, PageType,
+    Platform, PolicyAction, PolicyScope, Result, RuntimeEvent, SessionFilter, SessionHandle,
+    SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, StartSessionRequest,
+    TokenPricing, TokenUsage, ToolCallFormat, ToolOutput, UserId, UserMessage, WikiPage,
+    WorkspaceId,
 };
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_memory::FileMemoryStore;
@@ -2115,6 +2116,32 @@ async fn observe_stream_receives_events_in_order() -> Result<()> {
     let fifth = stream.next().await.transpose()?.ok_or_else(|| {
         moa_core::MoaError::ProviderError("missing fifth observed event".to_string())
     })?;
+
+    let LiveEvent::Event(first) = first else {
+        return Err(moa_core::MoaError::ProviderError(
+            "unexpected gap marker for first observed event".to_string(),
+        ));
+    };
+    let LiveEvent::Event(second) = second else {
+        return Err(moa_core::MoaError::ProviderError(
+            "unexpected gap marker for second observed event".to_string(),
+        ));
+    };
+    let LiveEvent::Event(third) = third else {
+        return Err(moa_core::MoaError::ProviderError(
+            "unexpected gap marker for third observed event".to_string(),
+        ));
+    };
+    let LiveEvent::Event(fourth) = fourth else {
+        return Err(moa_core::MoaError::ProviderError(
+            "unexpected gap marker for fourth observed event".to_string(),
+        ));
+    };
+    let LiveEvent::Event(fifth) = fifth else {
+        return Err(moa_core::MoaError::ProviderError(
+            "unexpected gap marker for fifth observed event".to_string(),
+        ));
+    };
 
     assert_eq!(first.sequence_num, 0);
     assert_eq!(first.event_type, EventType::SessionCreated);

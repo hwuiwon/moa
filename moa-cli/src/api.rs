@@ -13,7 +13,10 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::stream::Stream;
-use moa_core::{BrainOrchestrator, RuntimeEvent, SessionId};
+use moa_core::{
+    BrainOrchestrator, BroadcastChannel, LagPolicy, RecvResult, RuntimeEvent, SessionId,
+    recv_with_lag_handling,
+};
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
@@ -73,22 +76,28 @@ async fn session_stream(
     let session_id = SessionId(Uuid::parse_str(&session_id).map_err(|_| StatusCode::BAD_REQUEST)?);
     let receiver = state
         .orchestrator
-        .observe_runtime(session_id)
+        .observe_runtime(session_id.clone())
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let event_stream = runtime_event_stream(receiver);
+    let event_stream = runtime_event_stream(session_id, receiver);
     Ok(Sse::new(event_stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
 fn runtime_event_stream(
+    session_id: SessionId,
     mut receiver: broadcast::Receiver<RuntimeEvent>,
 ) -> impl Stream<Item = Result<SseEvent, Infallible>> {
     stream! {
         loop {
-            match receiver.recv().await {
-                Ok(event) => {
+            match recv_with_lag_handling(
+                &mut receiver,
+                BroadcastChannel::Runtime,
+                &session_id,
+                LagPolicy::SkipWithGap,
+            ).await {
+                RecvResult::Message(event) => {
                     let payload = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
                     yield Ok(
                         SseEvent::default()
@@ -96,10 +105,19 @@ fn runtime_event_stream(
                             .data(payload),
                     );
                 }
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(skipped, "runtime SSE observer lagged behind broadcast buffer");
+                RecvResult::Gap { count } | RecvResult::BackfillRequested { count } => {
+                    let payload = serde_json::to_string(&json!({
+                        "count": count,
+                        "channel": BroadcastChannel::Runtime.as_str(),
+                    }))
+                    .unwrap_or_else(|_| "{}".to_string());
+                    yield Ok(
+                        SseEvent::default()
+                            .event("gap")
+                            .data(payload),
+                    );
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
+                RecvResult::AbortRequested | RecvResult::Closed => break,
             }
         }
     }
@@ -302,6 +320,43 @@ mod tests {
         assert!(first_text.contains("data:"));
         assert!(second_text.contains("assistant_started"));
         assert!(second_text.contains("data:"));
+
+        server.abort();
+        let _ = server.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_stream_emits_gap_event_when_runtime_subscriber_lags() -> Result<()> {
+        let (runtime_tx, _) = broadcast::channel(4);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let router = build_api_router(ApiState {
+            orchestrator: Arc::new(StubOrchestrator {
+                runtime_tx: runtime_tx.clone(),
+                supports_runtime_stream: true,
+            }),
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+
+        let session_id = SessionId::new();
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/sessions/{session_id}/stream"))
+            .send()
+            .await?;
+        let mut stream = response.bytes_stream();
+
+        for _ in 0..20 {
+            let _ = runtime_tx.send(RuntimeEvent::AssistantStarted);
+        }
+
+        let chunk = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("gap SSE chunk should arrive")
+            .expect("stream should produce a chunk")?;
+        let text = String::from_utf8_lossy(&chunk).to_string();
+        assert!(text.contains("event: gap"));
+        assert!(text.contains("\"count\":16"));
 
         server.abort();
         let _ = server.await;

@@ -1,5 +1,6 @@
 //! Shared MOA types, traits, configuration, and error definitions.
 
+pub mod broadcast_recv;
 pub mod config;
 pub mod daemon;
 pub mod error;
@@ -13,6 +14,7 @@ pub mod turn_latency;
 pub mod types;
 pub mod workspace;
 
+pub use broadcast_recv::{RecvResult, recv_with_lag_handling};
 pub use config::{
     CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, CompactionConfig,
     DaemonConfig, DatabaseBackend, DatabaseConfig, DatabaseNeonConfig, GatewayConfig,

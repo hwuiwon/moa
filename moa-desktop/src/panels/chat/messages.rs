@@ -198,6 +198,16 @@ pub fn events_to_messages(records: &[EventRecord]) -> Vec<ChatMessage> {
     out
 }
 
+/// Returns a transient system row explaining that live runtime updates were dropped.
+pub fn gap_message(count: u64) -> ChatMessage {
+    ChatMessage::System {
+        text: format!(
+            "… {count} events missed (subscriber was behind; see session log for full history) …"
+        ),
+        timestamp: Utc::now(),
+    }
+}
+
 fn render_non_tool(event: &Event, timestamp: DateTime<Utc>) -> Option<ChatMessage> {
     match event {
         Event::UserMessage { text, .. } | Event::QueuedMessage { text, .. } => {

@@ -409,7 +409,7 @@ impl LocalChatRuntime {
                 )
             })?;
         self.queue_message(self.session_id.clone(), prompt).await?;
-        relay_runtime_events(&mut runtime_rx, event_tx, true).await
+        relay_runtime_events(&mut runtime_rx, &self.session_id, event_tx, true).await
     }
 
     /// Sends an approval decision to the active session.

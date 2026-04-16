@@ -8,7 +8,7 @@ use gpui::{
     SharedString, Styled, Task, Window, div, prelude::*, px,
 };
 use gpui_component::ActiveTheme;
-use moa_core::{Event, EventRecord, SessionId, SessionSummary};
+use moa_core::{Event, EventRecord, LiveEvent, SessionId, SessionSummary};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -188,16 +188,32 @@ impl DetailPanel {
                 let mut batcher = StreamBatcher::new(BATCH_INTERVAL);
                 while let Some(session_event) = rx.recv().await {
                     received_any = true;
-                    if let Some(_batch) = batcher.push(session_event.event)
-                        && weak
-                            .update(cx, |this, cx| {
-                                this.reload_events(cx);
-                                this.refresh_summary(cx);
-                            })
-                            .is_err()
-                    {
-                        observer.abort();
-                        return;
+                    match session_event.event {
+                        LiveEvent::Event(event) => {
+                            if let Some(_batch) = batcher.push(event)
+                                && weak
+                                    .update(cx, |this, cx| {
+                                        this.reload_events(cx);
+                                        this.refresh_summary(cx);
+                                    })
+                                    .is_err()
+                            {
+                                observer.abort();
+                                return;
+                            }
+                        }
+                        LiveEvent::Gap { .. } => {
+                            if weak
+                                .update(cx, |this, cx| {
+                                    this.reload_events(cx);
+                                    this.refresh_summary(cx);
+                                })
+                                .is_err()
+                            {
+                                observer.abort();
+                                return;
+                            }
+                        }
                     }
                 }
                 // Avoid leaking the observer task across reconnect iterations.

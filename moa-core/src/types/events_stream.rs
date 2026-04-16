@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::broadcast_recv::{RecvResult, recv_with_lag_handling};
 use crate::error::{MoaError, Result};
 use crate::events::Event;
 
@@ -192,44 +193,120 @@ pub struct EventStream {
     /// Buffered events currently available in the stream.
     pub events: Vec<EventRecord>,
     #[serde(skip)]
+    session_id: Option<SessionId>,
+    #[serde(skip)]
     receiver: Option<broadcast::Receiver<EventRecord>>,
     #[serde(skip)]
     cursor: usize,
+    #[serde(skip)]
+    last_sequence_num: Option<SequenceNum>,
+    #[serde(skip)]
+    lag_policy: LagPolicy,
+}
+
+/// Policy used when a broadcast subscriber falls behind the live buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LagPolicy {
+    /// Skip missed events, emit a gap marker, and continue.
+    #[default]
+    SkipWithGap,
+    /// Ask the caller to backfill from durable storage before continuing.
+    BackfillFromStore,
+    /// Abort the stream when lag is detected.
+    Abort,
+}
+
+/// Broadcast channel kinds used by live MOA observers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BroadcastChannel {
+    /// Session event-log live updates.
+    Event,
+    /// Session runtime/UI live updates.
+    Runtime,
+}
+
+impl BroadcastChannel {
+    /// Returns the stable metric/log label for this channel.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Event => "event",
+            Self::Runtime => "runtime",
+        }
+    }
+}
+
+/// One live stream item: either an event payload or a typed lag marker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveEvent<T> {
+    /// One event delivered in-order from buffered history or the live channel.
+    Event(T),
+    /// The subscriber fell behind and missed `count` messages.
+    Gap {
+        /// Number of dropped messages reported by the broadcast channel.
+        count: u64,
+        /// Channel that lagged.
+        channel: BroadcastChannel,
+        /// First sequence number the caller should reload from when backfilling.
+        since_seq: Option<SequenceNum>,
+    },
 }
 
 impl EventStream {
     /// Creates an event stream from buffered historical events.
     pub fn from_events(events: Vec<EventRecord>) -> Self {
+        let session_id = events.first().map(|record| record.session_id.clone());
         Self {
             events,
+            session_id,
             receiver: None,
             cursor: 0,
+            last_sequence_num: None,
+            lag_policy: LagPolicy::default(),
         }
     }
 
     /// Creates an event stream backed by a live broadcast receiver.
-    pub fn from_broadcast(receiver: broadcast::Receiver<EventRecord>) -> Self {
+    pub fn from_broadcast(
+        session_id: SessionId,
+        receiver: broadcast::Receiver<EventRecord>,
+    ) -> Self {
         Self {
             events: Vec::new(),
+            session_id: Some(session_id),
             receiver: Some(receiver),
             cursor: 0,
+            last_sequence_num: None,
+            lag_policy: LagPolicy::default(),
         }
     }
 
     /// Creates an event stream from buffered history plus live broadcast updates.
     pub fn from_history_and_broadcast(
+        session_id: SessionId,
         events: Vec<EventRecord>,
         receiver: broadcast::Receiver<EventRecord>,
     ) -> Self {
         Self {
             events,
+            session_id: Some(session_id),
             receiver: Some(receiver),
             cursor: 0,
+            last_sequence_num: None,
+            lag_policy: LagPolicy::default(),
         }
     }
 
+    /// Returns a clone of this stream that uses the supplied lag policy.
+    pub fn with_lag_policy(mut self, lag_policy: LagPolicy) -> Self {
+        self.lag_policy = lag_policy;
+        self
+    }
+
     /// Receives the next buffered or live event from the stream.
-    pub async fn next(&mut self) -> Option<Result<EventRecord>> {
+    pub async fn next(&mut self) -> Option<Result<LiveEvent<EventRecord>>> {
         if self.cursor < self.events.len() {
             let event = self.events[self.cursor].clone();
             self.cursor += 1;
@@ -237,20 +314,38 @@ impl EventStream {
                 self.events.clear();
                 self.cursor = 0;
             }
-            return Some(Ok(event));
+            self.last_sequence_num = Some(event.sequence_num);
+            return Some(Ok(LiveEvent::Event(event)));
         }
 
         match &mut self.receiver {
-            Some(receiver) => match receiver.recv().await {
-                Ok(event) => Some(Ok(event)),
-                Err(broadcast::error::RecvError::Closed) => None,
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(skipped, "event stream lagged behind live broadcast");
-                    Some(Err(MoaError::StreamError(format!(
-                        "event stream lagged by {skipped} messages"
-                    ))))
+            Some(receiver) => {
+                let session_id = self.session_id.clone().unwrap_or_default();
+                match recv_with_lag_handling(
+                    receiver,
+                    BroadcastChannel::Event,
+                    &session_id,
+                    self.lag_policy,
+                )
+                .await
+                {
+                    RecvResult::Message(event) => {
+                        self.last_sequence_num = Some(event.sequence_num);
+                        Some(Ok(LiveEvent::Event(event)))
+                    }
+                    RecvResult::Gap { count } | RecvResult::BackfillRequested { count } => {
+                        Some(Ok(LiveEvent::Gap {
+                            count,
+                            channel: BroadcastChannel::Event,
+                            since_seq: self.last_sequence_num.map(|seq| seq.saturating_add(1)),
+                        }))
+                    }
+                    RecvResult::AbortRequested => Some(Err(MoaError::StreamError(
+                        "event stream aborted after lagging behind live broadcast".to_string(),
+                    ))),
+                    RecvResult::Closed => None,
                 }
-            },
+            }
             None => None,
         }
     }
@@ -260,8 +355,11 @@ impl Clone for EventStream {
     fn clone(&self) -> Self {
         Self {
             events: self.events.clone(),
+            session_id: self.session_id.clone(),
             receiver: self.receiver.as_ref().map(broadcast::Receiver::resubscribe),
             cursor: self.cursor,
+            last_sequence_num: self.last_sequence_num,
+            lag_policy: self.lag_policy,
         }
     }
 }
@@ -276,14 +374,20 @@ impl fmt::Debug for EventStream {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("EventStream")
             .field("events", &self.events)
+            .field("session_id", &self.session_id)
             .field("live", &self.receiver.is_some())
+            .field("lag_policy", &self.lag_policy)
             .finish()
     }
 }
 
 impl PartialEq for EventStream {
     fn eq(&self, other: &Self) -> bool {
-        self.events == other.events && self.cursor == other.cursor
+        self.events == other.events
+            && self.session_id == other.session_id
+            && self.cursor == other.cursor
+            && self.last_sequence_num == other.last_sequence_num
+            && self.lag_policy == other.lag_policy
     }
 }
 
@@ -293,15 +397,70 @@ mod tests {
     use tokio::sync::broadcast;
     use uuid::Uuid;
 
-    use super::{EventRecord, EventStream, EventType, SessionId};
-    use crate::error::MoaError;
+    use super::{
+        BroadcastChannel, EventRecord, EventStream, EventType, LagPolicy, LiveEvent, SessionId,
+    };
     use crate::events::Event;
 
     #[tokio::test]
-    async fn event_stream_reports_lagged_broadcasts() {
+    async fn event_stream_emits_gap_marker_when_lagged() {
         let (tx, rx) = broadcast::channel(1);
-        let mut stream = EventStream::from_broadcast(rx);
         let session_id = SessionId::new();
+        let mut stream = EventStream::from_broadcast(session_id.clone(), rx)
+            .with_lag_policy(LagPolicy::SkipWithGap);
+
+        let first = EventRecord {
+            id: Uuid::now_v7(),
+            session_id: session_id.clone(),
+            sequence_num: 0,
+            event_type: EventType::Warning,
+            event: Event::Warning {
+                message: "first".to_string(),
+            },
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        };
+        let second = EventRecord {
+            id: Uuid::now_v7(),
+            session_id,
+            sequence_num: 1,
+            event_type: EventType::Warning,
+            event: Event::Warning {
+                message: "second".to_string(),
+            },
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        };
+
+        let _ = tx.send(first);
+        let _ = tx.send(second);
+
+        let live = stream
+            .next()
+            .await
+            .transpose()
+            .expect("lagged broadcast should emit a stream item")
+            .expect("lagged stream item should not be an error");
+        assert_eq!(
+            live,
+            LiveEvent::Gap {
+                count: 1,
+                channel: BroadcastChannel::Event,
+                since_seq: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn event_stream_abort_policy_surfaces_error() {
+        let (tx, rx) = broadcast::channel(1);
+        let session_id = SessionId::new();
+        let mut stream =
+            EventStream::from_broadcast(session_id.clone(), rx).with_lag_policy(LagPolicy::Abort);
 
         let first = EventRecord {
             id: Uuid::now_v7(),
@@ -337,7 +496,9 @@ mod tests {
             .next()
             .await
             .transpose()
-            .expect_err("lagged broadcast should surface an error");
-        assert!(matches!(error, MoaError::StreamError(message) if message.contains("lagged")));
+            .expect_err("abort policy should surface lag as an error");
+        assert!(
+            matches!(error, crate::MoaError::StreamError(message) if message.contains("aborted"))
+        );
     }
 }

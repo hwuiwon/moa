@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use moa_core::{
-    BrainOrchestrator, DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview,
-    DaemonStreamEvent, EventRange, MemoryScope, MemoryStore, MoaConfig, RuntimeEvent,
-    SessionFilter, SessionStatus, SessionStore, WorkspaceBudgetStatus,
+    BrainOrchestrator, BroadcastChannel, DaemonCommand, DaemonInfo, DaemonReply,
+    DaemonSessionPreview, DaemonStreamEvent, EventRange, LagPolicy, MemoryScope, MemoryStore,
+    MoaConfig, RecvResult, RuntimeEvent, SessionFilter, SessionId, SessionStatus, SessionStore,
+    WorkspaceBudgetStatus, recv_with_lag_handling,
 };
 use moa_orchestrator::LocalOrchestrator;
 use moa_session::SessionDatabase;
@@ -221,10 +222,10 @@ async fn handle_connection(
             write_stream_event(reader.get_mut(), &DaemonStreamEvent::Ready).await?;
             let receiver: tokio::sync::broadcast::Receiver<RuntimeEvent> = state
                 .orchestrator
-                .observe_runtime(session_id)
+                .observe_runtime(session_id.clone())
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("runtime observation is unavailable"))?;
-            relay_runtime_stream(reader.get_mut(), receiver).await?;
+            relay_runtime_stream(session_id, reader.get_mut(), receiver).await?;
             Ok(())
         }
         other => {
@@ -235,18 +236,33 @@ async fn handle_connection(
 }
 
 async fn relay_runtime_stream(
+    session_id: SessionId,
     stream: &mut UnixStream,
     mut receiver: tokio::sync::broadcast::Receiver<RuntimeEvent>,
 ) -> Result<()> {
     loop {
-        match receiver.recv().await {
-            Ok(event) => {
+        match recv_with_lag_handling(
+            &mut receiver,
+            BroadcastChannel::Runtime,
+            &session_id,
+            LagPolicy::SkipWithGap,
+        )
+        .await
+        {
+            RecvResult::Message(event) => {
                 write_stream_event(stream, &DaemonStreamEvent::Runtime(event)).await?;
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                tracing::warn!(skipped, "daemon observation receiver lagged");
+            RecvResult::Gap { count } | RecvResult::BackfillRequested { count } => {
+                write_stream_event(
+                    stream,
+                    &DaemonStreamEvent::Gap {
+                        count,
+                        channel: BroadcastChannel::Runtime,
+                    },
+                )
+                .await?;
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+            RecvResult::AbortRequested | RecvResult::Closed => return Ok(()),
         }
     }
 }
