@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use moa_brain::{TurnResult, build_default_pipeline_with_tools, run_brain_turn_with_tools};
 use moa_core::{
-    CompletionRequest, CountedSessionStore, Event, EventRange, EventRecord, MemoryPath,
+    CacheTtl, CompletionRequest, CountedSessionStore, Event, EventRange, EventRecord, MemoryPath,
     MemoryScope, MemorySearchResult, MemoryStore, ModelCapabilities, PageSummary, PageType, Result,
     SessionMeta, SessionStore, TokenPricing, TokenUsage, ToolCallFormat, ToolOutput,
     TurnReplayCounters, TurnReplaySnapshot, UserId, WikiPage, WorkspaceId,
@@ -337,31 +337,25 @@ async fn steps_72_77_e2e() -> Result<()> {
         workspace.display()
     )));
     let turn_six_body = debug_build_request_body(&turn_six_request, false)?;
-    let system_cache_marker = turn_six_body["system"].as_array().and_then(|blocks| {
-        blocks.iter().find_map(|block| {
-            block
-                .get("cache_control")
-                .and_then(|value| value.get("type"))
-                .and_then(Value::as_str)
-        })
-    });
-    assert!(
-        system_cache_marker == Some("ephemeral"),
-        "expected system cache marker on turn-six request; breakpoints={:?}, tool_count={}, body={turn_six_body:#}",
+    let cache_control_ttls = collect_cache_control_ttls(&turn_six_body);
+    assert_eq!(
+        cache_control_ttls,
+        vec!["1h", "1h", "1h", "5m"],
+        "expected 3 static 1h markers plus 1 rolling 5m conversation marker; breakpoints={:?}, controls={:?}, body={turn_six_body:#}",
         turn_six_request.cache_breakpoints,
-        turn_six_request.tools.len(),
+        turn_six_request.cache_controls,
     );
-    let tool_cache_marker = turn_six_body["tools"]
-        .as_array()
-        .and_then(|blocks| blocks.last())
-        .and_then(|block| block.get("cache_control"))
-        .and_then(|value| value.get("type"))
-        .and_then(Value::as_str);
+    assert_eq!(
+        turn_six_request.cache_controls.len(),
+        4,
+        "expected exactly four explicit cache controls"
+    );
     assert!(
-        tool_cache_marker == Some("ephemeral"),
-        "expected tool cache marker on turn-six request; breakpoints={:?}, tool_count={}, body={turn_six_body:#}",
-        turn_six_request.cache_breakpoints,
-        turn_six_request.tools.len(),
+        turn_six_request
+            .cache_controls
+            .iter()
+            .any(|breakpoint| breakpoint.ttl == moa_core::CacheTtl::FiveMinutes),
+        "expected one short-lived conversation cache breakpoint"
     );
 
     let turn_seven_request = requests
@@ -541,17 +535,71 @@ fn last_user_message(request: &CompletionRequest) -> Option<&str> {
 }
 
 fn stable_prefix_bytes(request: &CompletionRequest) -> Result<Vec<u8>> {
-    let stable_message_count = request
-        .cache_breakpoints
-        .last()
-        .copied()
-        .unwrap_or_default()
-        .min(request.messages.len());
+    let stable_message_count = static_prefix_message_count(request);
     serde_json::to_vec(&json!({
         "messages": request.messages[..stable_message_count],
         "tools": request.tools,
     }))
     .map_err(Into::into)
+}
+
+fn static_prefix_message_count(request: &CompletionRequest) -> usize {
+    request
+        .cache_controls
+        .iter()
+        .filter(|breakpoint| breakpoint.ttl == CacheTtl::OneHour)
+        .filter_map(|breakpoint| breakpoint.message_index())
+        .max()
+        .or_else(|| request.cache_breakpoints.last().copied())
+        .unwrap_or_default()
+        .min(request.messages.len())
+}
+
+fn collect_cache_control_ttls(body: &Value) -> Vec<&str> {
+    let mut ttls = Vec::new();
+
+    if let Some(system) = body["system"].as_array() {
+        for block in system {
+            if let Some(ttl) = block
+                .get("cache_control")
+                .and_then(|value| value.get("ttl"))
+                .and_then(Value::as_str)
+            {
+                ttls.push(ttl);
+            }
+        }
+    }
+
+    if let Some(tools) = body["tools"].as_array() {
+        for tool in tools {
+            if let Some(ttl) = tool
+                .get("cache_control")
+                .and_then(|value| value.get("ttl"))
+                .and_then(Value::as_str)
+            {
+                ttls.push(ttl);
+            }
+        }
+    }
+
+    if let Some(messages) = body["messages"].as_array() {
+        for message in messages {
+            if let Some(content) = message["content"].as_array() {
+                for block in content {
+                    if let Some(ttl) = block
+                        .get("cache_control")
+                        .and_then(|value| value.get("ttl"))
+                        .and_then(Value::as_str)
+                    {
+                        ttls.push(ttl);
+                    }
+                }
+            }
+        }
+    }
+
+    ttls.sort_unstable();
+    ttls
 }
 
 #[derive(Debug, Clone)]

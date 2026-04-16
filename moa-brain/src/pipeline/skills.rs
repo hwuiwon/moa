@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    ContextProcessor, MemoryStore, PageType, ProcessorOutput, Result, SkillMetadata, WorkingContext,
+    CacheTtl, ContextProcessor, MemoryStore, PageType, ProcessorOutput, Result, SkillMetadata,
+    WorkingContext,
 };
 use serde_json::Value;
 
@@ -64,7 +65,7 @@ If one of these skills is clearly relevant and you need the exact workflow, call
             ctx.append_system(section);
         }
 
-        ctx.mark_cache_breakpoint();
+        ctx.mark_cache_breakpoint_with_ttl(CacheTtl::OneHour);
 
         Ok(ProcessorOutput {
             tokens_added: ctx.token_count.saturating_sub(tokens_before),

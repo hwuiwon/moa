@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_brain::{TurnResult, build_default_pipeline_with_tools, run_brain_turn_with_tools};
 use moa_core::{
-    CompletionRequest, Event, MemoryPath, MemoryScope, MemorySearchResult, MemoryStore,
+    CacheTtl, CompletionRequest, Event, MemoryPath, MemoryScope, MemorySearchResult, MemoryStore,
     ModelCapabilities, PageSummary, PageType, Result, SessionMeta, SessionStore, TokenPricing,
     ToolCallFormat, UserId, WikiPage, WorkspaceId,
 };
@@ -219,9 +219,12 @@ fn extend_tool_schemas(mut schemas: Vec<serde_json::Value>) -> Vec<serde_json::V
 
 fn stable_prefix_bytes(request: &CompletionRequest) -> Result<Vec<u8>> {
     let stable_message_count = request
-        .cache_breakpoints
-        .last()
-        .copied()
+        .cache_controls
+        .iter()
+        .filter(|breakpoint| breakpoint.ttl == CacheTtl::OneHour)
+        .filter_map(|breakpoint| breakpoint.message_index())
+        .max()
+        .or_else(|| request.cache_breakpoints.last().copied())
         .unwrap_or_default()
         .min(request.messages.len());
     serde_json::to_vec(&json!({

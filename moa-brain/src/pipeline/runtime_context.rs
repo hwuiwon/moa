@@ -11,6 +11,7 @@ use moa_core::{
 use tokio::process::Command;
 
 use super::estimate_tokens;
+use super::memory::MEMORY_REMINDER_PREFIX;
 
 pub(crate) const WORKSPACE_ROOT_METADATA_KEY: &str = "_moa.runtime.workspace_root";
 
@@ -143,7 +144,12 @@ fn workspace_root_from_context(ctx: &WorkingContext) -> Option<PathBuf> {
 
 fn runtime_context_insertion_index(messages: &[ContextMessage]) -> usize {
     let mut insertion_index = messages.len();
-    while insertion_index > 0 && messages[insertion_index - 1].role == MessageRole::User {
+    while insertion_index > 0
+        && messages[insertion_index - 1].role == MessageRole::User
+        && !messages[insertion_index - 1]
+            .content
+            .starts_with(MEMORY_REMINDER_PREFIX)
+    {
         insertion_index -= 1;
     }
     insertion_index

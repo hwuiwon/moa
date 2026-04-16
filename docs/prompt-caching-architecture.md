@@ -9,14 +9,12 @@ static for identical session inputs.
 
 ### Stable Prefix
 
-The cached prompt prefix is produced by the static pipeline stages:
+The long-lived static prefix is produced by the byte-stable pipeline stages:
 
 1. `IdentityProcessor`
 2. `InstructionProcessor`
 3. `ToolDefinitionProcessor`
 4. `SkillInjector`
-5. `MemoryRetriever`
-6. `HistoryCompiler`
 
 These stages must not render per-turn dynamic values such as:
 
@@ -30,11 +28,32 @@ These stages must not render per-turn dynamic values such as:
 If a stage above needs to reference dynamic runtime state, it should use a
 placeholder in static text and rely on the runtime reminder described below.
 
+### Rolling Conversation Prefix
+
+Conversation history is cached separately from the static prefix.
+
+MOA uses four logical cache regions:
+
+1. `BP1` — identity + guardrails (`1h`)
+2. `BP2` — workspace instructions + skills (`1h`)
+3. `BP3` — tool definitions (`1h`)
+4. `BP4` — the last frozen assistant/tool message in conversation history (`5m`)
+
+`BP4` rolls forward as the conversation grows so that the cached conversation
+tail stays within Anthropic's 20-block lookback window. The deepest breakpoint
+is therefore not the static prefix; it is the rolling conversation prefix.
+
 ### Dynamic Tail
 
-All per-turn runtime state belongs in `RuntimeContextProcessor`.
+All per-turn runtime state belongs in the dynamic tail:
 
-That processor emits a single trailing user-role message in the form:
+- `HistoryCompiler` emits the replayed conversation before the dynamic tail.
+- `MemoryRetriever` injects relevant memory after history and before the active
+  user turn.
+- `RuntimeContextProcessor` emits the runtime reminder immediately before the
+  current user turn.
+
+`RuntimeContextProcessor` emits a single trailing user-role message in the form:
 
 ```text
 <system-reminder>
@@ -46,15 +65,28 @@ Current user: alice
 </system-reminder>
 ```
 
-This reminder is inserted after the cached prefix boundary and before the
-current user turn. That keeps the system prompt byte-stable while still giving
-the model the runtime facts it needs for the active turn.
+This reminder is inserted after the cacheable static and conversation prefix
+boundaries and before the current user turn. That keeps the early prompt
+byte-stable while still giving the model the runtime facts it needs for the
+active turn.
+
+### Provider Mapping
+
+- Anthropic uses explicit `cache_control` markers with `1h` and `5m` TTLs.
+- OpenAI does not use message-level breakpoints, but it benefits from the same
+  prompt layout because prompt caching matches exact prefixes. MOA should keep
+  the static prefix stable and the dynamic tail at the end, and provide a
+  stable `prompt_cache_key` for repeated prefixes.
+- Gemini benefits from the same prompt layout for implicit caching. Explicit
+  Gemini cached-content resources are a separate optimization and should not be
+  mixed into the byte-stable prompt stages.
 
 ### Rules For Future Changes
 
 When adding prompt content:
 
 - Put static instructions in the early pipeline stages.
+- Keep replayed history before memory and runtime context.
 - Put dynamic session or turn state in `RuntimeContextProcessor`.
 - Keep tool definitions sorted deterministically by tool name.
 - Keep rendered skill metadata sorted deterministically by skill name.

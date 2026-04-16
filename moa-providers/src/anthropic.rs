@@ -13,10 +13,10 @@ use std::time::{Duration, Instant};
 use eventsource_stream::{Event as SseEvent, Eventsource};
 use futures_util::{Stream, StreamExt, pin_mut};
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
-    LLMProvider, MessageRole, MoaConfig, MoaError, ModelCapabilities, ProviderNativeTool, Result,
-    StopReason, TokenPricing, TokenUsage, ToolCallFormat, ToolContent, ToolInvocation,
-    estimate_text_tokens,
+    CacheBreakpoint, CacheBreakpointTarget, CacheTtl, CompletionContent, CompletionRequest,
+    CompletionResponse, CompletionStream, ContextMessage, LLMProvider, MessageRole, MoaConfig,
+    MoaError, ModelCapabilities, ProviderNativeTool, Result, StopReason, TokenPricing, TokenUsage,
+    ToolCallFormat, ToolContent, ToolInvocation, estimate_text_tokens,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -376,71 +376,82 @@ fn apply_cache_breakpoints(
     messages: &mut [Value],
     tools: &mut [Value],
 ) {
-    let eligible_breakpoints = eligible_cache_breakpoints(request, MAX_CACHE_BREAKPOINTS);
-    let should_mark_tool_boundary =
-        should_annotate_tool_breakpoint(tools.len(), eligible_breakpoints.last().copied());
-    let tool_slots = usize::from(should_mark_tool_boundary);
-    let remaining_slots = MAX_CACHE_BREAKPOINTS.saturating_sub(tool_slots);
-
-    if should_mark_tool_boundary && let Some(last_tool) = tools.last_mut() {
-        annotate_cache_control(last_tool);
-    }
-
-    for breakpoint in eligible_breakpoints
-        .into_iter()
-        .rev()
-        .take(remaining_slots)
-        .rev()
-    {
-        let Some(target_index) = breakpoint.checked_sub(1) else {
-            continue;
-        };
-        let Some(target) = cache_targets.get(target_index).copied() else {
-            continue;
-        };
-
-        match target {
-            CacheTarget::System(index) => {
-                if let Some(block) = system_messages.get_mut(index) {
-                    annotate_cache_control(block);
+    for breakpoint in eligible_cache_breakpoints(request, MAX_CACHE_BREAKPOINTS) {
+        match breakpoint.target {
+            CacheBreakpointTarget::ToolDefinitions => {
+                if let Some(last_tool) = tools.last_mut() {
+                    annotate_cache_control(last_tool, breakpoint.ttl);
                 }
             }
-            CacheTarget::Message(index) => {
-                if let Some(message) = messages.get_mut(index) {
-                    annotate_message_cache_control(message);
+            CacheBreakpointTarget::MessageBoundary { index } => {
+                let Some(target_index) = index.checked_sub(1) else {
+                    continue;
+                };
+                let Some(target) = cache_targets.get(target_index).copied() else {
+                    continue;
+                };
+
+                match target {
+                    CacheTarget::System(index) => {
+                        if let Some(block) = system_messages.get_mut(index) {
+                            annotate_cache_control(block, breakpoint.ttl);
+                        }
+                    }
+                    CacheTarget::Message(index) => {
+                        if let Some(message) = messages.get_mut(index) {
+                            annotate_message_cache_control(message, breakpoint.ttl);
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-fn eligible_cache_breakpoints(request: &CompletionRequest, max_breakpoints: usize) -> Vec<usize> {
-    let mut requested = request
-        .cache_breakpoints
-        .iter()
-        .copied()
-        .filter(|breakpoint| *breakpoint > 0)
-        .collect::<Vec<_>>();
-    requested.sort_unstable();
-    requested.dedup();
-
+fn eligible_cache_breakpoints(
+    request: &CompletionRequest,
+    max_breakpoints: usize,
+) -> Vec<CacheBreakpoint> {
+    let mut requested = requested_cache_breakpoints(request);
     if requested.is_empty() || max_breakpoints == 0 {
         return Vec::new();
     }
 
+    requested.sort_by_key(cache_breakpoint_sort_key);
+    requested.dedup();
+
     let mut eligible = Vec::new();
-    let mut prefix_tokens = request
+    let tool_tokens = request
         .tools
         .iter()
         .map(|tool| estimate_text_tokens(&tool.to_string()))
         .sum::<usize>();
-    let mut next_breakpoint = 0;
+    let mut prefix_tokens = tool_tokens;
+    let mut next_breakpoint = 0usize;
+
+    while let Some(breakpoint) = requested.get(next_breakpoint).cloned() {
+        match breakpoint.target {
+            CacheBreakpointTarget::ToolDefinitions => {
+                if tool_tokens >= MIN_CACHEABLE_TOKENS {
+                    eligible.push(breakpoint);
+                }
+                next_breakpoint += 1;
+            }
+            CacheBreakpointTarget::MessageBoundary { .. } => break,
+        }
+    }
 
     for (index, message) in request.messages.iter().enumerate() {
         prefix_tokens += estimate_text_tokens(&message.content);
 
-        while let Some(breakpoint) = requested.get(next_breakpoint).copied() {
-            if breakpoint != index + 1 {
+        while let Some(breakpoint) = requested.get(next_breakpoint).cloned() {
+            let CacheBreakpointTarget::MessageBoundary {
+                index: breakpoint_index,
+            } = breakpoint.target
+            else {
+                break;
+            };
+            if breakpoint_index != index + 1 {
                 break;
             }
             if prefix_tokens >= MIN_CACHEABLE_TOKENS {
@@ -454,31 +465,44 @@ fn eligible_cache_breakpoints(request: &CompletionRequest, max_breakpoints: usiz
         .into_iter()
         .rev()
         .take(max_breakpoints)
-        .collect::<Vec<_>>()
-        .into_iter()
         .rev()
         .collect()
 }
 
-fn should_annotate_tool_breakpoint(tool_count: usize, deepest_breakpoint: Option<usize>) -> bool {
-    if tool_count == 0 {
-        return false;
+fn requested_cache_breakpoints(request: &CompletionRequest) -> Vec<CacheBreakpoint> {
+    if !request.cache_controls.is_empty() {
+        return request.cache_controls.clone();
     }
 
-    let Some(deepest_breakpoint) = deepest_breakpoint else {
-        return true;
-    };
-
-    tool_count + deepest_breakpoint > 20
+    request
+        .cache_breakpoints
+        .iter()
+        .copied()
+        .filter(|breakpoint| *breakpoint > 0)
+        .map(|index| CacheBreakpoint::message(index, CacheTtl::OneHour))
+        .collect()
 }
 
-fn annotate_cache_control(value: &mut Value) {
+fn cache_breakpoint_sort_key(breakpoint: &CacheBreakpoint) -> (usize, usize) {
+    match breakpoint.target {
+        CacheBreakpointTarget::ToolDefinitions => (0, 0),
+        CacheBreakpointTarget::MessageBoundary { index } => (1, index),
+    }
+}
+
+fn annotate_cache_control(value: &mut Value, ttl: CacheTtl) {
     if let Some(object) = value.as_object_mut() {
-        object.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
+        object.insert(
+            "cache_control".to_string(),
+            json!({
+                "type": "ephemeral",
+                "ttl": ttl.as_anthropic_ttl(),
+            }),
+        );
     }
 }
 
-fn annotate_message_cache_control(message: &mut Value) {
+fn annotate_message_cache_control(message: &mut Value, ttl: CacheTtl) {
     let Some(content) = message.get_mut("content") else {
         return;
     };
@@ -490,12 +514,12 @@ fn annotate_message_cache_control(message: &mut Value) {
             if let Some(blocks) = content.as_array_mut()
                 && let Some(last_block) = blocks.last_mut()
             {
-                annotate_cache_control(last_block);
+                annotate_cache_control(last_block, ttl);
             }
         }
         Value::Array(blocks) => {
             if let Some(last_block) = blocks.last_mut() {
-                annotate_cache_control(last_block);
+                annotate_cache_control(last_block, ttl);
             }
         }
         _ => {}
@@ -1199,7 +1223,8 @@ mod tests {
     use eventsource_stream::Eventsource;
     use futures_util::stream;
     use moa_core::{
-        CompletionContent, CompletionRequest, ContextMessage, LLMProvider, StopReason, ToolContent,
+        CacheBreakpoint, CacheTtl, CompletionContent, CompletionRequest, ContextMessage,
+        LLMProvider, StopReason, ToolContent,
     };
     use serde_json::json;
     use tokio::sync::mpsc;
@@ -1235,6 +1260,7 @@ mod tests {
             max_output_tokens: Some(512),
             temperature: Some(0.2),
             cache_breakpoints: Vec::new(),
+            cache_controls: Vec::new(),
             metadata: Default::default(),
         };
 
@@ -1279,6 +1305,7 @@ mod tests {
             max_output_tokens: Some(512),
             temperature: None,
             cache_breakpoints: vec![1],
+            cache_controls: vec![CacheBreakpoint::message(1, CacheTtl::OneHour)],
             metadata: Default::default(),
         };
 
@@ -1291,6 +1318,7 @@ mod tests {
         .expect("request should build");
 
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["system"][0]["cache_control"]["ttl"], "1h");
         assert!(body["tools"][0].get("cache_control").is_none());
     }
 
@@ -1306,6 +1334,7 @@ mod tests {
             max_output_tokens: Some(512),
             temperature: None,
             cache_breakpoints: vec![1],
+            cache_controls: vec![CacheBreakpoint::message(1, CacheTtl::FiveMinutes)],
             metadata: Default::default(),
         };
 
@@ -1320,6 +1349,10 @@ mod tests {
         assert_eq!(
             body["messages"][0]["content"][0]["cache_control"]["type"],
             "ephemeral"
+        );
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["ttl"],
+            "5m"
         );
     }
 
@@ -1349,6 +1382,13 @@ mod tests {
             max_output_tokens: Some(512),
             temperature: None,
             cache_breakpoints: vec![1, 2, 3, 4, 5],
+            cache_controls: vec![
+                CacheBreakpoint::tools(CacheTtl::OneHour),
+                CacheBreakpoint::message(1, CacheTtl::OneHour),
+                CacheBreakpoint::message(3, CacheTtl::OneHour),
+                CacheBreakpoint::message(5, CacheTtl::FiveMinutes),
+                CacheBreakpoint::message(6, CacheTtl::FiveMinutes),
+            ],
             metadata: Default::default(),
         };
 
@@ -1392,6 +1432,10 @@ mod tests {
             max_output_tokens: Some(512),
             temperature: None,
             cache_breakpoints: vec![1],
+            cache_controls: vec![
+                CacheBreakpoint::tools(CacheTtl::OneHour),
+                CacheBreakpoint::message(1, CacheTtl::OneHour),
+            ],
             metadata: Default::default(),
         };
 
@@ -1404,10 +1448,11 @@ mod tests {
         .expect("request should build");
 
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["tools"][0]["cache_control"]["ttl"], "1h");
     }
 
     #[test]
-    fn completion_request_marks_tool_boundary_when_static_prefix_exceeds_twenty_blocks() {
+    fn completion_request_marks_explicit_tool_breakpoint() {
         let request = CompletionRequest {
             model: Some(MODEL_SONNET_4_6.to_string()),
             messages: vec![
@@ -1418,7 +1463,7 @@ mod tests {
                 .map(|index| {
                     json!({
                         "name": format!("tool_{index}"),
-                        "description": "Run shell commands",
+                        "description": "Run shell commands ".repeat(80),
                         "input_schema": { "type": "object" }
                     })
                 })
@@ -1426,6 +1471,10 @@ mod tests {
             max_output_tokens: Some(512),
             temperature: None,
             cache_breakpoints: vec![1],
+            cache_controls: vec![
+                CacheBreakpoint::tools(CacheTtl::OneHour),
+                CacheBreakpoint::message(1, CacheTtl::OneHour),
+            ],
             metadata: Default::default(),
         };
 
@@ -1445,6 +1494,14 @@ mod tests {
                 .and_then(|value| value.get("type"))
                 .and_then(serde_json::Value::as_str),
             Some("ephemeral")
+        );
+        assert_eq!(
+            tools
+                .last()
+                .and_then(|tool| tool.get("cache_control"))
+                .and_then(|value| value.get("ttl"))
+                .and_then(serde_json::Value::as_str),
+            Some("1h")
         );
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
     }

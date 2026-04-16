@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    CompletionRequest, ModelCapabilities, SessionId, SessionMeta, ToolContent, ToolInvocation,
-    UserId, WorkspaceId,
+    CacheBreakpoint, CacheTtl, CompletionRequest, ModelCapabilities, SessionId, SessionMeta,
+    ToolContent, ToolInvocation, UserId, WorkspaceId,
 };
 
 /// Role of a context message passed to the LLM.
@@ -169,6 +169,8 @@ pub struct WorkingContext {
     pub workspace_id: WorkspaceId,
     /// Cache breakpoint indexes within `messages`.
     pub cache_breakpoints: Vec<usize>,
+    /// Detailed cache controls emitted to providers that support TTL-aware prompt caching.
+    pub cache_controls: Vec<CacheBreakpoint>,
     /// Active tool schemas compiled for the request.
     tool_schemas: Vec<Value>,
     /// Arbitrary processor metadata.
@@ -189,6 +191,7 @@ impl WorkingContext {
             user_id: session.user_id.clone(),
             workspace_id: session.workspace_id.clone(),
             cache_breakpoints: Vec::new(),
+            cache_controls: Vec::new(),
             tool_schemas: Vec::new(),
             metadata: HashMap::new(),
         }
@@ -213,6 +216,13 @@ impl WorkingContext {
         for breakpoint in &mut self.cache_breakpoints {
             if *breakpoint > bounded_index {
                 *breakpoint += 1;
+            }
+        }
+        for breakpoint in &mut self.cache_controls {
+            if let Some(index) = breakpoint.message_index()
+                && index > bounded_index
+            {
+                *breakpoint = CacheBreakpoint::message(index + 1, breakpoint.ttl);
             }
         }
     }
@@ -259,7 +269,20 @@ impl WorkingContext {
 
     /// Marks the current message index as a cache breakpoint.
     pub fn mark_cache_breakpoint(&mut self) {
-        self.cache_breakpoints.push(self.messages.len());
+        self.mark_cache_breakpoint_with_ttl(CacheTtl::OneHour);
+    }
+
+    /// Marks the current message index as a cache breakpoint with an explicit TTL.
+    pub fn mark_cache_breakpoint_with_ttl(&mut self, ttl: CacheTtl) {
+        let index = self.messages.len();
+        self.cache_breakpoints.push(index);
+        self.cache_controls
+            .push(CacheBreakpoint::message(index, ttl));
+    }
+
+    /// Marks the tool definitions block as a cache breakpoint with an explicit TTL.
+    pub fn mark_tool_cache_breakpoint(&mut self, ttl: CacheTtl) {
+        self.cache_controls.push(CacheBreakpoint::tools(ttl));
     }
 
     /// Returns the approximate token count of the last message.
@@ -288,6 +311,7 @@ impl WorkingContext {
             max_output_tokens: Some(self.model_capabilities.max_output),
             temperature: None,
             cache_breakpoints: self.cache_breakpoints,
+            cache_controls: self.cache_controls,
             metadata: self.metadata,
         }
     }
@@ -326,8 +350,9 @@ mod tests {
 
     use super::{ContextMessage, MessageRole};
     use crate::types::{
-        ModelCapabilities, Platform, SessionId, SessionMeta, TokenPricing, ToolCallFormat,
-        ToolContent, ToolInvocation, UserId, WorkingContext, WorkspaceId,
+        CacheBreakpoint, CacheTtl, ModelCapabilities, Platform, SessionId, SessionMeta,
+        TokenPricing, ToolCallFormat, ToolContent, ToolInvocation, UserId, WorkingContext,
+        WorkspaceId,
     };
 
     #[test]
@@ -414,5 +439,9 @@ mod tests {
         let request = ctx.into_request();
 
         assert_eq!(request.cache_breakpoints, vec![1]);
+        assert_eq!(
+            request.cache_controls,
+            vec![CacheBreakpoint::message(1, CacheTtl::OneHour)]
+        );
     }
 }
