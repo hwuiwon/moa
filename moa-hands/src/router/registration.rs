@@ -127,6 +127,22 @@ impl ToolRegistry {
             read_tool_policy(ToolInputShape::Path),
         );
         registry.register_hand(
+            "str_replace",
+            "Replace one unique string match in a UTF-8 text file. Use this for edits to existing files; include enough surrounding context in old_str to make the match unique.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path within the workspace root. Bash `cd` state does not carry over." },
+                    "old_str": { "type": "string", "description": "Exact string to replace. Must match exactly once unless empty for insertion or creation." },
+                    "new_str": { "type": "string", "description": "Replacement string. Empty deletes the matched region." },
+                    "insert_after_line": { "type": "integer", "minimum": 0, "description": "Required when old_str is empty and you want to insert after a specific line." }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            write_tool_policy(ToolInputShape::Path, ToolDiffStrategy::StrReplace),
+        );
+        registry.register_hand(
             "file_write",
             "Create or overwrite a UTF-8 text file inside the active workspace root. Paths must be relative and must not use `..`.",
             json!({
@@ -161,6 +177,7 @@ impl ToolRegistry {
             "session_search".to_string(),
             "bash".to_string(),
             "file_read".to_string(),
+            "str_replace".to_string(),
             "file_write".to_string(),
             "file_search".to_string(),
         ];

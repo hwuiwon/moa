@@ -29,7 +29,10 @@ otherwise:\n\
 __pycache__, target, vendor, .git, etc.) when searching. The file_search \
 tool excludes these automatically. When using bash with grep or ripgrep, add \
 exclusion flags yourself.\n\
-- Prefer the file_write tool for targeted code edits. Avoid bash-based text \
+- Prefer the str_replace tool for editing existing files. It replaces one \
+unique string match per call, so include enough surrounding context \
+(indentation, nearby lines) to make old_str match exactly once. Use \
+file_write only when creating new files from scratch. Avoid bash-based text \
 manipulation (sed, python -c, heredocs) for modifying source files.\n\
 - After making code changes, always run the project's test suite or relevant \
 tests to verify correctness. A linter or formatter pass alone is not \
@@ -163,7 +166,7 @@ mod tests {
             .unwrap();
 
         let content = &ctx.messages[0].content;
-        assert!(content.contains("file_write tool for targeted code edits"));
+        assert!(content.contains("Prefer the str_replace tool for editing existing files"));
         assert!(content.contains("test suite"));
         assert!(content.contains("3 attempts"));
         assert!(content.contains(".venv"));

@@ -20,7 +20,7 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
-use crate::tools::{bash, file_read, file_search, file_write};
+use crate::tools::{bash, file_read, file_search, file_write, str_replace};
 
 const DEFAULT_DOCKER_IMAGE: &str = "alpine:3.20";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -194,6 +194,7 @@ impl LocalHandProvider {
                 .await
             }
             "file_read" => file_read::execute(&sandbox.execution_root, input).await,
+            "str_replace" => str_replace::execute(&sandbox.execution_root, input).await,
             "file_write" => file_write::execute(&sandbox.execution_root, input).await,
             "file_search" => {
                 file_search::execute(&sandbox.execution_root, input, &sandbox.extra_search_skips)
@@ -236,6 +237,16 @@ impl LocalHandProvider {
         match tool {
             "file_read" => {
                 file_read::execute_docker(
+                    container_id,
+                    &sandbox.workspace_mount,
+                    input,
+                    self.command_timeout,
+                    hard_cancel_token,
+                )
+                .await
+            }
+            "str_replace" => {
+                str_replace::execute_docker(
                     container_id,
                     &sandbox.workspace_mount,
                     input,

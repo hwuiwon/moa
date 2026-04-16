@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 
+use crate::tools::str_replace::plan_str_replace;
+
 const DEFAULT_E2B_API_URL: &str = "https://api.e2b.dev";
 const DEFAULT_E2B_DOMAIN: &str = "e2b.app";
 const DEFAULT_E2B_TEMPLATE: &str = "base";
@@ -294,6 +296,25 @@ impl E2BHandProvider {
             started_at.elapsed(),
         ))
     }
+
+    async fn str_replace_file(
+        &self,
+        sandbox_id: &str,
+        sandbox: &ConnectedSandbox,
+        path: &str,
+        input: &str,
+    ) -> Result<ToolOutput> {
+        let existing_content = match self.read_file(sandbox_id, sandbox, path).await {
+            Ok(output) => Some(output.to_text()),
+            Err(MoaError::HttpStatus { status: 404, .. }) => None,
+            Err(error) => return Err(error),
+        };
+        let planned = plan_str_replace(input, existing_content.as_deref(), path, 4)?;
+        let write_output = self
+            .write_file(sandbox_id, sandbox, path, &planned.updated_content)
+            .await?;
+        Ok(ToolOutput::text(planned.message, write_output.duration))
+    }
 }
 
 #[async_trait]
@@ -322,27 +343,44 @@ impl HandProvider for E2BHandProvider {
             }
         };
         let sandbox = self.connected_sandbox(sandbox_id).await?;
-        let input: Value = serde_json::from_str(input)?;
+        let payload: Value = serde_json::from_str(input)?;
         match tool {
             "bash" => {
-                self.execute_bash(sandbox_id, &sandbox, required_string_field(&input, "cmd")?)
-                    .await
+                self.execute_bash(
+                    sandbox_id,
+                    &sandbox,
+                    required_string_field(&payload, "cmd")?,
+                )
+                .await
             }
             "file_read" => {
-                self.read_file(sandbox_id, &sandbox, required_string_field(&input, "path")?)
-                    .await
+                self.read_file(
+                    sandbox_id,
+                    &sandbox,
+                    required_string_field(&payload, "path")?,
+                )
+                .await
+            }
+            "str_replace" => {
+                self.str_replace_file(
+                    sandbox_id,
+                    &sandbox,
+                    required_string_field(&payload, "path")?,
+                    input,
+                )
+                .await
             }
             "file_write" => {
                 self.write_file(
                     sandbox_id,
                     &sandbox,
-                    required_string_field(&input, "path")?,
-                    required_string_field(&input, "content")?,
+                    required_string_field(&payload, "path")?,
+                    required_string_field(&payload, "content")?,
                 )
                 .await
             }
             "file_search" => {
-                let pattern = shell_escape(required_string_field(&input, "pattern")?);
+                let pattern = shell_escape(required_string_field(&payload, "pattern")?);
                 self.execute_bash(
                     sandbox_id,
                     &sandbox,

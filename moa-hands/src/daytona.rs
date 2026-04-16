@@ -11,6 +11,8 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 
+use crate::tools::str_replace::plan_str_replace;
+
 const DEFAULT_DAYTONA_API_URL: &str = "https://app.daytona.io/api";
 const DEFAULT_DAYTONA_TOOLBOX_URL: &str = "https://proxy.app.daytona.io/toolbox";
 const DEFAULT_DAYTONA_IMAGE: &str = "daytonaio/workspace:latest";
@@ -223,6 +225,24 @@ impl DaytonaHandProvider {
         ))
     }
 
+    async fn str_replace_file(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        input: &str,
+    ) -> Result<ToolOutput> {
+        let existing_content = match self.read_file(workspace_id, path).await {
+            Ok(output) => Some(output.to_text()),
+            Err(MoaError::HttpStatus { status: 404, .. }) => None,
+            Err(error) => return Err(error),
+        };
+        let planned = plan_str_replace(input, existing_content.as_deref(), path, 4)?;
+        let write_output = self
+            .write_file(workspace_id, path, &planned.updated_content)
+            .await?;
+        Ok(ToolOutput::text(planned.message, write_output.duration))
+    }
+
     async fn search_files(&self, workspace_id: &str, pattern: &str) -> Result<ToolOutput> {
         let started_at = Instant::now();
         let url = build_url(
@@ -259,32 +279,40 @@ impl HandProvider for DaytonaHandProvider {
 
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput> {
         let workspace_id = handle.daytona_id()?;
-        let input: Value = serde_json::from_str(input)?;
+        let payload: Value = serde_json::from_str(input)?;
         self.resume(handle).await?;
         match tool {
             "bash" => {
                 self.execute_command(
                     workspace_id,
-                    required_string_field(&input, "cmd")?,
+                    required_string_field(&payload, "cmd")?,
                     None,
-                    input.get("timeout_secs").and_then(Value::as_u64),
+                    payload.get("timeout_secs").and_then(Value::as_u64),
                 )
                 .await
             }
             "file_read" => {
-                self.read_file(workspace_id, required_string_field(&input, "path")?)
+                self.read_file(workspace_id, required_string_field(&payload, "path")?)
                     .await
+            }
+            "str_replace" => {
+                self.str_replace_file(
+                    workspace_id,
+                    required_string_field(&payload, "path")?,
+                    input,
+                )
+                .await
             }
             "file_write" => {
                 self.write_file(
                     workspace_id,
-                    required_string_field(&input, "path")?,
-                    required_string_field(&input, "content")?,
+                    required_string_field(&payload, "path")?,
+                    required_string_field(&payload, "content")?,
                 )
                 .await
             }
             "file_search" => {
-                self.search_files(workspace_id, required_string_field(&input, "pattern")?)
+                self.search_files(workspace_id, required_string_field(&payload, "pattern")?)
                     .await
             }
             other => Err(MoaError::ToolError(format!(

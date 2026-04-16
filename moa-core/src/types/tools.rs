@@ -49,6 +49,8 @@ pub enum ToolDiffStrategy {
     None,
     /// The tool writes a full file body and can show a file diff.
     FileWrite,
+    /// The tool replaces a single matched region and can show a surgical diff preview.
+    StrReplace,
 }
 
 /// Static policy and approval metadata for a tool.
