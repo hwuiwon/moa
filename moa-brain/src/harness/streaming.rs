@@ -22,12 +22,14 @@ use crate::turn::{
 use super::approval_flow::{process_resolved_approval, wait_for_approval};
 use super::budget::enforce_workspace_budget;
 use super::context_build::{
-    append_event, buffer_queued_message, build_cache_report, build_turn_context,
-    calculate_response_cost_cents, last_user_message_text, record_turn_span_metrics,
-    turn_number_for_events,
+    BuildTurnContextOptions, append_event, buffer_queued_message, build_cache_report,
+    build_turn_context, calculate_response_cost_cents, last_user_message_text,
+    record_turn_span_metrics, turn_number_for_events,
 };
 use super::tool_dispatch::{ToolCallOutcome, handle_tool_call};
 use super::{StreamedTurnResult, ToolLoopMode};
+
+const TURN_EVENT_TAIL_LIMIT: usize = 16;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_streamed_turn_with_tools_mode(
@@ -48,7 +50,10 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
 ) -> Result<StreamedTurnResult> {
     let initial_session = session_store.get_session(session_id.clone()).await?;
     let initial_events = session_store
-        .get_events(session_id.clone(), EventRange::all())
+        .get_events(
+            session_id.clone(),
+            EventRange::recent(TURN_EVENT_TAIL_LIMIT),
+        )
         .await?;
     let turn_number = turn_number_for_events(&initial_events);
     let trace_context =
@@ -73,7 +78,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
         loop {
             let session = session_store.get_session(session_id.clone()).await?;
             let events = session_store
-                .get_events(session_id.clone(), EventRange::all())
+                .get_events(session_id.clone(), EventRange::recent(TURN_EVENT_TAIL_LIMIT))
                 .await?;
 
             if let Some(router) = &tool_router {
@@ -247,15 +252,17 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 Some(router) => router.workspace_root(&session.workspace_id).await,
                 None => None,
             };
-            let (ctx, active_canary) = build_turn_context(
-                &session_id,
-                &session,
+            let (ctx, active_canary) = build_turn_context(BuildTurnContextOptions {
+                session_id: &session_id,
+                session: &session,
+                session_store: &session_store,
                 pipeline,
-                &llm_provider,
+                llm_provider: &llm_provider,
                 workspace_root,
-                tool_router.is_some(),
-                &trace_context,
-            )
+                enable_canary: tool_router.is_some(),
+                trace_context: &trace_context,
+                snapshot_max_size_bytes: pipeline.snapshot_config().max_size_bytes,
+            })
             .instrument(pipeline_compile_span.clone())
             .await?;
             pipeline_compile_span.record("moa.pipeline.total_tokens", ctx.token_count as i64);

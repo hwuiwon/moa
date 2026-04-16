@@ -11,9 +11,9 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::{
-    ApprovalDecision, ApprovalPrompt, Event, EventFilter, EventRange, EventRecord, PendingSignal,
-    PendingSignalId, Result, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
-    SessionSummary, ToolContent, ToolOutput, WorkspaceId,
+    ApprovalDecision, ApprovalPrompt, ContextSnapshot, Event, EventFilter, EventRange, EventRecord,
+    PendingSignal, PendingSignalId, Result, SessionFilter, SessionId, SessionMeta, SessionStatus,
+    SessionStore, SessionSummary, ToolContent, ToolOutput, WorkspaceId,
 };
 
 tokio::task_local! {
@@ -161,6 +161,18 @@ impl SessionStore for CountedSessionStore {
 
     async fn update_status(&self, session_id: SessionId, status: SessionStatus) -> Result<()> {
         self.inner.update_status(session_id, status).await
+    }
+
+    async fn put_snapshot(&self, session_id: SessionId, snapshot: ContextSnapshot) -> Result<()> {
+        self.inner.put_snapshot(session_id, snapshot).await
+    }
+
+    async fn get_snapshot(&self, session_id: SessionId) -> Result<Option<ContextSnapshot>> {
+        self.inner.get_snapshot(session_id).await
+    }
+
+    async fn delete_snapshot(&self, session_id: SessionId) -> Result<()> {
+        self.inner.delete_snapshot(session_id).await
     }
 
     async fn store_pending_signal(

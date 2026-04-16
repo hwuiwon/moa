@@ -26,6 +26,7 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
     let workspaces = qualified_name(schema_name, "workspaces");
     let users = qualified_name(schema_name, "users");
     let pending_signals = qualified_name(schema_name, "pending_signals");
+    let context_snapshots = qualified_name(schema_name, "context_snapshots");
     let idx_sessions_workspace = quote_identifier("idx_sessions_workspace");
     let idx_sessions_user = quote_identifier("idx_sessions_user");
     let idx_sessions_status = quote_identifier("idx_sessions_status");
@@ -34,6 +35,7 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
     let idx_events_timestamp = quote_identifier("idx_events_timestamp");
     let idx_events_fts = quote_identifier("idx_events_fts");
     let idx_pending_signals_session = quote_identifier("idx_pending_signals_session");
+    let idx_context_snapshots_last_seq = quote_identifier("idx_context_snapshots_last_seq");
 
     let sql = format!(
         r#"
@@ -133,6 +135,17 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS {idx_pending_signals_session}
             ON {pending_signals}(session_id, resolved_at, created_at);
+
+        CREATE TABLE IF NOT EXISTS {context_snapshots} (
+            session_id UUID PRIMARY KEY REFERENCES {sessions}(id) ON DELETE CASCADE,
+            format_version INTEGER NOT NULL,
+            last_sequence_num BIGINT NOT NULL,
+            payload JSONB NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS {idx_context_snapshots_last_seq}
+            ON {context_snapshots}(session_id, last_sequence_num);
         "#
     );
 

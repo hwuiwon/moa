@@ -16,6 +16,7 @@ mod platform;
 mod runtime_events;
 mod scheduling;
 mod session;
+mod snapshot;
 mod tools;
 
 pub use approval::*;
@@ -31,6 +32,7 @@ pub use platform::*;
 pub use runtime_events::*;
 pub use scheduling::*;
 pub use session::*;
+pub use snapshot::*;
 pub use tools::*;
 
 #[cfg(test)]

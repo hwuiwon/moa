@@ -200,6 +200,7 @@ async fn steps_72_77_e2e() -> Result<()> {
     let requests = provider.recorded_requests().await;
     let tool_runs = collect_tool_runs(&events);
     let final_session = session_store.get_session(session_id.clone()).await?;
+    let final_snapshot = session_store.get_snapshot(session_id.clone()).await?;
 
     assert_eq!(
         requests.len(),
@@ -402,7 +403,16 @@ async fn steps_72_77_e2e() -> Result<()> {
         final_session.cache_hit_rate() > 0.0,
         "session cache hit rate should be non-zero"
     );
-    assert_replay_growth(&replay_snapshots);
+    let final_snapshot = final_snapshot.expect("expected a persisted context snapshot");
+    assert!(
+        final_snapshot.last_sequence_num > 0,
+        "snapshot should advance past the initial event once incremental replay is active"
+    );
+    assert!(
+        !final_snapshot.messages.is_empty(),
+        "snapshot should retain compiled history messages for reuse"
+    );
+    assert_replay_flattening(&replay_snapshots);
     assert_turn_latency_spans(&span_recorder);
 
     Ok(())
@@ -646,7 +656,7 @@ fn collect_tool_runs(events: &[EventRecord]) -> Vec<ToolRun> {
     runs
 }
 
-fn assert_replay_growth(replay_snapshots: &[TurnReplaySnapshot]) {
+fn assert_replay_flattening(replay_snapshots: &[TurnReplaySnapshot]) {
     assert_eq!(
         replay_snapshots.len(),
         7,
@@ -661,12 +671,16 @@ fn assert_replay_growth(replay_snapshots: &[TurnReplaySnapshot]) {
         "first turn should call get_events at least once"
     );
     assert!(
-        replay_snapshots[6].events_replayed > replay_snapshots[0].events_replayed,
-        "later turns should replay more events than early turns"
+        replay_snapshots[3].events_replayed <= replay_snapshots[2].events_replayed + 8,
+        "snapshot replay should stop growing linearly once the session tail is bounded"
     );
     assert!(
-        replay_snapshots[6].events_bytes > replay_snapshots[0].events_bytes,
-        "later turns should deserialize more event bytes than early turns"
+        replay_snapshots[5].events_replayed <= replay_snapshots[3].events_replayed,
+        "later turns should reuse the bounded replay window instead of re-reading the full log"
+    );
+    assert!(
+        replay_snapshots[6].pipeline_compile_ms() <= replay_snapshots[2].pipeline_compile_ms(),
+        "pipeline compile time should stay flat or improve once snapshots are active"
     );
 }
 

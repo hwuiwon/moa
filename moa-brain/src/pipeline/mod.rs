@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    ContextProcessor, LLMProvider, MemoryStore, MoaConfig, ProcessorOutput, Result, SessionStore,
-    WorkingContext,
+    ContextProcessor, ContextSnapshotConfig, LLMProvider, MemoryStore, MoaConfig, ProcessorOutput,
+    Result, SessionStore, WorkingContext,
 };
 use tracing::Instrument;
 
@@ -42,12 +42,13 @@ pub struct PipelineStageReport {
 pub struct ContextPipeline {
     stages: Vec<Box<dyn ContextProcessor>>,
     daily_workspace_budget_cents: u32,
+    snapshot_config: ContextSnapshotConfig,
 }
 
 impl ContextPipeline {
     /// Creates a pipeline from an ordered list of processors.
     pub fn new(stages: Vec<Box<dyn ContextProcessor>>) -> Self {
-        Self::with_daily_workspace_budget(stages, 0)
+        Self::with_runtime_limits(stages, 0, ContextSnapshotConfig::default())
     }
 
     /// Creates a pipeline from an ordered list of processors and a workspace budget limit.
@@ -55,9 +56,23 @@ impl ContextPipeline {
         stages: Vec<Box<dyn ContextProcessor>>,
         daily_workspace_budget_cents: u32,
     ) -> Self {
+        Self::with_runtime_limits(
+            stages,
+            daily_workspace_budget_cents,
+            ContextSnapshotConfig::default(),
+        )
+    }
+
+    /// Creates a pipeline from an ordered list of processors and runtime limits.
+    pub fn with_runtime_limits(
+        stages: Vec<Box<dyn ContextProcessor>>,
+        daily_workspace_budget_cents: u32,
+        snapshot_config: ContextSnapshotConfig,
+    ) -> Self {
         Self {
             stages,
             daily_workspace_budget_cents,
+            snapshot_config,
         }
     }
 
@@ -69,6 +84,11 @@ impl ContextPipeline {
     /// Returns the number of configured pipeline stages.
     pub fn stage_count(&self) -> usize {
         self.stages.len()
+    }
+
+    /// Returns the snapshot configuration used by history compilation.
+    pub fn snapshot_config(&self) -> &ContextSnapshotConfig {
+        &self.snapshot_config
     }
 
     /// Runs the configured pipeline against a working context.
@@ -235,16 +255,18 @@ pub fn build_default_pipeline_with_runtime_and_instructions(
                 llm_provider,
                 config.compaction.clone(),
             )
-            .with_tool_output_config(config.tool_output.clone()),
+            .with_tool_output_config(config.tool_output.clone())
+            .with_snapshot_config(config.context_snapshot.clone()),
         )
     } else {
         Box::new(
             HistoryCompiler::new(session_store.clone())
                 .with_compaction_config(config.compaction.clone())
-                .with_tool_output_config(config.tool_output.clone()),
+                .with_tool_output_config(config.tool_output.clone())
+                .with_snapshot_config(config.context_snapshot.clone()),
         )
     };
-    ContextPipeline::with_daily_workspace_budget(
+    ContextPipeline::with_runtime_limits(
         vec![
             Box::new(IdentityProcessor::default()),
             Box::new(InstructionProcessor::new(
@@ -255,11 +277,12 @@ pub fn build_default_pipeline_with_runtime_and_instructions(
             Box::new(ToolDefinitionProcessor::new(tool_schemas)),
             Box::new(SkillInjector::from_memory(memory_store.clone())),
             history,
-            Box::new(MemoryRetriever::new(memory_store, session_store.clone())),
+            Box::new(MemoryRetriever::new(memory_store)),
             Box::new(RuntimeContextProcessor::default()),
             Box::new(CacheOptimizer),
         ],
         config.budgets.daily_workspace_cents,
+        config.context_snapshot.clone(),
     )
 }
 

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    ContextMessage, ContextProcessor, Event, EventRange, EventRecord, MemoryPath, MemoryScope,
-    MemoryStore, ProcessorOutput, Result, SessionStore, WorkingContext,
+    ContextMessage, ContextProcessor, MemoryPath, MemoryScope, MemoryStore, ProcessorOutput,
+    Result, WorkingContext,
 };
 
 const MEMORY_BUDGET_DIVISOR: usize = 5;
@@ -41,16 +41,12 @@ struct RelevantMemoryPage {
 /// Injects scoped memory indexes and relevant page snippets.
 pub struct MemoryRetriever {
     memory_store: Arc<dyn MemoryStore>,
-    session_store: Arc<dyn SessionStore>,
 }
 
 impl MemoryRetriever {
-    /// Creates a memory retriever backed by memory and session stores.
-    pub fn new(memory_store: Arc<dyn MemoryStore>, session_store: Arc<dyn SessionStore>) -> Self {
-        Self {
-            memory_store,
-            session_store,
-        }
+    /// Creates a memory retriever backed by the shared memory store.
+    pub fn new(memory_store: Arc<dyn MemoryStore>) -> Self {
+        Self { memory_store }
     }
 
     async fn load_stage_data(&self, ctx: &WorkingContext) -> Result<MemoryStageData> {
@@ -58,13 +54,9 @@ impl MemoryRetriever {
         let workspace_scope = MemoryScope::Workspace(ctx.workspace_id.clone());
         let user_index = self.memory_store.get_index(user_scope.clone()).await?;
         let workspace_index = self.memory_store.get_index(workspace_scope.clone()).await?;
-        let events = self
-            .session_store
-            .get_events(ctx.session_id.clone(), EventRange::all())
-            .await?;
         let mut relevant_pages = Vec::new();
 
-        if let Some(query) = extract_search_query(&events) {
+        if let Some(query) = extract_search_query_from_messages(&ctx.messages) {
             for scope in [user_scope, workspace_scope] {
                 let scope_label = scope_label_for(&scope);
                 let results = match self
@@ -233,12 +225,14 @@ fn trailing_user_insertion_index(messages: &[ContextMessage]) -> usize {
     insertion_index
 }
 
-pub(crate) fn extract_search_query(events: &[EventRecord]) -> Option<String> {
-    let text = events.iter().rev().find_map(|record| match &record.event {
-        Event::UserMessage { text, .. } => Some(text.as_str()),
-        Event::QueuedMessage { text, .. } => Some(text.as_str()),
-        _ => None,
-    })?;
+fn extract_search_query_from_messages(messages: &[ContextMessage]) -> Option<String> {
+    let text = messages
+        .iter()
+        .rev()
+        .find_map(|message| match message.role {
+            moa_core::MessageRole::User => Some(message.content.as_str()),
+            _ => None,
+        })?;
     let keywords = extract_search_keywords(text);
     if keywords.is_empty() {
         None
@@ -310,115 +304,14 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use chrono::{DateTime, Utc};
+    use chrono::Utc;
     use moa_core::{
-        ContextProcessor, Event, EventFilter, EventRange, EventRecord, MemoryPath, MemoryScope,
-        MemorySearchResult, MemoryStore, ModelCapabilities, PageSummary, PageType, PendingSignal,
-        PendingSignalId, Platform, Result, SequenceNum, SessionFilter, SessionId, SessionMeta,
-        SessionStatus, SessionStore, SessionSummary, TokenPricing, ToolCallFormat, UserId,
-        WikiPage, WorkspaceId,
+        ContextProcessor, MemoryPath, MemoryScope, MemorySearchResult, MemoryStore,
+        ModelCapabilities, PageSummary, PageType, Platform, Result, SessionId, SessionMeta,
+        TokenPricing, ToolCallFormat, UserId, WikiPage, WorkspaceId,
     };
-    use tokio::sync::Mutex;
 
     use super::{MEMORY_REMINDER_PREFIX, MemoryRetriever, extract_search_keywords};
-
-    #[derive(Clone)]
-    struct StubSessionStore {
-        session: Arc<Mutex<SessionMeta>>,
-        events: Arc<Mutex<Vec<EventRecord>>>,
-    }
-
-    impl StubSessionStore {
-        fn new(session: SessionMeta, events: Vec<EventRecord>) -> Self {
-            Self {
-                session: Arc::new(Mutex::new(session)),
-                events: Arc::new(Mutex::new(events)),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl SessionStore for StubSessionStore {
-        async fn create_session(&self, meta: SessionMeta) -> Result<SessionId> {
-            let id = meta.id.clone();
-            *self.session.lock().await = meta;
-            Ok(id)
-        }
-
-        async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<SequenceNum> {
-            let mut events = self.events.lock().await;
-            let sequence_num = events.len() as SequenceNum;
-            events.push(EventRecord {
-                id: uuid::Uuid::now_v7(),
-                session_id,
-                sequence_num,
-                event_type: event.event_type(),
-                event,
-                timestamp: Utc::now(),
-                brain_id: None,
-                hand_id: None,
-                token_count: None,
-            });
-            Ok(sequence_num)
-        }
-
-        async fn get_events(
-            &self,
-            _session_id: SessionId,
-            _range: EventRange,
-        ) -> Result<Vec<EventRecord>> {
-            Ok(self.events.lock().await.clone())
-        }
-
-        async fn get_session(&self, _session_id: SessionId) -> Result<SessionMeta> {
-            Ok(self.session.lock().await.clone())
-        }
-
-        async fn update_status(&self, _session_id: SessionId, status: SessionStatus) -> Result<()> {
-            self.session.lock().await.status = status;
-            Ok(())
-        }
-
-        async fn store_pending_signal(
-            &self,
-            _session_id: SessionId,
-            signal: PendingSignal,
-        ) -> Result<PendingSignalId> {
-            Ok(signal.id)
-        }
-
-        async fn get_pending_signals(&self, _session_id: SessionId) -> Result<Vec<PendingSignal>> {
-            Ok(Vec::new())
-        }
-
-        async fn resolve_pending_signal(&self, _signal_id: PendingSignalId) -> Result<()> {
-            Ok(())
-        }
-
-        async fn search_events(
-            &self,
-            _query: &str,
-            _filter: EventFilter,
-        ) -> Result<Vec<EventRecord>> {
-            Ok(Vec::new())
-        }
-
-        async fn list_sessions(&self, _filter: SessionFilter) -> Result<Vec<SessionSummary>> {
-            Ok(Vec::new())
-        }
-
-        async fn workspace_cost_since(
-            &self,
-            _workspace_id: &WorkspaceId,
-            _since: DateTime<Utc>,
-        ) -> Result<u32> {
-            Ok(0)
-        }
-
-        async fn delete_session(&self, _session_id: SessionId) -> Result<()> {
-            Ok(())
-        }
-    }
 
     #[derive(Clone)]
     struct StubMemoryStore {
@@ -507,6 +400,9 @@ mod tests {
             native_tools: Vec::new(),
         };
         let mut ctx = moa_core::WorkingContext::new(&session, capabilities);
+        ctx.append_message(moa_core::ContextMessage::user(
+            "How do we store durable session state?",
+        ));
         let shared_path = MemoryPath::new("topics/storage.md");
         let memory_store = StubMemoryStore {
             page_by_scope: HashMap::from([(
@@ -540,35 +436,22 @@ mod tests {
                 reference_count: 0,
             }],
         };
-        let session_store = StubSessionStore::new(
-            session.clone(),
-            vec![EventRecord {
-                id: uuid::Uuid::now_v7(),
-                session_id: session.id.clone(),
-                sequence_num: 0,
-                event_type: moa_core::EventType::UserMessage,
-                event: Event::UserMessage {
-                    text: "How do we store durable session state?".to_string(),
-                    attachments: Vec::new(),
-                },
-                timestamp: Utc::now(),
-                brain_id: None,
-                hand_id: None,
-                token_count: None,
-            }],
-        );
-
-        let output = MemoryRetriever::new(Arc::new(memory_store), Arc::new(session_store))
+        let output = MemoryRetriever::new(Arc::new(memory_store))
             .process(&mut ctx)
             .await
             .unwrap();
 
-        assert_eq!(ctx.messages.len(), 1);
+        assert_eq!(ctx.messages.len(), 2);
         assert_eq!(ctx.messages[0].role, moa_core::MessageRole::User);
         assert!(ctx.messages[0].content.contains(MEMORY_REMINDER_PREFIX));
         assert!(ctx.messages[0].content.contains("<user_memory>"));
         assert!(ctx.messages[0].content.contains("<workspace_memory>"));
         assert!(ctx.messages[0].content.contains("<relevant_memory>"));
+        assert_eq!(ctx.messages[1].role, moa_core::MessageRole::User);
+        assert_eq!(
+            ctx.messages[1].content,
+            "How do we store durable session state?"
+        );
         assert!(
             output.tokens_added
                 >= super::super::estimate_tokens("Use Postgres for durable session state.")
