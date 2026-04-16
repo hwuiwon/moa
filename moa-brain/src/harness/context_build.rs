@@ -99,6 +99,20 @@ async fn persist_context_snapshot(
     let Some(snapshot_value) = ctx.metadata().get(HISTORY_SNAPSHOT_METADATA_KEY).cloned() else {
         return;
     };
+    if snapshot_value.is_null() {
+        let started_at = Instant::now();
+        if let Err(error) = session_store.delete_snapshot(ctx.session_id.clone()).await {
+            tracing::warn!(
+                session_id = %ctx.session_id,
+                error = %error,
+                "compiled context snapshot delete failed"
+            );
+            return;
+        }
+
+        record_turn_snapshot_write_duration(started_at.elapsed());
+        return;
+    }
 
     let mut snapshot = match serde_json::from_value::<ContextSnapshot>(snapshot_value) {
         Ok(snapshot) => snapshot,

@@ -22,5 +22,6 @@ uuid.workspace = true
 moa-memory = { path = "../moa-memory" }
 moa-providers = { path = "../moa-providers", features = ["test-util"] }
 moa-session = { path = "../moa-session" }
+proptest = "1"
 tempfile = "3"
 tracing-subscriber.workspace = true
