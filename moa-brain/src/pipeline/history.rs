@@ -555,7 +555,7 @@ fn compile_records(
         .collect::<Result<Vec<_>>>()
 }
 
-fn preserved_error_messages(events: &[&EventRecord]) -> Vec<ContextMessage> {
+pub(crate) fn preserved_error_messages(events: &[&EventRecord]) -> Vec<ContextMessage> {
     let mut messages = Vec::new();
     for record in events {
         match &record.event {

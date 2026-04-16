@@ -386,7 +386,7 @@ impl LLMProvider for ToolCancelProvider {
                         id: Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()),
                         name: "bash".to_string(),
                         input: serde_json::json!({
-                            "cmd": "python3 -c 'import time; time.sleep(0.35); print(\"cancelled-tool\")'"
+                            "cmd": "sleep 0.35 && printf 'cancelled-tool\\n'"
                         }),
                     },
                     provider_metadata: None,
@@ -1978,8 +1978,7 @@ async fn resume_cancelled_session_waits_for_new_input() -> Result<()> {
     let model = MoaConfig::default().general.default_model;
     let provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
         model,
-        first_tool_cmd: "python3 -c 'import time; time.sleep(0.35); print(\"tool-finished\")'"
-            .to_string(),
+        first_tool_cmd: "sleep 0.35 && printf 'tool-finished\\n'".to_string(),
         requests: requests.clone(),
     });
     let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
@@ -2499,9 +2498,12 @@ async fn workspace_memory_bootstrap_informs_first_turn_from_instruction_file() -
 
     let requests = requests.lock().expect("request log lock poisoned");
     assert_eq!(requests.len(), 1);
-    assert!(requests[0].messages.iter().any(|message| {
-        message.content.contains("bootmarkeralpha")
-    }));
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| { message.content.contains("bootmarkeralpha") })
+    );
     Ok(())
 }
 

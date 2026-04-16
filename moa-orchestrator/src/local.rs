@@ -963,6 +963,11 @@ async fn run_session_task(
                 moa.turn.tool_dispatch_ms = tracing::field::Empty,
                 moa.turn.event_persist_ms = tracing::field::Empty,
                 moa.turn.llm_ttft_ms = tracing::field::Empty,
+                moa.turn.compaction_tier1 = tracing::field::Empty,
+                moa.turn.compaction_tier2 = tracing::field::Empty,
+                moa.turn.compaction_tier3 = tracing::field::Empty,
+                moa.turn.compaction_tokens_reclaimed = tracing::field::Empty,
+                moa.turn.compaction_messages_elided = tracing::field::Empty,
                 langfuse.trace.metadata.turn_number = turn_number,
             );
             trace_context.apply_to_span(&turn_root_span);
@@ -1755,6 +1760,17 @@ fn emit_turn_latency_summary(
         "moa.turn.event_persist_ms",
         snapshot.event_persist_ms() as i64,
     );
+    turn_root_span.record("moa.turn.compaction_tier1", snapshot.compaction_tier1);
+    turn_root_span.record("moa.turn.compaction_tier2", snapshot.compaction_tier2);
+    turn_root_span.record("moa.turn.compaction_tier3", snapshot.compaction_tier3);
+    turn_root_span.record(
+        "moa.turn.compaction_tokens_reclaimed",
+        snapshot.compaction_tokens_reclaimed as i64,
+    );
+    turn_root_span.record(
+        "moa.turn.compaction_messages_elided",
+        snapshot.compaction_messages_elided as i64,
+    );
     if let Some(ttft_ms) = snapshot.llm_ttft_ms() {
         turn_root_span.record("moa.turn.llm_ttft_ms", ttft_ms as i64);
     }
@@ -1769,6 +1785,11 @@ fn emit_turn_latency_summary(
         llm_call_ms = snapshot.llm_call_ms(),
         tool_dispatch_ms = snapshot.tool_dispatch_ms(),
         event_persist_ms = snapshot.event_persist_ms(),
+        compaction_tier1 = snapshot.compaction_tier1,
+        compaction_tier2 = snapshot.compaction_tier2,
+        compaction_tier3 = snapshot.compaction_tier3,
+        compaction_tokens_reclaimed = snapshot.compaction_tokens_reclaimed,
+        compaction_messages_elided = snapshot.compaction_messages_elided,
         llm_ttft_ms = snapshot.llm_ttft_ms().unwrap_or_default(),
         "turn latency breakdown"
     );

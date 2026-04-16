@@ -100,3 +100,7 @@ event_threshold = 100
 token_ratio_threshold = 0.7
 recent_turns_verbatim = 5
 preserve_errors = true
+tier2_trigger_blocks_past_bp4 = 14
+tier3_trigger_fraction = 0.9
+max_input_tokens_per_turn = 160000
+summarizer_model = "gpt-5.4-mini"

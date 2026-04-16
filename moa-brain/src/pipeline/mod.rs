@@ -10,6 +10,7 @@ use moa_core::{
 use tracing::Instrument;
 
 pub mod cache;
+pub mod compactor;
 pub mod history;
 pub mod identity;
 pub mod instructions;
@@ -19,6 +20,7 @@ pub mod skills;
 pub mod tools;
 
 use cache::CacheOptimizer;
+use compactor::Compactor;
 use history::HistoryCompiler;
 use identity::IdentityProcessor;
 use instructions::InstructionProcessor;
@@ -248,7 +250,7 @@ pub fn build_default_pipeline_with_runtime_and_instructions(
     discovered_workspace_instructions: Option<String>,
     tool_schemas: Vec<serde_json::Value>,
 ) -> ContextPipeline {
-    let history: Box<dyn ContextProcessor> = if let Some(llm_provider) = llm_provider {
+    let history: Box<dyn ContextProcessor> = if let Some(llm_provider) = llm_provider.clone() {
         Box::new(
             HistoryCompiler::with_compaction(
                 session_store.clone(),
@@ -279,6 +281,11 @@ pub fn build_default_pipeline_with_runtime_and_instructions(
             history,
             Box::new(MemoryRetriever::new(memory_store)),
             Box::new(RuntimeContextProcessor::default()),
+            Box::new(Compactor::new(
+                config.compaction.clone(),
+                session_store,
+                llm_provider,
+            )),
             Box::new(CacheOptimizer),
         ],
         config.budgets.daily_workspace_cents,
