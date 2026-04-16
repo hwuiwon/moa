@@ -33,6 +33,16 @@ pub struct TurnLatencySnapshot {
     pub tool_calls: u64,
     /// Number of persisted event writes recorded during the turn.
     pub events_written: u64,
+    /// Whether deterministic compaction ran for the turn.
+    pub compaction_tier1: bool,
+    /// Whether cache-aware trimming ran for the turn.
+    pub compaction_tier2: bool,
+    /// Whether summarization compaction ran for the turn.
+    pub compaction_tier3: bool,
+    /// Approximate input tokens reclaimed by compaction.
+    pub compaction_tokens_reclaimed: u64,
+    /// Number of message payloads replaced or elided by compaction.
+    pub compaction_messages_elided: u64,
 }
 
 impl TurnLatencySnapshot {
@@ -85,6 +95,11 @@ pub struct TurnLatencyCounters {
     event_persist_us: AtomicU64,
     tool_calls: AtomicU64,
     events_written: AtomicU64,
+    compaction_tier1: AtomicU64,
+    compaction_tier2: AtomicU64,
+    compaction_tier3: AtomicU64,
+    compaction_tokens_reclaimed: AtomicU64,
+    compaction_messages_elided: AtomicU64,
     llm_ttft_us: Mutex<Option<u64>>,
 }
 
@@ -102,6 +117,11 @@ impl TurnLatencyCounters {
             event_persist_us: AtomicU64::new(0),
             tool_calls: AtomicU64::new(0),
             events_written: AtomicU64::new(0),
+            compaction_tier1: AtomicU64::new(0),
+            compaction_tier2: AtomicU64::new(0),
+            compaction_tier3: AtomicU64::new(0),
+            compaction_tokens_reclaimed: AtomicU64::new(0),
+            compaction_messages_elided: AtomicU64::new(0),
             llm_ttft_us: Mutex::new(None),
         }
     }
@@ -135,6 +155,11 @@ impl TurnLatencyCounters {
             llm_ttft,
             tool_calls: self.tool_calls.load(Ordering::Relaxed),
             events_written: self.events_written.load(Ordering::Relaxed),
+            compaction_tier1: self.compaction_tier1.load(Ordering::Relaxed) > 0,
+            compaction_tier2: self.compaction_tier2.load(Ordering::Relaxed) > 0,
+            compaction_tier3: self.compaction_tier3.load(Ordering::Relaxed) > 0,
+            compaction_tokens_reclaimed: self.compaction_tokens_reclaimed.load(Ordering::Relaxed),
+            compaction_messages_elided: self.compaction_messages_elided.load(Ordering::Relaxed),
         }
     }
 
@@ -185,6 +210,29 @@ impl TurnLatencyCounters {
         {
             *guard = Some(duration.as_micros() as u64);
         }
+    }
+
+    fn record_compaction(
+        &self,
+        tier1: bool,
+        tier2: bool,
+        tier3: bool,
+        tokens_reclaimed: usize,
+        messages_elided: usize,
+    ) {
+        if tier1 {
+            self.compaction_tier1.store(1, Ordering::Relaxed);
+        }
+        if tier2 {
+            self.compaction_tier2.store(1, Ordering::Relaxed);
+        }
+        if tier3 {
+            self.compaction_tier3.store(1, Ordering::Relaxed);
+        }
+        self.compaction_tokens_reclaimed
+            .fetch_add(tokens_reclaimed as u64, Ordering::Relaxed);
+        self.compaction_messages_elided
+            .fetch_add(messages_elided as u64, Ordering::Relaxed);
     }
 }
 
@@ -252,6 +300,19 @@ pub fn record_turn_llm_ttft(duration: Duration) {
     });
 }
 
+/// Records compaction activity for the current turn.
+pub fn record_turn_compaction(
+    tier1: bool,
+    tier2: bool,
+    tier3: bool,
+    tokens_reclaimed: usize,
+    messages_elided: usize,
+) {
+    let _ = TURN_LATENCY_COUNTERS.try_with(|counters| {
+        counters.record_compaction(tier1, tier2, tier3, tokens_reclaimed, messages_elided);
+    });
+}
+
 fn display_duration_ms(duration: Duration) -> u64 {
     let millis = duration.as_millis() as u64;
     if millis == 0 && duration > Duration::ZERO {
@@ -278,6 +339,7 @@ mod tests {
             record_turn_event_persist_duration(Duration::from_millis(5), 3);
             record_turn_llm_ttft(Duration::from_millis(9));
             record_turn_llm_ttft(Duration::from_millis(20));
+            record_turn_compaction(true, false, true, 42, 3);
         })
         .await;
 
@@ -292,5 +354,10 @@ mod tests {
         assert_eq!(snapshot.llm_ttft_ms(), Some(9));
         assert_eq!(snapshot.tool_calls, 2);
         assert_eq!(snapshot.events_written, 3);
+        assert!(snapshot.compaction_tier1);
+        assert!(!snapshot.compaction_tier2);
+        assert!(snapshot.compaction_tier3);
+        assert_eq!(snapshot.compaction_tokens_reclaimed, 42);
+        assert_eq!(snapshot.compaction_messages_elided, 3);
     }
 }

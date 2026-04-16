@@ -36,7 +36,7 @@ pub use traits::{
 };
 pub use truncation::{truncate_head_tail, truncate_head_tail_lines};
 pub use turn_latency::{
-    TurnLatencyCounters, TurnLatencySnapshot, current_turn_root_span,
+    TurnLatencyCounters, TurnLatencySnapshot, current_turn_root_span, record_turn_compaction,
     record_turn_event_persist_duration, record_turn_llm_call_duration, record_turn_llm_ttft,
     record_turn_pipeline_compile_duration, record_turn_snapshot_load,
     record_turn_snapshot_write_duration, record_turn_tool_dispatch_duration,

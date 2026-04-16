@@ -8,9 +8,9 @@ use moa_core::{
     ApprovalDecision, BufferedUserMessage, CacheReport, CompletionRequest, CompletionResponse,
     ContextSnapshot, Event, EventRange, EventRecord, LLMProvider, MoaError, Result, SessionId,
     SessionMeta, SessionStore, TokenPricing, TraceContext, UserMessage, WorkingContext,
-    current_turn_root_span, record_pipeline_compile_duration, record_turn_event_persist_duration,
-    record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
-    stable_prefix_fingerprint,
+    current_turn_root_span, record_pipeline_compile_duration, record_turn_compaction,
+    record_turn_event_persist_duration, record_turn_pipeline_compile_duration,
+    record_turn_snapshot_write_duration, stable_prefix_fingerprint,
 };
 use moa_security::inject_canary;
 use tokio::sync::broadcast;
@@ -85,6 +85,43 @@ pub(super) async fn build_turn_context(
         pipeline_compile_ms = pipeline_compile_duration.as_millis() as u64,
         "compiled context for streamed brain turn"
     );
+
+    if let Some(report) = stage_reports
+        .iter()
+        .find(|report| report.name == "compactor")
+    {
+        let tier1 = report
+            .output
+            .metadata
+            .get("tier1_applied")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let tier2 = report
+            .output
+            .metadata
+            .get("tier2_applied")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let tier3 = report
+            .output
+            .metadata
+            .get("tier3_applied")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let tokens_reclaimed = report
+            .output
+            .metadata
+            .get("tokens_reclaimed")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
+        let messages_elided = report
+            .output
+            .metadata
+            .get("messages_elided")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
+        record_turn_compaction(tier1, tier2, tier3, tokens_reclaimed, messages_elided);
+    }
 
     persist_context_snapshot(options.session_store, &ctx, options.snapshot_max_size_bytes).await;
 

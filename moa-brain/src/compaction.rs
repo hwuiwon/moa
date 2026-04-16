@@ -116,6 +116,7 @@ pub(crate) async fn maybe_compact_events(
         let candidate = &unsummarized[..candidate_end];
         let response = llm
             .complete(compaction_request(
+                config.summarizer_model.as_deref(),
                 checkpoint.as_ref().map(|state| state.summary.as_str()),
                 candidate,
             ))
@@ -139,7 +140,7 @@ pub(crate) async fn maybe_compact_events(
                     summary: summary.clone(),
                     events_summarized: summarized_events as u64,
                     token_count: estimate_tokens(&summary),
-                    model: llm.capabilities().model_id.clone(),
+                    model: response.model.clone(),
                     input_tokens: response.input_tokens,
                     output_tokens: response.output_tokens,
                     cost_cents,
@@ -175,21 +176,13 @@ pub async fn maybe_compact(
 }
 
 fn compaction_request(
+    summarizer_model: Option<&str>,
     previous_summary: Option<&str>,
     events: &[&EventRecord],
 ) -> CompletionRequest {
-    let mut prompt = String::from(
-        "Create a reversible checkpoint summary for an agent session.\n\
-         Preserve concrete facts, file paths, commands, errors, fixes, decisions, and unresolved work.\n\
-         Format the output as markdown with these headings:\n\
-         - Key Facts\n\
-         - Decisions\n\
-         - Errors And Fixes\n\
-         - Open Threads\n\
-         - Active Files\n",
-    );
+    let mut prompt = String::new();
     if let Some(previous_summary) = previous_summary {
-        prompt.push_str("\nExisting checkpoint summary:\n");
+        prompt.push_str("Existing checkpoint summary:\n");
         prompt.push_str(previous_summary);
         prompt.push('\n');
     }
@@ -201,11 +194,9 @@ fn compaction_request(
     }
 
     CompletionRequest {
-        model: None,
+        model: summarizer_model.map(str::to_string),
         messages: vec![
-            ContextMessage::system(
-                "You compact agent session history without losing factual recoverability.",
-            ),
+            ContextMessage::system(include_str!("prompts/summarizer.txt")),
             ContextMessage::user(prompt),
         ],
         tools: Vec::new(),

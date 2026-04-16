@@ -406,6 +406,22 @@ impl MoaConfig {
                 "compaction.preserve_errors",
                 Self::default().compaction.preserve_errors,
             )?
+            .set_default(
+                "compaction.tier2_trigger_blocks_past_bp4",
+                Self::default().compaction.tier2_trigger_blocks_past_bp4 as i64,
+            )?
+            .set_default(
+                "compaction.tier3_trigger_fraction",
+                Self::default().compaction.tier3_trigger_fraction,
+            )?
+            .set_default(
+                "compaction.max_input_tokens_per_turn",
+                Self::default().compaction.max_input_tokens_per_turn as i64,
+            )?
+            .set_default(
+                "compaction.summarizer_model",
+                Self::default().compaction.summarizer_model.clone(),
+            )?
             .add_source(File::from(path).required(false))
             .add_source(Environment::with_prefix("MOA").separator("__"));
 
@@ -1092,6 +1108,14 @@ pub struct CompactionConfig {
     pub recent_turns_verbatim: usize,
     /// Whether old error events must stay verbatim in the compiled view.
     pub preserve_errors: bool,
+    /// Trigger cache-aware trimming when older history exceeds this many blocks.
+    pub tier2_trigger_blocks_past_bp4: usize,
+    /// Trigger summarization when the turn approaches this fraction of the model context window.
+    pub tier3_trigger_fraction: f64,
+    /// Hard ceiling for input tokens per turn after compaction.
+    pub max_input_tokens_per_turn: usize,
+    /// Optional model override used for tier-3 summarization requests.
+    pub summarizer_model: Option<String>,
 }
 
 impl Default for CompactionConfig {
@@ -1102,6 +1126,10 @@ impl Default for CompactionConfig {
             token_ratio_threshold: 0.7,
             recent_turns_verbatim: 5,
             preserve_errors: true,
+            tier2_trigger_blocks_past_bp4: 14,
+            tier3_trigger_fraction: 0.9,
+            max_input_tokens_per_turn: 160_000,
+            summarizer_model: None,
         }
     }
 }
@@ -1148,6 +1176,10 @@ mod tests {
         assert_eq!(config.compaction.event_threshold, 100);
         assert_eq!(config.compaction.recent_turns_verbatim, 5);
         assert!(config.compaction.preserve_errors);
+        assert_eq!(config.compaction.tier2_trigger_blocks_past_bp4, 14);
+        assert_eq!(config.compaction.tier3_trigger_fraction, 0.9);
+        assert_eq!(config.compaction.max_input_tokens_per_turn, 160_000);
+        assert!(config.compaction.summarizer_model.is_none());
     }
 
     #[test]
