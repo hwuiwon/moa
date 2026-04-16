@@ -34,6 +34,9 @@ unique string match per call, so include enough surrounding context \
 (indentation, nearby lines) to make old_str match exactly once. Use \
 file_write only when creating new files from scratch. Avoid bash-based text \
 manipulation (sed, python -c, heredocs) for modifying source files.\n\
+- When a file is large, locate the relevant symbol or line number first, \
+then use file_read with start_line and end_line. Do not read a multi-\
+thousand-line file into context when a narrow range will do.\n\
 - After making code changes, always run the project's test suite or relevant \
 tests to verify correctness. A linter or formatter pass alone is not \
 sufficient verification. Look for test commands in AGENTS.md, Makefile, \
@@ -167,6 +170,7 @@ mod tests {
 
         let content = &ctx.messages[0].content;
         assert!(content.contains("Prefer the str_replace tool for editing existing files"));
+        assert!(content.contains("file_read with start_line and end_line"));
         assert!(content.contains("test suite"));
         assert!(content.contains("3 attempts"));
         assert!(content.contains(".venv"));

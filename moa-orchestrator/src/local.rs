@@ -12,7 +12,7 @@ use chrono::Utc;
 use moa_brain::{
     LoopDetector, StreamedTurnResult, build_default_pipeline_with_runtime_and_instructions,
     find_pending_tool_approval, find_resolved_pending_tool_approval,
-    run_streamed_turn_with_signals, update_workspace_tool_stats,
+    run_streamed_turn_with_signals_stepwise, update_workspace_tool_stats,
 };
 use moa_core::{
     BrainOrchestrator, BranchManager, BufferedUserMessage, CronHandle, CronSpec, Event, EventRange,
@@ -959,7 +959,7 @@ async fn run_session_task(
         );
         trace_context.apply_to_span(&turn_root_span);
 
-        let turn_result = run_streamed_turn_with_signals(
+        let turn_result = run_streamed_turn_with_signals_stepwise(
             context.session_id.clone(),
             context.session_store.clone(),
             context.llm_provider.clone(),
@@ -979,33 +979,20 @@ async fn run_session_task(
 
         match turn_result {
             Ok(StreamedTurnResult::Complete) => {
-                turn_count = turn_count.saturating_add(1);
-                let completed_turn_events = context
-                    .session_store
-                    .get_events(
-                        context.session_id.clone(),
-                        EventRange {
-                            from_seq: Some(turn_start_sequence_num.saturating_add(1)),
-                            ..EventRange::default()
-                        },
-                    )
-                    .await?;
-                let tool_summaries = collect_turn_tool_summaries(&completed_turn_events);
-                if !tool_summaries.is_empty() && loop_detector.record_turn(&tool_summaries) {
-                    let updated_events = context
-                        .session_store
-                        .get_events(context.session_id.clone(), EventRange::all())
-                        .await?;
-                    pause_active_session(
-                        &context,
-                        &event_tx,
-                        &runtime_tx,
-                        &status,
-                        &context.session_id,
-                        &mut queued_messages,
-                        loop_detected_pause_message(loop_detection_threshold, &updated_events),
-                    )
-                    .await?;
+                if record_turn_boundary(
+                    &context,
+                    &event_tx,
+                    &runtime_tx,
+                    &status,
+                    &context.session_id,
+                    &mut queued_messages,
+                    turn_start_sequence_num,
+                    &mut turn_count,
+                    &mut loop_detector,
+                    loop_detection_threshold,
+                )
+                .await?
+                {
                     return Ok(());
                 }
                 if flush_next_queued_message(
@@ -1075,6 +1062,22 @@ async fn run_session_task(
                 let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
             }
             Ok(StreamedTurnResult::Continue) => {
+                if record_turn_boundary(
+                    &context,
+                    &event_tx,
+                    &runtime_tx,
+                    &status,
+                    &context.session_id,
+                    &mut queued_messages,
+                    turn_start_sequence_num,
+                    &mut turn_count,
+                    &mut loop_detector,
+                    loop_detection_threshold,
+                )
+                .await?
+                {
+                    return Ok(());
+                }
                 turn_requested = true;
                 continue;
             }
@@ -1544,6 +1547,52 @@ async fn pause_session_task(
         SessionStatus::Paused,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_turn_boundary(
+    context: &SessionTaskContext,
+    event_tx: &broadcast::Sender<EventRecord>,
+    runtime_tx: &broadcast::Sender<RuntimeEvent>,
+    status: &Arc<RwLock<SessionStatus>>,
+    session_id: &SessionId,
+    queued_messages: &mut Vec<BufferedUserMessage>,
+    turn_start_sequence_num: u64,
+    turn_count: &mut u32,
+    loop_detector: &mut LoopDetector,
+    loop_detection_threshold: u32,
+) -> Result<bool> {
+    *turn_count = turn_count.saturating_add(1);
+    let completed_turn_events = context
+        .session_store
+        .get_events(
+            session_id.clone(),
+            EventRange {
+                from_seq: Some(turn_start_sequence_num.saturating_add(1)),
+                ..EventRange::default()
+            },
+        )
+        .await?;
+    let tool_summaries = collect_turn_tool_summaries(&completed_turn_events);
+    if tool_summaries.is_empty() || !loop_detector.record_turn(&tool_summaries) {
+        return Ok(false);
+    }
+
+    let updated_events = context
+        .session_store
+        .get_events(session_id.clone(), EventRange::all())
+        .await?;
+    pause_active_session(
+        context,
+        event_tx,
+        runtime_tx,
+        status,
+        session_id,
+        queued_messages,
+        loop_detected_pause_message(loop_detection_threshold, &updated_events),
+    )
+    .await?;
+    Ok(true)
 }
 
 fn turn_number_for_events(events: &[EventRecord]) -> i64 {
