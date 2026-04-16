@@ -14,6 +14,7 @@ pub mod history;
 pub mod identity;
 pub mod instructions;
 pub mod memory;
+pub mod runtime_context;
 pub mod skills;
 pub mod tools;
 
@@ -22,6 +23,7 @@ use history::HistoryCompiler;
 use identity::IdentityProcessor;
 use instructions::InstructionProcessor;
 use memory::MemoryRetriever;
+use runtime_context::RuntimeContextProcessor;
 use skills::SkillInjector;
 use tools::ToolDefinitionProcessor;
 
@@ -62,6 +64,11 @@ impl ContextPipeline {
     /// Returns the configured daily workspace budget limit in cents.
     pub fn daily_workspace_budget_cents(&self) -> u32 {
         self.daily_workspace_budget_cents
+    }
+
+    /// Returns the number of configured pipeline stages.
+    pub fn stage_count(&self) -> usize {
+        self.stages.len()
     }
 
     /// Runs the configured pipeline against a working context.
@@ -175,7 +182,7 @@ impl ContextPipeline {
     }
 }
 
-/// Builds the default seven-stage context pipeline.
+/// Builds the default context pipeline.
 pub fn build_default_pipeline(
     config: &MoaConfig,
     session_store: Arc<dyn SessionStore>,
@@ -184,7 +191,7 @@ pub fn build_default_pipeline(
     build_default_pipeline_with_tools(config, session_store, memory_store, Vec::new())
 }
 
-/// Builds the default seven-stage context pipeline with a fixed tool loadout.
+/// Builds the default context pipeline with a fixed tool loadout.
 pub fn build_default_pipeline_with_tools(
     config: &MoaConfig,
     session_store: Arc<dyn SessionStore>,
@@ -194,7 +201,7 @@ pub fn build_default_pipeline_with_tools(
     build_default_pipeline_with_runtime(config, session_store, memory_store, None, tool_schemas)
 }
 
-/// Builds the default seven-stage context pipeline with an optional compaction-capable LLM.
+/// Builds the default context pipeline with an optional compaction-capable LLM.
 pub fn build_default_pipeline_with_runtime(
     config: &MoaConfig,
     session_store: Arc<dyn SessionStore>,
@@ -212,7 +219,7 @@ pub fn build_default_pipeline_with_runtime(
     )
 }
 
-/// Builds the default seven-stage context pipeline with optional discovered workspace instructions.
+/// Builds the default context pipeline with optional discovered workspace instructions.
 pub fn build_default_pipeline_with_runtime_and_instructions(
     config: &MoaConfig,
     session_store: Arc<dyn SessionStore>,
@@ -245,13 +252,11 @@ pub fn build_default_pipeline_with_runtime_and_instructions(
                 config.general.user_instructions.clone(),
                 discovered_workspace_instructions,
             )),
-            Box::new(ToolDefinitionProcessor::with_memory(
-                tool_schemas,
-                memory_store.clone(),
-            )),
+            Box::new(ToolDefinitionProcessor::new(tool_schemas)),
             Box::new(SkillInjector::from_memory(memory_store.clone())),
             Box::new(MemoryRetriever::new(memory_store, session_store.clone())),
             history,
+            Box::new(RuntimeContextProcessor::default()),
             Box::new(CacheOptimizer),
         ],
         config.budgets.daily_workspace_cents,

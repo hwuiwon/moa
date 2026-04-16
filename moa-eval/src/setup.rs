@@ -12,6 +12,7 @@ use moa_brain::{
         identity::{DEFAULT_IDENTITY_PROMPT, IdentityProcessor},
         instructions::InstructionProcessor,
         memory::MemoryRetriever,
+        runtime_context::RuntimeContextProcessor,
         skills::SkillInjector,
         tools::ToolDefinitionProcessor,
     },
@@ -260,10 +261,7 @@ async fn build_pipeline(
             user_instructions,
             None,
         )),
-        Box::new(ToolDefinitionProcessor::with_memory(
-            tool_schemas,
-            memory_store.clone(),
-        )),
+        Box::new(ToolDefinitionProcessor::new(tool_schemas)),
         Box::new(SkillInjector::from_memory(memory_store_dyn.clone())),
         Box::new(MemoryRetriever::new(
             memory_store_dyn,
@@ -274,6 +272,7 @@ async fn build_pipeline(
             llm_provider,
             base_config.compaction.clone(),
         )),
+        Box::new(RuntimeContextProcessor::default()),
         Box::new(CacheOptimizer),
     ];
 

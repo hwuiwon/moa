@@ -306,6 +306,16 @@ async fn steps_72_77_e2e() -> Result<()> {
             .all(|request| !request.cache_breakpoints.is_empty()),
         "all scripted requests should carry cache breakpoints"
     );
+    let first_prefix = stable_prefix_bytes(&requests[0])?;
+    let last_prefix = stable_prefix_bytes(
+        requests
+            .last()
+            .expect("scripted provider should record at least one request"),
+    )?;
+    assert_eq!(
+        first_prefix, last_prefix,
+        "stable prefix bytes should remain identical across turns"
+    );
     let turn_six_request = requests
         .iter()
         .find(|request| {
@@ -317,6 +327,15 @@ async fn steps_72_77_e2e() -> Result<()> {
         })
         .cloned()
         .expect("expected the pre-bash turn-6 request");
+    let runtime_context_message = turn_six_request
+        .messages
+        .iter()
+        .find(|message| message.content.contains("<system-reminder>"))
+        .expect("expected a runtime context reminder message");
+    assert!(runtime_context_message.content.contains(&format!(
+        "Current working directory: {}",
+        workspace.display()
+    )));
     let turn_six_body = debug_build_request_body(&turn_six_request, false)?;
     let system_cache_marker = turn_six_body["system"].as_array().and_then(|blocks| {
         blocks.iter().find_map(|block| {
@@ -519,6 +538,20 @@ fn last_user_message(request: &CompletionRequest) -> Option<&str> {
         .rev()
         .find(|message| message.role == moa_core::MessageRole::User)
         .map(|message| message.content.as_str())
+}
+
+fn stable_prefix_bytes(request: &CompletionRequest) -> Result<Vec<u8>> {
+    let stable_message_count = request
+        .cache_breakpoints
+        .last()
+        .copied()
+        .unwrap_or_default()
+        .min(request.messages.len());
+    serde_json::to_vec(&json!({
+        "messages": request.messages[..stable_message_count],
+        "tools": request.tools,
+    }))
+    .map_err(Into::into)
 }
 
 #[derive(Debug, Clone)]

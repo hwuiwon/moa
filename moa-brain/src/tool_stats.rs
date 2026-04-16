@@ -1,5 +1,6 @@
 //! Workspace-scoped tool performance tracking and schema ranking helpers.
 
+#[cfg(test)]
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -9,12 +10,14 @@ use moa_core::{
     MoaError, PageType, Result, SessionId, SessionMeta, SessionStore, WikiPage, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::Value;
 use uuid::Uuid;
 
 const TOOL_STATS_PAGE_PATH: &str = "entities/tool-stats.md";
 const TOOL_STATS_METADATA_KEY: &str = "tool_stats";
 const TOOL_STATS_EMA_ALPHA: f64 = 0.1;
+#[cfg(test)]
 const TOOL_RANKING_MIN_CALLS: u64 = 5;
 const TOOL_ANNOTATION_MIN_CALLS: u64 = 10;
 const TOOL_WARNING_SUCCESS_THRESHOLD: f64 = 0.8;
@@ -201,6 +204,7 @@ pub(crate) async fn update_workspace_tool_stats_from_events(
     Ok(Some(stats))
 }
 
+#[cfg(test)]
 pub(crate) fn apply_tool_rankings(
     mut tool_schemas: Vec<Value>,
     stats: &WorkspaceToolStats,
@@ -217,6 +221,7 @@ pub(crate) fn apply_tool_rankings(
     tool_schemas
 }
 
+#[cfg(test)]
 fn compare_schemas(left: &Value, right: &Value, stats: &WorkspaceToolStats) -> Ordering {
     let left_name = schema_name(left);
     let right_name = schema_name(right);
@@ -231,6 +236,7 @@ fn compare_schemas(left: &Value, right: &Value, stats: &WorkspaceToolStats) -> O
         .then_with(|| left_name.cmp(&right_name))
 }
 
+#[cfg(test)]
 fn compare_within_tier(left: Option<&ToolStats>, right: Option<&ToolStats>, tier: u8) -> Ordering {
     match tier {
         0 => compare_success_first(left, right),
@@ -239,6 +245,7 @@ fn compare_within_tier(left: Option<&ToolStats>, right: Option<&ToolStats>, tier
     }
 }
 
+#[cfg(test)]
 fn compare_success_first(left: Option<&ToolStats>, right: Option<&ToolStats>) -> Ordering {
     compare_f64_desc(
         left.map(|stats| stats.ema_success_rate).unwrap_or_default(),
@@ -253,6 +260,7 @@ fn compare_success_first(left: Option<&ToolStats>, right: Option<&ToolStats>) ->
     })
 }
 
+#[cfg(test)]
 fn compare_failure_last(left: Option<&ToolStats>, right: Option<&ToolStats>) -> Ordering {
     compare_f64_asc(
         left.map(|stats| stats.ema_success_rate).unwrap_or(1.0),
@@ -265,14 +273,17 @@ fn compare_failure_last(left: Option<&ToolStats>, right: Option<&ToolStats>) -> 
     })
 }
 
+#[cfg(test)]
 fn compare_f64_desc(left: f64, right: f64) -> Ordering {
     right.partial_cmp(&left).unwrap_or(Ordering::Equal)
 }
 
+#[cfg(test)]
 fn compare_f64_asc(left: f64, right: f64) -> Ordering {
     left.partial_cmp(&right).unwrap_or(Ordering::Equal)
 }
 
+#[cfg(test)]
 fn tool_rank_tier(stats: Option<&ToolStats>) -> u8 {
     match stats {
         Some(stats)
@@ -286,6 +297,7 @@ fn tool_rank_tier(stats: Option<&ToolStats>) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn annotate_schema(schema: &mut Value, stats: &WorkspaceToolStats) {
     let Some(name) = schema_name(schema) else {
         return;
@@ -373,6 +385,7 @@ fn failure_rate(stats: &ToolStats) -> f64 {
     }
 }
 
+#[cfg(test)]
 fn schema_name(schema: &Value) -> Option<&str> {
     schema.get("name").and_then(Value::as_str)
 }

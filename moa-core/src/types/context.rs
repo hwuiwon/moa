@@ -205,6 +205,18 @@ impl WorkingContext {
         self.messages.push(message);
     }
 
+    /// Inserts a message at the requested index and updates token counts.
+    pub fn insert_message(&mut self, index: usize, message: ContextMessage) {
+        let bounded_index = index.min(self.messages.len());
+        self.token_count += estimate_text_tokens(&message.content);
+        self.messages.insert(bounded_index, message);
+        for breakpoint in &mut self.cache_breakpoints {
+            if *breakpoint > bounded_index {
+                *breakpoint += 1;
+            }
+        }
+    }
+
     /// Extends the context with multiple messages and updates token counts.
     pub fn extend_messages<I>(&mut self, messages: I)
     where

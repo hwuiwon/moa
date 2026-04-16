@@ -5,6 +5,11 @@ use moa_core::{ContextProcessor, ProcessorOutput, Result, WorkingContext};
 
 use super::estimate_tokens;
 
+// WARNING: This file contributes to the cached system prompt prefix.
+// Do not add dynamic content here (datetime, workspace path, git branch, user identity, etc.).
+// Dynamic per-turn context belongs in `RuntimeContextProcessor`.
+// See `moa/docs/prompt-caching-architecture.md`.
+
 /// Default identity prompt used by the MOA brain.
 pub const DEFAULT_IDENTITY_PROMPT: &str = "\
 You are MOA, a general-purpose AI agent. You help users accomplish tasks by \

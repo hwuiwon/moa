@@ -1,4 +1,4 @@
-//! Stage 7: validates cache breakpoint ordering and reports cache efficiency.
+//! Stage 8: validates cache breakpoint ordering and reports cache efficiency.
 
 use super::{estimate_tokens, sort_json_keys};
 use async_trait::async_trait;
@@ -15,7 +15,7 @@ impl ContextProcessor for CacheOptimizer {
     }
 
     fn stage(&self) -> u8 {
-        7
+        8
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
