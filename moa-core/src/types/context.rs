@@ -282,7 +282,7 @@ impl WorkingContext {
 }
 
 /// Output emitted by a context processor stage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ProcessorOutput {
     /// Tokens added by the stage.
     pub tokens_added: usize,
@@ -292,6 +292,8 @@ pub struct ProcessorOutput {
     pub items_included: Vec<String>,
     /// Excluded item identifiers.
     pub items_excluded: Vec<String>,
+    /// Auxiliary structured metadata emitted by the stage.
+    pub metadata: HashMap<String, Value>,
     /// Stage execution duration.
     pub duration: Duration,
 }
