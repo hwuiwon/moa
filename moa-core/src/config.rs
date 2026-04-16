@@ -42,6 +42,8 @@ pub struct MoaConfig {
     pub budgets: BudgetConfig,
     /// Per-session turn and loop guardrails.
     pub session_limits: SessionLimitsConfig,
+    /// Tool-output truncation settings for storage and replay.
+    pub tool_output: ToolOutputConfig,
     /// External MCP server connections.
     pub mcp_servers: Vec<McpServerConfig>,
 }
@@ -190,6 +192,18 @@ impl MoaConfig {
             .set_default(
                 "session_limits.loop_detection_threshold",
                 Self::default().session_limits.loop_detection_threshold as i64,
+            )?
+            .set_default(
+                "tool_output.max_replay_chars",
+                Self::default().tool_output.max_replay_chars as i64,
+            )?
+            .set_default(
+                "tool_output.max_bash_lines",
+                Self::default().tool_output.max_bash_lines as i64,
+            )?
+            .set_default(
+                "tool_output.head_ratio",
+                Self::default().tool_output.head_ratio,
             )?
             .set_default("cloud.enabled", Self::default().cloud.enabled)?
             .set_default("cloud.turso_url", Self::default().cloud.turso_url.clone())?
@@ -805,6 +819,28 @@ impl Default for SessionLimitsConfig {
     }
 }
 
+/// Tool-output truncation settings for storage and history replay.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolOutputConfig {
+    /// Maximum characters for replayed tool output.
+    pub max_replay_chars: usize,
+    /// Maximum preserved lines for bash output before head+tail truncation.
+    pub max_bash_lines: usize,
+    /// Fraction of the truncation budget allocated to the head of the output.
+    pub head_ratio: f64,
+}
+
+impl Default for ToolOutputConfig {
+    fn default() -> Self {
+        Self {
+            max_replay_chars: 20_000,
+            max_bash_lines: 200,
+            head_ratio: 0.4,
+        }
+    }
+}
+
 /// Cloud runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1254,6 +1290,9 @@ mod tests {
         assert_eq!(config.tui.tab_limit, 8);
         assert_eq!(config.session_limits.max_turns, 50);
         assert_eq!(config.session_limits.loop_detection_threshold, 3);
+        assert_eq!(config.tool_output.max_replay_chars, 20_000);
+        assert_eq!(config.tool_output.max_bash_lines, 200);
+        assert_eq!(config.tool_output.head_ratio, 0.4);
     }
 
     #[test]

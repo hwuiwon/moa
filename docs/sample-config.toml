@@ -94,6 +94,11 @@ always_deny = []
 max_turns = 50 # 0 = unlimited
 loop_detection_threshold = 3 # 0 = disabled
 
+[tool_output]
+max_replay_chars = 20000
+max_bash_lines = 200
+head_ratio = 0.4
+
 [compaction]
 enabled = true
 event_threshold = 100

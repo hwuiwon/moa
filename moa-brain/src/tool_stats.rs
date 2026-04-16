@@ -779,6 +779,7 @@ mod tests {
                         is_error: false,
                         structured: None,
                         duration: std::time::Duration::from_secs(2),
+                        truncated: false,
                     },
                     success: true,
                     duration_ms: 2000,

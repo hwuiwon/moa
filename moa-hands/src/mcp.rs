@@ -420,6 +420,7 @@ fn flatten_call_result(result: Value) -> Result<ToolOutput> {
         is_error,
         structured: result.get("structuredContent").cloned(),
         duration: Duration::default(),
+        truncated: false,
     })
 }
 

@@ -275,6 +275,7 @@ fn build_file_search_output(
         is_error: false,
         structured: Some(structured),
         duration,
+        truncated: false,
     }
 }
 

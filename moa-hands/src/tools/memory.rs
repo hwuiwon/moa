@@ -360,6 +360,7 @@ impl BuiltInTool for MemoryIngestTool {
             is_error: false,
             structured: Some(ingest_report_json(&report)),
             duration: started_at.elapsed(),
+            truncated: false,
         })
     }
 }
