@@ -100,6 +100,9 @@ pub struct CompletionRequest {
     pub max_output_tokens: Option<usize>,
     /// Optional temperature override.
     pub temperature: Option<f32>,
+    /// Message-boundary cache breakpoints used by providers that support explicit prompt caching.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cache_breakpoints: Vec<usize>,
     /// Request-scoped metadata.
     pub metadata: HashMap<String, Value>,
 }
@@ -113,6 +116,7 @@ impl CompletionRequest {
             tools: Vec::new(),
             max_output_tokens: None,
             temperature: None,
+            cache_breakpoints: Vec::new(),
             metadata: HashMap::new(),
         }
     }

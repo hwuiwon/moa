@@ -21,6 +21,7 @@ async fn gemini_live_completion_returns_expected_answer() {
             tools: Vec::new(),
             max_output_tokens: Some(32),
             temperature: None,
+            cache_breakpoints: Vec::new(),
             metadata: Default::default(),
         })
         .await
@@ -51,6 +52,7 @@ async fn gemini_live_web_search_returns_current_information() {
                 tools: Vec::new(),
                 max_output_tokens: Some(128),
                 temperature: Some(0.0),
+                cache_breakpoints: Vec::new(),
                 metadata: Default::default(),
             })
             .await

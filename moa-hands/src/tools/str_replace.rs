@@ -94,8 +94,16 @@ pub(crate) fn plan_str_replace(
 ) -> Result<PlannedStrReplace> {
     let params: StrReplaceInput = serde_json::from_str(input)?;
 
+    if params.insert_after_line.is_some() {
+        return Err(MoaError::ToolError(format!(
+            "str_replace failed: line-based insertion is not supported for {display_path}. Use file_write to create or rewrite a file, or use str_replace with a non-empty old_str that matches existing text exactly once."
+        )));
+    }
+
     if params.old_str.is_empty() {
-        return plan_insert_or_create(&params, existing_content, display_path, context_lines);
+        return Err(MoaError::ToolError(format!(
+            "str_replace failed: old_str must be non-empty for {display_path}. Use file_write to create a new file, or use str_replace with a unique existing snippet."
+        )));
     }
 
     let content = existing_content.ok_or_else(|| {
@@ -125,64 +133,6 @@ pub(crate) fn plan_str_replace(
             context_lines,
         ))),
     }
-}
-
-fn plan_insert_or_create(
-    params: &StrReplaceInput,
-    existing_content: Option<&str>,
-    display_path: &str,
-    context_lines: usize,
-) -> Result<PlannedStrReplace> {
-    if let Some(insert_after_line) = params.insert_after_line {
-        let content = existing_content.unwrap_or_default();
-        let insert_index = insertion_index_after_line(content, insert_after_line);
-        let inserted_fragment = insertion_fragment(content, insert_index, &params.new_str);
-
-        let mut updated_content = String::with_capacity(content.len() + inserted_fragment.len());
-        updated_content.push_str(&content[..insert_index]);
-        updated_content.push_str(&inserted_fragment);
-        updated_content.push_str(&content[insert_index..]);
-
-        let existing_line_count = line_count(content);
-        let actual_after_line = insert_after_line.min(existing_line_count);
-        let start_line = if actual_after_line == 0 {
-            1
-        } else {
-            actual_after_line + 1
-        };
-        let inserted_line_count = line_count(&params.new_str);
-        let preview_start = start_line.saturating_sub(context_lines).max(1);
-        let preview_end_before = actual_after_line.saturating_add(context_lines).max(1);
-        let preview_end_after = replacement_end_line(start_line, inserted_line_count)
-            .max(actual_after_line.saturating_add(1))
-            .saturating_add(context_lines);
-
-        let preview_before = preview_lines(content, preview_start, preview_end_before);
-        let preview_after = preview_lines(&updated_content, preview_start, preview_end_after);
-        let message = format!(
-            "inserted {inserted_line_count} lines after line {actual_after_line} in {display_path}"
-        );
-
-        return Ok(PlannedStrReplace {
-            updated_content,
-            message,
-            preview_before,
-            preview_after,
-        });
-    }
-
-    if existing_content.is_some() {
-        return Err(MoaError::ToolError(format!(
-            "str_replace failed: old_str is empty for existing file {display_path}. Use insert_after_line for insertion or file_write to replace the full file."
-        )));
-    }
-
-    Ok(PlannedStrReplace {
-        updated_content: params.new_str.clone(),
-        message: format!("created {display_path}"),
-        preview_before: String::new(),
-        preview_after: params.new_str.clone(),
-    })
 }
 
 fn plan_unique_replacement(
@@ -302,40 +252,6 @@ fn preview_lines(content: &str, start_line: usize, end_line: usize) -> String {
     lines[start_index..end_index].concat()
 }
 
-fn insertion_index_after_line(content: &str, after_line: usize) -> usize {
-    if after_line == 0 || content.is_empty() {
-        return 0;
-    }
-
-    let mut seen_lines = 0;
-    for (index, ch) in content.char_indices() {
-        if ch == '\n' {
-            seen_lines += 1;
-            if seen_lines == after_line {
-                return index + 1;
-            }
-        }
-    }
-
-    content.len()
-}
-
-fn insertion_fragment(content: &str, insert_index: usize, new_str: &str) -> String {
-    if new_str.is_empty() {
-        return String::new();
-    }
-
-    let mut fragment = String::new();
-    if insert_index == content.len() && !content.is_empty() && !content.ends_with('\n') {
-        fragment.push('\n');
-    }
-    fragment.push_str(new_str);
-    if insert_index < content.len() && !new_str.ends_with('\n') {
-        fragment.push('\n');
-    }
-    fragment
-}
-
 async fn read_existing_text_file(path: &Path) -> Result<Option<String>> {
     match fs::read_to_string(path).await {
         Ok(content) => Ok(Some(content)),
@@ -448,39 +364,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn str_replace_insert_after_line() {
+    async fn str_replace_rejects_line_based_insertion() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("test.py"), "line1\nline3\n")
             .await
             .expect("write");
 
-        execute(
+        let error = execute(
             dir.path(),
             r#"{"path":"test.py","old_str":"","new_str":"line2","insert_after_line":1}"#,
         )
         .await
-        .expect("insert");
+        .expect_err("expected error");
 
-        let content = fs::read_to_string(dir.path().join("test.py"))
-            .await
-            .expect("read");
-        assert_eq!(content, "line1\nline2\nline3\n");
+        assert!(
+            error
+                .to_string()
+                .contains("line-based insertion is not supported")
+        );
     }
 
     #[tokio::test]
-    async fn str_replace_creates_new_file_when_missing() {
+    async fn str_replace_rejects_creation_without_old_str() {
         let dir = tempdir().expect("tempdir");
 
-        execute(
+        let error = execute(
             dir.path(),
             r#"{"path":"nested/new.py","old_str":"","new_str":"print('hi')\n"}"#,
         )
         .await
-        .expect("create");
+        .expect_err("expected error");
 
-        let content = fs::read_to_string(dir.path().join("nested/new.py"))
-            .await
-            .expect("read");
-        assert_eq!(content, "print('hi')\n");
+        assert!(error.to_string().contains("old_str must be non-empty"));
+        assert!(!dir.path().join("nested/new.py").exists());
     }
 }

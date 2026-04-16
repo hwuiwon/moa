@@ -160,16 +160,15 @@ impl ToolRegistry {
         );
         registry.register_hand(
             "str_replace",
-            "Replace one unique string match in a UTF-8 text file. Use this for edits to existing files; include enough surrounding context in old_str to make the match unique.",
+            "Replace one unique string match in an existing UTF-8 text file. Use this for edits to existing files; include enough surrounding context in old_str to make the match unique.",
             json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Relative path within the workspace root. Bash `cd` state does not carry over." },
-                    "old_str": { "type": "string", "description": "Exact string to replace. Must match exactly once unless empty for insertion or creation." },
-                    "new_str": { "type": "string", "description": "Replacement string. Empty deletes the matched region." },
-                    "insert_after_line": { "type": "integer", "minimum": 0, "description": "Required when old_str is empty and you want to insert after a specific line." }
+                    "old_str": { "type": "string", "description": "Exact existing string to replace. Must be non-empty and must match exactly once." },
+                    "new_str": { "type": "string", "description": "Replacement string. Empty deletes the matched region." }
                 },
-                "required": ["path"],
+                "required": ["path", "old_str", "new_str"],
                 "additionalProperties": false
             }),
             write_tool_policy(ToolInputShape::Path, ToolDiffStrategy::StrReplace),

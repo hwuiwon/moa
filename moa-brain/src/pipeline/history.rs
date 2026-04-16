@@ -613,7 +613,9 @@ mod tests {
                 tool_id,
                 provider_tool_use_id: Some("toolu_large".to_string()),
                 output: ToolOutput {
-                    content: vec![ToolContent::Text { text: giant.clone() }],
+                    content: vec![ToolContent::Text {
+                        text: giant.clone(),
+                    }],
                     is_error: false,
                     structured: None,
                     duration: Duration::from_millis(7),

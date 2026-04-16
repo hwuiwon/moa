@@ -211,6 +211,7 @@ fn compaction_request(
         tools: Vec::new(),
         max_output_tokens: Some(700),
         temperature: Some(0.0_f32),
+        cache_breakpoints: Vec::new(),
         metadata: std::collections::HashMap::new(),
     }
 }

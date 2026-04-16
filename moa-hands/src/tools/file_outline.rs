@@ -90,11 +90,19 @@ fn render_outline(
 fn build_python_outline(content: &str) -> Vec<OutlineEntry> {
     let mut outline = Vec::new();
     let mut current_class: Option<(String, usize)> = None;
+    let mut multiline_string_delimiter: Option<&'static str> = None;
 
     for (index, line) in content.lines().enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim_start();
         if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if let Some(delimiter) = multiline_string_delimiter {
+            if triple_quote_count(trimmed, delimiter) % 2 == 1 {
+                multiline_string_delimiter = None;
+            }
             continue;
         }
 
@@ -134,6 +142,10 @@ fn build_python_outline(content: &str) -> Vec<OutlineEntry> {
                 name,
                 parent: Some(class_name.clone()),
             });
+        }
+
+        if let Some(delimiter) = opening_multiline_string_delimiter(trimmed) {
+            multiline_string_delimiter = Some(delimiter);
         }
     }
 
@@ -176,6 +188,16 @@ fn parse_python_function_name(trimmed: &str) -> Option<String> {
         .or_else(|| trimmed.strip_prefix("async def "))?;
     let name = suffix.split('(').next()?.trim();
     (!name.is_empty()).then(|| name.to_string())
+}
+
+fn opening_multiline_string_delimiter(line: &str) -> Option<&'static str> {
+    ["\"\"\"", "'''"]
+        .into_iter()
+        .find(|delimiter| triple_quote_count(line, delimiter) % 2 == 1)
+}
+
+fn triple_quote_count(line: &str, delimiter: &str) -> usize {
+    line.match_indices(delimiter).count()
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,6 +276,33 @@ mod tests {
         assert!(text.contains("1 class CallViewSet"));
         assert!(text.contains("  5 method outbound"));
         assert!(!text.contains("  2 method start"));
+    }
+
+    #[tokio::test]
+    async fn file_outline_keeps_class_context_across_multiline_docstrings() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("demo.py"),
+            concat!(
+                "class CallViewSet:\n",
+                "    \"\"\"\n",
+                "TL;DR\n",
+                "Caller dials in.\n",
+                "    \"\"\"\n",
+                "    def start(self):\n",
+                "        pass\n",
+            ),
+        )
+        .await
+        .expect("write file");
+
+        let output = execute(dir.path(), r#"{"path":"demo.py","symbol":"CallViewSet"}"#)
+            .await
+            .expect("outline");
+        let text = output.to_text();
+
+        assert!(text.contains("1 class CallViewSet"));
+        assert!(text.contains("  6 method start"));
     }
 
     #[tokio::test]

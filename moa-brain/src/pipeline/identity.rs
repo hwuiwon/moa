@@ -36,9 +36,11 @@ tool excludes these automatically. When using bash with grep or ripgrep, add \
 exclusion flags yourself.\n\
 - Prefer the str_replace tool for editing existing files. It replaces one \
 unique string match per call, so include enough surrounding context \
-(indentation, nearby lines) to make old_str match exactly once. Use \
-file_write only when creating new files from scratch. Avoid bash-based text \
-manipulation (sed, python -c, heredocs) for modifying source files.\n\
+(indentation, nearby lines) to make old_str match exactly once. Do not use \
+line-number-based insertion for source edits; anchor the change to existing \
+text instead. Use file_write only when creating new files from scratch. \
+Avoid bash-based text manipulation (sed, python -c, heredocs) for modifying \
+source files.\n\
 - Workspace-root AGENTS.md instructions are already loaded for the current \
 session. Do not recursively search for AGENTS.md unless you have already \
 narrowed work to a specific subdirectory and need its local instructions.\n\
@@ -190,6 +192,7 @@ mod tests {
                 .contains("preferred flow is file_search to find files, grep to search contents")
         );
         assert!(content.contains("Prefer the str_replace tool for editing existing files"));
+        assert!(content.contains("Do not use line-number-based insertion for source edits"));
         assert!(content.contains("Workspace-root AGENTS.md instructions are already loaded"));
         assert!(content.contains("prefer file_outline before file_read"));
         assert!(content.contains("Prefer grep over bash rg/grep"));

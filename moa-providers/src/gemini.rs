@@ -1043,6 +1043,7 @@ mod tests {
                 })],
                 max_output_tokens: Some(1024),
                 temperature: Some(0.2),
+                cache_breakpoints: Vec::new(),
                 metadata: Default::default(),
             })
             .await
@@ -1123,6 +1124,7 @@ mod tests {
                 tools: Vec::new(),
                 max_output_tokens: Some(1024),
                 temperature: None,
+                cache_breakpoints: Vec::new(),
                 metadata: Default::default(),
             })
             .await
