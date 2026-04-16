@@ -38,7 +38,7 @@ fn settings_mutations_round_trip_through_config_file() {
 
     let mut config = MoaConfig::default();
     // Simulate: user toggles theme via General tab.
-    config.tui.theme = "light".to_string();
+    config.desktop.theme = "light".to_string();
     // Simulate: user switches default provider.
     config.general.default_provider = "anthropic".to_string();
     config.general.default_model = "claude-sonnet-4-6".to_string();
@@ -64,7 +64,7 @@ fn settings_mutations_round_trip_through_config_file() {
     assert!(written.contains("file_read"));
 
     let loaded = MoaConfig::load_from_path(&path).expect("load");
-    assert_eq!(loaded.tui.theme, "light");
+    assert_eq!(loaded.desktop.theme, "light");
     assert_eq!(loaded.general.default_provider, "anthropic");
     assert_eq!(loaded.general.default_model, "claude-sonnet-4-6");
     assert_eq!(loaded.permissions.default_posture, "auto");

@@ -26,8 +26,8 @@ pub struct MoaConfig {
     pub cloud: CloudConfig,
     /// Messaging gateway settings.
     pub gateway: GatewayConfig,
-    /// Interactive shell settings.
-    pub tui: TuiConfig,
+    /// Desktop application settings.
+    pub desktop: DesktopConfig,
     /// Permission policy settings.
     pub permissions: PermissionsConfig,
     /// Session storage settings.
@@ -376,11 +376,14 @@ impl MoaConfig {
                 "gateway.discord_token_env",
                 Self::default().gateway.discord_token_env,
             )?
-            .set_default("tui.theme", Self::default().tui.theme)?
-            .set_default("tui.sidebar_auto", Self::default().tui.sidebar_auto)?
-            .set_default("tui.tab_limit", Self::default().tui.tab_limit as i64)?
-            .set_default("tui.diff_style", Self::default().tui.diff_style)?
-            .set_default("tui.density", Self::default().tui.density)?
+            .set_default("desktop.theme", Self::default().desktop.theme)?
+            .set_default("desktop.sidebar_auto", Self::default().desktop.sidebar_auto)?
+            .set_default(
+                "desktop.tab_limit",
+                Self::default().desktop.tab_limit as i64,
+            )?
+            .set_default("desktop.diff_style", Self::default().desktop.diff_style)?
+            .set_default("desktop.density", Self::default().desktop.density)?
             .set_default(
                 "permissions.default_posture",
                 Self::default().permissions.default_posture,
@@ -1052,10 +1055,10 @@ impl Default for GatewayConfig {
     }
 }
 
-/// Terminal UI configuration.
+/// Desktop application configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct TuiConfig {
+pub struct DesktopConfig {
     /// Theme name.
     pub theme: String,
     /// Whether to auto-show the sidebar.
@@ -1073,7 +1076,7 @@ fn default_density() -> String {
     "comfortable".to_string()
 }
 
-impl Default for TuiConfig {
+impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
             theme: "default".to_string(),
@@ -1287,7 +1290,7 @@ mod tests {
 
         let config = MoaConfig::load_from_path(file.path()).unwrap();
         assert_eq!(config.general.default_provider, "openai");
-        assert_eq!(config.tui.tab_limit, 8);
+        assert_eq!(config.desktop.tab_limit, 8);
         assert_eq!(config.session_limits.max_turns, 50);
         assert_eq!(config.session_limits.loop_detection_threshold, 3);
         assert_eq!(config.tool_output.max_replay_chars, 20_000);

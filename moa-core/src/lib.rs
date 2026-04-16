@@ -17,10 +17,10 @@ pub mod workspace;
 pub use broadcast_recv::{RecvResult, recv_with_lag_handling};
 pub use config::{
     CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, CompactionConfig,
-    DaemonConfig, DatabaseBackend, DatabaseConfig, DatabaseNeonConfig, GatewayConfig,
-    GeneralConfig, LocalConfig, McpCredentialConfig, McpServerConfig, McpTransportConfig,
-    MoaConfig, ObservabilityConfig, OtlpProtocol, PermissionsConfig, ProviderCredentialConfig,
-    ProvidersConfig, ToolOutputConfig, TuiConfig,
+    DaemonConfig, DatabaseBackend, DatabaseConfig, DatabaseNeonConfig, DesktopConfig,
+    GatewayConfig, GeneralConfig, LocalConfig, McpCredentialConfig, McpServerConfig,
+    McpTransportConfig, MoaConfig, ObservabilityConfig, OtlpProtocol, PermissionsConfig,
+    ProviderCredentialConfig, ProvidersConfig, ToolOutputConfig,
 };
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
 pub use error::{MoaError, Result};
