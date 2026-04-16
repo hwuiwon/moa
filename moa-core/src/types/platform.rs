@@ -20,8 +20,6 @@ pub enum Platform {
     Discord,
     /// Desktop application.
     Desktop,
-    /// Terminal UI.
-    Tui,
     /// One-shot CLI.
     Cli,
 }
@@ -33,7 +31,6 @@ impl std::fmt::Display for Platform {
             Self::Slack => "slack",
             Self::Discord => "discord",
             Self::Desktop => "desktop",
-            Self::Tui => "tui",
             Self::Cli => "cli",
         };
         f.write_str(label)

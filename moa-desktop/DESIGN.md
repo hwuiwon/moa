@@ -168,7 +168,7 @@ pill on a session row.
 ## Density modes
 
 The app supports two densities, selectable from **Settings → Appearance →
-Density** and persisted to `~/.moa/config.toml` (`tui.density`).
+Density** and persisted to `~/.moa/config.toml` (`desktop.density`).
 
 - **Comfortable** (default): 12 px chat-bubble padding, 8 px row padding,
   1.55 markdown line-height.

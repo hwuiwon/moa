@@ -9,7 +9,7 @@ _System diagram, component interactions, trait hierarchy, Rust workspace layout.
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        USER INTERFACES                          │
-│  Telegram │ Slack │ Discord │ TUI │ CLI (exec) │ (Future: Web) │
+│ Telegram │ Slack │ Discord │ Desktop App │ CLI (exec) │ Future: Web │
 └─────┬─────┴───┬───┴────┬────┴──┬──┴──────┬─────┴───────────────┘
       │         │        │       │         │
       ▼         ▼        ▼       ▼         ▼
@@ -148,7 +148,7 @@ pub enum SandboxTier {
     None,       // Tier 0: no sandbox, brain-only ops
     Container,  // Tier 1: Docker/Daytona (default for cloud)
     MicroVM,    // Tier 2: Firecracker/E2B (untrusted code)
-    Local,      // Direct execution on host (TUI on-ramp)
+    Local,      // Direct execution on host (desktop app / CLI on-ramp)
 }
 
 // ─── LLM Provider ───
@@ -272,8 +272,8 @@ moa/
 │   └── src/ { lib, temporal, local, cron }
 ├── moa-gateway/                  # Messaging gateway
 │   └── src/ { lib, telegram, slack, discord, renderer, approval }
-├── moa-tui/                      # Terminal UI
-│   └── src/ { main, app, views/*, widgets/*, keybindings }
+├── moa-desktop/                  # Desktop application (GPUI)
+│   └── src/ { main, app, panels/*, components/*, services/* }
 ├── moa-cli/                      # CLI entry point
 │   └── src/ { main, exec }
 ├── moa-security/                 # Credential vault + sandbox policies
@@ -298,13 +298,13 @@ PlatformAdapter    →  TelegramAdapter, SlackAdapter, DiscordAdapter
 CredentialVault    →  VaultCredentialStore (HashiCorp Vault)
 ```
 
-### Local mode (`moa`)
+### Local mode (`moa-desktop` / `moa exec`)
 
 ```
 BrainOrchestrator  →  LocalOrchestrator (tokio tasks + mpsc channels)
 SessionStore       →  TursoSessionStore (local file: ~/.moa/sessions.db)
 HandProvider       →  LocalHandProvider (direct exec or local Docker)
-PlatformAdapter    →  TuiAdapter (renders to terminal)
+Local client       →  Desktop app or CLI
 CredentialVault    →  FileCredentialStore (~/.moa/vault.enc)
 ```
 

@@ -46,15 +46,13 @@ _Crates, external services, implementation phases, build and deployment._
 | `serenity` | Discord API (with Gateway + HTTP, auto-sharding) |
 | `slack-morphism-rust` | Slack API (Web, Events, Socket Mode, Block Kit) |
 
-### TUI
+### Desktop app
 
 | Crate | Purpose |
 |---|---|
-| `ratatui` | Terminal UI framework |
-| `crossterm` | Terminal backend (cross-platform) |
-| `tui-textarea` | Rich text input (vim-like editing) |
-| `tui-overlay` | Modals, drawers, toasts |
-| `nucleo` | Fuzzy matching (command palette, file picker) |
+| `gpui` | Desktop UI framework |
+| `gpui-component` | Reusable desktop controls and layout |
+| `tray-icon` | System tray integration |
 | `pulldown-cmark` | Markdown parsing |
 | `syntect` | Syntax highlighting |
 | `similar` | Diff algorithm |
@@ -129,8 +127,8 @@ Deliverables:
 - [ ] `moa-brain/pipeline`: All 7 context compilation stages (basic implementations)
 - [ ] `moa-memory`: FileMemoryStore (MEMORY.md read/write, FTS5 search)
 - [ ] `moa-orchestrator`: LocalOrchestrator (tokio tasks + mpsc channels)
-- [ ] `moa-tui`: Basic chat view (prompt input, streaming output, no sidebar)
-- [ ] `moa-cli`: `moa` (TUI) and `moa exec` (one-shot) entry points
+- [ ] `moa-desktop`: Basic chat view (prompt input, streaming output, no sidebar)
+- [ ] `moa-cli`: one-shot and admin entry points
 
 Test: `moa "What's 2+2?"` works. Agent can read/write memory. Sessions persist across restarts.
 
@@ -143,10 +141,10 @@ Deliverables:
 - [ ] `moa-hands`: ToolRouter with tool registry
 - [ ] Built-in tools: bash, file_read, file_write, file_search, web_search, web_fetch
 - [ ] Memory tools: memory_search, memory_write
-- [ ] Approval flow: inline approval cards in TUI (y/n/a/d)
+- [ ] Approval flow: inline approval cards in the desktop app
 - [ ] Permission policies: per-workspace rules storage
 - [ ] `moa-security`: Basic tool policy checking
-- [ ] TUI: Tool call cards, approval widgets, diff preview
+- [ ] Desktop app: Tool call cards, approval widgets, diff preview
 
 Test: `moa "Create a hello world Express app"` → agent writes files, user approves, files exist on disk.
 
@@ -197,7 +195,7 @@ Deliverables:
 - [ ] Memory consolidation cron (Temporal timer)
 - [ ] Git-branch concurrent writes + LLM reconciler
 - [ ] Memory per-user scoping
-- [ ] TUI: Memory browser (two-pane wiki view)
+- [ ] Desktop app: Memory browser (two-pane wiki view)
 - [ ] Pipeline Stage 4 (SkillInjector) with progressive loading
 
 Test: Complete 3 complex tasks. Check that skills were auto-generated. Start a new session. Verify the agent uses the skills instead of solving from scratch.
@@ -213,9 +211,9 @@ Deliverables:
 - [ ] `moa-security`: Full credential vault (local + HashiCorp)
 - [ ] `moa-security`: Prompt injection detection
 - [ ] `moa-security`: Canary tokens
-- [ ] TUI: Full sidebar, tab bar, all keyboard shortcuts
-- [ ] TUI: Settings panel, workspace switcher, session picker
-- [ ] CLI: All subcommands (status, sessions, attach, resume, memory, doctor)
+- [ ] Desktop app: Full sidebar, tab bar, and keyboard shortcuts
+- [ ] Desktop app: Settings panel, workspace switcher, session picker
+- [ ] CLI: All subcommands (status, sessions, memory, doctor, daemon, eval)
 - [ ] Observability: OTel traces for pipeline stages, tool calls, LLM requests
 - [ ] `moa daemon` for persistent local background operation
 - [ ] Documentation: README, getting started guide, configuration reference
@@ -241,8 +239,9 @@ strip target/release/moa
 # With specific features
 cargo build --release --features "telegram,slack,discord"
 
-# Local-only (minimal binary)
-cargo build --release --features "tui"
+# Local clients
+cargo build --release -p moa-cli
+cargo build --release -p moa-desktop
 ```
 
 ### Docker (cloud deployment)

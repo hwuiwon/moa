@@ -6,7 +6,7 @@ _Product identity, philosophy, target users._
 
 ## What MOA is
 
-MOA is a **cloud-first, Rust-based, general-purpose agent platform** built on the **many-brains, many-hands** pattern. Users interact through **messaging apps** (Telegram, Slack, Discord). The system **learns from usage** via a file-backed wiki memory. A **TUI** provides a zero-setup local on-ramp.
+MOA is a **cloud-first, Rust-based, general-purpose agent platform** built on the **many-brains, many-hands** pattern. Users interact through **messaging apps** (Telegram, Slack, Discord). The system **learns from usage** via a file-backed wiki memory. A **desktop app and CLI** provide the zero-setup local on-ramp.
 
 > MOA is a persistent, learning, general-purpose agent that lives in the cloud, reaches you through messaging, and gets better the longer it runs.
 
@@ -17,7 +17,7 @@ MOA is a **cloud-first, Rust-based, general-purpose agent platform** built on th
 - **Pluggable hands** — execution environments behind `execute(name, input) → output`
 - A **learning loop** — file-wiki memory that compounds with every session
 - **Messaging-first UX** — Telegram, Slack, Discord as primary interfaces
-- A **TUI on-ramp** — full local experience with zero cloud dependencies
+- A **desktop app and CLI on-ramp** — full local experience with zero cloud dependencies
 
 ## What MOA is not
 

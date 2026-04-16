@@ -2,12 +2,12 @@
 //!
 //! The user picks between "Comfortable" (default) and "Compact" in the
 //! Appearance tab. That preference is read from `cx.theme()` indirectly
-//! via the [`MoaConfig.tui.density`] string and mapped to a concrete
+//! via the [`MoaConfig.desktop.density`] string and mapped to a concrete
 //! [`Spacing`] struct that panels consume.
 
 use gpui::{App, Pixels, Rems, px, rems};
 
-/// Discrete density levels. Stored as a string in `MoaConfig.tui.density`
+/// Discrete density levels. Stored as a string in `MoaConfig.desktop.density`
 /// for forward compatibility (e.g. adding a "Dense" mode later) but only
 /// the two listed variants are recognized today; unknown values fall
 /// back to `Comfortable`.
@@ -63,7 +63,7 @@ pub fn current(cx: &App) -> Density {
     let bridge = handle.entity().read(cx);
     bridge
         .config()
-        .map(|cfg| Density::from_str(&cfg.tui.density))
+        .map(|cfg| Density::from_str(&cfg.desktop.density))
         .unwrap_or(Density::Comfortable)
 }
 

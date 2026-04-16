@@ -26,7 +26,7 @@ CREATE TABLE sessions (
     user_id TEXT NOT NULL,
     title TEXT,                             -- auto-generated or user-set
     status TEXT NOT NULL DEFAULT 'created', -- created|running|paused|waiting_approval|completed|cancelled|failed
-    platform TEXT,                          -- telegram|slack|discord|tui|cli
+    platform TEXT,                          -- telegram|slack|discord|desktop|cli
     platform_channel TEXT,                  -- platform-specific channel/thread ID
     model TEXT,                             -- model used for this session
     created_at TEXT NOT NULL,               -- ISO 8601

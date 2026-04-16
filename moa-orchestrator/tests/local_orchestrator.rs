@@ -639,7 +639,7 @@ async fn start_session(orchestrator: &LocalOrchestrator) -> Result<SessionHandle
         .start_session(StartSessionRequest {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Tui,
+            platform: Platform::Desktop,
             model: orchestrator.model().to_string(),
             initial_message: None,
             title: None,

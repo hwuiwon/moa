@@ -270,7 +270,7 @@ impl Default for SessionMeta {
             user_id: UserId::new(""),
             title: None,
             status: SessionStatus::Created,
-            platform: Platform::Tui,
+            platform: Platform::Desktop,
             platform_channel: None,
             model: String::new(),
             created_at: now,

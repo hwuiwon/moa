@@ -14,21 +14,21 @@ const DENSITY_OPTIONS: &[(&str, &str)] = &[("comfortable", "Comfortable"), ("com
 
 pub fn render_appearance_tab(panel: &SettingsPage, cx: &mut Context<SettingsPage>) -> AnyElement {
     let theme = cx.theme().clone();
-    let current = canonical_theme_key(&panel.config().tui.theme);
+    let current = canonical_theme_key(&panel.config().desktop.theme);
 
     let theme_control = segmented(cx, "theme", THEME_OPTIONS, current, |this, value, cx| {
         let owned = value.to_string();
-        this.mutate(cx, |cfg| cfg.tui.theme = owned.clone());
+        this.mutate(cx, |cfg| cfg.desktop.theme = owned.clone());
         apply_theme_name(&owned, cx);
     });
-    let current_density = Density::from_str(&panel.config().tui.density).as_str();
+    let current_density = Density::from_str(&panel.config().desktop.density).as_str();
     let density_control = segmented(
         cx,
         "density",
         DENSITY_OPTIONS,
         current_density,
         |this, value, cx| {
-            this.mutate(cx, |cfg| cfg.tui.density = value.to_string());
+            this.mutate(cx, |cfg| cfg.desktop.density = value.to_string());
         },
     );
     let font_control = div()

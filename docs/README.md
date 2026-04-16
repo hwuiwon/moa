@@ -13,7 +13,7 @@ This specification is split into standalone documents. Each is self-contained bu
 | 00 | [Direction](00-direction.md) | Product identity, philosophy, target users |
 | 01 | [Architecture Overview](01-architecture-overview.md) | System diagram, component interactions, trait hierarchy, Rust workspace |
 | 02 | [Brain Orchestration](02-brain-orchestration.md) | Temporal workflows, Fly.io hosting, local runtime mode, brain lifecycle |
-| 03 | [Communication Layer](03-communication-layer.md) | Messaging gateway, approval UX, thread observation, TUI, CLI |
+| 03 | [Communication Layer](03-communication-layer.md) | Messaging gateway, approval UX, thread observation, desktop app, CLI |
 | 04 | [Memory Architecture](04-memory-architecture.md) | File-wiki, FTS5, scoping, consolidation, concurrent writes |
 | 05 | [Session & Event Log](05-session-event-log.md) | Turso/libSQL, event schema, compaction, replay |
 | 06 | [Hands & MCP](06-hands-and-mcp.md) | HandProvider trait, Daytona/E2B/Local, MCP proxy, tool routing |
@@ -38,7 +38,7 @@ This specification is split into standalone documents. Each is self-contained bu
 | 10 | Event log | Full payloads for important events, summaries for thinking |
 | 11 | Context pipeline | 7-stage compilation with stable prefix caching |
 | 12 | Local runtime | Full local mode without any cloud providers |
-| 13 | TUI | Ratatui split-pane with memory browser |
+| 13 | Desktop app | GPUI desktop client with memory browser |
 | 14 | LLM providers | OpenAI, Anthropic, Google Gemini at launch |
 | 15 | Language | Rust |
 | 16 | Concurrent memory writes | Git-branch-per-brain with LLM reconciler cron |

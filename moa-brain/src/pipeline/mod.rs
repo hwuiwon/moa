@@ -379,7 +379,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Tui,
+            platform: Platform::Desktop,
             model: "claude-sonnet-4-6".to_string(),
             ..SessionMeta::default()
         };
@@ -427,7 +427,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Tui,
+            platform: Platform::Desktop,
             model: "claude-sonnet-4-6".to_string(),
             ..SessionMeta::default()
         };

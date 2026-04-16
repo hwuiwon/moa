@@ -1,6 +1,6 @@
 # 03 — Communication Layer
 
-_Messaging gateway, TUI, CLI, approval UX, thread observation._
+_Messaging gateway, desktop app, CLI, approval UX, thread observation._
 
 ---
 
@@ -13,7 +13,7 @@ Single Rust binary with per-platform tokio task isolation. Feature flags control
 ```toml
 # Cargo.toml features
 [features]
-default = ["tui"]
+default = []
 telegram = ["teloxide"]
 slack = ["slack-morphism"]
 discord = ["serenity"]
@@ -217,7 +217,7 @@ Discord: Thread with embed
 
 ---
 
-## TUI specification
+## Desktop application specification
 
 ### Layout (5 zones)
 
@@ -257,7 +257,7 @@ Discord: Thread with embed
 2. **Header**: Workspace name, model, token usage (current/max), cumulative cost, mode indicator.
 3. **Chat stream**: Scrollable message history with inline tool cards, approval widgets, and diff previews. Auto-scrolls during streaming. Pauses on user scroll-up. Resumes with `End`.
 4. **Sidebar** (optional): Session info (duration, turns, tools, cost), workspace tools list, recent memory entries. Auto-shows at 120+ cols. Toggle with `Ctrl+X, B`.
-5. **Prompt**: Rich text input via `tui-textarea`. Supports `@filename` completion (frecency-ranked), `/command` completion, `!shell` prefix, `Shift+Enter` for newline, `Enter` to submit.
+5. **Prompt**: Rich text composer with `@filename` completion (frecency-ranked), `/command` completion, `!shell` prefix, `Shift+Enter` for newline, and `Enter` to submit.
 6. **Footer**: Context-sensitive shortcuts (changes based on active view), mode indicator, cost ticker.
 
 ### Views (modes)
@@ -375,23 +375,23 @@ Discord: Thread with embed
 ### Subcommands
 
 ```
-moa                          Interactive TUI (default)
-moa "prompt text"            TUI with pre-submitted prompt
 moa exec "prompt text"       Non-interactive one-shot
-moa exec --json "prompt"     JSON output for scripting
 moa status                   Show active sessions (table)
 moa sessions                 List all sessions
 moa sessions --workspace .   Sessions for current workspace
-moa attach <session-id>      Attach TUI to running session
-moa resume                   Resume most recent session in TUI
-moa resume <session-id>      Resume specific session
 moa memory search "query"    Search memory from CLI
 moa memory show <path>       Display a memory page
+moa memory ingest <files...> Ingest documents into memory
 moa config                   Show current config
 moa config set <key> <val>   Update config
 moa init                     Initialize workspace in current directory
 moa version                  Show version info
 moa doctor                   Check system health (Docker, API keys, etc.)
+moa daemon start|stop|status|logs
+moa sync enable [url]
+moa checkpoint create|list|rollback|cleanup
+moa eval run|plan|skill|list
+moa-desktop                  Launch the desktop app
 ```
 
 ### Non-interactive mode (`moa exec`)
@@ -403,22 +403,14 @@ moa exec "What's the weather in NYC?"
 # Pipe input
 cat error.log | moa exec "Explain these errors"
 
-# JSON output for scripting
-moa exec --json "List all TODO items in the codebase" | jq '.items'
-
-# Specify model
-moa exec --model gpt-4o "Translate this to Japanese"
-
-# Specify workspace
-moa exec --workspace ~/projects/webapp "Run the tests"
+# Launch the desktop app
+moa-desktop
 ```
 
 Behavior:
 - Progress → stderr (streaming status updates)
 - Final response → stdout
 - Exit code: 0 = success, 1 = error, 2 = user cancelled
-- `--json` outputs JSONL (one event per line) to stdout
-- `--bare` outputs raw text only (no formatting, no ANSI)
 - TTY detection: if stdin is not a terminal, read piped input as context
 
 ### Daemon mode (`moa daemon`)
@@ -432,21 +424,18 @@ moa daemon status            Show daemon status
 moa daemon logs              Tail daemon logs
 ```
 
-The daemon runs the `LocalOrchestrator` in the background, allowing sessions to continue when the TUI is closed. The TUI connects to the daemon over a local Unix socket.
+The daemon runs the `LocalOrchestrator` in the background, allowing sessions to continue after the invoking CLI command exits. Local clients reconnect over a Unix socket.
 
 ---
 
-## Ratatui crate stack
+## Desktop + CLI stack
 
 | Purpose | Crate | Notes |
 |---|---|---|
-| TUI framework | `ratatui` | Core rendering |
-| Terminal backend | `crossterm` | Cross-platform terminal control |
+| Desktop UI framework | `gpui` | Native desktop rendering |
+| Desktop components | `gpui-component` | Shared panels and controls |
+| System tray | `tray-icon` | Background app presence |
 | Async runtime | `tokio` | Async I/O, task spawning |
-| Text input | `tui-textarea` | Vim-like editing, used by rainfrog |
-| Overlays | `tui-overlay` | Drawers, modals, toasts |
-| Fuzzy matching | `nucleo` | Same matcher as Helix editor |
+| CLI parsing | `clap` | Derive-based argument parsing |
 | Markdown rendering | `pulldown-cmark` + `syntect` | Parse + syntax highlight |
 | Diff rendering | `similar` | Diff algorithm |
-| Form widgets | `rat-widget` | Settings panel inputs |
-| CLI parsing | `clap` | Derive-based argument parsing |

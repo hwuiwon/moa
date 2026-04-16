@@ -79,7 +79,7 @@ slack_token_env = "SLACK_BOT_TOKEN"
 slack_app_token_env = "SLACK_APP_TOKEN"
 discord_token_env = "DISCORD_BOT_TOKEN"
 
-[tui]
+[desktop]
 theme = "default"
 sidebar_auto = true
 tab_limit = 8

@@ -494,10 +494,10 @@ scheduler.add(consolidation_job).await?;
 
 ## Startup flow
 
-### `moa` (local, no args)
+### `moa-desktop` (local desktop app)
 
 ```
-1. Parse CLI args (none → interactive TUI mode)
+1. Launch the desktop binary
 2. Load config from ~/.moa/config.toml (create defaults if missing)
 3. Detect Docker availability
 4. Initialize:
@@ -507,8 +507,7 @@ scheduler.add(consolidation_job).await?;
    - HandProvider → LocalHandProvider
    - Orchestrator → LocalOrchestrator
 5. Start cron scheduler (consolidation, skill improvement)
-6. Launch TUI (moa-tui)
-7. TUI connects to Orchestrator for session management
+6. Open the desktop window and connect it to the local runtime
 ```
 
 ### `moa --cloud`
@@ -524,7 +523,7 @@ scheduler.add(consolidation_job).await?;
    - Orchestrator → TemporalOrchestrator
 4. Start messaging gateway (Telegram + Slack + Discord per config)
 5. Gateway receives messages → routes to Orchestrator
-6. Optionally also start TUI for local monitoring
+6. Optionally also start a local desktop client for monitoring
 ```
 
 ### `moa exec "deploy to staging"` (non-interactive)
@@ -598,7 +597,7 @@ slack_token_env = "SLACK_BOT_TOKEN"
 slack_app_token_env = "SLACK_APP_TOKEN"
 discord_token_env = "DISCORD_BOT_TOKEN"
 
-[tui]
+[desktop]
 theme = "default"               # default | dark | light
 sidebar_auto = true             # auto-show at 120+ cols
 tab_limit = 8
