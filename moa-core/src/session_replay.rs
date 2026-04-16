@@ -38,12 +38,12 @@ pub struct TurnReplaySnapshot {
 impl TurnReplaySnapshot {
     /// Returns total `get_events` time in whole milliseconds.
     pub fn get_events_total_ms(&self) -> u64 {
-        self.get_events_total_duration.as_millis() as u64
+        display_duration_ms(self.get_events_total_duration)
     }
 
     /// Returns total pipeline compile time in whole milliseconds.
     pub fn pipeline_compile_ms(&self) -> u64 {
-        self.pipeline_compile_duration.as_millis() as u64
+        display_duration_ms(self.pipeline_compile_duration)
     }
 }
 
@@ -79,12 +79,12 @@ impl TurnReplayCounters {
             .fetch_add(event_count as u64, Ordering::Relaxed);
         self.events_bytes.fetch_add(bytes, Ordering::Relaxed);
         self.get_events_total_us
-            .fetch_add(duration.as_micros() as u64, Ordering::Relaxed);
+            .fetch_add(recorded_duration_micros(duration), Ordering::Relaxed);
     }
 
     fn record_pipeline_compile_duration(&self, duration: Duration) {
         self.pipeline_compile_us
-            .fetch_add(duration.as_micros() as u64, Ordering::Relaxed);
+            .fetch_add(recorded_duration_micros(duration), Ordering::Relaxed);
     }
 }
 
@@ -197,6 +197,19 @@ impl SessionStore for CountedSessionStore {
 
     async fn delete_session(&self, session_id: SessionId) -> Result<()> {
         self.inner.delete_session(session_id).await
+    }
+}
+
+fn recorded_duration_micros(duration: Duration) -> u64 {
+    duration.as_micros().max(1) as u64
+}
+
+fn display_duration_ms(duration: Duration) -> u64 {
+    let millis = duration.as_millis() as u64;
+    if millis == 0 && duration > Duration::ZERO {
+        1
+    } else {
+        millis
     }
 }
 

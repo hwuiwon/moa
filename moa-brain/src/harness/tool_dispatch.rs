@@ -1,6 +1,7 @@
 //! Tool call dispatch, execution, and output handling for the harness.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use moa_core::{
     ApprovalRequest, BufferedUserMessage, Event, EventRecord, MoaError, PolicyAction, Result,
@@ -11,6 +12,7 @@ use moa_hands::ToolRouter;
 use moa_security::{InputClassification, check_canary, contains_canary_tokens, inspect_input};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use super::approval_flow::wait_for_signal_approval;
@@ -35,6 +37,7 @@ pub(super) async fn handle_tool_call(
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     cancel_token: Option<&CancellationToken>,
     hard_cancel_token: Option<&CancellationToken>,
+    tool_dispatch_span: Option<&tracing::Span>,
     signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
     turn_requested: &mut bool,
     queued_messages: &mut Vec<BufferedUserMessage>,
@@ -143,11 +146,12 @@ pub(super) async fn handle_tool_call(
                 runtime_tx,
                 cancel_token,
                 hard_cancel_token,
+                tool_dispatch_span,
             )
             .await
         }
         PolicyAction::Deny => {
-            record_denied_tool_span(invocation);
+            record_denied_tool_span(invocation, tool_dispatch_span);
             append_event(
                 &session_store,
                 event_tx,
@@ -243,6 +247,7 @@ pub(super) async fn handle_tool_call(
                     runtime_tx,
                     cancel_token,
                     hard_cancel_token,
+                    tool_dispatch_span,
                     receiver,
                     turn_requested,
                     queued_messages,
@@ -271,6 +276,7 @@ pub(super) async fn execute_tool(
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     cancel_token: Option<&CancellationToken>,
     hard_cancel_token: Option<&CancellationToken>,
+    tool_dispatch_span: Option<&tracing::Span>,
 ) -> Result<ToolCallOutcome> {
     if emit_call_event {
         append_tool_call_event(
@@ -285,11 +291,30 @@ pub(super) async fn execute_tool(
         .await?;
     }
 
-    match tool_router
+    let span_name = format!("tool:{}", call.name);
+    let current_span = tracing::Span::current();
+    let parent_span = tool_dispatch_span.unwrap_or(&current_span);
+    let tool_span = tracing::info_span!(
+        parent: parent_span,
+        "tool_execution",
+        otel.name = %span_name,
+        gen_ai.tool.name = %call.name,
+        gen_ai.tool.call.id = ?call.id,
+        moa.tool.success = tracing::field::Empty,
+        moa.tool.denied = false,
+        moa.tool.duration_ms = tracing::field::Empty,
+    );
+    let started_at = Instant::now();
+    let execution_result = tool_router
         .execute_authorized_with_cancel(session, call, cancel_token, hard_cancel_token)
-        .await
-    {
+        .instrument(tool_span.clone())
+        .await;
+    let duration_ms = started_at.elapsed().as_millis() as i64;
+    tool_span.record("moa.tool.duration_ms", duration_ms);
+
+    match execution_result {
         Ok((_resolved_hand_id, output)) => {
+            tool_span.record("moa.tool.success", true);
             let secured_output = secure_tool_output(&output, active_canary);
             emit_tool_output_warning(
                 session_id.clone(),
@@ -327,6 +352,7 @@ pub(super) async fn execute_tool(
             Ok(ToolCallOutcome::Executed)
         }
         Err(MoaError::Cancelled) => {
+            tool_span.record("moa.tool.success", false);
             append_event(
                 &session_store,
                 event_tx,
@@ -350,6 +376,7 @@ pub(super) async fn execute_tool(
             Ok(ToolCallOutcome::Cancelled)
         }
         Err(error) => {
+            tool_span.record("moa.tool.success", false);
             append_event(
                 &session_store,
                 event_tx,
@@ -412,6 +439,7 @@ pub(super) async fn execute_pending_tool(
     active_canary: Option<&str>,
     cancel_token: Option<&CancellationToken>,
     hard_cancel_token: Option<&CancellationToken>,
+    tool_dispatch_span: Option<&tracing::Span>,
 ) -> Result<()> {
     let invocation = ToolInvocation {
         id: resumed_tool_invocation_id(&pending),
@@ -432,6 +460,7 @@ pub(super) async fn execute_pending_tool(
         runtime_tx,
         cancel_token,
         hard_cancel_token,
+        tool_dispatch_span,
     )
     .await?;
     Ok(())
@@ -525,9 +554,12 @@ async fn emit_tool_output_warning(
     Ok(())
 }
 
-fn record_denied_tool_span(call: &ToolInvocation) {
-    let span_name = format!("execute_tool {}", call.name);
+fn record_denied_tool_span(call: &ToolInvocation, tool_dispatch_span: Option<&tracing::Span>) {
+    let span_name = format!("tool:{}", call.name);
+    let current_span = tracing::Span::current();
+    let parent_span = tool_dispatch_span.unwrap_or(&current_span);
     let denied_span = tracing::info_span!(
+        parent: parent_span,
         "tool_execution",
         otel.name = %span_name,
         gen_ai.tool.name = %call.name,

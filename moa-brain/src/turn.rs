@@ -2,10 +2,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use moa_core::{
     ApprovalDecision, ApprovalRequest, CompletionContent, CompletionRequest, CompletionResponse,
-    Event, EventRecord, LLMProvider, Result, RuntimeEvent, SessionSignal,
+    Event, EventRecord, LLMProvider, Result, RuntimeEvent, SessionSignal, record_turn_llm_ttft,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -73,6 +74,7 @@ pub enum StreamSignalDisposition {
 pub async fn stream_completion_response<F, G>(
     llm_provider: Arc<dyn LLMProvider>,
     request: CompletionRequest,
+    llm_call_span: Option<&tracing::Span>,
     cancel_token: Option<&CancellationToken>,
     mut signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
     mut on_runtime_event: F,
@@ -82,9 +84,11 @@ where
     F: FnMut(RuntimeEvent),
     G: FnMut(SessionSignal) -> StreamSignalDisposition,
 {
+    let started_at = Instant::now();
     let mut stream = llm_provider.complete(request).await?;
     let mut streamed_text = String::new();
     let mut started_assistant = false;
+    let mut recorded_first_token = false;
 
     loop {
         if let Some(receiver) = signal_rx.as_deref_mut() {
@@ -93,6 +97,14 @@ where
                     let Some(block) = block else {
                         break;
                     };
+                    if !recorded_first_token {
+                        let ttft = started_at.elapsed();
+                        record_turn_llm_ttft(ttft);
+                        if let Some(span) = llm_call_span {
+                            span.record("gen_ai.response.first_token_at_ms", ttft.as_millis() as i64);
+                        }
+                        recorded_first_token = true;
+                    }
                     match block? {
                         CompletionContent::Text(delta) => {
                             if !started_assistant {
@@ -146,6 +158,14 @@ where
                         let Some(block) = block else {
                             break;
                         };
+                        if !recorded_first_token {
+                            let ttft = started_at.elapsed();
+                            record_turn_llm_ttft(ttft);
+                            if let Some(span) = llm_call_span {
+                                span.record("gen_ai.response.first_token_at_ms", ttft.as_millis() as i64);
+                            }
+                            recorded_first_token = true;
+                        }
                         match block? {
                             CompletionContent::Text(delta) => {
                                 if !started_assistant {
@@ -176,6 +196,14 @@ where
                 let Some(block) = stream.next().await else {
                     break;
                 };
+                if !recorded_first_token {
+                    let ttft = started_at.elapsed();
+                    record_turn_llm_ttft(ttft);
+                    if let Some(span) = llm_call_span {
+                        span.record("gen_ai.response.first_token_at_ms", ttft.as_millis() as i64);
+                    }
+                    recorded_first_token = true;
+                }
                 match block? {
                     CompletionContent::Text(delta) => {
                         if !started_assistant {
@@ -468,6 +496,7 @@ mod tests {
         let streamed = stream_completion_response(
             Arc::new(ProviderToolResultLlm),
             CompletionRequest::simple("latest weather"),
+            None,
             None,
             None,
             |event| runtime_events.push(event),

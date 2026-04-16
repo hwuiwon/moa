@@ -9,6 +9,7 @@ pub mod shell;
 pub mod telemetry;
 pub mod traits;
 pub mod truncation;
+pub mod turn_latency;
 pub mod types;
 pub mod workspace;
 
@@ -32,4 +33,10 @@ pub use traits::{
     HandProvider, LLMProvider, MemoryStore, PlatformAdapter, SessionStore, ToolContext,
 };
 pub use truncation::{truncate_head_tail, truncate_head_tail_lines};
+pub use turn_latency::{
+    TurnLatencyCounters, TurnLatencySnapshot, current_turn_root_span,
+    record_turn_event_persist_duration, record_turn_llm_call_duration, record_turn_llm_ttft,
+    record_turn_pipeline_compile_duration, record_turn_tool_dispatch_duration,
+    scope_turn_latency_counters,
+};
 pub use types::*;

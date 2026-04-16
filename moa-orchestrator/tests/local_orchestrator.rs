@@ -795,6 +795,33 @@ async fn wait_for_tool_result_count(
     }
 }
 
+async fn wait_for_tool_call_count(
+    orchestrator: &LocalOrchestrator,
+    session_id: SessionId,
+    expected: usize,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let events = orchestrator
+            .session_store()
+            .get_events(session_id.clone(), EventRange::all())
+            .await?;
+        let tool_call_count = events
+            .iter()
+            .filter(|record| matches!(record.event, Event::ToolCall { .. }))
+            .count();
+        if tool_call_count == expected {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(MoaError::ProviderError(format!(
+                "timed out waiting for {expected} tool calls"
+            )));
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
 fn brain_response_texts(events: &[moa_core::EventRecord]) -> Vec<String> {
     events
         .iter()
@@ -1132,7 +1159,7 @@ async fn soft_cancel_stops_after_current_tool_call() -> Result<()> {
             },
         )
         .await?;
-    sleep(Duration::from_millis(50)).await;
+    wait_for_tool_call_count(&orchestrator, session.session_id.clone(), 1).await?;
     orchestrator
         .signal(session.session_id.clone(), SessionSignal::SoftCancel)
         .await?;
@@ -1900,7 +1927,7 @@ async fn resume_cancelled_session_waits_for_new_input() -> Result<()> {
             },
         )
         .await?;
-    sleep(Duration::from_millis(50)).await;
+    wait_for_tool_call_count(&orchestrator, session.session_id.clone(), 1).await?;
     orchestrator
         .signal(session.session_id.clone(), SessionSignal::SoftCancel)
         .await?;
