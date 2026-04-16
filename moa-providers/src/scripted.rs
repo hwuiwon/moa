@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, LLMProvider,
-    ModelCapabilities, Result, StopReason, ToolCallContent, ToolInvocation,
+    ModelCapabilities, Result, StopReason, TokenUsage, ToolCallContent, ToolInvocation,
 };
 use serde_json::Value;
 const DEFAULT_INPUT_TOKENS: usize = 64;
@@ -88,6 +88,8 @@ pub struct ScriptedResponse {
     pub input_tokens: usize,
     /// Synthetic cached input token usage.
     pub cached_input_tokens: usize,
+    /// Synthetic cache-write token usage.
+    pub cache_write_input_tokens: usize,
     /// Synthetic duration.
     pub duration_ms: u64,
 }
@@ -110,6 +112,7 @@ impl ScriptedResponse {
             },
             input_tokens: DEFAULT_INPUT_TOKENS,
             cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
             duration_ms: DEFAULT_DURATION_MS,
         }
     }
@@ -122,6 +125,14 @@ impl ScriptedResponse {
     /// Creates a tool-use response with one tool-call block.
     pub fn tool_call(name: impl Into<String>, input: Value, id: impl Into<String>) -> Self {
         Self::from_blocks(vec![ScriptedBlock::tool_call(name, input, id)])
+    }
+
+    /// Overrides synthetic token usage for the scripted response.
+    pub fn with_usage(mut self, usage: TokenUsage) -> Self {
+        self.input_tokens = usage.total_input_tokens();
+        self.cached_input_tokens = usage.input_tokens_cache_read;
+        self.cache_write_input_tokens = usage.input_tokens_cache_write;
+        self
     }
 }
 
@@ -256,6 +267,15 @@ impl LLMProvider for ScriptedProvider {
             input_tokens: response.input_tokens,
             output_tokens,
             cached_input_tokens: response.cached_input_tokens,
+            usage: TokenUsage {
+                input_tokens_uncached: response
+                    .input_tokens
+                    .saturating_sub(response.cached_input_tokens)
+                    .saturating_sub(response.cache_write_input_tokens),
+                input_tokens_cache_write: response.cache_write_input_tokens,
+                input_tokens_cache_read: response.cached_input_tokens,
+                output_tokens,
+            },
             duration_ms: response.duration_ms,
             thought_signature: None,
         }))

@@ -340,7 +340,7 @@ impl SessionStore for PostgresSessionStore {
         let sessions = self.table_name("sessions");
         sqlx::query(&format!(
             "INSERT INTO {sessions} ({SESSION_COLUMNS}) VALUES \
-             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"
+             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)"
         ))
         .bind(session_id.0)
         .bind(meta.workspace_id.to_string())
@@ -355,6 +355,9 @@ impl SessionStore for PostgresSessionStore {
         .bind(meta.completed_at)
         .bind(meta.parent_session_id.map(|value| value.0))
         .bind(meta.total_input_tokens as i64)
+        .bind(meta.total_input_tokens_uncached as i64)
+        .bind(meta.total_input_tokens_cache_write as i64)
+        .bind(meta.total_input_tokens_cache_read as i64)
         .bind(meta.total_output_tokens as i64)
         .bind(meta.total_cost_cents as i64)
         .bind(meta.event_count as i64)
@@ -419,13 +422,19 @@ impl SessionStore for PostgresSessionStore {
         sqlx::query(&format!(
             "UPDATE {sessions} SET updated_at = $1, event_count = event_count + 1, \
              total_input_tokens = total_input_tokens + $2, \
-             total_output_tokens = total_output_tokens + $3, \
-             total_cost_cents = total_cost_cents + $4, \
-             last_checkpoint_seq = COALESCE($5, last_checkpoint_seq) \
-             WHERE id = $6"
+             total_input_tokens_uncached = total_input_tokens_uncached + $3, \
+             total_input_tokens_cache_write = total_input_tokens_cache_write + $4, \
+             total_input_tokens_cache_read = total_input_tokens_cache_read + $5, \
+             total_output_tokens = total_output_tokens + $6, \
+             total_cost_cents = total_cost_cents + $7, \
+             last_checkpoint_seq = COALESCE($8, last_checkpoint_seq) \
+             WHERE id = $9"
         ))
         .bind(now)
         .bind(event.input_tokens() as i64)
+        .bind(event.input_tokens_uncached() as i64)
+        .bind(event.input_tokens_cache_write() as i64)
+        .bind(event.input_tokens_cache_read() as i64)
         .bind(event.output_tokens() as i64)
         .bind(event.cost_cents() as i64)
         .bind(checkpoint_seq)

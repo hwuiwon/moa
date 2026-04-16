@@ -18,13 +18,14 @@ use async_openai::types::responses::{
     CreateResponse, EasyInputContent, EasyInputMessage, FunctionCallOutput,
     FunctionCallOutputItemParam, FunctionTool, FunctionToolCall, InputContent, InputItem,
     InputParam, InputTextContent, Item, OutputItem, OutputMessageContent, Reasoning, Response,
-    ResponseStream, ResponseStreamEvent, Role as OpenAiRole, Status as OpenAiStatus, Tool,
-    ToolChoiceOptions, ToolChoiceParam, WebSearchTool, WebSearchToolCallStatus,
+    ResponseStream, ResponseStreamEvent, ResponseUsage, Role as OpenAiRole, Status as OpenAiStatus,
+    Tool, ToolChoiceOptions, ToolChoiceParam, WebSearchTool, WebSearchToolCallStatus,
 };
 use futures_util::StreamExt;
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, MessageRole,
-    MoaError, ProviderNativeTool, Result, StopReason, ToolCallContent, ToolContent, ToolInvocation,
+    MoaError, ProviderNativeTool, Result, StopReason, TokenUsage, ToolCallContent, ToolContent,
+    ToolInvocation,
 };
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -394,10 +395,11 @@ async fn consume_responses_stream_once(
     }
 
     let usage = response.usage.clone();
-    let cached_input_tokens = usage
+    let token_usage = usage
         .as_ref()
-        .map(|usage| usage.input_tokens_details.cached_tokens as usize)
-        .unwrap_or(0);
+        .map(token_usage_from_openai_usage)
+        .unwrap_or_default();
+    let cached_input_tokens = token_usage.input_tokens_cache_read;
     span_recorder.set_cached_input_tokens(cached_input_tokens);
     let input_tokens = usage
         .as_ref()
@@ -421,9 +423,23 @@ async fn consume_responses_stream_once(
         input_tokens,
         output_tokens,
         cached_input_tokens,
+        usage: token_usage,
         duration_ms: started_at.elapsed().as_millis() as u64,
         thought_signature: None,
     })
+}
+
+fn token_usage_from_openai_usage(usage: &ResponseUsage) -> TokenUsage {
+    let cached_input_tokens = usage.input_tokens_details.cached_tokens as usize;
+    let input_tokens = usage.input_tokens as usize;
+    let output_tokens = usage.output_tokens as usize;
+
+    TokenUsage {
+        input_tokens_uncached: input_tokens.saturating_sub(cached_input_tokens),
+        input_tokens_cache_write: 0,
+        input_tokens_cache_read: cached_input_tokens,
+        output_tokens,
+    }
 }
 
 struct ResponsesStreamError {
@@ -820,9 +836,12 @@ mod tests {
     use std::collections::HashMap;
 
     use async_openai::error::OpenAIError;
+    use async_openai::types::responses::ResponseUsage;
     use serde_json::json;
 
-    use super::{is_ignorable_openai_stream_error, metadata_as_strings};
+    use super::{
+        is_ignorable_openai_stream_error, metadata_as_strings, token_usage_from_openai_usage,
+    };
 
     #[test]
     fn metadata_as_strings_drops_internal_moa_keys() {
@@ -846,5 +865,27 @@ mod tests {
         );
 
         assert!(is_ignorable_openai_stream_error(&error));
+    }
+
+    #[test]
+    fn token_usage_from_openai_usage_splits_cached_prompt_tokens() {
+        let usage: ResponseUsage = serde_json::from_value(json!({
+            "input_tokens": 2048,
+            "output_tokens": 512,
+            "total_tokens": 2560,
+            "input_tokens_details": {
+                "cached_tokens": 1536
+            },
+            "output_tokens_details": {
+                "reasoning_tokens": 0
+            }
+        }))
+        .expect("usage fixture should deserialize");
+
+        let token_usage = token_usage_from_openai_usage(&usage);
+        assert_eq!(token_usage.input_tokens_uncached, 512);
+        assert_eq!(token_usage.input_tokens_cache_write, 0);
+        assert_eq!(token_usage.input_tokens_cache_read, 1536);
+        assert_eq!(token_usage.output_tokens, 512);
     }
 }

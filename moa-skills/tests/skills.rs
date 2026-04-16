@@ -7,7 +7,7 @@ use chrono::{TimeZone, Utc};
 use moa_core::{
     CompletionRequest, CompletionResponse, CompletionStream, Event, EventRecord, LLMProvider,
     MemoryStore, MoaConfig, Platform, Result, SessionId, SessionMeta, StopReason, TokenPricing,
-    ToolCallFormat, UserId, WorkspaceId,
+    TokenUsage, ToolCallFormat, UserId, WorkspaceId,
 };
 use moa_memory::FileMemoryStore;
 use moa_skills::{
@@ -104,6 +104,15 @@ metadata:
 3. Ship the fix quickly.
 "#;
 
+fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
+    TokenUsage {
+        input_tokens_uncached: input_tokens,
+        input_tokens_cache_write: 0,
+        input_tokens_cache_read: 0,
+        output_tokens,
+    }
+}
+
 #[derive(Clone)]
 struct MockLlm {
     response: Arc<Mutex<String>>,
@@ -144,6 +153,7 @@ impl LLMProvider for MockLlm {
             input_tokens: 10,
             output_tokens: 20,
             cached_input_tokens: 0,
+            usage: token_usage(10, 20),
             duration_ms: 1,
             thought_signature: None,
         }))
@@ -205,6 +215,7 @@ impl LLMProvider for ImprovementAndEvalLlm {
             input_tokens: 10,
             output_tokens: 20,
             cached_input_tokens: 0,
+            usage: token_usage(10, 20),
             duration_ms: 1,
             thought_signature: None,
         }))

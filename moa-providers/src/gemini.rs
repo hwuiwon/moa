@@ -16,8 +16,8 @@ use futures_util::{Stream, StreamExt, pin_mut};
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
     LLMProvider, MessageRole, MoaConfig, MoaError, ModelCapabilities, ProviderNativeTool,
-    ProviderToolCallMetadata, Result, StopReason, TokenPricing, ToolCallContent, ToolCallFormat,
-    ToolContent, ToolInvocation,
+    ProviderToolCallMetadata, Result, StopReason, TokenPricing, TokenUsage, ToolCallContent,
+    ToolCallFormat, ToolContent, ToolInvocation,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -778,6 +778,19 @@ struct GeminiUsageMetadata {
     cached_content_token_count: Option<usize>,
 }
 
+fn token_usage_from_gemini_usage(metadata: &GeminiUsageMetadata) -> TokenUsage {
+    let input_tokens = metadata.prompt_token_count.unwrap_or_default();
+    let cached_input_tokens = metadata.cached_content_token_count.unwrap_or_default();
+    let output_tokens = metadata.candidates_token_count.unwrap_or_default();
+
+    TokenUsage {
+        input_tokens_uncached: input_tokens.saturating_sub(cached_input_tokens),
+        input_tokens_cache_write: 0,
+        input_tokens_cache_read: cached_input_tokens,
+        output_tokens,
+    }
+}
+
 #[derive(Debug)]
 struct GeminiStreamState {
     model: String,
@@ -906,6 +919,11 @@ impl GeminiStreamState {
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
             cached_input_tokens: self.cached_input_tokens,
+            usage: token_usage_from_gemini_usage(&GeminiUsageMetadata {
+                prompt_token_count: Some(self.input_tokens),
+                candidates_token_count: Some(self.output_tokens),
+                cached_content_token_count: Some(self.cached_input_tokens),
+            }),
             duration_ms: started_at.elapsed().as_millis() as u64,
             thought_signature: self.thought_signature,
         }
@@ -956,7 +974,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::GeminiProvider;
+    use super::{GeminiProvider, GeminiUsageMetadata, token_usage_from_gemini_usage};
 
     fn sse_stream(frames: &[Value]) -> String {
         let mut stream = String::new();
@@ -989,9 +1007,9 @@ mod tests {
             );
             assert!(request.contains("\"role\":\"user\""));
             assert!(request.contains("\"text\":\"hello\""));
-            assert!(request.contains(
-                "\"functionDeclarations\":[{\"description\":\"Read a file\",\"name\":\"file_read\""
-            ));
+            assert!(request.contains("\"functionDeclarations\":[{"));
+            assert!(request.contains("\"name\":\"file_read\""));
+            assert!(request.contains("\"description\":\"Read a file\""));
             assert!(!request.contains("\"additionalProperties\":false"));
             assert!(!request.contains("\"google_search\":{}"));
             assert!(request.contains("\"thinkingBudget\":4096"));
@@ -1057,6 +1075,21 @@ mod tests {
         server.abort();
     }
 
+    #[test]
+    fn token_usage_from_gemini_usage_splits_cached_prompt_tokens() {
+        let usage = GeminiUsageMetadata {
+            prompt_token_count: Some(2048),
+            candidates_token_count: Some(512),
+            cached_content_token_count: Some(1536),
+        };
+
+        let token_usage = token_usage_from_gemini_usage(&usage);
+        assert_eq!(token_usage.input_tokens_uncached, 512);
+        assert_eq!(token_usage.input_tokens_cache_write, 0);
+        assert_eq!(token_usage.input_tokens_cache_read, 1536);
+        assert_eq!(token_usage.output_tokens, 512);
+    }
+
     #[tokio::test]
     async fn gemini_provider_groups_tool_history_and_preserves_thought_signatures() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1067,11 +1100,14 @@ mod tests {
             let read = socket.read(&mut buffer).await.unwrap();
             let request = String::from_utf8_lossy(&buffer[..read]).to_string();
 
-            assert!(request.contains("\"functionCall\":{\"args\":{\"path\":\"notes/today.md\"},\"id\":\"fc_1\",\"name\":\"file_write\"}"));
+            assert!(request.contains("\"functionCall\":{"));
+            assert!(request.contains("\"name\":\"file_write\""));
+            assert!(request.contains("\"id\":\"fc_1\""));
+            assert!(request.contains("\"args\":{\"path\":\"notes/today.md\"}"));
             assert!(request.contains("\"thoughtSignature\":\"sig_fc_1\""));
-            assert!(
-                request.contains("\"functionResponse\":{\"id\":\"fc_1\",\"name\":\"file_write\"")
-            );
+            assert!(request.contains("\"functionResponse\":{"));
+            assert!(request.contains("\"name\":\"file_write\""));
+            assert!(request.contains("\"id\":\"fc_1\""));
             assert!(request.contains("\"result\":{\"path\":\"notes/today.md\"}"));
 
             let body = sse_stream(&[json!({

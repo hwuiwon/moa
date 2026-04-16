@@ -67,8 +67,15 @@ pub enum Event {
         thought_signature: Option<String>,
         /// Model identifier.
         model: String,
-        /// Input token count.
-        input_tokens: usize,
+        /// Input tokens billed at the provider's standard uncached rate.
+        #[serde(default, alias = "input_tokens")]
+        input_tokens_uncached: usize,
+        /// Input tokens billed to create or refresh a cache entry.
+        #[serde(default)]
+        input_tokens_cache_write: usize,
+        /// Input tokens served from cache.
+        #[serde(default)]
+        input_tokens_cache_read: usize,
         /// Output token count.
         output_tokens: usize,
         /// Cost in cents.
@@ -298,9 +305,50 @@ impl Event {
     /// Returns input tokens attributed to the event.
     pub fn input_tokens(&self) -> usize {
         match self {
-            Self::BrainResponse { input_tokens, .. } | Self::Checkpoint { input_tokens, .. } => {
-                *input_tokens
+            Self::BrainResponse {
+                input_tokens_uncached,
+                input_tokens_cache_write,
+                input_tokens_cache_read,
+                ..
+            } => input_tokens_uncached + input_tokens_cache_write + input_tokens_cache_read,
+            Self::Checkpoint { input_tokens, .. } => *input_tokens,
+            _ => 0,
+        }
+    }
+
+    /// Returns uncached input tokens attributed to the event.
+    pub fn input_tokens_uncached(&self) -> usize {
+        match self {
+            Self::BrainResponse {
+                input_tokens_uncached,
+                ..
             }
+            | Self::Checkpoint {
+                input_tokens: input_tokens_uncached,
+                ..
+            } => *input_tokens_uncached,
+            _ => 0,
+        }
+    }
+
+    /// Returns cache-write input tokens attributed to the event.
+    pub fn input_tokens_cache_write(&self) -> usize {
+        match self {
+            Self::BrainResponse {
+                input_tokens_cache_write,
+                ..
+            } => *input_tokens_cache_write,
+            _ => 0,
+        }
+    }
+
+    /// Returns cache-read input tokens attributed to the event.
+    pub fn input_tokens_cache_read(&self) -> usize {
+        match self {
+            Self::BrainResponse {
+                input_tokens_cache_read,
+                ..
+            } => *input_tokens_cache_read,
             _ => 0,
         }
     }
@@ -332,11 +380,7 @@ impl Event {
                 *token_count
             }
             Self::CacheReport { report } => report.total_tokens_estimate,
-            Self::BrainResponse {
-                input_tokens,
-                output_tokens,
-                ..
-            } => input_tokens + output_tokens,
+            Self::BrainResponse { output_tokens, .. } => self.input_tokens() + output_tokens,
             _ => 0,
         }
     }
@@ -425,14 +469,50 @@ mod tests {
             text: "Hi there".to_string(),
             thought_signature: None,
             model: "claude-sonnet-4-6".to_string(),
-            input_tokens: 100,
+            input_tokens_uncached: 100,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 0,
             output_tokens: 50,
             cost_cents: 2,
             duration_ms: 1500,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("cost_cents"));
-        assert!(json.contains("input_tokens"));
+        assert!(json.contains("input_tokens_uncached"));
+    }
+
+    #[test]
+    fn brain_response_deserializes_pre_step_79_payload() {
+        let payload = serde_json::json!({
+            "type": "BrainResponse",
+            "data": {
+                "text": "done",
+                "model": "claude-sonnet-4-6",
+                "input_tokens": 42,
+                "output_tokens": 9,
+                "cost_cents": 3,
+                "duration_ms": 120
+            }
+        });
+
+        let parsed: Event =
+            serde_json::from_value(payload).expect("legacy BrainResponse should deserialize");
+
+        match parsed {
+            Event::BrainResponse {
+                input_tokens_uncached,
+                input_tokens_cache_write,
+                input_tokens_cache_read,
+                output_tokens,
+                ..
+            } => {
+                assert_eq!(input_tokens_uncached, 42);
+                assert_eq!(input_tokens_cache_write, 0);
+                assert_eq!(input_tokens_cache_read, 0);
+                assert_eq!(output_tokens, 9);
+            }
+            other => panic!("expected BrainResponse, got {other:?}"),
+        }
     }
 
     #[test]

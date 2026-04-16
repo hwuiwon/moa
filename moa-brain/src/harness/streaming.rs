@@ -61,6 +61,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
         moa.turn.tool_calls = tracing::field::Empty,
         moa.turn.input_tokens = tracing::field::Empty,
         moa.turn.output_tokens = tracing::field::Empty,
+        moa.session.cache_hit_rate = tracing::field::Empty,
         moa.turn.result = tracing::field::Empty,
     );
     trace_context.apply_to_span(&turn_span);
@@ -279,6 +280,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                     "streamed turn finished without a provider response".to_string(),
                 )
             })?;
+            let response_usage = response.token_usage();
             let response_cost_cents =
                 calculate_response_cost_cents(&response, &llm_provider.capabilities().pricing);
             total_input_tokens += response.input_tokens;
@@ -302,7 +304,9 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                         text: streamed.streamed_text.clone(),
                         thought_signature: response.thought_signature.clone(),
                         model: response.model.clone(),
-                        input_tokens: response.input_tokens,
+                        input_tokens_uncached: response_usage.input_tokens_uncached,
+                        input_tokens_cache_write: response_usage.input_tokens_cache_write,
+                        input_tokens_cache_read: response_usage.input_tokens_cache_read,
                         output_tokens: response.output_tokens,
                         cost_cents: response_cost_cents,
                         duration_ms: response.duration_ms,
@@ -393,11 +397,16 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 total_tokens: updated_session.total_input_tokens
                     + updated_session.total_output_tokens,
             });
+            turn_span.record(
+                "moa.session.cache_hit_rate",
+                updated_session.cache_hit_rate(),
+            );
 
             tracing::info!(
                 session_id = %session_id,
                 tool_calls = emitted_tool_calls,
                 stop_reason = ?response.stop_reason,
+                session_cache_hit_rate = %format!("{:.1}%", updated_session.cache_hit_rate() * 100.0),
                 "streamed brain turn completed"
             );
 

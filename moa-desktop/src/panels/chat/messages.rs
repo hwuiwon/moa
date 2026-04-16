@@ -209,14 +209,13 @@ fn render_non_tool(event: &Event, timestamp: DateTime<Utc>) -> Option<ChatMessag
         Event::BrainResponse {
             text,
             model,
-            input_tokens,
             output_tokens,
             cost_cents,
             ..
         } => Some(ChatMessage::Agent {
             text: text.clone(),
             model: model.clone(),
-            input_tokens: *input_tokens,
+            input_tokens: event.input_tokens(),
             output_tokens: *output_tokens,
             cost_cents: *cost_cents,
             timestamp,

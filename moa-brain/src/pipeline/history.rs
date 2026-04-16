@@ -552,13 +552,22 @@ mod tests {
         BrainId, CompactionConfig, CompletionContent, CompletionRequest, CompletionResponse,
         CompletionStream, EventFilter, EventRecord, PendingSignal, PendingSignalId, Platform,
         SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
-        SessionSummary, StopReason, TokenPricing, ToolCallFormat, ToolOutputConfig, UserId,
-        WorkspaceId,
+        SessionSummary, StopReason, TokenPricing, TokenUsage, ToolCallFormat, ToolOutputConfig,
+        UserId, WorkspaceId,
     };
     use serde_json::json;
     use tokio::sync::Mutex;
 
     use super::*;
+
+    fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
+        TokenUsage {
+            input_tokens_uncached: input_tokens,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 0,
+            output_tokens,
+        }
+    }
 
     #[derive(Clone)]
     struct MockSessionStore {
@@ -683,8 +692,9 @@ mod tests {
                 input_tokens: 120,
                 output_tokens: 40,
                 cached_input_tokens: 0,
+                usage: token_usage(120, 40),
                 duration_ms: 25,
-            thought_signature: None,
+                thought_signature: None,
             }))
         }
     }
@@ -808,7 +818,9 @@ mod tests {
                 Event::BrainResponse {
                     text: "Hi there".to_string(),
                     model: "claude-sonnet-4-6".to_string(),
-                    input_tokens: 10,
+                    input_tokens_uncached: 10,
+                    input_tokens_cache_write: 0,
+                    input_tokens_cache_read: 0,
                     output_tokens: 4,
                     cost_cents: 1,
                     duration_ms: 100,

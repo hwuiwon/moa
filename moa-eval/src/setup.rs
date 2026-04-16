@@ -633,12 +633,22 @@ mod tests {
     use async_trait::async_trait;
     use moa_core::{
         CompletionRequest, CompletionResponse, CompletionStream, LLMProvider, MemoryPath,
-        MemoryScope, MoaConfig, ModelCapabilities, StopReason, TokenPricing, ToolCallFormat,
+        MemoryScope, MoaConfig, ModelCapabilities, StopReason, TokenPricing, TokenUsage,
+        ToolCallFormat,
     };
     use tempfile::tempdir;
 
     use super::{build_agent_environment_with_provider, slugify_name};
     use crate::{AgentConfig, MemoryOverride, PermissionOverride, ToolOverride};
+
+    fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
+        TokenUsage {
+            input_tokens_uncached: input_tokens,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 0,
+            output_tokens,
+        }
+    }
 
     #[derive(Clone)]
     struct MockProvider;
@@ -680,6 +690,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 cached_input_tokens: 0,
+                usage: token_usage(1, 1),
                 duration_ms: 1,
                 thought_signature: None,
             }))

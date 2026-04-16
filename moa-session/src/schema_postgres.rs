@@ -51,11 +51,21 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
             completed_at TIMESTAMPTZ,
             parent_session_id UUID REFERENCES {sessions}(id),
             total_input_tokens BIGINT DEFAULT 0,
+            total_input_tokens_uncached BIGINT DEFAULT 0,
+            total_input_tokens_cache_write BIGINT DEFAULT 0,
+            total_input_tokens_cache_read BIGINT DEFAULT 0,
             total_output_tokens BIGINT DEFAULT 0,
             total_cost_cents BIGINT DEFAULT 0,
             event_count BIGINT DEFAULT 0,
             last_checkpoint_seq BIGINT
         );
+
+        ALTER TABLE {sessions}
+            ADD COLUMN IF NOT EXISTS total_input_tokens_uncached BIGINT DEFAULT 0;
+        ALTER TABLE {sessions}
+            ADD COLUMN IF NOT EXISTS total_input_tokens_cache_write BIGINT DEFAULT 0;
+        ALTER TABLE {sessions}
+            ADD COLUMN IF NOT EXISTS total_input_tokens_cache_read BIGINT DEFAULT 0;
 
         CREATE INDEX IF NOT EXISTS {idx_sessions_workspace} ON {sessions}(workspace_id, updated_at DESC);
         CREATE INDEX IF NOT EXISTS {idx_sessions_user} ON {sessions}(user_id, updated_at DESC);

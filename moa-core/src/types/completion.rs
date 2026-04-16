@@ -127,6 +127,40 @@ impl CompletionRequest {
     }
 }
 
+/// Normalized provider token-usage counters.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    /// Input tokens billed at the provider's standard uncached rate.
+    #[serde(default, alias = "input_tokens")]
+    pub input_tokens_uncached: usize,
+    /// Input tokens billed to create or refresh a cache entry.
+    #[serde(default)]
+    pub input_tokens_cache_write: usize,
+    /// Input tokens served from an existing cache entry.
+    #[serde(default, alias = "cached_input_tokens")]
+    pub input_tokens_cache_read: usize,
+    /// Output tokens emitted by the provider.
+    #[serde(default)]
+    pub output_tokens: usize,
+}
+
+impl TokenUsage {
+    /// Returns the total number of input tokens across uncached, cache-write, and cache-read usage.
+    pub fn total_input_tokens(&self) -> usize {
+        self.input_tokens_uncached + self.input_tokens_cache_write + self.input_tokens_cache_read
+    }
+
+    /// Returns the fraction of input tokens that were served from cache.
+    pub fn cache_hit_rate(&self) -> f64 {
+        let denom = self.total_input_tokens();
+        if denom == 0 {
+            return 0.0;
+        }
+
+        self.input_tokens_cache_read as f64 / denom as f64
+    }
+}
+
 /// Provider completion response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompletionResponse {
@@ -138,17 +172,36 @@ pub struct CompletionResponse {
     pub stop_reason: StopReason,
     /// Model identifier used.
     pub model: String,
-    /// Input token usage.
+    /// Total input token usage, retained for compatibility with existing call sites.
     pub input_tokens: usize,
-    /// Output token usage.
+    /// Output token usage, retained for compatibility with existing call sites.
     pub output_tokens: usize,
-    /// Cached input token usage.
+    /// Cached input token usage served from cache, retained for compatibility with existing call sites.
     pub cached_input_tokens: usize,
+    /// Normalized provider token-usage counters.
+    #[serde(default)]
+    pub usage: TokenUsage,
     /// Total request duration in milliseconds.
     pub duration_ms: u64,
     /// Provider-specific thought signature that should be replayed on the next turn when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
+}
+
+impl CompletionResponse {
+    /// Returns normalized token usage for the response.
+    pub fn token_usage(&self) -> TokenUsage {
+        if self.usage != TokenUsage::default() {
+            return self.usage.clone();
+        }
+
+        TokenUsage {
+            input_tokens_uncached: self.input_tokens.saturating_sub(self.cached_input_tokens),
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: self.cached_input_tokens,
+            output_tokens: self.output_tokens,
+        }
+    }
 }
 
 /// Streaming provider response wrapper.
@@ -247,8 +300,23 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::{Duration as TokioDuration, sleep};
 
-    use super::{CompletionContent, CompletionResponse, CompletionStream, StopReason};
+    use super::{CompletionContent, CompletionResponse, CompletionStream, StopReason, TokenUsage};
     use crate::error::MoaError;
+
+    #[test]
+    fn token_usage_cache_hit_rate_handles_zero_and_mixed_usage() {
+        assert_eq!(TokenUsage::default().cache_hit_rate(), 0.0);
+
+        let usage = TokenUsage {
+            input_tokens_uncached: 40,
+            input_tokens_cache_write: 10,
+            input_tokens_cache_read: 50,
+            output_tokens: 8,
+        };
+
+        assert_eq!(usage.total_input_tokens(), 100);
+        assert!((usage.cache_hit_rate() - 0.5).abs() < f64::EPSILON);
+    }
 
     #[tokio::test]
     async fn completion_stream_abort_stops_completion_task() {
@@ -263,6 +331,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_input_tokens: 0,
+                usage: TokenUsage::default(),
                 duration_ms: 30_000,
                 thought_signature: None,
             })

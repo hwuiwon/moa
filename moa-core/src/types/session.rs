@@ -229,8 +229,17 @@ pub struct SessionMeta {
     pub completed_at: Option<DateTime<Utc>>,
     /// Parent session identifier for child sessions.
     pub parent_session_id: Option<SessionId>,
-    /// Aggregate input token usage.
+    /// Aggregate input token usage across all cache states.
     pub total_input_tokens: usize,
+    /// Aggregate uncached input token usage.
+    #[serde(default)]
+    pub total_input_tokens_uncached: usize,
+    /// Aggregate cache-write input token usage.
+    #[serde(default)]
+    pub total_input_tokens_cache_write: usize,
+    /// Aggregate cache-read input token usage.
+    #[serde(default)]
+    pub total_input_tokens_cache_read: usize,
     /// Aggregate output token usage.
     pub total_output_tokens: usize,
     /// Aggregate cost in cents.
@@ -239,6 +248,17 @@ pub struct SessionMeta {
     pub event_count: usize,
     /// Sequence number of the last checkpoint event.
     pub last_checkpoint_seq: Option<SequenceNum>,
+}
+
+impl SessionMeta {
+    /// Returns the fraction of total input tokens that were served from cache for this session.
+    pub fn cache_hit_rate(&self) -> f64 {
+        if self.total_input_tokens == 0 {
+            return 0.0;
+        }
+
+        self.total_input_tokens_cache_read as f64 / self.total_input_tokens as f64
+    }
 }
 
 impl Default for SessionMeta {
@@ -258,6 +278,9 @@ impl Default for SessionMeta {
             completed_at: None,
             parent_session_id: None,
             total_input_tokens: 0,
+            total_input_tokens_uncached: 0,
+            total_input_tokens_cache_write: 0,
+            total_input_tokens_cache_read: 0,
             total_output_tokens: 0,
             total_cost_cents: 0,
             event_count: 0,

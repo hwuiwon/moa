@@ -12,7 +12,7 @@ use moa_core::{
     Event, EventFilter, EventRange, EventRecord, EventType, LLMProvider, MemoryPath, MemoryScope,
     MemorySearchResult, MemoryStore, MoaConfig, ModelCapabilities, PageSummary, PageType,
     PendingSignal, PendingSignalId, Result, RuntimeEvent, SequenceNum, SessionFilter, SessionId,
-    SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason, TokenPricing,
+    SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason, TokenPricing, TokenUsage,
     ToolCallContent, ToolCallFormat, ToolInvocation, UserId, WikiPage, WorkspaceId,
 };
 use moa_hands::ToolRouter;
@@ -35,6 +35,15 @@ impl MockSessionStore {
             session: Arc::new(Mutex::new(session)),
             events: Arc::new(Mutex::new(events)),
         }
+    }
+}
+
+fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
+    TokenUsage {
+        input_tokens_uncached: input_tokens,
+        input_tokens_cache_write: 0,
+        input_tokens_cache_read: 0,
+        output_tokens,
     }
 }
 
@@ -293,6 +302,7 @@ impl LLMProvider for MockLlmProvider {
             input_tokens: 32,
             output_tokens: 8,
             cached_input_tokens: 0,
+            usage: token_usage(32, 8),
             duration_ms: 25,
             thought_signature: None,
         }))
@@ -334,6 +344,7 @@ impl LLMProvider for CapturingTextLlmProvider {
             input_tokens: 32,
             output_tokens: 8,
             cached_input_tokens: 0,
+            usage: token_usage(32, 8),
             duration_ms: 25,
             thought_signature: None,
         }))
@@ -388,6 +399,7 @@ impl LLMProvider for ToolLoopLlmProvider {
                 input_tokens: 12,
                 output_tokens: 5,
                 cached_input_tokens: 0,
+                usage: token_usage(12, 5),
                 duration_ms: 10,
                 thought_signature: None,
             }
@@ -408,6 +420,7 @@ impl LLMProvider for ToolLoopLlmProvider {
                 input_tokens: 20,
                 output_tokens: 7,
                 cached_input_tokens: 0,
+                usage: token_usage(20, 7),
                 duration_ms: 12,
                 thought_signature: None,
             }
@@ -465,6 +478,7 @@ impl LLMProvider for OpenAiApprovalLoopLlmProvider {
                 input_tokens: 12,
                 output_tokens: 5,
                 cached_input_tokens: 0,
+                usage: token_usage(12, 5),
                 duration_ms: 10,
                 thought_signature: None,
             }
@@ -494,6 +508,7 @@ impl LLMProvider for OpenAiApprovalLoopLlmProvider {
                 input_tokens: 20,
                 output_tokens: 7,
                 cached_input_tokens: 0,
+                usage: token_usage(20, 7),
                 duration_ms: 12,
                 thought_signature: None,
             }
@@ -551,6 +566,7 @@ impl LLMProvider for OpenAiFailedReadLoopLlmProvider {
                 input_tokens: 12,
                 output_tokens: 5,
                 cached_input_tokens: 0,
+                usage: token_usage(12, 5),
                 duration_ms: 10,
                 thought_signature: None,
             }
@@ -583,6 +599,7 @@ impl LLMProvider for OpenAiFailedReadLoopLlmProvider {
                 input_tokens: 20,
                 output_tokens: 7,
                 cached_input_tokens: 0,
+                usage: token_usage(20, 7),
                 duration_ms: 12,
                 thought_signature: None,
             }
@@ -645,6 +662,7 @@ impl LLMProvider for MemoryWriteLoopLlmProvider {
                 input_tokens: 12,
                 output_tokens: 5,
                 cached_input_tokens: 0,
+                usage: token_usage(12, 5),
                 duration_ms: 10,
                 thought_signature: None,
             }
@@ -664,6 +682,7 @@ impl LLMProvider for MemoryWriteLoopLlmProvider {
                 input_tokens: 20,
                 output_tokens: 7,
                 cached_input_tokens: 0,
+                usage: token_usage(20, 7),
                 duration_ms: 12,
                 thought_signature: None,
             }
@@ -709,6 +728,7 @@ impl LLMProvider for MemoryIngestLoopLlmProvider {
                 input_tokens: 18,
                 output_tokens: 8,
                 cached_input_tokens: 0,
+                usage: token_usage(18, 8),
                 duration_ms: 11,
                 thought_signature: None,
             },
@@ -727,6 +747,7 @@ impl LLMProvider for MemoryIngestLoopLlmProvider {
                     input_tokens: 24,
                     output_tokens: 10,
                     cached_input_tokens: 0,
+                    usage: token_usage(24, 10),
                     duration_ms: 12,
                     thought_signature: None,
                 }
@@ -750,6 +771,7 @@ impl LLMProvider for MemoryIngestLoopLlmProvider {
                 input_tokens: 14,
                 output_tokens: 5,
                 cached_input_tokens: 0,
+                usage: token_usage(14, 5),
                 duration_ms: 9,
                 thought_signature: None,
             },
@@ -776,6 +798,7 @@ impl LLMProvider for MemoryIngestLoopLlmProvider {
                     input_tokens: 22,
                     output_tokens: 9,
                     cached_input_tokens: 0,
+                    usage: token_usage(22, 9),
                     duration_ms: 10,
                     thought_signature: None,
                 }
@@ -839,6 +862,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
                 input_tokens: 12,
                 output_tokens: 5,
                 cached_input_tokens: 0,
+                usage: token_usage(12, 5),
                 duration_ms: 10,
                 thought_signature: None,
             },
@@ -859,6 +883,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
                     input_tokens: 20,
                     output_tokens: 7,
                     cached_input_tokens: 0,
+                    usage: token_usage(20, 7),
                     duration_ms: 12,
                     thought_signature: None,
                 }
@@ -871,6 +896,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
                 input_tokens: 10,
                 output_tokens: 2,
                 cached_input_tokens: 0,
+                usage: token_usage(10, 2),
                 duration_ms: 5,
                 thought_signature: None,
             },
@@ -925,6 +951,7 @@ impl LLMProvider for CanaryLeakLlmProvider {
                 input_tokens: 20,
                 output_tokens: 4,
                 cached_input_tokens: 0,
+                usage: token_usage(20, 4),
                 duration_ms: 10,
                 thought_signature: None,
             }
@@ -941,6 +968,7 @@ impl LLMProvider for CanaryLeakLlmProvider {
                 input_tokens: 16,
                 output_tokens: 2,
                 cached_input_tokens: 0,
+                usage: token_usage(16, 2),
                 duration_ms: 8,
                 thought_signature: None,
             }
@@ -983,6 +1011,7 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
                 input_tokens: 18,
                 output_tokens: 3,
                 cached_input_tokens: 0,
+                usage: token_usage(18, 3),
                 duration_ms: 12,
                 thought_signature: None,
             }
@@ -1011,6 +1040,7 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
                 input_tokens: 22,
                 output_tokens: 5,
                 cached_input_tokens: 0,
+                usage: token_usage(22, 5),
                 duration_ms: 11,
                 thought_signature: None,
             }
@@ -1047,6 +1077,7 @@ impl LLMProvider for ProviderToolResultTurnLlm {
             input_tokens: 8,
             output_tokens: 5,
             cached_input_tokens: 0,
+            usage: token_usage(8, 5),
             duration_ms: 6,
             thought_signature: None,
         }))
@@ -1113,13 +1144,12 @@ async fn run_brain_turn_emits_brain_response_event() {
         Event::BrainResponse {
             text,
             model,
-            input_tokens,
             output_tokens,
             ..
         } => {
             assert_eq!(text, "Hi there");
             assert_eq!(model, "claude-sonnet-4-6");
-            assert_eq!(*input_tokens, 32);
+            assert_eq!(events[2].event.input_tokens(), 32);
             assert_eq!(*output_tokens, 8);
         }
         other => panic!("expected brain response event, got {other:?}"),
@@ -1204,7 +1234,9 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
             Event::BrainResponse {
                 text: "Existing reply".to_string(),
                 model: "claude-sonnet-4-6".to_string(),
-                input_tokens: 20,
+                input_tokens_uncached: 20,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
                 output_tokens: 10,
                 cost_cents: 5,
                 duration_ms: 25,
@@ -1268,7 +1300,9 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
             Event::BrainResponse {
                 text: "Existing reply".to_string(),
                 model: "claude-sonnet-4-6".to_string(),
-                input_tokens: 20,
+                input_tokens_uncached: 20,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
                 output_tokens: 10,
                 cost_cents: 500,
                 duration_ms: 25,
