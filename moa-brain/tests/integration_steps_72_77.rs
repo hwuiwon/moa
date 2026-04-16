@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use moa_brain::{TurnResult, build_default_pipeline_with_tools, run_brain_turn_with_tools};
 use moa_core::{
-    CompletionRequest, Event, EventRange, EventRecord, ModelCapabilities, Result, SessionMeta,
-    SessionStore, TokenPricing, TokenUsage, ToolCallFormat, ToolOutput, UserId, WorkspaceId,
+    CompletionRequest, CountedSessionStore, Event, EventRange, EventRecord, ModelCapabilities,
+    Result, SessionMeta, SessionStore, TokenPricing, TokenUsage, ToolCallFormat, ToolOutput,
+    TurnReplayCounters, TurnReplaySnapshot, UserId, WorkspaceId, scope_turn_replay_counters,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
@@ -61,6 +62,8 @@ async fn steps_72_77_e2e() -> Result<()> {
     let memory_store = Arc::new(FileMemoryStore::new(&state_dir).await?);
     let session_store =
         Arc::new(TursoSessionStore::new_local(&state_dir.join("sessions.db")).await?);
+    let counted_session_store: Arc<dyn SessionStore> =
+        Arc::new(CountedSessionStore::new(session_store.clone()));
     let workspace_id = WorkspaceId::new("steps-72-77");
     let session = SessionMeta {
         workspace_id: workspace_id.clone(),
@@ -83,10 +86,11 @@ async fn steps_72_77_e2e() -> Result<()> {
     let provider = Arc::new(build_scripted_provider());
     let pipeline = build_default_pipeline_with_tools(
         &config,
-        session_store.clone(),
+        counted_session_store.clone(),
         memory_store,
         extend_tool_schemas(router.tool_schemas()),
     );
+    let mut replay_snapshots = Vec::new();
 
     for prompt in [
         "Turn 1: inspect the target range",
@@ -107,14 +111,19 @@ async fn steps_72_77_e2e() -> Result<()> {
             )
             .await?;
 
-        let result = run_brain_turn_with_tools(
-            session_id.clone(),
-            session_store.clone(),
-            provider.clone(),
-            &pipeline,
-            Some(router.clone()),
+        let turn_counters = Arc::new(TurnReplayCounters::default());
+        let result = scope_turn_replay_counters(
+            turn_counters.clone(),
+            run_brain_turn_with_tools(
+                session_id.clone(),
+                counted_session_store.clone(),
+                provider.clone(),
+                &pipeline,
+                Some(router.clone()),
+            ),
         )
         .await?;
+        replay_snapshots.push(turn_counters.snapshot());
 
         assert_eq!(
             result,
@@ -318,6 +327,7 @@ async fn steps_72_77_e2e() -> Result<()> {
         final_session.cache_hit_rate() > 0.0,
         "session cache hit rate should be non-zero"
     );
+    assert_replay_growth(&replay_snapshots);
 
     Ok(())
 }
@@ -490,4 +500,28 @@ fn collect_tool_runs(events: &[EventRecord]) -> Vec<ToolRun> {
     }
 
     runs
+}
+
+fn assert_replay_growth(replay_snapshots: &[TurnReplaySnapshot]) {
+    assert_eq!(
+        replay_snapshots.len(),
+        7,
+        "expected one replay snapshot per scripted turn"
+    );
+    assert!(
+        replay_snapshots[0].events_replayed > 0,
+        "first turn should replay at least one event"
+    );
+    assert!(
+        replay_snapshots[0].get_events_calls > 0,
+        "first turn should call get_events at least once"
+    );
+    assert!(
+        replay_snapshots[6].events_replayed > replay_snapshots[0].events_replayed,
+        "later turns should replay more events than early turns"
+    );
+    assert!(
+        replay_snapshots[6].events_bytes > replay_snapshots[0].events_bytes,
+        "later turns should deserialize more event bytes than early turns"
+    );
 }

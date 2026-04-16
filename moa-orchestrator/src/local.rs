@@ -15,11 +15,12 @@ use moa_brain::{
     run_streamed_turn_with_signals_stepwise, update_workspace_tool_stats,
 };
 use moa_core::{
-    BrainOrchestrator, BranchManager, BufferedUserMessage, CronHandle, CronSpec, Event, EventRange,
-    EventRecord, EventStream, LLMProvider, MemoryScope, MoaConfig, MoaError, ObserveLevel,
-    PendingSignal, Result, RuntimeEvent, SessionFilter, SessionHandle, SessionId, SessionMeta,
-    SessionSignal, SessionStatus, SessionStore, SessionSummary, StartSessionRequest, TraceContext,
-    UserMessage, WorkspaceId,
+    BrainOrchestrator, BranchManager, BufferedUserMessage, CountedSessionStore, CronHandle,
+    CronSpec, Event, EventRange, EventRecord, EventStream, LLMProvider, MemoryScope, MoaConfig,
+    MoaError, ObserveLevel, PendingSignal, Result, RuntimeEvent, SessionFilter, SessionHandle,
+    SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, SessionSummary,
+    StartSessionRequest, TraceContext, TurnReplayCounters, TurnReplaySnapshot, UserMessage,
+    WorkspaceId, scope_turn_replay_counters,
 };
 use moa_hands::ToolRouter;
 use moa_memory::{ConsolidationReport, FileMemoryStore, bootstrap};
@@ -37,6 +38,7 @@ use tracing::Instrument;
 pub struct LocalOrchestrator {
     config: MoaConfig,
     session_store: Arc<SessionDatabase>,
+    instrumented_session_store: Arc<dyn SessionStore>,
     memory_store: Arc<FileMemoryStore>,
     llm_provider: Arc<dyn LLMProvider>,
     tool_router: Arc<ToolRouter>,
@@ -58,7 +60,7 @@ struct LocalBrainHandle {
 #[derive(Clone)]
 struct SessionTaskContext {
     config: MoaConfig,
-    session_store: Arc<SessionDatabase>,
+    session_store: Arc<dyn SessionStore>,
     memory_store: Arc<FileMemoryStore>,
     llm_provider: Arc<dyn LLMProvider>,
     tool_router: Arc<ToolRouter>,
@@ -84,9 +86,12 @@ impl LocalOrchestrator {
             .map_err(|error| MoaError::ProviderError(error.to_string()))?;
 
         let branch_manager = NeonBranchManager::maybe_from_config(&config)?.map(Arc::new);
+        let instrumented_session_store: Arc<dyn SessionStore> =
+            Arc::new(CountedSessionStore::new(session_store.clone()));
         let orchestrator = Self {
             config,
             session_store,
+            instrumented_session_store,
             memory_store,
             llm_provider,
             tool_router,
@@ -282,7 +287,7 @@ impl LocalOrchestrator {
         let finished = Arc::new(AtomicBool::new(false));
         let context = SessionTaskContext {
             config: self.config.clone(),
-            session_store: self.session_store.clone(),
+            session_store: self.instrumented_session_store.clone(),
             memory_store: self.memory_store.clone(),
             llm_provider: self.llm_provider.clone(),
             tool_router: self.tool_router.clone(),
@@ -313,7 +318,7 @@ impl LocalOrchestrator {
             )
             .await
         });
-        let supervisor_session_store = self.session_store.clone();
+        let supervisor_session_store = self.instrumented_session_store.clone();
         let supervisor_tool_router = self.tool_router.clone();
         let supervisor_status = status.clone();
         let supervisor_finished = finished.clone();
@@ -598,6 +603,12 @@ impl LocalOrchestrator {
     }
 }
 
+enum TurnDirective {
+    ContinueLoop,
+    FinishOk,
+    FinishErr(MoaError),
+}
+
 #[async_trait]
 impl BrainOrchestrator for LocalOrchestrator {
     /// Starts a new session task and returns its handle.
@@ -622,7 +633,7 @@ impl BrainOrchestrator for LocalOrchestrator {
         };
         self.session_store.create_session(meta).await?;
         append_event(
-            &self.session_store,
+            &self.instrumented_session_store,
             &broadcast::channel(1).0,
             session_id.clone(),
             Event::SessionCreated {
@@ -637,7 +648,7 @@ impl BrainOrchestrator for LocalOrchestrator {
             .await;
         if let Some(message) = initial_message {
             append_event(
-                &self.session_store,
+                &self.instrumented_session_store,
                 &broadcast::channel(1).0,
                 session_id.clone(),
                 Event::UserMessage {
@@ -904,266 +915,289 @@ async fn run_session_task(
             }
             continue;
         }
+        let turn_counters = Arc::new(TurnReplayCounters::default());
+        let turn_counters_scope = turn_counters.clone();
+        let turn_directive = scope_turn_replay_counters(turn_counters.clone(), async {
+            let session = context
+                .session_store
+                .get_session(context.session_id.clone())
+                .await?;
+            let events = context
+                .session_store
+                .get_events(context.session_id.clone(), EventRange::all())
+                .await?;
+            let turn_number = turn_number_for_events(&events);
+            let trace_context =
+                TraceContext::from_session_meta(&session, last_user_message_text(&events))
+                    .with_environment(context.config.observability.environment.clone());
+            let trace_name = trace_context
+                .trace_name
+                .clone()
+                .unwrap_or_else(|| format!("MOA turn {turn_number}"));
+            let turn_root_span = tracing::info_span!(
+                "session_turn",
+                otel.name = %trace_name,
+                moa.turn.number = turn_number,
+                moa.turn.get_events_calls = tracing::field::Empty,
+                moa.turn.events_replayed = tracing::field::Empty,
+                moa.turn.events_bytes = tracing::field::Empty,
+                moa.turn.get_events_total_ms = tracing::field::Empty,
+                moa.turn.pipeline_compile_ms = tracing::field::Empty,
+                langfuse.trace.metadata.turn_number = turn_number,
+            );
+            trace_context.apply_to_span(&turn_root_span);
 
-        let session = context
-            .session_store
-            .get_session(context.session_id.clone())
-            .await?;
-        let events = context
-            .session_store
-            .get_events(context.session_id.clone(), EventRange::all())
-            .await?;
-        if max_turns > 0 && turn_count >= max_turns {
-            pause_active_session(
-                &context,
-                &event_tx,
-                &runtime_tx,
-                &status,
-                &context.session_id,
-                &mut queued_messages,
-                turn_limit_pause_message(turn_count, &events),
-            )
-            .await?;
-            return Ok(());
-        }
-        if !session_requires_processing(&session, &events)
-            && !queued_messages.is_empty()
-            && flush_next_queued_message(
-                &context.session_store,
-                &event_tx,
-                &context.session_id,
-                &mut queued_messages,
-            )
-            .await?
-        {
-            turn_requested = true;
-            continue;
-        }
-
-        turn_requested = false;
-        let mut soft_cancel_requested = false;
-        let turn_start_sequence_num = events.last().map(|record| record.sequence_num).unwrap_or(0);
-        let turn_number = turn_number_for_events(&events);
-        let trace_context =
-            TraceContext::from_session_meta(&session, last_user_message_text(&events))
-                .with_environment(context.config.observability.environment.clone());
-        let trace_name = trace_context
-            .trace_name
-            .clone()
-            .unwrap_or_else(|| format!("MOA turn {turn_number}"));
-        let turn_root_span = tracing::info_span!(
-            "session_turn",
-            otel.name = %trace_name,
-            moa.turn.number = turn_number,
-            langfuse.trace.metadata.turn_number = turn_number,
-        );
-        trace_context.apply_to_span(&turn_root_span);
-
-        let turn_result = run_streamed_turn_with_signals_stepwise(
-            context.session_id.clone(),
-            context.session_store.clone(),
-            context.llm_provider.clone(),
-            &pipeline,
-            Some(context.tool_router.clone()),
-            &runtime_tx,
-            Some(&event_tx),
-            &mut signal_rx,
-            &mut turn_requested,
-            &mut queued_messages,
-            &mut soft_cancel_requested,
-            Some(&cancel_token),
-            Some(&hard_cancel_token),
-        )
-        .instrument(turn_root_span)
-        .await;
-
-        match turn_result {
-            Ok(StreamedTurnResult::Complete) => {
-                if record_turn_boundary(
-                    &context,
-                    &event_tx,
-                    &runtime_tx,
-                    &status,
-                    &context.session_id,
-                    &mut queued_messages,
-                    turn_start_sequence_num,
-                    &mut turn_count,
-                    &mut loop_detector,
-                    loop_detection_threshold,
-                )
-                .await?
-                {
-                    return Ok(());
+            let turn_outcome: Result<TurnDirective> = async {
+                if max_turns > 0 && turn_count >= max_turns {
+                    pause_active_session(
+                        &context,
+                        &event_tx,
+                        &runtime_tx,
+                        &status,
+                        &context.session_id,
+                        &mut queued_messages,
+                        turn_limit_pause_message(turn_count, &events),
+                    )
+                    .await?;
+                    return Ok(TurnDirective::FinishOk);
                 }
-                if flush_next_queued_message(
-                    &context.session_store,
-                    &event_tx,
-                    &context.session_id,
-                    &mut queued_messages,
-                )
-                .await?
+                if !session_requires_processing(&session, &events)
+                    && !queued_messages.is_empty()
+                    && flush_next_queued_message(
+                        &context.session_store,
+                        &event_tx,
+                        &context.session_id,
+                        &mut queued_messages,
+                    )
+                    .await?
                 {
                     turn_requested = true;
+                    return Ok(TurnDirective::ContinueLoop);
                 }
-                if turn_requested {
-                    continue;
-                }
-                let session = context
-                    .session_store
-                    .get_session(context.session_id.clone())
-                    .await?;
-                let events = context
-                    .session_store
-                    .get_events(context.session_id.clone(), EventRange::all())
-                    .await?;
-                if let Some(skill) = maybe_distill_skill(
-                    &context.config,
-                    &session,
-                    &events,
-                    context.memory_store.clone(),
+
+                turn_requested = false;
+                let mut soft_cancel_requested = false;
+                let turn_start_sequence_num =
+                    events.last().map(|record| record.sequence_num).unwrap_or(0);
+                let turn_result = run_streamed_turn_with_signals_stepwise(
+                    context.session_id.clone(),
+                    context.session_store.clone(),
                     context.llm_provider.clone(),
-                )
-                .await?
-                {
-                    append_event(
-                        &context.session_store,
-                        &event_tx,
-                        context.session_id.clone(),
-                        Event::MemoryWrite {
-                            path: skill.path.to_string(),
-                            scope: session.workspace_id.to_string(),
-                            summary: format!("Distilled skill {}", skill.name),
-                        },
-                    )
-                    .await?;
-                    let _ = runtime_tx.send(RuntimeEvent::Notice(format!(
-                        "Distilled skill: {}",
-                        skill.name
-                    )));
-                }
-                refresh_workspace_tool_stats(
-                    &context.session_store,
-                    &context.memory_store,
-                    &context.session_id,
-                )
-                .await;
-                update_status(
-                    &context.session_store,
-                    &event_tx,
-                    &status,
-                    context.session_id.clone(),
-                    SessionStatus::Completed,
-                )
-                .await?;
-                context
-                    .tool_router
-                    .destroy_session_hands(&context.session_id)
-                    .await;
-                let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
-            }
-            Ok(StreamedTurnResult::Continue) => {
-                if record_turn_boundary(
-                    &context,
-                    &event_tx,
+                    &pipeline,
+                    Some(context.tool_router.clone()),
                     &runtime_tx,
-                    &status,
-                    &context.session_id,
+                    Some(&event_tx),
+                    &mut signal_rx,
+                    &mut turn_requested,
                     &mut queued_messages,
-                    turn_start_sequence_num,
-                    &mut turn_count,
-                    &mut loop_detector,
-                    loop_detection_threshold,
-                )
-                .await?
-                {
-                    return Ok(());
-                }
-                turn_requested = true;
-                continue;
-            }
-            Ok(StreamedTurnResult::NeedsApproval(_)) => {
-                continue;
-            }
-            Ok(StreamedTurnResult::Cancelled) => {
-                flush_queued_messages(
-                    &context.session_store,
-                    &event_tx,
-                    &context.session_id,
-                    &mut queued_messages,
-                )
-                .await?;
-                refresh_workspace_tool_stats(
-                    &context.session_store,
-                    &context.memory_store,
-                    &context.session_id,
+                    &mut soft_cancel_requested,
+                    Some(&cancel_token),
+                    Some(&hard_cancel_token),
                 )
                 .await;
-                update_status(
-                    &context.session_store,
-                    &event_tx,
-                    &status,
-                    context.session_id.clone(),
-                    SessionStatus::Cancelled,
-                )
-                .await?;
-                context
-                    .tool_router
-                    .destroy_session_hands(&context.session_id)
-                    .await;
-                let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
-                return Ok(());
-            }
-            Err(error) => {
-                let budget_exhausted = matches!(error, MoaError::BudgetExhausted(_));
-                if !budget_exhausted {
-                    append_event(
-                        &context.session_store,
-                        &event_tx,
-                        context.session_id.clone(),
-                        Event::Error {
-                            message: error.to_string(),
-                            recoverable: false,
-                        },
-                    )
-                    .await?;
+
+                match turn_result {
+                    Ok(StreamedTurnResult::Complete) => {
+                        if record_turn_boundary(
+                            &context,
+                            &event_tx,
+                            &runtime_tx,
+                            &status,
+                            &context.session_id,
+                            &mut queued_messages,
+                            turn_start_sequence_num,
+                            &mut turn_count,
+                            &mut loop_detector,
+                            loop_detection_threshold,
+                        )
+                        .await?
+                        {
+                            return Ok(TurnDirective::FinishOk);
+                        }
+                        if flush_next_queued_message(
+                            &context.session_store,
+                            &event_tx,
+                            &context.session_id,
+                            &mut queued_messages,
+                        )
+                        .await?
+                        {
+                            turn_requested = true;
+                        }
+                        if turn_requested {
+                            return Ok(TurnDirective::ContinueLoop);
+                        }
+
+                        let session = context
+                            .session_store
+                            .get_session(context.session_id.clone())
+                            .await?;
+                        let events = context
+                            .session_store
+                            .get_events(context.session_id.clone(), EventRange::all())
+                            .await?;
+                        if let Some(skill) = maybe_distill_skill(
+                            &context.config,
+                            &session,
+                            &events,
+                            context.memory_store.clone(),
+                            context.llm_provider.clone(),
+                        )
+                        .await?
+                        {
+                            append_event(
+                                &context.session_store,
+                                &event_tx,
+                                context.session_id.clone(),
+                                Event::MemoryWrite {
+                                    path: skill.path.to_string(),
+                                    scope: session.workspace_id.to_string(),
+                                    summary: format!("Distilled skill {}", skill.name),
+                                },
+                            )
+                            .await?;
+                            let _ = runtime_tx.send(RuntimeEvent::Notice(format!(
+                                "Distilled skill: {}",
+                                skill.name
+                            )));
+                        }
+                        refresh_workspace_tool_stats(
+                            &context.session_store,
+                            &context.memory_store,
+                            &context.session_id,
+                        )
+                        .await;
+                        update_status(
+                            &context.session_store,
+                            &event_tx,
+                            &status,
+                            context.session_id.clone(),
+                            SessionStatus::Completed,
+                        )
+                        .await?;
+                        context
+                            .tool_router
+                            .destroy_session_hands(&context.session_id)
+                            .await;
+                        let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
+                        Ok(TurnDirective::ContinueLoop)
+                    }
+                    Ok(StreamedTurnResult::Continue) => {
+                        if record_turn_boundary(
+                            &context,
+                            &event_tx,
+                            &runtime_tx,
+                            &status,
+                            &context.session_id,
+                            &mut queued_messages,
+                            turn_start_sequence_num,
+                            &mut turn_count,
+                            &mut loop_detector,
+                            loop_detection_threshold,
+                        )
+                        .await?
+                        {
+                            return Ok(TurnDirective::FinishOk);
+                        }
+                        turn_requested = true;
+                        Ok(TurnDirective::ContinueLoop)
+                    }
+                    Ok(StreamedTurnResult::NeedsApproval(_)) => Ok(TurnDirective::ContinueLoop),
+                    Ok(StreamedTurnResult::Cancelled) => {
+                        flush_queued_messages(
+                            &context.session_store,
+                            &event_tx,
+                            &context.session_id,
+                            &mut queued_messages,
+                        )
+                        .await?;
+                        refresh_workspace_tool_stats(
+                            &context.session_store,
+                            &context.memory_store,
+                            &context.session_id,
+                        )
+                        .await;
+                        update_status(
+                            &context.session_store,
+                            &event_tx,
+                            &status,
+                            context.session_id.clone(),
+                            SessionStatus::Cancelled,
+                        )
+                        .await?;
+                        context
+                            .tool_router
+                            .destroy_session_hands(&context.session_id)
+                            .await;
+                        let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
+                        Ok(TurnDirective::FinishOk)
+                    }
+                    Err(error) => {
+                        let budget_exhausted = matches!(error, MoaError::BudgetExhausted(_));
+                        if !budget_exhausted {
+                            append_event(
+                                &context.session_store,
+                                &event_tx,
+                                context.session_id.clone(),
+                                Event::Error {
+                                    message: error.to_string(),
+                                    recoverable: false,
+                                },
+                            )
+                            .await?;
+                        }
+                        flush_queued_messages(
+                            &context.session_store,
+                            &event_tx,
+                            &context.session_id,
+                            &mut queued_messages,
+                        )
+                        .await?;
+                        refresh_workspace_tool_stats(
+                            &context.session_store,
+                            &context.memory_store,
+                            &context.session_id,
+                        )
+                        .await;
+                        update_status(
+                            &context.session_store,
+                            &event_tx,
+                            &status,
+                            context.session_id.clone(),
+                            SessionStatus::Failed,
+                        )
+                        .await?;
+                        context
+                            .tool_router
+                            .destroy_session_hands(&context.session_id)
+                            .await;
+                        if !budget_exhausted {
+                            let _ = runtime_tx.send(RuntimeEvent::Error(error.to_string()));
+                        }
+                        let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
+                        Ok(TurnDirective::FinishErr(error))
+                    }
                 }
-                flush_queued_messages(
-                    &context.session_store,
-                    &event_tx,
-                    &context.session_id,
-                    &mut queued_messages,
-                )
-                .await?;
-                refresh_workspace_tool_stats(
-                    &context.session_store,
-                    &context.memory_store,
-                    &context.session_id,
-                )
-                .await;
-                update_status(
-                    &context.session_store,
-                    &event_tx,
-                    &status,
-                    context.session_id.clone(),
-                    SessionStatus::Failed,
-                )
-                .await?;
-                context
-                    .tool_router
-                    .destroy_session_hands(&context.session_id)
-                    .await;
-                if !budget_exhausted {
-                    let _ = runtime_tx.send(RuntimeEvent::Error(error.to_string()));
-                }
-                let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
-                return Err(error);
             }
+            .instrument(turn_root_span.clone())
+            .await;
+
+            let turn_snapshot = turn_counters_scope.snapshot();
+            emit_turn_replay_summary(&turn_root_span, turn_number, &turn_snapshot);
+            turn_outcome
+        })
+        .await?;
+
+        match turn_directive {
+            TurnDirective::ContinueLoop => continue,
+            TurnDirective::FinishOk => return Ok(()),
+            TurnDirective::FinishErr(error) => return Err(error),
         }
     }
 }
 
 async fn accept_user_message(
-    session_store: &Arc<SessionDatabase>,
+    session_store: &Arc<dyn SessionStore>,
     event_tx: &broadcast::Sender<EventRecord>,
     session_id: &SessionId,
     message: UserMessage,
@@ -1185,7 +1219,7 @@ async fn accept_user_message(
 }
 
 async fn flush_queued_messages(
-    session_store: &Arc<SessionDatabase>,
+    session_store: &Arc<dyn SessionStore>,
     event_tx: &broadcast::Sender<EventRecord>,
     session_id: &SessionId,
     queued_messages: &mut Vec<BufferedUserMessage>,
@@ -1198,7 +1232,7 @@ async fn flush_queued_messages(
 }
 
 async fn flush_next_queued_message(
-    session_store: &Arc<SessionDatabase>,
+    session_store: &Arc<dyn SessionStore>,
     event_tx: &broadcast::Sender<EventRecord>,
     session_id: &SessionId,
     queued_messages: &mut Vec<BufferedUserMessage>,
@@ -1213,7 +1247,7 @@ async fn flush_next_queued_message(
 }
 
 async fn flush_pending_signal(
-    session_store: &Arc<SessionDatabase>,
+    session_store: &Arc<dyn SessionStore>,
     event_tx: &broadcast::Sender<EventRecord>,
     session_id: &SessionId,
     buffered: BufferedUserMessage,
@@ -1247,7 +1281,7 @@ async fn flush_pending_signal(
 }
 
 async fn best_effort_resolve_pending_signal(
-    session_store: &Arc<SessionDatabase>,
+    session_store: &Arc<dyn SessionStore>,
     session_id: &SessionId,
     signal_id: moa_core::PendingSignalId,
 ) -> Result<()> {
@@ -1270,7 +1304,7 @@ async fn best_effort_resolve_pending_signal(
 }
 
 async fn resolve_matching_pending_signal(
-    session_store: &Arc<SessionDatabase>,
+    session_store: &Arc<dyn SessionStore>,
     session_id: &SessionId,
     message: &UserMessage,
 ) -> Result<Option<moa_core::PendingSignalId>> {
@@ -1286,7 +1320,7 @@ async fn resolve_matching_pending_signal(
 }
 
 async fn update_status(
-    session_store: &Arc<SessionDatabase>,
+    session_store: &Arc<dyn SessionStore>,
     event_tx: &broadcast::Sender<EventRecord>,
     status: &Arc<RwLock<SessionStatus>>,
     session_id: SessionId,
@@ -1314,7 +1348,7 @@ async fn update_status(
 }
 
 async fn refresh_workspace_tool_stats(
-    session_store: &Arc<SessionDatabase>,
+    session_store: &Arc<dyn SessionStore>,
     memory_store: &Arc<FileMemoryStore>,
     session_id: &SessionId,
 ) {
@@ -1330,7 +1364,7 @@ async fn refresh_workspace_tool_stats(
 }
 
 async fn append_event(
-    session_store: &Arc<SessionDatabase>,
+    session_store: &Arc<dyn SessionStore>,
     event_tx: &broadcast::Sender<EventRecord>,
     session_id: SessionId,
     event: Event,
@@ -1420,7 +1454,7 @@ async fn detect_workspace_path(workspace_id: &WorkspaceId) -> Result<PathBuf> {
 }
 
 async fn report_session_task_failure(
-    session_store: &Arc<SessionDatabase>,
+    session_store: &Arc<dyn SessionStore>,
     event_tx: &broadcast::Sender<EventRecord>,
     status: &Arc<RwLock<SessionStatus>>,
     session_id: SessionId,
@@ -1455,7 +1489,7 @@ async fn report_session_task_failure(
 /// parks the session at `Paused` so the UI can offer a Resume affordance
 /// rather than treating it as terminal.
 async fn report_session_task_paused(
-    session_store: &Arc<SessionDatabase>,
+    session_store: &Arc<dyn SessionStore>,
     event_tx: &broadcast::Sender<EventRecord>,
     status: &Arc<RwLock<SessionStatus>>,
     session_id: SessionId,
@@ -1518,7 +1552,7 @@ async fn pause_active_session(
 }
 
 async fn pause_session_task(
-    session_store: &Arc<SessionDatabase>,
+    session_store: &Arc<dyn SessionStore>,
     event_tx: &broadcast::Sender<EventRecord>,
     status: &Arc<RwLock<SessionStatus>>,
     session_id: SessionId,
@@ -1593,6 +1627,38 @@ async fn record_turn_boundary(
     )
     .await?;
     Ok(true)
+}
+
+fn emit_turn_replay_summary(
+    turn_root_span: &tracing::Span,
+    turn_number: i64,
+    snapshot: &TurnReplaySnapshot,
+) {
+    turn_root_span.record(
+        "moa.turn.get_events_calls",
+        snapshot.get_events_calls as i64,
+    );
+    turn_root_span.record("moa.turn.events_replayed", snapshot.events_replayed as i64);
+    turn_root_span.record("moa.turn.events_bytes", snapshot.events_bytes as i64);
+    turn_root_span.record(
+        "moa.turn.get_events_total_ms",
+        snapshot.get_events_total_ms() as i64,
+    );
+    turn_root_span.record(
+        "moa.turn.pipeline_compile_ms",
+        snapshot.pipeline_compile_ms() as i64,
+    );
+
+    tracing::info!(
+        parent: turn_root_span,
+        turn_number,
+        get_events_calls = snapshot.get_events_calls,
+        events_replayed = snapshot.events_replayed,
+        events_bytes = snapshot.events_bytes,
+        get_events_total_ms = snapshot.get_events_total_ms(),
+        pipeline_compile_ms = snapshot.pipeline_compile_ms(),
+        "turn event replay summary"
+    );
 }
 
 fn turn_number_for_events(events: &[EventRecord]) -> i64 {

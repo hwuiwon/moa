@@ -4,6 +4,7 @@ pub mod config;
 pub mod daemon;
 pub mod error;
 pub mod events;
+pub mod session_replay;
 pub mod shell;
 pub mod telemetry;
 pub mod traits;
@@ -21,6 +22,10 @@ pub use config::{
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
 pub use error::{MoaError, Result};
 pub use events::Event;
+pub use session_replay::{
+    CountedSessionStore, TurnReplayCounters, TurnReplaySnapshot, record_pipeline_compile_duration,
+    scope_turn_replay_counters,
+};
 pub use telemetry::{TelemetryConfig, TelemetryGuard, default_log_path, init_observability};
 pub use traits::{
     BlobStore, BrainOrchestrator, BranchManager, BuiltInTool, ContextProcessor, CredentialVault,

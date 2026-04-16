@@ -1,11 +1,13 @@
 //! Context compilation and shared harness support utilities.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use moa_core::{
     ApprovalDecision, BufferedUserMessage, CacheReport, CompletionRequest, CompletionResponse,
     Event, EventRange, EventRecord, LLMProvider, MoaError, Result, SessionId, SessionMeta,
-    TokenPricing, TraceContext, UserMessage, WorkingContext, stable_prefix_fingerprint,
+    TokenPricing, TraceContext, UserMessage, WorkingContext, record_pipeline_compile_duration,
+    stable_prefix_fingerprint,
 };
 use moa_security::inject_canary;
 use tokio::sync::broadcast;
@@ -22,6 +24,10 @@ pub(super) async fn build_turn_context(
 ) -> Result<(WorkingContext, Option<String>)> {
     let mut ctx = WorkingContext::new(session, llm_provider.capabilities());
     let stage_reports = pipeline.run(&mut ctx).await?;
+    let pipeline_compile_duration = stage_reports.iter().fold(Duration::ZERO, |total, report| {
+        total + report.output.duration
+    });
+    record_pipeline_compile_duration(pipeline_compile_duration);
     let active_canary = if enable_canary {
         Some(inject_canary(&mut ctx))
     } else {
@@ -51,6 +57,7 @@ pub(super) async fn build_turn_context(
         compiled_messages = ctx.messages.len(),
         total_tokens = ctx.token_count,
         stages = stage_reports.len(),
+        pipeline_compile_ms = pipeline_compile_duration.as_millis() as u64,
         "compiled context for streamed brain turn"
     );
 
