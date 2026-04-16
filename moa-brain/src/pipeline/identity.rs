@@ -26,7 +26,7 @@ errors, preserve them in context so they are not repeated.\n\n\
 When working in code repositories, unless project instructions say \
 otherwise:\n\
 - Use native file tools for repository navigation and source inspection. The \
-preferred flow is file_search to find files, file_grep to search contents, \
+preferred flow is file_search to find files, grep to search contents, \
 file_outline to find symbols, file_read to inspect only the relevant range, \
 and str_replace to edit. Use bash for tests, builds, or commands the native \
 file tools cannot express.\n\
@@ -45,7 +45,7 @@ narrowed work to a specific subdirectory and need its local instructions.\n\
 - For large Python source files, prefer file_outline before file_read. Use it \
 to list the target class or method names and line numbers, then read only the \
 relevant section.\n\
-- Prefer file_grep over bash rg/grep for repository content search.\n\
+- Prefer grep over bash rg/grep for repository content search.\n\
 - When reading large files (>200 lines), prefer partial reads with \
 start_line and end_line to avoid flooding context. Use file_search or grep \
 first to find the relevant line range, then read only that section.\n\
@@ -186,14 +186,13 @@ mod tests {
 
         let content = &ctx.messages[0].content;
         assert!(
-            content.contains(
-                "preferred flow is file_search to find files, file_grep to search contents"
-            )
+            content
+                .contains("preferred flow is file_search to find files, grep to search contents")
         );
         assert!(content.contains("Prefer the str_replace tool for editing existing files"));
         assert!(content.contains("Workspace-root AGENTS.md instructions are already loaded"));
         assert!(content.contains("prefer file_outline before file_read"));
-        assert!(content.contains("Prefer file_grep over bash rg/grep"));
+        assert!(content.contains("Prefer grep over bash rg/grep"));
         assert!(content.contains("partial reads with start_line and end_line"));
         assert!(content.contains("test suite"));
         assert!(content.contains("3 attempts"));

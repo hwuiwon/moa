@@ -20,9 +20,7 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
-use crate::tools::{
-    bash, file_grep, file_outline, file_read, file_search, file_write, str_replace,
-};
+use crate::tools::{bash, file_outline, file_read, file_search, file_write, grep, str_replace};
 
 const DEFAULT_DOCKER_IMAGE: &str = "alpine:3.20";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -195,9 +193,8 @@ impl LocalHandProvider {
                 )
                 .await
             }
-            "file_grep" => {
-                file_grep::execute(&sandbox.execution_root, input, &sandbox.extra_search_skips)
-                    .await
+            "grep" => {
+                grep::execute(&sandbox.execution_root, input, &sandbox.extra_search_skips).await
             }
             "file_outline" => file_outline::execute(&sandbox.execution_root, input).await,
             "file_read" => file_read::execute(&sandbox.execution_root, input).await,
@@ -242,17 +239,7 @@ impl LocalHandProvider {
         }
 
         match tool {
-            "file_grep" => {
-                file_grep::execute_docker(
-                    container_id,
-                    &sandbox.workspace_mount,
-                    input,
-                    &sandbox.extra_search_skips,
-                    self.command_timeout,
-                    hard_cancel_token,
-                )
-                .await
-            }
+            "grep" => grep::execute(&sandbox.sandbox_dir, input, &sandbox.extra_search_skips).await,
             "file_outline" => {
                 file_outline::execute_docker(
                     container_id,

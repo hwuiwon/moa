@@ -16,6 +16,7 @@ chrono.workspace = true
 eventsource-stream.workspace = true
 futures-util.workspace = true
 globset = "0.4"
+ignore = "0.4"
 moa-core = { path = "../moa-core" }
 moa-security = { path = "../moa-security" }
 opentelemetry.workspace = true

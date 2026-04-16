@@ -101,7 +101,7 @@ impl ToolRegistry {
         registry.register_builtin(Arc::new(session_search::SessionSearchTool));
         registry.register_hand(
             "bash",
-            "Run a non-interactive shell command inside the active workspace root. Use bash for tests, builds, and commands the native file tools cannot express. Do not use bash for routine repository navigation or source inspection when file_search, file_grep, file_outline, file_read, or str_replace can handle the task.",
+            "Run a non-interactive shell command inside the active workspace root. Use bash for tests, builds, and commands the native file tools cannot express. Do not use bash for routine repository navigation or source inspection when file_search, grep, file_outline, file_read, or str_replace can handle the task.",
             json!({
                 "type": "object",
                 "properties": {
@@ -128,15 +128,15 @@ impl ToolRegistry {
             read_tool_policy(ToolInputShape::Path),
         );
         registry.register_hand(
-            "file_grep",
-            "Preferred content-search tool for code repositories. Search UTF-8 files by regex or fixed string without shelling out to rg or grep.",
+            "grep",
+            "Search file contents using a regex or literal pattern. Respects .gitignore, skips vendored directories, and returns matches with file paths and line numbers.",
             json!({
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string", "description": "Regex pattern to search for, or a literal string when fixed_string is true." },
-                    "path_glob": { "type": "string", "description": "Optional glob to limit which files are searched, e.g. server/**/*.py." },
-                    "fixed_string": { "type": "boolean", "description": "Treat pattern as a literal string instead of a regex." },
-                    "max_matches": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum matching lines to return." }
+                    "pattern": { "type": "string", "description": "Regex pattern to search for. Use literal for exact string matching." },
+                    "path": { "type": "string", "description": "Optional subdirectory or file to search within. Defaults to the workspace root." },
+                    "context_lines": { "type": "integer", "minimum": 0, "maximum": 5, "description": "Optional number of surrounding lines to include for each match. Default: 0." },
+                    "literal": { "type": "boolean", "description": "Treat pattern as a literal string instead of a regex. Default: false." }
                 },
                 "required": ["pattern"],
                 "additionalProperties": false
@@ -207,12 +207,12 @@ impl ToolRegistry {
             "memory_write".to_string(),
             "memory_ingest".to_string(),
             "session_search".to_string(),
-            "file_grep".to_string(),
+            "file_search".to_string(),
+            "grep".to_string(),
             "file_outline".to_string(),
             "file_read".to_string(),
             "str_replace".to_string(),
             "file_write".to_string(),
-            "file_search".to_string(),
             "bash".to_string(),
         ];
         registry
