@@ -5,8 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    BranchManager, CheckpointHandle, CheckpointInfo, DatabaseBackend, MoaConfig, MoaError, Result,
-    SessionId,
+    BranchManager, CheckpointHandle, CheckpointInfo, MoaConfig, MoaError, Result, SessionId,
 };
 use reqwest::{Client, Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
@@ -49,11 +48,6 @@ impl NeonBranchManager {
         if !config.database.neon.enabled {
             return Err(MoaError::ConfigError(
                 "database.neon.enabled must be true to use Neon checkpoints".to_string(),
-            ));
-        }
-        if config.database.backend != DatabaseBackend::Postgres {
-            return Err(MoaError::ConfigError(
-                "database.neon requires database.backend = \"postgres\"".to_string(),
             ));
         }
         if config.database.neon.max_checkpoints == 0 {

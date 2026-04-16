@@ -27,7 +27,7 @@ use moa_hands::ToolRouter;
 use moa_memory::{ConsolidationReport, FileMemoryStore, bootstrap};
 use moa_providers::{build_provider_from_config, resolve_provider_selection};
 use moa_security::cleanup_overly_broad_shell_rules;
-use moa_session::{NeonBranchManager, SessionDatabase, create_session_store};
+use moa_session::{NeonBranchManager, PostgresSessionStore, create_session_store};
 use moa_skills::maybe_distill_skill;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -38,7 +38,7 @@ use tracing::Instrument;
 #[derive(Clone)]
 pub struct LocalOrchestrator {
     config: MoaConfig,
-    session_store: Arc<SessionDatabase>,
+    session_store: Arc<PostgresSessionStore>,
     instrumented_session_store: Arc<dyn SessionStore>,
     memory_store: Arc<FileMemoryStore>,
     llm_provider: Arc<dyn LLMProvider>,
@@ -73,7 +73,7 @@ impl LocalOrchestrator {
     /// Creates a local orchestrator from explicit component instances.
     pub async fn new(
         config: MoaConfig,
-        session_store: Arc<SessionDatabase>,
+        session_store: Arc<PostgresSessionStore>,
         memory_store: Arc<FileMemoryStore>,
         llm_provider: Arc<dyn LLMProvider>,
         tool_router: Arc<ToolRouter>,
@@ -145,7 +145,7 @@ impl LocalOrchestrator {
     }
 
     /// Returns the underlying local session store.
-    pub fn session_store(&self) -> Arc<SessionDatabase> {
+    pub fn session_store(&self) -> Arc<PostgresSessionStore> {
         self.session_store.clone()
     }
 
@@ -285,6 +285,21 @@ impl LocalOrchestrator {
         let hard_cancel_token = CancellationToken::new();
         let session = self.session_store.get_session(session_id.clone()).await?;
         let status = Arc::new(RwLock::new(session.status.clone()));
+        if initial_turn_requested
+            && !matches!(
+                session.status,
+                SessionStatus::Running | SessionStatus::WaitingApproval
+            )
+        {
+            update_status(
+                &self.instrumented_session_store,
+                &event_tx,
+                &status,
+                session_id.clone(),
+                SessionStatus::Running,
+            )
+            .await?;
+        }
         let finished = Arc::new(AtomicBool::new(false));
         let context = SessionTaskContext {
             config: self.config.clone(),
@@ -717,26 +732,17 @@ impl BrainOrchestrator for LocalOrchestrator {
     async fn signal(&self, session_id: SessionId, signal: SessionSignal) -> Result<()> {
         self.ensure_session_running(session_id.clone()).await?;
         if let SessionSignal::QueueMessage(message) = &signal {
-            let session = self.session_store.get_session(session_id.clone()).await?;
-            if matches!(
-                session.status,
-                SessionStatus::Running | SessionStatus::WaitingApproval
-            ) {
-                let pending = PendingSignal::queue_message(session_id.clone(), message.clone())?;
-                self.session_store
-                    .store_pending_signal(session_id.clone(), pending)
-                    .await?;
-            }
+            let pending = PendingSignal::queue_message(session_id.clone(), message.clone())?;
+            self.session_store
+                .store_pending_signal(session_id.clone(), pending)
+                .await?;
         }
         let sessions = self.sessions.read().await;
         let handle = sessions
             .get(&session_id)
             .ok_or_else(|| MoaError::SessionNotFound(session_id.clone()))?;
 
-        if matches!(
-            signal,
-            SessionSignal::SoftCancel | SessionSignal::HardCancel
-        ) {
+        if matches!(signal, SessionSignal::HardCancel) {
             handle.cancel_token.cancel();
         }
         if matches!(signal, SessionSignal::HardCancel) {
@@ -1083,6 +1089,10 @@ async fn run_session_task(
                                     &context.session_id,
                                 )
                                 .await;
+                                context
+                                    .tool_router
+                                    .destroy_session_hands(&context.session_id)
+                                    .await;
                                 update_status(
                                     &context.session_store,
                                     &event_tx,
@@ -1096,10 +1106,6 @@ async fn run_session_task(
                             .instrument(event_persist_span)
                             .await?;
                             record_turn_event_persist_duration(persist_started.elapsed(), 0);
-                            context
-                                .tool_router
-                                .destroy_session_hands(&context.session_id)
-                                .await;
                             let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
                             Ok(TurnDirective::ContinueLoop)
                         }
@@ -1145,6 +1151,10 @@ async fn run_session_task(
                                     &context.session_id,
                                 )
                                 .await;
+                                context
+                                    .tool_router
+                                    .destroy_session_hands(&context.session_id)
+                                    .await;
                                 update_status(
                                     &context.session_store,
                                     &event_tx,
@@ -1158,10 +1168,6 @@ async fn run_session_task(
                             .instrument(event_persist_span)
                             .await?;
                             record_turn_event_persist_duration(persist_started.elapsed(), 0);
-                            context
-                                .tool_router
-                                .destroy_session_hands(&context.session_id)
-                                .await;
                             let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
                             Ok(TurnDirective::FinishOk)
                         }
@@ -1199,6 +1205,10 @@ async fn run_session_task(
                                     &context.session_id,
                                 )
                                 .await;
+                                context
+                                    .tool_router
+                                    .destroy_session_hands(&context.session_id)
+                                    .await;
                                 update_status(
                                     &context.session_store,
                                     &event_tx,
@@ -1212,10 +1222,6 @@ async fn run_session_task(
                             .instrument(event_persist_span)
                             .await?;
                             record_turn_event_persist_duration(persist_started.elapsed(), 0);
-                            context
-                                .tool_router
-                                .destroy_session_hands(&context.session_id)
-                                .await;
                             if !budget_exhausted {
                                 let _ = runtime_tx.send(RuntimeEvent::Error(error.to_string()));
                             }

@@ -1,30 +1,26 @@
-//! Session store backends and backend selection for MOA.
-
-#[cfg(not(any(feature = "turso", feature = "postgres")))]
-compile_error!("At least one session store backend must be enabled: `turso` or `postgres`");
-#[cfg(any(feature = "turso", feature = "postgres"))]
-mod backend;
+//! Postgres-backed session storage for MOA.
+//!
+//! This crate embeds the canonical Postgres migration set used for local and
+//! test session storage.
 
 pub mod blob;
 pub mod neon;
-#[cfg(feature = "postgres")]
-pub mod postgres;
-#[cfg(feature = "postgres")]
-pub mod queries_postgres;
-#[cfg(feature = "turso")]
-pub mod queries_turso;
-#[cfg(feature = "postgres")]
-pub mod schema_postgres;
-#[cfg(feature = "turso")]
-pub mod schema_turso;
-#[cfg(feature = "turso")]
-pub mod turso;
+pub mod queries;
+pub mod schema;
+pub mod store;
+pub mod testing;
 
-#[cfg(any(feature = "turso", feature = "postgres"))]
-pub use backend::{SessionDatabase, create_session_store};
+use std::sync::Arc;
+
+use moa_core::{MoaConfig, Result};
+
 pub use blob::FileBlobStore;
 pub use neon::NeonBranchManager;
-#[cfg(feature = "postgres")]
-pub use postgres::PostgresSessionStore;
-#[cfg(feature = "turso")]
-pub use turso::TursoSessionStore;
+pub use store::PostgresSessionStore;
+
+/// Creates the shared Postgres session store from config and verifies connectivity.
+pub async fn create_session_store(config: &MoaConfig) -> Result<Arc<PostgresSessionStore>> {
+    let store = PostgresSessionStore::from_config(config).await?;
+    store.ping().await?;
+    Ok(Arc::new(store))
+}

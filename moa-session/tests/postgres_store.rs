@@ -1,41 +1,23 @@
-#![cfg(feature = "postgres")]
-
 mod shared;
 
 use std::future::Future;
 use std::time::Duration;
 
 use moa_core::{Event, SessionMeta, SessionStore, ToolOutput, UserId, WorkspaceId};
-use moa_session::PostgresSessionStore;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use moa_session::{PostgresSessionStore, testing};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 async fn create_test_store() -> (PostgresSessionStore, String, String) {
-    let database_url = std::env::var("TEST_DATABASE_URL")
-        .expect("TEST_DATABASE_URL must be set for ignored tests");
-    let schema_name = format!("moa_test_{}", Uuid::now_v7().simple());
-    let store = PostgresSessionStore::new_in_schema(&database_url, &schema_name)
+    testing::create_isolated_test_store()
         .await
-        .expect("postgres store");
-    (store, database_url, schema_name)
+        .expect("postgres store")
 }
 
 async fn cleanup_schema(database_url: &str, schema_name: &str) {
-    let pool = PgPoolOptions::new()
-        .min_connections(1)
-        .max_connections(1)
-        .connect(database_url)
-        .await
-        .expect("admin postgres pool");
-    let query = format!(
-        "DROP SCHEMA IF EXISTS {} CASCADE",
-        quote_identifier(schema_name)
-    );
-    sqlx::query(&query)
-        .execute(&pool)
+    testing::cleanup_test_schema(database_url, schema_name)
         .await
         .expect("drop schema");
-    pool.close().await;
 }
 
 async fn with_test_store<F, Fut>(test: F)
@@ -49,16 +31,8 @@ where
     cleanup_schema(&database_url, &schema_name).await;
 }
 
-fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
-}
-
 fn qualified(schema_name: &str, table_name: &str) -> String {
-    format!(
-        "{}.{}",
-        quote_identifier(schema_name),
-        quote_identifier(table_name)
-    )
+    format!("\"{}\".\"{}\"", schema_name, table_name)
 }
 
 #[tokio::test]

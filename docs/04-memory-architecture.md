@@ -137,7 +137,7 @@ Fastify API + React SPA + PostgreSQL. Auth via JWT with refresh tokens.
 See [[topics/architecture]] for full details.
 
 ## Active decisions
-- [[decisions/2026-04-01-adopt-turso]]: Moving session storage to Turso
+- [[decisions/2026-04-16-postgres-everywhere]]: Moving all persistence to Postgres
 - [[decisions/2026-03-15-switch-to-fastify]]: Completed migration from Express
 
 ## Key entities
@@ -645,7 +645,7 @@ async fn rebuild_fts_index(memory: &FileMemoryStore, scope: &MemoryScope) -> Res
 
 ```rust
 async fn search_memory(
-    db: &SqlitePool,
+    db: &PgPool,
     query: &str,
     scope: &str,
     limit: usize,
@@ -687,10 +687,10 @@ async fn search_memory(
 
 | Aspect | Local | Cloud |
 |---|---|---|
-| Storage | `~/.moa/memory/` filesystem | Synced filesystem (Turso file sync or object storage) |
-| FTS5 index | `~/.moa/search.db` (SQLite) | Turso (libSQL with FTS5 support) |
+| Storage | `~/.moa/memory/` filesystem | Synced filesystem or mounted volume |
+| Search index | Postgres tsvector + GIN (step 90) | Postgres tsvector + GIN (step 90) |
 | Concurrent writes | Single brain — no branching needed | Git-branch model with LLM reconciler |
 | Consolidation | Local cron (tokio-cron-scheduler) | Temporal timer workflow |
 | Editing | Any text editor | Web dashboard or messaging commands |
 | Backup | Git (wiki is markdown files) | Git + cloud backup |
-| Migration | Copy `memory/` directory to cloud storage | Automatic via Turso sync |
+| Migration | Copy `memory/` directory plus Postgres data | Managed via Postgres backups / Neon branches |

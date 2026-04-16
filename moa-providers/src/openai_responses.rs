@@ -522,6 +522,10 @@ fn is_rate_limit_message(message: &str) -> bool {
 /// when a new field shows up in production traces.
 const IGNORABLE_DESERIALIZE_FIELD_HINTS: &[&str] = &["compatibility", "model_compatibility"];
 
+/// Stream event types that are safe to ignore when the SDK lags behind
+/// the provider's event schema.
+const IGNORABLE_STREAM_EVENT_TYPES: &[&str] = &["response.rate_limits.updated"];
+
 /// Returns `true` when a streaming or response error is safe to skip
 /// past — either an already-known shape (`web_search_call` output items)
 /// or a field name on the allow-list above.
@@ -551,6 +555,20 @@ fn is_ignorable_openai_stream_error(error: &OpenAIError) -> bool {
         false
     };
 
+    let event_type_matches = |text: &str, payload_bytes: Option<usize>| -> bool {
+        for event_type in IGNORABLE_STREAM_EVENT_TYPES {
+            if text.contains(event_type) {
+                tracing::warn!(
+                    event_type,
+                    payload_bytes = payload_bytes.unwrap_or(0),
+                    "openai stream event skipped because the SDK does not model it yet"
+                );
+                return true;
+            }
+        }
+        false
+    };
+
     match error {
         OpenAIError::JSONDeserialize(serde_err, content) => {
             // Known-safe web_search_call shape (predates the allow-list).
@@ -561,9 +579,14 @@ fn is_ignorable_openai_stream_error(error: &OpenAIError) -> bool {
             }
             let err_msg = serde_err.to_string();
             let bytes = Some(content.len());
-            field_hint_matches(&err_msg, bytes) || field_hint_matches(content, bytes)
+            field_hint_matches(&err_msg, bytes)
+                || field_hint_matches(content, bytes)
+                || event_type_matches(&err_msg, bytes)
+                || event_type_matches(content, bytes)
         }
-        OpenAIError::InvalidArgument(msg) => field_hint_matches(msg, None),
+        OpenAIError::InvalidArgument(msg) => {
+            field_hint_matches(msg, None) || event_type_matches(msg, None)
+        }
         _ => false,
     }
 }
@@ -606,6 +629,14 @@ mod ignorable_error_tests {
         let msg =
             "compatibility: invalid type: map, expected a string at line 4 column 3".to_string();
         let err = OpenAIError::InvalidArgument(msg);
+        assert!(is_ignorable_openai_stream_error(&err));
+    }
+
+    #[test]
+    fn rate_limit_update_event_is_ignorable() {
+        let payload = r#"{"type":"response.rate_limits.updated","rate_limits":{"remaining_requests":"14999"}}"#;
+        let serde_err = serde_json::from_str::<i32>(payload).expect_err("must fail");
+        let err = OpenAIError::JSONDeserialize(serde_err, payload.to_string());
         assert!(is_ignorable_openai_stream_error(&err));
     }
 

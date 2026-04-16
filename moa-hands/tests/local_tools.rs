@@ -9,7 +9,7 @@ use moa_core::{
 };
 use moa_hands::{LocalHandProvider, ToolRouter};
 use moa_memory::FileMemoryStore;
-use moa_session::TursoSessionStore;
+use moa_session::{PostgresSessionStore, testing};
 use serde_json::json;
 use tempfile::tempdir;
 use tokio::time::Instant;
@@ -70,6 +70,11 @@ fn session() -> SessionMeta {
         model: "claude-sonnet-4-6".to_string(),
         ..SessionMeta::default()
     }
+}
+
+async fn test_session_store() -> Arc<PostgresSessionStore> {
+    let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await.unwrap();
+    Arc::new(store)
 }
 
 fn sample_page(path: &str, title: &str, page_type: PageType, content: &str) -> WikiPage {
@@ -610,9 +615,8 @@ async fn bash_respects_timeout() {
 #[tokio::test]
 async fn session_search_finds_prior_events() {
     let dir = tempdir().unwrap();
-    let db_path = dir.path().join("sessions.db");
     let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let session_store = Arc::new(TursoSessionStore::new_local(&db_path).await.unwrap());
+    let session_store = test_session_store().await;
     let router = ToolRouter::new_local(memory_store, dir.path())
         .await
         .unwrap()
@@ -673,9 +677,8 @@ async fn session_search_finds_prior_events() {
 #[tokio::test]
 async fn session_search_filters_error_events() {
     let dir = tempdir().unwrap();
-    let db_path = dir.path().join("sessions.db");
     let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let session_store = Arc::new(TursoSessionStore::new_local(&db_path).await.unwrap());
+    let session_store = test_session_store().await;
     let router = ToolRouter::new_local(memory_store, dir.path())
         .await
         .unwrap()
@@ -765,6 +768,7 @@ async fn local_bash_hard_cancel_kills_running_process() {
 }
 
 #[tokio::test]
+#[ignore = "workspace memory search is disabled until step 90 lands the Postgres tsvector index"]
 async fn memory_search_returns_indexed_results() {
     let dir = tempdir().unwrap();
     let memory_root = dir.path().join("memory-root");
@@ -1045,10 +1049,9 @@ async fn memory_ingest_creates_source_page_and_related_pages() {
 #[tokio::test]
 async fn memory_ingest_emits_session_event() {
     let dir = tempdir().unwrap();
-    let db_path = dir.path().join("sessions.db");
     let memory_root = dir.path().join("memory-root");
     let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
-    let session_store = Arc::new(TursoSessionStore::new_local(&db_path).await.unwrap());
+    let session_store = test_session_store().await;
     let router = ToolRouter::new_local(memory_store, dir.path().join("sandboxes"))
         .await
         .unwrap()

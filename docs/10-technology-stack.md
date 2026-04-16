@@ -25,9 +25,7 @@ _Crates, external services, implementation phases, build and deployment._
 
 | Crate | Purpose |
 |---|---|
-| `libsql` | Turso/libSQL client (SQLite + cloud sync) |
-| `sqlx` | SQL toolkit (compile-time checked queries) — for Postgres fallback path |
-| `rusqlite` | Direct SQLite access for FTS5 (if libsql gaps) |
+| `sqlx` | SQL toolkit for Postgres access, migrations, and typed queries |
 
 ### LLM providers
 
@@ -91,7 +89,7 @@ _Crates, external services, implementation phases, build and deployment._
 |---|---|---|
 | Temporal Cloud | Workflow orchestration | $25/mo base + $0.01/1K actions |
 | Fly.io | Brain hosting | ~$2/mo per always-on machine; $0/mo if suspended |
-| Turso | Session database (cloud sync) | Free tier: 500 DBs, 9GB; Pro: $29/mo |
+| Neon / managed Postgres | Session database and checkpoint branches | Varies by plan |
 | Daytona | Container hands (default) | ~$0.067/hr per container |
 | LLM API | Anthropic, OpenAI, or Google Gemini | Pay-per-token |
 
@@ -100,7 +98,7 @@ _Crates, external services, implementation phases, build and deployment._
 | Service | Purpose | Cost |
 |---|---|---|
 | LLM API | Anthropic, OpenAI, or Google Gemini | Pay-per-token |
-| (Nothing else) | Everything else runs locally | Free |
+| Docker + Postgres 18 | Required local storage backend | Free |
 
 ### Optional
 
@@ -122,7 +120,7 @@ Deliverables:
 - [ ] Rust workspace scaffold (all crate directories)
 - [ ] `moa-core`: types, traits, config, error handling
 - [ ] `moa-providers`: Anthropic provider (streaming completion)
-- [ ] `moa-session`: TursoSessionStore (local SQLite mode)
+- [ ] `moa-session`: PostgresSessionStore
 - [ ] `moa-brain`: Brain harness loop (single turn: compile → call LLM → emit events)
 - [ ] `moa-brain/pipeline`: All 7 context compilation stages (basic implementations)
 - [ ] `moa-memory`: FileMemoryStore (MEMORY.md read/write, FTS5 search)
@@ -157,7 +155,7 @@ Deliverables:
 - [ ] Temporal workflows: session workflow, brain turn activity
 - [ ] Temporal signals: approval, queue, stop
 - [ ] Fly.io deployment config (Dockerfile, fly.toml)
-- [ ] `moa-session`: Turso Cloud sync (add syncUrl)
+- [ ] `moa-session`: Managed Postgres / Neon configuration
 - [ ] `moa-hands`: DaytonaHandProvider
 - [ ] Multi-session support in orchestrator
 - [ ] Session observation (event streaming)
@@ -247,12 +245,12 @@ cargo build --release -p moa-desktop
 ### Docker (cloud deployment)
 
 ```dockerfile
-FROM rust:1.80-bookworm AS builder
+FROM rust:1.94.1-trixie AS builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release --features "cloud"
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/moa /usr/local/bin/moa
 ENTRYPOINT ["moa", "--cloud"]
@@ -291,8 +289,7 @@ OPENAI_API_KEY=sk-...
 GOOGLE_API_KEY=AIza...
 
 # Cloud mode (optional)
-TURSO_DATABASE_URL=libsql://your-db.turso.io
-TURSO_AUTH_TOKEN=...
+MOA__DATABASE__URL=postgres://moa:moa@localhost:5432/moa
 TEMPORAL_API_KEY=...
 TEMPORAL_ADDRESS=your-ns.tmprl.cloud:7233
 FLY_API_TOKEN=...
@@ -326,6 +323,6 @@ VAULT_TOKEN=...
 ### Cloud mode
 - Fly.io account (free tier sufficient for testing)
 - Temporal Cloud account ($25/mo)
-- Turso account (free tier sufficient)
+- Managed Postgres / Neon database
 - Daytona account (pay-per-use)
 - At least one LLM API key

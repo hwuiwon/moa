@@ -29,6 +29,7 @@ moa-runtime = { path = "../moa-runtime" }
 moa-session = { path = "../moa-session" }
 moa-skills = { path = "../moa-skills" }
 serde_json.workspace = true
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 tokio.workspace = true
 toml = "0.8"
 tracing.workspace = true

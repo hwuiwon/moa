@@ -4,17 +4,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use async_trait::async_trait;
 use moa_brain::{TurnResult, build_default_pipeline_with_tools, run_brain_turn_with_tools};
 use moa_core::{
-    CompletionRequest, CountedSessionStore, Event, EventRange, EventRecord, ModelCapabilities,
-    Result, SessionMeta, SessionStore, TokenPricing, TokenUsage, ToolCallFormat, ToolOutput,
-    TurnReplayCounters, TurnReplaySnapshot, UserId, WorkspaceId, scope_turn_replay_counters,
+    CompletionRequest, CountedSessionStore, Event, EventRange, EventRecord, MemoryPath,
+    MemoryScope, MemorySearchResult, MemoryStore, ModelCapabilities, PageSummary, PageType, Result,
+    SessionMeta, SessionStore, TokenPricing, TokenUsage, ToolCallFormat, ToolOutput,
+    TurnReplayCounters, TurnReplaySnapshot, UserId, WikiPage, WorkspaceId,
+    scope_turn_replay_counters,
 };
 use moa_hands::ToolRouter;
-use moa_memory::FileMemoryStore;
 use moa_providers::{ScriptedProvider, ScriptedResponse, anthropic::debug_build_request_body};
 use moa_security::ToolPolicies;
-use moa_session::TursoSessionStore;
+use moa_session::testing;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracing::Id;
@@ -31,6 +33,57 @@ const FILE_READ_DEDUP_PLACEHOLDER: &str = "[file previously read — see latest 
 const OLD_SNIPPET: &str = "    let refresh_token = issue_refresh_token(user_id);\n    format!(\"refresh:{refresh_token}\")";
 const NEW_SNIPPET: &str = "    let issued_refresh_token = issue_refresh_token(user_id);\n    format!(\"refresh:{issued_refresh_token}\")";
 
+#[derive(Default)]
+struct NoopMemoryStore;
+
+#[async_trait]
+impl MemoryStore for NoopMemoryStore {
+    async fn search(
+        &self,
+        _query: &str,
+        _scope: MemoryScope,
+        _limit: usize,
+    ) -> Result<Vec<MemorySearchResult>> {
+        Ok(Vec::new())
+    }
+
+    async fn read_page(&self, _scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
+        Err(moa_core::MoaError::StorageError(format!(
+            "memory page not found: {}",
+            path.as_str()
+        )))
+    }
+
+    async fn write_page(
+        &self,
+        _scope: MemoryScope,
+        _path: &MemoryPath,
+        _page: WikiPage,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_pages(
+        &self,
+        _scope: MemoryScope,
+        _filter: Option<PageType>,
+    ) -> Result<Vec<PageSummary>> {
+        Ok(Vec::new())
+    }
+
+    async fn get_index(&self, _scope: MemoryScope) -> Result<String> {
+        Ok(String::new())
+    }
+
+    async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn steps_72_77_e2e() -> Result<()> {
     let span_recorder = SpanRecorder::default();
@@ -39,9 +92,7 @@ async fn steps_72_77_e2e() -> Result<()> {
 
     let root = TempDir::new()?;
     let workspace = root.path().join("workspace");
-    let state_dir = root.path().join("state");
     tokio::fs::create_dir_all(&workspace).await?;
-    tokio::fs::create_dir_all(&state_dir).await?;
     tokio::fs::create_dir_all(workspace.join(".venv")).await?;
     tokio::fs::create_dir_all(workspace.join("ignored_dir")).await?;
 
@@ -69,9 +120,10 @@ async fn steps_72_77_e2e() -> Result<()> {
     config.compaction.recent_turns_verbatim = 2;
     config.permissions.auto_approve = vec!["bash".to_string(), "str_replace".to_string()];
 
-    let memory_store = Arc::new(FileMemoryStore::new(&state_dir).await?);
-    let session_store =
-        Arc::new(TursoSessionStore::new_local(&state_dir.join("sessions.db")).await?);
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(NoopMemoryStore);
+    let (session_store, _database_url, _schema_name) =
+        testing::create_isolated_test_store().await?;
+    let session_store = Arc::new(session_store);
     let counted_session_store: Arc<dyn SessionStore> =
         Arc::new(CountedSessionStore::new(session_store.clone()));
     let workspace_id = WorkspaceId::new("steps-72-77");

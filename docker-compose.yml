@@ -1,0 +1,26 @@
+# docker-compose.yml — Required for local MOA development.
+# Production uses managed Postgres / Neon, not this compose stack.
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.2-pg18-trixie
+    container_name: moa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: moa
+      POSTGRES_USER: moa
+      POSTGRES_PASSWORD: moa
+    ports:
+      - "5432:5432"
+    volumes:
+      - moa-pg-data:/var/lib/postgresql
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U moa -d moa"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  moa-pg-data:

@@ -1,7 +1,6 @@
 //! Minimal no-UI chat harness for verifying Step 04 end to end.
 
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use moa_brain::{build_default_pipeline_with_runtime, run_brain_turn_with_tools};
@@ -12,16 +11,15 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_providers::build_provider_from_config;
-use moa_session::TursoSessionStore;
-use tempfile::TempDir;
+use moa_session::{PostgresSessionStore, testing};
 
 /// Runs the Step 04 chat harness.
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = MoaConfig::load()?;
-    let (session_db_path, _session_db_guard) = resolve_session_db_path();
     let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
-    let store = Arc::new(TursoSessionStore::new_local(Path::new(&session_db_path)).await?);
+    let (store, database_url, schema_name) = testing::create_isolated_test_store().await?;
+    let store = Arc::new(store);
     let provider = build_provider_from_config(&config)?;
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())
@@ -48,7 +46,7 @@ async fn main() -> Result<()> {
     println!("MOA Step 04 chat harness");
     println!("model: {}", config.general.default_model);
     println!("session: {}", session_id);
-    println!("database: {}", session_db_path.display());
+    println!("database: {} schema={}", database_url, schema_name);
 
     if cli_prompt.trim().is_empty() {
         println!("Type a prompt and press enter. Use /quit to exit.");
@@ -97,23 +95,9 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn resolve_session_db_path() -> (PathBuf, Option<TempDir>) {
-    if let Ok(path) = std::env::var("MOA_HARNESS_DB_PATH") {
-        return (PathBuf::from(path), None);
-    }
-
-    let temp_dir = tempfile::tempdir().ok();
-    let path = temp_dir
-        .as_ref()
-        .map(|dir| dir.path().join("sessions.db"))
-        .unwrap_or_else(|| std::env::temp_dir().join("moa-step-04-sessions.db"));
-
-    (path, temp_dir)
-}
-
 async fn run_prompt(
     session_id: moa_core::SessionId,
-    store: Arc<TursoSessionStore>,
+    store: Arc<PostgresSessionStore>,
     provider: Arc<dyn LLMProvider>,
     pipeline: &moa_brain::ContextPipeline,
     tool_router: Arc<ToolRouter>,

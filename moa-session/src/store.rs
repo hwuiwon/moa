@@ -16,17 +16,18 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::blob::{FileBlobStore, decode_event_from_storage, encode_event_for_storage};
-use crate::queries_postgres::{
+use crate::queries::{
     EVENT_COLUMNS, SESSION_COLUMNS, SESSION_SUMMARY_COLUMNS, approval_rule_from_row,
     event_type_from_db, event_type_to_db, map_sqlx_error, pending_signal_from_row,
     pending_signal_type_to_db, platform_to_db, policy_action_to_db, policy_scope_to_db,
     session_meta_from_row, session_status_to_db, session_summary_from_row,
 };
-use crate::schema_postgres;
+use crate::schema;
 
 /// PostgreSQL-backed implementation of `SessionStore`.
 #[derive(Clone)]
 pub struct PostgresSessionStore {
+    url: String,
     pool: PgPool,
     schema_name: Option<String>,
     blob_store: Arc<dyn BlobStore>,
@@ -45,9 +46,9 @@ impl PostgresSessionStore {
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
         Self::new_with_options_and_blob_store(
             config.database.runtime_url(),
-            config.database.pool_min,
-            config.database.pool_max,
-            config.database.connect_timeout_secs,
+            1,
+            config.database.max_connections,
+            config.database.connect_timeout_seconds,
             Arc::new(FileBlobStore::from_config(config)?),
             config.session.blob_threshold_bytes,
         )
@@ -58,9 +59,9 @@ impl PostgresSessionStore {
     pub async fn from_admin_config(config: &MoaConfig) -> Result<Self> {
         Self::new_with_options_and_blob_store(
             config.database.admin_url(),
-            config.database.pool_min,
-            config.database.pool_max,
-            config.database.connect_timeout_secs,
+            1,
+            config.database.max_connections,
+            config.database.connect_timeout_seconds,
             Arc::new(FileBlobStore::from_config(config)?),
             config.session.blob_threshold_bytes,
         )
@@ -104,33 +105,23 @@ impl PostgresSessionStore {
         })
     }
 
-    /// Returns whether cloud-backed sync is active for this backend.
-    pub fn cloud_sync_enabled(&self) -> bool {
-        false
+    /// Verifies the configured Postgres instance is reachable.
+    pub async fn ping(&self) -> Result<()> {
+        sqlx::query("SELECT 1")
+            .fetch_one(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                MoaError::ConfigError(format!(
+                    "cannot reach Postgres at {}: {error}. Run `docker-compose up -d` from the repo root, or set database.url to a reachable Postgres instance.",
+                    redact_password(&self.url)
+                ))
+            })
     }
 
-    /// Forces an immediate backend sync when supported.
-    pub async fn sync_now(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn new_with_options(
-        database_url: &str,
-        pool_min: u32,
-        pool_max: u32,
-        connect_timeout_secs: u64,
-    ) -> Result<Self> {
-        let blob_store: Arc<dyn BlobStore> =
-            Arc::new(FileBlobStore::new(FileBlobStore::default_dir()?));
-        Self::new_with_options_and_blob_store(
-            database_url,
-            pool_min,
-            pool_max,
-            connect_timeout_secs,
-            blob_store,
-            65_536,
-        )
-        .await
+    /// Returns the pooled Postgres connection handle used by the session store.
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     async fn new_with_options_and_blob_store(
@@ -165,8 +156,9 @@ impl PostgresSessionStore {
         let pool =
             Self::connect_with_retry(database_url, pool_min, pool_max, connect_timeout_secs, 3)
                 .await?;
-        schema_postgres::migrate(&pool, schema_name).await?;
+        schema::migrate(&pool, schema_name).await?;
         Ok(Self {
+            url: database_url.to_string(),
             pool,
             schema_name: schema_name.map(ToOwned::to_owned),
             blob_store,
@@ -330,6 +322,17 @@ fn checkpoint_view(events: &[EventRecord]) -> (Option<String>, Vec<EventRecord>)
         .collect::<Vec<_>>();
 
     (summary, recent_events)
+}
+
+fn redact_password(url: &str) -> String {
+    if let Ok(mut parsed) = url::Url::parse(url) {
+        if parsed.password().is_some() {
+            let _ = parsed.set_password(Some("******"));
+        }
+        return parsed.to_string();
+    }
+
+    url.to_string()
 }
 
 #[async_trait]
@@ -747,7 +750,7 @@ impl SessionStore for PostgresSessionStore {
             "SELECT COALESCE( \
                  SUM((e.payload -> 'data' ->> 'cost_cents')::BIGINT), \
                  0 \
-             ) \
+             )::BIGINT \
              FROM {events} e \
              JOIN {sessions} s ON s.id = e.session_id \
              WHERE s.workspace_id = $1 \
@@ -765,10 +768,7 @@ impl SessionStore for PostgresSessionStore {
             .map_err(|_| MoaError::StorageError("workspace spend exceeded u32 range".to_string()))
     }
 
-    /// Permanently removes a session and its dependent rows. See the
-    /// `TursoSessionStore` counterpart for the ordering rationale;
-    /// Postgres doesn't use an FTS5 external-content table so there's no
-    /// events_fts step.
+    /// Permanently removes a session and its dependent rows.
     async fn delete_session(&self, session_id: moa_core::SessionId) -> Result<()> {
         let events = self.table_name("events");
         let pending_signals = self.table_name("pending_signals");

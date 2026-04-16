@@ -14,12 +14,10 @@ api_key_env = "OPENAI_API_KEY"
 api_key_env = "GOOGLE_API_KEY"
 
 [database]
-backend = "turso"
-url = "~/.moa/sessions.db"
+url = "postgres://moa:moa@localhost:5432/moa"
 # admin_url = "postgresql://..." # direct/non-pooled URL for migrations and admin flows
-pool_min = 1
-pool_max = 5
-connect_timeout_secs = 10
+max_connections = 20
+connect_timeout_seconds = 10
 
 [local]
 docker_enabled = true
@@ -49,9 +47,6 @@ sample_rate = 1.0
 
 [cloud]
 enabled = false
-turso_url = ""
-turso_auth_token_env = "TURSO_AUTH_TOKEN"
-turso_sync_interval_secs = 2
 # memory_dir = "/data/memory"
 
 [cloud.temporal]

@@ -21,7 +21,7 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_providers::build_provider_from_config;
-use moa_session::{SessionDatabase, create_session_store};
+use moa_session::{PostgresSessionStore, create_session_store};
 use moa_skills::maybe_distill_skill;
 use serde::{Deserialize, Serialize};
 use temporalio_client::{
@@ -54,7 +54,7 @@ const DEFAULT_OBSERVE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Durable Temporal orchestrator for cloud session execution.
 #[derive(Clone)]
 pub struct TemporalOrchestrator {
-    session_store: Arc<SessionDatabase>,
+    session_store: Arc<PostgresSessionStore>,
     scheduler: Arc<JobScheduler>,
     runtime: Arc<TemporalRuntime>,
 }
@@ -68,7 +68,7 @@ struct TemporalRuntime {
 #[derive(Clone)]
 struct TemporalActivities {
     config: MoaConfig,
-    session_store: Arc<SessionDatabase>,
+    session_store: Arc<PostgresSessionStore>,
     memory_store: Arc<FileMemoryStore>,
     llm_provider: Arc<dyn LLMProvider>,
     tool_router: Arc<ToolRouter>,
@@ -480,7 +480,7 @@ impl TemporalOrchestrator {
     /// Creates a Temporal orchestrator from explicit local dependencies and cloud config.
     pub async fn new(
         config: MoaConfig,
-        session_store: Arc<SessionDatabase>,
+        session_store: Arc<PostgresSessionStore>,
         memory_store: Arc<FileMemoryStore>,
         llm_provider: Arc<dyn LLMProvider>,
         tool_router: Arc<ToolRouter>,
@@ -616,7 +616,7 @@ impl TemporalRuntime {
     /// Connects a Temporal client and starts an in-process worker for the configured task queue.
     async fn connect(
         config: &MoaConfig,
-        session_store: Arc<SessionDatabase>,
+        session_store: Arc<PostgresSessionStore>,
         memory_store: Arc<FileMemoryStore>,
         llm_provider: Arc<dyn LLMProvider>,
         tool_router: Arc<ToolRouter>,

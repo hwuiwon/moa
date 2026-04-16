@@ -83,11 +83,8 @@ if ! volume_ids | grep -q .; then
 fi
 
 secret_args=("OPENAI_API_KEY=$OPENAI_API_KEY")
-if [[ -n "${MOA_TURSO_URL:-}" ]]; then
-  secret_args+=("MOA__CLOUD__TURSO_URL=$MOA_TURSO_URL")
-fi
-if [[ -n "${TURSO_AUTH_TOKEN:-}" ]]; then
-  secret_args+=("TURSO_AUTH_TOKEN=$TURSO_AUTH_TOKEN")
+if [[ -n "${MOA_DATABASE_URL:-}" ]]; then
+  secret_args+=("MOA__DATABASE__URL=$MOA_DATABASE_URL")
 fi
 fly secrets set -a "$APP_NAME" "${secret_args[@]}" >/dev/null
 

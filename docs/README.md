@@ -15,7 +15,7 @@ This specification is split into standalone documents. Each is self-contained bu
 | 02 | [Brain Orchestration](02-brain-orchestration.md) | Temporal workflows, Fly.io hosting, local runtime mode, brain lifecycle |
 | 03 | [Communication Layer](03-communication-layer.md) | Messaging gateway, approval UX, thread observation, desktop app, CLI |
 | 04 | [Memory Architecture](04-memory-architecture.md) | File-wiki, FTS5, scoping, consolidation, concurrent writes |
-| 05 | [Session & Event Log](05-session-event-log.md) | Turso/libSQL, event schema, compaction, replay |
+| 05 | [Session & Event Log](05-session-event-log.md) | Postgres event schema, compaction, replay |
 | 06 | [Hands & MCP](06-hands-and-mcp.md) | HandProvider trait, Daytona/E2B/Local, MCP proxy, tool routing |
 | 07 | [Context Pipeline](07-context-pipeline.md) | 7-stage compilation, cache optimization, failure modes |
 | 08 | [Security](08-security.md) | Credential vault, sandbox tiers, prompt injection, approval policies |
@@ -28,9 +28,9 @@ This specification is split into standalone documents. Each is self-contained bu
 |---|---|---|
 | 1 | Brain orchestration | Temporal.io + Fly.io Machines; `LocalOrchestrator` for zero-cloud local |
 | 2 | Skill format | Agent Skills standard (agentskills.io) with MOA extensions |
-| 3 | Memory | Hybrid file-wiki + FTS5, per-user + per-workspace scoping |
+| 3 | Memory | Hybrid file-wiki + Postgres-backed indexing, per-user + per-workspace scoping |
 | 4 | Messaging gateway | Single Rust binary, adapter pattern (teloxide / serenity / slack-morphism) |
-| 5 | Session storage | Turso/libSQL everywhere (SQLite locally, Turso Cloud remotely) |
+| 5 | Session storage | Postgres everywhere |
 | 6 | Approval UX | Three-tier buttons: Allow Once / Always Allow / Deny |
 | 7 | Hand provisioning | Pluggable `HandProvider` trait, Daytona default |
 | 8 | Security posture | Secure by default in cloud, usable by default locally |

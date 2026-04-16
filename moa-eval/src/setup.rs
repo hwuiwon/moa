@@ -25,7 +25,7 @@ use moa_memory::FileMemoryStore;
 use moa_memory::wiki::parse_markdown;
 use moa_providers::{build_provider_from_selection, resolve_provider_selection};
 use moa_security::{ApprovalRuleStore, ToolPolicies};
-use moa_session::TursoSessionStore;
+use moa_session::PostgresSessionStore;
 use serde_json::Value;
 use tokio::fs;
 use uuid::Uuid;
@@ -93,8 +93,10 @@ pub(crate) async fn build_agent_environment_with_provider(
 
     let workspace_id = WorkspaceId::new(slugify_name(&agent_config.name).as_str());
     let user_id = UserId::new(DEFAULT_EVAL_USER);
-    let session_store_concrete =
-        Arc::new(TursoSessionStore::new_local(&run_root.join("sessions.db")).await?);
+    let schema_name = format!("eval_{}", Uuid::now_v7().simple());
+    let session_store_concrete = Arc::new(
+        PostgresSessionStore::new_in_schema(&base_config.database.url, &schema_name).await?,
+    );
     let session_store: Arc<dyn SessionStore> = session_store_concrete.clone();
     let rule_store: Arc<dyn ApprovalRuleStore> = session_store_concrete.clone();
     let memory_store_concrete = Arc::new(FileMemoryStore::new(&memory_root).await?);

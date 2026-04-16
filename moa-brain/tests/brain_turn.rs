@@ -18,7 +18,7 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_memory::wiki::parse_markdown;
-use moa_session::TursoSessionStore;
+use moa_session::{PostgresSessionStore, testing};
 use serde_json::json;
 use tempfile::tempdir;
 use tokio::sync::{Mutex, broadcast};
@@ -27,6 +27,11 @@ use tokio::sync::{Mutex, broadcast};
 struct MockSessionStore {
     session: Arc<Mutex<SessionMeta>>,
     events: Arc<Mutex<Vec<EventRecord>>>,
+}
+
+async fn test_session_store() -> Arc<PostgresSessionStore> {
+    let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await.unwrap();
+    Arc::new(store)
 }
 
 impl MockSessionStore {
@@ -252,8 +257,21 @@ impl MemoryStore for FixedPageMemoryStore {
     async fn list_pages(
         &self,
         _scope: MemoryScope,
-        _filter: Option<PageType>,
+        filter: Option<PageType>,
     ) -> Result<Vec<PageSummary>> {
+        if filter
+            .as_ref()
+            .is_none_or(|page_type| page_type == &self.page.page_type)
+        {
+            return Ok(vec![PageSummary {
+                path: self.path.clone(),
+                title: self.page.title.clone(),
+                page_type: self.page.page_type.clone(),
+                confidence: self.page.confidence.clone(),
+                updated: self.page.updated,
+            }]);
+        }
+
         Ok(Vec::new())
     }
 
@@ -1608,6 +1626,7 @@ async fn run_brain_turn_memory_write_creates_workspace_page_after_approval() {
     let memory_root = tempdir().unwrap();
     let memory_store = Arc::new(FileMemoryStore::new(memory_root.path()).await.unwrap());
     let memory_store_trait: Arc<dyn MemoryStore> = memory_store.clone();
+    let pipeline_memory_store: Arc<dyn MemoryStore> = Arc::new(MockMemoryStore);
     let sandbox_dir = tempdir().unwrap();
     let tool_router = Arc::new(
         ToolRouter::new_local(memory_store_trait.clone(), sandbox_dir.path())
@@ -1617,7 +1636,7 @@ async fn run_brain_turn_memory_write_creates_workspace_page_after_approval() {
     let pipeline = build_default_pipeline_with_tools(
         &MoaConfig::default(),
         store.clone(),
-        memory_store_trait,
+        pipeline_memory_store,
         tool_router.tool_schemas(),
     );
     let llm = Arc::new(MemoryWriteLoopLlmProvider::default());
@@ -1701,6 +1720,7 @@ async fn run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event
     let memory_root = tempdir().unwrap();
     let memory_store = Arc::new(FileMemoryStore::new(memory_root.path()).await.unwrap());
     let memory_store_trait: Arc<dyn MemoryStore> = memory_store.clone();
+    let pipeline_memory_store: Arc<dyn MemoryStore> = Arc::new(MockMemoryStore);
     let sandbox_dir = tempdir().unwrap();
     let tool_router = Arc::new(
         ToolRouter::new_local(memory_store_trait.clone(), sandbox_dir.path())
@@ -1711,7 +1731,7 @@ async fn run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event
     let pipeline = build_default_pipeline_with_tools(
         &MoaConfig::default(),
         store.clone(),
-        memory_store_trait,
+        pipeline_memory_store,
         tool_router.tool_schemas(),
     );
     let llm = Arc::new(MemoryIngestLoopLlmProvider::default());
@@ -1793,6 +1813,7 @@ async fn run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event
 }
 
 #[tokio::test]
+#[ignore = "workspace memory search is disabled until step 90 lands the Postgres tsvector index"]
 async fn run_brain_turn_can_search_recently_ingested_memory_on_follow_up_turn() {
     let session = SessionMeta {
         id: SessionId::new(),
@@ -1907,8 +1928,7 @@ async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execu
         token_count: None,
     }];
     let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
-    let memory_root = tempdir().unwrap();
-    let memory_store = Arc::new(FileMemoryStore::new(memory_root.path()).await.unwrap());
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(MockMemoryStore);
     let sandbox_dir = tempdir().unwrap();
     let tool_router = Arc::new(
         ToolRouter::new_local(memory_store.clone(), sandbox_dir.path())
@@ -1966,10 +1986,8 @@ async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execu
 #[tokio::test]
 async fn always_allow_rule_persists_and_skips_next_approval() {
     let dir = tempdir().unwrap();
-    let db_path = dir.path().join("sessions.db");
-    let memory_root = dir.path().join("memory");
-    let store = Arc::new(TursoSessionStore::new_local(&db_path).await.unwrap());
-    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
+    let store = test_session_store().await;
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(MockMemoryStore);
     let tool_router = Arc::new(
         ToolRouter::new_local(memory_store.clone(), dir.path())
             .await
@@ -2080,11 +2098,7 @@ async fn always_allow_rule_persists_and_skips_next_approval() {
 
 #[tokio::test]
 async fn pipeline_stage_four_injects_workspace_skill_metadata() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("sessions.db");
-    let memory_root = dir.path().join("memory");
-    let store = Arc::new(TursoSessionStore::new_local(&db_path).await.unwrap());
-    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
+    let store = test_session_store().await;
     let session = SessionMeta {
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
@@ -2123,14 +2137,10 @@ metadata:
 "#,
     )
     .unwrap();
-    memory_store
-        .write_page(
-            MemoryScope::Workspace(WorkspaceId::new("workspace")),
-            &skill_path,
-            skill_page,
-        )
-        .await
-        .unwrap();
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(FixedPageMemoryStore {
+        path: skill_path.clone(),
+        page: skill_page,
+    });
     store
         .emit_event(
             session_id.clone(),

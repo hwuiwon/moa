@@ -90,23 +90,15 @@ impl MoaConfig {
                 "providers.google.api_key_env",
                 Self::default().providers.google.api_key_env,
             )?
-            .set_default(
-                "database.backend",
-                Self::default().database.backend.as_str(),
-            )?
             .set_default("database.url", Self::default().database.url)?
             .set_default("database.admin_url", Self::default().database.admin_url)?
             .set_default(
-                "database.pool_min",
-                Self::default().database.pool_min as i64,
+                "database.max_connections",
+                Self::default().database.max_connections as i64,
             )?
             .set_default(
-                "database.pool_max",
-                Self::default().database.pool_max as i64,
-            )?
-            .set_default(
-                "database.connect_timeout_secs",
-                Self::default().database.connect_timeout_secs as i64,
+                "database.connect_timeout_seconds",
+                Self::default().database.connect_timeout_seconds as i64,
             )?
             .set_default(
                 "database.neon.enabled",
@@ -206,15 +198,6 @@ impl MoaConfig {
                 Self::default().tool_output.head_ratio,
             )?
             .set_default("cloud.enabled", Self::default().cloud.enabled)?
-            .set_default("cloud.turso_url", Self::default().cloud.turso_url.clone())?
-            .set_default(
-                "cloud.turso_auth_token_env",
-                Self::default().cloud.turso_auth_token_env.clone(),
-            )?
-            .set_default(
-                "cloud.turso_sync_interval_secs",
-                Self::default().cloud.turso_sync_interval_secs as i64,
-            )?
             .set_default("cloud.memory_dir", Self::default().cloud.memory_dir.clone())?
             .set_default(
                 "cloud.temporal.address",
@@ -416,8 +399,7 @@ impl MoaConfig {
             .add_source(File::from(path).required(false))
             .add_source(Environment::with_prefix("MOA").separator("__"));
 
-        let mut config: Self = builder.build()?.try_deserialize()?;
-        config.normalize_legacy_database_config();
+        let config: Self = builder.build()?.try_deserialize()?;
         config.validate()?;
         Ok(config)
     }
@@ -441,17 +423,14 @@ impl MoaConfig {
 }
 
 impl MoaConfig {
-    fn normalize_legacy_database_config(&mut self) {
-        if self.local.session_db.is_empty() {
-            return;
-        }
-
-        if self.database.url == DatabaseConfig::default().url {
-            self.database.url = self.local.session_db.clone();
-        }
-    }
-
     fn validate(&self) -> Result<()> {
+        if self.database.url.trim().is_empty() {
+            return Err(MoaError::ConfigError(
+                "database.url is required and must point to a reachable Postgres instance"
+                    .to_string(),
+            ));
+        }
+
         if self.database.neon.enabled && self.database.neon.max_checkpoints == 0 {
             return Err(MoaError::ConfigError(
                 "database.neon.max_checkpoints must be greater than zero when Neon checkpointing is enabled"
@@ -539,43 +518,18 @@ impl Default for ProvidersConfig {
     }
 }
 
-/// Supported session database backends.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DatabaseBackend {
-    /// SQLite/libSQL/Turso backend.
-    #[default]
-    Turso,
-    /// PostgreSQL backend.
-    Postgres,
-}
-
-impl DatabaseBackend {
-    /// Returns the serialized config string for this backend.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Turso => "turso",
-            Self::Postgres => "postgres",
-        }
-    }
-}
-
 /// Session database configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatabaseConfig {
-    /// Selected database backend.
-    pub backend: DatabaseBackend,
-    /// Database URL or local file path.
+    /// Runtime Postgres connection URL.
     pub url: String,
     /// Optional direct/admin database URL for migrations and other session-sensitive flows.
     pub admin_url: Option<String>,
-    /// Minimum pool size for pooled backends.
-    pub pool_min: u32,
-    /// Maximum pool size for pooled backends.
-    pub pool_max: u32,
+    /// Maximum pool size for the shared Postgres client.
+    pub max_connections: u32,
     /// Connection timeout in seconds.
-    pub connect_timeout_secs: u64,
+    pub connect_timeout_seconds: u64,
     /// Optional Neon branching configuration for ephemeral checkpoints.
     pub neon: DatabaseNeonConfig,
 }
@@ -583,12 +537,10 @@ pub struct DatabaseConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            backend: DatabaseBackend::Turso,
-            url: "~/.moa/sessions.db".to_string(),
+            url: "postgres://moa:moa@localhost:5432/moa".to_string(),
             admin_url: None,
-            pool_min: 1,
-            pool_max: 5,
-            connect_timeout_secs: 10,
+            max_connections: 20,
+            connect_timeout_seconds: 10,
             neon: DatabaseNeonConfig::default(),
         }
     }
@@ -651,9 +603,6 @@ pub struct LocalConfig {
     pub docker_enabled: bool,
     /// Sandbox working directory.
     pub sandbox_dir: String,
-    /// Legacy session database path alias. New configs should use `database.url`.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub session_db: String,
     /// Memory root directory.
     pub memory_dir: String,
 }
@@ -663,7 +612,6 @@ impl Default for LocalConfig {
         Self {
             docker_enabled: true,
             sandbox_dir: "~/.moa/sandbox".to_string(),
-            session_db: String::new(),
             memory_dir: "~/.moa/memory".to_string(),
         }
     }
@@ -850,12 +798,6 @@ impl Default for ToolOutputConfig {
 pub struct CloudConfig {
     /// Whether cloud mode is enabled.
     pub enabled: bool,
-    /// Optional Turso URL.
-    pub turso_url: Option<String>,
-    /// Environment variable containing the Turso auth token.
-    pub turso_auth_token_env: Option<String>,
-    /// Background embedded-replica sync cadence in seconds.
-    pub turso_sync_interval_secs: u64,
     /// Optional alternate memory root for cloud deployments.
     pub memory_dir: Option<String>,
     /// Optional Temporal configuration.
@@ -870,9 +812,6 @@ impl Default for CloudConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            turso_url: None,
-            turso_auth_token_env: Some("TURSO_AUTH_TOKEN".to_string()),
-            turso_sync_interval_secs: 2,
             memory_dir: None,
             temporal: Some(CloudTemporalConfig::default()),
             flyio: Some(CloudFlyioConfig::default()),

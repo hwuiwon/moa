@@ -17,8 +17,7 @@ use moa_core::{
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
-use moa_security::ApprovalRuleStore;
-use moa_session::create_session_store;
+use moa_session::{PostgresSessionStore, testing};
 use tempfile::TempDir;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{Instant, sleep};
@@ -191,11 +190,10 @@ async fn test_orchestrator_with_provider(
     let dir = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
     config.memory.auto_bootstrap = false;
-    config.database.url = dir.path().join("sessions.db").display().to_string();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
-    let session_store = create_session_store(&config).await?;
+    let session_store = create_test_store().await?;
     let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())
@@ -213,7 +211,7 @@ async fn test_orchestrator_with_config_and_provider(
     config: MoaConfig,
     provider: Arc<dyn LLMProvider>,
 ) -> Result<LocalOrchestrator> {
-    let session_store = create_session_store(&config).await?;
+    let session_store = create_test_store().await?;
     let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())
@@ -227,6 +225,11 @@ async fn test_orchestrator_with_config_and_provider(
 fn cwd_lock() -> &'static AsyncMutex<()> {
     static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
+async fn create_test_store() -> Result<Arc<PostgresSessionStore>> {
+    let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
+    Ok(Arc::new(store))
 }
 
 struct CurrentDirGuard {
@@ -719,6 +722,31 @@ async fn wait_for_approval_event(
     }
 }
 
+async fn wait_for_approval_decision(
+    orchestrator: &LocalOrchestrator,
+    session_id: SessionId,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let events = orchestrator
+            .session_store()
+            .get_events(session_id.clone(), EventRange::all())
+            .await?;
+        if events
+            .iter()
+            .any(|record| matches!(record.event, Event::ApprovalDecided { .. }))
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(MoaError::ProviderError(
+                "timed out waiting for approval decision".to_string(),
+            ));
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn collect_runtime_events_until<P>(
     runtime_rx: &mut tokio::sync::broadcast::Receiver<RuntimeEvent>,
     predicate: P,
@@ -849,6 +877,44 @@ fn warning_messages(events: &[moa_core::EventRecord]) -> Vec<String> {
         .filter_map(|record| match &record.event {
             Event::Warning { message } => Some(message.clone()),
             _ => None,
+        })
+        .collect()
+}
+
+fn event_labels(events: &[moa_core::EventRecord]) -> Vec<String> {
+    events
+        .iter()
+        .map(|record| match &record.event {
+            Event::SessionCreated { .. } => "SessionCreated".to_string(),
+            Event::SessionStatusChanged { from, to } => {
+                format!("SessionStatusChanged({from:?}->{to:?})")
+            }
+            Event::SessionCompleted { .. } => "SessionCompleted".to_string(),
+            Event::UserMessage { text, .. } => format!("UserMessage({text})"),
+            Event::QueuedMessage { text, .. } => format!("QueuedMessage({text})"),
+            Event::BrainThinking { .. } => "BrainThinking".to_string(),
+            Event::BrainResponse { text, .. } => format!("BrainResponse({text})"),
+            Event::ToolCall { tool_name, .. } => format!("ToolCall({tool_name})"),
+            Event::ToolResult { .. } => "ToolResult".to_string(),
+            Event::ToolError {
+                tool_name, error, ..
+            } => {
+                format!("ToolError({tool_name}: {error})")
+            }
+            Event::ApprovalRequested { tool_name, .. } => {
+                format!("ApprovalRequested({tool_name})")
+            }
+            Event::ApprovalDecided { .. } => "ApprovalDecided".to_string(),
+            Event::MemoryRead { path, .. } => format!("MemoryRead({path})"),
+            Event::MemoryWrite { path, .. } => format!("MemoryWrite({path})"),
+            Event::HandProvisioned { hand_id, .. } => format!("HandProvisioned({hand_id})"),
+            Event::HandDestroyed { hand_id, .. } => format!("HandDestroyed({hand_id})"),
+            Event::HandError { hand_id, error } => format!("HandError({hand_id}: {error})"),
+            Event::Checkpoint { .. } => "Checkpoint".to_string(),
+            Event::Error { message, .. } => format!("Error({message})"),
+            Event::Warning { message } => format!("Warning({message})"),
+            Event::MemoryIngest { source_path, .. } => format!("MemoryIngest({source_path})"),
+            Event::CacheReport { .. } => "CacheReport".to_string(),
         })
         .collect()
 }
@@ -1160,7 +1226,7 @@ async fn soft_cancel_stops_after_current_tool_call() -> Result<()> {
             },
         )
         .await?;
-    wait_for_tool_call_count(&orchestrator, session.session_id.clone(), 1).await?;
+    wait_for_approval_decision(&orchestrator, session.session_id.clone()).await?;
     orchestrator
         .signal(session.session_id.clone(), SessionSignal::SoftCancel)
         .await?;
@@ -1178,7 +1244,9 @@ async fn soft_cancel_stops_after_current_tool_call() -> Result<()> {
     assert!(
         events
             .iter()
-            .any(|record| matches!(record.event, Event::ToolResult { .. }))
+            .any(|record| matches!(record.event, Event::ToolResult { .. })),
+        "expected ToolResult in events: {:?}",
+        event_labels(&events)
     );
     assert!(
         !events
@@ -1279,13 +1347,12 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
         .store_pending_signal(session.session_id.clone(), pending)
         .await?;
 
+    let reopened_store = orchestrator.session_store();
     drop(orchestrator);
 
     let mut reopened_config = MoaConfig::default();
-    reopened_config.database.url = dir.path().join("sessions.db").display().to_string();
     reopened_config.local.memory_dir = dir.path().join("memory").display().to_string();
     reopened_config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
-    let reopened_store = create_session_store(&reopened_config).await?;
     let reopened_memory = Arc::new(FileMemoryStore::from_config(&reopened_config).await?);
     let reopened_provider: Arc<dyn LLMProvider> = Arc::new(MockProvider {
         model: reopened_config.general.default_model.clone(),
@@ -2014,11 +2081,10 @@ async fn completed_tool_turn_destroys_cached_hand() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
     config.memory.auto_bootstrap = false;
-    config.database.url = dir.path().join("sessions.db").display().to_string();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
-    let session_store = create_session_store(&config).await?;
+    let session_store = create_test_store().await?;
     let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
     let provider = Arc::new(DestroyTrackingHandProvider {
         provisioned: Arc::new(AtomicUsize::new(0)),
@@ -2327,7 +2393,7 @@ async fn workspace_memory_bootstrap_copies_contributing_file_without_provider_ca
     let base = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
     config.memory.auto_bootstrap = true;
-    config.database.url = base.path().join("sessions.db").display().to_string();
+    config.database.url = testing::test_database_url();
     config.local.memory_dir = base.path().join("memory").display().to_string();
     config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -2389,7 +2455,7 @@ async fn workspace_memory_bootstrap_informs_first_turn_from_instruction_file() -
     let base = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
     config.memory.auto_bootstrap = true;
-    config.database.url = base.path().join("sessions.db").display().to_string();
+    config.database.url = testing::test_database_url();
     config.local.memory_dir = base.path().join("memory").display().to_string();
     config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -2442,7 +2508,7 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
 
     let base = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
-    config.database.url = base.path().join("sessions.db").display().to_string();
+    config.database.url = testing::test_database_url();
     config.local.memory_dir = base.path().join("memory").display().to_string();
     config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
     config.memory.auto_bootstrap = true;
@@ -2548,7 +2614,7 @@ async fn workspace_memory_bootstrap_can_be_disabled() -> Result<()> {
     let base = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
     config.memory.auto_bootstrap = false;
-    config.database.url = base.path().join("sessions.db").display().to_string();
+    config.database.url = testing::test_database_url();
     config.local.memory_dir = base.path().join("memory").display().to_string();
     config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -2602,7 +2668,7 @@ async fn workspace_instruction_file_is_injected_into_prompt_with_config_instruct
 
     let base = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
-    config.database.url = base.path().join("sessions.db").display().to_string();
+    config.database.url = testing::test_database_url();
     config.local.memory_dir = base.path().join("memory").display().to_string();
     config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
     config.general.workspace_instructions = Some("Config workspace guidance.".to_string());
@@ -2660,7 +2726,7 @@ async fn workspace_instruction_file_is_reloaded_for_each_new_session() -> Result
 
     let base = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
-    config.database.url = base.path().join("sessions.db").display().to_string();
+    config.database.url = testing::test_database_url();
     config.local.memory_dir = base.path().join("memory").display().to_string();
     config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
     config.memory.auto_bootstrap = false;
@@ -2886,7 +2952,7 @@ async fn session_pauses_after_max_turns_and_resume_processes_pending_work() -> R
     let dir = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
     config.memory.auto_bootstrap = false;
-    config.database.url = dir.path().join("sessions.db").display().to_string();
+    config.database.url = testing::test_database_url();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     config.session_limits.max_turns = 1;
@@ -2986,7 +3052,7 @@ async fn session_pauses_on_loop_detection() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
     config.memory.auto_bootstrap = false;
-    config.database.url = dir.path().join("sessions.db").display().to_string();
+    config.database.url = testing::test_database_url();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     config.session_limits.max_turns = 0;

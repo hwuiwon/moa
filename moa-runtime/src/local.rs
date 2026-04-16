@@ -14,7 +14,7 @@ use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
 use moa_providers::{build_provider_from_config, resolve_provider_selection};
-use moa_session::create_session_store;
+use moa_session::{create_session_store, testing};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -448,7 +448,7 @@ impl ChatRuntime {
         tokio::fs::create_dir_all(&base).await?;
 
         let mut config = MoaConfig::default();
-        config.database.url = base.join("sessions.db").display().to_string();
+        config.database.url = testing::test_database_url();
         config.local.memory_dir = base.join("memory").display().to_string();
         config.local.sandbox_dir = base.join("sandbox").display().to_string();
 

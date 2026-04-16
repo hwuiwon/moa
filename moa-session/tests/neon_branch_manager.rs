@@ -1,12 +1,9 @@
-#![cfg(feature = "postgres")]
-
 //! Ignored live tests for `NeonBranchManager`.
 
 use std::time::Duration;
 
 use moa_core::{
-    BranchManager, DatabaseBackend, MoaConfig, SessionFilter, SessionMeta, SessionStore, UserId,
-    WorkspaceId,
+    BranchManager, MoaConfig, SessionFilter, SessionMeta, SessionStore, UserId, WorkspaceId,
 };
 use moa_session::{NeonBranchManager, PostgresSessionStore};
 use uuid::Uuid;
@@ -20,7 +17,6 @@ fn live_neon_config() -> Option<MoaConfig> {
         std::env::var("NEON_PARENT_BRANCH_ID").unwrap_or_else(|_| "main".to_string());
 
     let mut config = MoaConfig::default();
-    config.database.backend = DatabaseBackend::Postgres;
     config.database.url = database_url;
     config.database.neon.enabled = true;
     config.database.neon.project_id = project_id;
