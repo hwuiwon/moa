@@ -404,7 +404,7 @@ impl SessionStore for TursoSessionStore {
         let completed_at = meta.completed_at.map(|timestamp| timestamp.to_rfc3339());
         let parent_session_id = meta.parent_session_id.map(|value| value.to_string());
         let insert_sql = format!(
-            "INSERT INTO sessions ({SESSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO sessions ({SESSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         );
 
         self.connection
@@ -424,6 +424,9 @@ impl SessionStore for TursoSessionStore {
                     completed_at,
                     parent_session_id,
                     meta.total_input_tokens as i64,
+                    meta.total_input_tokens_uncached as i64,
+                    meta.total_input_tokens_cache_write as i64,
+                    meta.total_input_tokens_cache_read as i64,
                     meta.total_output_tokens as i64,
                     meta.total_cost_cents as i64,
                     meta.event_count as i64,
@@ -485,6 +488,9 @@ impl SessionStore for TursoSessionStore {
             .execute(
                 "UPDATE sessions SET updated_at = ?, event_count = event_count + 1, \
                  total_input_tokens = total_input_tokens + ?, \
+                 total_input_tokens_uncached = total_input_tokens_uncached + ?, \
+                 total_input_tokens_cache_write = total_input_tokens_cache_write + ?, \
+                 total_input_tokens_cache_read = total_input_tokens_cache_read + ?, \
                  total_output_tokens = total_output_tokens + ?, \
                  total_cost_cents = total_cost_cents + ?, \
                  last_checkpoint_seq = COALESCE(?, last_checkpoint_seq) \
@@ -492,6 +498,9 @@ impl SessionStore for TursoSessionStore {
                 params![
                     now,
                     event.input_tokens() as i64,
+                    event.input_tokens_uncached() as i64,
+                    event.input_tokens_cache_write() as i64,
+                    event.input_tokens_cache_read() as i64,
                     event.output_tokens() as i64,
                     event.cost_cents() as i64,
                     checkpoint_seq,

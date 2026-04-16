@@ -96,7 +96,8 @@ pub(super) fn calculate_response_cost_cents(
     response: &moa_core::CompletionResponse,
     pricing: &TokenPricing,
 ) -> u32 {
-    let cached_input_tokens = response.cached_input_tokens.min(response.input_tokens);
+    let usage = response.token_usage();
+    let cached_input_tokens = usage.input_tokens_cache_read.min(response.input_tokens);
     let uncached_input_tokens = response.input_tokens.saturating_sub(cached_input_tokens);
     let cached_input_rate = pricing
         .cached_input_per_mtok
@@ -130,8 +131,8 @@ pub(super) fn build_cache_report(
         provider.to_string(),
         response.model.clone(),
         stable_prefix_reused,
-        response.input_tokens,
-        response.cached_input_tokens,
+        response.token_usage().total_input_tokens(),
+        response.token_usage().input_tokens_cache_read,
         response.output_tokens,
     )
 }
@@ -187,6 +188,12 @@ mod tests {
             input_tokens: 100_000,
             output_tokens: 10_000,
             cached_input_tokens: 50_000,
+            usage: moa_core::TokenUsage {
+                input_tokens_uncached: 50_000,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 50_000,
+                output_tokens: 10_000,
+            },
             duration_ms: 1500,
             thought_signature: None,
         };

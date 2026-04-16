@@ -12,6 +12,7 @@ use uuid::Uuid;
 pub(crate) const SESSION_COLUMNS: &str = concat!(
     "id, workspace_id, user_id, title, status, platform, platform_channel, model, ",
     "created_at, updated_at, completed_at, parent_session_id, total_input_tokens, ",
+    "total_input_tokens_uncached, total_input_tokens_cache_write, total_input_tokens_cache_read, ",
     "total_output_tokens, total_cost_cents, event_count, last_checkpoint_seq"
 );
 
@@ -238,6 +239,15 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
             .map(moa_core::SessionId),
         total_input_tokens: row
             .try_get::<i64, _>("total_input_tokens")
+            .map_err(map_sqlx_error)? as usize,
+        total_input_tokens_uncached: row
+            .try_get::<i64, _>("total_input_tokens_uncached")
+            .map_err(map_sqlx_error)? as usize,
+        total_input_tokens_cache_write: row
+            .try_get::<i64, _>("total_input_tokens_cache_write")
+            .map_err(map_sqlx_error)? as usize,
+        total_input_tokens_cache_read: row
+            .try_get::<i64, _>("total_input_tokens_cache_read")
             .map_err(map_sqlx_error)? as usize,
         total_output_tokens: row
             .try_get::<i64, _>("total_output_tokens")

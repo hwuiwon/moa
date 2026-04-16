@@ -11,7 +11,7 @@ use moa_core::{
     MemoryPath, MemoryScope, MemoryStore, MessageRole, MoaConfig, MoaError, PageType, Platform,
     PolicyAction, PolicyScope, Result, RuntimeEvent, SessionFilter, SessionHandle, SessionId,
     SessionMeta, SessionSignal, SessionStatus, SessionStore, StartSessionRequest, TokenPricing,
-    ToolCallFormat, ToolOutput, UserId, UserMessage, WikiPage, WorkspaceId,
+    TokenUsage, ToolCallFormat, ToolOutput, UserId, UserMessage, WikiPage, WorkspaceId,
 };
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_memory::FileMemoryStore;
@@ -34,6 +34,15 @@ struct SlowStreamingProvider {
     model: String,
     text: String,
     delay: Duration,
+}
+
+fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
+    TokenUsage {
+        input_tokens_uncached: input_tokens,
+        input_tokens_cache_write: 0,
+        input_tokens_cache_read: 0,
+        output_tokens,
+    }
 }
 
 #[async_trait]
@@ -78,6 +87,7 @@ impl LLMProvider for MockProvider {
             input_tokens: 4,
             output_tokens: 2,
             cached_input_tokens: 0,
+            usage: token_usage(4, 2),
             duration_ms: delay.as_millis() as u64,
             thought_signature: None,
         };
@@ -145,6 +155,7 @@ impl LLMProvider for SlowStreamingProvider {
                 input_tokens: 4,
                 output_tokens: text.len(),
                 cached_input_tokens: 0,
+                usage: token_usage(4, text.len()),
                 duration_ms: (delay.as_millis() as usize * text.len()) as u64,
                 thought_signature: None,
             })
@@ -304,6 +315,7 @@ impl LLMProvider for RequestGuardProvider {
             input_tokens: 4,
             output_tokens: 2,
             cached_input_tokens: 0,
+            usage: token_usage(4, 2),
             duration_ms: delay.as_millis() as u64,
             thought_signature: None,
         };
@@ -370,6 +382,7 @@ impl LLMProvider for ToolCancelProvider {
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
+                usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
             }
@@ -382,6 +395,7 @@ impl LLMProvider for ToolCancelProvider {
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
+                usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
             }
@@ -443,6 +457,7 @@ impl LLMProvider for ToolThenEchoProvider {
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
+                usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
             }
@@ -456,6 +471,7 @@ impl LLMProvider for ToolThenEchoProvider {
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
+                usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
             }
@@ -518,6 +534,7 @@ impl LLMProvider for RepeatingToolTurnProvider {
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
+                usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
             }
@@ -531,6 +548,7 @@ impl LLMProvider for RepeatingToolTurnProvider {
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
+                usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
             }
@@ -592,6 +610,7 @@ impl LLMProvider for FileWriteApprovalProvider {
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
+                usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
             }
@@ -604,6 +623,7 @@ impl LLMProvider for FileWriteApprovalProvider {
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
+                usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
             }

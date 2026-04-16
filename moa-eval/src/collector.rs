@@ -93,17 +93,17 @@ impl TrajectoryCollector {
             }
             Event::BrainResponse {
                 text,
-                input_tokens,
                 output_tokens,
                 cost_cents,
                 duration_ms,
                 ..
             } => {
+                let input_tokens = event.input_tokens();
                 if self.capture_content && !text.trim().is_empty() {
                     self.response_chunks
                         .push(truncate(text, self.content_max_bytes));
                 }
-                self.metrics.input_tokens += *input_tokens;
+                self.metrics.input_tokens += input_tokens;
                 self.metrics.output_tokens += *output_tokens;
                 self.metrics.total_tokens += input_tokens + output_tokens;
                 self.metrics.latency_ms += *duration_ms;
@@ -111,7 +111,7 @@ impl TrajectoryCollector {
                 self.metrics.cost_dollars += if *cost_cents > 0 {
                     *cost_cents as f64 / 100.0
                 } else {
-                    estimate_cost(self.pricing.as_ref(), *input_tokens, *output_tokens)
+                    estimate_cost(self.pricing.as_ref(), input_tokens, *output_tokens)
                 };
             }
             _ => {}
@@ -259,7 +259,9 @@ mod tests {
             text: "done".to_string(),
             thought_signature: None,
             model: "mock".to_string(),
-            input_tokens: 100,
+            input_tokens_uncached: 100,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 0,
             output_tokens: 50,
             cost_cents: 0,
             duration_ms: 12,

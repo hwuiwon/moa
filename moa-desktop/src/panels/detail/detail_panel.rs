@@ -864,7 +864,6 @@ fn collect_turn_costs(events: &[EventRecord]) -> Vec<TurnCost> {
     for rec in events {
         if let Event::BrainResponse {
             model,
-            input_tokens,
             output_tokens,
             cost_cents,
             ..
@@ -874,7 +873,7 @@ fn collect_turn_costs(events: &[EventRecord]) -> Vec<TurnCost> {
             out.push(TurnCost {
                 turn,
                 model: model.clone(),
-                input_tokens: *input_tokens,
+                input_tokens: rec.event.input_tokens(),
                 output_tokens: *output_tokens,
                 cost_cents: *cost_cents,
             });
@@ -945,13 +944,12 @@ fn aggregate_brain_usage(events: &[EventRecord]) -> (usize, usize, u32) {
     let mut cost_cents = 0u32;
     for rec in events {
         if let Event::BrainResponse {
-            input_tokens,
             output_tokens,
             cost_cents: c,
             ..
         } = &rec.event
         {
-            in_tokens += input_tokens;
+            in_tokens += rec.event.input_tokens();
             out_tokens += output_tokens;
             cost_cents = cost_cents.saturating_add(*c);
         }
@@ -964,8 +962,8 @@ fn aggregate_brain_usage(events: &[EventRecord]) -> (usize, usize, u32) {
 /// detail panel's context-usage meter.
 fn latest_input_tokens(events: &[EventRecord]) -> usize {
     for rec in events.iter().rev() {
-        if let Event::BrainResponse { input_tokens, .. } = &rec.event {
-            return *input_tokens;
+        if let Event::BrainResponse { .. } = &rec.event {
+            return rec.event.input_tokens();
         }
     }
     0

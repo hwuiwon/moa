@@ -380,10 +380,19 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::Utc;
-    use moa_core::{CompletionResponse, SessionId, StopReason};
+    use moa_core::{CompletionResponse, SessionId, StopReason, TokenUsage};
     use uuid::Uuid;
 
     use super::*;
+
+    fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
+        TokenUsage {
+            input_tokens_uncached: input_tokens,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 0,
+            output_tokens,
+        }
+    }
 
     fn event_record(sequence_num: u64, event: Event) -> EventRecord {
         EventRecord {
@@ -445,6 +454,7 @@ mod tests {
                     input_tokens: 4,
                     output_tokens: 2,
                     cached_input_tokens: 0,
+                    usage: token_usage(4, 2),
                     duration_ms: 1,
                     thought_signature: None,
                 },

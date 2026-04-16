@@ -6,11 +6,11 @@ use std::sync::Arc;
 use moa_brain::{TurnResult, build_default_pipeline_with_tools, run_brain_turn_with_tools};
 use moa_core::{
     CompletionRequest, Event, EventRange, EventRecord, ModelCapabilities, Result, SessionMeta,
-    SessionStore, TokenPricing, ToolCallFormat, ToolOutput, UserId, WorkspaceId,
+    SessionStore, TokenPricing, TokenUsage, ToolCallFormat, ToolOutput, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
-use moa_providers::{ScriptedProvider, anthropic::debug_build_request_body};
+use moa_providers::{ScriptedProvider, ScriptedResponse, anthropic::debug_build_request_body};
 use moa_security::ToolPolicies;
 use moa_session::TursoSessionStore;
 use serde_json::{Value, json};
@@ -128,6 +128,7 @@ async fn steps_72_77_e2e() -> Result<()> {
         .await?;
     let requests = provider.recorded_requests().await;
     let tool_runs = collect_tool_runs(&events);
+    let final_session = session_store.get_session(session_id.clone()).await?;
 
     assert_eq!(
         requests.len(),
@@ -309,45 +310,79 @@ async fn steps_72_77_e2e() -> Result<()> {
         }),
         "deduplicated tool results must preserve tool_use_id for provider replay"
     );
+    assert!(
+        final_session.total_input_tokens_cache_read > 0,
+        "session should accumulate non-zero cache-read tokens"
+    );
+    assert!(
+        final_session.cache_hit_rate() > 0.0,
+        "session cache hit rate should be non-zero"
+    );
 
     Ok(())
 }
 
 fn build_scripted_provider() -> ScriptedProvider {
     ScriptedProvider::new(scripted_capabilities())
-        .push_tool_call(
+        .push_response(ScriptedResponse::tool_call(
             "file_read",
             json!({ "path": "auth.rs", "start_line": 118, "end_line": 125 }),
             "tc_001",
+        ))
+        .push_response(ScriptedResponse::text("Turn 1 complete."))
+        .push_response(
+            ScriptedResponse::tool_call(
+                "grep",
+                json!({ "pattern": "issue_refresh_token", "path": ".", "literal": true }),
+                "tc_002",
+            )
+            .with_usage(cached_usage(72, 24)),
         )
-        .push_end_turn("Turn 1 complete.")
-        .push_tool_call(
-            "grep",
-            json!({ "pattern": "issue_refresh_token", "path": ".", "literal": true }),
-            "tc_002",
+        .push_response(ScriptedResponse::text("Turn 2 complete.").with_usage(cached_usage(80, 32)))
+        .push_response(
+            ScriptedResponse::tool_call("file_read", json!({ "path": "auth.rs" }), "tc_003")
+                .with_usage(cached_usage(96, 40)),
         )
-        .push_end_turn("Turn 2 complete.")
-        .push_tool_call("file_read", json!({ "path": "auth.rs" }), "tc_003")
-        .push_end_turn("Turn 3 complete.")
-        .push_tool_call(
-            "str_replace",
-            json!({
-                "path": "auth.rs",
-                "old_str": OLD_SNIPPET,
-                "new_str": NEW_SNIPPET,
-            }),
-            "tc_004",
+        .push_response(ScriptedResponse::text("Turn 3 complete.").with_usage(cached_usage(104, 48)))
+        .push_response(
+            ScriptedResponse::tool_call(
+                "str_replace",
+                json!({
+                    "path": "auth.rs",
+                    "old_str": OLD_SNIPPET,
+                    "new_str": NEW_SNIPPET,
+                }),
+                "tc_004",
+            )
+            .with_usage(cached_usage(112, 56)),
         )
-        .push_end_turn("Turn 4 complete.")
-        .push_tool_call("file_read", json!({ "path": "auth.rs" }), "tc_005")
-        .push_end_turn("Turn 5 complete.")
-        .push_tool_call(
-            "bash",
-            json!({ "cmd": "for i in $(seq 1 260); do echo bash-line-$i; done" }),
-            "tc_006",
+        .push_response(ScriptedResponse::text("Turn 4 complete.").with_usage(cached_usage(120, 64)))
+        .push_response(
+            ScriptedResponse::tool_call("file_read", json!({ "path": "auth.rs" }), "tc_005")
+                .with_usage(cached_usage(128, 72)),
         )
-        .push_end_turn("Turn 6 complete.")
-        .push_end_turn("Turn 7 complete.")
+        .push_response(ScriptedResponse::text("Turn 5 complete.").with_usage(cached_usage(136, 80)))
+        .push_response(
+            ScriptedResponse::tool_call(
+                "bash",
+                json!({ "cmd": "for i in $(seq 1 260); do echo bash-line-$i; done" }),
+                "tc_006",
+            )
+            .with_usage(cached_usage(144, 88)),
+        )
+        .push_response(ScriptedResponse::text("Turn 6 complete.").with_usage(cached_usage(152, 96)))
+        .push_response(
+            ScriptedResponse::text("Turn 7 complete.").with_usage(cached_usage(160, 104)),
+        )
+}
+
+fn cached_usage(total_input_tokens: usize, cache_read_tokens: usize) -> TokenUsage {
+    TokenUsage {
+        input_tokens_uncached: total_input_tokens.saturating_sub(cache_read_tokens),
+        input_tokens_cache_write: 0,
+        input_tokens_cache_read: cache_read_tokens,
+        output_tokens: 0,
+    }
 }
 
 fn scripted_capabilities() -> ModelCapabilities {

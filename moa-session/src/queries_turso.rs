@@ -13,6 +13,7 @@ use uuid::Uuid;
 pub(crate) const SESSION_COLUMNS: &str = concat!(
     "id, workspace_id, user_id, title, status, platform, platform_channel, model, ",
     "created_at, updated_at, completed_at, parent_session_id, total_input_tokens, ",
+    "total_input_tokens_uncached, total_input_tokens_cache_write, total_input_tokens_cache_read, ",
     "total_output_tokens, total_cost_cents, event_count, last_checkpoint_seq"
 );
 
@@ -183,14 +184,23 @@ pub(crate) fn session_meta_from_row(row: &Row) -> Result<SessionMeta> {
     let total_input_tokens: u64 = row
         .get(12)
         .map_err(|error| MoaError::StorageError(error.to_string()))?;
-    let total_output_tokens: u64 = row
+    let total_input_tokens_uncached: u64 = row
         .get(13)
         .map_err(|error| MoaError::StorageError(error.to_string()))?;
-    let total_cost_cents: u32 = row
+    let total_input_tokens_cache_write: u64 = row
         .get(14)
         .map_err(|error| MoaError::StorageError(error.to_string()))?;
-    let event_count: u64 = row
+    let total_input_tokens_cache_read: u64 = row
         .get(15)
+        .map_err(|error| MoaError::StorageError(error.to_string()))?;
+    let total_output_tokens: u64 = row
+        .get(16)
+        .map_err(|error| MoaError::StorageError(error.to_string()))?;
+    let total_cost_cents: u32 = row
+        .get(17)
+        .map_err(|error| MoaError::StorageError(error.to_string()))?;
+    let event_count: u64 = row
+        .get(18)
         .map_err(|error| MoaError::StorageError(error.to_string()))?;
 
     Ok(SessionMeta {
@@ -214,10 +224,13 @@ pub(crate) fn session_meta_from_row(row: &Row) -> Result<SessionMeta> {
             .transpose()?
             .map(moa_core::SessionId),
         total_input_tokens: total_input_tokens as usize,
+        total_input_tokens_uncached: total_input_tokens_uncached as usize,
+        total_input_tokens_cache_write: total_input_tokens_cache_write as usize,
+        total_input_tokens_cache_read: total_input_tokens_cache_read as usize,
         total_output_tokens: total_output_tokens as usize,
         total_cost_cents,
         event_count: event_count as usize,
-        last_checkpoint_seq: optional_i64(row, 16)?.map(|value| value as u64),
+        last_checkpoint_seq: optional_i64(row, 19)?.map(|value| value as u64),
     })
 }
 

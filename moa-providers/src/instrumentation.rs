@@ -1,7 +1,9 @@
 //! Shared tracing helpers for provider-level LLM completion spans.
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use moa_core::{CompletionContent, CompletionRequest, CompletionResponse, TokenPricing};
+use moa_core::{
+    CompletionContent, CompletionRequest, CompletionResponse, TokenPricing, TokenUsage,
+};
 use opentelemetry::trace::Status;
 use serde::Serialize;
 use serde_json::Value;
@@ -173,7 +175,8 @@ impl LLMSpanRecorder {
 
     /// Finalizes the span with usage, cost, and response content.
     pub(crate) fn finish(&self, response: &CompletionResponse) {
-        let total_tokens = response.input_tokens + response.output_tokens;
+        let usage = self.merged_usage(response);
+        let total_tokens = usage.total_input_tokens() + usage.output_tokens;
         let output_content = if response.content.is_empty() {
             serialize_output_text(&response.text)
         } else {
@@ -181,27 +184,22 @@ impl LLMSpanRecorder {
         };
         let cost = calculate_cost_with_cached(
             response.input_tokens,
-            self.cached_input_tokens.max(response.cached_input_tokens),
+            usage.input_tokens_cache_read,
             response.output_tokens,
             &self.pricing,
         );
-        let cached_input_tokens = self.cached_input_tokens.max(response.cached_input_tokens);
-        let provider_cache_hit_rate = if response.input_tokens == 0 {
-            0.0
-        } else {
-            cached_input_tokens as f64 / response.input_tokens as f64
-        };
+        let provider_cache_hit_rate = usage.cache_hit_rate();
 
         record_llm_span_attributes(
             &self.span,
             &LLMSpanAttributes {
                 response_model: Some(response.model.clone()),
-                input_tokens: Some(response.input_tokens),
-                output_tokens: Some(response.output_tokens),
+                input_tokens: Some(usage.total_input_tokens()),
+                output_tokens: Some(usage.output_tokens),
                 total_tokens: Some(total_tokens),
                 cost: Some(cost),
-                cache_read_tokens: Some(cached_input_tokens),
-                cache_creation_tokens: Some(self.cache_creation_input_tokens),
+                cache_read_tokens: Some(usage.input_tokens_cache_read),
+                cache_creation_tokens: Some(usage.input_tokens_cache_write),
                 provider_cache_hit_rate: Some(provider_cache_hit_rate),
                 output_content,
                 ..LLMSpanAttributes::default()
@@ -209,10 +207,13 @@ impl LLMSpanRecorder {
         );
 
         tracing::info!(
-            cache_read = cached_input_tokens,
-            cache_creation = self.cache_creation_input_tokens,
+            model = %response.model,
+            input_uncached = usage.input_tokens_uncached,
+            input_cache_read = usage.input_tokens_cache_read,
+            input_cache_write = usage.input_tokens_cache_write,
+            output = usage.output_tokens,
             cache_hit_rate = %format!("{:.1}%", provider_cache_hit_rate * 100.0),
-            "provider cache metrics"
+            "completion received"
         );
     }
 
@@ -234,6 +235,18 @@ impl LLMSpanRecorder {
     pub(crate) fn fail_at_stage(&self, phase: &'static str, error: &impl std::fmt::Display) {
         self.set_phase(phase);
         self.fail(error);
+    }
+
+    fn merged_usage(&self, response: &CompletionResponse) -> TokenUsage {
+        let mut usage = response.token_usage();
+        if usage.input_tokens_cache_read == 0 && self.cached_input_tokens > 0 {
+            usage.input_tokens_cache_read = self.cached_input_tokens;
+        }
+        if usage.input_tokens_cache_write == 0 && self.cache_creation_input_tokens > 0 {
+            usage.input_tokens_cache_write = self.cache_creation_input_tokens;
+        }
+        usage.output_tokens = response.output_tokens;
+        usage
     }
 }
 
@@ -258,9 +271,11 @@ pub(crate) fn record_llm_span_attributes(span: &Span, attrs: &LLMSpanAttributes)
         span.set_attribute("gen_ai.request.max_tokens", max_tokens as i64);
     }
     if let Some(input_tokens) = attrs.input_tokens {
+        span.set_attribute("gen_ai.usage.input_tokens", input_tokens as i64);
         span.set_attribute("gen_ai.usage.prompt_tokens", input_tokens as i64);
     }
     if let Some(output_tokens) = attrs.output_tokens {
+        span.set_attribute("gen_ai.usage.output_tokens", output_tokens as i64);
         span.set_attribute("gen_ai.usage.completion_tokens", output_tokens as i64);
     }
     if let Some(total_tokens) = attrs.total_tokens {
@@ -312,6 +327,10 @@ pub(crate) fn record_llm_span_attributes(span: &Span, attrs: &LLMSpanAttributes)
         span.set_attribute("gen_ai.usage.cache_read_tokens", cache_read_tokens as i64);
     }
     if let Some(cache_creation_tokens) = attrs.cache_creation_tokens {
+        span.set_attribute(
+            "gen_ai.usage.cache_write_tokens",
+            cache_creation_tokens as i64,
+        );
         span.set_attribute(
             "gen_ai.usage.cache_creation_tokens",
             cache_creation_tokens as i64,

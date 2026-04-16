@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     completed_at TEXT,
     parent_session_id TEXT,
     total_input_tokens INTEGER DEFAULT 0,
+    total_input_tokens_uncached INTEGER DEFAULT 0,
+    total_input_tokens_cache_write INTEGER DEFAULT 0,
+    total_input_tokens_cache_read INTEGER DEFAULT 0,
     total_output_tokens INTEGER DEFAULT 0,
     total_cost_cents INTEGER DEFAULT 0,
     event_count INTEGER DEFAULT 0,
@@ -152,5 +155,27 @@ pub async fn migrate(connection: &Connection) -> Result<()> {
             .map_err(|error| MoaError::StorageError(error.to_string()))?;
     }
 
+    for statement in [
+        "ALTER TABLE sessions ADD COLUMN total_input_tokens_uncached INTEGER DEFAULT 0",
+        "ALTER TABLE sessions ADD COLUMN total_input_tokens_cache_write INTEGER DEFAULT 0",
+        "ALTER TABLE sessions ADD COLUMN total_input_tokens_cache_read INTEGER DEFAULT 0",
+    ] {
+        add_sessions_column_if_missing(connection, statement).await?;
+    }
+
     Ok(())
+}
+
+async fn add_sessions_column_if_missing(connection: &Connection, statement: &str) -> Result<()> {
+    match connection.execute(statement, ()).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let message = error.to_string();
+            if message.contains("duplicate column name") {
+                Ok(())
+            } else {
+                Err(MoaError::StorageError(message))
+            }
+        }
+    }
 }
