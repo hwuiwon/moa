@@ -59,8 +59,11 @@ impl LoopDetector {
             output
                 .chars()
                 .take(OUTPUT_PREFIX_LEN)
-                .collect::<String>()
+                .count()
                 .hash(&mut hasher);
+            for ch in output.chars().take(OUTPUT_PREFIX_LEN) {
+                ch.hash(&mut hasher);
+            }
         }
         hasher.finish()
     }

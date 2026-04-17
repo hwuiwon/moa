@@ -30,42 +30,42 @@ impl MemoryStore for EmptyMemoryStore {
     async fn search(
         &self,
         _query: &str,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
         Ok(Vec::new())
     }
 
-    async fn read_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
+    async fn read_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
         Err(MoaError::StorageError("not found".to_string()))
     }
 
     async fn write_page(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _path: &MemoryPath,
         _page: WikiPage,
     ) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
+    async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
         Ok(())
     }
 
     async fn list_pages(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _filter: Option<PageType>,
     ) -> Result<Vec<PageSummary>> {
         Ok(Vec::new())
     }
 
-    async fn get_index(&self, _scope: MemoryScope) -> Result<String> {
+    async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
         Ok(String::new())
     }
 
-    async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+    async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
         Ok(())
     }
 }
@@ -74,7 +74,7 @@ fn session(label: &str) -> SessionMeta {
     SessionMeta {
         workspace_id: WorkspaceId::new("e2b-live-workspace"),
         user_id: UserId::new(format!("e2b-live-user-{label}")),
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     }
 }

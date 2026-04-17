@@ -38,7 +38,7 @@ pub async fn should_bootstrap(store: &FileMemoryStore, scope: &MemoryScope) -> R
         return Ok(false);
     }
 
-    let pages = store.list_pages(scope.clone(), None).await?;
+    let pages = store.list_pages(scope, None).await?;
     if pages.is_empty() {
         return Ok(true);
     }
@@ -48,12 +48,12 @@ pub async fn should_bootstrap(store: &FileMemoryStore, scope: &MemoryScope) -> R
             return Ok(false);
         }
         if summary.path.as_str() == INDEX_FILENAME {
-            let index = store.get_index(scope.clone()).await?;
+            let index = store.get_index(scope).await?;
             if !index.trim().is_empty() && !is_bootstrap_index(&index) {
                 return Ok(false);
             }
         } else {
-            let page = store.read_page(scope.clone(), &summary.path).await?;
+            let page = store.read_page(scope, &summary.path).await?;
             if !page.auto_generated {
                 return Ok(false);
             }
@@ -85,22 +85,18 @@ pub async fn run_bootstrap(
         ),
         _ => minimal_index_page(index_path.clone(), workspace_name, workspace_path, now),
     };
-    store
-        .write_page(scope.clone(), &index_path, index_page)
-        .await?;
+    store.write_page(scope, &index_path, index_page).await?;
     pages_created.push(INDEX_FILENAME.to_string());
 
     if let (Some(filename), Some(contents)) = (&source_file, content.as_deref()) {
         let project_path = MemoryPath::new("topics/project.md");
         let project_page = project_instructions_page(project_path.clone(), filename, contents, now);
-        store
-            .write_page(scope.clone(), &project_path, project_page)
-            .await?;
+        store.write_page(scope, &project_path, project_page).await?;
         pages_created.push(project_path.as_str().to_string());
     } else {
         let project_path = MemoryPath::new("topics/project.md");
-        if store.read_page(scope.clone(), &project_path).await.is_ok() {
-            store.delete_page(scope.clone(), &project_path).await?;
+        if store.read_page(scope, &project_path).await.is_ok() {
+            store.delete_page(scope, &project_path).await?;
         }
     }
 
@@ -286,7 +282,7 @@ mod tests {
         );
 
         let project = store
-            .read_page(scope.clone(), &MemoryPath::new("topics/project.md"))
+            .read_page(&scope, &MemoryPath::new("topics/project.md"))
             .await
             .unwrap();
         assert_eq!(project.page_type, PageType::Topic);
@@ -318,11 +314,11 @@ mod tests {
         assert_eq!(report.source_file, None);
         assert_eq!(report.pages_created, vec![INDEX_FILENAME.to_string()]);
 
-        let index = store.get_index(scope.clone()).await.unwrap();
+        let index = store.get_index(&scope).await.unwrap();
         assert!(index.contains("No project instructions file found"));
         assert!(
             store
-                .read_page(scope, &MemoryPath::new("topics/project.md"))
+                .read_page(&scope, &MemoryPath::new("topics/project.md"))
                 .await
                 .is_err()
         );

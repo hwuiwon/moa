@@ -65,11 +65,7 @@ async fn consolidation_normalizes_dates_and_resolves_conflicts() {
     architecture.updated -= Duration::days(40);
     architecture.reference_count = 0;
     store
-        .write_page(
-            scope.clone(),
-            &"topics/architecture.md".into(),
-            architecture,
-        )
+        .write_page(&scope, &"topics/architecture.md".into(), architecture)
         .await
         .unwrap();
 
@@ -80,7 +76,7 @@ async fn consolidation_normalizes_dates_and_resolves_conflicts() {
     );
     deployment.updated -= Duration::days(10);
     store
-        .write_page(scope.clone(), &"topics/deployment.md".into(), deployment)
+        .write_page(&scope, &"topics/deployment.md".into(), deployment)
         .await
         .unwrap();
 
@@ -89,7 +85,7 @@ async fn consolidation_normalizes_dates_and_resolves_conflicts() {
         .metadata
         .insert("entity_exists".to_string(), serde_json::Value::Bool(false));
     store
-        .write_page(scope.clone(), &"entities/legacy.md".into(), removed)
+        .write_page(&scope, &"entities/legacy.md".into(), removed)
         .await
         .unwrap();
 
@@ -99,18 +95,18 @@ async fn consolidation_normalizes_dates_and_resolves_conflicts() {
     assert_eq!(report.pages_deleted, 1);
 
     let deployment = store
-        .read_page(scope.clone(), &"topics/deployment.md".into())
+        .read_page(&scope, &"topics/deployment.md".into())
         .await
         .unwrap();
     assert!(deployment.content.contains("port 4000"));
     let architecture = store
-        .read_page(scope.clone(), &"topics/architecture.md".into())
+        .read_page(&scope, &"topics/architecture.md".into())
         .await
         .unwrap();
     assert!(architecture.content.contains("2026-"));
     assert!(
         store
-            .read_page(scope.clone(), &"entities/legacy.md".into())
+            .read_page(&scope, &"entities/legacy.md".into())
             .await
             .is_err()
     );
@@ -126,7 +122,7 @@ async fn ingest_source_creates_summary_and_updates_related_pages() {
         .ingest_source(
             &scope,
             "RFC 0042 Auth Redesign",
-            r#"
+            r"
 ## Entities
 - Auth Service
 
@@ -138,7 +134,7 @@ async fn ingest_source_creates_summary_and_updates_related_pages() {
 
 ## Contradictions
 - Existing deployment docs still mention multi-use refresh tokens.
-"#,
+",
         )
         .await
         .unwrap();
@@ -156,7 +152,7 @@ async fn ingest_source_creates_summary_and_updates_related_pages() {
     );
     assert!(
         store
-            .read_page(scope.clone(), &"topics/token-rotation.md".into())
+            .read_page(&scope, &"topics/token-rotation.md".into())
             .await
             .unwrap()
             .content
@@ -176,7 +172,7 @@ async fn ingest_source_truncates_large_content() {
         .await
         .unwrap();
 
-    let page = store.read_page(scope, &report.source_path).await.unwrap();
+    let page = store.read_page(&scope, &report.source_path).await.unwrap();
     assert!(page.content.contains("[Document truncated at 100KB."));
 }
 
@@ -193,7 +189,7 @@ async fn branch_reconciliation_merges_conflicting_writes() {
     );
     main_page.updated = Utc.with_ymd_and_hms(2026, 4, 9, 17, 0, 0).unwrap();
     store
-        .write_page(scope.clone(), &"topics/architecture.md".into(), main_page)
+        .write_page(&scope, &"topics/architecture.md".into(), main_page)
         .await
         .unwrap();
 
@@ -217,7 +213,7 @@ async fn branch_reconciliation_merges_conflicting_writes() {
     assert_eq!(report.conflicts_resolved, 1);
 
     let merged = store
-        .read_page(scope.clone(), &"topics/architecture.md".into())
+        .read_page(&scope, &"topics/architecture.md".into())
         .await
         .unwrap();
     assert!(merged.content.contains("original deployment command"));
@@ -240,14 +236,14 @@ async fn consolidation_decays_confidence_once_and_is_stable_on_repeat_runs() {
     page.reference_count = 0;
     page.confidence = ConfidenceLevel::High;
     store
-        .write_page(scope.clone(), &"topics/lonely-topic.md".into(), page)
+        .write_page(&scope, &"topics/lonely-topic.md".into(), page)
         .await
         .unwrap();
 
     let first = store.run_consolidation(&scope).await.unwrap();
     assert_eq!(first.confidence_decayed, 1);
     let first_page = store
-        .read_page(scope.clone(), &"topics/lonely-topic.md".into())
+        .read_page(&scope, &"topics/lonely-topic.md".into())
         .await
         .unwrap();
     assert_eq!(first_page.confidence, ConfidenceLevel::Medium);
@@ -255,7 +251,7 @@ async fn consolidation_decays_confidence_once_and_is_stable_on_repeat_runs() {
     let second = store.run_consolidation(&scope).await.unwrap();
     assert_eq!(second.confidence_decayed, 0);
     let second_page = store
-        .read_page(scope.clone(), &"topics/lonely-topic.md".into())
+        .read_page(&scope, &"topics/lonely-topic.md".into())
         .await
         .unwrap();
     assert_eq!(second_page.confidence, ConfidenceLevel::Medium);
@@ -267,13 +263,13 @@ async fn repeated_ingest_updates_existing_pages_without_duplicate_links() {
     let store = FileMemoryStore::new(dir.path()).await.unwrap();
     let scope = MemoryScope::Workspace("ws1".into());
 
-    let source = r#"
+    let source = r"
 ## Entities
 - Auth Service
 
 ## Topics
 - Token Rotation
-"#;
+";
 
     let first = store
         .ingest_source(&scope, "RFC 0042 Auth Redesign", source)
@@ -286,7 +282,7 @@ async fn repeated_ingest_updates_existing_pages_without_duplicate_links() {
 
     assert_eq!(first.source_path, second.source_path);
     let entity = store
-        .read_page(scope.clone(), &"entities/auth-service.md".into())
+        .read_page(&scope, &"entities/auth-service.md".into())
         .await
         .unwrap();
     assert_eq!(
@@ -315,7 +311,7 @@ async fn reconciliation_merges_multiple_branches_and_cleans_branch_directory() {
 
     store
         .write_page(
-            scope.clone(),
+            &scope,
             &"topics/architecture.md".into(),
             sample_page(
                 "Architecture",
@@ -358,14 +354,14 @@ async fn reconciliation_merges_multiple_branches_and_cleans_branch_directory() {
     assert_eq!(report.branches_reconciled, 2);
     assert_eq!(report.pages_created, 1);
     let merged = store
-        .read_page(scope.clone(), &"topics/architecture.md".into())
+        .read_page(&scope, &"topics/architecture.md".into())
         .await
         .unwrap();
     assert!(merged.content.contains("Base deployment flow"));
     assert!(merged.content.contains("canary validation"));
     assert!(
         store
-            .read_page(scope.clone(), &"entities/auth-service.md".into())
+            .read_page(&scope, &"entities/auth-service.md".into())
             .await
             .is_ok()
     );
@@ -392,13 +388,13 @@ async fn maintenance_operations_append_log_and_keep_results_searchable() {
         .ingest_source(
             &scope,
             "RFC 0042 Auth Redesign",
-            r#"
+            r"
 ## Entities
 - Auth Service
 
 ## Topics
 - Token Rotation
-"#,
+",
         )
         .await
         .unwrap();
@@ -423,7 +419,7 @@ async fn maintenance_operations_append_log_and_keep_results_searchable() {
     assert!(log.contains("consolidation"));
     assert!(log.contains("reconcile"));
 
-    let results = moa_core::MemoryStore::search(&store, "canary verification", scope.clone(), 5)
+    let results = moa_core::MemoryStore::search(&store, "canary verification", &scope, 5)
         .await
         .unwrap();
     assert!(!results.is_empty());
@@ -433,7 +429,7 @@ async fn maintenance_operations_append_log_and_keep_results_searchable() {
             .any(|result| result.path.as_str() == "topics/token-rotation.md")
     );
 
-    let index = moa_core::MemoryStore::get_index(&store, scope)
+    let index = moa_core::MemoryStore::get_index(&store, &scope)
         .await
         .unwrap();
     assert!(index.lines().count() <= 200);
@@ -449,7 +445,7 @@ async fn manual_stress_ingest_reconcile_and_consolidate_preserves_invariants() {
     for index in 0..20 {
         store
             .write_page(
-                scope.clone(),
+                &scope,
                 &format!("topics/base-{index}.md").into(),
                 sample_page(
                     &format!("Base {index}"),
@@ -494,17 +490,17 @@ async fn manual_stress_ingest_reconcile_and_consolidate_preserves_invariants() {
 
         store.reconcile_branches(&scope).await.unwrap();
         store.run_consolidation(&scope).await.unwrap();
-        moa_core::MemoryStore::rebuild_search_index(&store, scope.clone())
+        moa_core::MemoryStore::rebuild_search_index(&store, &scope)
             .await
             .unwrap();
     }
 
-    let index = moa_core::MemoryStore::get_index(&store, scope.clone())
+    let index = moa_core::MemoryStore::get_index(&store, &scope)
         .await
         .unwrap();
     assert!(index.lines().count() <= 200);
 
-    let results = moa_core::MemoryStore::search(&store, "guardrail", scope.clone(), 20)
+    let results = moa_core::MemoryStore::search(&store, "guardrail", &scope, 20)
         .await
         .unwrap();
     assert!(!results.is_empty());
@@ -539,7 +535,7 @@ async fn manual_seeded_memory_fuzz_preserves_core_invariants() {
             tracked_terms.push(term.clone());
             store
                 .write_page(
-                    scope.clone(),
+                    &scope,
                     &format!("topics/base-{index}.md").into(),
                     sample_page(
                         &format!("Base {index}"),
@@ -558,15 +554,9 @@ async fn manual_seeded_memory_fuzz_preserves_core_invariants() {
                     let term = format!("seed{seed}-direct-{round}-{page_index}");
                     tracked_terms.push(term.clone());
                     let path = format!("topics/base-{page_index}.md");
-                    let mut page = store
-                        .read_page(scope.clone(), &path.clone().into())
-                        .await
-                        .unwrap();
+                    let mut page = store.read_page(&scope, &path.clone().into()).await.unwrap();
                     page.content.push_str(&format!("\nDirect update {term}.\n"));
-                    store
-                        .write_page(scope.clone(), &path.into(), page)
-                        .await
-                        .unwrap();
+                    store.write_page(&scope, &path.into(), page).await.unwrap();
                 }
                 1 => {
                     let page_index = rng.next_usize(10);
@@ -606,10 +596,7 @@ async fn manual_seeded_memory_fuzz_preserves_core_invariants() {
                 3 => {
                     let page_index = rng.next_usize(10);
                     let mut page = store
-                        .read_page(
-                            scope.clone(),
-                            &format!("topics/base-{page_index}.md").into(),
-                        )
+                        .read_page(&scope, &format!("topics/base-{page_index}.md").into())
                         .await
                         .unwrap();
                     page.content.push_str("\nThis was noted today.\n");
@@ -617,17 +604,13 @@ async fn manual_seeded_memory_fuzz_preserves_core_invariants() {
                     page.last_referenced -= Duration::days(35);
                     page.reference_count = 0;
                     store
-                        .write_page(
-                            scope.clone(),
-                            &format!("topics/base-{page_index}.md").into(),
-                            page,
-                        )
+                        .write_page(&scope, &format!("topics/base-{page_index}.md").into(), page)
                         .await
                         .unwrap();
                     store.run_consolidation(&scope).await.unwrap();
                 }
                 _ => {
-                    moa_core::MemoryStore::rebuild_search_index(&store, scope.clone())
+                    moa_core::MemoryStore::rebuild_search_index(&store, &scope)
                         .await
                         .unwrap();
                 }
@@ -668,13 +651,13 @@ async fn validate_memory_invariants(
     scope: &MemoryScope,
     tracked_terms: &[String],
 ) {
-    let pages = moa_core::MemoryStore::list_pages(store, scope.clone(), None)
+    let pages = moa_core::MemoryStore::list_pages(store, scope, None)
         .await
         .unwrap();
     assert!(!pages.is_empty());
 
     for summary in &pages {
-        let page = store.read_page(scope.clone(), &summary.path).await.unwrap();
+        let page = store.read_page(scope, &summary.path).await.unwrap();
         let related_len = page.related.len();
         let sources_len = page.sources.len();
         let related_set = page.related.iter().collect::<HashSet<_>>();
@@ -693,22 +676,22 @@ async fn validate_memory_invariants(
         );
     }
 
-    let index = moa_core::MemoryStore::get_index(store, scope.clone())
+    let index = moa_core::MemoryStore::get_index(store, scope)
         .await
         .unwrap();
     assert!(index.lines().count() <= 200, "index exceeded line budget");
 
     for term in tracked_terms.iter().take(6) {
-        let before = moa_core::MemoryStore::search(store, term, scope.clone(), 10)
+        let before = moa_core::MemoryStore::search(store, term, scope, 10)
             .await
             .unwrap()
             .into_iter()
             .map(|result| result.path.as_str().to_string())
             .collect::<Vec<_>>();
-        moa_core::MemoryStore::rebuild_search_index(store, scope.clone())
+        moa_core::MemoryStore::rebuild_search_index(store, scope)
             .await
             .unwrap();
-        let after = moa_core::MemoryStore::search(store, term, scope.clone(), 10)
+        let after = moa_core::MemoryStore::search(store, term, scope, 10)
             .await
             .unwrap()
             .into_iter()

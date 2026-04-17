@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
         .create_session(SessionMeta {
             workspace_id: WorkspaceId::new("step-04-harness"),
             user_id: UserId::new("local-user"),
-            model: config.general.default_model.clone(),
+            model: config.general.default_model.clone().into(),
             ..SessionMeta::default()
         })
         .await?;
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
         println!("Type a prompt and press enter. Use /quit to exit.");
     } else {
         run_prompt(
-            session_id.clone(),
+            session_id,
             store.clone(),
             provider.clone(),
             &pipeline,
@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
         }
 
         run_prompt(
-            session_id.clone(),
+            session_id,
             store.clone(),
             provider.clone(),
             &pipeline,
@@ -103,14 +103,11 @@ async fn run_prompt(
     tool_router: Arc<ToolRouter>,
     prompt: &str,
 ) -> Result<()> {
-    let event_count_before = store
-        .get_events(session_id.clone(), EventRange::all())
-        .await?
-        .len();
+    let event_count_before = store.get_events(session_id, EventRange::all()).await?.len();
 
     store
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::UserMessage {
                 text: prompt.to_string(),
                 attachments: Vec::new(),
@@ -119,7 +116,7 @@ async fn run_prompt(
         .await?;
 
     run_brain_turn_with_tools(
-        session_id.clone(),
+        session_id,
         store.clone(),
         provider,
         pipeline,

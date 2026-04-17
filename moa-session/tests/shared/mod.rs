@@ -2,9 +2,9 @@
 
 use chrono::{Duration, Utc};
 use moa_core::{
-    ApprovalRule, Event, EventFilter, EventRange, EventType, PendingSignal, PendingSignalType,
-    PolicyAction, PolicyScope, SessionFilter, SessionMeta, SessionStatus, SessionStore, UserId,
-    UserMessage, WorkspaceId,
+    ApprovalRule, Event, EventFilter, EventRange, EventType, ModelId, PendingSignal,
+    PendingSignalType, PolicyAction, PolicyScope, SessionFilter, SessionMeta, SessionStatus,
+    SessionStore, UserId, UserMessage, WorkspaceId,
 };
 use moa_security::ApprovalRuleStore;
 use serde_json::json;
@@ -14,7 +14,7 @@ fn test_session_meta(workspace: &str) -> SessionMeta {
     SessionMeta {
         workspace_id: WorkspaceId::new(workspace),
         user_id: UserId::new("u1"),
-        model: "test-model".to_string(),
+        model: ModelId::new("test-model"),
         ..SessionMeta::default()
     }
 }
@@ -31,7 +31,7 @@ where
 
     let seq1 = store
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::UserMessage {
                 text: "Hello".into(),
                 attachments: vec![],
@@ -43,7 +43,7 @@ where
 
     let seq2 = store
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::BrainResponse {
                 text: "Hi there".into(),
                 thought_signature: None,
@@ -61,7 +61,7 @@ where
     assert_eq!(seq2, 1);
 
     let events = store
-        .get_events(session_id.clone(), EventRange::all())
+        .get_events(session_id, EventRange::all())
         .await
         .expect("get events");
     assert_eq!(events.len(), 2);
@@ -85,7 +85,7 @@ where
     for index in 0..10 {
         store
             .emit_event(
-                session_id.clone(),
+                session_id,
                 Event::UserMessage {
                     text: format!("message {index}"),
                     attachments: vec![],
@@ -97,7 +97,7 @@ where
 
     let ranged = store
         .get_events(
-            session_id.clone(),
+            session_id,
             EventRange {
                 from_seq: Some(3),
                 to_seq: Some(7),
@@ -113,7 +113,7 @@ where
 
     let filtered = store
         .get_events(
-            session_id.clone(),
+            session_id,
             EventRange {
                 event_types: Some(vec![EventType::UserMessage]),
                 ..Default::default()
@@ -129,7 +129,7 @@ where
     );
 
     let recent = store
-        .get_events(session_id.clone(), EventRange::recent(3))
+        .get_events(session_id, EventRange::recent(3))
         .await
         .expect("get recent events");
     assert_eq!(recent.len(), 3);
@@ -149,7 +149,7 @@ where
 
     store
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::UserMessage {
                 text: "Fix the OAuth refresh token bug".into(),
                 attachments: vec![],
@@ -195,7 +195,7 @@ where
         .expect("create session");
 
     store
-        .update_status(session_id.clone(), SessionStatus::Completed)
+        .update_status(session_id, SessionStatus::Completed)
         .await
         .expect("update status");
 
@@ -326,7 +326,7 @@ where
         .expect("create session");
 
     let signal = PendingSignal::queue_message(
-        session_id.clone(),
+        session_id,
         UserMessage {
             text: "queued follow-up".into(),
             attachments: vec![],
@@ -335,13 +335,13 @@ where
     .expect("build pending signal");
 
     let signal_id = store
-        .store_pending_signal(session_id.clone(), signal.clone())
+        .store_pending_signal(session_id, signal.clone())
         .await
         .expect("store pending signal");
     assert_eq!(signal_id, signal.id);
 
     let pending = store
-        .get_pending_signals(session_id.clone())
+        .get_pending_signals(session_id)
         .await
         .expect("get pending");
     assert_eq!(pending, vec![signal.clone()]);

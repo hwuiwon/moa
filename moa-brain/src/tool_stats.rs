@@ -7,12 +7,12 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use moa_core::{
     ConfidenceLevel, Event, EventRange, EventRecord, MemoryPath, MemoryScope, MemoryStore,
-    MoaError, PageType, Result, SessionId, SessionMeta, SessionStore, WikiPage, WorkspaceId,
+    MoaError, PageType, Result, SessionId, SessionMeta, SessionStore, ToolCallId, WikiPage,
+    WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::Value;
-use uuid::Uuid;
 
 const TOOL_STATS_PAGE_PATH: &str = "entities/tool-stats.md";
 const TOOL_STATS_METADATA_KEY: &str = "tool_stats";
@@ -106,7 +106,7 @@ pub async fn load_workspace_tool_stats(
 ) -> Result<WorkspaceToolStats> {
     let scope = MemoryScope::Workspace(workspace_id.clone());
     let path = MemoryPath::from(TOOL_STATS_PAGE_PATH);
-    let Some(page) = read_optional_page(memory_store, scope, &path).await? else {
+    let Some(page) = read_optional_page(memory_store, &scope, &path).await? else {
         return Ok(WorkspaceToolStats::default());
     };
 
@@ -121,7 +121,7 @@ pub async fn write_workspace_tool_stats(
 ) -> Result<()> {
     let scope = MemoryScope::Workspace(workspace_id.clone());
     let path = MemoryPath::from(TOOL_STATS_PAGE_PATH);
-    let existing_page = read_optional_page(memory_store, scope.clone(), &path).await?;
+    let existing_page = read_optional_page(memory_store, &scope, &path).await?;
     let now = Utc::now();
     let created = existing_page
         .as_ref()
@@ -156,7 +156,7 @@ pub async fn write_workspace_tool_stats(
         metadata,
     };
 
-    memory_store.write_page(scope, &path, page).await
+    memory_store.write_page(&scope, &path, page).await
 }
 
 /// Recomputes workspace tool statistics from one completed session.
@@ -165,9 +165,9 @@ pub async fn update_workspace_tool_stats(
     memory_store: &dyn MemoryStore,
     session_id: &SessionId,
 ) -> Result<Option<WorkspaceToolStats>> {
-    let session = session_store.get_session(session_id.clone()).await?;
+    let session = session_store.get_session(*session_id).await?;
     let events = session_store
-        .get_events(session_id.clone(), EventRange::all())
+        .get_events(*session_id, EventRange::all())
         .await?;
 
     update_workspace_tool_stats_from_events(memory_store, &session, &events).await
@@ -393,7 +393,7 @@ fn schema_name(schema: &Value) -> Option<&str> {
 fn collect_session_tool_observations(
     events: &[EventRecord],
 ) -> HashMap<String, SessionToolObservation> {
-    let mut call_names = HashMap::<Uuid, String>::new();
+    let mut call_names = HashMap::<ToolCallId, String>::new();
     let mut observations = HashMap::<String, SessionToolObservation>::new();
 
     for record in events {
@@ -595,7 +595,7 @@ fn workspace_tool_stats_from_page(page: &WikiPage) -> Result<WorkspaceToolStats>
 
 async fn read_optional_page(
     memory_store: &dyn MemoryStore,
-    scope: MemoryScope,
+    scope: &MemoryScope,
     path: &MemoryPath,
 ) -> Result<Option<WikiPage>> {
     match memory_store.read_page(scope, path).await {
@@ -616,9 +616,10 @@ mod tests {
 
     use chrono::Duration;
     use moa_core::{
-        Platform, SessionId, SessionMeta, ToolContent, ToolOutput, UserId, WorkspaceId,
+        ModelId, Platform, SessionId, SessionMeta, ToolContent, ToolOutput, UserId, WorkspaceId,
     };
     use moa_memory::FileMemoryStore;
+    use uuid::Uuid;
 
     use super::*;
 
@@ -759,11 +760,11 @@ mod tests {
             workspace_id: WorkspaceId::new("ws-stats"),
             user_id: UserId::new("user"),
             platform: Platform::Desktop,
-            model: "claude-sonnet-4-6".to_string(),
+            model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
         let now = Utc::now();
-        let tool_id = Uuid::now_v7();
+        let tool_id = ToolCallId::new();
         let events = vec![
             event_record(
                 &session,
@@ -803,7 +804,7 @@ mod tests {
                 3,
                 now + Duration::seconds(2),
                 Event::ToolError {
-                    tool_id: Uuid::now_v7(),
+                    tool_id: ToolCallId::new(),
                     provider_tool_use_id: None,
                     tool_name: "web_search".to_string(),
                     error: "provider error: timeout".to_string(),
@@ -878,7 +879,7 @@ mod tests {
     ) -> EventRecord {
         EventRecord {
             id: Uuid::now_v7(),
-            session_id: session.id.clone(),
+            session_id: session.id,
             sequence_num,
             event_type: event.event_type(),
             event,

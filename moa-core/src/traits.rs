@@ -136,7 +136,9 @@ pub trait BlobStore: Send + Sync {
 }
 
 /// Optional database-level state checkpointing.
-#[async_trait]
+// Deliberately not dyn-compatible: no `dyn BranchManager` usage in the workspace.
+// Uses native AFIT (stable Rust 1.75+) instead of async_trait.
+#[allow(async_fn_in_trait)]
 pub trait BranchManager: Send + Sync {
     /// Creates a checkpoint branch for later rollback or inspection.
     async fn create_checkpoint(
@@ -225,34 +227,38 @@ pub trait MemoryStore: Send + Sync {
     async fn search(
         &self,
         query: &str,
-        scope: MemoryScope,
+        scope: &MemoryScope,
         limit: usize,
     ) -> Result<Vec<MemorySearchResult>>;
 
     /// Reads a wiki page by logical path within an explicit scope.
-    async fn read_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage>;
+    async fn read_page(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<WikiPage>;
 
     /// Writes a wiki page by logical path within an explicit scope.
-    async fn write_page(&self, scope: MemoryScope, path: &MemoryPath, page: WikiPage)
-    -> Result<()>;
+    async fn write_page(
+        &self,
+        scope: &MemoryScope,
+        path: &MemoryPath,
+        page: WikiPage,
+    ) -> Result<()>;
 
     /// Deletes a wiki page by logical path within an explicit scope.
-    async fn delete_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<()>;
+    async fn delete_page(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<()>;
 
     /// Lists pages within a scope.
     async fn list_pages(
         &self,
-        scope: MemoryScope,
+        scope: &MemoryScope,
         filter: Option<PageType>,
     ) -> Result<Vec<PageSummary>>;
 
     /// Returns the index document for a memory scope.
-    async fn get_index(&self, scope: MemoryScope) -> Result<String>;
+    async fn get_index(&self, scope: &MemoryScope) -> Result<String>;
 
     /// Ingests a raw source document into the wiki for the given scope.
     async fn ingest_source(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _source_name: &str,
         _content: &str,
     ) -> Result<IngestReport> {
@@ -262,7 +268,7 @@ pub trait MemoryStore: Send + Sync {
     }
 
     /// Rebuilds the search index for a memory scope.
-    async fn rebuild_search_index(&self, scope: MemoryScope) -> Result<()>;
+    async fn rebuild_search_index(&self, scope: &MemoryScope) -> Result<()>;
 }
 
 /// Execution context passed to built-in tool implementations.

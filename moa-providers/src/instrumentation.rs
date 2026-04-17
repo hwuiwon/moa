@@ -13,12 +13,12 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 const OPERATION_CHAT: &str = "chat";
 const ATTRIBUTE_VALUE_LIMIT: usize = 32 * 1024;
 
-/// Attributes recorded on one GenAI completion span.
+/// Attributes recorded on one `GenAI` completion span.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LLMSpanAttributes {
     /// Provider system identifier.
     pub system: Option<&'static str>,
-    /// GenAI operation name.
+    /// `GenAI` operation name.
     pub operation: Option<&'static str>,
     /// Requested model identifier.
     pub request_model: Option<String>,
@@ -76,7 +76,7 @@ pub(crate) struct LLMSpanRecorder {
 }
 
 impl LLMSpanRecorder {
-    /// Creates a new GenAI span recorder for one logical chat completion.
+    /// Creates a new `GenAI` span recorder for one logical chat completion.
     pub(crate) fn new(
         system: &'static str,
         request_model: impl Into<String>,
@@ -153,8 +153,8 @@ impl LLMSpanRecorder {
     }
 
     /// Observes one streamed output block, capturing TTFT and partial output.
-    pub(crate) fn observe_block(&mut self, block: &CompletionContent) {
-        if !has_meaningful_output(block) {
+    pub(crate) fn observe_block(&mut self, block: CompletionContent) {
+        if !has_meaningful_output(&block) {
             return;
         }
 
@@ -170,7 +170,7 @@ impl LLMSpanRecorder {
             );
         }
 
-        self.streamed_output.push(block.clone());
+        self.streamed_output.push(block);
     }
 
     /// Finalizes the span with usage, cost, and response content.
@@ -193,7 +193,7 @@ impl LLMSpanRecorder {
         record_llm_span_attributes(
             &self.span,
             &LLMSpanAttributes {
-                response_model: Some(response.model.clone()),
+                response_model: Some(response.model.to_string()),
                 input_tokens: Some(usage.total_input_tokens()),
                 output_tokens: Some(usage.output_tokens),
                 total_tokens: Some(total_tokens),
@@ -250,7 +250,7 @@ impl LLMSpanRecorder {
     }
 }
 
-/// Records GenAI semantic-convention attributes on a tracing span.
+/// Records `GenAI` semantic-convention attributes on a tracing span.
 pub(crate) fn record_llm_span_attributes(span: &Span, attrs: &LLMSpanAttributes) {
     if let Some(system) = attrs.system {
         span.set_attribute("gen_ai.system", system);

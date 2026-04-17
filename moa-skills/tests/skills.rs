@@ -126,7 +126,7 @@ impl LLMProvider for MockLlm {
 
     fn capabilities(&self) -> moa_core::ModelCapabilities {
         moa_core::ModelCapabilities {
-            model_id: "mock".to_string(),
+            model_id: moa_core::ModelId::new("mock"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: false,
@@ -149,7 +149,7 @@ impl LLMProvider for MockLlm {
             text: text.clone(),
             content: vec![moa_core::CompletionContent::Text(text)],
             stop_reason: StopReason::EndTurn,
-            model: "mock".to_string(),
+            model: moa_core::ModelId::new("mock"),
             input_tokens: 10,
             output_tokens: 20,
             cached_input_tokens: 0,
@@ -175,7 +175,7 @@ impl LLMProvider for ImprovementAndEvalLlm {
 
     fn capabilities(&self) -> moa_core::ModelCapabilities {
         moa_core::ModelCapabilities {
-            model_id: "mock".to_string(),
+            model_id: moa_core::ModelId::new("mock"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -211,7 +211,7 @@ impl LLMProvider for ImprovementAndEvalLlm {
             text: text.clone(),
             content: vec![moa_core::CompletionContent::Text(text)],
             stop_reason: StopReason::EndTurn,
-            model: "mock".to_string(),
+            model: moa_core::ModelId::new("mock"),
             input_tokens: 10,
             output_tokens: 20,
             cached_input_tokens: 0,
@@ -229,7 +229,7 @@ fn session() -> SessionMeta {
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
         platform: Platform::Desktop,
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         created_at: timestamp,
         updated_at: timestamp,
         ..SessionMeta::default()
@@ -247,7 +247,7 @@ fn tool_rich_events() -> Vec<EventRecord> {
                 }
             } else {
                 Event::ToolCall {
-                    tool_id: Uuid::now_v7(),
+                    tool_id: moa_core::ToolCallId::new(),
                     provider_tool_use_id: None,
                     provider_thought_signature: None,
                     tool_name: if index % 2 == 0 {
@@ -261,7 +261,7 @@ fn tool_rich_events() -> Vec<EventRecord> {
             };
             EventRecord {
                 id: Uuid::now_v7(),
-                session_id: session_id.clone(),
+                session_id,
                 sequence_num: index as u64,
                 event_type: event.event_type(),
                 event,
@@ -321,7 +321,7 @@ async fn registry_lists_skill_metadata() -> Result<()> {
     let skill = parse_skill_markdown(DISTILLED_SKILL)?;
     let path = build_skill_path(&skill.frontmatter.name);
     let page = wiki_page_from_skill(&skill, Some(path.clone()))?;
-    memory.write_page(scope.clone(), &path, page).await?;
+    memory.write_page(&scope, &path, page).await?;
 
     let registry_memory: Arc<dyn MemoryStore> = memory.clone();
     let registry = SkillRegistry::new(registry_memory);
@@ -358,7 +358,7 @@ async fn distills_skill_after_tool_heavy_session() -> Result<()> {
     let metadata = distilled.unwrap();
     let stored = memory
         .read_page(
-            moa_core::MemoryScope::Workspace(session.workspace_id.clone()),
+            &moa_core::MemoryScope::Workspace(session.workspace_id.clone()),
             &metadata.path,
         )
         .await?;
@@ -384,7 +384,7 @@ async fn improves_existing_skill_when_better_flow_is_found() -> Result<()> {
     let original = parse_skill_markdown(DISTILLED_SKILL)?;
     let path = build_skill_path(&original.frontmatter.name);
     let page = wiki_page_from_skill(&original, Some(path.clone()))?;
-    memory.write_page(scope.clone(), &path, page).await?;
+    memory.write_page(&scope, &path, page).await?;
 
     let llm: Arc<dyn LLMProvider> = Arc::new(MockLlm {
         response: Arc::new(Mutex::new(IMPROVED_SKILL.to_string())),
@@ -401,7 +401,7 @@ async fn improves_existing_skill_when_better_flow_is_found() -> Result<()> {
     .await?;
 
     assert!(improved.is_some());
-    let updated = memory.read_page(scope.clone(), &path).await?;
+    let updated = memory.read_page(&scope, &path).await?;
     assert!(
         updated
             .content
@@ -420,7 +420,7 @@ async fn improvement_accepted_when_scores_better() -> Result<()> {
     let original = parse_skill_markdown(DISTILLED_SKILL)?;
     let path = build_skill_path(&original.frontmatter.name);
     let page = wiki_page_from_skill(&original, Some(path.clone()))?;
-    memory.write_page(scope.clone(), &path, page).await?;
+    memory.write_page(&scope, &path, page).await?;
     write_skill_suite(
         &dir.path()
             .join("workspaces")
@@ -448,7 +448,7 @@ async fn improvement_accepted_when_scores_better() -> Result<()> {
     .await?;
 
     assert!(improved.is_some());
-    let updated = memory.read_page(scope.clone(), &path).await?;
+    let updated = memory.read_page(&scope, &path).await?;
     assert!(
         updated
             .metadata
@@ -468,7 +468,7 @@ async fn improvement_rejected_on_regression() -> Result<()> {
     let original = parse_skill_markdown(IMPROVED_SKILL)?;
     let path = build_skill_path(&original.frontmatter.name);
     let page = wiki_page_from_skill(&original, Some(path.clone()))?;
-    memory.write_page(scope.clone(), &path, page).await?;
+    memory.write_page(&scope, &path, page).await?;
     write_skill_suite(
         &dir.path()
             .join("workspaces")
@@ -496,7 +496,7 @@ async fn improvement_rejected_on_regression() -> Result<()> {
     .await?;
 
     assert!(improved.is_none());
-    let restored = memory.read_page(scope.clone(), &path).await?;
+    let restored = memory.read_page(&scope, &path).await?;
     let restored_skill = skill_from_wiki_page(&restored)?;
     assert!(
         restored_skill
@@ -516,7 +516,7 @@ async fn no_tests_means_unconditional_accept() -> Result<()> {
     let original = parse_skill_markdown(DISTILLED_SKILL)?;
     let path = build_skill_path(&original.frontmatter.name);
     let page = wiki_page_from_skill(&original, Some(path.clone()))?;
-    memory.write_page(scope.clone(), &path, page).await?;
+    memory.write_page(&scope, &path, page).await?;
 
     let llm: Arc<dyn LLMProvider> = Arc::new(MockLlm {
         response: Arc::new(Mutex::new(IMPROVED_SKILL.to_string())),
@@ -545,7 +545,7 @@ async fn log_entry_written_for_regression_attempt() -> Result<()> {
     let original = parse_skill_markdown(DISTILLED_SKILL)?;
     let path = build_skill_path(&original.frontmatter.name);
     let page = wiki_page_from_skill(&original, Some(path.clone()))?;
-    memory.write_page(scope.clone(), &path, page).await?;
+    memory.write_page(&scope, &path, page).await?;
     write_skill_suite(
         &dir.path()
             .join("workspaces")
@@ -590,7 +590,7 @@ async fn budget_limit_skips_expensive_tests() -> Result<()> {
     let original = parse_skill_markdown(DISTILLED_SKILL)?;
     let path = build_skill_path(&original.frontmatter.name);
     let page = wiki_page_from_skill(&original, Some(path.clone()))?;
-    memory.write_page(scope.clone(), &path, page).await?;
+    memory.write_page(&scope, &path, page).await?;
     write_skill_suite(
         &dir.path()
             .join("workspaces")

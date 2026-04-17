@@ -61,10 +61,10 @@ pub async fn run_consolidation(
 ) -> Result<ConsolidationReport> {
     let now = Utc::now();
     let mut report = ConsolidationReport::empty(scope.clone());
-    let existing_index = store.get_index(scope.clone()).await?;
+    let existing_index = store.get_index(scope).await?;
     report.memory_lines_before = existing_index.lines().count();
 
-    let page_summaries = store.list_pages(scope.clone(), None).await?;
+    let page_summaries = store.list_pages(scope, None).await?;
     let page_paths = page_summaries
         .iter()
         .map(|page| page.path.clone())
@@ -73,7 +73,7 @@ pub async fn run_consolidation(
 
     let mut pages = Vec::with_capacity(page_paths.len());
     for path in &page_paths {
-        pages.push((path.clone(), store.read_page(scope.clone(), path).await?));
+        pages.push((path.clone(), store.read_page(scope, path).await?));
     }
 
     let canonical_ports = canonical_port_claims(&pages);
@@ -83,7 +83,7 @@ pub async fn run_consolidation(
     for (path, mut page) in pages {
         let mut modified = false;
         if should_prune_page(&page) {
-            store.delete_page(scope.clone(), &path).await?;
+            store.delete_page(scope, &path).await?;
             report.pages_deleted += 1;
             log_changes.push(LogChange {
                 action: "Pruned".to_string(),
@@ -122,7 +122,7 @@ pub async fn run_consolidation(
         }
 
         if modified {
-            store.write_page(scope.clone(), &path, page).await?;
+            store.write_page(scope, &path, page).await?;
             report.pages_updated += 1;
             log_changes.push(LogChange {
                 action: "Updated".to_string(),
@@ -133,9 +133,9 @@ pub async fn run_consolidation(
     }
 
     store.refresh_scope_index(scope).await?;
-    let refreshed_index = store.get_index(scope.clone()).await?;
+    let refreshed_index = store.get_index(scope).await?;
     report.memory_lines_after = refreshed_index.lines().count();
-    store.rebuild_search_index(scope.clone()).await?;
+    store.rebuild_search_index(scope).await?;
     store
         .append_scope_log(
             scope,
@@ -444,7 +444,7 @@ mod tests {
 
         store
             .write_page(
-                scope.clone(),
+                &scope,
                 &"topics/architecture.md".into(),
                 page(
                     "# Architecture\n\nAuth service runs on port 3000 today.",
@@ -460,7 +460,7 @@ mod tests {
         );
         conflicting.reference_count = 1;
         store
-            .write_page(scope.clone(), &"topics/deployment.md".into(), conflicting)
+            .write_page(&scope, &"topics/deployment.md".into(), conflicting)
             .await
             .unwrap();
 
@@ -469,7 +469,7 @@ mod tests {
             .metadata
             .insert("entity_exists".to_string(), serde_json::Value::Bool(false));
         store
-            .write_page(scope.clone(), &"entities/legacy-service.md".into(), stale)
+            .write_page(&scope, &"entities/legacy-service.md".into(), stale)
             .await
             .unwrap();
 
@@ -479,13 +479,13 @@ mod tests {
         assert!(report.contradictions_resolved >= 1);
         assert_eq!(report.pages_deleted, 1);
         let deployment = store
-            .read_page(scope.clone(), &"topics/deployment.md".into())
+            .read_page(&scope, &"topics/deployment.md".into())
             .await
             .unwrap();
         assert!(deployment.content.contains("port 3000"));
         assert!(
             store
-                .read_page(scope.clone(), &"entities/legacy-service.md".into())
+                .read_page(&scope, &"entities/legacy-service.md".into())
                 .await
                 .is_err()
         );

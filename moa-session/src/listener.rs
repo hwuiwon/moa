@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use futures_util::FutureExt as _;
 use moa_core::{EventRange, EventRecord, MoaError, Result, SequenceNum, SessionId, SessionStore};
 use serde::Deserialize;
 use sqlx::postgres::PgListener;
@@ -53,13 +54,20 @@ impl SessionEventStream {
 
         let (tx, rx) = mpsc::channel(LISTENER_BUFFER_CAPACITY);
         let initial_from_seq = from_seq.unwrap_or(0);
-        tokio::spawn(run_listener_task(
-            store,
-            session_id,
-            initial_from_seq,
-            listener,
-            tx,
-        ));
+        tokio::spawn(async move {
+            let result = std::panic::AssertUnwindSafe(run_listener_task(
+                store,
+                session_id,
+                initial_from_seq,
+                listener,
+                tx,
+            ))
+            .catch_unwind()
+            .await;
+            if let Err(panic) = result {
+                tracing::error!(?panic, "session listener task panicked");
+            }
+        });
 
         Ok(Self { rx })
     }
@@ -130,7 +138,7 @@ async fn backfill_from(
 ) -> Result<()> {
     let records = store
         .get_events(
-            session_id.clone(),
+            *session_id,
             EventRange {
                 from_seq: Some(*next_seq),
                 ..EventRange::all()
@@ -163,7 +171,7 @@ mod tests {
         let now = Utc::now();
         store
             .create_session(SessionMeta {
-                id: session_id.clone(),
+                id: *session_id,
                 workspace_id: WorkspaceId::new("workspace"),
                 user_id: UserId::new("user"),
                 status: SessionStatus::Running,
@@ -185,13 +193,13 @@ mod tests {
             let session_id = SessionId::new();
             seed_session(emitter.as_ref(), &session_id).await?;
 
-            let mut stream = SessionEventStream::subscribe(observer, session_id.clone(), None)
+            let mut stream = SessionEventStream::subscribe(observer, session_id, None)
                 .await?
                 .into_receiver();
 
             emitter
                 .emit_event(
-                    session_id.clone(),
+                    session_id,
                     Event::Warning {
                         message: "first".to_string(),
                     },
@@ -199,7 +207,7 @@ mod tests {
                 .await?;
             emitter
                 .emit_event(
-                    session_id.clone(),
+                    session_id,
                     Event::Warning {
                         message: "second".to_string(),
                     },
@@ -245,7 +253,7 @@ mod tests {
 
             emitter
                 .emit_event(
-                    session_id.clone(),
+                    session_id,
                     Event::Warning {
                         message: "before-subscribe".to_string(),
                     },
@@ -253,14 +261,14 @@ mod tests {
                 .await?;
             emitter
                 .emit_event(
-                    session_id.clone(),
+                    session_id,
                     Event::Warning {
                         message: "still-before-subscribe".to_string(),
                     },
                 )
                 .await?;
 
-            let mut stream = SessionEventStream::subscribe(observer, session_id.clone(), Some(1))
+            let mut stream = SessionEventStream::subscribe(observer, session_id, Some(1))
                 .await?
                 .into_receiver();
 
@@ -290,7 +298,7 @@ mod tests {
             seed_session(&store, &session_id).await?;
 
             let mut stream =
-                SessionEventStream::subscribe(listener_store, session_id.clone(), Some(0)).await?
+                SessionEventStream::subscribe(listener_store, session_id, Some(0)).await?
                     .into_receiver();
 
             let mut tx = store.pool().begin().await.map_err(|error| {

@@ -11,8 +11,8 @@ use moa_core::{
     CONTEXT_SNAPSHOT_FORMAT_VERSION, CompactionConfig, ContextMessage, ContextProcessor,
     ContextSnapshot, ContextSnapshotConfig, Event, EventRange, EventRecord, FileReadDedupState,
     LLMProvider, ProcessorOutput, Result, SequenceNum, SessionStore, SnapshotFileReadState,
-    ToolContent, ToolOutput, ToolOutputConfig, WorkingContext, record_turn_snapshot_load,
-    truncate_head_tail,
+    ToolCallId, ToolContent, ToolOutput, ToolOutputConfig, WorkingContext,
+    record_turn_snapshot_load, truncate_head_tail,
 };
 use moa_security::wrap_untrusted_tool_output;
 use serde_json::json;
@@ -178,10 +178,7 @@ impl HistoryCompiler {
         }
 
         let started_at = Instant::now();
-        let snapshot = self
-            .session_store
-            .get_snapshot(ctx.session_id.clone())
-            .await;
+        let snapshot = self.session_store.get_snapshot(ctx.session_id).await;
         match snapshot {
             Ok(Some(snapshot))
                 if snapshot.is_current_version()
@@ -377,7 +374,7 @@ impl ContextProcessor for HistoryCompiler {
             let delta_events = self
                 .session_store
                 .get_events(
-                    ctx.session_id.clone(),
+                    ctx.session_id,
                     EventRange {
                         from_seq: Some(snapshot.last_sequence_num.saturating_add(1)),
                         ..EventRange::default()
@@ -414,7 +411,7 @@ impl ContextProcessor for HistoryCompiler {
                 HISTORY_SNAPSHOT_METADATA_KEY,
                 serde_json::to_value(ContextSnapshot {
                     format_version: CONTEXT_SNAPSHOT_FORMAT_VERSION,
-                    session_id: ctx.session_id.clone(),
+                    session_id: ctx.session_id,
                     last_sequence_num: snapshot.last_sequence_num,
                     created_at: chrono::Utc::now(),
                     messages: snapshot.messages.clone(),
@@ -455,7 +452,7 @@ impl HistoryCompiler {
     ) -> Result<CompiledHistory> {
         let mut events = self
             .session_store
-            .get_events(ctx.session_id.clone(), EventRange::all())
+            .get_events(ctx.session_id, EventRange::all())
             .await?;
 
         if let Some(llm_provider) = &self.llm_provider
@@ -463,7 +460,7 @@ impl HistoryCompiler {
                 &self.compaction,
                 &*self.session_store,
                 &**llm_provider,
-                ctx.session_id.clone(),
+                ctx.session_id,
                 ctx.token_budget,
                 &events,
             )
@@ -471,7 +468,7 @@ impl HistoryCompiler {
         {
             events = self
                 .session_store
-                .get_events(ctx.session_id.clone(), EventRange::all())
+                .get_events(ctx.session_id, EventRange::all())
                 .await?;
         }
 
@@ -547,7 +544,7 @@ fn build_snapshot_state(
 fn compile_records(
     records: &[&EventRecord],
     tool_output: &ToolOutputConfig,
-    file_read_paths: &HashMap<uuid::Uuid, String>,
+    file_read_paths: &HashMap<ToolCallId, String>,
 ) -> Result<Vec<CompiledRecordMessage>> {
     records
         .iter()
@@ -574,7 +571,7 @@ pub(crate) fn preserved_error_messages(events: &[&EventRecord]) -> Vec<ContextMe
 fn event_to_context_message(
     record: &EventRecord,
     tool_output: &ToolOutputConfig,
-    file_read_paths: &HashMap<uuid::Uuid, String>,
+    file_read_paths: &HashMap<ToolCallId, String>,
 ) -> Option<Result<CompiledRecordMessage>> {
     match &record.event {
         Event::UserMessage { text, .. } => Some(Ok(CompiledRecordMessage::plain(
@@ -687,7 +684,7 @@ fn event_to_context_message(
 
 fn tool_result_context_message(
     tool_use_id: String,
-    tool_id: uuid::Uuid,
+    tool_id: ToolCallId,
     success: bool,
     output: &ToolOutput,
     tool_output: &ToolOutputConfig,
@@ -712,7 +709,7 @@ fn tool_result_context_message(
     }
 }
 
-fn build_full_file_read_path_map(events: &[&EventRecord]) -> HashMap<uuid::Uuid, String> {
+fn build_full_file_read_path_map(events: &[&EventRecord]) -> HashMap<ToolCallId, String> {
     let mut file_reads = HashMap::new();
 
     for record in events {
@@ -746,8 +743,8 @@ fn build_full_file_read_path_map(events: &[&EventRecord]) -> HashMap<uuid::Uuid,
 
 fn latest_full_file_read_results(
     events: &[&EventRecord],
-    file_read_paths: &HashMap<uuid::Uuid, String>,
-) -> HashMap<String, uuid::Uuid> {
+    file_read_paths: &HashMap<ToolCallId, String>,
+) -> HashMap<String, ToolCallId> {
     let mut latest_results = HashMap::new();
 
     for record in events {
@@ -767,7 +764,7 @@ fn latest_full_file_read_results(
 
 fn deduplicate_file_reads(
     messages: &mut [CompiledRecordMessage],
-    latest_file_reads: &HashMap<String, uuid::Uuid>,
+    latest_file_reads: &HashMap<String, ToolCallId>,
 ) -> DeduplicationStats {
     let mut stats = DeduplicationStats::default();
 
@@ -913,7 +910,7 @@ impl CompiledRecordMessage {
 #[derive(Debug, Clone)]
 struct ToolResultReplayMeta {
     tool_use_id: String,
-    tool_id: uuid::Uuid,
+    tool_id: ToolCallId,
     success: bool,
     file_read_path: String,
 }
@@ -933,10 +930,10 @@ mod tests {
     use chrono::{DateTime, Utc};
     use moa_core::{
         BrainId, CompactionConfig, CompletionContent, CompletionRequest, CompletionResponse,
-        CompletionStream, EventFilter, EventRecord, PendingSignal, PendingSignalId, Platform,
-        SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
-        SessionSummary, StopReason, TokenPricing, TokenUsage, ToolCallFormat, ToolOutputConfig,
-        UserId, WorkspaceId,
+        CompletionStream, EventFilter, EventRecord, ModelId, PendingSignal, PendingSignalId,
+        Platform, SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
+        SessionSummary, StopReason, TokenPricing, TokenUsage, ToolCallFormat, ToolCallId,
+        ToolOutputConfig, UserId, WorkspaceId,
     };
     use proptest::prelude::*;
     use serde_json::json;
@@ -973,7 +970,7 @@ mod tests {
     #[async_trait]
     impl SessionStore for MockSessionStore {
         async fn create_session(&self, meta: SessionMeta) -> Result<SessionId> {
-            let id = meta.id.clone();
+            let id = meta.id;
             *self.session.lock().await = meta;
             Ok(id)
         }
@@ -1092,7 +1089,7 @@ mod tests {
                         .to_string(),
                 )],
                 stop_reason: StopReason::EndTurn,
-                model: "claude-sonnet-4-6".to_string(),
+                model: ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 120,
                 output_tokens: 40,
                 cached_input_tokens: 0,
@@ -1105,7 +1102,7 @@ mod tests {
 
     fn capabilities() -> moa_core::ModelCapabilities {
         moa_core::ModelCapabilities {
-            model_id: "claude-sonnet-4-6".to_string(),
+            model_id: ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -1125,7 +1122,7 @@ mod tests {
     fn event_record(session_id: &SessionId, sequence_num: u64, event: Event) -> EventRecord {
         EventRecord {
             id: uuid::Uuid::now_v7(),
-            session_id: session_id.clone(),
+            session_id: *session_id,
             sequence_num,
             event_type: event.event_type(),
             event,
@@ -1142,7 +1139,7 @@ mod tests {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Desktop,
-            model: "claude-sonnet-4-6".to_string(),
+            model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         }
     }
@@ -1167,7 +1164,7 @@ mod tests {
     fn file_read_tool_call(
         session_id: &SessionId,
         sequence_num: u64,
-        tool_id: uuid::Uuid,
+        tool_id: ToolCallId,
         provider_tool_use_id: &str,
         input: serde_json::Value,
     ) -> EventRecord {
@@ -1188,7 +1185,7 @@ mod tests {
     fn file_read_tool_result(
         session_id: &SessionId,
         sequence_num: u64,
-        tool_id: uuid::Uuid,
+        tool_id: ToolCallId,
         provider_tool_use_id: &str,
         text: &str,
     ) -> EventRecord {
@@ -1222,7 +1219,7 @@ mod tests {
                 1,
                 Event::BrainResponse {
                     text: "Hi there".to_string(),
-                    model: "claude-sonnet-4-6".to_string(),
+                    model: ModelId::new("claude-sonnet-4-6"),
                     input_tokens_uncached: 10,
                     input_tokens_cache_write: 0,
                     input_tokens_cache_read: 0,
@@ -1251,7 +1248,7 @@ mod tests {
     #[test]
     fn history_compiler_preserves_structured_tool_result_blocks() {
         let session = session();
-        let tool_id = uuid::Uuid::now_v7();
+        let tool_id = ToolCallId::new();
         let events = vec![event_record(
             &session.id,
             0,
@@ -1283,7 +1280,7 @@ mod tests {
     #[test]
     fn history_compiler_truncates_oversized_tool_results_for_replay() {
         let session = session();
-        let tool_id = uuid::Uuid::now_v7();
+        let tool_id = ToolCallId::new();
         let giant = (1..=15_000)
             .map(|index| format!("src/lib.rs:{index}"))
             .collect::<Vec<_>>()
@@ -1336,7 +1333,7 @@ mod tests {
     #[test]
     fn history_compiler_preserves_structured_tool_call_invocation() {
         let session = session();
-        let tool_id = uuid::Uuid::now_v7();
+        let tool_id = ToolCallId::new();
         let events = vec![event_record(
             &session.id,
             0,
@@ -1377,9 +1374,9 @@ mod tests {
     #[test]
     fn history_compiler_deduplicates_repeated_full_file_reads() {
         let session = session();
-        let foo_first = uuid::Uuid::now_v7();
-        let bar = uuid::Uuid::now_v7();
-        let foo_second = uuid::Uuid::now_v7();
+        let foo_first = ToolCallId::new();
+        let bar = ToolCallId::new();
+        let foo_second = ToolCallId::new();
         let first_read = (1..=80)
             .map(|line| format!("fn first_version_{line}() {{}}\n"))
             .collect::<String>();
@@ -1483,8 +1480,8 @@ mod tests {
     #[test]
     fn history_compiler_does_not_deduplicate_recent_turn_file_reads() {
         let session = session();
-        let foo_first = uuid::Uuid::now_v7();
-        let foo_second = uuid::Uuid::now_v7();
+        let foo_first = ToolCallId::new();
+        let foo_second = ToolCallId::new();
         let events = vec![
             event_record(
                 &session.id,
@@ -1569,8 +1566,8 @@ mod tests {
     #[test]
     fn history_compiler_does_not_deduplicate_partial_file_reads() {
         let session = session();
-        let partial_one = uuid::Uuid::now_v7();
-        let partial_two = uuid::Uuid::now_v7();
+        let partial_one = ToolCallId::new();
+        let partial_two = ToolCallId::new();
         let events = vec![
             event_record(
                 &session.id,
@@ -1641,8 +1638,8 @@ mod tests {
     #[tokio::test]
     async fn history_processor_reports_file_read_deduplication_metadata() {
         let session = session();
-        let foo_first = uuid::Uuid::now_v7();
-        let foo_second = uuid::Uuid::now_v7();
+        let foo_first = ToolCallId::new();
+        let foo_second = ToolCallId::new();
         let first_read = (1..=80)
             .map(|line| format!("fn first_version_{line}() {{}}\n"))
             .collect::<String>();
@@ -1759,7 +1756,7 @@ mod tests {
 
         compiler.process(&mut ctx).await.unwrap();
         let stored_events = store
-            .get_events(session.id.clone(), EventRange::all())
+            .get_events(session.id, EventRange::all())
             .await
             .unwrap();
 
@@ -1798,7 +1795,7 @@ mod tests {
                 summary: "## Key Facts\n- earlier turns were compacted".to_string(),
                 events_summarized: 8,
                 token_count: 12,
-                model: "claude-sonnet-4-6".to_string(),
+                model: ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 60,
                 output_tokens: 20,
                 cost_cents: 1,
@@ -1855,7 +1852,7 @@ mod tests {
 
         compiler.process(&mut ctx).await.unwrap();
         let stored_events = store
-            .get_events(session.id.clone(), EventRange::all())
+            .get_events(session.id, EventRange::all())
             .await
             .unwrap();
 
@@ -1870,8 +1867,8 @@ mod tests {
     #[test]
     fn incremental_history_replaces_prior_full_file_reads_across_turns() {
         let session = session();
-        let foo_first = uuid::Uuid::from_u128(1);
-        let foo_second = uuid::Uuid::from_u128(2);
+        let foo_first = ToolCallId(uuid::Uuid::from_u128(1));
+        let foo_second = ToolCallId(uuid::Uuid::from_u128(2));
         let prefix_events = vec![
             event_record(
                 &session.id,
@@ -1909,7 +1906,7 @@ mod tests {
                 Event::BrainResponse {
                     text: "noted".to_string(),
                     thought_signature: None,
-                    model: "claude-sonnet-4-6".to_string(),
+                    model: ModelId::new("claude-sonnet-4-6"),
                     input_tokens_uncached: 1,
                     input_tokens_cache_write: 0,
                     input_tokens_cache_read: 0,
@@ -1983,7 +1980,7 @@ mod tests {
         let compiler = compiler_with_recent_turns(&session, &[], 1);
         let snapshot = ContextSnapshot {
             format_version: CONTEXT_SNAPSHOT_FORMAT_VERSION,
-            session_id: session.id.clone(),
+            session_id: session.id,
             last_sequence_num: 0,
             created_at: Utc::now(),
             messages: vec![ContextMessage::user("stable")],
@@ -2114,7 +2111,7 @@ mod tests {
                             Event::BrainResponse {
                                 text: format!("assistant-{turn_index}-{seed}"),
                                 thought_signature: None,
-                                model: "claude-sonnet-4-6".to_string(),
+                                model: ModelId::new("claude-sonnet-4-6"),
                                 input_tokens_uncached: 1,
                                 input_tokens_cache_write: 0,
                                 input_tokens_cache_read: 0,
@@ -2129,7 +2126,7 @@ mod tests {
                         path_index,
                         version,
                     } => {
-                        let tool_id = uuid::Uuid::from_u128(next_tool_id);
+                        let tool_id = ToolCallId(uuid::Uuid::from_u128(next_tool_id));
                         next_tool_id += 1;
                         let provider_id = format!("toolu_{tool_id}");
                         let path = test_path(*path_index);
@@ -2154,7 +2151,7 @@ mod tests {
                         path_index,
                         start_line,
                     } => {
-                        let tool_id = uuid::Uuid::from_u128(next_tool_id);
+                        let tool_id = ToolCallId(uuid::Uuid::from_u128(next_tool_id));
                         next_tool_id += 1;
                         let provider_id = format!("toolu_{tool_id}");
                         let path = test_path(*path_index);
@@ -2180,7 +2177,7 @@ mod tests {
                         sequence_num += 1;
                     }
                     TestAction::Bash(seed) => {
-                        let tool_id = uuid::Uuid::from_u128(next_tool_id);
+                        let tool_id = ToolCallId(uuid::Uuid::from_u128(next_tool_id));
                         next_tool_id += 1;
                         let provider_id = format!("toolu_{tool_id}");
                         events.push(event_record(
@@ -2259,7 +2256,7 @@ mod tests {
     ) -> Option<ContextSnapshot> {
         compiled.snapshot.as_ref().map(|snapshot| ContextSnapshot {
             format_version: CONTEXT_SNAPSHOT_FORMAT_VERSION,
-            session_id: session.id.clone(),
+            session_id: session.id,
             last_sequence_num: snapshot.last_sequence_num,
             created_at: Utc::now(),
             messages: snapshot.messages.clone(),

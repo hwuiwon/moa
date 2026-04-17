@@ -15,7 +15,7 @@ use teloxide::{
     sugar::request::RequestReplyExt,
     types::{InlineKeyboardButton, InlineKeyboardMarkup, Message, Update, User},
 };
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{RwLock, mpsc};
 use tracing::Instrument;
 use tracing::warn;
 use uuid::Uuid;
@@ -31,8 +31,8 @@ use crate::{
 pub struct TelegramAdapter {
     bot: Bot,
     renderer: TelegramRenderer,
-    inbound_contexts: Arc<Mutex<HashMap<String, TelegramMessageRef>>>,
-    outbound_messages: Arc<Mutex<HashMap<String, Vec<TelegramMessageRef>>>>,
+    inbound_contexts: Arc<RwLock<HashMap<String, TelegramMessageRef>>>,
+    outbound_messages: Arc<RwLock<HashMap<String, Vec<TelegramMessageRef>>>>,
 }
 
 impl TelegramAdapter {
@@ -41,8 +41,8 @@ impl TelegramAdapter {
         Self {
             bot: Bot::new(token.into()),
             renderer: TelegramRenderer::new(),
-            inbound_contexts: Arc::new(Mutex::new(HashMap::new())),
-            outbound_messages: Arc::new(Mutex::new(HashMap::new())),
+            inbound_contexts: Arc::new(RwLock::new(HashMap::new())),
+            outbound_messages: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -63,7 +63,7 @@ impl TelegramAdapter {
 
         if let Some(last_ref) = self
             .outbound_messages
-            .lock()
+            .read()
             .await
             .get(reply_to)
             .and_then(|refs| refs.last().copied())
@@ -75,7 +75,7 @@ impl TelegramAdapter {
         }
 
         let message_id = parse_message_id(reply_to)?;
-        if let Some(inbound_ref) = self.inbound_contexts.lock().await.get(reply_to).copied() {
+        if let Some(inbound_ref) = self.inbound_contexts.read().await.get(reply_to).copied() {
             return Ok(TelegramTarget {
                 chat_id: inbound_ref.chat_id,
                 reply_to_message_id: Some(message_id),
@@ -189,7 +189,7 @@ impl PlatformAdapter for TelegramAdapter {
 
         let synthetic_id = MessageId::new(Uuid::now_v7().to_string());
         self.outbound_messages
-            .lock()
+            .write()
             .await
             .insert(synthetic_id.as_str().to_string(), sent_refs);
         Ok(synthetic_id)
@@ -200,7 +200,7 @@ impl PlatformAdapter for TelegramAdapter {
         let msg = prepare_outbound_message(self.platform(), &self.capabilities(), msg);
         let existing = self
             .outbound_messages
-            .lock()
+            .read()
             .await
             .get(msg_id.as_str())
             .cloned()
@@ -258,7 +258,7 @@ impl PlatformAdapter for TelegramAdapter {
         }
 
         self.outbound_messages
-            .lock()
+            .write()
             .await
             .insert(msg_id.as_str().to_string(), updated_refs);
         Ok(())
@@ -268,7 +268,7 @@ impl PlatformAdapter for TelegramAdapter {
     async fn delete(&self, msg_id: &MessageId) -> Result<()> {
         let refs = self
             .outbound_messages
-            .lock()
+            .write()
             .await
             .remove(msg_id.as_str())
             .ok_or_else(|| {
@@ -313,12 +313,12 @@ impl TelegramMessageRef {
 async fn handle_message(
     msg: Message,
     event_tx: mpsc::Sender<InboundMessage>,
-    inbound_contexts: Arc<Mutex<HashMap<String, TelegramMessageRef>>>,
+    inbound_contexts: Arc<RwLock<HashMap<String, TelegramMessageRef>>>,
 ) -> std::result::Result<(), teloxide::RequestError> {
     if let Some(inbound) = inbound_from_message(&msg) {
         let gateway_span = gateway_receive_span(&inbound);
         async {
-            inbound_contexts.lock().await.insert(
+            inbound_contexts.write().await.insert(
                 inbound.platform_msg_id.clone(),
                 TelegramMessageRef::from_message(&msg),
             );
@@ -337,8 +337,8 @@ async fn handle_callback_query(
     bot: Bot,
     query: CallbackQuery,
     event_tx: mpsc::Sender<InboundMessage>,
-    inbound_contexts: Arc<Mutex<HashMap<String, TelegramMessageRef>>>,
-    outbound_messages: Arc<Mutex<HashMap<String, Vec<TelegramMessageRef>>>>,
+    inbound_contexts: Arc<RwLock<HashMap<String, TelegramMessageRef>>>,
+    outbound_messages: Arc<RwLock<HashMap<String, Vec<TelegramMessageRef>>>>,
 ) -> std::result::Result<(), teloxide::RequestError> {
     bot.answer_callback_query(query.id.clone()).await?;
     if let Some(inbound) =
@@ -359,8 +359,8 @@ async fn handle_callback_query(
 
 async fn inbound_from_callback_query(
     query: &CallbackQuery,
-    inbound_contexts: Arc<Mutex<HashMap<String, TelegramMessageRef>>>,
-    outbound_messages: Arc<Mutex<HashMap<String, Vec<TelegramMessageRef>>>>,
+    inbound_contexts: Arc<RwLock<HashMap<String, TelegramMessageRef>>>,
+    outbound_messages: Arc<RwLock<HashMap<String, Vec<TelegramMessageRef>>>>,
 ) -> Option<InboundMessage> {
     let action = ApprovalCallbackAction::decode(query.data.as_deref()?)?;
     let origin = if let Some(message) = query.regular_message() {
@@ -368,7 +368,7 @@ async fn inbound_from_callback_query(
     } else {
         let message_id = query.inline_message_id.as_ref()?;
         outbound_messages
-            .lock()
+            .read()
             .await
             .get(message_id)
             .and_then(|refs| refs.last().copied())?
@@ -376,7 +376,7 @@ async fn inbound_from_callback_query(
 
     let platform_msg_id = format!("callback:{}", query.id);
     inbound_contexts
-        .lock()
+        .write()
         .await
         .insert(platform_msg_id.clone(), origin);
 
@@ -471,7 +471,7 @@ fn inline_keyboard(buttons: &[moa_core::ActionButton]) -> Option<InlineKeyboardM
 }
 
 fn telegram_user_name(user: &User) -> String {
-    if let Some(username) = user.username.clone() {
+    if let Some(username) = user.username.as_deref() {
         return format!("@{username}");
     }
 
@@ -553,8 +553,8 @@ mod tests {
 
         let inbound = inbound_from_callback_query(
             &query,
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
         )
         .await
         .expect("normalized callback");

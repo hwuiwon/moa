@@ -24,7 +24,6 @@ use tracing::Subscriber;
 use tracing::span::Attributes;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
-use uuid::Uuid;
 
 const PARTIAL_READ_HEADER: &str = "[showing lines 118-125 of 260 total in auth.rs]";
 const FULL_READ_HEADER: &str = "[showing lines 1-200 of 260 total in auth.rs]";
@@ -41,13 +40,13 @@ impl MemoryStore for NoopMemoryStore {
     async fn search(
         &self,
         _query: &str,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
         Ok(Vec::new())
     }
 
-    async fn read_page(&self, _scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
+    async fn read_page(&self, _scope: &MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
         Err(moa_core::MoaError::StorageError(format!(
             "memory page not found: {}",
             path.as_str()
@@ -56,30 +55,30 @@ impl MemoryStore for NoopMemoryStore {
 
     async fn write_page(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _path: &MemoryPath,
         _page: WikiPage,
     ) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
+    async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
         Ok(())
     }
 
     async fn list_pages(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _filter: Option<PageType>,
     ) -> Result<Vec<PageSummary>> {
         Ok(Vec::new())
     }
 
-    async fn get_index(&self, _scope: MemoryScope) -> Result<String> {
+    async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
         Ok(String::new())
     }
 
-    async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+    async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
         Ok(())
     }
 }
@@ -130,7 +129,7 @@ async fn steps_72_77_e2e() -> Result<()> {
     let session = SessionMeta {
         workspace_id: workspace_id.clone(),
         user_id: UserId::new("integration-test"),
-        model: config.general.default_model.clone(),
+        model: config.general.default_model.clone().into(),
         ..SessionMeta::default()
     };
     let session_id = session_store.create_session(session.clone()).await?;
@@ -165,7 +164,7 @@ async fn steps_72_77_e2e() -> Result<()> {
     ] {
         session_store
             .emit_event(
-                session_id.clone(),
+                session_id,
                 Event::UserMessage {
                     text: prompt.to_string(),
                     attachments: Vec::new(),
@@ -177,7 +176,7 @@ async fn steps_72_77_e2e() -> Result<()> {
         let result = scope_turn_replay_counters(
             turn_counters.clone(),
             run_brain_turn_with_tools(
-                session_id.clone(),
+                session_id,
                 counted_session_store.clone(),
                 provider.clone(),
                 &pipeline,
@@ -195,12 +194,12 @@ async fn steps_72_77_e2e() -> Result<()> {
     }
 
     let events = session_store
-        .get_events(session_id.clone(), EventRange::all())
+        .get_events(session_id, EventRange::all())
         .await?;
-    let requests = provider.recorded_requests().await;
+    let requests = provider.recorded_requests();
     let tool_runs = collect_tool_runs(&events);
-    let final_session = session_store.get_session(session_id.clone()).await?;
-    let final_snapshot = session_store.get_snapshot(session_id.clone()).await?;
+    let final_session = session_store.get_session(session_id).await?;
+    let final_snapshot = session_store.get_snapshot(session_id).await?;
 
     assert_eq!(
         requests.len(),
@@ -483,7 +482,7 @@ fn cached_usage(total_input_tokens: usize, cache_read_tokens: usize) -> TokenUsa
 
 fn scripted_capabilities() -> ModelCapabilities {
     ModelCapabilities {
-        model_id: "claude-sonnet-4-6".to_string(),
+        model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
         context_window: 200_000,
         max_output: 8_192,
         supports_tools: true,
@@ -558,7 +557,7 @@ fn static_prefix_message_count(request: &CompletionRequest) -> usize {
         .cache_controls
         .iter()
         .filter(|breakpoint| breakpoint.ttl == CacheTtl::OneHour)
-        .filter_map(|breakpoint| breakpoint.message_index())
+        .filter_map(moa_core::CacheBreakpoint::message_index)
         .max()
         .or_else(|| request.cache_breakpoints.last().copied())
         .unwrap_or_default()
@@ -621,7 +620,7 @@ struct ToolRun {
 }
 
 fn collect_tool_runs(events: &[EventRecord]) -> Vec<ToolRun> {
-    let mut calls = HashMap::<Uuid, (String, Value)>::new();
+    let mut calls = HashMap::<moa_core::ToolCallId, (String, Value)>::new();
     let mut runs = Vec::new();
 
     for record in events {

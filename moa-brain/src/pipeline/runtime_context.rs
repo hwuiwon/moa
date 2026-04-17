@@ -182,7 +182,7 @@ async fn detect_git_branch(workspace_root: &Path) -> Option<String> {
 mod tests {
     use chrono::TimeZone;
     use moa_core::{
-        ContextMessage, ModelCapabilities, Platform, SessionId, SessionMeta, TokenPricing,
+        ContextMessage, ModelCapabilities, ModelId, Platform, SessionId, SessionMeta, TokenPricing,
         ToolCallFormat, UserId, WorkspaceId,
     };
 
@@ -190,7 +190,7 @@ mod tests {
 
     fn capabilities() -> ModelCapabilities {
         ModelCapabilities {
-            model_id: "claude-sonnet-4-6".to_string(),
+            model_id: ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -213,7 +213,7 @@ mod tests {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Desktop,
-            model: "claude-sonnet-4-6".to_string(),
+            model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         }
     }

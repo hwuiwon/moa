@@ -128,34 +128,28 @@ pub async fn reconcile_branches(
             match change.operation {
                 ChangeOperation::Write => {
                     let branch_page = read_branch_page(store, scope, &branch, &change.path).await?;
-                    match store.read_page(scope.clone(), &change.path).await {
+                    match store.read_page(scope, &change.path).await {
                         Ok(main_page)
                             if main_page.updated > branch_page.updated
                                 || (main_page.updated == branch_page.updated
                                     && main_page.content.trim() != branch_page.content.trim()) =>
                         {
                             let merged = merge_pages(&main_page, &branch_page);
-                            store
-                                .write_page(scope.clone(), &change.path, merged)
-                                .await?;
+                            store.write_page(scope, &change.path, merged).await?;
                             report.conflicts_resolved += 1;
                         }
                         Ok(_) => {
-                            store
-                                .write_page(scope.clone(), &change.path, branch_page)
-                                .await?;
+                            store.write_page(scope, &change.path, branch_page).await?;
                             report.pages_merged += 1;
                         }
                         Err(_) => {
-                            store
-                                .write_page(scope.clone(), &change.path, branch_page)
-                                .await?;
+                            store.write_page(scope, &change.path, branch_page).await?;
                             report.pages_created += 1;
                         }
                     }
                 }
                 ChangeOperation::Delete => {
-                    if store.delete_page(scope.clone(), &change.path).await.is_ok() {
+                    if store.delete_page(scope, &change.path).await.is_ok() {
                         report.pages_merged += 1;
                     }
                 }
@@ -167,7 +161,7 @@ pub async fn reconcile_branches(
     }
 
     store.refresh_scope_index(scope).await?;
-    store.rebuild_search_index(scope.clone()).await?;
+    store.rebuild_search_index(scope).await?;
     store
         .append_scope_log(
             scope,

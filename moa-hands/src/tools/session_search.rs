@@ -66,7 +66,7 @@ impl BuiltInTool for SessionSearchTool {
         let started_at = Instant::now();
         let limit = params.last_n.unwrap_or(5).clamp(1, 20);
         let filter = EventFilter {
-            session_id: Some(ctx.session.id.clone()),
+            session_id: Some(ctx.session.id),
             workspace_id: None,
             user_id: None,
             event_types: params.event_type.event_types(),

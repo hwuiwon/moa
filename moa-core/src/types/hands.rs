@@ -16,7 +16,7 @@ pub enum SandboxTier {
     None,
     /// Container sandbox.
     Container,
-    /// MicroVM sandbox.
+    /// `MicroVM` sandbox.
     MicroVM,
     /// Direct host execution.
     Local,

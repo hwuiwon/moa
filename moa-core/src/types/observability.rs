@@ -8,7 +8,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CacheTtl, CompletionRequest, Platform, SessionId, SessionMeta, UserId, WorkspaceId,
+    CacheTtl, CompletionRequest, ModelId, Platform, SessionId, SessionMeta, UserId, WorkspaceId,
     estimate_text_tokens,
 };
 
@@ -18,7 +18,7 @@ pub struct CacheReport {
     /// Provider identifier, for example `anthropic` or `openai`.
     pub provider: String,
     /// Model identifier used for the request.
-    pub model: String,
+    pub model: ModelId,
     /// Number of context messages sent to the provider.
     pub message_count: usize,
     /// Number of tool schemas sent to the provider.
@@ -53,12 +53,37 @@ pub struct CacheReport {
     pub cached_vs_stable_estimate_ratio: f64,
 }
 
+impl Default for CacheReport {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            model: ModelId::new(""),
+            message_count: 0,
+            tool_count: 0,
+            cache_breakpoints: Vec::new(),
+            tool_tokens_estimate: 0,
+            stable_message_tokens_estimate: 0,
+            stable_total_tokens_estimate: 0,
+            total_tokens_estimate: 0,
+            dynamic_tokens_estimate: 0,
+            cache_ratio_estimate: 0.0,
+            stable_prefix_fingerprint: 0,
+            full_request_fingerprint: 0,
+            stable_prefix_reused: false,
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            cached_vs_stable_estimate_ratio: 0.0,
+        }
+    }
+}
+
 impl CacheReport {
     /// Builds a cache report from one completion request and its provider response metrics.
     pub fn from_request(
         request: &CompletionRequest,
         provider: impl Into<String>,
-        model: impl Into<String>,
+        model: impl Into<ModelId>,
         stable_prefix_reused: bool,
         input_tokens: usize,
         cached_input_tokens: usize,
@@ -120,15 +145,12 @@ impl CacheReport {
 /// Returns a stable fingerprint for the cacheable prefix of a completion request.
 pub fn stable_prefix_fingerprint(request: &CompletionRequest) -> u64 {
     let stable_message_count = stable_prefix_message_count(request);
-    fingerprint_json(&(
-        request.tools.clone(),
-        request.messages[..stable_message_count].to_vec(),
-    ))
+    fingerprint_json(&(&request.tools, &request.messages[..stable_message_count]))
 }
 
 /// Returns a stable fingerprint for the full completion request payload.
 pub fn full_request_fingerprint(request: &CompletionRequest) -> u64 {
-    fingerprint_json(&(request.tools.clone(), request.messages.clone()))
+    fingerprint_json(&(&request.tools, &request.messages))
 }
 
 fn fingerprint_json<T>(value: &T) -> u64
@@ -146,7 +168,7 @@ fn stable_prefix_message_count(request: &CompletionRequest) -> usize {
         .cache_controls
         .iter()
         .filter(|breakpoint| breakpoint.ttl == CacheTtl::OneHour)
-        .filter_map(|breakpoint| breakpoint.message_index())
+        .filter_map(super::completion::CacheBreakpoint::message_index)
         .max()
         .or_else(|| request.cache_breakpoints.last().copied())
         .unwrap_or_default()
@@ -165,7 +187,7 @@ pub struct TraceContext {
     /// Optional originating platform.
     pub platform: Option<Platform>,
     /// Active model identifier.
-    pub model: String,
+    pub model: ModelId,
     /// Human-readable trace name derived from the user prompt.
     pub trace_name: Option<String>,
     /// Filterable Langfuse tags serialized on the root span.
@@ -178,7 +200,7 @@ impl TraceContext {
     /// Builds a trace context from persisted session metadata and the current user prompt.
     pub fn from_session_meta(session: &SessionMeta, prompt: Option<&str>) -> Self {
         Self {
-            session_id: session.id.clone(),
+            session_id: session.id,
             user_id: session.user_id.clone(),
             workspace_id: session.workspace_id.clone(),
             platform: Some(session.platform.clone()),
@@ -190,6 +212,7 @@ impl TraceContext {
     }
 
     /// Returns a clone of the trace context with an explicit environment override.
+    #[must_use]
     pub fn with_environment(mut self, environment: Option<String>) -> Self {
         self.environment = environment
             .as_deref()
@@ -212,11 +235,12 @@ impl TraceContext {
             "langfuse.trace.metadata.workspace_id",
             self.workspace_id.to_string(),
         );
-        span.set_attribute("langfuse.trace.metadata.model", self.model.clone());
+        let model = self.model.to_string();
+        span.set_attribute("langfuse.trace.metadata.model", model.clone());
         span.set_attribute("moa.session.id", self.session_id.to_string());
         span.set_attribute("moa.user.id", self.user_id.to_string());
         span.set_attribute("moa.workspace.id", self.workspace_id.to_string());
-        span.set_attribute("moa.model", self.model.clone());
+        span.set_attribute("moa.model", model);
 
         if let Some(platform) = self.platform.as_ref() {
             let value = platform.to_string();

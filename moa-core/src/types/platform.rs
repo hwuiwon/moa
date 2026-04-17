@@ -24,16 +24,22 @@ pub enum Platform {
     Cli,
 }
 
-impl std::fmt::Display for Platform {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let label = match self {
+impl Platform {
+    /// Returns the canonical lowercase string label for this platform variant.
+    pub fn as_str(&self) -> &'static str {
+        match self {
             Self::Telegram => "telegram",
             Self::Slack => "slack",
             Self::Discord => "discord",
             Self::Desktop => "desktop",
             Self::Cli => "cli",
-        };
-        f.write_str(label)
+        }
+    }
+}
+
+impl std::fmt::Display for Platform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

@@ -96,7 +96,7 @@ impl ChatPanel {
         if self.session_id.as_ref() == Some(&session_id) {
             return;
         }
-        self.session_id = Some(session_id.clone());
+        self.session_id = Some(session_id);
         self.messages.clear();
         self.error = None;
         self.loading = true;
@@ -110,7 +110,7 @@ impl ChatPanel {
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.session_id.clone() else {
+        let Some(session_id) = self.session_id else {
             return;
         };
         let bridge = self.bridge.entity().read(cx);
@@ -147,7 +147,7 @@ impl ChatPanel {
     }
 
     fn start_stream(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.session_id.clone() else {
+        let Some(session_id) = self.session_id else {
             return;
         };
         let bridge = self.bridge.entity().read(cx);
@@ -161,7 +161,7 @@ impl ChatPanel {
 
         let task = cx.spawn(async move |weak, cx| {
             let (tx, mut rx) = mpsc::unbounded_channel();
-            let session_for_task = session_id.clone();
+            let session_for_task = session_id;
             let _observer = handle.spawn(async move {
                 let _ = chat.observe_session(session_for_task, tx).await;
             });
@@ -263,7 +263,7 @@ impl ChatPanel {
     }
 
     fn submit_prompt(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.session_id.clone() else {
+        let Some(session_id) = self.session_id else {
             return;
         };
         let user_text = self.input.read(cx).text().to_string();
@@ -385,7 +385,7 @@ impl ChatPanel {
         );
         cx.notify();
 
-        let Some(session_id) = self.session_id.clone() else {
+        let Some(session_id) = self.session_id else {
             tracing::error!("approval click without an active session");
             return;
         };
@@ -419,7 +419,7 @@ impl ChatPanel {
     }
 
     fn stop_session(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.session_id.clone() else {
+        let Some(session_id) = self.session_id else {
             return;
         };
         let bridge = self.bridge.entity().read(cx);

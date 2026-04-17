@@ -48,12 +48,9 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
     soft_cancel_requested: Option<&mut bool>,
     tool_loop_mode: ToolLoopMode,
 ) -> Result<StreamedTurnResult> {
-    let initial_session = session_store.get_session(session_id.clone()).await?;
+    let initial_session = session_store.get_session(session_id).await?;
     let initial_events = session_store
-        .get_events(
-            session_id.clone(),
-            EventRange::recent(TURN_EVENT_TAIL_LIMIT),
-        )
+        .get_events(session_id, EventRange::recent(TURN_EVENT_TAIL_LIMIT))
         .await?;
     let turn_number = turn_number_for_events(&initial_events);
     let trace_context =
@@ -76,9 +73,9 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
         let mut total_output_tokens = 0usize;
 
         loop {
-            let session = session_store.get_session(session_id.clone()).await?;
+            let session = session_store.get_session(session_id).await?;
             let events = session_store
-                .get_events(session_id.clone(), EventRange::recent(TURN_EVENT_TAIL_LIMIT))
+                .get_events(session_id, EventRange::recent(TURN_EVENT_TAIL_LIMIT))
                 .await?;
 
             if let Some(router) = &tool_router {
@@ -90,7 +87,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 let resolved_dispatch_started = Instant::now();
                 let resolved_dispatched = async {
                     process_resolved_approval(
-                        session_id.clone(),
+                        session_id,
                         &session,
                         session_store.clone(),
                         router,
@@ -147,7 +144,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                         );
                         let waiting_dispatch_started = Instant::now();
                         let outcome = wait_for_approval(
-                            session_id.clone(),
+                            session_id,
                             &session,
                             session_store.clone(),
                             router,
@@ -219,7 +216,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                         }
                     } else if let Some(request) = find_pending_approval_request(&events) {
                         session_store
-                            .update_status(session_id.clone(), SessionStatus::WaitingApproval)
+                            .update_status(session_id, SessionStatus::WaitingApproval)
                             .await?;
                         record_turn_span_metrics(
                             &turn_span,
@@ -367,7 +364,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             append_event(
                 &session_store,
                 event_tx,
-                session_id.clone(),
+                session_id,
                 Event::CacheReport {
                     report: build_cache_report(&events, llm_provider.name(), &request, &response),
                 },
@@ -378,7 +375,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 append_event(
                     &session_store,
                     event_tx,
-                    session_id.clone(),
+                    session_id,
                     Event::BrainResponse {
                         text: streamed.streamed_text.clone(),
                         thought_signature: response.thought_signature.clone(),
@@ -392,9 +389,13 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                     },
                 )
                 .await?;
-                let _ = runtime_tx.send(RuntimeEvent::AssistantFinished {
+                // This is the terminal assistant event for a turn; warn on a
+                // dropped receiver so stream consumers do not silently miss it.
+                if let Err(err) = runtime_tx.send(RuntimeEvent::AssistantFinished {
                     text: streamed.streamed_text,
-                });
+                }) {
+                    tracing::warn!(?err, "runtime receiver dropped while sending AssistantFinished");
+                }
             }
 
             let mut emitted_tool_calls = 0usize;
@@ -412,7 +413,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                         CompletionContent::ToolCall(call) => {
                             saw_tool_request = true;
                             let outcome = handle_tool_call(
-                                session_id.clone(),
+                                session_id,
                                 &session,
                                 session_store.clone(),
                                 tool_router.as_deref(),
@@ -488,7 +489,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 return Ok(result);
             }
 
-            let updated_session = session_store.get_session(session_id.clone()).await?;
+            let updated_session = session_store.get_session(session_id).await?;
             let _ = runtime_tx.send(RuntimeEvent::UsageUpdated {
                 total_tokens: updated_session.total_input_tokens
                     + updated_session.total_output_tokens,

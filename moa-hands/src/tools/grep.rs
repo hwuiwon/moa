@@ -46,7 +46,7 @@ pub async fn execute(
         )
     })
     .await
-    .map_err(|error| MoaError::ToolError(format!("grep search task failed: {error}")))??;
+    .map_err(|error| MoaError::ToolError(format!("grep search task failed: {error}")))?;
 
     Ok(build_grep_output(outcome, started.elapsed()))
 }
@@ -64,7 +64,7 @@ fn search_workspace(
     regex: &Regex,
     context_lines: usize,
     extra_skips: &[String],
-) -> Result<SearchOutcome> {
+) -> SearchOutcome {
     let mut matches = Vec::new();
     let mut files_searched = 0usize;
     let mut truncated = false;
@@ -131,11 +131,11 @@ fn search_workspace(
         }
     }
 
-    Ok(SearchOutcome {
+    SearchOutcome {
         matches,
         files_searched,
         truncated,
-    })
+    }
 }
 
 fn collect_context(lines: &[&str], line_index: usize, context_lines: usize) -> Vec<ContextLine> {

@@ -6,17 +6,17 @@ use std::time::Instant;
 
 use moa_core::{
     ApprovalDecision, ApprovalRequest, CompletionContent, CompletionRequest, CompletionResponse,
-    Event, EventRecord, LLMProvider, Result, RuntimeEvent, SessionSignal, record_turn_llm_ttft,
+    Event, EventRecord, LLMProvider, Result, RuntimeEvent, SessionSignal, ToolCallId,
+    record_turn_llm_ttft,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 /// One previously requested tool call that is waiting on or has received approval.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingToolApproval {
     /// Tool call identifier.
-    pub tool_id: Uuid,
+    pub tool_id: ToolCallId,
     /// Provider-specific tool-use identifier, when available.
     pub provider_tool_use_id: Option<String>,
     /// Provider-specific thought signature that must be replayed with this tool call when present.
@@ -260,7 +260,7 @@ pub fn find_pending_approval_request(events: &[EventRecord]) -> Option<ApprovalR
                 decisions.insert(*request_id);
             }
             Event::ToolResult { tool_id, .. } | Event::ToolError { tool_id, .. } => {
-                completed.insert(*tool_id);
+                completed.insert(tool_id.0);
             }
             _ => {}
         }
@@ -310,7 +310,7 @@ pub fn find_pending_tool_approval(events: &[EventRecord]) -> Option<PendingToolA
                 decisions.insert(*request_id);
             }
             Event::ToolResult { tool_id, .. } | Event::ToolError { tool_id, .. } => {
-                completed.insert(*tool_id);
+                completed.insert(tool_id.0);
             }
             _ => {}
         }
@@ -319,9 +319,9 @@ pub fn find_pending_tool_approval(events: &[EventRecord]) -> Option<PendingToolA
     let mut pending = tool_calls
         .into_values()
         .filter(|pending| {
-            requested.contains(&pending.tool_id)
-                && !decisions.contains(&pending.tool_id)
-                && !completed.contains(&pending.tool_id)
+            requested.contains(&pending.tool_id.0)
+                && !decisions.contains(&pending.tool_id.0)
+                && !completed.contains(&pending.tool_id.0)
         })
         .collect::<Vec<_>>();
     pending.sort_by_key(|item| item.sequence_num);
@@ -382,7 +382,7 @@ pub fn find_resolved_pending_tool_approval(events: &[EventRecord]) -> Option<Pen
                 decisions.insert(*request_id, stored);
             }
             Event::ToolResult { tool_id, .. } | Event::ToolError { tool_id, .. } => {
-                completed.insert(*tool_id);
+                completed.insert(tool_id.0);
             }
             _ => {}
         }
@@ -391,10 +391,10 @@ pub fn find_resolved_pending_tool_approval(events: &[EventRecord]) -> Option<Pen
     let mut pending = tool_calls
         .into_values()
         .filter_map(|mut pending| {
-            if completed.contains(&pending.tool_id) || !requested.contains(&pending.tool_id) {
+            if completed.contains(&pending.tool_id.0) || !requested.contains(&pending.tool_id.0) {
                 return None;
             }
-            let decision = decisions.get(&pending.tool_id)?.clone();
+            let decision = decisions.get(&pending.tool_id.0)?.clone();
             pending.decision = decision;
             Some(pending)
         })
@@ -446,7 +446,7 @@ mod tests {
 
         fn capabilities(&self) -> moa_core::ModelCapabilities {
             moa_core::ModelCapabilities {
-                model_id: "mock-model".to_string(),
+                model_id: moa_core::ModelId::new("mock-model"),
                 context_window: 32_000,
                 max_output: 1_024,
                 supports_tools: true,
@@ -478,7 +478,7 @@ mod tests {
                         CompletionContent::Text("Fresh answer".to_string()),
                     ],
                     stop_reason: StopReason::EndTurn,
-                    model: "mock-model".to_string(),
+                    model: moa_core::ModelId::new("mock-model"),
                     input_tokens: 4,
                     output_tokens: 2,
                     cached_input_tokens: 0,
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn resolved_pending_tool_approval_preserves_provider_tool_use_id() {
-        let tool_id = Uuid::now_v7();
+        let tool_id = ToolCallId::new();
         let events = vec![
             event_record(
                 0,
@@ -528,13 +528,13 @@ mod tests {
             event_record(
                 1,
                 Event::ApprovalRequested {
-                    request_id: tool_id,
+                    request_id: tool_id.0,
                     tool_name: "bash".to_string(),
                     input_summary: "pwd".to_string(),
                     risk_level: moa_core::RiskLevel::Medium,
                     prompt: moa_core::ApprovalPrompt {
                         request: ApprovalRequest {
-                            request_id: tool_id,
+                            request_id: tool_id.0,
                             tool_name: "bash".to_string(),
                             input_summary: "pwd".to_string(),
                             risk_level: moa_core::RiskLevel::Medium,
@@ -548,7 +548,7 @@ mod tests {
             event_record(
                 2,
                 Event::ApprovalDecided {
-                    request_id: tool_id,
+                    request_id: tool_id.0,
                     decision: ApprovalDecision::AllowOnce,
                     decided_by: "user".to_string(),
                     decided_at: Utc::now(),

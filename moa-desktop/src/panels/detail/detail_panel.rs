@@ -82,7 +82,7 @@ impl DetailPanel {
         if self.session_id.as_ref() == Some(&session_id) {
             return;
         }
-        self.session_id = Some(session_id.clone());
+        self.session_id = Some(session_id);
         self.events.clear();
         self.session_summary = None;
         self.expanded.clear();
@@ -97,7 +97,7 @@ impl DetailPanel {
     }
 
     fn reload_events(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.session_id.clone() else {
+        let Some(session_id) = self.session_id else {
             return;
         };
         let bridge = self.bridge.entity().read(cx);
@@ -111,7 +111,10 @@ impl DetailPanel {
             handle,
             entity,
             async move { chat.session_events(session_id).await },
-            |this, result, _cx| {
+            move |this, result, _cx| {
+                if this.session_id != Some(session_id) {
+                    return;
+                }
                 this.loading = false;
                 match result {
                     Ok(events) => {
@@ -125,7 +128,7 @@ impl DetailPanel {
     }
 
     fn refresh_summary(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.session_id.clone() else {
+        let Some(session_id) = self.session_id else {
             return;
         };
         let bridge = self.bridge.entity().read(cx);
@@ -134,7 +137,7 @@ impl DetailPanel {
         };
         let handle = bridge.tokio_handle();
         let entity = cx.entity().clone();
-        let needle = session_id.clone();
+        let needle = session_id;
         spawn_into(
             cx,
             handle,
@@ -144,7 +147,10 @@ impl DetailPanel {
                     .await
                     .map(|sessions| sessions.into_iter().find(|s| s.session_id == needle))
             },
-            |this, result, _cx| {
+            move |this, result, _cx| {
+                if this.session_id != Some(session_id) {
+                    return;
+                }
                 if let Ok(Some(summary)) = result {
                     this.session_summary = Some(summary);
                 }
@@ -153,7 +159,7 @@ impl DetailPanel {
     }
 
     fn start_stream(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.session_id.clone() else {
+        let Some(session_id) = self.session_id else {
             return;
         };
         let bridge = self.bridge.entity().read(cx);
@@ -178,7 +184,7 @@ impl DetailPanel {
                 }
 
                 let (tx, mut rx) = mpsc::unbounded_channel();
-                let observe_session = session_id.clone();
+                let observe_session = session_id;
                 let chat_clone = chat.clone();
                 let observer = handle.spawn(async move {
                     let _ = chat_clone.observe_session(observe_session, tx).await;
@@ -258,8 +264,8 @@ impl DetailPanel {
             .session_summary
             .as_ref()
             .map(|s| s.model.clone())
-            .unwrap_or_else(|| "—".to_string());
-        let context_window = estimated_context_window(&model);
+            .unwrap_or_else(|| moa_core::ModelId::new("—"));
+        let context_window = estimated_context_window(model.as_str());
         let ctx_pct = if context_window > 0 {
             (latest_input as f32 / context_window as f32).clamp(0.0, 1.0)
         } else {
@@ -304,7 +310,7 @@ impl DetailPanel {
             .border_color(theme.sidebar_border)
             .bg(theme.sidebar)
             .child(status_row)
-            .child(metric_row("model", &model, &theme))
+            .child(metric_row("model", model.as_str(), &theme))
             .child(metric_row("turns", &turns.to_string(), &theme))
             .child(metric_row("tools", &tool_calls.to_string(), &theme))
             .when(pending_approvals > 0, |d| {
@@ -888,7 +894,7 @@ fn collect_turn_costs(events: &[EventRecord]) -> Vec<TurnCost> {
             turn += 1;
             out.push(TurnCost {
                 turn,
-                model: model.clone(),
+                model: model.as_str().to_string(),
                 input_tokens: rec.event.input_tokens(),
                 output_tokens: *output_tokens,
                 cost_cents: *cost_cents,

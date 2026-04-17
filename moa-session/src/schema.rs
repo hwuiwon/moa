@@ -1,9 +1,9 @@
-//! Embedded PostgreSQL migrations for the session store.
+//! Embedded `PostgreSQL` migrations for the session store.
 
 use moa_core::{MoaError, Result};
 use sqlx::{PgPool, raw_sql};
 
-/// Runs all embedded PostgreSQL migrations idempotently on the provided pool.
+/// Runs all embedded `PostgreSQL` migrations idempotently on the provided pool.
 pub async fn migrate(pool: &PgPool, schema_name: Option<&str>) -> Result<()> {
     match schema_name {
         Some(schema_name) => migrate_in_schema(pool, schema_name).await,
@@ -38,7 +38,7 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
     let idx_context_snapshots_last_seq = quote_identifier("idx_context_snapshots_last_seq");
 
     let sql = format!(
-        r#"
+        r"
         CREATE TABLE IF NOT EXISTS {sessions} (
             id UUID PRIMARY KEY,
             workspace_id TEXT NOT NULL,
@@ -146,7 +146,7 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS {idx_context_snapshots_last_seq}
             ON {context_snapshots}(session_id, last_sequence_num);
-        "#
+        "
     );
 
     raw_sql(&sql).execute(pool).await.map_err(|error| {

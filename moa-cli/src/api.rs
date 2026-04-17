@@ -76,7 +76,7 @@ async fn session_stream(
     let session_id = SessionId(Uuid::parse_str(&session_id).map_err(|_| StatusCode::BAD_REQUEST)?);
     let receiver = state
         .orchestrator
-        .observe_runtime(session_id.clone())
+        .observe_runtime(session_id)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?
         .ok_or(StatusCode::NOT_FOUND)?;

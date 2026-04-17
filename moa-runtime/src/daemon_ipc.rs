@@ -131,7 +131,7 @@ pub(crate) async fn relay_daemon_runtime_events(
             DaemonStreamEvent::Runtime(event) => {
                 if event_tx
                     .send(SessionRuntimeEvent {
-                        session_id: session_id.clone(),
+                        session_id,
                         event: LiveEvent::Event(event),
                     })
                     .is_err()
@@ -142,7 +142,7 @@ pub(crate) async fn relay_daemon_runtime_events(
             DaemonStreamEvent::Gap { count, channel } => {
                 if event_tx
                     .send(SessionRuntimeEvent {
-                        session_id: session_id.clone(),
+                        session_id,
                         event: LiveEvent::Gap {
                             count,
                             channel,

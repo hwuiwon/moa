@@ -52,8 +52,8 @@ impl MemoryRetriever {
     async fn load_stage_data(&self, ctx: &WorkingContext) -> Result<MemoryStageData> {
         let user_scope = MemoryScope::User(ctx.user_id.clone());
         let workspace_scope = MemoryScope::Workspace(ctx.workspace_id.clone());
-        let user_index = self.memory_store.get_index(user_scope.clone()).await?;
-        let workspace_index = self.memory_store.get_index(workspace_scope.clone()).await?;
+        let user_index = self.memory_store.get_index(&user_scope).await?;
+        let workspace_index = self.memory_store.get_index(&workspace_scope).await?;
         let mut relevant_pages = Vec::new();
 
         if let Some(query) = extract_search_query_from_messages(&ctx.messages) {
@@ -61,7 +61,7 @@ impl MemoryRetriever {
                 let scope_label = scope_label_for(&scope);
                 let results = match self
                     .memory_store
-                    .search(&query, scope.clone(), MEMORY_RESULTS_PER_SCOPE)
+                    .search(&query, &scope, MEMORY_RESULTS_PER_SCOPE)
                     .await
                 {
                     Ok(results) => results,
@@ -84,7 +84,7 @@ impl MemoryRetriever {
                     let result_scope = result.scope.clone();
                     let excerpt = match self
                         .memory_store
-                        .read_page(result_scope.clone(), &result.path)
+                        .read_page(&result_scope, &result.path)
                         .await
                     {
                         Ok(page) => page.content,
@@ -126,7 +126,7 @@ impl MemoryRetriever {
         }
 
         let path = MemoryPath::new(WORKSPACE_BOOTSTRAP_PAGE_PATH);
-        let page = match self.memory_store.read_page(scope.clone(), &path).await {
+        let page = match self.memory_store.read_page(scope, &path).await {
             Ok(page) => page,
             Err(_) => return Ok(Vec::new()),
         };
@@ -294,7 +294,7 @@ fn query_matches_page(query: &str, title: &str, content: &str) -> bool {
         .split_whitespace()
         .map(str::trim)
         .filter(|token| !token.is_empty())
-        .map(|token| token.to_ascii_lowercase())
+        .map(str::to_ascii_lowercase)
         .any(|token| normalized_title.contains(&token) || normalized_content.contains(&token))
 }
 
@@ -307,8 +307,8 @@ mod tests {
     use chrono::Utc;
     use moa_core::{
         ContextProcessor, MemoryPath, MemoryScope, MemorySearchResult, MemoryStore,
-        ModelCapabilities, PageSummary, PageType, Platform, Result, SessionId, SessionMeta,
-        TokenPricing, ToolCallFormat, UserId, WikiPage, WorkspaceId,
+        ModelCapabilities, ModelId, PageSummary, PageType, Platform, Result, SessionId,
+        SessionMeta, TokenPricing, ToolCallFormat, UserId, WikiPage, WorkspaceId,
     };
 
     use super::{MEMORY_REMINDER_PREFIX, MemoryRetriever, extract_search_keywords};
@@ -325,7 +325,7 @@ mod tests {
         async fn search(
             &self,
             _query: &str,
-            scope: MemoryScope,
+            scope: &MemoryScope,
             _limit: usize,
         ) -> Result<Vec<MemorySearchResult>> {
             Ok(match scope {
@@ -334,9 +334,9 @@ mod tests {
             })
         }
 
-        async fn read_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
+        async fn read_page(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
             self.page_by_scope
-                .get(&(super::scope_label_for(&scope), path.as_str().to_string()))
+                .get(&(super::scope_label_for(scope), path.as_str().to_string()))
                 .cloned()
                 .ok_or_else(|| {
                     moa_core::MoaError::StorageError(format!("mock page not found: {}", path))
@@ -345,30 +345,30 @@ mod tests {
 
         async fn write_page(
             &self,
-            _scope: MemoryScope,
+            _scope: &MemoryScope,
             _path: &MemoryPath,
             _page: WikiPage,
         ) -> Result<()> {
             Ok(())
         }
 
-        async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
+        async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
             Ok(())
         }
 
         async fn list_pages(
             &self,
-            _scope: MemoryScope,
+            _scope: &MemoryScope,
             _filter: Option<PageType>,
         ) -> Result<Vec<PageSummary>> {
             Ok(Vec::new())
         }
 
-        async fn get_index(&self, scope: MemoryScope) -> Result<String> {
-            Ok(format!("{} memory", super::scope_label_for(&scope)))
+        async fn get_index(&self, scope: &MemoryScope) -> Result<String> {
+            Ok(format!("{} memory", super::scope_label_for(scope)))
         }
 
-        async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+        async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
             Ok(())
         }
     }
@@ -380,11 +380,11 @@ mod tests {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Desktop,
-            model: "claude-sonnet-4-6".to_string(),
+            model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
         let capabilities = ModelCapabilities {
-            model_id: "claude-sonnet-4-6".to_string(),
+            model_id: ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,

@@ -81,12 +81,12 @@ async fn load_skills(
 ) -> Result<Vec<SkillMetadata>> {
     let scope = moa_core::MemoryScope::Workspace(workspace_id.clone());
     let summaries = memory_store
-        .list_pages(scope.clone(), Some(PageType::Skill))
+        .list_pages(&scope, Some(PageType::Skill))
         .await?;
     let mut skills = Vec::with_capacity(summaries.len());
 
     for summary in summaries {
-        let page = memory_store.read_page(scope.clone(), &summary.path).await?;
+        let page = memory_store.read_page(&scope, &summary.path).await?;
         skills.push(skill_metadata_from_page(summary.path, &page));
     }
 
@@ -219,9 +219,9 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use moa_core::{
-        ContextProcessor, MemoryPath, MemoryScope, MemoryStore, ModelCapabilities, PageSummary,
-        PageType, Platform, Result, SessionId, SessionMeta, TokenPricing, ToolCallFormat, UserId,
-        WikiPage, WorkspaceId,
+        ContextProcessor, MemoryPath, MemoryScope, MemoryStore, ModelCapabilities, ModelId,
+        PageSummary, PageType, Platform, Result, SessionId, SessionMeta, TokenPricing,
+        ToolCallFormat, UserId, WikiPage, WorkspaceId,
     };
 
     use super::SkillInjector;
@@ -243,13 +243,13 @@ mod tests {
         async fn search(
             &self,
             _query: &str,
-            _scope: MemoryScope,
+            _scope: &MemoryScope,
             _limit: usize,
         ) -> Result<Vec<moa_core::MemorySearchResult>> {
             Ok(Vec::new())
         }
 
-        async fn read_page(&self, _scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
+        async fn read_page(&self, _scope: &MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
             self.pages
                 .get(path)
                 .cloned()
@@ -258,30 +258,30 @@ mod tests {
 
         async fn write_page(
             &self,
-            _scope: MemoryScope,
+            _scope: &MemoryScope,
             _path: &MemoryPath,
             _page: WikiPage,
         ) -> Result<()> {
             Ok(())
         }
 
-        async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
+        async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
             Ok(())
         }
 
         async fn list_pages(
             &self,
-            _scope: MemoryScope,
+            _scope: &MemoryScope,
             _filter: Option<PageType>,
         ) -> Result<Vec<PageSummary>> {
             Ok(self.summaries.clone())
         }
 
-        async fn get_index(&self, _scope: MemoryScope) -> Result<String> {
+        async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
             Ok(String::new())
         }
 
-        async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+        async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
             Ok(())
         }
     }
@@ -293,11 +293,11 @@ mod tests {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Desktop,
-            model: "claude-sonnet-4-6".to_string(),
+            model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
         let capabilities = ModelCapabilities {
-            model_id: "claude-sonnet-4-6".to_string(),
+            model_id: ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -390,11 +390,11 @@ mod tests {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Desktop,
-            model: "claude-sonnet-4-6".to_string(),
+            model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
         let capabilities = ModelCapabilities {
-            model_id: "claude-sonnet-4-6".to_string(),
+            model_id: ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -433,11 +433,11 @@ mod tests {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Desktop,
-            model: "claude-sonnet-4-6".to_string(),
+            model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
         let capabilities = ModelCapabilities {
-            model_id: "claude-sonnet-4-6".to_string(),
+            model_id: ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,

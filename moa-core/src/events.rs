@@ -6,8 +6,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::types::{
-    ApprovalDecision, ApprovalPrompt, Attachment, CacheReport, EventType, RiskLevel, SessionStatus,
-    ToolOutput,
+    ApprovalDecision, ApprovalPrompt, Attachment, CacheReport, EventType, ModelId, RiskLevel,
+    SessionStatus, ToolCallId, ToolOutput, UserId, WorkspaceId,
 };
 
 /// Append-only session event payload.
@@ -17,11 +17,11 @@ pub enum Event {
     /// Session was created.
     SessionCreated {
         /// Workspace identifier.
-        workspace_id: String,
+        workspace_id: WorkspaceId,
         /// User identifier.
-        user_id: String,
+        user_id: UserId,
         /// Model identifier.
-        model: String,
+        model: ModelId,
     },
     /// Session status changed.
     SessionStatusChanged {
@@ -66,7 +66,7 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thought_signature: Option<String>,
         /// Model identifier.
-        model: String,
+        model: ModelId,
         /// Input tokens billed at the provider's standard uncached rate.
         #[serde(default, alias = "input_tokens")]
         input_tokens_uncached: usize,
@@ -86,7 +86,7 @@ pub enum Event {
     /// A tool call was issued.
     ToolCall {
         /// Unique tool call identifier.
-        tool_id: Uuid,
+        tool_id: ToolCallId,
         /// Provider-specific tool-use identifier, when available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_tool_use_id: Option<String>,
@@ -103,7 +103,7 @@ pub enum Event {
     /// A tool call completed.
     ToolResult {
         /// Matching tool call identifier.
-        tool_id: Uuid,
+        tool_id: ToolCallId,
         /// Provider-specific tool-use identifier, when available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_tool_use_id: Option<String>,
@@ -117,7 +117,7 @@ pub enum Event {
     /// A tool call failed.
     ToolError {
         /// Matching tool call identifier.
-        tool_id: Uuid,
+        tool_id: ToolCallId,
         /// Provider-specific tool-use identifier, when available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_tool_use_id: Option<String>,
@@ -215,7 +215,7 @@ pub enum Event {
         token_count: usize,
         /// Model identifier used to generate the summary.
         #[serde(default)]
-        model: String,
+        model: ModelId,
         /// Input token count used to generate the summary.
         #[serde(default)]
         input_tokens: usize,
@@ -437,7 +437,7 @@ mod tests {
         let event = Event::CacheReport {
             report: CacheReport {
                 provider: "anthropic".to_string(),
-                model: "claude-sonnet-4-6".to_string(),
+                model: ModelId::new("claude-sonnet-4-6"),
                 message_count: 3,
                 tool_count: 2,
                 cache_breakpoints: vec![2],
@@ -468,7 +468,7 @@ mod tests {
         let event = Event::BrainResponse {
             text: "Hi there".to_string(),
             thought_signature: None,
-            model: "claude-sonnet-4-6".to_string(),
+            model: ModelId::new("claude-sonnet-4-6"),
             input_tokens_uncached: 100,
             input_tokens_cache_write: 0,
             input_tokens_cache_read: 0,
@@ -519,16 +519,16 @@ mod tests {
     fn all_event_types_serialize() {
         let events = vec![
             Event::SessionCreated {
-                workspace_id: "ws1".into(),
-                user_id: "u1".into(),
-                model: "test".into(),
+                workspace_id: WorkspaceId::new("ws1"),
+                user_id: UserId::new("u1"),
+                model: ModelId::new("test"),
             },
             Event::UserMessage {
                 text: "hi".into(),
                 attachments: vec![],
             },
             Event::ToolCall {
-                tool_id: Uuid::now_v7(),
+                tool_id: ToolCallId::new(),
                 provider_tool_use_id: Some("toolu_123".into()),
                 provider_thought_signature: None,
                 tool_name: "bash".into(),
@@ -546,7 +546,7 @@ mod tests {
                 summary: "test".into(),
                 events_summarized: 10,
                 token_count: 500,
-                model: "claude-sonnet-4-6".into(),
+                model: ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 120,
                 output_tokens: 45,
                 cost_cents: 1,
@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn tool_result_event_deserializes_without_provider_tool_use_id() {
-        let tool_id = Uuid::now_v7();
+        let tool_id = ToolCallId::new();
         let json = serde_json::json!({
             "type": "ToolResult",
             "data": {

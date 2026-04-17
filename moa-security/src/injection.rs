@@ -113,7 +113,7 @@ pub fn wrap_untrusted_tool_output(content: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{SessionMeta, TokenPricing, ToolCallFormat};
+    use moa_core::{ModelId, SessionMeta, TokenPricing, ToolCallFormat};
 
     use super::{
         InputClassification, check_canary, classify_input, inject_canary, inspect_input,
@@ -125,7 +125,7 @@ mod tests {
         moa_core::WorkingContext::new(
             &session,
             moa_core::ModelCapabilities {
-                model_id: "claude-sonnet-4-6".to_string(),
+                model_id: ModelId::new("claude-sonnet-4-6"),
                 context_window: 200_000,
                 max_output: 8_192,
                 supports_tools: true,

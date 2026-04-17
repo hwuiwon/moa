@@ -1,8 +1,7 @@
 //! Event-log collection helpers for eval trajectories, responses, and aggregate metrics.
 
-use moa_core::{Event, EventRecord, TokenPricing};
+use moa_core::{Event, EventRecord, TokenPricing, ToolCallId};
 use std::collections::HashMap;
-use uuid::Uuid;
 
 use crate::{EvalMetrics, TrajectoryStep};
 
@@ -21,7 +20,7 @@ pub(crate) struct CollectedExecution {
 #[derive(Debug, Clone)]
 pub struct TrajectoryCollector {
     steps: Vec<TrajectoryStep>,
-    tool_indices: HashMap<Uuid, usize>,
+    tool_indices: HashMap<ToolCallId, usize>,
     response_chunks: Vec<String>,
     metrics: EvalMetrics,
     pricing: Option<TokenPricing>,
@@ -157,7 +156,7 @@ impl TrajectoryCollector {
         }
     }
 
-    fn ensure_step(&mut self, tool_id: &Uuid) -> usize {
+    fn ensure_step(&mut self, tool_id: &ToolCallId) -> usize {
         if let Some(index) = self.tool_indices.get(tool_id) {
             return *index;
         }
@@ -221,15 +220,14 @@ fn truncate(text: &str, max_bytes: usize) -> String {
 mod tests {
     use std::time::Duration;
 
-    use moa_core::{Event, TokenPricing, ToolOutput};
+    use moa_core::{Event, TokenPricing, ToolCallId, ToolOutput};
     use serde_json::json;
-    use uuid::Uuid;
 
     use super::TrajectoryCollector;
 
     #[test]
     fn collector_tracks_tool_steps_and_metrics() {
-        let tool_id = Uuid::now_v7();
+        let tool_id = ToolCallId::new();
         let mut collector = TrajectoryCollector::new(
             Some(TokenPricing {
                 input_per_mtok: 3.0,
@@ -258,7 +256,7 @@ mod tests {
         collector.process_event(&Event::BrainResponse {
             text: "done".to_string(),
             thought_signature: None,
-            model: "mock".to_string(),
+            model: moa_core::ModelId::new("mock"),
             input_tokens_uncached: 100,
             input_tokens_cache_write: 0,
             input_tokens_cache_read: 0,

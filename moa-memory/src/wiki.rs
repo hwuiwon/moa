@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn wiki_page_roundtrip() {
-        let markdown = r#"---
+        let markdown = r"---
 type: topic
 created: 2026-04-09T14:30:00Z
 updated: 2026-04-09T16:45:00Z
@@ -309,7 +309,7 @@ reference_count: 7
 # Authentication Architecture
 
 The auth system uses JWT.
-"#;
+";
 
         let page = parse_markdown(Some("topics/authentication.md".into()), markdown).unwrap();
         let rendered = render_markdown(&page).unwrap();
@@ -320,7 +320,7 @@ The auth system uses JWT.
 
     #[test]
     fn frontmatter_parsing_reads_expected_fields() {
-        let markdown = r#"---
+        let markdown = r"---
 type: skill
 confidence: low
 related:
@@ -335,7 +335,7 @@ reference_count: 3
 # Run the tests
 
 Use cargo test.
-"#;
+";
 
         let page = parse_markdown(Some("skills/run-tests.md".into()), markdown).unwrap();
 

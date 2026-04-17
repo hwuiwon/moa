@@ -67,8 +67,8 @@ fn tool_name(schema: &Value) -> &str {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        ModelCapabilities, Platform, SessionId, SessionMeta, TokenPricing, ToolCallFormat, UserId,
-        WorkspaceId,
+        ModelCapabilities, ModelId, Platform, SessionId, SessionMeta, TokenPricing, ToolCallFormat,
+        UserId, WorkspaceId,
     };
     use serde_json::json;
 
@@ -76,7 +76,7 @@ mod tests {
 
     fn capabilities() -> ModelCapabilities {
         ModelCapabilities {
-            model_id: "claude-sonnet-4-6".to_string(),
+            model_id: ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -100,7 +100,7 @@ mod tests {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Desktop,
-            model: "claude-sonnet-4-6".to_string(),
+            model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
         let mut ctx = WorkingContext::new(&session, capabilities());
@@ -131,7 +131,7 @@ mod tests {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Desktop,
-            model: "claude-sonnet-4-6".to_string(),
+            model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
         let mut ctx = WorkingContext::new(&session, capabilities());

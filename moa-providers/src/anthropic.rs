@@ -8,6 +8,7 @@
 //! 5. record provider-private stream snapshots for tracing/debugging
 
 use std::env;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eventsource_stream::{Event as SseEvent, Eventsource};
@@ -15,8 +16,8 @@ use futures_util::{Stream, StreamExt, pin_mut};
 use moa_core::{
     CacheBreakpoint, CacheBreakpointTarget, CacheTtl, CompletionContent, CompletionRequest,
     CompletionResponse, CompletionStream, ContextMessage, LLMProvider, MessageRole, MoaConfig,
-    MoaError, ModelCapabilities, ProviderNativeTool, Result, StopReason, TokenPricing, TokenUsage,
-    ToolCallFormat, ToolContent, ToolInvocation, estimate_text_tokens,
+    MoaError, ModelCapabilities, ModelId, ProviderNativeTool, Result, StopReason, TokenPricing,
+    TokenUsage, ToolCallFormat, ToolContent, ToolInvocation, estimate_text_tokens,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -48,10 +49,10 @@ enum CacheTarget {
 /// Anthropic Claude provider backed by the Messages API.
 pub struct AnthropicProvider {
     client: reqwest::Client,
-    api_key: String,
+    api_key: Arc<str>,
     default_model: String,
     default_capabilities: ModelCapabilities,
-    messages_url: String,
+    messages_url: Arc<str>,
     retry_policy: RetryPolicy,
     web_search_enabled: bool,
 }
@@ -65,10 +66,10 @@ impl AnthropicProvider {
 
         Ok(Self {
             client: build_http_client()?,
-            api_key: api_key.into(),
+            api_key: Arc::from(api_key.into()),
             default_model: resolved_default_model,
             default_capabilities,
-            messages_url: ANTHROPIC_MESSAGES_URL.to_string(),
+            messages_url: Arc::from(ANTHROPIC_MESSAGES_URL),
             retry_policy: RetryPolicy::default().with_max_retries(DEFAULT_MAX_RETRIES),
             web_search_enabled: true,
         })
@@ -102,7 +103,7 @@ impl AnthropicProvider {
 
     /// Overrides the Messages API URL, primarily for tests.
     pub fn with_messages_url(mut self, messages_url: impl Into<String>) -> Self {
-        self.messages_url = messages_url.into();
+        self.messages_url = Arc::from(messages_url.into());
         self
     }
 
@@ -132,7 +133,8 @@ impl LLMProvider for AnthropicProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
         let requested_model = request
             .model
-            .as_deref()
+            .as_ref()
+            .map(ModelId::as_str)
             .unwrap_or(self.default_model.as_str())
             .to_string();
         let resolved_model = canonical_model_id(&requested_model)?;
@@ -165,8 +167,8 @@ impl LLMProvider for AnthropicProvider {
             }
         };
         let client = self.client.clone();
-        let api_key = self.api_key.clone();
-        let messages_url = self.messages_url.clone();
+        let api_key = Arc::clone(&self.api_key);
+        let messages_url = Arc::clone(&self.messages_url);
         let retry_policy = self.retry_policy.clone();
         let (tx, rx) = mpsc::channel(DEFAULT_STREAM_BUFFER);
 
@@ -178,8 +180,8 @@ impl LLMProvider for AnthropicProvider {
                 let response = retry_policy
                     .send(|| {
                         client
-                            .post(&messages_url)
-                            .header("x-api-key", &api_key)
+                            .post(&*messages_url)
+                            .header("x-api-key", &*api_key)
                             .header("anthropic-version", ANTHROPIC_API_VERSION)
                             .header(ACCEPT, "text/event-stream")
                             .header(CONTENT_TYPE, "application/json")
@@ -237,7 +239,7 @@ fn canonical_model_id(model: &str) -> Result<String> {
 fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
     match model {
         MODEL_OPUS_4_6 => Ok(ModelCapabilities {
-            model_id: MODEL_OPUS_4_6.to_string(),
+            model_id: ModelId::new(MODEL_OPUS_4_6),
             context_window: 1_000_000,
             max_output: 128_000,
             supports_tools: true,
@@ -253,7 +255,7 @@ fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
             native_tools: native_web_search_tools(),
         }),
         MODEL_SONNET_4_6 => Ok(ModelCapabilities {
-            model_id: MODEL_SONNET_4_6.to_string(),
+            model_id: ModelId::new(MODEL_SONNET_4_6),
             context_window: 1_000_000,
             max_output: 64_000,
             supports_tools: true,
@@ -293,7 +295,7 @@ fn build_request_body(
         }
 
         let message_index = messages.len();
-        messages.push(anthropic_message(message));
+        messages.push(anthropic_message(message)?);
         cache_targets.push(CacheTarget::Message(message_index));
     }
 
@@ -356,7 +358,11 @@ pub fn debug_build_request_body(
     request: &CompletionRequest,
     web_search_enabled: bool,
 ) -> Result<Value> {
-    let requested_model = request.model.as_deref().unwrap_or(MODEL_SONNET_4_6);
+    let requested_model = request
+        .model
+        .as_ref()
+        .map(ModelId::as_str)
+        .unwrap_or(MODEL_SONNET_4_6);
     let resolved_model = canonical_model_id(requested_model)?;
     let capabilities = capabilities_for_model(&resolved_model)?;
     build_request_body(request, &resolved_model, &capabilities, web_search_enabled)
@@ -585,9 +591,9 @@ fn summarize_anthropic_search_results(content: &[WebSearchResultContent]) -> Str
     format!("Web search returned {} result(s).", content.len())
 }
 
-fn anthropic_message(message: &ContextMessage) -> Value {
+fn anthropic_message(message: &ContextMessage) -> Result<Value> {
     if let Some(invocation) = message.tool_invocation.as_ref() {
-        return json!({
+        return Ok(json!({
             "role": "assistant",
             "content": [{
                 "type": "tool_use",
@@ -598,7 +604,7 @@ fn anthropic_message(message: &ContextMessage) -> Value {
                 "name": invocation.name,
                 "input": invocation.input,
             }]
-        });
+        }));
     }
 
     if message.role == MessageRole::Tool {
@@ -608,7 +614,7 @@ fn anthropic_message(message: &ContextMessage) -> Value {
             json!(message.content)
         };
 
-        return json!({
+        return Ok(json!({
             "role": "user",
             "content": [{
                 "type": "tool_result",
@@ -618,20 +624,30 @@ fn anthropic_message(message: &ContextMessage) -> Value {
                     .unwrap_or_else(|| "unknown_tool_use".to_string()),
                 "content": content,
             }]
-        });
+        }));
     }
 
     let role = match message.role {
         MessageRole::User => "user",
         MessageRole::Assistant => "assistant",
-        MessageRole::System => unreachable!("system messages are handled separately"),
-        MessageRole::Tool => unreachable!("tool messages are handled above"),
+        MessageRole::System => {
+            return Err(MoaError::ProviderError(
+                "unexpected System message in anthropic_message; should be filtered upstream"
+                    .to_string(),
+            ));
+        }
+        MessageRole::Tool => {
+            return Err(MoaError::ProviderError(
+                "unexpected Tool message in anthropic_message; should be filtered upstream"
+                    .to_string(),
+            ));
+        }
     };
 
-    json!({
+    Ok(json!({
         "role": role,
         "content": message.content,
-    })
+    }))
 }
 
 fn anthropic_content_blocks(blocks: &[ToolContent]) -> Value {
@@ -709,7 +725,7 @@ where
         let emitted = state.apply_event(&event)?;
 
         for block in emitted {
-            span_recorder.observe_block(&block);
+            span_recorder.observe_block(block.clone());
             if tx.send(Ok(block)).await.is_err() {
                 tracing::debug!("completion stream receiver dropped before the response finished");
                 break;
@@ -774,7 +790,7 @@ impl AnthropicStreamState {
             }
             "content_block_start" => self.apply_block_start(parse_sse_json(event)?),
             "content_block_delta" => self.apply_block_delta(parse_sse_json(event)?),
-            "content_block_stop" => self.apply_block_stop(parse_sse_json(event)?),
+            "content_block_stop" => Ok(self.apply_block_stop(parse_sse_json(event)?)),
             "message_delta" => {
                 let payload: MessageDeltaEvent = parse_sse_json(event)?;
                 self.stop_reason = payload
@@ -894,10 +910,7 @@ impl AnthropicStreamState {
         }
     }
 
-    fn apply_block_stop(
-        &mut self,
-        payload: ContentBlockStopEvent,
-    ) -> Result<Vec<CompletionContent>> {
+    fn apply_block_stop(&mut self, payload: ContentBlockStopEvent) -> Vec<CompletionContent> {
         self.ensure_capacity(payload.index);
         self.ensure_completed_capacity(payload.index);
 
@@ -905,7 +918,7 @@ impl AnthropicStreamState {
         match block {
             BlockAccumulator::Text(text) => {
                 self.completed_content[payload.index] = Some(CompletionContent::Text(text));
-                Ok(Vec::new())
+                Vec::new()
             }
             BlockAccumulator::Tool {
                 id,
@@ -938,7 +951,7 @@ impl AnthropicStreamState {
                     provider_metadata: None,
                 });
                 self.completed_content[payload.index] = Some(content.clone());
-                Ok(vec![content])
+                vec![content]
             }
             BlockAccumulator::ServerTool { name, partial_json } => {
                 let block = CompletionContent::ProviderToolResult {
@@ -946,9 +959,9 @@ impl AnthropicStreamState {
                     summary: summarize_anthropic_server_tool_use(&name, &partial_json),
                 };
                 self.completed_content[payload.index] = Some(block.clone());
-                Ok(vec![block])
+                vec![block]
             }
-            BlockAccumulator::Ignored => Ok(Vec::new()),
+            BlockAccumulator::Ignored => Vec::new(),
         }
     }
 
@@ -1021,7 +1034,7 @@ impl AnthropicStreamState {
             text,
             content,
             stop_reason: self.stop_reason,
-            model: self.model,
+            model: ModelId::new(self.model),
             input_tokens: self.input_tokens
                 + self.cached_input_tokens
                 + self.cache_creation_input_tokens,
@@ -1224,7 +1237,7 @@ mod tests {
     use futures_util::stream;
     use moa_core::{
         CacheBreakpoint, CacheTtl, CompletionContent, CompletionRequest, ContextMessage,
-        LLMProvider, StopReason, ToolContent,
+        LLMProvider, ModelId, StopReason, ToolContent,
     };
     use serde_json::json;
     use tokio::sync::mpsc;
@@ -1239,7 +1252,7 @@ mod tests {
     #[test]
     fn completion_request_serializes_to_anthropic_format() {
         let request = CompletionRequest {
-            model: Some(MODEL_SONNET_4_6.to_string()),
+            model: Some(ModelId::new(MODEL_SONNET_4_6)),
             messages: vec![
                 ContextMessage::system("System one"),
                 ContextMessage::system("System two"),
@@ -1286,7 +1299,7 @@ mod tests {
     #[test]
     fn completion_request_prefers_deepest_breakpoint_when_static_prefix_fits_window() {
         let request = CompletionRequest {
-            model: Some(MODEL_SONNET_4_6.to_string()),
+            model: Some(ModelId::new(MODEL_SONNET_4_6)),
             messages: vec![
                 ContextMessage::system("S".repeat(5_000)),
                 ContextMessage::user("Hello"),
@@ -1325,7 +1338,7 @@ mod tests {
     #[test]
     fn completion_request_applies_cache_control_to_message_breakpoints() {
         let request = CompletionRequest {
-            model: Some(MODEL_SONNET_4_6.to_string()),
+            model: Some(ModelId::new(MODEL_SONNET_4_6)),
             messages: vec![
                 ContextMessage::user("U".repeat(5_000)),
                 ContextMessage::assistant("ack"),
@@ -1359,7 +1372,7 @@ mod tests {
     #[test]
     fn completion_request_limits_cache_control_markers_to_four_total() {
         let request = CompletionRequest {
-            model: Some(MODEL_SONNET_4_6.to_string()),
+            model: Some(ModelId::new(MODEL_SONNET_4_6)),
             messages: vec![
                 ContextMessage::user("A".repeat(5_000)),
                 ContextMessage::user("B".repeat(5_000)),
@@ -1419,7 +1432,7 @@ mod tests {
     #[test]
     fn completion_request_counts_tool_tokens_toward_breakpoint_eligibility() {
         let request = CompletionRequest {
-            model: Some(MODEL_SONNET_4_6.to_string()),
+            model: Some(ModelId::new(MODEL_SONNET_4_6)),
             messages: vec![
                 ContextMessage::system("brief"),
                 ContextMessage::user("Hello"),
@@ -1454,7 +1467,7 @@ mod tests {
     #[test]
     fn completion_request_marks_explicit_tool_breakpoint() {
         let request = CompletionRequest {
-            model: Some(MODEL_SONNET_4_6.to_string()),
+            model: Some(ModelId::new(MODEL_SONNET_4_6)),
             messages: vec![
                 ContextMessage::system("S".repeat(5_000)),
                 ContextMessage::user("Hello"),
@@ -1563,7 +1576,8 @@ mod tests {
             Some(vec![ToolContent::Text {
                 text: "hello".to_string(),
             }]),
-        ));
+        ))
+        .unwrap();
 
         assert_eq!(message["role"], "user");
         assert_eq!(message["content"][0]["type"], "tool_result");
@@ -1580,7 +1594,8 @@ mod tests {
                 input: json!({ "path": "live/anthropic.txt" }),
             },
             "<tool_call name=\"file_write\">{\"path\":\"live/anthropic.txt\"}</tool_call>",
-        ));
+        ))
+        .unwrap();
 
         assert_eq!(message["role"], "assistant");
         assert_eq!(message["content"][0]["type"], "tool_use");
@@ -1678,7 +1693,7 @@ mod tests {
             other => panic!("expected tool call, got {other:?}"),
         }
         assert_eq!(response.text, "Hello");
-        assert_eq!(response.model, MODEL_SONNET_4_6);
+        assert_eq!(response.model, ModelId::new(MODEL_SONNET_4_6));
         assert_eq!(response.input_tokens, 15);
         assert_eq!(response.cached_input_tokens, 3);
         assert_eq!(response.output_tokens, 5);
@@ -1699,10 +1714,10 @@ mod tests {
         assert_eq!(sonnet_caps.context_window, 1_000_000);
         assert_eq!(opus_caps.max_output, 128_000);
         assert_eq!(sonnet_caps.max_output, 64_000);
-        assert_eq!(opus_caps.pricing.input_per_mtok, 5.0);
-        assert_eq!(sonnet_caps.pricing.input_per_mtok, 3.0);
-        assert_eq!(opus_caps.model_id, MODEL_OPUS_4_6);
-        assert_eq!(sonnet_caps.model_id, MODEL_SONNET_4_6);
+        assert!((opus_caps.pricing.input_per_mtok - 5.0_f64).abs() < f64::EPSILON);
+        assert!((sonnet_caps.pricing.input_per_mtok - 3.0_f64).abs() < f64::EPSILON);
+        assert_eq!(opus_caps.model_id, ModelId::new(MODEL_OPUS_4_6));
+        assert_eq!(sonnet_caps.model_id, ModelId::new(MODEL_SONNET_4_6));
     }
 
     #[test]
@@ -1717,6 +1732,9 @@ mod tests {
     #[test]
     fn provider_accepts_documented_default_models() {
         let provider = AnthropicProvider::new("test-key", MODEL_SONNET_4_6).unwrap();
-        assert_eq!(provider.capabilities().model_id, MODEL_SONNET_4_6);
+        assert_eq!(
+            provider.capabilities().model_id,
+            ModelId::new(MODEL_SONNET_4_6)
+        );
     }
 }

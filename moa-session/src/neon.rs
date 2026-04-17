@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
     BranchManager, CheckpointHandle, CheckpointInfo, MoaConfig, MoaError, Result, SessionId,
@@ -301,7 +300,6 @@ impl NeonBranchManager {
     }
 }
 
-#[async_trait]
 impl BranchManager for NeonBranchManager {
     /// Creates an ephemeral Neon checkpoint branch from the configured parent branch.
     async fn create_checkpoint(

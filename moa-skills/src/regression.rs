@@ -288,7 +288,7 @@ pub async fn append_skill_regression_log(
                 operation: "skill_improvement".to_string(),
                 description: format!("{skill_name} {previous_version} -> {candidate_version}"),
                 changes,
-                brain_session: Some(session.id.clone()),
+                brain_session: Some(session.id),
             },
         )
         .await
@@ -371,11 +371,11 @@ async fn resolve_workspace_skill(
 ) -> Result<ResolvedWorkspaceSkill> {
     let scope = MemoryScope::Workspace(workspace_id.clone());
     let summaries = memory_store
-        .list_pages(scope.clone(), Some(moa_core::PageType::Skill))
+        .list_pages(&scope, Some(moa_core::PageType::Skill))
         .await?;
 
     for summary in summaries {
-        let page = memory_store.read_page(scope.clone(), &summary.path).await?;
+        let page = memory_store.read_page(&scope, &summary.path).await?;
         let document = skill_from_wiki_page(&page)?;
         if skill_selector_matches(selector, &summary.path, &document.frontmatter.name) {
             return Ok(ResolvedWorkspaceSkill {

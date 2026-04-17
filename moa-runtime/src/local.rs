@@ -62,7 +62,7 @@ impl LocalChatRuntime {
         let user_id = local_user_id();
         let session_id = match session_id {
             Some(session_id) => {
-                let meta = orchestrator.get_session(session_id.clone()).await?;
+                let meta = orchestrator.get_session(session_id).await?;
                 if meta.workspace_id != workspace_id {
                     workspace_id = meta.workspace_id.clone();
                     orchestrator
@@ -141,7 +141,7 @@ impl LocalChatRuntime {
             &self.model,
         )
         .await?;
-        Ok(self.session_id.clone())
+        Ok(self.session_id)
     }
 
     /// Switches models and starts a fresh session using the new default model.
@@ -163,7 +163,7 @@ impl LocalChatRuntime {
 
     /// Loads the current session metadata snapshot.
     pub async fn session_meta(&self) -> Result<SessionMeta> {
-        self.orchestrator.get_session(self.session_id.clone()).await
+        self.orchestrator.get_session(self.session_id).await
     }
 
     /// Loads a specific session metadata snapshot.
@@ -197,7 +197,7 @@ impl LocalChatRuntime {
             let events = self
                 .orchestrator
                 .session_store()
-                .get_events(summary.session_id.clone(), EventRange::recent(16))
+                .get_events(summary.session_id, EventRange::recent(16))
                 .await?;
             previews.push(SessionPreview {
                 last_message: last_session_message(&events),
@@ -218,7 +218,7 @@ impl LocalChatRuntime {
         let mut pages = self
             .orchestrator
             .memory_store()
-            .list_pages(MemoryScope::Workspace(self.workspace_id.clone()), filter)
+            .list_pages(&MemoryScope::Workspace(self.workspace_id.clone()), filter)
             .await?;
         pages.sort_by(|left, right| right.updated.cmp(&left.updated));
         Ok(pages)
@@ -241,7 +241,7 @@ impl LocalChatRuntime {
             .memory_store()
             .search(
                 query,
-                MemoryScope::Workspace(self.workspace_id.clone()),
+                &MemoryScope::Workspace(self.workspace_id.clone()),
                 limit,
             )
             .await
@@ -251,7 +251,7 @@ impl LocalChatRuntime {
     pub async fn read_memory_page(&self, path: &MemoryPath) -> Result<WikiPage> {
         self.orchestrator
             .memory_store()
-            .read_page(MemoryScope::Workspace(self.workspace_id.clone()), path)
+            .read_page(&MemoryScope::Workspace(self.workspace_id.clone()), path)
             .await
     }
 
@@ -264,14 +264,14 @@ impl LocalChatRuntime {
         self.orchestrator
             .memory_store()
             .write_page(
-                MemoryScope::Workspace(self.workspace_id.clone()),
+                &MemoryScope::Workspace(self.workspace_id.clone()),
                 &path,
                 page,
             )
             .await?;
         self.orchestrator
             .memory_store()
-            .read_page(MemoryScope::Workspace(self.workspace_id.clone()), &path)
+            .read_page(&MemoryScope::Workspace(self.workspace_id.clone()), &path)
             .await
     }
 
@@ -279,7 +279,7 @@ impl LocalChatRuntime {
     pub async fn delete_memory_page(&self, path: &MemoryPath) -> Result<()> {
         self.orchestrator
             .memory_store()
-            .delete_page(MemoryScope::Workspace(self.workspace_id.clone()), path)
+            .delete_page(&MemoryScope::Workspace(self.workspace_id.clone()), path)
             .await
     }
 
@@ -287,7 +287,7 @@ impl LocalChatRuntime {
     pub async fn memory_index(&self) -> Result<String> {
         self.orchestrator
             .memory_store()
-            .get_index(MemoryScope::Workspace(self.workspace_id.clone()))
+            .get_index(&MemoryScope::Workspace(self.workspace_id.clone()))
             .await
     }
 
@@ -324,11 +324,7 @@ impl LocalChatRuntime {
         session_id: SessionId,
         event_tx: mpsc::UnboundedSender<SessionRuntimeEvent>,
     ) -> Result<()> {
-        let Some(mut runtime_rx) = self
-            .orchestrator
-            .observe_runtime(session_id.clone())
-            .await?
-        else {
+        let Some(mut runtime_rx) = self.orchestrator.observe_runtime(session_id).await? else {
             return Ok(());
         };
         relay_session_runtime_events(&mut runtime_rx, session_id, event_tx).await
@@ -340,9 +336,7 @@ impl LocalChatRuntime {
             return Ok(());
         }
 
-        self.orchestrator
-            .ensure_session_running(session_id.clone())
-            .await?;
+        self.orchestrator.ensure_session_running(session_id).await?;
         self.orchestrator
             .signal(
                 session_id,
@@ -397,18 +391,18 @@ impl LocalChatRuntime {
         }
 
         self.orchestrator
-            .ensure_session_running(self.session_id.clone())
+            .ensure_session_running(self.session_id)
             .await?;
         let mut runtime_rx = self
             .orchestrator
-            .observe_runtime(self.session_id.clone())
+            .observe_runtime(self.session_id)
             .await?
             .ok_or_else(|| {
                 MoaError::ProviderError(
                     "live runtime observation is unavailable for this session".to_string(),
                 )
             })?;
-        self.queue_message(self.session_id.clone(), prompt).await?;
+        self.queue_message(self.session_id, prompt).await?;
         relay_runtime_events(&mut runtime_rx, &self.session_id, event_tx, true).await
     }
 
@@ -418,13 +412,13 @@ impl LocalChatRuntime {
         request_id: Uuid,
         decision: ApprovalDecision,
     ) -> Result<()> {
-        self.respond_to_session_approval(self.session_id.clone(), request_id, decision)
+        self.respond_to_session_approval(self.session_id, request_id, decision)
             .await
     }
 
     /// Requests an immediate cancellation of the active session task.
     pub async fn cancel_active_generation(&self) -> Result<()> {
-        self.hard_cancel_session(self.session_id.clone()).await
+        self.hard_cancel_session(self.session_id).await
     }
 }
 

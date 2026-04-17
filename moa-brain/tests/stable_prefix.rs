@@ -23,13 +23,13 @@ impl MemoryStore for NoopMemoryStore {
     async fn search(
         &self,
         _query: &str,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
         Ok(Vec::new())
     }
 
-    async fn read_page(&self, _scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
+    async fn read_page(&self, _scope: &MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
         Err(moa_core::MoaError::StorageError(format!(
             "memory page not found: {}",
             path.as_str()
@@ -38,30 +38,30 @@ impl MemoryStore for NoopMemoryStore {
 
     async fn write_page(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _path: &MemoryPath,
         _page: WikiPage,
     ) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
+    async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
         Ok(())
     }
 
     async fn list_pages(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _filter: Option<PageType>,
     ) -> Result<Vec<PageSummary>> {
         Ok(Vec::new())
     }
 
-    async fn get_index(&self, _scope: MemoryScope) -> Result<String> {
+    async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
         Ok(String::new())
     }
 
-    async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+    async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
         Ok(())
     }
 }
@@ -103,13 +103,13 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
         .create_session(SessionMeta {
             workspace_id: workspace_id.clone(),
             user_id: user_id.clone(),
-            model: config.general.default_model.clone(),
+            model: config.general.default_model.clone().into(),
             ..SessionMeta::default()
         })
         .await?;
     session_store
         .emit_event(
-            first_session_id.clone(),
+            first_session_id,
             Event::UserMessage {
                 text: "First request".to_string(),
                 attachments: Vec::new(),
@@ -118,7 +118,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
         .await?;
     assert_eq!(
         run_brain_turn_with_tools(
-            first_session_id.clone(),
+            first_session_id,
             session_store.clone(),
             provider.clone(),
             &pipeline,
@@ -132,13 +132,13 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
         .create_session(SessionMeta {
             workspace_id,
             user_id,
-            model: config.general.default_model.clone(),
+            model: config.general.default_model.clone().into(),
             ..SessionMeta::default()
         })
         .await?;
     session_store
         .emit_event(
-            second_session_id.clone(),
+            second_session_id,
             Event::UserMessage {
                 text: "Second request".to_string(),
                 attachments: Vec::new(),
@@ -157,7 +157,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
         TurnResult::Complete
     );
 
-    let requests = provider.recorded_requests().await;
+    let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2, "expected exactly two compiled requests");
 
     assert_eq!(
@@ -186,7 +186,7 @@ fn scripted_provider() -> ScriptedProvider {
 
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
-        model_id: "claude-sonnet-4-6".to_string(),
+        model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
         context_window: 200_000,
         max_output: 8_192,
         supports_tools: true,
@@ -222,7 +222,7 @@ fn stable_prefix_bytes(request: &CompletionRequest) -> Result<Vec<u8>> {
         .cache_controls
         .iter()
         .filter(|breakpoint| breakpoint.ttl == CacheTtl::OneHour)
-        .filter_map(|breakpoint| breakpoint.message_index())
+        .filter_map(moa_core::CacheBreakpoint::message_index)
         .max()
         .or_else(|| request.cache_breakpoints.last().copied())
         .unwrap_or_default()

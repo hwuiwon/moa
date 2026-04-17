@@ -97,7 +97,7 @@ impl CacheTurnPlan {
         let model = request
             .model
             .clone()
-            .unwrap_or_else(|| "unspecified".to_string());
+            .unwrap_or_else(|| moa_core::ModelId::new("unspecified"));
         let stable_message_count = static_prefix_message_count(request);
         let request_tools = request
             .tools
@@ -147,7 +147,7 @@ impl CacheTurnPlan {
             scenario,
             turn_label,
             provider,
-            model,
+            model: model.to_string(),
             tool_count: request.tools.len(),
             message_count: request.messages.len(),
             cache_breakpoints: request.cache_breakpoints.clone(),
@@ -260,7 +260,7 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
         .await?;
         run_turn(
             store.clone(),
-            session_id.clone(),
+            session_id,
             provider.clone(),
             &pipeline,
             None,
@@ -269,7 +269,7 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
         .await?;
         run_turn(
             store.clone(),
-            session_id.clone(),
+            session_id,
             provider.clone(),
             &pipeline,
             None,
@@ -427,7 +427,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         create_session(store.clone(), &workspace_id, &user_id, "claude-sonnet-4-6").await?;
     run_turn(
         store.clone(),
-        session_a.clone(),
+        session_a,
         sonnet_provider.clone(),
         &sonnet_pipeline,
         Some(tool_router.clone()),
@@ -436,7 +436,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     .await?;
     run_turn(
         store.clone(),
-        session_a.clone(),
+        session_a,
         sonnet_provider.clone(),
         &sonnet_pipeline,
         Some(tool_router.clone()),
@@ -445,7 +445,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     .await?;
     run_turn(
         store.clone(),
-        session_a.clone(),
+        session_a,
         sonnet_provider.clone(),
         &sonnet_pipeline,
         Some(tool_router.clone()),
@@ -503,7 +503,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         create_session(store.clone(), &workspace_id, &user_id, "claude-sonnet-4-6").await?;
     run_turn(
         store.clone(),
-        session_c.clone(),
+        session_c,
         cold_session_provider.clone(),
         &cold_session_pipeline,
         Some(tool_router.clone()),
@@ -539,7 +539,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     );
     run_turn(
         store.clone(),
-        session_a.clone(),
+        session_a,
         opus_provider.clone(),
         &opus_pipeline,
         Some(tool_router.clone()),
@@ -624,7 +624,7 @@ async fn create_session(
         .create_session(SessionMeta {
             workspace_id: workspace_id.clone(),
             user_id: user_id.clone(),
-            model: model.to_string(),
+            model: moa_core::ModelId::new(model),
             ..SessionMeta::default()
         })
         .await
@@ -640,7 +640,7 @@ async fn run_turn(
 ) -> Result<()> {
     store
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::UserMessage {
                 text: prompt.to_string(),
                 attachments: Vec::new(),
@@ -648,14 +648,9 @@ async fn run_turn(
         )
         .await?;
 
-    let result = run_brain_turn_with_tools(
-        session_id.clone(),
-        store.clone(),
-        provider,
-        pipeline,
-        tool_router,
-    )
-    .await?;
+    let result =
+        run_brain_turn_with_tools(session_id, store.clone(), provider, pipeline, tool_router)
+            .await?;
 
     assert_eq!(result, moa_brain::TurnResult::Complete);
     let _events = store.get_events(session_id, EventRange::all()).await?;
@@ -779,7 +774,7 @@ fn static_prefix_message_count(request: &CompletionRequest) -> usize {
         .cache_controls
         .iter()
         .filter(|breakpoint| breakpoint.ttl == CacheTtl::OneHour)
-        .filter_map(|breakpoint| breakpoint.message_index())
+        .filter_map(moa_core::CacheBreakpoint::message_index)
         .max()
         .or_else(|| request.cache_breakpoints.last().copied())
         .unwrap_or_default()

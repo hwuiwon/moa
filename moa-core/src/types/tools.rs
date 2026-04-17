@@ -184,6 +184,7 @@ impl ToolOutput {
     }
 
     /// Marks this tool output as truncated or untruncated.
+    #[must_use]
     pub fn with_truncated(mut self, truncated: bool) -> Self {
         self.truncated = truncated;
         self

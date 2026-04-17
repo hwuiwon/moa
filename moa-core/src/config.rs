@@ -431,24 +431,49 @@ impl MoaConfig {
     }
 
     /// Persists this config to the default MOA config path.
+    ///
+    /// This is a synchronous operation. Prefer [`save_async`][Self::save_async] when calling
+    /// from an async context to avoid blocking the executor.
     pub fn save(&self) -> Result<()> {
         self.save_to_path(Self::default_path()?)
     }
 
     /// Persists this config to an explicit TOML file path.
+    ///
+    /// This is a synchronous operation. Prefer [`save_to_path_async`][Self::save_to_path_async]
+    /// when calling from an async context to avoid blocking the executor.
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = config_parent_dir(path) {
             std::fs::create_dir_all(parent)?;
         }
-        let content = toml::to_string_pretty(self)
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?;
+        let content = self.serialize_config()?;
         std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Persists this config to the default MOA config path using async I/O.
+    pub async fn save_async(&self) -> Result<()> {
+        self.save_to_path_async(Self::default_path()?).await
+    }
+
+    /// Persists this config to an explicit TOML file path using async I/O.
+    pub async fn save_to_path_async(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = config_parent_dir(path) {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let content = self.serialize_config()?;
+        tokio::fs::write(path, content).await?;
         Ok(())
     }
 }
 
 impl MoaConfig {
+    fn serialize_config(&self) -> Result<String> {
+        toml::to_string_pretty(self).map_err(|error| MoaError::ConfigError(error.to_string()))
+    }
+
     fn validate(&self) -> Result<()> {
         if self.database.url.trim().is_empty() {
             return Err(MoaError::ConfigError(
@@ -466,6 +491,11 @@ impl MoaConfig {
 
         Ok(())
     }
+}
+
+fn config_parent_dir(path: &Path) -> Option<&Path> {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
 }
 
 /// General runtime settings.
@@ -528,7 +558,7 @@ impl Default for ProviderCredentialConfig {
 pub struct ProvidersConfig {
     /// Anthropic credentials.
     pub anthropic: ProviderCredentialConfig,
-    /// OpenAI credentials.
+    /// `OpenAI` credentials.
     pub openai: ProviderCredentialConfig,
     /// Google Gemini credentials.
     pub google: ProviderCredentialConfig,
@@ -1177,7 +1207,7 @@ mod tests {
         assert_eq!(config.compaction.recent_turns_verbatim, 5);
         assert!(config.compaction.preserve_errors);
         assert_eq!(config.compaction.tier2_trigger_blocks_past_bp4, 14);
-        assert_eq!(config.compaction.tier3_trigger_fraction, 0.9);
+        assert!((config.compaction.tier3_trigger_fraction - 0.9_f64).abs() < f64::EPSILON);
         assert_eq!(config.compaction.max_input_tokens_per_turn, 160_000);
         assert!(config.compaction.summarizer_model.is_none());
     }
@@ -1217,7 +1247,7 @@ mod tests {
         "#;
         let config: MoaConfig = toml::from_str(toml).expect("config should deserialize");
         assert_eq!(config.observability.otlp_protocol, OtlpProtocol::Grpc);
-        assert_eq!(config.observability.sample_rate, 1.0);
+        assert!((config.observability.sample_rate - 1.0_f64).abs() < f64::EPSILON);
         assert!(config.observability.otlp_headers.is_empty());
     }
 
@@ -1240,20 +1270,20 @@ mod tests {
         assert_eq!(config.observability.otlp_protocol, OtlpProtocol::Http);
         assert_eq!(config.observability.environment.as_deref(), Some("staging"));
         assert_eq!(config.observability.release.as_deref(), Some("abc123"));
-        assert_eq!(config.observability.sample_rate, 0.5);
+        assert!((config.observability.sample_rate - 0.5_f64).abs() < f64::EPSILON);
         assert_eq!(config.observability.otlp_headers.len(), 2);
     }
 
     #[test]
     fn observability_config_backward_compat() {
-        let toml = r#"
+        let toml = r"
             [observability]
             enabled = false
-        "#;
+        ";
         let config: MoaConfig = toml::from_str(toml).expect("config should deserialize");
         assert!(!config.observability.enabled);
         assert_eq!(config.observability.otlp_protocol, OtlpProtocol::Grpc);
-        assert_eq!(config.observability.sample_rate, 1.0);
+        assert!((config.observability.sample_rate - 1.0_f64).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1295,7 +1325,7 @@ mod tests {
         assert_eq!(config.session_limits.loop_detection_threshold, 3);
         assert_eq!(config.tool_output.max_replay_chars, 20_000);
         assert_eq!(config.tool_output.max_bash_lines, 200);
-        assert_eq!(config.tool_output.head_ratio, 0.4);
+        assert!((config.tool_output.head_ratio - 0.4_f64).abs() < f64::EPSILON);
     }
 
     #[test]

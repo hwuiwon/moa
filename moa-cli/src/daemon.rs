@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use futures_util::FutureExt;
 use moa_core::{
     BrainOrchestrator, BroadcastChannel, DaemonCommand, DaemonInfo, DaemonReply,
     DaemonSessionPreview, DaemonStreamEvent, EventRange, LagPolicy, MemoryScope, MemoryStore,
@@ -21,7 +22,7 @@ use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::api::start_api_server;
 
@@ -47,11 +48,14 @@ pub async fn start_daemon(config: &MoaConfig) -> Result<()> {
     ensure_parent_dir(&pid_path).await?;
     ensure_parent_dir(&log_path).await?;
 
-    let log_file = std::fs::OpenOptions::new()
+    let log_file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_path)
-        .with_context(|| format!("opening daemon log at {}", log_path.display()))?;
+        .await
+        .with_context(|| format!("opening daemon log at {}", log_path.display()))?
+        .into_std()
+        .await;
     let log_file_err = log_file
         .try_clone()
         .with_context(|| format!("cloning daemon log at {}", log_path.display()))?;
@@ -162,6 +166,8 @@ pub async fn run_daemon_server(config: MoaConfig) -> Result<()> {
     let signal_task = spawn_signal_listener(shutdown_tx.clone());
     let api_task = spawn_api_server(&config, orchestrator, shutdown_tx.subscribe()).await?;
 
+    let mut connection_tasks: JoinSet<()> = JoinSet::new();
+
     loop {
         tokio::select! {
             changed = shutdown_rx.changed() => {
@@ -173,12 +179,32 @@ pub async fn run_daemon_server(config: MoaConfig) -> Result<()> {
                 let (stream, _) = accept?;
                 let state = state.clone();
                 let shutdown_tx = shutdown_tx.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = handle_connection(state, shutdown_tx, stream).await {
-                        tracing::error!(error = %error, "daemon request failed");
+                connection_tasks.spawn(async move {
+                    let result = std::panic::AssertUnwindSafe(async {
+                        handle_connection(state, shutdown_tx, stream).await
+                    })
+                    .catch_unwind()
+                    .await;
+                    match result {
+                        Err(panic) => tracing::error!(?panic, "daemon connection handler panicked"),
+                        Ok(Err(error)) => tracing::error!(%error, "daemon request failed"),
+                        Ok(Ok(())) => {}
                     }
                 });
             }
+            // Reap finished connection tasks to avoid unbounded growth.
+            Some(_) = connection_tasks.join_next() => {}
+        }
+    }
+
+    // Observation streams can outlive the shutdown signal indefinitely. Abort
+    // any remaining handlers so drain does not block on long-lived clients.
+    connection_tasks.abort_all();
+
+    // Drain in-flight connection handlers before teardown.
+    while let Some(result) = connection_tasks.join_next().await {
+        if let Err(error) = result {
+            tracing::error!(?error, "daemon connection task panicked during drain");
         }
     }
 
@@ -222,7 +248,7 @@ async fn handle_connection(
             write_stream_event(reader.get_mut(), &DaemonStreamEvent::Ready).await?;
             let receiver: tokio::sync::broadcast::Receiver<RuntimeEvent> = state
                 .orchestrator
-                .observe_runtime(session_id.clone())
+                .observe_runtime(session_id)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("runtime observation is unavailable"))?;
             relay_runtime_stream(session_id, reader.get_mut(), receiver).await?;
@@ -340,7 +366,7 @@ async fn handle_unary_command_inner(
             let mut pages: Vec<moa_core::PageSummary> = state
                 .orchestrator
                 .memory_store()
-                .list_pages(MemoryScope::Workspace(workspace_id), None)
+                .list_pages(&MemoryScope::Workspace(workspace_id), None)
                 .await?;
             pages.sort_by(|left, right| right.updated.cmp(&left.updated));
             pages.truncate(limit);
@@ -354,14 +380,14 @@ async fn handle_unary_command_inner(
             state
                 .orchestrator
                 .memory_store()
-                .search(&query, MemoryScope::Workspace(workspace_id), limit)
+                .search(&query, &MemoryScope::Workspace(workspace_id), limit)
                 .await?,
         )),
         DaemonCommand::ReadMemoryPage { workspace_id, path } => Ok(DaemonReply::MemoryPage(
             state
                 .orchestrator
                 .memory_store()
-                .read_page(MemoryScope::Workspace(workspace_id), &path)
+                .read_page(&MemoryScope::Workspace(workspace_id), &path)
                 .await?,
         )),
         DaemonCommand::WriteMemoryPage {
@@ -372,7 +398,7 @@ async fn handle_unary_command_inner(
             state
                 .orchestrator
                 .memory_store()
-                .write_page(MemoryScope::Workspace(workspace_id), &path, page)
+                .write_page(&MemoryScope::Workspace(workspace_id), &path, page)
                 .await?;
             Ok(DaemonReply::Ack)
         }
@@ -380,7 +406,7 @@ async fn handle_unary_command_inner(
             state
                 .orchestrator
                 .memory_store()
-                .delete_page(MemoryScope::Workspace(workspace_id), &path)
+                .delete_page(&MemoryScope::Workspace(workspace_id), &path)
                 .await?;
             Ok(DaemonReply::Ack)
         }
@@ -388,7 +414,7 @@ async fn handle_unary_command_inner(
             state
                 .orchestrator
                 .memory_store()
-                .get_index(MemoryScope::Workspace(workspace_id))
+                .get_index(&MemoryScope::Workspace(workspace_id))
                 .await?,
         )),
         DaemonCommand::ToolNames => Ok(DaemonReply::ToolNames(state.orchestrator.tool_names())),
@@ -462,7 +488,7 @@ async fn list_session_previews(
     let mut previews = Vec::new();
     for summary in session_store.list_sessions(filter).await? {
         let events = session_store
-            .get_events(summary.session_id.clone(), EventRange::recent(16))
+            .get_events(summary.session_id, EventRange::recent(16))
             .await?;
         previews.push(DaemonSessionPreview {
             summary,
@@ -723,7 +749,7 @@ mod tests {
                     workspace_id: WorkspaceId::new("default"),
                     user_id: UserId::new("tester"),
                     platform: Platform::Cli,
-                    model: config.general.default_model.clone(),
+                    model: config.general.default_model.clone().into(),
                     initial_message: Some(UserMessage {
                         text: "start".to_string(),
                         attachments: Vec::new(),
@@ -777,7 +803,7 @@ mod tests {
                     workspace_id: workspace_id.clone(),
                     user_id: UserId::new("tester"),
                     platform: Platform::Cli,
-                    model: config.general.default_model.clone(),
+                    model: config.general.default_model.clone().into(),
                     initial_message: Some(UserMessage {
                         text: "preview".to_string(),
                         attachments: Vec::new(),
@@ -828,7 +854,7 @@ mod tests {
                         workspace_id,
                         user_id: UserId::new("tester"),
                         platform: Platform::Cli,
-                        model: config.general.default_model.clone(),
+                        model: config.general.default_model.clone().into(),
                         initial_message: Some(UserMessage {
                             text: "scoped".to_string(),
                             attachments: Vec::new(),

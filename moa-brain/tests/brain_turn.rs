@@ -55,7 +55,7 @@ fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
 #[async_trait]
 impl SessionStore for MockSessionStore {
     async fn create_session(&self, meta: SessionMeta) -> Result<SessionId> {
-        let id = meta.id.clone();
+        let id = meta.id;
         *self.session.lock().await = meta;
         Ok(id)
     }
@@ -173,13 +173,13 @@ impl MemoryStore for MockMemoryStore {
     async fn search(
         &self,
         _query: &str,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
         Ok(Vec::new())
     }
 
-    async fn read_page(&self, _scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
+    async fn read_page(&self, _scope: &MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
         Err(moa_core::MoaError::StorageError(format!(
             "memory page not found: {}",
             path.as_str()
@@ -188,30 +188,30 @@ impl MemoryStore for MockMemoryStore {
 
     async fn write_page(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _path: &MemoryPath,
         _page: WikiPage,
     ) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
+    async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
         Ok(())
     }
 
     async fn list_pages(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _filter: Option<PageType>,
     ) -> Result<Vec<PageSummary>> {
         Ok(Vec::new())
     }
 
-    async fn get_index(&self, _scope: MemoryScope) -> Result<String> {
+    async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
         Ok(String::new())
     }
 
-    async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+    async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
         Ok(())
     }
 }
@@ -227,13 +227,13 @@ impl MemoryStore for FixedPageMemoryStore {
     async fn search(
         &self,
         _query: &str,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
         Ok(Vec::new())
     }
 
-    async fn read_page(&self, _scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
+    async fn read_page(&self, _scope: &MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
         if path == &self.path {
             Ok(self.page.clone())
         } else {
@@ -243,20 +243,20 @@ impl MemoryStore for FixedPageMemoryStore {
 
     async fn write_page(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _path: &MemoryPath,
         _page: WikiPage,
     ) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
+    async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
         Ok(())
     }
 
     async fn list_pages(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         filter: Option<PageType>,
     ) -> Result<Vec<PageSummary>> {
         if filter
@@ -275,11 +275,11 @@ impl MemoryStore for FixedPageMemoryStore {
         Ok(Vec::new())
     }
 
-    async fn get_index(&self, _scope: MemoryScope) -> Result<String> {
+    async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
         Ok(String::new())
     }
 
-    async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+    async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
         Ok(())
     }
 }
@@ -294,7 +294,7 @@ impl LLMProvider for MockLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: "claude-sonnet-4-6".to_string(),
+            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -316,7 +316,7 @@ impl LLMProvider for MockLlmProvider {
             text: "Hi there".to_string(),
             content: vec![moa_core::CompletionContent::Text("Hi there".to_string())],
             stop_reason: StopReason::EndTurn,
-            model: "claude-sonnet-4-6".to_string(),
+            model: moa_core::ModelId::new("claude-sonnet-4-6"),
             input_tokens: 32,
             output_tokens: 8,
             cached_input_tokens: 0,
@@ -358,7 +358,7 @@ impl LLMProvider for CapturingTextLlmProvider {
             text: self.text.clone(),
             content: vec![moa_core::CompletionContent::Text(self.text.clone())],
             stop_reason: StopReason::EndTurn,
-            model: "claude-sonnet-4-6".to_string(),
+            model: moa_core::ModelId::new("claude-sonnet-4-6"),
             input_tokens: 32,
             output_tokens: 8,
             cached_input_tokens: 0,
@@ -382,7 +382,7 @@ impl LLMProvider for ToolLoopLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: "claude-sonnet-4-6".to_string(),
+            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -413,7 +413,7 @@ impl LLMProvider for ToolLoopLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: "claude-sonnet-4-6".to_string(),
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 12,
                 output_tokens: 5,
                 cached_input_tokens: 0,
@@ -434,7 +434,7 @@ impl LLMProvider for ToolLoopLlmProvider {
                     "Tool said hello from tool".to_string(),
                 )],
                 stop_reason: StopReason::EndTurn,
-                model: "claude-sonnet-4-6".to_string(),
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 20,
                 output_tokens: 7,
                 cached_input_tokens: 0,
@@ -461,7 +461,7 @@ impl LLMProvider for OpenAiApprovalLoopLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: "gpt-5.4".to_string(),
+            model_id: moa_core::ModelId::new("gpt-5.4"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -492,7 +492,7 @@ impl LLMProvider for OpenAiApprovalLoopLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: "gpt-5.4".to_string(),
+                model: moa_core::ModelId::new("gpt-5.4"),
                 input_tokens: 12,
                 output_tokens: 5,
                 cached_input_tokens: 0,
@@ -522,7 +522,7 @@ impl LLMProvider for OpenAiApprovalLoopLlmProvider {
                     "Approved tool completed".to_string(),
                 )],
                 stop_reason: StopReason::EndTurn,
-                model: "gpt-5.4".to_string(),
+                model: moa_core::ModelId::new("gpt-5.4"),
                 input_tokens: 20,
                 output_tokens: 7,
                 cached_input_tokens: 0,
@@ -549,7 +549,7 @@ impl LLMProvider for OpenAiFailedReadLoopLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: "gpt-5.4".to_string(),
+            model_id: moa_core::ModelId::new("gpt-5.4"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -580,7 +580,7 @@ impl LLMProvider for OpenAiFailedReadLoopLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: "gpt-5.4".to_string(),
+                model: moa_core::ModelId::new("gpt-5.4"),
                 input_tokens: 12,
                 output_tokens: 5,
                 cached_input_tokens: 0,
@@ -613,7 +613,7 @@ impl LLMProvider for OpenAiFailedReadLoopLlmProvider {
                     "Read failed as expected".to_string(),
                 )],
                 stop_reason: StopReason::EndTurn,
-                model: "gpt-5.4".to_string(),
+                model: moa_core::ModelId::new("gpt-5.4"),
                 input_tokens: 20,
                 output_tokens: 7,
                 cached_input_tokens: 0,
@@ -640,7 +640,7 @@ impl LLMProvider for MemoryWriteLoopLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: "claude-sonnet-4-6".to_string(),
+            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -676,7 +676,7 @@ impl LLMProvider for MemoryWriteLoopLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: "claude-sonnet-4-6".to_string(),
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 12,
                 output_tokens: 5,
                 cached_input_tokens: 0,
@@ -696,7 +696,7 @@ impl LLMProvider for MemoryWriteLoopLlmProvider {
                     "Saved the workspace page.".to_string(),
                 )],
                 stop_reason: StopReason::EndTurn,
-                model: "claude-sonnet-4-6".to_string(),
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 20,
                 output_tokens: 7,
                 cached_input_tokens: 0,
@@ -742,7 +742,7 @@ impl LLMProvider for MemoryIngestLoopLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: "claude-sonnet-4-6".to_string(),
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 18,
                 output_tokens: 8,
                 cached_input_tokens: 0,
@@ -761,7 +761,7 @@ impl LLMProvider for MemoryIngestLoopLlmProvider {
                         "Stored the API design doc in workspace memory.".to_string(),
                     )],
                     stop_reason: StopReason::EndTurn,
-                    model: "claude-sonnet-4-6".to_string(),
+                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
                     input_tokens: 24,
                     output_tokens: 10,
                     cached_input_tokens: 0,
@@ -785,7 +785,7 @@ impl LLMProvider for MemoryIngestLoopLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: "claude-sonnet-4-6".to_string(),
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 14,
                 output_tokens: 5,
                 cached_input_tokens: 0,
@@ -812,7 +812,7 @@ impl LLMProvider for MemoryIngestLoopLlmProvider {
                         "The design doc says tokens rotate every 24 hours.".to_string(),
                     )],
                     stop_reason: StopReason::EndTurn,
-                    model: "claude-sonnet-4-6".to_string(),
+                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
                     input_tokens: 22,
                     output_tokens: 9,
                     cached_input_tokens: 0,
@@ -841,7 +841,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: "claude-sonnet-4-6".to_string(),
+            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -876,7 +876,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: "claude-sonnet-4-6".to_string(),
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 12,
                 output_tokens: 5,
                 cached_input_tokens: 0,
@@ -897,7 +897,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
                         "Tool said hello from tool ({request_index})"
                     ))],
                     stop_reason: StopReason::EndTurn,
-                    model: "claude-sonnet-4-6".to_string(),
+                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
                     input_tokens: 20,
                     output_tokens: 7,
                     cached_input_tokens: 0,
@@ -910,7 +910,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
                 text: "done".to_string(),
                 content: vec![CompletionContent::Text("done".to_string())],
                 stop_reason: StopReason::EndTurn,
-                model: "claude-sonnet-4-6".to_string(),
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 10,
                 output_tokens: 2,
                 cached_input_tokens: 0,
@@ -965,7 +965,7 @@ impl LLMProvider for CanaryLeakLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: "claude-sonnet-4-6".to_string(),
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 20,
                 output_tokens: 4,
                 cached_input_tokens: 0,
@@ -982,7 +982,7 @@ impl LLMProvider for CanaryLeakLlmProvider {
                 text: "blocked".to_string(),
                 content: vec![CompletionContent::Text("blocked".to_string())],
                 stop_reason: StopReason::EndTurn,
-                model: "claude-sonnet-4-6".to_string(),
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 16,
                 output_tokens: 2,
                 cached_input_tokens: 0,
@@ -1025,7 +1025,7 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: "claude-sonnet-4-6".to_string(),
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 18,
                 output_tokens: 3,
                 cached_input_tokens: 0,
@@ -1054,7 +1054,7 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
                 text: "wrapped".to_string(),
                 content: vec![CompletionContent::Text("wrapped".to_string())],
                 stop_reason: StopReason::EndTurn,
-                model: "claude-sonnet-4-6".to_string(),
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 22,
                 output_tokens: 5,
                 cached_input_tokens: 0,
@@ -1091,7 +1091,7 @@ impl LLMProvider for ProviderToolResultTurnLlm {
                 CompletionContent::Text("Fresh answer from web search".to_string()),
             ],
             stop_reason: StopReason::EndTurn,
-            model: "claude-sonnet-4-6".to_string(),
+            model: moa_core::ModelId::new("claude-sonnet-4-6"),
             input_tokens: 8,
             output_tokens: 5,
             cached_input_tokens: 0,
@@ -1105,7 +1105,7 @@ impl LLMProvider for ProviderToolResultTurnLlm {
 fn make_event_record(session_id: &SessionId, sequence_num: u64, event: Event) -> EventRecord {
     EventRecord {
         id: uuid::Uuid::now_v7(),
-        session_id: session_id.clone(),
+        session_id: *session_id,
         sequence_num,
         event_type: event.event_type(),
         event,
@@ -1122,7 +1122,7 @@ async fn run_brain_turn_emits_brain_response_event() {
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let initial_events = vec![make_event_record(
@@ -1141,7 +1141,7 @@ async fn run_brain_turn_emits_brain_response_event() {
     );
     let llm = Arc::new(MockLlmProvider);
 
-    let result = run_brain_turn(session.id.clone(), store.clone(), llm, &pipeline)
+    let result = run_brain_turn(session.id, store.clone(), llm, &pipeline)
         .await
         .unwrap();
 
@@ -1152,7 +1152,7 @@ async fn run_brain_turn_emits_brain_response_event() {
     match &events[1].event {
         Event::CacheReport { report } => {
             assert_eq!(report.provider, "mock");
-            assert_eq!(report.model, "claude-sonnet-4-6");
+            assert_eq!(report.model.as_str(), "claude-sonnet-4-6");
             assert_eq!(report.cached_input_tokens, 0);
             assert!(!report.stable_prefix_reused);
         }
@@ -1166,7 +1166,7 @@ async fn run_brain_turn_emits_brain_response_event() {
             ..
         } => {
             assert_eq!(text, "Hi there");
-            assert_eq!(model, "claude-sonnet-4-6");
+            assert_eq!(model.as_str(), "claude-sonnet-4-6");
             assert_eq!(events[2].event.input_tokens(), 32);
             assert_eq!(*output_tokens, 8);
         }
@@ -1180,7 +1180,7 @@ async fn run_brain_turn_marks_cache_prefix_reuse_on_second_request() {
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let initial_events = vec![make_event_record(
@@ -1199,12 +1199,12 @@ async fn run_brain_turn_marks_cache_prefix_reuse_on_second_request() {
     );
     let llm = Arc::new(MockLlmProvider);
 
-    run_brain_turn(session.id.clone(), store.clone(), llm.clone(), &pipeline)
+    run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline)
         .await
         .unwrap();
     store
         .emit_event(
-            session.id.clone(),
+            session.id,
             Event::UserMessage {
                 text: "Hello again".to_string(),
                 attachments: Vec::new(),
@@ -1212,7 +1212,7 @@ async fn run_brain_turn_marks_cache_prefix_reuse_on_second_request() {
         )
         .await
         .unwrap();
-    run_brain_turn(session.id.clone(), store.clone(), llm, &pipeline)
+    run_brain_turn(session.id, store.clone(), llm, &pipeline)
         .await
         .unwrap();
 
@@ -1234,7 +1234,7 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let initial_events = vec![
@@ -1251,7 +1251,7 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
             1,
             Event::BrainResponse {
                 text: "Existing reply".to_string(),
-                model: "claude-sonnet-4-6".to_string(),
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 input_tokens_uncached: 20,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,
@@ -1268,7 +1268,7 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
     let pipeline = build_default_pipeline(&config, store.clone(), Arc::new(MockMemoryStore));
     let llm = Arc::new(CapturingTextLlmProvider::new("should not run"));
 
-    let error = run_brain_turn(session.id.clone(), store.clone(), llm.clone(), &pipeline)
+    let error = run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline)
         .await
         .expect_err("budget should stop the turn");
     match error {
@@ -1300,7 +1300,7 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let initial_events = vec![
@@ -1317,7 +1317,7 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
             1,
             Event::BrainResponse {
                 text: "Existing reply".to_string(),
-                model: "claude-sonnet-4-6".to_string(),
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 input_tokens_uncached: 20,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,
@@ -1334,7 +1334,7 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
     let pipeline = build_default_pipeline(&config, store.clone(), Arc::new(MockMemoryStore));
     let llm = Arc::new(CapturingTextLlmProvider::new("still runs"));
 
-    let result = run_brain_turn(session.id.clone(), store.clone(), llm.clone(), &pipeline)
+    let result = run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline)
         .await
         .expect("unlimited budget should allow the turn");
 
@@ -1348,7 +1348,7 @@ async fn run_brain_turn_pauses_for_approval_then_executes_tool() {
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let initial_events = vec![make_event_record(
@@ -1376,7 +1376,7 @@ async fn run_brain_turn_pauses_for_approval_then_executes_tool() {
     let llm = Arc::new(ToolLoopLlmProvider::default());
 
     let result = run_brain_turn_with_tools(
-        session.id.clone(),
+        session.id,
         store.clone(),
         llm.clone(),
         &pipeline,
@@ -1392,7 +1392,7 @@ async fn run_brain_turn_pauses_for_approval_then_executes_tool() {
     assert_eq!(llm.requests.lock().await.len(), 1);
     store
         .emit_event(
-            session.id.clone(),
+            session.id,
             Event::ApprovalDecided {
                 request_id: request.request_id,
                 decision: ApprovalDecision::AllowOnce,
@@ -1404,7 +1404,7 @@ async fn run_brain_turn_pauses_for_approval_then_executes_tool() {
         .unwrap();
 
     let resumed = run_brain_turn_with_tools(
-        session.id.clone(),
+        session.id,
         store.clone(),
         llm.clone(),
         &pipeline,
@@ -1438,7 +1438,7 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_approval() {
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "gpt-5.4".to_string(),
+        model: moa_core::ModelId::new("gpt-5.4"),
         ..SessionMeta::default()
     };
     let initial_events = vec![make_event_record(
@@ -1466,7 +1466,7 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_approval() {
     let llm = Arc::new(OpenAiApprovalLoopLlmProvider::default());
 
     let result = run_brain_turn_with_tools(
-        session.id.clone(),
+        session.id,
         store.clone(),
         llm.clone(),
         &pipeline,
@@ -1482,7 +1482,7 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_approval() {
 
     store
         .emit_event(
-            session.id.clone(),
+            session.id,
             Event::ApprovalDecided {
                 request_id: request.request_id,
                 decision: ApprovalDecision::AllowOnce,
@@ -1494,7 +1494,7 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_approval() {
         .unwrap();
 
     let resumed = run_brain_turn_with_tools(
-        session.id.clone(),
+        session.id,
         store.clone(),
         llm.clone(),
         &pipeline,
@@ -1526,7 +1526,7 @@ async fn run_brain_turn_records_tool_call_before_auto_allowed_tool_error() {
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "gpt-5.4".to_string(),
+        model: moa_core::ModelId::new("gpt-5.4"),
         ..SessionMeta::default()
     };
     let initial_events = vec![make_event_record(
@@ -1553,15 +1553,10 @@ async fn run_brain_turn_records_tool_call_before_auto_allowed_tool_error() {
     );
     let llm = Arc::new(OpenAiFailedReadLoopLlmProvider::default());
 
-    let result = run_brain_turn_with_tools(
-        session.id.clone(),
-        store.clone(),
-        llm,
-        &pipeline,
-        Some(tool_router),
-    )
-    .await
-    .unwrap();
+    let result =
+        run_brain_turn_with_tools(session.id, store.clone(), llm, &pipeline, Some(tool_router))
+            .await
+            .unwrap();
 
     assert_eq!(result, TurnResult::Complete);
 
@@ -1611,7 +1606,7 @@ async fn run_brain_turn_memory_write_creates_workspace_page_after_approval() {
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let initial_events = vec![make_event_record(
@@ -1642,7 +1637,7 @@ async fn run_brain_turn_memory_write_creates_workspace_page_after_approval() {
     let llm = Arc::new(MemoryWriteLoopLlmProvider::default());
 
     let result = run_brain_turn_with_tools(
-        session.id.clone(),
+        session.id,
         store.clone(),
         llm.clone(),
         &pipeline,
@@ -1657,7 +1652,7 @@ async fn run_brain_turn_memory_write_creates_workspace_page_after_approval() {
     };
     store
         .emit_event(
-            session.id.clone(),
+            session.id,
             Event::ApprovalDecided {
                 request_id: request.request_id,
                 decision: ApprovalDecision::AllowOnce,
@@ -1668,20 +1663,15 @@ async fn run_brain_turn_memory_write_creates_workspace_page_after_approval() {
         .await
         .unwrap();
 
-    let resumed = run_brain_turn_with_tools(
-        session.id.clone(),
-        store.clone(),
-        llm,
-        &pipeline,
-        Some(tool_router),
-    )
-    .await
-    .unwrap();
+    let resumed =
+        run_brain_turn_with_tools(session.id, store.clone(), llm, &pipeline, Some(tool_router))
+            .await
+            .unwrap();
 
     assert_eq!(resumed, TurnResult::Complete);
     let page = memory_store
         .read_page(
-            MemoryScope::Workspace(session.workspace_id.clone()),
+            &MemoryScope::Workspace(session.workspace_id.clone()),
             &MemoryPath::new("topics/generated.md"),
         )
         .await
@@ -1705,7 +1695,7 @@ async fn run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let initial_events = vec![make_event_record(
@@ -1736,21 +1726,16 @@ async fn run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event
     );
     let llm = Arc::new(MemoryIngestLoopLlmProvider::default());
 
-    let result = run_brain_turn_with_tools(
-        session.id.clone(),
-        store.clone(),
-        llm,
-        &pipeline,
-        Some(tool_router),
-    )
-    .await
-    .unwrap();
+    let result =
+        run_brain_turn_with_tools(session.id, store.clone(), llm, &pipeline, Some(tool_router))
+            .await
+            .unwrap();
 
     assert_eq!(result, TurnResult::Complete);
 
     let source_page = memory_store
         .read_page(
-            MemoryScope::Workspace(session.workspace_id.clone()),
+            &MemoryScope::Workspace(session.workspace_id.clone()),
             &MemoryPath::new("sources/api-design-doc.md"),
         )
         .await
@@ -1763,7 +1748,7 @@ async fn run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event
 
     let entity_page = memory_store
         .read_page(
-            MemoryScope::Workspace(session.workspace_id.clone()),
+            &MemoryScope::Workspace(session.workspace_id.clone()),
             &MemoryPath::new("entities/auth-service.md"),
         )
         .await
@@ -1772,7 +1757,7 @@ async fn run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event
 
     let topic_page = memory_store
         .read_page(
-            MemoryScope::Workspace(session.workspace_id.clone()),
+            &MemoryScope::Workspace(session.workspace_id.clone()),
             &MemoryPath::new("topics/api-conventions.md"),
         )
         .await
@@ -1819,7 +1804,7 @@ async fn run_brain_turn_can_search_recently_ingested_memory_on_follow_up_turn() 
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let initial_events = vec![make_event_record(
@@ -1850,7 +1835,7 @@ async fn run_brain_turn_can_search_recently_ingested_memory_on_follow_up_turn() 
     let llm = Arc::new(MemoryIngestLoopLlmProvider::default());
 
     let first = run_brain_turn_with_tools(
-        session.id.clone(),
+        session.id,
         store.clone(),
         llm.clone(),
         &pipeline,
@@ -1862,7 +1847,7 @@ async fn run_brain_turn_can_search_recently_ingested_memory_on_follow_up_turn() 
 
     store
         .emit_event(
-            session.id.clone(),
+            session.id,
             Event::UserMessage {
                 text: "What does the design doc say about token rotation?".to_string(),
                 attachments: Vec::new(),
@@ -1871,15 +1856,10 @@ async fn run_brain_turn_can_search_recently_ingested_memory_on_follow_up_turn() 
         .await
         .unwrap();
 
-    let resumed = run_brain_turn_with_tools(
-        session.id.clone(),
-        store.clone(),
-        llm,
-        &pipeline,
-        Some(tool_router),
-    )
-    .await
-    .unwrap();
+    let resumed =
+        run_brain_turn_with_tools(session.id, store.clone(), llm, &pipeline, Some(tool_router))
+            .await
+            .unwrap();
 
     assert_eq!(resumed, TurnResult::Complete);
 
@@ -1909,13 +1889,13 @@ async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execu
     let session = SessionMeta {
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
-    let session_id = session.id.clone();
+    let session_id = session.id;
     let initial_events = vec![EventRecord {
         id: uuid::Uuid::now_v7(),
-        session_id: session_id.clone(),
+        session_id,
         sequence_num: 0,
         event_type: EventType::UserMessage,
         event: Event::UserMessage {
@@ -1945,7 +1925,7 @@ async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execu
     let (runtime_tx, mut runtime_rx) = broadcast::channel(64);
 
     let streamed_result = run_streamed_turn(
-        session_id.clone(),
+        session_id,
         store.clone(),
         Arc::new(ProviderToolResultTurnLlm),
         &pipeline,
@@ -1999,14 +1979,14 @@ async fn always_allow_rule_persists_and_skips_next_approval() {
         .create_session(SessionMeta {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            model: "claude-sonnet-4-6".to_string(),
+            model: moa_core::ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         })
         .await
         .unwrap();
     store
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::UserMessage {
                 text: "Use a tool".to_string(),
                 attachments: Vec::new(),
@@ -2024,7 +2004,7 @@ async fn always_allow_rule_persists_and_skips_next_approval() {
     let llm = Arc::new(RepeatingToolLlmProvider::default());
 
     let first = run_brain_turn_with_tools(
-        session_id.clone(),
+        session_id,
         store.clone(),
         llm.clone(),
         &pipeline,
@@ -2039,7 +2019,7 @@ async fn always_allow_rule_persists_and_skips_next_approval() {
 
     store
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::ApprovalDecided {
                 request_id: request.request_id,
                 decision: ApprovalDecision::AlwaysAllow {
@@ -2053,7 +2033,7 @@ async fn always_allow_rule_persists_and_skips_next_approval() {
         .unwrap();
 
     let resumed = run_brain_turn_with_tools(
-        session_id.clone(),
+        session_id,
         store.clone(),
         llm.clone(),
         &pipeline,
@@ -2073,7 +2053,7 @@ async fn always_allow_rule_persists_and_skips_next_approval() {
 
     store
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::UserMessage {
                 text: "Use the same tool again".to_string(),
                 attachments: Vec::new(),
@@ -2083,7 +2063,7 @@ async fn always_allow_rule_persists_and_skips_next_approval() {
         .unwrap();
 
     let final_result = run_brain_turn_with_tools(
-        session_id.clone(),
+        session_id,
         store.clone(),
         llm.clone(),
         &pipeline,
@@ -2102,7 +2082,7 @@ async fn pipeline_stage_four_injects_workspace_skill_metadata() {
     let session = SessionMeta {
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let session_id = store.create_session(session.clone()).await.unwrap();
@@ -2143,7 +2123,7 @@ metadata:
     });
     store
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::UserMessage {
                 text: "Debug the OAuth refresh token failure.".to_string(),
                 attachments: Vec::new(),
@@ -2158,7 +2138,7 @@ metadata:
         "I will use the skill metadata.",
     ));
 
-    let result = run_brain_turn(session_id.clone(), store.clone(), llm.clone(), &pipeline)
+    let result = run_brain_turn(session_id, store.clone(), llm.clone(), &pipeline)
         .await
         .unwrap();
 
@@ -2192,15 +2172,15 @@ async fn canary_leaks_in_tool_input_are_detected_and_blocked() {
     let session = SessionMeta {
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
-    let session_id = session.id.clone();
+    let session_id = session.id;
     let store = Arc::new(MockSessionStore::new(
         session,
         vec![EventRecord {
             id: uuid::Uuid::now_v7(),
-            session_id: session_id.clone(),
+            session_id,
             sequence_num: 0,
             event_type: moa_core::EventType::UserMessage,
             event: Event::UserMessage {
@@ -2228,15 +2208,10 @@ async fn canary_leaks_in_tool_input_are_detected_and_blocked() {
     );
     let llm = Arc::new(CanaryLeakLlmProvider::default());
 
-    let result = run_brain_turn_with_tools(
-        session_id.clone(),
-        store.clone(),
-        llm,
-        &pipeline,
-        Some(tool_router),
-    )
-    .await
-    .unwrap();
+    let result =
+        run_brain_turn_with_tools(session_id, store.clone(), llm, &pipeline, Some(tool_router))
+            .await
+            .unwrap();
 
     assert_eq!(result, TurnResult::Complete);
     let events = store
@@ -2284,15 +2259,15 @@ async fn malicious_tool_results_are_wrapped_as_untrusted_content() {
     let session = SessionMeta {
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
-    let session_id = session.id.clone();
+    let session_id = session.id;
     let store = Arc::new(MockSessionStore::new(
         session,
         vec![EventRecord {
             id: uuid::Uuid::now_v7(),
-            session_id: session_id.clone(),
+            session_id,
             sequence_num: 0,
             event_type: moa_core::EventType::UserMessage,
             event: Event::UserMessage {
@@ -2314,7 +2289,7 @@ async fn malicious_tool_results_are_wrapped_as_untrusted_content() {
     let llm = Arc::new(MaliciousToolOutputLlmProvider::default());
 
     let result = run_brain_turn_with_tools(
-        session_id.clone(),
+        session_id,
         store.clone(),
         llm.clone(),
         &pipeline,
@@ -2354,13 +2329,13 @@ async fn streamed_turn_runtime_matches_buffered_response() {
     let session = SessionMeta {
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
-    let session_id = session.id.clone();
+    let session_id = session.id;
     let initial_events = vec![EventRecord {
         id: uuid::Uuid::now_v7(),
-        session_id: session_id.clone(),
+        session_id,
         sequence_num: 0,
         event_type: EventType::UserMessage,
         event: Event::UserMessage {
@@ -2385,7 +2360,7 @@ async fn streamed_turn_runtime_matches_buffered_response() {
     let (runtime_tx, mut runtime_rx) = broadcast::channel(64);
 
     let streamed_result = run_streamed_turn(
-        session_id.clone(),
+        session_id,
         streamed_store.clone(),
         streamed_provider,
         &streamed_pipeline,
@@ -2413,7 +2388,7 @@ async fn streamed_turn_runtime_matches_buffered_response() {
     }
 
     let streamed_events = streamed_store
-        .get_events(session_id.clone(), EventRange::all())
+        .get_events(session_id, EventRange::all())
         .await
         .unwrap();
     let streamed_response = streamed_events
@@ -2437,7 +2412,7 @@ async fn streamed_turn_runtime_matches_buffered_response() {
     let buffered_provider = Arc::new(CapturingTextLlmProvider::new("Hello streamed world"));
 
     let buffered_result = run_brain_turn_with_tools(
-        session_id.clone(),
+        session_id,
         buffered_store.clone(),
         buffered_provider,
         &buffered_pipeline,

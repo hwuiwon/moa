@@ -180,7 +180,7 @@ pub fn build_spans(events: &[EventRecord]) -> Vec<Span> {
                     &mut current_turn,
                     &mut roots,
                     Span {
-                        id: *tool_id,
+                        id: tool_id.0,
                         kind: SpanKind::Tool,
                         name: format!("tool · {tool_name}"),
                         detail: String::new(),
@@ -197,7 +197,7 @@ pub fn build_spans(events: &[EventRecord]) -> Vec<Span> {
                 duration_ms,
                 ..
             } => {
-                if let Some(span) = find_child_mut(&mut current_turn, *tool_id) {
+                if let Some(span) = find_child_mut(&mut current_turn, tool_id.0) {
                     span.end = span.start + Duration::milliseconds(*duration_ms as i64);
                     span.detail = if *success { "ok" } else { "failed" }.into();
                     if !*success {
@@ -211,7 +211,7 @@ pub fn build_spans(events: &[EventRecord]) -> Vec<Span> {
                 error,
                 ..
             } => {
-                if let Some(span) = find_child_mut(&mut current_turn, *tool_id) {
+                if let Some(span) = find_child_mut(&mut current_turn, tool_id.0) {
                     span.end = ts;
                     span.kind = SpanKind::ToolError;
                     span.detail = one_line(error, 120);
@@ -220,7 +220,7 @@ pub fn build_spans(events: &[EventRecord]) -> Vec<Span> {
                         &mut current_turn,
                         &mut roots,
                         Span {
-                            id: *tool_id,
+                            id: tool_id.0,
                             kind: SpanKind::ToolError,
                             name: format!("tool error · {tool_name}"),
                             detail: one_line(error, 120),

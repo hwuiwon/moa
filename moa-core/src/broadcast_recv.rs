@@ -107,7 +107,7 @@ mod tests {
         for idx in 0..20 {
             let _ = tx.send(EventRecord {
                 id: Uuid::now_v7(),
-                session_id: session_id.clone(),
+                session_id,
                 sequence_num: idx,
                 event_type: EventType::Warning,
                 event: Event::Warning {

@@ -30,7 +30,7 @@ async fn docker_container_runs_with_hardening() {
         return;
     }
 
-    let result = async {
+    let _result = async {
         let output = provider
             .execute(
                 &handle,
@@ -59,5 +59,4 @@ async fn docker_container_runs_with_hardening() {
     .await;
 
     let _ = provider.destroy(&handle).await;
-    result
 }
