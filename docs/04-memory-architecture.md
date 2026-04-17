@@ -1,6 +1,6 @@
 # 04 — Memory Architecture
 
-_File-wiki + FTS5, per-user + per-workspace scoping, consolidation, concurrent writes._
+_File-wiki + Postgres `tsvector`, per-user + per-workspace scoping, consolidation, concurrent writes._
 
 ---
 
@@ -8,7 +8,7 @@ _File-wiki + FTS5, per-user + per-workspace scoping, consolidation, concurrent w
 
 1. **Files are the source of truth.** Markdown on disk. No database is authoritative.
 2. **Memory compounds.** Each session should leave the knowledge base richer.
-3. **Zero-dependency locally.** FTS5 is the only index, derived from files, rebuildable.
+3. **Derived search index.** Markdown files stay canonical; the Postgres search index is derived and rebuildable.
 4. **Inspectable and editable.** Users can browse, edit, and delete memory in any editor.
 5. **Separate scopes compose at runtime.** User knowledge + workspace knowledge.
 
@@ -214,7 +214,12 @@ async fn load_session_memory(
 
 ### On-demand search (tool call)
 
-The brain calls `memory_search` as a tool when it needs more context:
+The brain calls `memory_search` as a tool when it needs more context. Search
+uses `websearch_to_tsquery('english', ...)`, so quoted phrases, `-negation`,
+and `OR` are all available in the query grammar. The derived Postgres index
+stores title, tags, and content in a weighted `tsvector`, and ranking starts
+with `ts_rank_cd` before applying recency, confidence, and reference-count
+reranking.
 
 ```rust
 pub struct MemorySearchTool;
@@ -556,87 +561,43 @@ async fn resolve_conflict(
 
 ---
 
-## FTS5 search index
+## Postgres search index
 
 ### Schema
 
 ```sql
-CREATE VIRTUAL TABLE wiki_search USING fts5(
-    path,
-    scope,          -- 'user:{id}' or 'workspace:{id}'
-    title,
-    page_type,      -- topic, entity, decision, skill, source
-    tags,
-    content,
-    tokenize='porter unicode61'
-);
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
--- Metadata table for non-FTS queries
 CREATE TABLE wiki_pages (
-    path TEXT NOT NULL,
     scope TEXT NOT NULL,
-    title TEXT,
-    page_type TEXT,
-    confidence TEXT,
-    created TEXT,
-    updated TEXT,
-    last_referenced TEXT,
-    reference_count INTEGER DEFAULT 0,
+    path TEXT NOT NULL,
+    title TEXT NOT NULL,
+    page_type TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    created TIMESTAMPTZ NOT NULL,
+    updated TIMESTAMPTZ NOT NULL,
+    last_referenced TIMESTAMPTZ NOT NULL,
+    reference_count INTEGER NOT NULL DEFAULT 0,
+    tags TEXT[] NOT NULL DEFAULT '{}',
+    content TEXT NOT NULL,
+    search_tsv TSVECTOR GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
+        setweight(array_to_tsvector(coalesce(tags, ARRAY[]::text[])), 'B') ||
+        setweight(to_tsvector('english', coalesce(content, '')), 'C')
+    ) STORED,
     PRIMARY KEY (scope, path)
 );
+
+CREATE INDEX wiki_pages_tsv_gin ON wiki_pages USING GIN (search_tsv);
+CREATE INDEX wiki_pages_title_trgm ON wiki_pages USING GIN (title gin_trgm_ops);
+CREATE INDEX wiki_pages_tags_gin ON wiki_pages USING GIN (tags);
 ```
 
 ### Rebuild
 
 ```rust
-async fn rebuild_fts_index(memory: &FileMemoryStore, scope: &MemoryScope) -> Result<()> {
-    let db = memory.search_db();
-    let scope_key = scope.to_key();
-    
-    // Clear existing entries for this scope
-    sqlx::query("DELETE FROM wiki_search WHERE scope = ?")
-        .bind(&scope_key)
-        .execute(db).await?;
-    
-    sqlx::query("DELETE FROM wiki_pages WHERE scope = ?")
-        .bind(&scope_key)
-        .execute(db).await?;
-    
-    // Walk all markdown files in the scope directory
-    let pages = memory.list_all_files(scope).await?;
-    
-    for page_path in pages {
-        let page = memory.read_page(&page_path).await?;
-        let fm = page.frontmatter();
-        
-        sqlx::query(
-            "INSERT INTO wiki_search (path, scope, title, page_type, tags, content) \
-             VALUES (?, ?, ?, ?, ?, ?)"
-        )
-        .bind(page_path.as_str())
-        .bind(&scope_key)
-        .bind(&fm.title())
-        .bind(&fm.page_type())
-        .bind(&fm.tags_joined())
-        .bind(&page.body())
-        .execute(db).await?;
-        
-        sqlx::query(
-            "INSERT INTO wiki_pages (path, scope, title, page_type, confidence, created, updated, last_referenced, reference_count) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(page_path.as_str())
-        .bind(&scope_key)
-        .bind(&fm.title())
-        .bind(&fm.page_type())
-        .bind(&fm.confidence())
-        .bind(&fm.created())
-        .bind(&fm.updated())
-        .bind(&fm.last_referenced())
-        .bind(fm.reference_count())
-        .execute(db).await?;
-    }
-    
+async fn rebuild_search_index(memory: &FileMemoryStore, scope: &MemoryScope) -> Result<()> {
+    memory.rebuild_search_index(scope).await?;
     Ok(())
 }
 ```
@@ -650,36 +611,52 @@ async fn search_memory(
     scope: &str,
     limit: usize,
 ) -> Result<Vec<MemorySearchResult>> {
-    let results = sqlx::query_as::<_, MemorySearchResult>(
-        "SELECT 
-            ws.path,
-            ws.title,
-            ws.page_type,
-            snippet(wiki_search, 5, '<mark>', '</mark>', '...', 40) as snippet,
-            wp.confidence,
-            wp.updated,
-            wp.reference_count,
-            rank
-         FROM wiki_search ws
-         JOIN wiki_pages wp ON ws.path = wp.path AND ws.scope = wp.scope
-         WHERE wiki_search MATCH ? AND ws.scope = ?
-         ORDER BY 
-            -- Boost by recency (pages updated in last 7 days get 2x)
-            CASE WHEN wp.updated > datetime('now', '-7 days') THEN rank * 2 ELSE rank END,
-            -- Boost by confidence
-            CASE wp.confidence WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC,
-            -- Boost by reference count
-            wp.reference_count DESC
-         LIMIT ?"
+    let results = sqlx::query(
+        "WITH search_query AS (
+            SELECT websearch_to_tsquery('english', $1) AS tsquery
+         )
+         SELECT
+            path,
+            title,
+            page_type,
+            confidence,
+            updated,
+            reference_count,
+            ts_headline(
+                'english',
+                content,
+                search_query.tsquery,
+                'StartSel=<mark>, StopSel=</mark>, MaxFragments=2, MaxWords=20, MinWords=5'
+            ) AS snippet
+         FROM wiki_pages, search_query
+         WHERE scope = $2
+           AND search_tsv @@ search_query.tsquery
+         ORDER BY
+            ts_rank_cd(search_tsv, search_query.tsquery)
+                * CASE WHEN updated > NOW() - INTERVAL '7 days' THEN 2.0 ELSE 1.0 END
+                * CASE confidence WHEN 'high' THEN 3.0 WHEN 'medium' THEN 2.0 ELSE 1.0 END
+                * GREATEST(1.0, LOG((1 + reference_count)::double precision)) DESC,
+            updated DESC
+         LIMIT $3"
     )
     .bind(query)
     .bind(scope)
     .bind(limit as i64)
-    .fetch_all(db).await?;
-    
+    .fetch_all(db)
+    .await?;
+
     Ok(results)
 }
 ```
+
+Behavior:
+
+- Markdown files on disk remain the source of truth.
+- `write_page` writes the markdown file first, then best-effort upserts the Postgres row.
+- `rebuild_search_index(scope)` re-walks markdown files and repopulates `wiki_pages`.
+- `moa memory rebuild-index` rebuilds one scope or all discovered scopes from disk.
+- `ts_headline` produces snippets with `<mark>` tags.
+- If the main `tsvector` query returns no rows and the query is short, the store falls back to `pg_trgm` title similarity.
 
 ---
 

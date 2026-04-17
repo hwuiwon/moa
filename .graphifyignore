@@ -10,3 +10,7 @@ graphify-out/
 
 # agents.md
 AGENTS.md
+
+# settings
+.claude/
+.codex/

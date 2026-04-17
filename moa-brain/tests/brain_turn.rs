@@ -1798,7 +1798,6 @@ async fn run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event
 }
 
 #[tokio::test]
-#[ignore = "workspace memory search is disabled until step 90 lands the Postgres tsvector index"]
 async fn run_brain_turn_can_search_recently_ingested_memory_on_follow_up_turn() {
     let session = SessionMeta {
         id: SessionId::new(),
@@ -1817,7 +1816,17 @@ async fn run_brain_turn_can_search_recently_ingested_memory_on_follow_up_turn() 
     )];
     let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
     let memory_root = tempdir().unwrap();
-    let memory_store = Arc::new(FileMemoryStore::new(memory_root.path()).await.unwrap());
+    let (search_store, _database_url, schema_name) =
+        testing::create_isolated_test_store().await.unwrap();
+    let memory_store = Arc::new(
+        FileMemoryStore::new_with_pool_and_schema(
+            memory_root.path(),
+            Arc::new(search_store.pool().clone()),
+            Some(&schema_name),
+        )
+        .await
+        .unwrap(),
+    );
     let memory_store_trait: Arc<dyn MemoryStore> = memory_store.clone();
     let sandbox_dir = tempdir().unwrap();
     let tool_router = Arc::new(

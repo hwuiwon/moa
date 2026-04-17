@@ -100,7 +100,14 @@ pub(crate) async fn build_agent_environment_with_provider(
     );
     let session_store: Arc<dyn SessionStore> = session_store_concrete.clone();
     let rule_store: Arc<dyn ApprovalRuleStore> = session_store_concrete.clone();
-    let memory_store_concrete = Arc::new(FileMemoryStore::new(&memory_root).await?);
+    let memory_store_concrete = Arc::new(
+        FileMemoryStore::new_with_pool_and_schema(
+            &memory_root,
+            Arc::new(session_store_concrete.pool().clone()),
+            Some(&schema_name),
+        )
+        .await?,
+    );
     seed_memory(
         base_config,
         agent_config,

@@ -119,6 +119,8 @@ enum MemoryCommand {
     },
     /// Ingests one or more documents into workspace memory.
     Ingest(IngestArgs),
+    /// Rebuilds the derived Postgres memory index from markdown files on disk.
+    RebuildIndex(RebuildIndexArgs),
 }
 
 /// Arguments for `moa memory ingest`.
@@ -135,6 +137,22 @@ struct IngestArgs {
     /// Workspace id override. Use `.` for the current directory workspace.
     #[arg(long)]
     workspace: Option<String>,
+}
+
+/// Arguments for `moa memory rebuild-index`.
+#[derive(Debug, Args)]
+struct RebuildIndexArgs {
+    /// Rebuild every discovered scope under the local memory root.
+    #[arg(long)]
+    all: bool,
+
+    /// Workspace id override. Use `.` for the current directory workspace.
+    #[arg(long)]
+    workspace: Option<String>,
+
+    /// Rebuild the local user-memory scope instead of a workspace scope.
+    #[arg(long)]
+    user: bool,
 }
 
 /// Config CLI commands.
@@ -345,6 +363,18 @@ async fn main() -> Result<()> {
                     .await?
                 );
             }
+            MemoryCommand::RebuildIndex(args) => {
+                print!(
+                    "{}",
+                    memory_rebuild_index_report(
+                        &config,
+                        args.all,
+                        args.workspace.as_deref(),
+                        args.user,
+                    )
+                    .await?
+                );
+            }
         },
         Some(CommandKind::Config { command }) => match command {
             None => {
@@ -490,7 +520,7 @@ fn handle_eval_plan(args: EvalPlanArgs, config: MoaConfig) -> Result<()> {
 }
 
 async fn handle_eval_skill(args: EvalSkillArgs, config: MoaConfig) -> Result<i32> {
-    let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
+    let memory_store = Arc::new(load_memory_store(&config).await?);
     let workspace_id = current_workspace_id();
     let skill_run = run_skill_suite(&config, memory_store, &workspace_id, &args.skill).await?;
     let reporters = build_reporters(
@@ -623,7 +653,7 @@ async fn sessions_report(config: &MoaConfig, workspace: Option<&str>) -> Result<
 }
 
 async fn memory_search_report(config: &MoaConfig, query: &str) -> Result<String> {
-    let store = FileMemoryStore::from_config(config).await?;
+    let store = load_memory_store(config).await?;
     let results = store
         .search(query, &MemoryScope::Workspace(current_workspace_id()), 20)
         .await?;
@@ -638,7 +668,7 @@ async fn memory_search_report(config: &MoaConfig, query: &str) -> Result<String>
 }
 
 async fn memory_show_report(config: &MoaConfig, path: &str) -> Result<String> {
-    let store = FileMemoryStore::from_config(config).await?;
+    let store = load_memory_store(config).await?;
     let path = MemoryPath::new(path);
     let page = store
         .read_page(&MemoryScope::Workspace(current_workspace_id()), &path)
@@ -660,7 +690,7 @@ async fn memory_ingest_report(
         bail!("--name can only be used when ingesting a single file");
     }
 
-    let store = FileMemoryStore::from_config(config).await?;
+    let store = load_memory_store(config).await?;
     let scope = MemoryScope::Workspace(
         workspace
             .map(resolve_workspace_arg)
@@ -781,6 +811,17 @@ async fn load_session_store(config: &MoaConfig) -> Result<Arc<PostgresSessionSto
         .context("opening session store")
 }
 
+async fn load_memory_store(config: &MoaConfig) -> Result<FileMemoryStore> {
+    let session_store = load_session_store(config).await?;
+    FileMemoryStore::from_config_with_pool(
+        config,
+        Arc::new(session_store.pool().clone()),
+        session_store.schema_name(),
+    )
+    .await
+    .context("opening memory store")
+}
+
 fn load_branch_manager(config: &MoaConfig) -> Result<NeonBranchManager> {
     NeonBranchManager::from_config(config).context("opening Neon branch manager")
 }
@@ -801,6 +842,14 @@ fn current_workspace_id() -> WorkspaceId {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("default");
     WorkspaceId::new(name)
+}
+
+fn current_user_id() -> moa_core::UserId {
+    moa_core::UserId::new(
+        env::var("USER")
+            .or_else(|_| env::var("USERNAME"))
+            .unwrap_or_else(|_| "local-user".to_string()),
+    )
 }
 
 fn derive_ingest_source_name(path: &Path) -> String {
@@ -898,7 +947,7 @@ async fn doctor_database(config: &MoaConfig) -> String {
 }
 
 async fn memory_index_status(config: &MoaConfig) -> String {
-    match FileMemoryStore::from_config(config).await {
+    match load_memory_store(config).await {
         Ok(store) => match store
             .get_index(&MemoryScope::Workspace(current_workspace_id()))
             .await
@@ -908,6 +957,67 @@ async fn memory_index_status(config: &MoaConfig) -> String {
         },
         Err(error) => format!("unhealthy ({error})"),
     }
+}
+
+async fn memory_rebuild_index_report(
+    config: &MoaConfig,
+    rebuild_all: bool,
+    workspace: Option<&str>,
+    rebuild_user: bool,
+) -> Result<String> {
+    if rebuild_all && (workspace.is_some() || rebuild_user) {
+        bail!("--all cannot be combined with --workspace or --user");
+    }
+    if rebuild_user && workspace.is_some() {
+        bail!("--user cannot be combined with --workspace");
+    }
+
+    let store = load_memory_store(config).await?;
+    let scopes = if rebuild_all {
+        discover_memory_scopes(&store).await?
+    } else if rebuild_user {
+        vec![MemoryScope::User(current_user_id())]
+    } else {
+        vec![MemoryScope::Workspace(
+            workspace
+                .map(resolve_workspace_arg)
+                .unwrap_or_else(current_workspace_id),
+        )]
+    };
+
+    let mut output = String::new();
+    for scope in scopes {
+        let pages = MemoryStore::list_pages(&store, &scope, None).await?;
+        MemoryStore::rebuild_search_index(&store, &scope).await?;
+        output.push_str(&format!("rebuilt {} pages in {:?}\n", pages.len(), scope));
+    }
+    Ok(output)
+}
+
+async fn discover_memory_scopes(store: &FileMemoryStore) -> Result<Vec<MemoryScope>> {
+    let mut scopes = Vec::new();
+
+    if fs::try_exists(&store.base_dir().join("memory")).await? {
+        scopes.push(MemoryScope::User(current_user_id()));
+    }
+
+    let workspaces_root = store.base_dir().join("workspaces");
+    if fs::try_exists(&workspaces_root).await? {
+        let mut entries = fs::read_dir(&workspaces_root).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if !entry.file_type().await?.is_dir() {
+                continue;
+            }
+            let memory_root = entry.path().join("memory");
+            if !fs::try_exists(&memory_root).await? {
+                continue;
+            }
+            let workspace_id = entry.file_name().to_string_lossy().to_string();
+            scopes.push(MemoryScope::Workspace(WorkspaceId::new(workspace_id)));
+        }
+    }
+
+    Ok(scopes)
 }
 
 fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result<()> {

@@ -17,9 +17,16 @@ use moa_session::{PostgresSessionStore, testing};
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = MoaConfig::load()?;
-    let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
     let (store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     let store = Arc::new(store);
+    let memory_store = Arc::new(
+        FileMemoryStore::from_config_with_pool(
+            &config,
+            Arc::new(store.pool().clone()),
+            Some(&schema_name),
+        )
+        .await?,
+    );
     let provider = build_provider_from_config(&config)?;
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())

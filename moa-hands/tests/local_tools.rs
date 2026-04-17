@@ -768,11 +768,20 @@ async fn local_bash_hard_cancel_kills_running_process() {
 }
 
 #[tokio::test]
-#[ignore = "workspace memory search is disabled until step 90 lands the Postgres tsvector index"]
 async fn memory_search_returns_indexed_results() {
     let dir = tempdir().unwrap();
     let memory_root = dir.path().join("memory-root");
-    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
+    let (search_store, _database_url, schema_name) =
+        testing::create_isolated_test_store().await.unwrap();
+    let memory_store = Arc::new(
+        FileMemoryStore::new_with_pool_and_schema(
+            &memory_root,
+            Arc::new(search_store.pool().clone()),
+            Some(&schema_name),
+        )
+        .await
+        .unwrap(),
+    );
     memory_store
         .write_page(
             &MemoryScope::Workspace(WorkspaceId::new("workspace")),

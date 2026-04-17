@@ -1,21 +1,25 @@
-//! File-backed wiki memory store with a Postgres-backed search stub.
+//! File-backed wiki memory store with an optional Postgres-backed search index.
 
 use std::env;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
     BrainId, MemoryPath, MemoryScope, MemorySearchResult, MemoryStore, MoaConfig, MoaError,
     PageSummary, PageType, Result, SessionStore, WikiPage,
 };
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::fs;
+use tracing::warn;
 
 pub mod bootstrap;
 pub mod branching;
 pub mod consolidation;
 pub mod index;
 pub mod ingest;
+mod schema;
 pub mod search;
 pub mod wiki;
 
@@ -37,6 +41,9 @@ pub struct FileMemoryStore {
 
 impl FileMemoryStore {
     /// Creates a file-backed memory store rooted at the provided MOA data directory.
+    ///
+    /// This constructor keeps search disabled, which is useful for lightweight
+    /// tests that only exercise the file-backed wiki semantics.
     pub async fn new(base_dir: impl AsRef<Path>) -> Result<Self> {
         let base_dir = base_dir.as_ref().to_path_buf();
         fs::create_dir_all(base_dir.join("memory")).await?;
@@ -48,22 +55,41 @@ impl FileMemoryStore {
         })
     }
 
-    /// Creates a file-backed memory store from the local memory config.
+    /// Creates a file-backed memory store backed by a shared Postgres pool.
+    pub async fn new_with_pool(base_dir: impl AsRef<Path>, pool: Arc<PgPool>) -> Result<Self> {
+        Self::new_with_pool_and_schema(base_dir, pool, None).await
+    }
+
+    /// Creates a file-backed memory store backed by a shared Postgres pool and schema.
+    pub async fn new_with_pool_and_schema(
+        base_dir: impl AsRef<Path>,
+        pool: Arc<PgPool>,
+        schema_name: Option<&str>,
+    ) -> Result<Self> {
+        let base_dir = base_dir.as_ref().to_path_buf();
+        fs::create_dir_all(base_dir.join("memory")).await?;
+        fs::create_dir_all(base_dir.join("workspaces")).await?;
+
+        Ok(Self {
+            base_dir: Arc::new(base_dir),
+            search_index: WikiSearchIndex::new_with_pool(pool, schema_name).await?,
+        })
+    }
+
+    /// Creates a Postgres-backed memory store from the local memory config.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
-        let configured_memory_dir = if config.cloud.enabled {
-            config
-                .cloud
-                .memory_dir
-                .as_deref()
-                .unwrap_or(&config.local.memory_dir)
-        } else {
-            &config.local.memory_dir
-        };
-        let memory_dir = expand_local_path(configured_memory_dir)?;
-        let base_dir = memory_dir.parent().map(Path::to_path_buf).ok_or_else(|| {
-            MoaError::ConfigError("local.memory_dir must have a parent".to_string())
-        })?;
-        Self::new(base_dir).await
+        let pool = connect_search_pool(config).await?;
+        Self::from_config_with_pool(config, pool, None).await
+    }
+
+    /// Creates a Postgres-backed memory store from config using a shared pool and schema.
+    pub async fn from_config_with_pool(
+        config: &MoaConfig,
+        pool: Arc<PgPool>,
+        schema_name: Option<&str>,
+    ) -> Result<Self> {
+        let base_dir = configured_base_dir(config)?;
+        Self::new_with_pool_and_schema(base_dir, pool, schema_name).await
     }
 
     /// Returns the local filesystem root backing the memory store.
@@ -77,9 +103,14 @@ impl FileMemoryStore {
         append_log_entry(&scope_root, &entry).await?;
         let log_path: MemoryPath = "_log.md".into();
         let log_page = self.read_page(scope, &log_path).await?;
-        self.search_index
-            .upsert_page(scope, &log_path, &log_page)
-            .await?;
+        self.warn_on_search_sync_failure(
+            scope,
+            &log_path,
+            self.search_index
+                .upsert_page(scope, &log_path, &log_page)
+                .await,
+            "scope log written but search index upsert failed",
+        );
         Ok(())
     }
 
@@ -209,6 +240,23 @@ impl FileMemoryStore {
 
         Ok(self.scope_root(scope).join(logical_path))
     }
+
+    fn warn_on_search_sync_failure(
+        &self,
+        scope: &MemoryScope,
+        path: &MemoryPath,
+        result: Result<()>,
+        message: &str,
+    ) {
+        if let Err(error) = result {
+            warn!(
+                scope = ?scope,
+                path = %path.as_str(),
+                error = %error,
+                "{message}; run `moa memory rebuild-index` to reconcile"
+            );
+        }
+    }
 }
 
 fn expand_local_path(path: &str) -> Result<PathBuf> {
@@ -218,6 +266,34 @@ fn expand_local_path(path: &str) -> Result<PathBuf> {
     }
 
     Ok(PathBuf::from(path))
+}
+
+fn configured_base_dir(config: &MoaConfig) -> Result<PathBuf> {
+    let configured_memory_dir = if config.cloud.enabled {
+        config
+            .cloud
+            .memory_dir
+            .as_deref()
+            .unwrap_or(&config.local.memory_dir)
+    } else {
+        &config.local.memory_dir
+    };
+    let memory_dir = expand_local_path(configured_memory_dir)?;
+    memory_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| MoaError::ConfigError("local.memory_dir must have a parent".to_string()))
+}
+
+async fn connect_search_pool(config: &MoaConfig) -> Result<Arc<PgPool>> {
+    let pool = PgPoolOptions::new()
+        .min_connections(1)
+        .max_connections(config.database.max_connections)
+        .acquire_timeout(Duration::from_secs(config.database.connect_timeout_seconds))
+        .connect(config.database.runtime_url())
+        .await
+        .map_err(memory_error)?;
+    Ok(Arc::new(pool))
 }
 
 #[async_trait]
@@ -263,8 +339,13 @@ impl MemoryStore for FileMemoryStore {
 
         page.path = Some(path.clone());
         let markdown = render_markdown(&page)?;
-        fs::write(&file_path, markdown).await?;
-        self.search_index.upsert_page(scope, path, &page).await?;
+        fs::write(&file_path, &markdown).await?;
+        self.warn_on_search_sync_failure(
+            scope,
+            path,
+            self.search_index.upsert_page(scope, path, &page).await,
+            "file written but search index upsert failed",
+        );
 
         Ok(())
     }
@@ -282,7 +363,12 @@ impl MemoryStore for FileMemoryStore {
             }
             Err(error) => return Err(error.into()),
         }
-        self.search_index.delete_page(scope, path).await?;
+        self.warn_on_search_sync_failure(
+            scope,
+            path,
+            self.search_index.delete_page(scope, path).await,
+            "memory page deleted but search index delete failed",
+        );
 
         Ok(())
     }
