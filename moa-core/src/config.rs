@@ -444,11 +444,10 @@ impl MoaConfig {
     /// when calling from an async context to avoid blocking the executor.
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = config_parent_dir(path) {
             std::fs::create_dir_all(parent)?;
         }
-        let content = toml::to_string_pretty(self)
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?;
+        let content = self.serialize_config()?;
         std::fs::write(path, content)?;
         Ok(())
     }
@@ -461,17 +460,20 @@ impl MoaConfig {
     /// Persists this config to an explicit TOML file path using async I/O.
     pub async fn save_to_path_async(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = config_parent_dir(path) {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let content = toml::to_string_pretty(self)
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?;
+        let content = self.serialize_config()?;
         tokio::fs::write(path, content).await?;
         Ok(())
     }
 }
 
 impl MoaConfig {
+    fn serialize_config(&self) -> Result<String> {
+        toml::to_string_pretty(self).map_err(|error| MoaError::ConfigError(error.to_string()))
+    }
+
     fn validate(&self) -> Result<()> {
         if self.database.url.trim().is_empty() {
             return Err(MoaError::ConfigError(
@@ -489,6 +491,11 @@ impl MoaConfig {
 
         Ok(())
     }
+}
+
+fn config_parent_dir(path: &Path) -> Option<&Path> {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
 }
 
 /// General runtime settings.

@@ -50,10 +50,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
 ) -> Result<StreamedTurnResult> {
     let initial_session = session_store.get_session(session_id).await?;
     let initial_events = session_store
-        .get_events(
-            session_id,
-            EventRange::recent(TURN_EVENT_TAIL_LIMIT),
-        )
+        .get_events(session_id, EventRange::recent(TURN_EVENT_TAIL_LIMIT))
         .await?;
     let turn_number = turn_number_for_events(&initial_events);
     let trace_context =
@@ -392,6 +389,8 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                     },
                 )
                 .await?;
+                // This is the terminal assistant event for a turn; warn on a
+                // dropped receiver so stream consumers do not silently miss it.
                 if let Err(err) = runtime_tx.send(RuntimeEvent::AssistantFinished {
                     text: streamed.streamed_text,
                 }) {

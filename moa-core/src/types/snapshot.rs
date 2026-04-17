@@ -4,9 +4,8 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use super::{CacheBreakpoint, ContextMessage, SequenceNum, SessionId};
+use super::{CacheBreakpoint, ContextMessage, SequenceNum, SessionId, ToolCallId};
 
 /// Current serialized context snapshot format version.
 pub const CONTEXT_SNAPSHOT_FORMAT_VERSION: u32 = 2;
@@ -57,7 +56,7 @@ pub struct SnapshotFileReadState {
     /// Provider-visible tool use identifier used to keep tool history structurally valid.
     pub tool_use_id: String,
     /// Internal tool call identifier for the file-read result.
-    pub tool_id: Uuid,
+    pub tool_id: ToolCallId,
     /// Whether the original tool result was successful.
     pub success: bool,
 }

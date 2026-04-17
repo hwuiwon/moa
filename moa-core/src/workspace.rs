@@ -18,29 +18,7 @@ pub fn discover_workspace_instructions(workspace_root: &Path) -> Option<String> 
         Ok(bytes) => bytes,
         Err(_) => return None,
     };
-
-    if bytes.len() > MAX_INSTRUCTION_FILE_BYTES {
-        tracing::warn!(
-            path = %path.display(),
-            size = bytes.len(),
-            max = MAX_INSTRUCTION_FILE_BYTES,
-            "workspace instruction file exceeds size limit, truncating"
-        );
-        let truncated = &bytes[..MAX_INSTRUCTION_FILE_BYTES];
-        let end = truncated
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map(|index| index + 1)
-            .unwrap_or(MAX_INSTRUCTION_FILE_BYTES);
-        return Some(String::from_utf8_lossy(&bytes[..end]).into_owned());
-    }
-
-    tracing::info!(
-        path = %path.display(),
-        size = bytes.len(),
-        "loaded workspace instruction file"
-    );
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    process_instruction_bytes(bytes, &path)
 }
 
 /// Async variant of [`discover_workspace_instructions`] that uses `tokio::fs`.
@@ -52,7 +30,10 @@ pub async fn discover_workspace_instructions_async(workspace_root: &Path) -> Opt
         Ok(bytes) => bytes,
         Err(_) => return None,
     };
+    process_instruction_bytes(bytes, &path)
+}
 
+fn process_instruction_bytes(bytes: Vec<u8>, path: &Path) -> Option<String> {
     if bytes.len() > MAX_INSTRUCTION_FILE_BYTES {
         tracing::warn!(
             path = %path.display(),
@@ -81,7 +62,7 @@ pub async fn discover_workspace_instructions_async(workspace_root: &Path) -> Opt
 mod tests {
     use tempfile::tempdir;
 
-    use super::discover_workspace_instructions;
+    use super::{discover_workspace_instructions, discover_workspace_instructions_async};
 
     #[test]
     fn discovers_agents_md() {
@@ -119,6 +100,20 @@ mod tests {
         std::fs::write(dir.path().join("AGENTS.md"), &large).unwrap();
 
         let result = discover_workspace_instructions(dir.path()).unwrap();
+
+        assert!(result.len() <= 32_768);
+        assert!(result.ends_with('\n') || result.ends_with('x'));
+    }
+
+    #[tokio::test]
+    async fn async_discovery_truncates_oversized_files() {
+        let dir = tempdir().unwrap();
+        let large = "x\n".repeat(20_000);
+        std::fs::write(dir.path().join("AGENTS.md"), &large).unwrap();
+
+        let result = discover_workspace_instructions_async(dir.path())
+            .await
+            .expect("expected async discovery result");
 
         assert!(result.len() <= 32_768);
         assert!(result.ends_with('\n') || result.ends_with('x'));

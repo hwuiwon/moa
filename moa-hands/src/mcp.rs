@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use moa_core::{McpServerConfig, McpTransportConfig, MoaError, Result, ToolContent, ToolOutput};
@@ -40,7 +41,7 @@ impl MCPClient {
     pub async fn connect(config: &McpServerConfig) -> Result<Self> {
         let transport = match config.transport {
             McpTransportConfig::Stdio => {
-                McpTransport::Stdio(StdioTransport::spawn(config)?)
+                McpTransport::Stdio(Box::new(StdioTransport::spawn(config)?))
             }
             McpTransportConfig::Http | McpTransportConfig::Sse => {
                 McpTransport::Remote(RemoteClient::new(config)?)
@@ -145,7 +146,7 @@ impl MCPClient {
 }
 
 enum McpTransport {
-    Stdio(StdioTransport),
+    Stdio(Box<StdioTransport>),
     Remote(RemoteClient),
 }
 
@@ -160,7 +161,8 @@ struct StdioTransport {
     /// Mutex only held during the actual `write_all` call — released before
     /// waiting for a response.
     writer: Mutex<ChildStdin>,
-    pending: std::sync::Arc<PendingMap>,
+    pending: Arc<PendingMap>,
+    closed: Arc<AtomicBool>,
     /// Background reader task handle (kept so it is aborted on drop).
     _reader_task: JoinHandle<()>,
     /// Held to keep the child process alive.
@@ -195,24 +197,36 @@ impl StdioTransport {
             ))
         })?;
 
-        let pending: std::sync::Arc<PendingMap> =
-            std::sync::Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<PendingMap> = Arc::new(Mutex::new(HashMap::new()));
         let pending_reader = pending.clone();
+        let closed = Arc::new(AtomicBool::new(false));
+        let closed_reader = closed.clone();
 
         let reader_task = tokio::spawn(async move {
-            run_reader(BufReader::new(stdout), pending_reader).await;
+            run_reader(BufReader::new(stdout), pending_reader, closed_reader).await;
         });
 
         Ok(Self {
             writer: Mutex::new(stdin),
             pending,
+            closed,
             _reader_task: reader_task,
             _child: child,
         })
     }
 
+    fn ensure_open(&self) -> Result<()> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(MoaError::StreamError(
+                "MCP stdio transport is closed".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Write a notification (fire-and-forget, no response expected).
     async fn notify(&self, message: Value) -> Result<()> {
+        self.ensure_open()?;
         let mut stdin = self.writer.lock().await;
         write_framed_message(&mut stdin, &message).await
         // lock released here — before any await that waits for a response
@@ -220,6 +234,7 @@ impl StdioTransport {
 
     /// Send a request and wait for the matching response, fully concurrent.
     async fn request(&self, id: u64, message: Value) -> Result<Value> {
+        self.ensure_open()?;
         let (tx, rx) = oneshot::channel::<Result<Value>>();
 
         // Register before writing so we never miss a fast response.
@@ -228,18 +243,23 @@ impl StdioTransport {
         // RAII guard: removes the pending entry if this future is dropped
         // (cancelled) before the oneshot fires.
         let pending_ref = self.pending.clone();
-        let guard = PendingGuard { id, pending: Some(pending_ref) };
+        let guard = PendingGuard {
+            id,
+            pending: Some(pending_ref),
+        };
+
+        if self.closed.load(Ordering::Acquire) {
+            drop(guard);
+            return Err(MoaError::StreamError(
+                "MCP stdio transport is closed".to_string(),
+            ));
+        }
 
         // Write to stdin — mutex is held only for the duration of the write.
         {
             let mut stdin = self.writer.lock().await;
             if let Err(err) = write_framed_message(&mut stdin, &message).await {
-                // Remove the pending entry we just inserted.
                 drop(guard);
-                // Clean up is handled by the guard's drop, but we already
-                // consumed it — explicitly remove just in case guard didn't
-                // fire yet (it hasn't been dropped yet; force it):
-                self.pending.lock().await.remove(&id);
                 return Err(err);
             }
         } // write mutex released here
@@ -271,7 +291,7 @@ impl StdioTransport {
 /// safety). Call `disarm()` before intentional completion to skip removal.
 struct PendingGuard {
     id: u64,
-    pending: Option<std::sync::Arc<PendingMap>>,
+    pending: Option<Arc<PendingMap>>,
 }
 
 impl PendingGuard {
@@ -283,16 +303,25 @@ impl PendingGuard {
 impl Drop for PendingGuard {
     fn drop(&mut self) {
         if let Some(pending) = self.pending.take() {
-            // Best-effort synchronous removal; if the lock is contended we
-            // spin briefly. In practice the map is never held for long.
             if let Ok(mut map) = pending.try_lock() {
                 map.remove(&self.id);
-            } else {
-                // Fall back: spawn a tiny task to do the cleanup.
+                return;
+            }
+
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let id = self.id;
-                tokio::spawn(async move {
+                handle.spawn(async move {
                     pending.lock().await.remove(&id);
                 });
+                return;
+            }
+
+            loop {
+                if let Ok(mut map) = pending.try_lock() {
+                    map.remove(&self.id);
+                    break;
+                }
+                std::thread::yield_now();
             }
         }
     }
@@ -302,7 +331,8 @@ impl Drop for PendingGuard {
 /// each response to the appropriate oneshot sender by id.
 async fn run_reader(
     mut stdout: BufReader<ChildStdout>,
-    pending: std::sync::Arc<PendingMap>,
+    pending: Arc<PendingMap>,
+    closed: Arc<AtomicBool>,
 ) {
     loop {
         match read_framed_message(&mut stdout).await {
@@ -320,6 +350,7 @@ async fn run_reader(
             Err(err) => {
                 // EOF or framing error — drain all pending requests with an
                 // error so callers don't wait until timeout.
+                closed.store(true, Ordering::Release);
                 let mut map = pending.lock().await;
                 for (_, tx) in map.drain() {
                     let _ = tx.send(Err(MoaError::StreamError(format!(

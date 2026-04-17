@@ -112,7 +112,7 @@ impl SlackAdapter {
     ) -> Result<SlackMessageRef> {
         let session = self.client.open_session(&self.bot_token);
         let request = SlackApiChatPostMessageRequest {
-            channel: SlackChannelId(target.channel_id.clone()),
+            channel: SlackChannelId(target.channel_id.to_string()),
             content: slack_message_content(chunk),
             as_user: None,
             icon_emoji: None,
@@ -131,7 +131,7 @@ impl SlackAdapter {
             .await
             .map_err(|error| MoaError::ProviderError(error.to_string()))?;
         Ok(SlackMessageRef {
-            channel_id: response.channel.0,
+            channel_id: Arc::<str>::from(response.channel.0),
             ts: response.ts.0,
             thread_ts: Some(target.thread_ts.clone()),
         })
@@ -144,7 +144,7 @@ impl SlackAdapter {
     ) -> Result<()> {
         let session = self.client.open_session(&self.bot_token);
         let request = SlackApiChatUpdateRequest {
-            channel: SlackChannelId(message_ref.channel_id.clone()),
+            channel: SlackChannelId(message_ref.channel_id.to_string()),
             content: slack_message_content(chunk),
             ts: SlackTs(message_ref.ts.clone()),
             as_user: None,
@@ -288,7 +288,7 @@ impl PlatformAdapter for SlackAdapter {
             let session = self.client.open_session(&self.bot_token);
             for message_ref in existing.iter().skip(rendered.len()) {
                 let request = SlackApiChatDeleteRequest {
-                    channel: SlackChannelId(message_ref.channel_id.clone()),
+                    channel: SlackChannelId(message_ref.channel_id.to_string()),
                     ts: SlackTs(message_ref.ts.clone()),
                     as_user: None,
                 };
@@ -319,7 +319,7 @@ impl PlatformAdapter for SlackAdapter {
         let session = self.client.open_session(&self.bot_token);
         for message_ref in refs {
             let request = SlackApiChatDeleteRequest {
-                channel: SlackChannelId(message_ref.channel_id),
+                channel: SlackChannelId(message_ref.channel_id.to_string()),
                 ts: SlackTs(message_ref.ts),
                 as_user: None,
             };
@@ -430,12 +430,12 @@ fn inbound_from_push_event(event: &SlackPushEventCallback) -> Option<InboundMess
 fn push_event_origin(event: &SlackPushEventCallback) -> Option<SlackMessageRef> {
     match &event.event {
         SlackEventCallbackBody::AppMention(message) => Some(SlackMessageRef {
-            channel_id: message.channel.0.clone(),
+            channel_id: Arc::<str>::from(message.channel.0.clone()),
             ts: message.origin.ts.0.clone(),
             thread_ts: message.origin.thread_ts.as_ref().map(|ts| ts.0.clone()),
         }),
         SlackEventCallbackBody::Message(message) => Some(SlackMessageRef {
-            channel_id: message.origin.channel.as_ref()?.0.clone(),
+            channel_id: Arc::<str>::from(message.origin.channel.as_ref()?.0.clone()),
             ts: message.origin.ts.0.clone(),
             thread_ts: message.origin.thread_ts.as_ref().map(|ts| ts.0.clone()),
         }),
@@ -559,7 +559,7 @@ fn interaction_origin(event: &SlackInteractionBlockActionsEvent) -> Option<Slack
         .map(|ts| ts.0.clone());
 
     Some(SlackMessageRef {
-        channel_id,
+        channel_id: Arc::<str>::from(channel_id),
         ts: message_ts,
         thread_ts,
     })
@@ -684,9 +684,12 @@ mod tests {
         }))
         .expect("slack interaction should deserialize");
 
-        let inbound = inbound_from_interaction_event(&event, Arc::new(Mutex::new(HashMap::new())))
-            .await
-            .expect("normalized callback");
+        let inbound = inbound_from_interaction_event(
+            &event,
+            Arc::new(RwLock::new(HashMap::<String, SlackMessageRef>::new())),
+        )
+        .await
+        .expect("normalized callback");
 
         assert_eq!(inbound.platform, Platform::Slack);
         assert_eq!(inbound.text, format!("/approval always {request_id}"));

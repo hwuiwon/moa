@@ -526,9 +526,7 @@ fn build_request_body_from_parts(
     Ok(Value::Object(body))
 }
 
-fn build_contents_from_messages(
-    messages: &[ContextMessage],
-) -> (Option<Value>, Vec<Value>) {
+fn build_contents_from_messages(messages: &[ContextMessage]) -> (Option<Value>, Vec<Value>) {
     let mut system_parts = Vec::new();
     let mut contents = Vec::new();
     let mut model_parts = Vec::new();
@@ -710,11 +708,7 @@ fn build_explicit_cache_plan(
     }))
 }
 
-fn build_cache_create_body(
-    model: &str,
-    ttl: CacheTtl,
-    parts: GeminiRequestParts,
-) -> Value {
+fn build_cache_create_body(model: &str, ttl: CacheTtl, parts: GeminiRequestParts) -> Value {
     let mut body = Map::new();
     body.insert(
         "model".to_string(),
@@ -1159,7 +1153,16 @@ impl GeminiStreamState {
                 .unwrap_or(self.cached_input_tokens);
         }
         self.last_raw_response = Some(response);
-        let candidates = self.last_raw_response.as_ref().unwrap().candidates.clone();
+        let candidates = self
+            .last_raw_response
+            .as_ref()
+            .ok_or_else(|| {
+                MoaError::ProviderError(
+                    "Gemini stream parser lost the last raw response".to_string(),
+                )
+            })?
+            .candidates
+            .clone();
 
         let mut emitted = Vec::new();
         for candidate in candidates {

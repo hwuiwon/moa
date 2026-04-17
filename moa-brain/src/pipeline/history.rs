@@ -178,10 +178,7 @@ impl HistoryCompiler {
         }
 
         let started_at = Instant::now();
-        let snapshot = self
-            .session_store
-            .get_snapshot(ctx.session_id)
-            .await;
+        let snapshot = self.session_store.get_snapshot(ctx.session_id).await;
         match snapshot {
             Ok(Some(snapshot))
                 if snapshot.is_current_version()
@@ -261,7 +258,7 @@ impl HistoryCompiler {
             .file_read_dedup_state
             .latest_reads
             .iter()
-            .map(|(path, state)| (path.clone(), ToolCallId(state.tool_id)))
+            .map(|(path, state)| (path.clone(), state.tool_id))
             .collect::<HashMap<_, _>>();
         latest_tool_ids.extend(
             replay_latest_reads
@@ -321,7 +318,7 @@ impl HistoryCompiler {
                     SnapshotFileReadState {
                         message_index,
                         tool_use_id: tool_result.tool_use_id.clone(),
-                        tool_id: tool_result.tool_id.0,
+                        tool_id: tool_result.tool_id,
                         success: tool_result.success,
                     },
                 );
@@ -812,7 +809,7 @@ fn build_file_read_dedup_state(messages: &[CompiledRecordMessage]) -> FileReadDe
             SnapshotFileReadState {
                 message_index: index,
                 tool_use_id: tool_result.tool_use_id.clone(),
-                tool_id: tool_result.tool_id.0,
+                tool_id: tool_result.tool_id,
                 success: tool_result.success,
             },
         );
@@ -842,7 +839,7 @@ fn placeholder_tool_result_from_snapshot(
 ) -> ContextMessage {
     let replay_meta = ToolResultReplayMeta {
         tool_use_id: tool_result.tool_use_id.clone(),
-        tool_id: ToolCallId(tool_result.tool_id),
+        tool_id: tool_result.tool_id,
         success: tool_result.success,
         file_read_path: file_read_path.to_string(),
     };

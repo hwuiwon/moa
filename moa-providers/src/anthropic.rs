@@ -103,7 +103,7 @@ impl AnthropicProvider {
 
     /// Overrides the Messages API URL, primarily for tests.
     pub fn with_messages_url(mut self, messages_url: impl Into<String>) -> Self {
-        self.messages_url = Arc::from(messages_url.into().as_str());
+        self.messages_url = Arc::from(messages_url.into());
         self
     }
 
@@ -634,13 +634,13 @@ fn anthropic_message(message: &ContextMessage) -> Result<Value> {
             return Err(MoaError::ProviderError(
                 "unexpected System message in anthropic_message; should be filtered upstream"
                     .to_string(),
-            ))
+            ));
         }
         MessageRole::Tool => {
             return Err(MoaError::ProviderError(
                 "unexpected Tool message in anthropic_message; should be filtered upstream"
                     .to_string(),
-            ))
+            ));
         }
     };
 
@@ -910,10 +910,7 @@ impl AnthropicStreamState {
         }
     }
 
-    fn apply_block_stop(
-        &mut self,
-        payload: ContentBlockStopEvent,
-    ) -> Vec<CompletionContent> {
+    fn apply_block_stop(&mut self, payload: ContentBlockStopEvent) -> Vec<CompletionContent> {
         self.ensure_capacity(payload.index);
         self.ensure_completed_capacity(payload.index);
 
@@ -1735,6 +1732,9 @@ mod tests {
     #[test]
     fn provider_accepts_documented_default_models() {
         let provider = AnthropicProvider::new("test-key", MODEL_SONNET_4_6).unwrap();
-        assert_eq!(provider.capabilities().model_id, ModelId::new(MODEL_SONNET_4_6));
+        assert_eq!(
+            provider.capabilities().model_id,
+            ModelId::new(MODEL_SONNET_4_6)
+        );
     }
 }

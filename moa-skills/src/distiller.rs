@@ -61,13 +61,8 @@ pub async fn maybe_distill_skill(
     normalize_new_skill(session, &mut skill);
     let path = build_skill_path(&skill.frontmatter.name);
     let page = wiki_page_from_skill(&skill, Some(path.clone()))?;
-    memory_store
-        .write_page(
-            &moa_core::MemoryScope::Workspace(session.workspace_id.clone()),
-            &path,
-            page,
-        )
-        .await?;
+    let scope = moa_core::MemoryScope::Workspace(session.workspace_id.clone());
+    memory_store.write_page(&scope, &path, page).await?;
     generate_skill_test_suite(session, &skill, &path, events, memory_store.clone()).await?;
 
     Ok(Some(skill_metadata_from_document(path, &skill)))

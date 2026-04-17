@@ -312,7 +312,6 @@ impl Render for SessionList {
                     updated: preview.summary.updated_at,
                     selected: self.is_selected(&session_id),
                 };
-                let id_for_click = session_id;
                 list = list.child(
                     div()
                         .id(ElementId::NamedInteger(
@@ -323,7 +322,7 @@ impl Render for SessionList {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, _, cx| {
-                                this.select_session(id_for_click, cx);
+                                this.select_session(session_id, cx);
                             }),
                         ),
                 );

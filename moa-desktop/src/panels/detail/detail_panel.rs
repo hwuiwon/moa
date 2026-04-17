@@ -111,7 +111,10 @@ impl DetailPanel {
             handle,
             entity,
             async move { chat.session_events(session_id).await },
-            |this, result, _cx| {
+            move |this, result, _cx| {
+                if this.session_id != Some(session_id) {
+                    return;
+                }
                 this.loading = false;
                 match result {
                     Ok(events) => {
@@ -144,7 +147,10 @@ impl DetailPanel {
                     .await
                     .map(|sessions| sessions.into_iter().find(|s| s.session_id == needle))
             },
-            |this, result, _cx| {
+            move |this, result, _cx| {
+                if this.session_id != Some(session_id) {
+                    return;
+                }
                 if let Ok(Some(summary)) = result {
                     this.session_summary = Some(summary);
                 }

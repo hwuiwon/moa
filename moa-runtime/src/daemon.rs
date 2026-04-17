@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use moa_core::{
     ApprovalDecision, DaemonCommand, DaemonReply, EventRecord, MemoryPath, MemorySearchResult,
-    MoaConfig, MoaError, PageSummary, PageType, Platform, Result, RuntimeEvent, SessionFilter,
-    SessionId, SessionMeta, SessionSummary, StartSessionRequest, UserId, WikiPage,
+    MoaConfig, MoaError, ModelId, PageSummary, PageType, Platform, Result, RuntimeEvent,
+    SessionFilter, SessionId, SessionMeta, SessionSummary, StartSessionRequest, UserId, WikiPage,
     WorkspaceBudgetStatus, WorkspaceId,
 };
 use moa_providers::resolve_provider_selection;
@@ -30,7 +30,7 @@ pub struct DaemonChatRuntime {
     workspace_id: WorkspaceId,
     user_id: UserId,
     platform: Platform,
-    model: String,
+    model: ModelId,
     session_id: SessionId,
 }
 
@@ -56,7 +56,7 @@ impl DaemonChatRuntime {
             workspace_id: workspace_id_for_root(&workspace_root),
             user_id: local_user_id(),
             platform,
-            model: selection.model_id,
+            model: selection.model_id.into(),
             session_id: SessionId::new(),
         };
         if let Some(session_id) = session_id {
@@ -72,7 +72,7 @@ impl DaemonChatRuntime {
     }
 
     fn model(&self) -> &str {
-        &self.model
+        self.model.as_str()
     }
 
     fn workspace_id(&self) -> &WorkspaceId {
@@ -92,7 +92,7 @@ impl DaemonChatRuntime {
             workspace_id: self.workspace_id.clone(),
             user_id: self.user_id.clone(),
             platform: self.platform.clone(),
-            model: self.model.clone().into(),
+            model: self.model.clone(),
             initial_message: None,
             title: None,
             parent_session_id: None,
@@ -117,7 +117,7 @@ impl DaemonChatRuntime {
     async fn set_model(&mut self, model: impl Into<String>) -> Result<SessionId> {
         let requested_model = model.into();
         let selection = resolve_provider_selection(&self.config, Some(requested_model.as_str()))?;
-        self.model = selection.model_id.clone();
+        self.model = selection.model_id.clone().into();
         self.config.general.default_model = selection.model_id;
         self.config.general.default_provider = selection.provider_name;
         self.reset_session().await
@@ -331,13 +331,8 @@ impl DaemonChatRuntime {
         event_tx: mpsc::UnboundedSender<SessionRuntimeEvent>,
     ) -> Result<()> {
         let socket = daemon_connect(&self.socket_path).await?;
-        let reader = daemon_send_command(
-            socket,
-            &DaemonCommand::ObserveSession {
-                session_id,
-            },
-        )
-        .await?;
+        let reader =
+            daemon_send_command(socket, &DaemonCommand::ObserveSession { session_id }).await?;
         relay_daemon_runtime_events(session_id, event_tx, reader).await
     }
 

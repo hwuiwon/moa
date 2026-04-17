@@ -222,7 +222,8 @@ async fn run_live_provider_tool_approval_roundtrip(provider: LiveProvider) {
             workspace_id: WorkspaceId::new(format!("ws-{label}")),
             user_id: UserId::new(format!("u-{label}")),
             platform: Platform::Cli,
-            model: model.into(),            initial_message: Some(UserMessage {
+            model: model.into(),
+            initial_message: Some(UserMessage {
                 text: prompt,
                 attachments: Vec::new(),
             }),
@@ -255,8 +256,7 @@ async fn run_live_provider_tool_approval_roundtrip(provider: LiveProvider) {
         .await
         .unwrap_or_else(|error| panic!("{label} approval signal failed: {error}"));
 
-    let tool_output =
-        wait_for_successful_tool_result(&session_store, session.session_id).await;
+    let tool_output = wait_for_successful_tool_result(&session_store, session.session_id).await;
     assert!(
         tool_output
             .to_text()
@@ -264,12 +264,7 @@ async fn run_live_provider_tool_approval_roundtrip(provider: LiveProvider) {
         "{label} wrote an unexpected path: {:?}",
         tool_output
     );
-    wait_for_status(
-        &orchestrator,
-        session.session_id,
-        SessionStatus::Completed,
-    )
-    .await;
+    wait_for_status(&orchestrator, session.session_id, SessionStatus::Completed).await;
     wait_for_final_response(&session_store, session.session_id, &token).await;
 }
 

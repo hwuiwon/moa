@@ -286,7 +286,7 @@ pub(crate) fn session_summary_from_row(row: &PgRow) -> Result<SessionSummary> {
             &row.try_get::<String, _>("platform")
                 .map_err(map_sqlx_error)?,
         )?,
-        model: ModelId::new(row.try_get::<String, _>("model").map_err(map_sqlx_error)?,),
+        model: ModelId::new(row.try_get::<String, _>("model").map_err(map_sqlx_error)?),
         updated_at: row
             .try_get::<DateTime<Utc>, _>("updated_at")
             .map_err(map_sqlx_error)?,

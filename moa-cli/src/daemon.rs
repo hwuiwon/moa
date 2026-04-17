@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use futures_util::FutureExt;
 use moa_core::{
     BrainOrchestrator, BroadcastChannel, DaemonCommand, DaemonInfo, DaemonReply,
     DaemonSessionPreview, DaemonStreamEvent, EventRange, LagPolicy, MemoryScope, MemoryStore,
@@ -21,7 +22,6 @@ use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
-use futures_util::FutureExt;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::api::start_api_server;
@@ -196,6 +196,10 @@ pub async fn run_daemon_server(config: MoaConfig) -> Result<()> {
             Some(_) = connection_tasks.join_next() => {}
         }
     }
+
+    // Observation streams can outlive the shutdown signal indefinitely. Abort
+    // any remaining handlers so drain does not block on long-lived clients.
+    connection_tasks.abort_all();
 
     // Drain in-flight connection handlers before teardown.
     while let Some(result) = connection_tasks.join_next().await {
