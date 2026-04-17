@@ -215,11 +215,19 @@ async fn load_session_memory(
 ### On-demand search (tool call)
 
 The brain calls `memory_search` as a tool when it needs more context. Search
-uses `websearch_to_tsquery('english', ...)`, so quoted phrases, `-negation`,
-and `OR` are all available in the query grammar. The derived Postgres index
-stores title, tags, and content in a weighted `tsvector`, and ranking starts
-with `ts_rank_cd` before applying recency, confidence, and reference-count
-reranking.
+now supports three retrieval modes:
+
+1. `keyword`: `websearch_to_tsquery('english', ...)` over the weighted
+   `tsvector` index, with quoted phrases, `-negation`, `OR`, and explicit
+   trigram fallback for short typo-prone queries.
+2. `semantic`: `pgvector` cosine search over asynchronously computed page
+   embeddings indexed with HNSW.
+3. `hybrid` (default): run keyword and semantic search in parallel and fuse the
+   rankings with Reciprocal Rank Fusion.
+
+The Postgres index remains derived from markdown files on disk. Keyword search
+is immediate after a page write; semantic search is eventually consistent while
+the embedding worker drains `wiki_embedding_queue`.
 
 ```rust
 pub struct MemorySearchTool;
@@ -234,7 +242,8 @@ impl Tool for MemorySearchTool {
                 "query": { "type": "string", "description": "Search terms" },
                 "scope": { "type": "string", "enum": ["user", "workspace", "both"] },
                 "type_filter": { "type": "string", "enum": ["topic", "entity", "decision", "skill", "source"] },
-                "limit": { "type": "integer", "default": 5 }
+                "limit": { "type": "integer", "default": 5 },
+                "mode": { "type": "string", "enum": ["hybrid", "keyword", "semantic"], "default": "hybrid" }
             },
             "required": ["query"]
         })
@@ -242,10 +251,11 @@ impl Tool for MemorySearchTool {
     
     async fn execute(&self, input: &str, ctx: &ToolContext) -> Result<String> {
         let params: SearchParams = serde_json::from_str(input)?;
-        let results = ctx.memory.search(
+        let results = ctx.memory.search_with_mode(
             &params.query,
             params.scope.into_memory_scope(ctx.user_id, ctx.workspace_id),
             params.limit.unwrap_or(5),
+            params.mode.unwrap_or(MemorySearchMode::Hybrid),
         ).await?;
         
         // Return formatted results with snippets

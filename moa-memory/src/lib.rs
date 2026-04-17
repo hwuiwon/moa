@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
-    BrainId, MemoryPath, MemoryScope, MemorySearchResult, MemoryStore, MoaConfig, MoaError,
-    PageSummary, PageType, Result, SessionStore, WikiPage,
+    BrainId, MemoryPath, MemoryScope, MemorySearchMode, MemorySearchResult, MemoryStore, MoaConfig,
+    MoaError, PageSummary, PageType, Result, SessionStore, WikiPage,
 };
+use moa_providers::{EmbeddingProvider, build_embedding_provider_from_config};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::fs;
 use tracing::warn;
@@ -29,6 +30,7 @@ use index::{
     INDEX_FILENAME, LogEntry, append_log_entry, compile_index, load_index_file, load_log_file,
 };
 pub use moa_core::IngestReport;
+pub use search::EmbeddingIndexStatus;
 use search::WikiSearchIndex;
 use wiki::{parse_markdown, render_markdown};
 
@@ -76,6 +78,24 @@ impl FileMemoryStore {
         })
     }
 
+    /// Creates a file-backed memory store backed by a shared Postgres pool and embedder.
+    pub async fn new_with_pool_and_schema_and_embedder(
+        base_dir: impl AsRef<Path>,
+        pool: Arc<PgPool>,
+        schema_name: Option<&str>,
+        embedder: Arc<dyn EmbeddingProvider>,
+    ) -> Result<Self> {
+        let base_dir = base_dir.as_ref().to_path_buf();
+        fs::create_dir_all(base_dir.join("memory")).await?;
+        fs::create_dir_all(base_dir.join("workspaces")).await?;
+
+        Ok(Self {
+            base_dir: Arc::new(base_dir),
+            search_index: WikiSearchIndex::new_with_pool_and_embedder(pool, schema_name, embedder)
+                .await?,
+        })
+    }
+
     /// Creates a Postgres-backed memory store from the local memory config.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
         let pool = connect_search_pool(config).await?;
@@ -89,7 +109,20 @@ impl FileMemoryStore {
         schema_name: Option<&str>,
     ) -> Result<Self> {
         let base_dir = configured_base_dir(config)?;
-        Self::new_with_pool_and_schema(base_dir, pool, schema_name).await
+        match build_embedding_provider_from_config(config)? {
+            Some(embedder) => {
+                let store = Self::new_with_pool_and_schema_and_embedder(
+                    base_dir,
+                    pool,
+                    schema_name,
+                    embedder,
+                )
+                .await?;
+                store.search_index.start_embedding_worker();
+                Ok(store)
+            }
+            None => Self::new_with_pool_and_schema(base_dir, pool, schema_name).await,
+        }
     }
 
     /// Returns the local filesystem root backing the memory store.
@@ -158,6 +191,21 @@ impl FileMemoryStore {
     /// Runs direct consolidation tasks against a single memory scope.
     pub async fn run_consolidation(&self, scope: &MemoryScope) -> Result<ConsolidationReport> {
         consolidation::run_consolidation(self, scope).await
+    }
+
+    /// Runs one embedding-worker batch immediately.
+    pub async fn run_embedding_queue_once(&self) -> Result<usize> {
+        self.search_index.run_embedding_queue_once().await
+    }
+
+    /// Enqueues every page in one scope for embedding or re-embedding.
+    pub async fn enqueue_scope_embeddings(&self, scope: &MemoryScope) -> Result<u64> {
+        self.search_index.enqueue_scope_embeddings(scope).await
+    }
+
+    /// Returns embedding-queue and model diagnostics for doctor output.
+    pub async fn embedding_status(&self) -> Result<EmbeddingIndexStatus> {
+        self.search_index.embedding_status().await
     }
 
     /// Runs scheduled consolidation checks and executes any due workspace consolidations.
@@ -306,6 +354,19 @@ impl MemoryStore for FileMemoryStore {
         limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
         self.search_index.search(query, scope, limit).await
+    }
+
+    /// Searches indexed wiki content within a single scope using an explicit retrieval mode.
+    async fn search_with_mode(
+        &self,
+        query: &str,
+        scope: &MemoryScope,
+        limit: usize,
+        mode: MemorySearchMode,
+    ) -> Result<Vec<MemorySearchResult>> {
+        self.search_index
+            .search_with_mode(query, scope, limit, mode)
+            .await
     }
 
     /// Reads a wiki page within an explicit scope.

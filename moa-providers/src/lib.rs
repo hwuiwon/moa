@@ -1,6 +1,7 @@
 //! LLM provider implementations for MOA.
 
 pub mod anthropic;
+pub mod embedding;
 mod factory;
 pub mod gemini;
 mod http;
@@ -16,6 +17,9 @@ pub mod scripted;
 mod sse;
 
 pub use anthropic::AnthropicProvider;
+pub use embedding::{
+    EmbeddingProvider, MockEmbedding, OpenAIEmbedding, build_embedding_provider_from_config,
+};
 pub use factory::{
     ProviderSelection, build_provider_from_config, build_provider_from_selection,
     resolve_provider_selection,

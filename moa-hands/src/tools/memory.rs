@@ -5,9 +5,9 @@ use std::time::Instant;
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    BuiltInTool, Event, IngestReport, MemoryPath, MemoryScope, MoaError, PageType, PolicyAction,
-    Result, RiskLevel, ToolContent, ToolContext, ToolDiffStrategy, ToolInputShape, ToolOutput,
-    ToolPolicySpec, WikiPage, read_tool_policy, write_tool_policy,
+    BuiltInTool, Event, IngestReport, MemoryPath, MemoryScope, MemorySearchMode, MoaError,
+    PageType, PolicyAction, Result, RiskLevel, ToolContent, ToolContext, ToolDiffStrategy,
+    ToolInputShape, ToolOutput, ToolPolicySpec, WikiPage, read_tool_policy, write_tool_policy,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -89,7 +89,8 @@ impl BuiltInTool for MemorySearchTool {
                 "query": { "type": "string", "description": "Search terms." },
                 "scope": { "type": "string", "enum": ["user", "workspace", "both"], "default": "both" },
                 "type_filter": { "type": "string", "enum": ["index", "topic", "entity", "decision", "skill", "source", "schema", "log"] },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 10, "default": 5 }
+                "limit": { "type": "integer", "minimum": 1, "maximum": 10, "default": 5 },
+                "mode": { "type": "string", "enum": ["hybrid", "keyword", "semantic"], "default": "hybrid" }
             },
             "required": ["query"],
             "additionalProperties": false
@@ -125,7 +126,7 @@ impl BuiltInTool for MemorySearchTool {
             };
             let mut results = ctx
                 .memory_store
-                .search(&params.query, &scope, per_scope_limit)
+                .search_with_mode(&params.query, &scope, per_scope_limit, params.mode)
                 .await?;
             if let Some(page_type) = &type_filter {
                 results.retain(|result| &result.page_type == page_type);
@@ -374,6 +375,8 @@ struct MemorySearchInput {
     type_filter: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    mode: MemorySearchMode,
 }
 
 #[derive(Debug, Deserialize)]

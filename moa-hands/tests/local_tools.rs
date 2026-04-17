@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
-    Event, HandProvider, HandResources, HandSpec, MemoryPath, MemoryScope, MemorySearchResult,
-    MemoryStore, ModelId, PageSummary, PageType, Result, SandboxTier, SessionMeta, SessionStore,
-    ToolInvocation, UserId, WikiPage, WorkspaceId,
+    Event, HandProvider, HandResources, HandSpec, MemoryPath, MemoryScope, MemorySearchMode,
+    MemorySearchResult, MemoryStore, ModelId, PageSummary, PageType, Result, SandboxTier,
+    SessionMeta, SessionStore, ToolInvocation, UserId, WikiPage, WorkspaceId,
 };
 use moa_hands::{LocalHandProvider, ToolRouter};
 use moa_memory::FileMemoryStore;
@@ -26,6 +26,67 @@ impl MemoryStore for EmptyMemoryStore {
         _scope: &MemoryScope,
         _limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
+        Ok(Vec::new())
+    }
+
+    async fn read_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
+        Err(moa_core::MoaError::StorageError("not found".to_string()))
+    }
+
+    async fn write_page(
+        &self,
+        _scope: &MemoryScope,
+        _path: &MemoryPath,
+        _page: WikiPage,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_pages(
+        &self,
+        _scope: &MemoryScope,
+        _filter: Option<PageType>,
+    ) -> Result<Vec<PageSummary>> {
+        Ok(Vec::new())
+    }
+
+    async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
+        Ok(String::new())
+    }
+
+    async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct TrackingMemoryStore {
+    last_mode: Mutex<Option<MemorySearchMode>>,
+}
+
+#[async_trait]
+impl MemoryStore for TrackingMemoryStore {
+    async fn search(
+        &self,
+        _query: &str,
+        _scope: &MemoryScope,
+        _limit: usize,
+    ) -> Result<Vec<MemorySearchResult>> {
+        Ok(Vec::new())
+    }
+
+    async fn search_with_mode(
+        &self,
+        _query: &str,
+        _scope: &MemoryScope,
+        _limit: usize,
+        mode: MemorySearchMode,
+    ) -> Result<Vec<MemorySearchResult>> {
+        *self.last_mode.lock().unwrap() = Some(mode);
         Ok(Vec::new())
     }
 
@@ -827,6 +888,38 @@ async fn memory_search_returns_indexed_results() {
     assert!(rendered.contains("OAuth Notes"));
     assert!(rendered.contains("refresh"));
     assert!(output.structured.is_some());
+}
+
+#[tokio::test]
+async fn memory_search_passes_through_explicit_mode() {
+    let dir = tempdir().unwrap();
+    let tracking_store = Arc::new(TrackingMemoryStore::default());
+    let memory_store_trait: Arc<dyn MemoryStore> = tracking_store.clone();
+    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
+        .await
+        .unwrap();
+    let session = session();
+
+    let _ = router
+        .execute(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "memory_search".to_string(),
+                input: json!({
+                    "query": "refresh token",
+                    "scope": "workspace",
+                    "mode": "keyword"
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *tracking_store.last_mode.lock().unwrap(),
+        Some(MemorySearchMode::Keyword)
+    );
 }
 
 #[tokio::test]
