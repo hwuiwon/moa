@@ -231,6 +231,18 @@ pub trait MemoryStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<MemorySearchResult>>;
 
+    /// Searches memory pages within a scope using an explicit retrieval mode.
+    async fn search_with_mode(
+        &self,
+        query: &str,
+        scope: &MemoryScope,
+        limit: usize,
+        mode: crate::MemorySearchMode,
+    ) -> Result<Vec<MemorySearchResult>> {
+        let _ = mode;
+        self.search(query, scope, limit).await
+    }
+
     /// Reads a wiki page by logical path within an explicit scope.
     async fn read_page(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<WikiPage>;
 

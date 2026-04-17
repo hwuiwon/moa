@@ -121,6 +121,8 @@ enum MemoryCommand {
     Ingest(IngestArgs),
     /// Rebuilds the derived Postgres memory index from markdown files on disk.
     RebuildIndex(RebuildIndexArgs),
+    /// Re-enqueues scoped wiki pages for semantic embedding backfill.
+    RebuildEmbeddings(RebuildEmbeddingsArgs),
 }
 
 /// Arguments for `moa memory ingest`.
@@ -151,6 +153,22 @@ struct RebuildIndexArgs {
     workspace: Option<String>,
 
     /// Rebuild the local user-memory scope instead of a workspace scope.
+    #[arg(long)]
+    user: bool,
+}
+
+/// Arguments for `moa memory rebuild-embeddings`.
+#[derive(Debug, Args)]
+struct RebuildEmbeddingsArgs {
+    /// Re-enqueue every discovered scope under the local memory root.
+    #[arg(long)]
+    all: bool,
+
+    /// Workspace id override. Use `.` for the current directory workspace.
+    #[arg(long)]
+    workspace: Option<String>,
+
+    /// Re-enqueue the local user-memory scope instead of a workspace scope.
     #[arg(long)]
     user: bool,
 }
@@ -367,6 +385,18 @@ async fn main() -> Result<()> {
                 print!(
                     "{}",
                     memory_rebuild_index_report(
+                        &config,
+                        args.all,
+                        args.workspace.as_deref(),
+                        args.user,
+                    )
+                    .await?
+                );
+            }
+            MemoryCommand::RebuildEmbeddings(args) => {
+                print!(
+                    "{}",
+                    memory_rebuild_embeddings_report(
                         &config,
                         args.all,
                         args.workspace.as_deref(),
@@ -748,6 +778,10 @@ async fn doctor_report(config: &MoaConfig, log_path: &Path) -> Result<String> {
         format!("database: {database_line}"),
         format!("memory_index: {}", memory_index_status(config).await),
         format!(
+            "memory_embeddings: {}",
+            memory_embedding_status(config).await
+        ),
+        format!(
             "log_file: {}{}",
             log_path.display(),
             if cfg!(debug_assertions) || std::env::var_os("RUST_LOG").is_some() {
@@ -959,6 +993,37 @@ async fn memory_index_status(config: &MoaConfig) -> String {
     }
 }
 
+async fn memory_embedding_status(config: &MoaConfig) -> String {
+    match load_memory_store(config).await {
+        Ok(store) => match store.embedding_status().await {
+            Ok(status) => {
+                let configured_model = status
+                    .configured_model
+                    .unwrap_or_else(|| "disabled".to_string());
+                let mut parts = vec![
+                    format!("model={configured_model}"),
+                    format!("missing={}", status.missing_embeddings),
+                    format!("queue_depth={}", status.queue_depth),
+                ];
+
+                if status.mismatched_model_pages > 0 {
+                    parts.push(format!(
+                        "model_mismatch={} (run `moa memory rebuild-embeddings`)",
+                        status.mismatched_model_pages
+                    ));
+                }
+                if status.stored_models.len() > 1 {
+                    parts.push(format!("stored_models={}", status.stored_models.join(",")));
+                }
+
+                format!("healthy ({})", parts.join("; "))
+            }
+            Err(error) => format!("unhealthy ({error})"),
+        },
+        Err(error) => format!("unhealthy ({error})"),
+    }
+}
+
 async fn memory_rebuild_index_report(
     config: &MoaConfig,
     rebuild_all: bool,
@@ -991,6 +1056,46 @@ async fn memory_rebuild_index_report(
         MemoryStore::rebuild_search_index(&store, &scope).await?;
         output.push_str(&format!("rebuilt {} pages in {:?}\n", pages.len(), scope));
     }
+    Ok(output)
+}
+
+async fn memory_rebuild_embeddings_report(
+    config: &MoaConfig,
+    rebuild_all: bool,
+    workspace: Option<&str>,
+    rebuild_user: bool,
+) -> Result<String> {
+    if rebuild_all && (workspace.is_some() || rebuild_user) {
+        bail!("--all cannot be combined with --workspace or --user");
+    }
+    if rebuild_user && workspace.is_some() {
+        bail!("--user cannot be combined with --workspace");
+    }
+
+    let store = load_memory_store(config).await?;
+    let scopes = if rebuild_all {
+        discover_memory_scopes(&store).await?
+    } else if rebuild_user {
+        vec![MemoryScope::User(current_user_id())]
+    } else {
+        vec![MemoryScope::Workspace(
+            workspace
+                .map(resolve_workspace_arg)
+                .unwrap_or_else(current_workspace_id),
+        )]
+    };
+
+    let mut output = String::new();
+    let mut total = 0_u64;
+    for scope in scopes {
+        let queued = store.enqueue_scope_embeddings(&scope).await?;
+        total += queued;
+        output.push_str(&format!("queued {} pages in {:?}\n", queued, scope));
+    }
+    output.push_str(&format!(
+        "enqueued {} pages for re-embedding; the background worker will process the queue while MOA is running\n",
+        total
+    ));
     Ok(output)
 }
 
@@ -1029,6 +1134,8 @@ fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result
         "cloud.memory_dir" => config.cloud.memory_dir = Some(value.to_string()),
         "local.docker_enabled" => config.local.docker_enabled = parse_bool(value)?,
         "local.sandbox_dir" => config.local.sandbox_dir = value.to_string(),
+        "memory.embedding_provider" => config.memory.embedding_provider = value.to_string(),
+        "memory.embedding_model" => config.memory.embedding_model = value.to_string(),
         "database.url" => config.database.url = value.to_string(),
         "database.admin_url" => config.database.admin_url = Some(value.to_string()),
         "database.max_connections" => {

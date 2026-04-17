@@ -207,6 +207,13 @@ pub struct PlatformCapabilities {
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
     async fn search(&self, query: &str, scope: MemoryScope, limit: usize) -> Result<Vec<MemorySearchResult>>;
+    async fn search_with_mode(
+        &self,
+        query: &str,
+        scope: MemoryScope,
+        limit: usize,
+        mode: MemorySearchMode,
+    ) -> Result<Vec<MemorySearchResult>>;
     async fn read_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage>;
     async fn write_page(&self, scope: MemoryScope, path: &MemoryPath, page: WikiPage) -> Result<()>;
     async fn delete_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<()>;
@@ -218,6 +225,12 @@ pub trait MemoryStore: Send + Sync {
 pub enum MemoryScope {
     User(UserId),
     Workspace(WorkspaceId),
+}
+
+pub enum MemorySearchMode {
+    Hybrid,
+    Keyword,
+    Semantic,
 }
 
 // ─── Context Compiler ───

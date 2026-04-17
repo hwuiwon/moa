@@ -8,6 +8,8 @@ license.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 moa-core = { path = "../moa-core" }
+moa-providers = { path = "../moa-providers" }
+opentelemetry.workspace = true
 regex = "1"
 serde.workspace = true
 serde_json.workspace = true

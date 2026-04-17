@@ -138,6 +138,14 @@ impl MoaConfig {
                 "memory.auto_bootstrap",
                 Self::default().memory.auto_bootstrap,
             )?
+            .set_default(
+                "memory.embedding_provider",
+                Self::default().memory.embedding_provider,
+            )?
+            .set_default(
+                "memory.embedding_model",
+                Self::default().memory.embedding_model,
+            )?
             .set_default("daemon.socket_path", Self::default().daemon.socket_path)?
             .set_default("daemon.pid_file", Self::default().daemon.pid_file)?
             .set_default("daemon.log_file", Self::default().daemon.log_file)?
@@ -679,12 +687,18 @@ impl Default for LocalConfig {
 pub struct MemoryConfig {
     /// Automatically bootstrap workspace memory when it is empty.
     pub auto_bootstrap: bool,
+    /// Embedding provider used for semantic wiki search. Set to `disabled` to turn it off.
+    pub embedding_provider: String,
+    /// Embedding model identifier used for semantic wiki search backfills and queries.
+    pub embedding_model: String,
 }
 
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             auto_bootstrap: true,
+            embedding_provider: "openai".to_string(),
+            embedding_model: "text-embedding-3-small".to_string(),
         }
     }
 }

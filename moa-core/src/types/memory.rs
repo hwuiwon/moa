@@ -18,6 +18,19 @@ pub enum MemoryScope {
     Workspace(WorkspaceId),
 }
 
+/// Search strategy used for wiki-backed memory retrieval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySearchMode {
+    /// Fuse keyword and semantic rankings when both are available.
+    #[default]
+    Hybrid,
+    /// Restrict search to the keyword `tsvector` index.
+    Keyword,
+    /// Restrict search to semantic vector search.
+    Semantic,
+}
+
 string_id!(
     /// Logical memory wiki path.
     pub struct MemoryPath
