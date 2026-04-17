@@ -15,6 +15,27 @@ Two orchestrator implementations share the same `BrainOrchestrator` trait:
 | Cloud | `TemporalOrchestrator` | Production: `moa --cloud` |
 | Local | `LocalOrchestrator` | Zero-setup: `moa` |
 
+## Converged lifecycle layer
+
+The orchestrators now share one lifecycle rule set instead of each
+re-implementing session wakeup semantics:
+
+- `moa-orchestrator/src/session_engine.rs` owns the shared
+  `session_requires_processing` rule.
+- `SessionStore::transition_status(...)` is the canonical path for
+  persisted status changes. It updates the session row, emits the
+  matching `SessionStatusChanged` event, and clears snapshots on cancel.
+- The brain harness uses that same `transition_status(...)` API when it
+  enters `WaitingApproval` or resumes `Running`, so Local and Temporal
+  persist identical status transitions.
+- Local and Temporal keep only adapter-specific concerns:
+  - Local: Tokio task supervision, runtime broadcasts, local filesystem root wiring
+  - Temporal: workflow signals, activity boundaries, worker/runtime connectivity
+
+This means new orchestrator backends should reuse the shared session
+engine and the store-level transition API instead of copying lifecycle
+rules into a new adapter.
+
 ---
 
 ## Cloud mode: Temporal.io
@@ -203,6 +224,35 @@ fly deploy --image moa:latest
 ## Local mode: LocalOrchestrator
 
 The local orchestrator provides the same `BrainOrchestrator` interface without any cloud dependencies.
+
+## Contract tests vs. adapter tests
+
+The orchestrator test strategy is split in two layers:
+
+- Contract tests:
+  `moa-orchestrator/tests/support/orchestrator_contract.rs`
+  These assert shared lifecycle behavior such as:
+  - blank sessions wait for the first message
+  - queued messages stay FIFO
+  - approval resume ordering is stable
+  - soft cancel while waiting for approval cancels cleanly
+- Adapter tests:
+  `local_orchestrator.rs` and `temporal_orchestrator.rs`
+  These keep only backend-specific checks such as local runtime
+  broadcasts or Temporal worker-restart recovery.
+
+Recommended commands:
+
+```bash
+# Local adapter + shared contract suite
+cargo test -p moa-orchestrator --test local_orchestrator
+
+# Temporal adapter + shared contract suite against a local dev server
+cargo test -p moa-orchestrator --features temporal --test temporal_orchestrator -- --test-threads=1
+
+# Optional live-provider Temporal smoke
+MOA_RUN_LIVE_PROVIDER_TESTS=1 cargo test -p moa-orchestrator --features temporal --test temporal_orchestrator temporal_orchestrator_live_anthropic_smoke -- --ignored --exact --nocapture
+```
 
 ### Implementation
 

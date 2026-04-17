@@ -744,7 +744,7 @@ mod tests {
         }
         if std::env::var(&config.providers.google.api_key_env).is_ok() {
             config.general.default_provider = "google".to_string();
-            config.general.default_model = "gemini-2.5-flash".to_string();
+            config.general.default_model = "gemini-3.1-pro-preview".to_string();
             return Some(config);
         }
 

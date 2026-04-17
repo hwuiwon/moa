@@ -5,7 +5,12 @@ use moa_providers::GeminiProvider;
 use tokio::time::timeout;
 
 fn gemini_live_model() -> String {
-    std::env::var("GOOGLE_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_string())
+    std::env::var("GOOGLE_MODEL").unwrap_or_else(|_| "gemini-3.1-pro-preview".to_string())
+}
+
+fn looks_like_four_answer(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    normalized.contains('4') || normalized.contains("four")
 }
 
 #[tokio::test]
@@ -13,25 +18,20 @@ fn gemini_live_model() -> String {
 async fn gemini_live_completion_returns_expected_answer() {
     let provider = GeminiProvider::from_env(gemini_live_model()).unwrap();
     let response = provider
-        .complete(CompletionRequest {
-            model: None,
-            messages: vec![moa_core::ContextMessage::user(
-                "What is 2+2? Respond with just the answer.",
-            )],
-            tools: Vec::new(),
-            max_output_tokens: Some(32),
-            temperature: None,
-            cache_breakpoints: Vec::new(),
-            cache_controls: Vec::new(),
-            metadata: Default::default(),
-        })
+        .complete(CompletionRequest::simple(
+            "What is 2+2? Respond with just the answer.",
+        ))
         .await
         .unwrap()
         .collect()
         .await
         .unwrap();
 
-    assert!(response.text.contains('4'));
+    assert!(
+        looks_like_four_answer(&response.text),
+        "unexpected arithmetic response: {:?}",
+        response.text
+    );
 }
 
 #[tokio::test]

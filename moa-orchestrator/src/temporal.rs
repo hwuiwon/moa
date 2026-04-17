@@ -9,8 +9,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use futures_util::FutureExt as _;
 use moa_brain::{
-    TurnResult, build_default_pipeline_with_runtime, find_pending_tool_approval,
-    find_resolved_pending_tool_approval, run_brain_turn_with_tools_stepwise,
+    TurnResult, build_default_pipeline_with_runtime, run_brain_turn_with_tools_stepwise,
     update_workspace_tool_stats,
 };
 use moa_core::{
@@ -43,6 +42,8 @@ use tokio::sync::broadcast;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use url::Url;
 use uuid::Uuid;
+
+use crate::session_engine::session_requires_processing;
 
 const DEFAULT_WORKFLOW_EXECUTION_TIMEOUT: Duration = Duration::from_secs(60 * 60 * 24);
 const DEFAULT_ACTIVITY_START_TO_CLOSE_TIMEOUT: Duration = Duration::from_secs(60 * 5);
@@ -293,7 +294,7 @@ impl TemporalActivities {
         session_id: SessionId,
     ) -> std::result::Result<TemporalTurnResult, ActivityError> {
         self.session_store
-            .update_status(session_id, SessionStatus::Running)
+            .transition_status(session_id, SessionStatus::Running)
             .await
             .map_err(non_retryable_activity_error)?;
         let heartbeat_ctx = ctx.clone();
@@ -402,7 +403,7 @@ impl TemporalActivities {
             .await
             .map_err(non_retryable_activity_error)?;
         self.session_store
-            .update_status(input.session_id, SessionStatus::Running)
+            .transition_status(input.session_id, SessionStatus::Running)
             .await
             .map_err(non_retryable_activity_error)?;
         Ok(())
@@ -415,7 +416,7 @@ impl TemporalActivities {
         input: SessionStatusActivityInput,
     ) -> std::result::Result<(), ActivityError> {
         self.session_store
-            .update_status(input.session_id, input.status)
+            .transition_status(input.session_id, input.status)
             .await
             .map_err(non_retryable_activity_error)?;
         Ok(())
@@ -468,9 +469,10 @@ impl TemporalActivities {
         )
         .await
         .map_err(non_retryable_activity_error)?;
+        self.tool_router.destroy_session_hands(&session_id).await;
 
         self.session_store
-            .update_status(session_id, SessionStatus::Completed)
+            .transition_status(session_id, SessionStatus::Completed)
             .await
             .map_err(non_retryable_activity_error)?;
         Ok(())
@@ -880,7 +882,7 @@ impl BrainOrchestrator for TemporalOrchestrator {
                 }),
             SessionSignal::HardCancel => {
                 self.session_store
-                    .update_status(session_id, SessionStatus::Cancelled)
+                    .transition_status(session_id, SessionStatus::Cancelled)
                     .await?;
                 handle
                     .terminate(
@@ -1192,38 +1194,6 @@ where
     T: Serialize + 'static,
 {
     RawValue::from_value(value, &PayloadConverter::serde_json())
-}
-
-fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) -> bool {
-    if matches!(session.status, SessionStatus::Cancelled) {
-        return false;
-    }
-
-    if find_pending_tool_approval(events).is_some()
-        || find_resolved_pending_tool_approval(events).is_some()
-    {
-        return true;
-    }
-
-    events
-        .iter()
-        .rev()
-        .find_map(|record| match record.event {
-            Event::SessionStatusChanged { .. }
-            | Event::Warning { .. }
-            | Event::MemoryWrite { .. }
-            | Event::HandDestroyed { .. }
-            | Event::HandError { .. }
-            | Event::Checkpoint { .. } => None,
-            Event::UserMessage { .. }
-            | Event::QueuedMessage { .. }
-            | Event::ToolResult { .. }
-            | Event::ToolError { .. }
-            | Event::ApprovalDecided { .. }
-            | Event::ToolCall { .. } => Some(true),
-            _ => Some(false),
-        })
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

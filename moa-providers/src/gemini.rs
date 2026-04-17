@@ -351,6 +351,25 @@ fn capabilities_for_model(model: &str) -> ModelCapabilities {
         };
     }
 
+    if model.starts_with("gemini-3.1-flash-lite") {
+        return ModelCapabilities {
+            model_id: ModelId::new(model),
+            context_window: 1_000_000,
+            max_output: 64_000,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Gemini,
+            pricing: TokenPricing {
+                input_per_mtok: 0.25,
+                output_per_mtok: 1.5,
+                cached_input_per_mtok: Some(0.025),
+            },
+            native_tools: native_google_search_tools(),
+        };
+    }
+
     if model.starts_with("gemini-3-flash") || model.starts_with("gemini-3.1-flash") {
         return ModelCapabilities {
             model_id: ModelId::new(model),
@@ -694,6 +713,9 @@ fn build_explicit_cache_plan(
     if tail_parts.contents.is_empty() {
         return Ok(None);
     }
+    if tail_parts.system_instruction.is_some() {
+        return Ok(None);
+    }
 
     let cache_body = build_cache_create_body(model, ttl, prefix_parts);
     let cache_key = format!(
@@ -916,11 +938,9 @@ fn thinking_config_for_model(model: &str, reasoning_effort: &str) -> Result<Opti
             }
         } else {
             match effort {
+                ReasoningEffort::None | ReasoningEffort::Minimal | ReasoningEffort::Low => "low",
+                ReasoningEffort::Medium => "medium",
                 ReasoningEffort::High | ReasoningEffort::Xhigh => "high",
-                ReasoningEffort::None
-                | ReasoningEffort::Minimal
-                | ReasoningEffort::Low
-                | ReasoningEffort::Medium => "low",
             }
         };
         return Ok(Some(json!({ "thinkingLevel": level })));
@@ -1299,7 +1319,10 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::{GeminiProvider, GeminiUsageMetadata, token_usage_from_gemini_usage};
+    use super::{
+        GeminiProvider, GeminiUsageMetadata, build_explicit_cache_plan, canonical_model_id,
+        capabilities_for_model, thinking_config_for_model, token_usage_from_gemini_usage,
+    };
 
     fn sse_stream(frames: &[Value]) -> String {
         let mut stream = String::new();
@@ -1414,6 +1437,75 @@ mod tests {
         assert_eq!(token_usage.input_tokens_cache_write, 0);
         assert_eq!(token_usage.input_tokens_cache_read, 1536);
         assert_eq!(token_usage.output_tokens, 512);
+    }
+
+    #[test]
+    fn gemini_preview_model_ids_pass_through_unchanged() {
+        assert_eq!(
+            canonical_model_id("gemini-3.1-pro-preview").unwrap(),
+            "gemini-3.1-pro-preview"
+        );
+        assert_eq!(
+            canonical_model_id("gemini-3-flash-preview").unwrap(),
+            "gemini-3-flash-preview"
+        );
+        assert_eq!(
+            canonical_model_id("gemini-3.1-flash-lite-preview").unwrap(),
+            "gemini-3.1-flash-lite-preview"
+        );
+    }
+
+    #[test]
+    fn gemini_flash_lite_preview_uses_documented_price_envelope() {
+        let capabilities = capabilities_for_model("gemini-3.1-flash-lite-preview");
+        assert_eq!(capabilities.context_window, 1_000_000);
+        assert_eq!(capabilities.max_output, 64_000);
+        assert_eq!(capabilities.pricing.input_per_mtok, 0.25);
+        assert_eq!(capabilities.pricing.output_per_mtok, 1.5);
+    }
+
+    #[test]
+    fn gemini_3_pro_maps_medium_reasoning_to_medium_thinking_level() {
+        let thinking = thinking_config_for_model("gemini-3.1-pro-preview", "medium")
+            .unwrap()
+            .expect("thinking config");
+        assert_eq!(thinking["thinkingLevel"], "medium");
+    }
+
+    #[test]
+    fn gemini_explicit_cache_plan_skips_tail_system_instruction() {
+        let request = CompletionRequest {
+            model: None,
+            messages: vec![
+                ContextMessage::system("cached rules"),
+                ContextMessage::user("prefix ".repeat(300)),
+                ContextMessage::system("late rule"),
+                ContextMessage::user("call the tool"),
+            ],
+            tools: vec![json!({
+                "name": "file_write",
+                "description": "Write a file",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "content": { "type": "string" }
+                    },
+                    "required": ["path", "content"]
+                }
+            })],
+            max_output_tokens: Some(256),
+            temperature: None,
+            cache_breakpoints: vec![2],
+            cache_controls: Vec::new(),
+            metadata: Default::default(),
+        };
+
+        let plan = build_explicit_cache_plan(&request, "gemini-2.5-flash", "medium", &[]).unwrap();
+        assert!(
+            plan.is_none(),
+            "tail requests with a system instruction must not use cachedContent"
+        );
     }
 
     #[tokio::test]

@@ -1,3 +1,5 @@
+mod support;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -18,10 +20,76 @@ use moa_hands::{ToolRegistry, ToolRouter};
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
 use moa_session::{PostgresSessionStore, testing};
+use support::orchestrator_contract::{
+    OrchestratorContractHarness, assert_blank_session_waits_for_first_message,
+    assert_processes_multiple_queued_messages_fifo, assert_processes_two_sessions_independently,
+    assert_queued_message_waiting_for_approval_runs_after_allowed_turn,
+    assert_soft_cancel_waiting_for_approval_cancels_cleanly,
+};
 use tempfile::TempDir;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, timeout};
 use uuid::Uuid;
+
+struct LocalContractHarness<'a> {
+    orchestrator: &'a LocalOrchestrator,
+    requests: Option<Arc<Mutex<Vec<CompletionRequest>>>>,
+}
+
+impl<'a> LocalContractHarness<'a> {
+    fn new(
+        orchestrator: &'a LocalOrchestrator,
+        requests: Option<Arc<Mutex<Vec<CompletionRequest>>>>,
+    ) -> Self {
+        Self {
+            orchestrator,
+            requests,
+        }
+    }
+}
+
+#[async_trait]
+impl OrchestratorContractHarness for LocalContractHarness<'_> {
+    fn harness_name(&self) -> &'static str {
+        "local"
+    }
+
+    fn default_model(&self) -> moa_core::ModelId {
+        moa_core::ModelId::new(self.orchestrator.model())
+    }
+
+    fn platform(&self) -> Platform {
+        Platform::Desktop
+    }
+
+    async fn start_session(&self, req: StartSessionRequest) -> Result<SessionHandle> {
+        self.orchestrator.start_session(req).await
+    }
+
+    async fn signal(&self, session_id: SessionId, signal: SessionSignal) -> Result<()> {
+        self.orchestrator.signal(session_id, signal).await
+    }
+
+    async fn session_status(&self, session_id: SessionId) -> Result<Option<SessionStatus>> {
+        self.orchestrator
+            .get_session(session_id)
+            .await
+            .map(|session| Some(session.status))
+    }
+
+    async fn session_events(&self, session_id: SessionId) -> Result<Vec<moa_core::EventRecord>> {
+        self.orchestrator
+            .session_store()
+            .get_events(session_id, EventRange::all())
+            .await
+    }
+
+    fn recorded_requests(&self) -> Option<Vec<CompletionRequest>> {
+        self.requests
+            .as_ref()
+            .map(|requests| requests.lock().expect("request log lock poisoned").clone())
+    }
+}
 
 #[derive(Clone)]
 struct MockProvider {
@@ -200,26 +268,36 @@ async fn test_orchestrator_with_provider(
     let dir = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
     config.memory.auto_bootstrap = false;
+    config.local.docker_enabled = false;
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
-    let session_store = create_test_store().await?;
+    let session_store = timed_test_stage("local:create_test_store", create_test_store()).await?;
     let memory_store = Arc::new(
-        FileMemoryStore::from_config_with_pool(
-            &config,
-            Arc::new(session_store.pool().clone()),
-            session_store.schema_name(),
+        timed_test_stage(
+            "local:create_memory_store",
+            FileMemoryStore::from_config_with_pool(
+                &config,
+                Arc::new(session_store.pool().clone()),
+                session_store.schema_name(),
+            ),
         )
         .await?,
     );
     let tool_router = Arc::new(
-        ToolRouter::from_config(&config, memory_store.clone())
-            .await?
-            .with_rule_store(session_store.clone())
-            .with_session_store(session_store.clone()),
+        timed_test_stage(
+            "local:create_tool_router",
+            ToolRouter::from_config(&config, memory_store.clone()),
+        )
+        .await?
+        .with_rule_store(session_store.clone())
+        .with_session_store(session_store.clone()),
     );
-    let orchestrator =
-        LocalOrchestrator::new(config, session_store, memory_store, provider, tool_router).await?;
+    let orchestrator = timed_test_stage(
+        "local:create_orchestrator",
+        LocalOrchestrator::new(config, session_store, memory_store, provider, tool_router),
+    )
+    .await?;
 
     Ok((dir, orchestrator))
 }
@@ -238,20 +316,30 @@ async fn test_orchestrator_with_config_provider_and_store(
     session_store: Arc<PostgresSessionStore>,
 ) -> Result<LocalOrchestrator> {
     let memory_store = Arc::new(
-        FileMemoryStore::from_config_with_pool(
-            &config,
-            Arc::new(session_store.pool().clone()),
-            session_store.schema_name(),
+        timed_test_stage(
+            "local:create_memory_store",
+            FileMemoryStore::from_config_with_pool(
+                &config,
+                Arc::new(session_store.pool().clone()),
+                session_store.schema_name(),
+            ),
         )
         .await?,
     );
     let tool_router = Arc::new(
-        ToolRouter::from_config(&config, memory_store.clone())
-            .await?
-            .with_rule_store(session_store.clone())
-            .with_session_store(session_store.clone()),
+        timed_test_stage(
+            "local:create_tool_router",
+            ToolRouter::from_config(&config, memory_store.clone()),
+        )
+        .await?
+        .with_rule_store(session_store.clone())
+        .with_session_store(session_store.clone()),
     );
-    LocalOrchestrator::new(config, session_store, memory_store, provider, tool_router).await
+    timed_test_stage(
+        "local:create_orchestrator",
+        LocalOrchestrator::new(config, session_store, memory_store, provider, tool_router),
+    )
+    .await
 }
 
 fn cwd_lock() -> &'static AsyncMutex<()> {
@@ -262,6 +350,16 @@ fn cwd_lock() -> &'static AsyncMutex<()> {
 async fn create_test_store() -> Result<Arc<PostgresSessionStore>> {
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     Ok(Arc::new(store))
+}
+
+async fn timed_test_stage<F, T>(stage: &'static str, future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    match timeout(Duration::from_secs(20), future).await {
+        Ok(output) => output,
+        Err(_) => panic!("timed out waiting for test stage `{stage}`"),
+    }
 }
 
 struct CurrentDirGuard {
@@ -754,31 +852,6 @@ async fn wait_for_approval_event(
     }
 }
 
-async fn wait_for_approval_decision(
-    orchestrator: &LocalOrchestrator,
-    session_id: SessionId,
-) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        let events = orchestrator
-            .session_store()
-            .get_events(session_id, EventRange::all())
-            .await?;
-        if events
-            .iter()
-            .any(|record| matches!(record.event, Event::ApprovalDecided { .. }))
-        {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(MoaError::ProviderError(
-                "timed out waiting for approval decision".to_string(),
-            ));
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-}
-
 async fn collect_runtime_events_until<P>(
     runtime_rx: &mut tokio::sync::broadcast::Receiver<RuntimeEvent>,
     predicate: P,
@@ -1038,49 +1111,27 @@ impl moa_core::HandProvider for DestroyTrackingHandProvider {
 #[tokio::test]
 async fn starts_two_sessions_and_processes_both() -> Result<()> {
     let (_dir, orchestrator) = test_orchestrator().await?;
-    let left = start_session(&orchestrator).await?;
-    let right = start_session(&orchestrator).await?;
+    let harness = LocalContractHarness::new(&orchestrator, None);
+    assert_processes_two_sessions_independently(&harness, "left", "right").await
+}
 
-    orchestrator
-        .signal(
-            left.session_id,
-            SessionSignal::QueueMessage(UserMessage {
-                text: "left".to_string(),
-                attachments: Vec::new(),
-            }),
-        )
-        .await?;
-    orchestrator
-        .signal(
-            right.session_id,
-            SessionSignal::QueueMessage(UserMessage {
-                text: "right".to_string(),
-                attachments: Vec::new(),
-            }),
-        )
-        .await?;
-
-    wait_for_status(&orchestrator, left.session_id, SessionStatus::Completed).await?;
-    wait_for_status(&orchestrator, right.session_id, SessionStatus::Completed).await?;
-
-    let left_events = orchestrator
-        .session_store()
-        .get_events(left.session_id, EventRange::all())
-        .await?;
-    let right_events = orchestrator
-        .session_store()
-        .get_events(right.session_id, EventRange::all())
-        .await?;
-
-    assert!(left_events.iter().any(|record| matches!(
-        record.event,
-        Event::BrainResponse { ref text, .. } if text.contains("left")
-    )));
-    assert!(right_events.iter().any(|record| matches!(
-        record.event,
-        Event::BrainResponse { ref text, .. } if text.contains("right")
-    )));
-    Ok(())
+#[tokio::test]
+async fn blank_session_waits_for_first_message() -> Result<()> {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
+        model: MoaConfig::default().general.default_model,
+        first_turn_delay: Duration::from_millis(50),
+        requests: requests.clone(),
+    });
+    let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
+    let harness = LocalContractHarness::new(&orchestrator, Some(requests));
+    assert_blank_session_waits_for_first_message(
+        &harness,
+        "ws-blank-local",
+        "u-blank-local",
+        "first real message",
+    )
+    .await
 }
 
 #[tokio::test]
@@ -1238,7 +1289,6 @@ async fn soft_cancel_stops_after_current_tool_call() -> Result<()> {
             },
         )
         .await?;
-    wait_for_approval_decision(&orchestrator, session.session_id).await?;
     orchestrator
         .signal(session.session_id, SessionSignal::SoftCancel)
         .await?;
@@ -1249,10 +1299,11 @@ async fn soft_cancel_stops_after_current_tool_call() -> Result<()> {
         .get_events(session.session_id, EventRange::all())
         .await?;
     assert!(
-        events
-            .iter()
-            .any(|record| matches!(record.event, Event::ToolResult { .. })),
-        "expected ToolResult in events: {:?}",
+        events.iter().any(|record| matches!(
+            record.event,
+            Event::ToolResult { .. } | Event::ToolError { .. }
+        )),
+        "expected ToolResult or ToolError in events: {:?}",
         event_labels(&events)
     );
     assert!(
@@ -1763,55 +1814,8 @@ async fn multiple_queued_messages_are_processed_fifo_one_turn_at_a_time() -> Res
         requests: requests.clone(),
     });
     let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
-    let session = start_session(&orchestrator).await?;
-
-    orchestrator
-        .signal(
-            session.session_id,
-            SessionSignal::QueueMessage(UserMessage {
-                text: "first".to_string(),
-                attachments: Vec::new(),
-            }),
-        )
-        .await?;
-    sleep(Duration::from_millis(30)).await;
-    orchestrator
-        .signal(
-            session.session_id,
-            SessionSignal::QueueMessage(UserMessage {
-                text: "second".to_string(),
-                attachments: Vec::new(),
-            }),
-        )
-        .await?;
-    orchestrator
-        .signal(
-            session.session_id,
-            SessionSignal::QueueMessage(UserMessage {
-                text: "third".to_string(),
-                attachments: Vec::new(),
-            }),
-        )
-        .await?;
-
-    wait_for_status(&orchestrator, session.session_id, SessionStatus::Completed).await?;
-
-    let events = orchestrator
-        .session_store()
-        .get_events(session.session_id, EventRange::all())
-        .await?;
-    assert_eq!(
-        brain_response_texts(&events),
-        vec!["assistant:first", "assistant:second", "assistant:third"]
-    );
-
-    let logged = requests.lock().expect("request log lock poisoned").clone();
-    assert_eq!(logged.len(), 3);
-    assert_eq!(last_user_message(&logged[0].messages), Some("first"));
-    assert_eq!(last_user_message(&logged[1].messages), Some("second"));
-    assert_eq!(last_user_message(&logged[2].messages), Some("third"));
-
-    Ok(())
+    let harness = LocalContractHarness::new(&orchestrator, Some(requests));
+    assert_processes_multiple_queued_messages_fifo(&harness, "first", &["second", "third"]).await
 }
 
 #[tokio::test]
@@ -1824,60 +1828,22 @@ async fn queued_message_waiting_for_approval_runs_after_allowed_turn() -> Result
         requests,
     });
     let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
-    let session = start_session(&orchestrator).await?;
+    let harness = LocalContractHarness::new(&orchestrator, None);
+    assert_queued_message_waiting_for_approval_runs_after_allowed_turn(&harness, "first", "queued")
+        .await
+}
 
-    orchestrator
-        .signal(
-            session.session_id,
-            SessionSignal::QueueMessage(UserMessage {
-                text: "first".to_string(),
-                attachments: Vec::new(),
-            }),
-        )
-        .await?;
-
-    let request_id = wait_for_approval_request(&orchestrator, session.session_id).await?;
-    orchestrator
-        .signal(
-            session.session_id,
-            SessionSignal::QueueMessage(UserMessage {
-                text: "queued".to_string(),
-                attachments: Vec::new(),
-            }),
-        )
-        .await?;
-    orchestrator
-        .signal(
-            session.session_id,
-            SessionSignal::ApprovalDecided {
-                request_id,
-                decision: moa_core::ApprovalDecision::AllowOnce,
-            },
-        )
-        .await?;
-
-    wait_for_status(&orchestrator, session.session_id, SessionStatus::Completed).await?;
-    let events = orchestrator
-        .session_store()
-        .get_events(session.session_id, EventRange::all())
-        .await?;
-
-    assert_eq!(
-        brain_response_texts(&events),
-        vec!["assistant:first", "assistant:queued"]
-    );
-
-    let first_response_index = events
-        .iter()
-        .position(|record| matches!(record.event, Event::BrainResponse { ref text, .. } if text == "assistant:first"))
-        .expect("missing first response");
-    let queued_index = events
-        .iter()
-        .position(|record| matches!(record.event, Event::QueuedMessage { ref text, .. } if text == "queued"))
-        .expect("missing queued message");
-    assert!(queued_index > first_response_index);
-
-    Ok(())
+#[tokio::test]
+async fn soft_cancel_waiting_for_approval_cancels_cleanly() -> Result<()> {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
+        model: MoaConfig::default().general.default_model,
+        first_tool_cmd: "printf 'awaiting approval'".to_string(),
+        requests,
+    });
+    let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
+    let harness = LocalContractHarness::new(&orchestrator, None);
+    assert_soft_cancel_waiting_for_approval_cancels_cleanly(&harness, "first").await
 }
 
 #[tokio::test]

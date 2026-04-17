@@ -219,9 +219,13 @@ pub(super) async fn handle_tool_call(
                 },
             )
             .await?;
-            session_store
-                .update_status(session_id, SessionStatus::WaitingApproval)
-                .await?;
+            if let Some(record) = session_store
+                .transition_status(session_id, SessionStatus::WaitingApproval)
+                .await?
+                && let Some(event_tx) = event_tx
+            {
+                let _ = event_tx.send(record);
+            }
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
                 tool_id: tool_id.0,
                 tool_name: invocation.name.clone(),

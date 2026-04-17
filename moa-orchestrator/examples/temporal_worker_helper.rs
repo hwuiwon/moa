@@ -14,8 +14,8 @@ mod temporal_helper {
     use moa_core::{
         BrainOrchestrator, CompletionContent, CompletionRequest, CompletionResponse,
         CompletionStream, LLMProvider, MessageRole, MoaConfig, Platform, Result,
-        StartSessionRequest, StopReason, TokenPricing, ToolCallFormat, UserId, UserMessage,
-        WorkspaceId,
+        StartSessionRequest, StopReason, TokenPricing, TokenUsage, ToolCallFormat, UserId,
+        UserMessage, WorkspaceId,
     };
     use moa_hands::ToolRouter;
     use moa_memory::FileMemoryStore;
@@ -37,7 +37,7 @@ mod temporal_helper {
 
         fn capabilities(&self) -> moa_core::ModelCapabilities {
             moa_core::ModelCapabilities {
-                model_id: self.model.clone(),
+                model_id: self.model.clone().into(),
                 context_window: 200_000,
                 max_output: 8_192,
                 supports_tools: false,
@@ -50,6 +50,7 @@ mod temporal_helper {
                     output_per_mtok: 0.0,
                     cached_input_per_mtok: None,
                 },
+                native_tools: Vec::new(),
             }
         }
 
@@ -66,11 +67,18 @@ mod temporal_helper {
                 text: format!("assistant:{prompt}"),
                 content: vec![CompletionContent::Text(format!("assistant:{prompt}"))],
                 stop_reason: StopReason::EndTurn,
-                model: self.model.clone(),
+                model: self.model.clone().into(),
                 input_tokens: 4,
                 output_tokens: 2,
                 cached_input_tokens: 0,
+                usage: TokenUsage {
+                    input_tokens_uncached: 4,
+                    input_tokens_cache_write: 0,
+                    input_tokens_cache_read: 0,
+                    output_tokens: 2,
+                },
                 duration_ms: self.delay.as_millis() as u64,
+                thought_signature: None,
             };
             let (tx, rx) = tokio::sync::mpsc::channel(4);
             let delay = self.delay;
@@ -182,7 +190,7 @@ mod temporal_helper {
                     workspace_id: WorkspaceId::new("ws-helper"),
                     user_id: UserId::new("u-helper"),
                     platform: Platform::Cli,
-                    model: config.general.default_model.clone(),
+                    model: config.general.default_model.clone().into(),
                     initial_message: Some(UserMessage {
                         text: "recover me".to_string(),
                         attachments: Vec::new(),

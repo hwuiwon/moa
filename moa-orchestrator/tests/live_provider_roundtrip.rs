@@ -36,7 +36,7 @@ fn available_live_providers() -> Vec<LiveProvider> {
             provider: Arc::new(provider),
         });
     }
-    if let Ok(provider) = GeminiProvider::from_env("gemini-2.5-flash") {
+    if let Ok(provider) = GeminiProvider::from_env("gemini-3.1-pro-preview") {
         providers.push(LiveProvider {
             label: "google",
             model: provider.capabilities().model_id.to_string(),
@@ -47,7 +47,7 @@ fn available_live_providers() -> Vec<LiveProvider> {
 }
 
 fn google_live_provider() -> Option<LiveProvider> {
-    GeminiProvider::from_env("gemini-2.5-flash")
+    GeminiProvider::from_env("gemini-3.1-pro-preview")
         .ok()
         .map(|provider| LiveProvider {
             label: "google",
@@ -94,6 +94,7 @@ async fn live_orchestrator_with_provider(
 
 async fn wait_for_status(
     orchestrator: &LocalOrchestrator,
+    session_store: &PostgresSessionStore,
     session_id: moa_core::SessionId,
     expected: SessionStatus,
 ) {
@@ -108,10 +109,17 @@ async fn wait_for_status(
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for session {} status {:?}; current status {:?}",
+            "timed out waiting for session {} status {:?}; current status {:?}; events: {:?}",
             session_id,
             expected,
-            meta.status
+            meta.status,
+            session_store
+                .get_events(session_id, EventRange::all())
+                .await
+                .expect("events")
+                .iter()
+                .map(|record| &record.event)
+                .collect::<Vec<_>>()
         );
         sleep(Duration::from_millis(250)).await;
     }
@@ -241,6 +249,7 @@ async fn run_live_provider_tool_approval_roundtrip(provider: LiveProvider) {
 
     wait_for_status(
         &orchestrator,
+        &session_store,
         session.session_id,
         SessionStatus::WaitingApproval,
     )
@@ -270,7 +279,13 @@ async fn run_live_provider_tool_approval_roundtrip(provider: LiveProvider) {
         "{label} wrote an unexpected path: {:?}",
         tool_output
     );
-    wait_for_status(&orchestrator, session.session_id, SessionStatus::Completed).await;
+    wait_for_status(
+        &orchestrator,
+        &session_store,
+        session.session_id,
+        SessionStatus::Completed,
+    )
+    .await;
     wait_for_final_response(&session_store, session.session_id, &token).await;
 }
 
