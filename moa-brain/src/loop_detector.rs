@@ -56,11 +56,9 @@ impl LoopDetector {
         let mut hasher = DefaultHasher::new();
         for (tool_name, output) in tool_calls {
             tool_name.hash(&mut hasher);
-            output
-                .chars()
-                .take(OUTPUT_PREFIX_LEN)
-                .collect::<String>()
-                .hash(&mut hasher);
+            for ch in output.chars().take(OUTPUT_PREFIX_LEN) {
+                ch.hash(&mut hasher);
+            }
         }
         hasher.finish()
     }

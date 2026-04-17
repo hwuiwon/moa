@@ -6,7 +6,7 @@ use std::time::Instant;
 use async_openai::config::OpenAIConfig;
 use moa_core::{
     CompletionRequest, CompletionStream, LLMProvider, MoaConfig, MoaError, ModelCapabilities,
-    ProviderNativeTool, Result, TokenPricing, ToolCallFormat,
+    ModelId, ProviderNativeTool, Result, TokenPricing, ToolCallFormat,
 };
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -52,7 +52,7 @@ impl OpenAIProvider {
         let default_model = canonical_model_id(&default_model.into())?;
         let default_capabilities = capabilities_for_model(&default_model)?;
         let api_key = api_key.into();
-        let client = build_openai_client(OpenAIConfig::new().with_api_key(api_key.clone()))?;
+        let client = build_openai_client(OpenAIConfig::new().with_api_key(api_key.clone()));
 
         Ok(Self {
             client,
@@ -100,7 +100,7 @@ impl OpenAIProvider {
         let config = OpenAIConfig::new()
             .with_api_key(self.api_key.clone())
             .with_api_base(api_base.into());
-        self.client = build_openai_client(config)?;
+        self.client = build_openai_client(config);
         Ok(self)
     }
 
@@ -130,7 +130,8 @@ impl LLMProvider for OpenAIProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
         let requested_model = request
             .model
-            .as_deref()
+            .as_ref()
+            .map(ModelId::as_str)
             .unwrap_or(self.default_model.as_str())
             .to_string();
         let resolved_model = canonical_model_id(&requested_model)?;
@@ -167,7 +168,7 @@ impl LLMProvider for OpenAIProvider {
                     &client,
                     &request,
                     tx,
-                    resolved_model,
+                    ModelId::new(resolved_model),
                     started_at,
                     retry_policy,
                     span_recorder,
@@ -206,7 +207,7 @@ pub(crate) fn canonical_model_id(model: &str) -> Result<String> {
 pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
     if model.starts_with(MODEL_GPT_5_4_MINI) {
         return Ok(ModelCapabilities {
-            model_id: model.to_string(),
+            model_id: ModelId::new(model),
             context_window: 400_000,
             max_output: 128_000,
             supports_tools: true,
@@ -225,7 +226,7 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
 
     if model.starts_with(MODEL_GPT_5_4_NANO) {
         return Ok(ModelCapabilities {
-            model_id: model.to_string(),
+            model_id: ModelId::new(model),
             context_window: 400_000,
             max_output: 128_000,
             supports_tools: true,
@@ -244,7 +245,7 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
 
     if model.starts_with(MODEL_GPT_5_4) {
         return Ok(ModelCapabilities {
-            model_id: model.to_string(),
+            model_id: ModelId::new(model),
             context_window: 1_050_000,
             max_output: 128_000,
             supports_tools: true,
@@ -263,7 +264,7 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
 
     if model.starts_with(MODEL_GPT_5_MINI) {
         return Ok(ModelCapabilities {
-            model_id: model.to_string(),
+            model_id: ModelId::new(model),
             context_window: 400_000,
             max_output: 128_000,
             supports_tools: true,
@@ -282,7 +283,7 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
 
     if model.starts_with(MODEL_GPT_5_NANO) {
         return Ok(ModelCapabilities {
-            model_id: model.to_string(),
+            model_id: ModelId::new(model),
             context_window: 400_000,
             max_output: 128_000,
             supports_tools: true,

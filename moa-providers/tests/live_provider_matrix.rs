@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use moa_core::{CompletionContent, CompletionRequest, LLMProvider};
+use moa_core::{CompletionContent, CompletionRequest, ContextMessage, LLMProvider};
 use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 use serde_json::json;
 use tokio::time::timeout;
@@ -196,6 +196,221 @@ async fn live_providers_can_use_native_web_search_across_available_keys() {
             !response.text.trim().is_empty(),
             "{} returned an empty response after web search",
             provider.label()
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "manual live provider matrix test"]
+async fn live_providers_obey_system_prompt_across_available_keys() {
+    let providers = available_live_providers();
+    if providers.is_empty() {
+        return;
+    }
+
+    let marker = "[E2E-SYS-MARKER-9421]";
+
+    for provider in providers {
+        let response = provider
+            .complete(CompletionRequest {
+                model: None,
+                messages: vec![
+                    ContextMessage::system(format!(
+                        "You must end every reply with exactly this literal marker, including brackets: {marker}"
+                    )),
+                    ContextMessage::user("Say hello in one short sentence."),
+                ],
+                tools: Vec::new(),
+                max_output_tokens: Some(64),
+                temperature: None,
+                cache_breakpoints: Vec::new(),
+                cache_controls: Vec::new(),
+                metadata: HashMap::new(),
+            })
+            .await
+            .unwrap_or_else(|e| {
+                panic!("{} system-prompt request failed: {e}", provider.label())
+            })
+            .collect()
+            .await
+            .unwrap_or_else(|e| {
+                panic!("{} system-prompt stream failed: {e}", provider.label())
+            });
+
+        assert!(
+            response.text.contains(marker),
+            "{} did not honor system prompt. Response: {:?}",
+            provider.label(),
+            response.text
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "manual live provider matrix test"]
+async fn live_providers_stream_incrementally_across_available_keys() {
+    let providers = available_live_providers();
+    if providers.is_empty() {
+        return;
+    }
+
+    for provider in providers {
+        let mut stream = provider
+            .complete(CompletionRequest::simple(
+                "Count from 1 to 5 on a single line, comma-separated. No other words.",
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("{} streaming request failed: {e}", provider.label()));
+
+        let mut streamed_text = String::new();
+        let mut text_chunks = 0usize;
+        while let Some(block) = stream.next().await {
+            let block = block
+                .unwrap_or_else(|e| panic!("{} streamed chunk error: {e}", provider.label()));
+            if let CompletionContent::Text(t) = block {
+                streamed_text.push_str(&t);
+                text_chunks += 1;
+            }
+        }
+
+        let response = stream
+            .into_response()
+            .await
+            .unwrap_or_else(|e| panic!("{} finalization failed: {e}", provider.label()));
+
+        assert!(
+            text_chunks > 0,
+            "{} produced zero text chunks during streaming",
+            provider.label()
+        );
+        assert_eq!(
+            streamed_text.trim(),
+            response.text.trim(),
+            "{} streamed text does not match aggregated response (chunks={text_chunks})",
+            provider.label()
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "manual live provider matrix test"]
+async fn live_providers_report_token_usage_across_available_keys() {
+    let providers = available_live_providers();
+    if providers.is_empty() {
+        return;
+    }
+
+    for provider in providers {
+        let response = provider
+            .complete(CompletionRequest::simple(
+                "Name three primary colors as a comma-separated list.",
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("{} usage request failed: {e}", provider.label()))
+            .collect()
+            .await
+            .unwrap_or_else(|e| panic!("{} usage stream failed: {e}", provider.label()));
+
+        let usage = response.token_usage();
+        assert!(
+            usage.total_input_tokens() > 0,
+            "{} reported zero input tokens: {:?}",
+            provider.label(),
+            usage
+        );
+        assert!(
+            usage.output_tokens > 0,
+            "{} reported zero output tokens: {:?}",
+            provider.label(),
+            usage
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "manual live provider matrix test"]
+async fn live_providers_truncate_at_max_output_tokens_across_available_keys() {
+    let providers = available_live_providers();
+    if providers.is_empty() {
+        return;
+    }
+
+    for provider in providers {
+        let response = provider
+            .complete(CompletionRequest {
+                model: None,
+                messages: vec![ContextMessage::user(
+                    "Describe the history of the Roman Empire in full detail.",
+                )],
+                tools: Vec::new(),
+                // OpenAI's Responses API rejects max_output_tokens < 16, so use the shared floor.
+                max_output_tokens: Some(16),
+                temperature: None,
+                cache_breakpoints: Vec::new(),
+                cache_controls: Vec::new(),
+                metadata: HashMap::new(),
+            })
+            .await
+            .unwrap_or_else(|e| panic!("{} max-tokens request failed: {e}", provider.label()))
+            .collect()
+            .await
+            .unwrap_or_else(|e| panic!("{} max-tokens stream failed: {e}", provider.label()));
+
+        let word_count = response.text.split_whitespace().count();
+        assert!(
+            word_count <= 30,
+            "{} ignored max_output_tokens=16 and produced {word_count} words: {:?}",
+            provider.label(),
+            response.text
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "manual live provider matrix test"]
+async fn live_providers_preserve_unicode_across_available_keys() {
+    let providers = available_live_providers();
+    if providers.is_empty() {
+        return;
+    }
+
+    for provider in providers {
+        let response = provider
+            .complete(CompletionRequest {
+                model: None,
+                messages: vec![ContextMessage::user(
+                    "Echo these three tokens on one line, separated by a single space, with no quotes or extra words: 🦀 你好 مرحبا",
+                )],
+                tools: Vec::new(),
+                max_output_tokens: Some(64),
+                temperature: None,
+                cache_breakpoints: Vec::new(),
+                cache_controls: Vec::new(),
+                metadata: HashMap::new(),
+            })
+            .await
+            .unwrap_or_else(|e| panic!("{} unicode request failed: {e}", provider.label()))
+            .collect()
+            .await
+            .unwrap_or_else(|e| panic!("{} unicode stream failed: {e}", provider.label()));
+
+        assert!(
+            response.text.contains('🦀'),
+            "{} dropped the 🦀 codepoint: {:?}",
+            provider.label(),
+            response.text
+        );
+        assert!(
+            response.text.contains("你好"),
+            "{} dropped the CJK segment: {:?}",
+            provider.label(),
+            response.text
+        );
+        assert!(
+            response.text.contains("مرحبا"),
+            "{} dropped the Arabic segment: {:?}",
+            provider.label(),
+            response.text
         );
     }
 }

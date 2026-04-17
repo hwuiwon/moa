@@ -53,7 +53,7 @@ impl LLMProvider for MockProvider {
 
     fn capabilities(&self) -> moa_core::ModelCapabilities {
         moa_core::ModelCapabilities {
-            model_id: self.model.clone(),
+            model_id: self.model.clone().into(),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: false,
@@ -83,8 +83,7 @@ impl LLMProvider for MockProvider {
             text: format!("assistant:{prompt_text}"),
             content: vec![CompletionContent::Text(format!("assistant:{prompt_text}"))],
             stop_reason: moa_core::StopReason::EndTurn,
-            model,
-            input_tokens: 4,
+            model: model.into(),            input_tokens: 4,
             output_tokens: 2,
             cached_input_tokens: 0,
             usage: token_usage(4, 2),
@@ -111,7 +110,7 @@ impl LLMProvider for SlowStreamingProvider {
 
     fn capabilities(&self) -> moa_core::ModelCapabilities {
         moa_core::ModelCapabilities {
-            model_id: self.model.clone(),
+            model_id: self.model.clone().into(),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: false,
@@ -151,8 +150,7 @@ impl LLMProvider for SlowStreamingProvider {
                     .map(|ch| CompletionContent::Text(ch.to_string()))
                     .collect(),
                 stop_reason: moa_core::StopReason::EndTurn,
-                model,
-                input_tokens: 4,
+                model: model.into(),                input_tokens: 4,
                 output_tokens: text.len(),
                 cached_input_tokens: 0,
                 usage: token_usage(4, text.len()),
@@ -285,7 +283,7 @@ impl LLMProvider for RequestGuardProvider {
 
     fn capabilities(&self) -> moa_core::ModelCapabilities {
         moa_core::ModelCapabilities {
-            model_id: self.model.clone(),
+            model_id: self.model.clone().into(),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: false,
@@ -333,8 +331,7 @@ impl LLMProvider for RequestGuardProvider {
             text: format!("assistant:{prompt_text}"),
             content: vec![CompletionContent::Text(format!("assistant:{prompt_text}"))],
             stop_reason: moa_core::StopReason::EndTurn,
-            model,
-            input_tokens: 4,
+            model: model.into(),            input_tokens: 4,
             output_tokens: 2,
             cached_input_tokens: 0,
             usage: token_usage(4, 2),
@@ -367,7 +364,7 @@ impl LLMProvider for ToolCancelProvider {
 
     fn capabilities(&self) -> moa_core::ModelCapabilities {
         moa_core::ModelCapabilities {
-            model_id: self.model.clone(),
+            model_id: self.model.clone().into(),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -400,7 +397,7 @@ impl LLMProvider for ToolCancelProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: moa_core::StopReason::ToolUse,
-                model: self.model.clone(),
+                model: self.model.clone().into(),
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
@@ -413,7 +410,7 @@ impl LLMProvider for ToolCancelProvider {
                 text: "should-not-run".to_string(),
                 content: vec![CompletionContent::Text("should-not-run".to_string())],
                 stop_reason: moa_core::StopReason::EndTurn,
-                model: self.model.clone(),
+                model: self.model.clone().into(),
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
@@ -442,7 +439,7 @@ impl LLMProvider for ToolThenEchoProvider {
 
     fn capabilities(&self) -> moa_core::ModelCapabilities {
         moa_core::ModelCapabilities {
-            model_id: self.model.clone(),
+            model_id: self.model.clone().into(),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -475,7 +472,7 @@ impl LLMProvider for ToolThenEchoProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: moa_core::StopReason::ToolUse,
-                model: self.model.clone(),
+                model: self.model.clone().into(),
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
@@ -489,7 +486,7 @@ impl LLMProvider for ToolThenEchoProvider {
                 text: format!("assistant:{prompt}"),
                 content: vec![CompletionContent::Text(format!("assistant:{prompt}"))],
                 stop_reason: moa_core::StopReason::EndTurn,
-                model: self.model.clone(),
+                model: self.model.clone().into(),
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
@@ -518,7 +515,7 @@ impl LLMProvider for RepeatingToolTurnProvider {
 
     fn capabilities(&self) -> moa_core::ModelCapabilities {
         moa_core::ModelCapabilities {
-            model_id: self.model.clone(),
+            model_id: self.model.clone().into(),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -552,7 +549,7 @@ impl LLMProvider for RepeatingToolTurnProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: moa_core::StopReason::ToolUse,
-                model: self.model.clone(),
+                model: self.model.clone().into(),
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
@@ -566,7 +563,7 @@ impl LLMProvider for RepeatingToolTurnProvider {
                 text: format!("assistant:{prompt}"),
                 content: vec![CompletionContent::Text(format!("assistant:{prompt}"))],
                 stop_reason: moa_core::StopReason::EndTurn,
-                model: self.model.clone(),
+                model: self.model.clone().into(),
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
@@ -594,7 +591,7 @@ impl LLMProvider for FileWriteApprovalProvider {
 
     fn capabilities(&self) -> moa_core::ModelCapabilities {
         moa_core::ModelCapabilities {
-            model_id: self.model.clone(),
+            model_id: self.model.clone().into(),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -628,7 +625,7 @@ impl LLMProvider for FileWriteApprovalProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: moa_core::StopReason::ToolUse,
-                model: self.model.clone(),
+                model: self.model.clone().into(),
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
@@ -641,7 +638,7 @@ impl LLMProvider for FileWriteApprovalProvider {
                 text: "done".to_string(),
                 content: vec![CompletionContent::Text("done".to_string())],
                 stop_reason: moa_core::StopReason::EndTurn,
-                model: self.model.clone(),
+                model: self.model.clone().into(),
                 input_tokens: 8,
                 output_tokens: 4,
                 cached_input_tokens: 0,
@@ -661,7 +658,7 @@ async fn start_session(orchestrator: &LocalOrchestrator) -> Result<SessionHandle
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Desktop,
-            model: orchestrator.model().to_string(),
+            model: moa_core::ModelId::new(orchestrator.model()),
             initial_message: None,
             title: None,
             parent_session_id: None,
@@ -676,7 +673,7 @@ async fn wait_for_status(
 ) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        let session = orchestrator.get_session(session_id.clone()).await?;
+        let session = orchestrator.get_session(session_id).await?;
         if session.status == expected {
             return Ok(());
         }
@@ -698,7 +695,7 @@ async fn wait_for_approval_request(
     loop {
         let events = orchestrator
             .session_store()
-            .get_events(session_id.clone(), EventRange::all())
+            .get_events(session_id, EventRange::all())
             .await?;
         if let Some(request_id) = events.iter().find_map(|record| match record.event {
             Event::ApprovalRequested { request_id, .. } => Some(request_id),
@@ -723,7 +720,7 @@ async fn wait_for_approval_event(
     loop {
         let events = orchestrator
             .session_store()
-            .get_events(session_id.clone(), EventRange::all())
+            .get_events(session_id, EventRange::all())
             .await?;
         if let Some(event) = events.iter().find_map(|record| match &record.event {
             Event::ApprovalRequested { .. } => Some(record.event.clone()),
@@ -748,7 +745,7 @@ async fn wait_for_approval_decision(
     loop {
         let events = orchestrator
             .session_store()
-            .get_events(session_id.clone(), EventRange::all())
+            .get_events(session_id, EventRange::all())
             .await?;
         if events
             .iter()
@@ -805,7 +802,7 @@ async fn wait_for_pending_signal_count(
     loop {
         let pending = orchestrator
             .session_store()
-            .get_pending_signals(session_id.clone())
+            .get_pending_signals(session_id)
             .await?;
         if pending.len() == expected {
             return Ok(());
@@ -828,7 +825,7 @@ async fn wait_for_tool_result_count(
     loop {
         let events = orchestrator
             .session_store()
-            .get_events(session_id.clone(), EventRange::all())
+            .get_events(session_id, EventRange::all())
             .await?;
         if tool_result_texts(&events).len() == expected {
             return Ok(());
@@ -851,7 +848,7 @@ async fn wait_for_tool_call_count(
     loop {
         let events = orchestrator
             .session_store()
-            .get_events(session_id.clone(), EventRange::all())
+            .get_events(session_id, EventRange::all())
             .await?;
         let tool_call_count = events
             .iter()
@@ -950,7 +947,7 @@ impl LLMProvider for PanicProvider {
 
     fn capabilities(&self) -> moa_core::ModelCapabilities {
         moa_core::ModelCapabilities {
-            model_id: self.model.clone(),
+            model_id: self.model.clone().into(),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: false,
@@ -1029,7 +1026,7 @@ async fn starts_two_sessions_and_processes_both() -> Result<()> {
 
     orchestrator
         .signal(
-            left.session_id.clone(),
+            left.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "left".to_string(),
                 attachments: Vec::new(),
@@ -1038,7 +1035,7 @@ async fn starts_two_sessions_and_processes_both() -> Result<()> {
         .await?;
     orchestrator
         .signal(
-            right.session_id.clone(),
+            right.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "right".to_string(),
                 attachments: Vec::new(),
@@ -1048,13 +1045,13 @@ async fn starts_two_sessions_and_processes_both() -> Result<()> {
 
     wait_for_status(
         &orchestrator,
-        left.session_id.clone(),
+        left.session_id,
         SessionStatus::Completed,
     )
     .await?;
     wait_for_status(
         &orchestrator,
-        right.session_id.clone(),
+        right.session_id,
         SessionStatus::Completed,
     )
     .await?;
@@ -1086,7 +1083,7 @@ async fn soft_cancel_marks_session_cancelled() -> Result<()> {
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "first".to_string(),
                 attachments: Vec::new(),
@@ -1095,12 +1092,12 @@ async fn soft_cancel_marks_session_cancelled() -> Result<()> {
         .await?;
     sleep(Duration::from_millis(30)).await;
     orchestrator
-        .signal(session.session_id.clone(), SessionSignal::SoftCancel)
+        .signal(session.session_id, SessionSignal::SoftCancel)
         .await?;
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Cancelled,
     )
     .await?;
@@ -1133,13 +1130,13 @@ async fn hard_cancel_aborts_stream_and_emits_cancelled_status() -> Result<()> {
     let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
     let session = start_session(&orchestrator).await?;
     let mut runtime = orchestrator
-        .observe_runtime(session.session_id.clone())
+        .observe_runtime(session.session_id)
         .await?
         .expect("local runtime stream should exist");
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "interrupt me".to_string(),
                 attachments: Vec::new(),
@@ -1163,7 +1160,7 @@ async fn hard_cancel_aborts_stream_and_emits_cancelled_status() -> Result<()> {
     );
 
     orchestrator
-        .signal(session.session_id.clone(), SessionSignal::HardCancel)
+        .signal(session.session_id, SessionSignal::HardCancel)
         .await?;
 
     let finish_deadline = Instant::now() + Duration::from_secs(2);
@@ -1182,7 +1179,7 @@ async fn hard_cancel_aborts_stream_and_emits_cancelled_status() -> Result<()> {
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Cancelled,
     )
     .await?;
@@ -1218,15 +1215,14 @@ async fn soft_cancel_stops_after_current_tool_call() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = MoaConfig::default().general.default_model;
     let provider: Arc<dyn LLMProvider> = Arc::new(ToolCancelProvider {
-        model,
-        requests: requests.clone(),
+        model,        requests: requests.clone(),
     });
     let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
     let session = start_session(&orchestrator).await?;
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "cancel during tool".to_string(),
                 attachments: Vec::new(),
@@ -1234,24 +1230,24 @@ async fn soft_cancel_stops_after_current_tool_call() -> Result<()> {
         )
         .await?;
 
-    let request_id = wait_for_approval_request(&orchestrator, session.session_id.clone()).await?;
+    let request_id = wait_for_approval_request(&orchestrator, session.session_id).await?;
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::ApprovalDecided {
                 request_id,
                 decision: moa_core::ApprovalDecision::AllowOnce,
             },
         )
         .await?;
-    wait_for_approval_decision(&orchestrator, session.session_id.clone()).await?;
+    wait_for_approval_decision(&orchestrator, session.session_id).await?;
     orchestrator
-        .signal(session.session_id.clone(), SessionSignal::SoftCancel)
+        .signal(session.session_id, SessionSignal::SoftCancel)
         .await?;
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Cancelled,
     )
     .await?;
@@ -1282,7 +1278,7 @@ async fn queued_message_is_processed_after_current_turn() -> Result<()> {
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "first".to_string(),
                 attachments: Vec::new(),
@@ -1292,7 +1288,7 @@ async fn queued_message_is_processed_after_current_turn() -> Result<()> {
     sleep(Duration::from_millis(30)).await;
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "second".to_string(),
                 attachments: Vec::new(),
@@ -1300,21 +1296,21 @@ async fn queued_message_is_processed_after_current_turn() -> Result<()> {
         )
         .await?;
 
-    wait_for_pending_signal_count(&orchestrator, session.session_id.clone(), 1).await?;
+    wait_for_pending_signal_count(&orchestrator, session.session_id, 1).await?;
     let pending = orchestrator
         .session_store()
-        .get_pending_signals(session.session_id.clone())
+        .get_pending_signals(session.session_id)
         .await?;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].user_message()?.text, "second");
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
-    wait_for_pending_signal_count(&orchestrator, session.session_id.clone(), 0).await?;
+    wait_for_pending_signal_count(&orchestrator, session.session_id, 0).await?;
     let events = orchestrator
         .session_store()
         .get_events(session.session_id, EventRange::all())
@@ -1339,7 +1335,7 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "initial".to_string(),
                 attachments: Vec::new(),
@@ -1348,13 +1344,13 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
         .await?;
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
 
     let pending = moa_core::PendingSignal::queue_message(
-        session.session_id.clone(),
+        session.session_id,
         UserMessage {
             text: "recovered follow-up".to_string(),
             attachments: Vec::new(),
@@ -1362,7 +1358,7 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
     )?;
     orchestrator
         .session_store()
-        .store_pending_signal(session.session_id.clone(), pending)
+        .store_pending_signal(session.session_id, pending)
         .await?;
 
     let reopened_store = orchestrator.session_store();
@@ -1391,14 +1387,14 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
     )
     .await?;
 
-    reopened.resume_session(session.session_id.clone()).await?;
+    reopened.resume_session(session.session_id).await?;
     wait_for_status(
         &reopened,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
-    wait_for_pending_signal_count(&reopened, session.session_id.clone(), 0).await?;
+    wait_for_pending_signal_count(&reopened, session.session_id, 0).await?;
 
     let events = reopened
         .session_store()
@@ -1423,10 +1419,10 @@ async fn resume_session_processes_user_message_before_trailing_status_event() ->
     orchestrator
         .session_store()
         .create_session(SessionMeta {
-            id: session_id.clone(),
+            id: session_id,
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            model: orchestrator.model().to_string(),
+            model: moa_core::ModelId::new(orchestrator.model()),
             status: SessionStatus::Running,
             created_at: now,
             updated_at: now,
@@ -1436,18 +1432,18 @@ async fn resume_session_processes_user_message_before_trailing_status_event() ->
     orchestrator
         .session_store()
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::SessionCreated {
-                workspace_id: "workspace".to_string(),
-                user_id: "user".to_string(),
-                model: orchestrator.model().to_string(),
+                workspace_id: moa_core::WorkspaceId::new("workspace"),
+                user_id: moa_core::UserId::new("user"),
+                model: moa_core::ModelId::new(orchestrator.model()),
             },
         )
         .await?;
     orchestrator
         .session_store()
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::UserMessage {
                 text: "recover trailing status".to_string(),
                 attachments: Vec::new(),
@@ -1457,7 +1453,7 @@ async fn resume_session_processes_user_message_before_trailing_status_event() ->
     orchestrator
         .session_store()
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::SessionStatusChanged {
                 from: SessionStatus::Created,
                 to: SessionStatus::Running,
@@ -1465,8 +1461,8 @@ async fn resume_session_processes_user_message_before_trailing_status_event() ->
         )
         .await?;
 
-    orchestrator.resume_session(session_id.clone()).await?;
-    wait_for_status(&orchestrator, session_id.clone(), SessionStatus::Completed).await?;
+    orchestrator.resume_session(session_id).await?;
+    wait_for_status(&orchestrator, session_id, SessionStatus::Completed).await?;
 
     let events = orchestrator
         .session_store()
@@ -1492,7 +1488,7 @@ async fn approval_requested_event_persists_full_prompt_details() -> Result<()> {
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "write approval test".to_string(),
                 attachments: Vec::new(),
@@ -1500,7 +1496,7 @@ async fn approval_requested_event_persists_full_prompt_details() -> Result<()> {
         )
         .await?;
 
-    let event = wait_for_approval_event(&orchestrator, session.session_id.clone()).await?;
+    let event = wait_for_approval_event(&orchestrator, session.session_id).await?;
     match event {
         Event::ApprovalRequested {
             tool_name,
@@ -1537,13 +1533,13 @@ async fn observe_runtime_streams_assistant_text_and_turn_completion() -> Result<
     let (_dir, orchestrator) = test_orchestrator_with_delay(Duration::from_millis(40)).await?;
     let session = start_session(&orchestrator).await?;
     let mut runtime_rx = orchestrator
-        .observe_runtime(session.session_id.clone())
+        .observe_runtime(session.session_id)
         .await?
         .expect("local orchestrator should support runtime observation");
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "stream this".to_string(),
                 attachments: Vec::new(),
@@ -1590,13 +1586,13 @@ async fn observe_runtime_reports_tool_updates_and_approval_flow() -> Result<()> 
     let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
     let session = start_session(&orchestrator).await?;
     let mut runtime_rx = orchestrator
-        .observe_runtime(session.session_id.clone())
+        .observe_runtime(session.session_id)
         .await?
         .expect("local orchestrator should support runtime observation");
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "write approval test".to_string(),
                 attachments: Vec::new(),
@@ -1625,7 +1621,7 @@ async fn observe_runtime_reports_tool_updates_and_approval_flow() -> Result<()> 
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::ApprovalDecided {
                 request_id: approval_prompt.request.request_id,
                 decision: moa_core::ApprovalDecision::AllowOnce,
@@ -1663,10 +1659,10 @@ async fn resumed_session_observe_runtime_streams_from_persisted_events() -> Resu
     orchestrator
         .session_store()
         .create_session(SessionMeta {
-            id: session_id.clone(),
+            id: session_id,
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            model: orchestrator.model().to_string(),
+            model: moa_core::ModelId::new(orchestrator.model()),
             status: SessionStatus::Created,
             created_at: now,
             updated_at: now,
@@ -1676,18 +1672,18 @@ async fn resumed_session_observe_runtime_streams_from_persisted_events() -> Resu
     orchestrator
         .session_store()
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::SessionCreated {
-                workspace_id: "workspace".to_string(),
-                user_id: "user".to_string(),
-                model: orchestrator.model().to_string(),
+                workspace_id: moa_core::WorkspaceId::new("workspace"),
+                user_id: moa_core::UserId::new("user"),
+                model: moa_core::ModelId::new(orchestrator.model()),
             },
         )
         .await?;
     orchestrator
         .session_store()
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::UserMessage {
                 text: "resume me".to_string(),
                 attachments: Vec::new(),
@@ -1695,9 +1691,9 @@ async fn resumed_session_observe_runtime_streams_from_persisted_events() -> Resu
         )
         .await?;
 
-    orchestrator.resume_session(session_id.clone()).await?;
+    orchestrator.resume_session(session_id).await?;
     let mut runtime_rx = orchestrator
-        .observe_runtime(session_id.clone())
+        .observe_runtime(session_id)
         .await?
         .expect("local orchestrator should support runtime observation");
 
@@ -1726,8 +1722,7 @@ async fn queued_follow_up_request_ends_with_user_message() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = MoaConfig::default().general.default_model;
     let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
-        model,
-        first_turn_delay: Duration::from_millis(200),
+        model,        first_turn_delay: Duration::from_millis(200),
         requests: requests.clone(),
     });
     let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
@@ -1735,7 +1730,7 @@ async fn queued_follow_up_request_ends_with_user_message() -> Result<()> {
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "first".to_string(),
                 attachments: Vec::new(),
@@ -1745,7 +1740,7 @@ async fn queued_follow_up_request_ends_with_user_message() -> Result<()> {
     sleep(Duration::from_millis(30)).await;
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "second".to_string(),
                 attachments: Vec::new(),
@@ -1755,7 +1750,7 @@ async fn queued_follow_up_request_ends_with_user_message() -> Result<()> {
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
@@ -1782,8 +1777,7 @@ async fn multiple_queued_messages_are_processed_fifo_one_turn_at_a_time() -> Res
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = MoaConfig::default().general.default_model;
     let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
-        model,
-        first_turn_delay: Duration::from_millis(200),
+        model,        first_turn_delay: Duration::from_millis(200),
         requests: requests.clone(),
     });
     let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
@@ -1791,7 +1785,7 @@ async fn multiple_queued_messages_are_processed_fifo_one_turn_at_a_time() -> Res
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "first".to_string(),
                 attachments: Vec::new(),
@@ -1801,7 +1795,7 @@ async fn multiple_queued_messages_are_processed_fifo_one_turn_at_a_time() -> Res
     sleep(Duration::from_millis(30)).await;
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "second".to_string(),
                 attachments: Vec::new(),
@@ -1810,7 +1804,7 @@ async fn multiple_queued_messages_are_processed_fifo_one_turn_at_a_time() -> Res
         .await?;
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "third".to_string(),
                 attachments: Vec::new(),
@@ -1820,7 +1814,7 @@ async fn multiple_queued_messages_are_processed_fifo_one_turn_at_a_time() -> Res
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
@@ -1848,8 +1842,7 @@ async fn queued_message_waiting_for_approval_runs_after_allowed_turn() -> Result
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = MoaConfig::default().general.default_model;
     let provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
-        model,
-        first_tool_cmd: "python3 -c 'print(\"tool-complete\")'".to_string(),
+        model,        first_tool_cmd: "python3 -c 'print(\"tool-complete\")'".to_string(),
         requests,
     });
     let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
@@ -1857,7 +1850,7 @@ async fn queued_message_waiting_for_approval_runs_after_allowed_turn() -> Result
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "first".to_string(),
                 attachments: Vec::new(),
@@ -1865,10 +1858,10 @@ async fn queued_message_waiting_for_approval_runs_after_allowed_turn() -> Result
         )
         .await?;
 
-    let request_id = wait_for_approval_request(&orchestrator, session.session_id.clone()).await?;
+    let request_id = wait_for_approval_request(&orchestrator, session.session_id).await?;
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "queued".to_string(),
                 attachments: Vec::new(),
@@ -1877,7 +1870,7 @@ async fn queued_message_waiting_for_approval_runs_after_allowed_turn() -> Result
         .await?;
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::ApprovalDecided {
                 request_id,
                 decision: moa_core::ApprovalDecision::AllowOnce,
@@ -1887,7 +1880,7 @@ async fn queued_message_waiting_for_approval_runs_after_allowed_turn() -> Result
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
@@ -1919,8 +1912,7 @@ async fn denied_tool_preserves_queued_follow_up() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = MoaConfig::default().general.default_model;
     let provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
-        model,
-        first_tool_cmd: "python3 -c 'print(\"tool-complete\")'".to_string(),
+        model,        first_tool_cmd: "python3 -c 'print(\"tool-complete\")'".to_string(),
         requests,
     });
     let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
@@ -1928,7 +1920,7 @@ async fn denied_tool_preserves_queued_follow_up() -> Result<()> {
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "first".to_string(),
                 attachments: Vec::new(),
@@ -1936,10 +1928,10 @@ async fn denied_tool_preserves_queued_follow_up() -> Result<()> {
         )
         .await?;
 
-    let request_id = wait_for_approval_request(&orchestrator, session.session_id.clone()).await?;
+    let request_id = wait_for_approval_request(&orchestrator, session.session_id).await?;
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "after-deny".to_string(),
                 attachments: Vec::new(),
@@ -1948,7 +1940,7 @@ async fn denied_tool_preserves_queued_follow_up() -> Result<()> {
         .await?;
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::ApprovalDecided {
                 request_id,
                 decision: moa_core::ApprovalDecision::Deny { reason: None },
@@ -1958,7 +1950,7 @@ async fn denied_tool_preserves_queued_follow_up() -> Result<()> {
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
@@ -1985,8 +1977,7 @@ async fn resume_cancelled_session_waits_for_new_input() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = MoaConfig::default().general.default_model;
     let provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
-        model,
-        first_tool_cmd: "sleep 0.35 && printf 'tool-finished\\n'".to_string(),
+        model,        first_tool_cmd: "sleep 0.35 && printf 'tool-finished\\n'".to_string(),
         requests: requests.clone(),
     });
     let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
@@ -1994,7 +1985,7 @@ async fn resume_cancelled_session_waits_for_new_input() -> Result<()> {
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "cancel during tool".to_string(),
                 attachments: Vec::new(),
@@ -2002,43 +1993,43 @@ async fn resume_cancelled_session_waits_for_new_input() -> Result<()> {
         )
         .await?;
 
-    let request_id = wait_for_approval_request(&orchestrator, session.session_id.clone()).await?;
+    let request_id = wait_for_approval_request(&orchestrator, session.session_id).await?;
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::ApprovalDecided {
                 request_id,
                 decision: moa_core::ApprovalDecision::AllowOnce,
             },
         )
         .await?;
-    wait_for_tool_call_count(&orchestrator, session.session_id.clone(), 1).await?;
+    wait_for_tool_call_count(&orchestrator, session.session_id, 1).await?;
     orchestrator
-        .signal(session.session_id.clone(), SessionSignal::SoftCancel)
+        .signal(session.session_id, SessionSignal::SoftCancel)
         .await?;
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Cancelled,
     )
     .await?;
 
     orchestrator
-        .resume_session(session.session_id.clone())
+        .resume_session(session.session_id)
         .await?;
     sleep(Duration::from_millis(450)).await;
 
     let events = orchestrator
         .session_store()
-        .get_events(session.session_id.clone(), EventRange::all())
+        .get_events(session.session_id, EventRange::all())
         .await?;
     assert!(brain_response_texts(&events).is_empty());
     assert_eq!(requests.lock().expect("request log lock poisoned").len(), 1);
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "after resume".to_string(),
                 attachments: Vec::new(),
@@ -2048,7 +2039,7 @@ async fn resume_cancelled_session_waits_for_new_input() -> Result<()> {
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
@@ -2075,7 +2066,7 @@ async fn panicking_provider_marks_session_failed() -> Result<()> {
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "panic please".to_string(),
                 attachments: Vec::new(),
@@ -2085,7 +2076,7 @@ async fn panicking_provider_marks_session_failed() -> Result<()> {
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Failed,
     )
     .await?;
@@ -2136,17 +2127,17 @@ async fn completed_tool_turn_destroys_cached_hand() -> Result<()> {
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "run tracked tool".to_string(),
                 attachments: Vec::new(),
             }),
         )
         .await?;
-    let request_id = wait_for_approval_request(&orchestrator, session.session_id.clone()).await?;
+    let request_id = wait_for_approval_request(&orchestrator, session.session_id).await?;
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::ApprovalDecided {
                 request_id,
                 decision: moa_core::ApprovalDecision::AllowOnce,
@@ -2156,7 +2147,7 @@ async fn completed_tool_turn_destroys_cached_hand() -> Result<()> {
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
@@ -2171,12 +2162,12 @@ async fn observe_stream_receives_events_in_order() -> Result<()> {
     let (_dir, orchestrator) = test_orchestrator().await?;
     let session = start_session(&orchestrator).await?;
     let mut stream = orchestrator
-        .observe(session.session_id.clone(), moa_core::ObserveLevel::Normal)
+        .observe(session.session_id, moa_core::ObserveLevel::Normal)
         .await?;
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "observe".to_string(),
                 attachments: Vec::new(),
@@ -2263,12 +2254,12 @@ async fn observe_uses_postgres_listener_for_remote_active_sessions() -> Result<(
     let session_id = SessionId::new();
     session_store
         .create_session(SessionMeta {
-            id: session_id.clone(),
+            id: session_id,
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             status: SessionStatus::Running,
             platform: Platform::Desktop,
-            model: observer.model().to_string(),
+            model: moa_core::ModelId::new(observer.model()),
             created_at: now,
             updated_at: now,
             ..SessionMeta::default()
@@ -2276,7 +2267,7 @@ async fn observe_uses_postgres_listener_for_remote_active_sessions() -> Result<(
         .await?;
 
     let mut stream = observer
-        .observe(session_id.clone(), moa_core::ObserveLevel::Normal)
+        .observe(session_id, moa_core::ObserveLevel::Normal)
         .await?;
 
     session_store
@@ -2337,7 +2328,7 @@ async fn memory_maintenance_runs_due_workspace_consolidation() -> Result<()> {
 
     memory_store
         .write_page(
-            MemoryScope::Workspace(workspace_id.clone()),
+            &MemoryScope::Workspace(workspace_id.clone()),
             &"topics/architecture.md".into(),
             WikiPage {
                 path: None,
@@ -2367,7 +2358,7 @@ async fn memory_maintenance_runs_due_workspace_consolidation() -> Result<()> {
                 title: Some(format!("finished-{index}")),
                 status: SessionStatus::Completed,
                 platform: Platform::Cli,
-                model: "test-model".to_string(),
+                model: moa_core::ModelId::new("test-model"),
                 created_at: now,
                 updated_at: now,
                 completed_at: Some(now),
@@ -2382,7 +2373,7 @@ async fn memory_maintenance_runs_due_workspace_consolidation() -> Result<()> {
     assert!(reports[0].relative_dates_normalized >= 1);
     let architecture = memory_store
         .read_page(
-            MemoryScope::Workspace(workspace_id),
+            &MemoryScope::Workspace(workspace_id),
             &"topics/architecture.md".into(),
         )
         .await?;
@@ -2403,7 +2394,7 @@ async fn memory_maintenance_skips_when_threshold_or_cooldown_not_met() -> Result
 
     memory_store
         .write_page(
-            scope.clone(),
+            &scope,
             &"topics/architecture.md".into(),
             WikiPage {
                 path: None,
@@ -2433,7 +2424,7 @@ async fn memory_maintenance_skips_when_threshold_or_cooldown_not_met() -> Result
                 title: Some(format!("finished-{index}")),
                 status: SessionStatus::Completed,
                 platform: Platform::Cli,
-                model: "test-model".to_string(),
+                model: moa_core::ModelId::new("test-model"),
                 created_at: now,
                 updated_at: now,
                 completed_at: Some(now),
@@ -2453,7 +2444,7 @@ async fn memory_maintenance_skips_when_threshold_or_cooldown_not_met() -> Result
             title: Some("finished-2".to_string()),
             status: SessionStatus::Completed,
             platform: Platform::Cli,
-            model: "test-model".to_string(),
+            model: moa_core::ModelId::new("test-model"),
             created_at: now,
             updated_at: now,
             completed_at: Some(now),
@@ -2500,7 +2491,7 @@ async fn workspace_memory_bootstrap_copies_contributing_file_without_provider_ca
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Cli,
-            model: orchestrator.model().to_string(),
+            model: moa_core::ModelId::new(orchestrator.model()),
             initial_message: None,
             title: None,
             parent_session_id: None,
@@ -2509,13 +2500,13 @@ async fn workspace_memory_bootstrap_copies_contributing_file_without_provider_ca
 
     let index = orchestrator
         .memory_store()
-        .get_index(MemoryScope::Workspace(WorkspaceId::new("workspace")))
+        .get_index(&MemoryScope::Workspace(WorkspaceId::new("workspace")))
         .await?;
     assert!(index.contains("Project instructions loaded from `CONTRIBUTING.md`"));
     let project = orchestrator
         .memory_store()
         .read_page(
-            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &"topics/project.md".into(),
         )
         .await?;
@@ -2562,7 +2553,7 @@ async fn workspace_memory_bootstrap_informs_first_turn_from_instruction_file() -
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Cli,
-            model: orchestrator.model().to_string(),
+            model: moa_core::ModelId::new(orchestrator.model()),
             initial_message: Some(UserMessage {
                 text: "What is bootmarkeralpha?".to_string(),
                 attachments: Vec::new(),
@@ -2573,7 +2564,7 @@ async fn workspace_memory_bootstrap_informs_first_turn_from_instruction_file() -
         .await?;
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
@@ -2619,7 +2610,7 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Cli,
-            model: orchestrator.model().to_string(),
+            model: moa_core::ModelId::new(orchestrator.model()),
             initial_message: None,
             title: None,
             parent_session_id: None,
@@ -2629,7 +2620,7 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
     let project = orchestrator
         .memory_store()
         .read_page(
-            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &project_path,
         )
         .await?;
@@ -2653,7 +2644,7 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Cli,
-            model: orchestrator.model().to_string(),
+            model: moa_core::ModelId::new(orchestrator.model()),
             initial_message: None,
             title: None,
             parent_session_id: None,
@@ -2662,7 +2653,7 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
     let project = orchestrator
         .memory_store()
         .read_page(
-            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &project_path,
         )
         .await?;
@@ -2675,7 +2666,7 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Cli,
-            model: orchestrator.model().to_string(),
+            model: moa_core::ModelId::new(orchestrator.model()),
             initial_message: None,
             title: None,
             parent_session_id: None,
@@ -2684,7 +2675,7 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
     let project = orchestrator
         .memory_store()
         .read_page(
-            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &project_path,
         )
         .await?;
@@ -2724,7 +2715,7 @@ async fn workspace_memory_bootstrap_can_be_disabled() -> Result<()> {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Cli,
-            model: orchestrator.model().to_string(),
+            model: moa_core::ModelId::new(orchestrator.model()),
             initial_message: None,
             title: None,
             parent_session_id: None,
@@ -2733,7 +2724,7 @@ async fn workspace_memory_bootstrap_can_be_disabled() -> Result<()> {
 
     let index = orchestrator
         .memory_store()
-        .get_index(MemoryScope::Workspace(WorkspaceId::new("workspace")))
+        .get_index(&MemoryScope::Workspace(WorkspaceId::new("workspace")))
         .await?;
     assert!(index.trim().is_empty());
 
@@ -2779,7 +2770,7 @@ async fn workspace_instruction_file_is_injected_into_prompt_with_config_instruct
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Cli,
-            model: orchestrator.model().to_string(),
+            model: moa_core::ModelId::new(orchestrator.model()),
             initial_message: Some(UserMessage {
                 text: "How should I run tests?".to_string(),
                 attachments: Vec::new(),
@@ -2790,7 +2781,7 @@ async fn workspace_instruction_file_is_injected_into_prompt_with_config_instruct
         .await?;
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
@@ -2837,7 +2828,7 @@ async fn workspace_instruction_file_is_reloaded_for_each_new_session() -> Result
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Cli,
-            model: orchestrator.model().to_string(),
+            model: moa_core::ModelId::new(orchestrator.model()),
             initial_message: Some(UserMessage {
                 text: "first session".to_string(),
                 attachments: Vec::new(),
@@ -2848,7 +2839,7 @@ async fn workspace_instruction_file_is_reloaded_for_each_new_session() -> Result
         .await?;
     wait_for_status(
         &orchestrator,
-        first_session.session_id.clone(),
+        first_session.session_id,
         SessionStatus::Completed,
     )
     .await?;
@@ -2864,7 +2855,7 @@ async fn workspace_instruction_file_is_reloaded_for_each_new_session() -> Result
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Cli,
-            model: orchestrator.model().to_string(),
+            model: moa_core::ModelId::new(orchestrator.model()),
             initial_message: Some(UserMessage {
                 text: "second session".to_string(),
                 attachments: Vec::new(),
@@ -2875,7 +2866,7 @@ async fn workspace_instruction_file_is_reloaded_for_each_new_session() -> Result
         .await?;
     wait_for_status(
         &orchestrator,
-        second_session.session_id.clone(),
+        second_session.session_id,
         SessionStatus::Completed,
     )
     .await?;
@@ -2914,7 +2905,7 @@ async fn local_bash_tools_run_in_detected_workspace_root() -> Result<()> {
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "inspect workspace".to_string(),
                 attachments: Vec::new(),
@@ -2922,10 +2913,10 @@ async fn local_bash_tools_run_in_detected_workspace_root() -> Result<()> {
         )
         .await?;
 
-    let request_id = wait_for_approval_request(&orchestrator, session.session_id.clone()).await?;
+    let request_id = wait_for_approval_request(&orchestrator, session.session_id).await?;
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::ApprovalDecided {
                 request_id,
                 decision: moa_core::ApprovalDecision::AllowOnce,
@@ -2935,7 +2926,7 @@ async fn local_bash_tools_run_in_detected_workspace_root() -> Result<()> {
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
@@ -2985,7 +2976,7 @@ async fn local_bash_tools_prefer_git_root_over_nested_cwd() -> Result<()> {
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "inspect git root".to_string(),
                 attachments: Vec::new(),
@@ -2993,10 +2984,10 @@ async fn local_bash_tools_prefer_git_root_over_nested_cwd() -> Result<()> {
         )
         .await?;
 
-    let request_id = wait_for_approval_request(&orchestrator, session.session_id.clone()).await?;
+    let request_id = wait_for_approval_request(&orchestrator, session.session_id).await?;
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::ApprovalDecided {
                 request_id,
                 decision: moa_core::ApprovalDecision::AllowOnce,
@@ -3006,7 +2997,7 @@ async fn local_bash_tools_prefer_git_root_over_nested_cwd() -> Result<()> {
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
@@ -3058,13 +3049,13 @@ async fn session_pauses_after_max_turns_and_resume_processes_pending_work() -> R
     let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
     let session = start_session(&orchestrator).await?;
     let mut runtime_rx = orchestrator
-        .observe_runtime(session.session_id.clone())
+        .observe_runtime(session.session_id)
         .await?
         .expect("runtime receiver should exist for active session");
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "first".to_string(),
                 attachments: Vec::new(),
@@ -3077,14 +3068,14 @@ async fn session_pauses_after_max_turns_and_resume_processes_pending_work() -> R
     .await?;
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "second".to_string(),
                 attachments: Vec::new(),
@@ -3097,7 +3088,7 @@ async fn session_pauses_after_max_turns_and_resume_processes_pending_work() -> R
     .await?;
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Paused,
     )
     .await?;
@@ -3109,7 +3100,7 @@ async fn session_pauses_after_max_turns_and_resume_processes_pending_work() -> R
 
     let paused_events = orchestrator
         .session_store()
-        .get_events(session.session_id.clone(), EventRange::all())
+        .get_events(session.session_id, EventRange::all())
         .await?;
     assert_eq!(
         brain_response_texts(&paused_events),
@@ -3120,11 +3111,11 @@ async fn session_pauses_after_max_turns_and_resume_processes_pending_work() -> R
     }));
 
     orchestrator
-        .resume_session(session.session_id.clone())
+        .resume_session(session.session_id)
         .await?;
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await?;
@@ -3163,7 +3154,7 @@ async fn session_pauses_on_loop_detection() -> Result<()> {
     for prompt in ["first", "second"] {
         orchestrator
             .signal(
-                session.session_id.clone(),
+                session.session_id,
                 SessionSignal::QueueMessage(UserMessage {
                     text: prompt.to_string(),
                     attachments: Vec::new(),
@@ -3173,7 +3164,7 @@ async fn session_pauses_on_loop_detection() -> Result<()> {
         let expected_tool_turns = if prompt == "first" { 1 } else { 2 };
         wait_for_tool_result_count(
             &orchestrator,
-            session.session_id.clone(),
+            session.session_id,
             expected_tool_turns,
         )
         .await?;
@@ -3181,7 +3172,7 @@ async fn session_pauses_on_loop_detection() -> Result<()> {
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::QueueMessage(UserMessage {
                 text: "third".to_string(),
                 attachments: Vec::new(),
@@ -3190,14 +3181,14 @@ async fn session_pauses_on_loop_detection() -> Result<()> {
         .await?;
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Paused,
     )
     .await?;
 
     let paused_events = orchestrator
         .session_store()
-        .get_events(session.session_id.clone(), EventRange::all())
+        .get_events(session.session_id, EventRange::all())
         .await?;
     let tool_outputs = tool_result_texts(&paused_events);
     assert_eq!(tool_outputs.len(), 3);

@@ -183,13 +183,13 @@ fn build_span_exporter(config: &ObservabilityConfig) -> Result<SpanExporter> {
 fn build_resource(config: &ObservabilityConfig) -> Resource {
     let mut attributes = Vec::new();
 
-    if let Some(environment) = config.environment.as_ref() {
+    if let Some(environment) = config.environment.clone() {
         attributes.push(KeyValue::new("deployment.environment", environment.clone()));
-        attributes.push(KeyValue::new("langfuse.environment", environment.clone()));
+        attributes.push(KeyValue::new("langfuse.environment", environment));
     }
-    if let Some(release) = config.release.as_ref() {
+    if let Some(release) = config.release.clone() {
         attributes.push(KeyValue::new("service.version", release.clone()));
-        attributes.push(KeyValue::new("langfuse.release", release.clone()));
+        attributes.push(KeyValue::new("langfuse.release", release));
     }
 
     Resource::builder()

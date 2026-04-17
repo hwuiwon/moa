@@ -131,24 +131,28 @@ impl ToolRouter {
     }
 
     /// Attaches a persistent approval rule store to the router.
+    #[must_use]
     pub fn with_rule_store(mut self, rule_store: Arc<dyn ApprovalRuleStore>) -> Self {
         self.rule_store = Some(rule_store);
         self
     }
 
     /// Attaches a session store so built-in tools can introspect session history.
+    #[must_use]
     pub fn with_session_store(mut self, session_store: Arc<dyn SessionStore>) -> Self {
         self.session_store = Some(session_store);
         self
     }
 
     /// Attaches an MCP credential proxy to the router.
+    #[must_use]
     pub fn with_mcp_proxy(mut self, mcp_proxy: Arc<MCPCredentialProxy>) -> Self {
         self.mcp_proxy = Some(mcp_proxy);
         self
     }
 
     /// Overrides the router's policy configuration.
+    #[must_use]
     pub fn with_policies(mut self, policies: ToolPolicies) -> Self {
         self.policies = policies;
         self
@@ -172,6 +176,7 @@ impl ToolRouter {
     }
 
     /// Restricts the router to an explicit set of enabled tool names.
+    #[must_use]
     pub fn with_enabled_tools<I, S>(mut self, tool_names: I) -> Self
     where
         I: IntoIterator<Item = S>,

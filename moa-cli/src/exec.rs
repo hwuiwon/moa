@@ -199,7 +199,7 @@ async fn handle_exec_interrupt(
         InterruptState::Idle => {
             eprintln!("interrupt received, requesting stop...");
             runtime
-                .soft_cancel_session(runtime.session_id().clone())
+                .soft_cancel_session(*runtime.session_id())
                 .await
                 .context("failed to request soft cancel")?;
             *interrupt_state = InterruptState::SoftCancelRequested;

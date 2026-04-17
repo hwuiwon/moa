@@ -8,7 +8,8 @@ use uuid::Uuid;
 use crate::error::Result;
 
 use super::{
-    Attachment, EventRecord, PendingSignalId, Platform, SequenceNum, SessionId, UserId, WorkspaceId,
+    Attachment, EventRecord, ModelId, PendingSignalId, Platform, SequenceNum, SessionId, UserId,
+    WorkspaceId,
 };
 
 /// Session lifecycle status.
@@ -139,6 +140,13 @@ impl PendingSignal {
             PendingSignalType::QueueMessage => Ok(serde_json::from_value(self.payload.clone())?),
         }
     }
+
+    /// Consumes the signal and decodes the queued user message payload without cloning.
+    pub fn into_user_message(self) -> Result<UserMessage> {
+        match self.signal_type {
+            PendingSignalType::QueueMessage => Ok(serde_json::from_value(self.payload)?),
+        }
+    }
 }
 
 /// Handle returned for a database checkpoint branch.
@@ -177,7 +185,7 @@ pub struct StartSessionRequest {
     /// Source platform.
     pub platform: Platform,
     /// Model identifier to use.
-    pub model: String,
+    pub model: ModelId,
     /// Optional first message.
     pub initial_message: Option<UserMessage>,
     /// Optional title override.
@@ -220,7 +228,7 @@ pub struct SessionMeta {
     /// Platform-specific channel identifier.
     pub platform_channel: Option<String>,
     /// Model identifier.
-    pub model: String,
+    pub model: ModelId,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Last update timestamp.
@@ -272,7 +280,7 @@ impl Default for SessionMeta {
             status: SessionStatus::Created,
             platform: Platform::Desktop,
             platform_channel: None,
-            model: String::new(),
+            model: ModelId::new(""),
             created_at: now,
             updated_at: now,
             completed_at: None,
@@ -305,7 +313,7 @@ pub struct SessionSummary {
     /// Source platform.
     pub platform: Platform,
     /// Model identifier.
-    pub model: String,
+    pub model: ModelId,
     /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
 }
@@ -356,7 +364,7 @@ mod tests {
     fn pending_signal_queue_message_round_trip() {
         let session_id = SessionId::new();
         let signal = PendingSignal::queue_message(
-            session_id.clone(),
+            session_id,
             UserMessage {
                 text: "queued".to_string(),
                 attachments: vec![],

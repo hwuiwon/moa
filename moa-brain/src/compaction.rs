@@ -1,8 +1,10 @@
 //! Reversible session-history compaction helpers.
 
+use std::borrow::Cow;
+
 use moa_core::{
     CompactionConfig, CompletionRequest, ContextMessage, Event, EventRange, EventRecord,
-    LLMProvider, Result, SessionId, SessionStore, TokenPricing,
+    LLMProvider, ModelId, Result, SessionId, SessionStore, TokenPricing,
 };
 use tracing::Instrument;
 
@@ -162,7 +164,7 @@ pub async fn maybe_compact(
     _pipeline: &ContextPipeline,
 ) -> Result<bool> {
     let events = store
-        .get_events(session_id.clone(), EventRange::all())
+        .get_events(session_id, EventRange::all())
         .await?;
     maybe_compact_events(
         &CompactionConfig::default(),
@@ -194,7 +196,7 @@ fn compaction_request(
     }
 
     CompletionRequest {
-        model: summarizer_model.map(str::to_string),
+        model: summarizer_model.map(ModelId::new),
         messages: vec![
             ContextMessage::system(include_str!("prompts/summarizer.txt")),
             ContextMessage::user(prompt),
@@ -315,14 +317,19 @@ fn event_summary_line(record: &EventRecord) -> String {
     }
 }
 
-fn truncate(text: &str) -> String {
+fn truncate(text: &str) -> Cow<'_, str> {
     const LIMIT: usize = 240;
-    if text.chars().count() <= LIMIT {
-        return text.to_string();
+    // Collect up to LIMIT+1 chars to detect overflow in one pass.
+    let mut iter = text.chars();
+    let head: String = iter.by_ref().take(LIMIT + 1).collect();
+    if head.chars().count() <= LIMIT {
+        // Original text fits; return a borrow.
+        Cow::Borrowed(text)
+    } else {
+        // Trim to LIMIT-3 and append ellipsis.
+        let prefix: String = head.chars().take(LIMIT - 3).collect();
+        Cow::Owned(format!("{prefix}..."))
     }
-
-    let prefix = text.chars().take(LIMIT - 3).collect::<String>();
-    format!("{prefix}...")
 }
 
 fn normalize_summary(summary: &str) -> String {

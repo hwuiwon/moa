@@ -11,7 +11,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
+use tokio::task::JoinHandle;
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const DEFAULT_MCP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -39,7 +40,7 @@ impl MCPClient {
     pub async fn connect(config: &McpServerConfig) -> Result<Self> {
         let transport = match config.transport {
             McpTransportConfig::Stdio => {
-                McpTransport::Stdio(Box::new(Mutex::new(StdioClient::spawn(config).await?)))
+                McpTransport::Stdio(StdioTransport::spawn(config)?)
             }
             McpTransportConfig::Http | McpTransportConfig::Sse => {
                 McpTransport::Remote(RemoteClient::new(config)?)
@@ -94,7 +95,7 @@ impl MCPClient {
                 headers,
             )
             .await?;
-        flatten_call_result(response)
+        Ok(flatten_call_result(response))
     }
 
     async fn initialize(&self) -> Result<()> {
@@ -122,7 +123,7 @@ impl MCPClient {
             "params": params,
         });
         match &self.transport {
-            McpTransport::Stdio(transport) => transport.lock().await.notify(message).await,
+            McpTransport::Stdio(transport) => transport.notify(message).await,
             McpTransport::Remote(transport) => transport.notify(message).await,
         }
     }
@@ -136,7 +137,7 @@ impl MCPClient {
             "params": params,
         });
         let response = match &self.transport {
-            McpTransport::Stdio(transport) => transport.lock().await.request(request).await?,
+            McpTransport::Stdio(transport) => transport.request(message_id, request).await?,
             McpTransport::Remote(transport) => transport.request(request, headers).await?,
         };
         parse_jsonrpc_result(response)
@@ -144,18 +145,30 @@ impl MCPClient {
 }
 
 enum McpTransport {
-    Stdio(Box<Mutex<StdioClient>>),
+    Stdio(StdioTransport),
     Remote(RemoteClient),
 }
 
-struct StdioClient {
+// ---------------------------------------------------------------------------
+// Stdio transport — demuxed, concurrent-safe
+// ---------------------------------------------------------------------------
+
+/// Shared map of in-flight requests: id -> oneshot sender for the response.
+type PendingMap = Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>;
+
+struct StdioTransport {
+    /// Mutex only held during the actual `write_all` call — released before
+    /// waiting for a response.
+    writer: Mutex<ChildStdin>,
+    pending: std::sync::Arc<PendingMap>,
+    /// Background reader task handle (kept so it is aborted on drop).
+    _reader_task: JoinHandle<()>,
+    /// Held to keep the child process alive.
     _child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
 }
 
-impl StdioClient {
-    async fn spawn(config: &McpServerConfig) -> Result<Self> {
+impl StdioTransport {
+    fn spawn(config: &McpServerConfig) -> Result<Self> {
         let command = config.command.as_deref().ok_or_else(|| {
             MoaError::ConfigError(format!(
                 "MCP server {} requires a command for stdio transport",
@@ -181,30 +194,147 @@ impl StdioClient {
                 config.name
             ))
         })?;
+
+        let pending: std::sync::Arc<PendingMap> =
+            std::sync::Arc::new(Mutex::new(HashMap::new()));
+        let pending_reader = pending.clone();
+
+        let reader_task = tokio::spawn(async move {
+            run_reader(BufReader::new(stdout), pending_reader).await;
+        });
+
         Ok(Self {
+            writer: Mutex::new(stdin),
+            pending,
+            _reader_task: reader_task,
             _child: child,
-            stdin,
-            stdout: BufReader::new(stdout),
         })
     }
 
-    async fn notify(&mut self, message: Value) -> Result<()> {
-        write_framed_message(&mut self.stdin, &message).await
+    /// Write a notification (fire-and-forget, no response expected).
+    async fn notify(&self, message: Value) -> Result<()> {
+        let mut stdin = self.writer.lock().await;
+        write_framed_message(&mut stdin, &message).await
+        // lock released here — before any await that waits for a response
     }
 
-    async fn request(&mut self, message: Value) -> Result<Value> {
-        write_framed_message(&mut self.stdin, &message).await?;
-        loop {
-            let value = read_framed_message(&mut self.stdout).await?;
-            if value.get("id").is_some()
-                || value.get("result").is_some()
-                || value.get("error").is_some()
-            {
-                return Ok(value);
+    /// Send a request and wait for the matching response, fully concurrent.
+    async fn request(&self, id: u64, message: Value) -> Result<Value> {
+        let (tx, rx) = oneshot::channel::<Result<Value>>();
+
+        // Register before writing so we never miss a fast response.
+        self.pending.lock().await.insert(id, tx);
+
+        // RAII guard: removes the pending entry if this future is dropped
+        // (cancelled) before the oneshot fires.
+        let pending_ref = self.pending.clone();
+        let guard = PendingGuard { id, pending: Some(pending_ref) };
+
+        // Write to stdin — mutex is held only for the duration of the write.
+        {
+            let mut stdin = self.writer.lock().await;
+            if let Err(err) = write_framed_message(&mut stdin, &message).await {
+                // Remove the pending entry we just inserted.
+                drop(guard);
+                // Clean up is handled by the guard's drop, but we already
+                // consumed it — explicitly remove just in case guard didn't
+                // fire yet (it hasn't been dropped yet; force it):
+                self.pending.lock().await.remove(&id);
+                return Err(err);
+            }
+        } // write mutex released here
+
+        // Await the response via the oneshot — no lock held.
+        let result = tokio::time::timeout(DEFAULT_MCP_TIMEOUT, rx).await;
+
+        // Disarm the guard: the oneshot fired (or we're about to error out).
+        guard.disarm();
+
+        match result {
+            Ok(Ok(value)) => value,
+            Ok(Err(_)) => Err(MoaError::StreamError(
+                "MCP stdio reader task closed".to_string(),
+            )),
+            Err(_) => {
+                // Timeout: clean up the now-stale pending entry.
+                self.pending.lock().await.remove(&id);
+                Err(MoaError::StreamError(format!(
+                    "MCP stdio request timed out after {}s",
+                    DEFAULT_MCP_TIMEOUT.as_secs()
+                )))
             }
         }
     }
 }
+
+/// RAII guard that removes a pending entry from the map when dropped (cancel
+/// safety). Call `disarm()` before intentional completion to skip removal.
+struct PendingGuard {
+    id: u64,
+    pending: Option<std::sync::Arc<PendingMap>>,
+}
+
+impl PendingGuard {
+    fn disarm(mut self) {
+        self.pending = None;
+    }
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            // Best-effort synchronous removal; if the lock is contended we
+            // spin briefly. In practice the map is never held for long.
+            if let Ok(mut map) = pending.try_lock() {
+                map.remove(&self.id);
+            } else {
+                // Fall back: spawn a tiny task to do the cleanup.
+                let id = self.id;
+                tokio::spawn(async move {
+                    pending.lock().await.remove(&id);
+                });
+            }
+        }
+    }
+}
+
+/// Background task: reads framed JSON-RPC messages from stdout and routes
+/// each response to the appropriate oneshot sender by id.
+async fn run_reader(
+    mut stdout: BufReader<ChildStdout>,
+    pending: std::sync::Arc<PendingMap>,
+) {
+    loop {
+        match read_framed_message(&mut stdout).await {
+            Ok(value) => {
+                // Responses carry an "id"; notifications do not.
+                let id = match value.get("id").and_then(Value::as_u64) {
+                    Some(id) => id,
+                    None => continue, // server-side notification — ignore
+                };
+                let sender = pending.lock().await.remove(&id);
+                if let Some(tx) = sender {
+                    let _ = tx.send(Ok(value));
+                }
+            }
+            Err(err) => {
+                // EOF or framing error — drain all pending requests with an
+                // error so callers don't wait until timeout.
+                let mut map = pending.lock().await;
+                for (_, tx) in map.drain() {
+                    let _ = tx.send(Err(MoaError::StreamError(format!(
+                        "MCP stdio process exited: {err}"
+                    ))));
+                }
+                return;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP / SSE remote client (unchanged)
+// ---------------------------------------------------------------------------
 
 struct RemoteClient {
     client: reqwest::Client,
@@ -283,6 +413,10 @@ impl RemoteClient {
             .map_err(|error| MoaError::StreamError(format!("invalid MCP JSON response: {error}")))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 struct ToolsListResponse {
@@ -393,7 +527,7 @@ fn parse_jsonrpc_result(response: Value) -> Result<Value> {
         .ok_or_else(|| MoaError::StreamError("missing MCP result payload".to_string()))
 }
 
-fn flatten_call_result(result: Value) -> Result<ToolOutput> {
+fn flatten_call_result(result: Value) -> ToolOutput {
     let is_error = result
         .get("isError")
         .and_then(Value::as_bool)
@@ -415,13 +549,13 @@ fn flatten_call_result(result: Value) -> Result<ToolOutput> {
         });
     }
 
-    Ok(ToolOutput {
+    ToolOutput {
         content: content_blocks,
         is_error,
         structured: result.get("structuredContent").cloned(),
         duration: Duration::default(),
         truncated: false,
-    })
+    }
 }
 
 fn header_map_from_pairs(headers: HashMap<String, String>) -> Result<HeaderMap> {
@@ -456,8 +590,7 @@ mod tests {
                 { "type": "text", "text": "hello" },
                 { "type": "text", "text": "world" }
             ]
-        }))
-        .unwrap();
+        }));
         assert_eq!(output.to_text(), "hello\n\nworld");
         assert!(!output.is_error);
     }

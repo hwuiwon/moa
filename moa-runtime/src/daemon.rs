@@ -92,7 +92,7 @@ impl DaemonChatRuntime {
             workspace_id: self.workspace_id.clone(),
             user_id: self.user_id.clone(),
             platform: self.platform.clone(),
-            model: self.model.clone(),
+            model: self.model.clone().into(),
             initial_message: None,
             title: None,
             parent_session_id: None,
@@ -111,7 +111,7 @@ impl DaemonChatRuntime {
 
     async fn reset_session(&mut self) -> Result<SessionId> {
         self.session_id = self.create_session().await?;
-        Ok(self.session_id.clone())
+        Ok(self.session_id)
     }
 
     async fn set_model(&mut self, model: impl Into<String>) -> Result<SessionId> {
@@ -124,7 +124,7 @@ impl DaemonChatRuntime {
     }
 
     async fn session_meta(&self) -> Result<SessionMeta> {
-        self.session_meta_by_id(self.session_id.clone()).await
+        self.session_meta_by_id(self.session_id).await
     }
 
     async fn session_meta_by_id(&self, session_id: SessionId) -> Result<SessionMeta> {
@@ -334,7 +334,7 @@ impl DaemonChatRuntime {
         let reader = daemon_send_command(
             socket,
             &DaemonCommand::ObserveSession {
-                session_id: session_id.clone(),
+                session_id,
             },
         )
         .await?;
@@ -389,11 +389,11 @@ impl DaemonChatRuntime {
         let reader = daemon_send_command(
             socket,
             &DaemonCommand::ObserveSession {
-                session_id: self.session_id.clone(),
+                session_id: self.session_id,
             },
         )
         .await?;
-        self.queue_message(self.session_id.clone(), prompt).await?;
+        self.queue_message(self.session_id, prompt).await?;
         relay_daemon_runtime_turn_events(event_tx, reader).await
     }
 
@@ -402,12 +402,12 @@ impl DaemonChatRuntime {
         request_id: Uuid,
         decision: ApprovalDecision,
     ) -> Result<()> {
-        self.respond_to_session_approval(self.session_id.clone(), request_id, decision)
+        self.respond_to_session_approval(self.session_id, request_id, decision)
             .await
     }
 
     async fn cancel_active_generation(&self) -> Result<()> {
-        self.hard_cancel_session(self.session_id.clone()).await
+        self.hard_cancel_session(self.session_id).await
     }
 }
 

@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{MoaError, Result};
 
-use super::ContextMessage;
+use super::{ContextMessage, ModelId};
 
 /// Single tool invocation emitted by a provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -91,7 +91,7 @@ pub enum StopReason {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompletionRequest {
     /// Optional model override.
-    pub model: Option<String>,
+    pub model: Option<ModelId>,
     /// Context messages.
     pub messages: Vec<ContextMessage>,
     /// Tool schemas available to the provider.
@@ -200,7 +200,7 @@ impl CacheBreakpoint {
 }
 
 /// Normalized provider token-usage counters.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     /// Input tokens billed at the provider's standard uncached rate.
     #[serde(default, alias = "input_tokens")]
@@ -243,7 +243,7 @@ pub struct CompletionResponse {
     /// Provider stop reason.
     pub stop_reason: StopReason,
     /// Model identifier used.
-    pub model: String,
+    pub model: ModelId,
     /// Total input token usage, retained for compatibility with existing call sites.
     pub input_tokens: usize,
     /// Output token usage, retained for compatibility with existing call sites.
@@ -264,7 +264,7 @@ impl CompletionResponse {
     /// Returns normalized token usage for the response.
     pub fn token_usage(&self) -> TokenUsage {
         if self.usage != TokenUsage::default() {
-            return self.usage.clone();
+            return self.usage;
         }
 
         TokenUsage {
@@ -304,6 +304,7 @@ impl CompletionStream {
     }
 
     /// Attaches a cooperative cancellation token to the stream.
+    #[must_use = "dropping the returned stream discards cancellation support"]
     pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
         self.cancel_token = Some(cancel_token);
         self
@@ -373,11 +374,12 @@ mod tests {
     use tokio::time::{Duration as TokioDuration, sleep};
 
     use super::{CompletionContent, CompletionResponse, CompletionStream, StopReason, TokenUsage};
+    use crate::ModelId;
     use crate::error::MoaError;
 
     #[test]
     fn token_usage_cache_hit_rate_handles_zero_and_mixed_usage() {
-        assert_eq!(TokenUsage::default().cache_hit_rate(), 0.0);
+        assert!(TokenUsage::default().cache_hit_rate().abs() < f64::EPSILON);
 
         let usage = TokenUsage {
             input_tokens_uncached: 40,
@@ -399,7 +401,7 @@ mod tests {
                 text: "late".to_string(),
                 content: vec![CompletionContent::Text("late".to_string())],
                 stop_reason: StopReason::EndTurn,
-                model: "test".to_string(),
+                model: ModelId::new("test"),
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_input_tokens: 0,

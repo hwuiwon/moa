@@ -51,10 +51,10 @@ impl Workspace {
         cx.subscribe(
             &session_list,
             move |this, _, event: &SessionSelected, cx| {
-                let id = event.0.clone();
-                this.selected_session = Some(id.clone());
+                let id = event.0;
+                this.selected_session = Some(id);
                 tracing::info!(session_id = %id, "session selected");
-                chat_for_select.update(cx, |panel, cx| panel.set_session(id.clone(), cx));
+                chat_for_select.update(cx, |panel, cx| panel.set_session(id, cx));
                 detail_for_session.update(cx, |panel, cx| panel.set_session(id, cx));
                 viewer_for_session.update(cx, |viewer, cx| viewer.clear(cx));
                 cx.notify();

@@ -91,9 +91,9 @@ impl PostgresSessionStore {
 
     /// Reconstructs the session state needed to resume a brain.
     pub async fn wake(&self, session_id: moa_core::SessionId) -> Result<WakeContext> {
-        let session = self.get_session(session_id.clone()).await?;
+        let session = self.get_session(session_id).await?;
         let all_events = self
-            .get_events(session_id.clone(), EventRange::all())
+            .get_events(session_id, EventRange::all())
             .await?;
         let (checkpoint_summary, recent_events) = checkpoint_view(&all_events);
         let pending_signals = self.get_pending_signals(session_id).await?;
@@ -340,7 +340,7 @@ fn redact_password(url: &str) -> String {
 impl SessionStore for PostgresSessionStore {
     /// Creates a new session record.
     async fn create_session(&self, meta: SessionMeta) -> Result<moa_core::SessionId> {
-        let session_id = meta.id.clone();
+        let session_id = meta.id;
         let sessions = self.table_name("sessions");
         sqlx::query(&format!(
             "INSERT INTO {sessions} ({SESSION_COLUMNS}) VALUES \
@@ -353,7 +353,7 @@ impl SessionStore for PostgresSessionStore {
         .bind(session_status_to_db(&meta.status))
         .bind(platform_to_db(&meta.platform))
         .bind(meta.platform_channel)
-        .bind(meta.model)
+        .bind(meta.model.to_string())
         .bind(meta.created_at)
         .bind(meta.updated_at)
         .bind(meta.completed_at)
@@ -395,7 +395,7 @@ impl SessionStore for PostgresSessionStore {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(map_sqlx_error)?
-        .ok_or_else(|| MoaError::SessionNotFound(session_id.clone()))?;
+        .ok_or_else(|| MoaError::SessionNotFound(session_id))?;
         let sequence_num = locked_session
             .try_get::<i64, _>("event_count")
             .map_err(map_sqlx_error)? as u64;
@@ -538,7 +538,7 @@ impl SessionStore for PostgresSessionStore {
             .fetch_optional(&self.pool)
             .await
             .map_err(map_sqlx_error)?
-            .ok_or_else(|| MoaError::SessionNotFound(session_id.clone()))?;
+            .ok_or_else(|| MoaError::SessionNotFound(session_id))?;
         session_meta_from_row(&row)
     }
 

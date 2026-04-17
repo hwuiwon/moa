@@ -8,7 +8,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CacheTtl, CompletionRequest, Platform, SessionId, SessionMeta, UserId, WorkspaceId,
+    CacheTtl, CompletionRequest, ModelId, Platform, SessionId, SessionMeta, UserId, WorkspaceId,
     estimate_text_tokens,
 };
 
@@ -18,7 +18,7 @@ pub struct CacheReport {
     /// Provider identifier, for example `anthropic` or `openai`.
     pub provider: String,
     /// Model identifier used for the request.
-    pub model: String,
+    pub model: ModelId,
     /// Number of context messages sent to the provider.
     pub message_count: usize,
     /// Number of tool schemas sent to the provider.
@@ -53,12 +53,43 @@ pub struct CacheReport {
     pub cached_vs_stable_estimate_ratio: f64,
 }
 
+impl Default for CacheReport {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            model: ModelId::new(""),
+            message_count: 0,
+            tool_count: 0,
+            cache_breakpoints: Vec::new(),
+            tool_tokens_estimate: 0,
+            stable_message_tokens_estimate: 0,
+            stable_total_tokens_estimate: 0,
+            total_tokens_estimate: 0,
+            dynamic_tokens_estimate: 0,
+            cache_ratio_estimate: 0.0,
+            stable_prefix_fingerprint: 0,
+            full_request_fingerprint: 0,
+            stable_prefix_reused: false,
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            cached_vs_stable_estimate_ratio: 0.0,
+        }
+    }
+}
+
 impl CacheReport {
+    /// Returns a builder for constructing a [`CacheReport`] value.
+    #[must_use]
+    pub fn builder() -> CacheReportBuilder {
+        CacheReportBuilder::default()
+    }
+
     /// Builds a cache report from one completion request and its provider response metrics.
     pub fn from_request(
         request: &CompletionRequest,
         provider: impl Into<String>,
-        model: impl Into<String>,
+        model: impl Into<ModelId>,
         stable_prefix_reused: bool,
         input_tokens: usize,
         cached_input_tokens: usize,
@@ -117,18 +148,194 @@ impl CacheReport {
     }
 }
 
+/// Builder for [`CacheReport`].
+#[derive(Default)]
+pub struct CacheReportBuilder {
+    provider: Option<String>,
+    model: Option<ModelId>,
+    message_count: Option<usize>,
+    tool_count: Option<usize>,
+    cache_breakpoints: Option<Vec<usize>>,
+    tool_tokens_estimate: Option<usize>,
+    stable_message_tokens_estimate: Option<usize>,
+    stable_total_tokens_estimate: Option<usize>,
+    total_tokens_estimate: Option<usize>,
+    dynamic_tokens_estimate: Option<usize>,
+    cache_ratio_estimate: Option<f64>,
+    stable_prefix_fingerprint: Option<u64>,
+    full_request_fingerprint: Option<u64>,
+    stable_prefix_reused: Option<bool>,
+    input_tokens: Option<usize>,
+    cached_input_tokens: Option<usize>,
+    output_tokens: Option<usize>,
+    cached_vs_stable_estimate_ratio: Option<f64>,
+}
+
+impl CacheReportBuilder {
+    /// Sets the provider identifier.
+    #[must_use]
+    pub fn provider(mut self, v: impl Into<String>) -> Self {
+        self.provider = Some(v.into());
+        self
+    }
+
+    /// Sets the model identifier.
+    #[must_use]
+    pub fn model(mut self, v: impl Into<ModelId>) -> Self {
+        self.model = Some(v.into());
+        self
+    }
+
+    /// Sets the number of context messages.
+    #[must_use]
+    pub fn message_count(mut self, v: usize) -> Self {
+        self.message_count = Some(v);
+        self
+    }
+
+    /// Sets the number of tool schemas.
+    #[must_use]
+    pub fn tool_count(mut self, v: usize) -> Self {
+        self.tool_count = Some(v);
+        self
+    }
+
+    /// Sets the explicit cache breakpoint indexes.
+    #[must_use]
+    pub fn cache_breakpoints(mut self, v: Vec<usize>) -> Self {
+        self.cache_breakpoints = Some(v);
+        self
+    }
+
+    /// Sets the estimated tokens contributed by tool schemas.
+    #[must_use]
+    pub fn tool_tokens_estimate(mut self, v: usize) -> Self {
+        self.tool_tokens_estimate = Some(v);
+        self
+    }
+
+    /// Sets the estimated tokens contributed by stable-prefix messages.
+    #[must_use]
+    pub fn stable_message_tokens_estimate(mut self, v: usize) -> Self {
+        self.stable_message_tokens_estimate = Some(v);
+        self
+    }
+
+    /// Sets the estimated tokens in the stable prefix, including tools.
+    #[must_use]
+    pub fn stable_total_tokens_estimate(mut self, v: usize) -> Self {
+        self.stable_total_tokens_estimate = Some(v);
+        self
+    }
+
+    /// Sets the estimated total request tokens.
+    #[must_use]
+    pub fn total_tokens_estimate(mut self, v: usize) -> Self {
+        self.total_tokens_estimate = Some(v);
+        self
+    }
+
+    /// Sets the estimated dynamic suffix tokens.
+    #[must_use]
+    pub fn dynamic_tokens_estimate(mut self, v: usize) -> Self {
+        self.dynamic_tokens_estimate = Some(v);
+        self
+    }
+
+    /// Sets the estimated stable-prefix ratio.
+    #[must_use]
+    pub fn cache_ratio_estimate(mut self, v: f64) -> Self {
+        self.cache_ratio_estimate = Some(v);
+        self
+    }
+
+    /// Sets the stable fingerprint of the cacheable prompt prefix.
+    #[must_use]
+    pub fn stable_prefix_fingerprint(mut self, v: u64) -> Self {
+        self.stable_prefix_fingerprint = Some(v);
+        self
+    }
+
+    /// Sets the stable fingerprint of the full request payload.
+    #[must_use]
+    pub fn full_request_fingerprint(mut self, v: u64) -> Self {
+        self.full_request_fingerprint = Some(v);
+        self
+    }
+
+    /// Sets whether the previous request reused the same stable prefix.
+    #[must_use]
+    pub fn stable_prefix_reused(mut self, v: bool) -> Self {
+        self.stable_prefix_reused = Some(v);
+        self
+    }
+
+    /// Sets the provider-reported prompt input tokens.
+    #[must_use]
+    pub fn input_tokens(mut self, v: usize) -> Self {
+        self.input_tokens = Some(v);
+        self
+    }
+
+    /// Sets the provider-reported cached input tokens.
+    #[must_use]
+    pub fn cached_input_tokens(mut self, v: usize) -> Self {
+        self.cached_input_tokens = Some(v);
+        self
+    }
+
+    /// Sets the provider-reported output tokens.
+    #[must_use]
+    pub fn output_tokens(mut self, v: usize) -> Self {
+        self.output_tokens = Some(v);
+        self
+    }
+
+    /// Sets the ratio of cached provider tokens vs. the estimated stable prefix.
+    #[must_use]
+    pub fn cached_vs_stable_estimate_ratio(mut self, v: f64) -> Self {
+        self.cached_vs_stable_estimate_ratio = Some(v);
+        self
+    }
+
+    /// Constructs the [`CacheReport`], using defaults for any unset fields.
+    pub fn build(self) -> CacheReport {
+        CacheReport {
+            provider: self.provider.unwrap_or_default(),
+            model: self.model.unwrap_or_default(),
+            message_count: self.message_count.unwrap_or_default(),
+            tool_count: self.tool_count.unwrap_or_default(),
+            cache_breakpoints: self.cache_breakpoints.unwrap_or_default(),
+            tool_tokens_estimate: self.tool_tokens_estimate.unwrap_or_default(),
+            stable_message_tokens_estimate: self
+                .stable_message_tokens_estimate
+                .unwrap_or_default(),
+            stable_total_tokens_estimate: self.stable_total_tokens_estimate.unwrap_or_default(),
+            total_tokens_estimate: self.total_tokens_estimate.unwrap_or_default(),
+            dynamic_tokens_estimate: self.dynamic_tokens_estimate.unwrap_or_default(),
+            cache_ratio_estimate: self.cache_ratio_estimate.unwrap_or_default(),
+            stable_prefix_fingerprint: self.stable_prefix_fingerprint.unwrap_or_default(),
+            full_request_fingerprint: self.full_request_fingerprint.unwrap_or_default(),
+            stable_prefix_reused: self.stable_prefix_reused.unwrap_or_default(),
+            input_tokens: self.input_tokens.unwrap_or_default(),
+            cached_input_tokens: self.cached_input_tokens.unwrap_or_default(),
+            output_tokens: self.output_tokens.unwrap_or_default(),
+            cached_vs_stable_estimate_ratio: self
+                .cached_vs_stable_estimate_ratio
+                .unwrap_or_default(),
+        }
+    }
+}
+
 /// Returns a stable fingerprint for the cacheable prefix of a completion request.
 pub fn stable_prefix_fingerprint(request: &CompletionRequest) -> u64 {
     let stable_message_count = stable_prefix_message_count(request);
-    fingerprint_json(&(
-        request.tools.clone(),
-        request.messages[..stable_message_count].to_vec(),
-    ))
+    fingerprint_json(&(&request.tools, &request.messages[..stable_message_count]))
 }
 
 /// Returns a stable fingerprint for the full completion request payload.
 pub fn full_request_fingerprint(request: &CompletionRequest) -> u64 {
-    fingerprint_json(&(request.tools.clone(), request.messages.clone()))
+    fingerprint_json(&(&request.tools, &request.messages))
 }
 
 fn fingerprint_json<T>(value: &T) -> u64
@@ -165,7 +372,7 @@ pub struct TraceContext {
     /// Optional originating platform.
     pub platform: Option<Platform>,
     /// Active model identifier.
-    pub model: String,
+    pub model: ModelId,
     /// Human-readable trace name derived from the user prompt.
     pub trace_name: Option<String>,
     /// Filterable Langfuse tags serialized on the root span.
@@ -178,7 +385,7 @@ impl TraceContext {
     /// Builds a trace context from persisted session metadata and the current user prompt.
     pub fn from_session_meta(session: &SessionMeta, prompt: Option<&str>) -> Self {
         Self {
-            session_id: session.id.clone(),
+            session_id: session.id,
             user_id: session.user_id.clone(),
             workspace_id: session.workspace_id.clone(),
             platform: Some(session.platform.clone()),
@@ -190,6 +397,7 @@ impl TraceContext {
     }
 
     /// Returns a clone of the trace context with an explicit environment override.
+    #[must_use]
     pub fn with_environment(mut self, environment: Option<String>) -> Self {
         self.environment = environment
             .as_deref()
@@ -212,11 +420,12 @@ impl TraceContext {
             "langfuse.trace.metadata.workspace_id",
             self.workspace_id.to_string(),
         );
-        span.set_attribute("langfuse.trace.metadata.model", self.model.clone());
+        let model = self.model.to_string();
+        span.set_attribute("langfuse.trace.metadata.model", model.clone());
         span.set_attribute("moa.session.id", self.session_id.to_string());
         span.set_attribute("moa.user.id", self.user_id.to_string());
         span.set_attribute("moa.workspace.id", self.workspace_id.to_string());
-        span.set_attribute("moa.model", self.model.clone());
+        span.set_attribute("moa.model", model);
 
         if let Some(platform) = self.platform.as_ref() {
             let value = platform.to_string();

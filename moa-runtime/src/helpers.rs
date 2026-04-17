@@ -112,7 +112,7 @@ pub(crate) async fn start_empty_session(
             workspace_id: workspace_id.clone(),
             user_id: user_id.clone(),
             platform: platform.clone(),
-            model: model.to_string(),
+            model: moa_core::ModelId::new(model),
             initial_message: None,
             title: None,
             parent_session_id: None,
@@ -180,7 +180,7 @@ pub(crate) async fn relay_session_runtime_events(
         {
             RecvResult::Message(event) => {
                 let payload = SessionRuntimeEvent {
-                    session_id: session_id.clone(),
+                    session_id,
                     event: LiveEvent::Event(event),
                 };
                 if event_tx.send(payload).is_err() {
@@ -190,7 +190,7 @@ pub(crate) async fn relay_session_runtime_events(
             RecvResult::Gap { count } => {
                 if event_tx
                     .send(SessionRuntimeEvent {
-                        session_id: session_id.clone(),
+                        session_id,
                         event: LiveEvent::Gap {
                             count,
                             channel: BroadcastChannel::Runtime,
@@ -205,7 +205,7 @@ pub(crate) async fn relay_session_runtime_events(
             RecvResult::BackfillRequested { count } => {
                 if event_tx
                     .send(SessionRuntimeEvent {
-                        session_id: session_id.clone(),
+                        session_id,
                         event: LiveEvent::Gap {
                             count,
                             channel: BroadcastChannel::Runtime,
@@ -583,7 +583,7 @@ mod tests {
         }
         drop(runtime_tx);
 
-        relay_session_runtime_events(&mut runtime_rx, session_id.clone(), event_tx)
+        relay_session_runtime_events(&mut runtime_rx, session_id, event_tx)
             .await
             .expect("relay should finish cleanly");
 

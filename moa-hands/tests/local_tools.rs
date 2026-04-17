@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moa_core::{
     Event, HandProvider, HandResources, HandSpec, MemoryPath, MemoryScope, MemorySearchResult,
-    MemoryStore, PageSummary, PageType, Result, SandboxTier, SessionMeta, SessionStore,
+    MemoryStore, ModelId, PageSummary, PageType, Result, SandboxTier, SessionMeta, SessionStore,
     ToolInvocation, UserId, WikiPage, WorkspaceId,
 };
 use moa_hands::{LocalHandProvider, ToolRouter};
@@ -23,42 +23,42 @@ impl MemoryStore for EmptyMemoryStore {
     async fn search(
         &self,
         _query: &str,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
         Ok(Vec::new())
     }
 
-    async fn read_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
+    async fn read_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
         Err(moa_core::MoaError::StorageError("not found".to_string()))
     }
 
     async fn write_page(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _path: &MemoryPath,
         _page: WikiPage,
     ) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
+    async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
         Ok(())
     }
 
     async fn list_pages(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _filter: Option<PageType>,
     ) -> Result<Vec<PageSummary>> {
         Ok(Vec::new())
     }
 
-    async fn get_index(&self, _scope: MemoryScope) -> Result<String> {
+    async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
         Ok(String::new())
     }
 
-    async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+    async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
         Ok(())
     }
 }
@@ -67,7 +67,7 @@ fn session() -> SessionMeta {
     SessionMeta {
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     }
 }
@@ -626,7 +626,7 @@ async fn session_search_finds_prior_events() {
 
     session_store
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::UserMessage {
                 text: "deploy failed on port binding".to_string(),
                 attachments: vec![],
@@ -640,7 +640,7 @@ async fn session_search_finds_prior_events() {
             Event::BrainResponse {
                 text: "I found the deploy failure".to_string(),
                 thought_signature: None,
-                model: "claude-sonnet-4-6".to_string(),
+                model: ModelId::new("claude-sonnet-4-6"),
                 input_tokens_uncached: 10,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,
@@ -688,7 +688,7 @@ async fn session_search_filters_error_events() {
 
     session_store
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::Error {
                 message: "deploy error".to_string(),
                 recoverable: true,
@@ -702,7 +702,7 @@ async fn session_search_filters_error_events() {
             Event::BrainResponse {
                 text: "deploy completed successfully".to_string(),
                 thought_signature: None,
-                model: "claude-sonnet-4-6".to_string(),
+                model: ModelId::new("claude-sonnet-4-6"),
                 input_tokens_uncached: 10,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,
@@ -775,7 +775,7 @@ async fn memory_search_returns_indexed_results() {
     let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
     memory_store
         .write_page(
-            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &MemoryPath::new("topics/oauth.md"),
             WikiPage {
                 path: Some(MemoryPath::new("topics/oauth.md")),
@@ -827,7 +827,7 @@ async fn memory_read_returns_page_contents() {
     let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
     memory_store
         .write_page(
-            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &MemoryPath::new("skills/oauth-refresh/SKILL.md"),
             WikiPage {
                 path: Some(MemoryPath::new("skills/oauth-refresh/SKILL.md")),
@@ -906,7 +906,7 @@ async fn memory_write_with_scope_creates_new_workspace_page() {
     );
     let page = memory_store
         .read_page(
-            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &MemoryPath::new("topics/new-page.md"),
         )
         .await
@@ -922,7 +922,7 @@ async fn memory_write_without_scope_updates_existing_page() {
     let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
     memory_store
         .write_page(
-            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &MemoryPath::new("topics/existing.md"),
             sample_page(
                 "topics/existing.md",
@@ -956,7 +956,7 @@ async fn memory_write_without_scope_updates_existing_page() {
 
     let page = memory_store
         .read_page(
-            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &MemoryPath::new("topics/existing.md"),
         )
         .await
@@ -1029,7 +1029,7 @@ async fn memory_ingest_creates_source_page_and_related_pages() {
 
     let source_page = memory_store
         .read_page(
-            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &MemoryPath::new("sources/api-design-doc.md"),
         )
         .await
@@ -1038,7 +1038,7 @@ async fn memory_ingest_creates_source_page_and_related_pages() {
 
     let entity_page = memory_store
         .read_page(
-            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &MemoryPath::new("entities/auth-service.md"),
         )
         .await
@@ -1075,7 +1075,7 @@ async fn memory_ingest_emits_session_event() {
         .unwrap();
 
     let events = session_store
-        .get_events(session.id.clone(), moa_core::EventRange::all())
+        .get_events(session.id, moa_core::EventRange::all())
         .await
         .unwrap();
     assert!(events.iter().any(|record| matches!(
@@ -1096,7 +1096,7 @@ async fn memory_read_without_scope_falls_back_to_user_scope() {
     let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
     memory_store
         .write_page(
-            MemoryScope::User(UserId::new("user")),
+            &MemoryScope::User(UserId::new("user")),
             &MemoryPath::new("topics/preferences.md"),
             sample_page(
                 "topics/preferences.md",
@@ -1136,7 +1136,7 @@ async fn memory_read_with_explicit_scope_reads_only_that_scope() {
     let path = MemoryPath::new("topics/preferences.md");
     memory_store
         .write_page(
-            MemoryScope::User(UserId::new("user")),
+            &MemoryScope::User(UserId::new("user")),
             &path,
             sample_page(
                 "topics/preferences.md",
@@ -1149,7 +1149,7 @@ async fn memory_read_with_explicit_scope_reads_only_that_scope() {
         .unwrap();
     memory_store
         .write_page(
-            MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
             &path,
             sample_page(
                 "topics/preferences.md",

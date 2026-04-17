@@ -188,7 +188,7 @@ impl ScriptedProvider {
     }
 
     /// Returns all completion requests recorded so far.
-    pub async fn recorded_requests(&self) -> Vec<CompletionRequest> {
+    pub fn recorded_requests(&self) -> Vec<CompletionRequest> {
         self.recorded_requests
             .lock()
             .map(|requests| requests.clone())

@@ -187,7 +187,7 @@ impl WorkingContext {
                 .context_window
                 .saturating_sub(model_capabilities.max_output),
             model_capabilities,
-            session_id: session.id.clone(),
+            session_id: session.id,
             user_id: session.user_id.clone(),
             workspace_id: session.workspace_id.clone(),
             cache_breakpoints: Vec::new(),
@@ -304,11 +304,13 @@ impl WorkingContext {
 
     /// Converts the compiled context into an LLM completion request.
     pub fn into_request(self) -> CompletionRequest {
+        let model_id = self.model_capabilities.model_id;
+        let max_output = self.model_capabilities.max_output;
         CompletionRequest {
-            model: Some(self.model_capabilities.model_id.clone()),
+            model: Some(model_id),
             messages: self.messages,
             tools: self.tool_schemas,
-            max_output_tokens: Some(self.model_capabilities.max_output),
+            max_output_tokens: Some(max_output),
             temperature: None,
             cache_breakpoints: self.cache_breakpoints,
             cache_controls: self.cache_controls,
@@ -350,7 +352,7 @@ mod tests {
 
     use super::{ContextMessage, MessageRole};
     use crate::types::{
-        CacheBreakpoint, CacheTtl, ModelCapabilities, Platform, SessionId, SessionMeta,
+        CacheBreakpoint, CacheTtl, ModelCapabilities, ModelId, Platform, SessionId, SessionMeta,
         TokenPricing, ToolCallFormat, ToolContent, ToolInvocation, UserId, WorkingContext,
         WorkspaceId,
     };
@@ -412,11 +414,11 @@ mod tests {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             platform: Platform::Desktop,
-            model: "claude-sonnet-4-6".to_string(),
+            model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
         let capabilities = ModelCapabilities {
-            model_id: "claude-sonnet-4-6".to_string(),
+            model_id: ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,

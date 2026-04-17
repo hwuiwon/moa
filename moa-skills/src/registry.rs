@@ -25,18 +25,15 @@ impl SkillRegistry {
 
     /// Reloads all skills for a workspace into the registry cache.
     pub async fn load(&self, workspace_id: &WorkspaceId) -> Result<()> {
+        let scope = moa_core::MemoryScope::Workspace(workspace_id.clone());
         let summaries = self
             .memory
-            .list_pages(
-                moa_core::MemoryScope::Workspace(workspace_id.clone()),
-                Some(PageType::Skill),
-            )
+            .list_pages(&scope, Some(PageType::Skill))
             .await?;
         let mut skills = HashMap::new();
-        let scope = moa_core::MemoryScope::Workspace(workspace_id.clone());
 
         for summary in summaries {
-            let page = self.memory.read_page(scope.clone(), &summary.path).await?;
+            let page = self.memory.read_page(&scope, &summary.path).await?;
             let metadata = skill_metadata_from_page(summary.path.clone(), &page)?;
             skills.insert(metadata.name.clone(), metadata);
         }
@@ -86,7 +83,7 @@ impl SkillRegistry {
                 })?
         };
         let scope = moa_core::MemoryScope::Workspace(workspace_id.clone());
-        let page = self.memory.read_page(scope, &path).await?;
+        let page = self.memory.read_page(&scope, &path).await?;
         let skill = skill_from_wiki_page(&page)?;
         render_skill_markdown(&skill)
     }

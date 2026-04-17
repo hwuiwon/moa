@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use moa_core::{
-    BranchManager, MoaConfig, SessionFilter, SessionMeta, SessionStore, UserId, WorkspaceId,
+    BranchManager, MoaConfig, ModelId, SessionFilter, SessionMeta, SessionStore, UserId,
+    WorkspaceId,
 };
 use moa_session::{NeonBranchManager, PostgresSessionStore};
 use uuid::Uuid;
@@ -111,7 +112,7 @@ async fn neon_checkpoint_branch_connection_is_copy_on_write() {
         .create_session(SessionMeta {
             workspace_id: workspace_id.clone(),
             user_id: UserId::new("neon-live-user"),
-            model: "test-model".to_string(),
+            model: ModelId::new("test-model"),
             ..SessionMeta::default()
         })
         .await
@@ -128,7 +129,7 @@ async fn neon_checkpoint_branch_connection_is_copy_on_write() {
     );
 
     let checkpoint = manager
-        .create_checkpoint("cow-check", Some(seed_session_id.clone()))
+        .create_checkpoint("cow-check", Some(seed_session_id))
         .await
         .expect("create checkpoint");
     let branch_store = PostgresSessionStore::new(&checkpoint.connection_url)
@@ -148,7 +149,7 @@ async fn neon_checkpoint_branch_connection_is_copy_on_write() {
         .create_session(SessionMeta {
             workspace_id: branch_only_workspace.clone(),
             user_id: UserId::new("branch-only-user"),
-            model: "test-model".to_string(),
+            model: ModelId::new("test-model"),
             ..SessionMeta::default()
         })
         .await

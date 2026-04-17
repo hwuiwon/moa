@@ -23,7 +23,7 @@ pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     let content = fs::read_to_string(&path).await?;
     let display_path = path.strip_prefix(sandbox_dir).unwrap_or(&path).display();
 
-    render_file_read_output(&content, &display_path.to_string(), &params)
+    Ok(render_file_read_output(&content, &display_path.to_string(), &params))
 }
 
 /// Executes the `file_read` tool inside an existing Docker sandbox.
@@ -38,7 +38,7 @@ pub async fn execute_docker(
     let path = resolve_container_workspace_path(workspace_root, &params.path)?;
     let content = docker_file_read(container_id, &path, timeout, hard_cancel_token).await?;
     let display_path = display_container_relative_path(workspace_root, &path);
-    render_file_read_output(&content, &display_path, &params)
+    Ok(render_file_read_output(&content, &display_path, &params))
 }
 
 /// Resolves a user-provided relative path inside a sandbox root.
@@ -68,16 +68,16 @@ fn render_file_read_output(
     content: &str,
     display_path: &str,
     params: &FileReadInput,
-) -> Result<ToolOutput> {
+) -> ToolOutput {
     let lines = split_lines(content);
     let total_lines = lines.len();
 
     if params.start_line.is_none() && params.end_line.is_none() {
         if content.len() <= MAX_UNSCOPED_FILE_READ_BYTES && total_lines <= LARGE_FILE_HINT_LINES {
-            return Ok(ToolOutput::text(content.to_string(), Duration::default()));
+            return ToolOutput::text(content.to_string(), Duration::default());
         }
 
-        return Ok(ToolOutput::text(
+        return ToolOutput::text(
             render_numbered_range(
                 &lines,
                 display_path,
@@ -87,11 +87,11 @@ fn render_file_read_output(
                 true,
             ),
             Duration::default(),
-        ));
+        );
     }
 
     let (start_line, end_line) = resolve_line_range(params, total_lines);
-    Ok(ToolOutput::text(
+    ToolOutput::text(
         render_numbered_range(
             &lines,
             display_path,
@@ -101,7 +101,7 @@ fn render_file_read_output(
             false,
         ),
         Duration::default(),
-    ))
+    )
 }
 
 fn resolve_line_range(params: &FileReadInput, total_lines: usize) -> (usize, usize) {

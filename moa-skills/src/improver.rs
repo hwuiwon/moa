@@ -28,7 +28,7 @@ pub async fn maybe_improve_skill(
 ) -> Result<Option<SkillMetadata>> {
     let scope = MemoryScope::Workspace(session.workspace_id.clone());
     let page = memory_store
-        .read_page(scope.clone(), &existing.path)
+        .read_page(&scope, &existing.path)
         .await?;
     let mut current = skill_from_wiki_page(&page)?;
     let current_markdown = render_skill_markdown(&current)?;
@@ -45,7 +45,7 @@ pub async fn maybe_improve_skill(
         record_successful_use(&mut current, now);
         let updated_page = wiki_page_from_skill(&current, Some(existing.path.clone()))?;
         memory_store
-            .write_page(scope.clone(), &existing.path, updated_page)
+            .write_page(&scope, &existing.path, updated_page)
             .await?;
         return Ok(None);
     }
@@ -79,7 +79,7 @@ pub async fn maybe_improve_skill(
     let candidate_markdown = render_skill_markdown(&improved)?;
     let updated_page = wiki_page_from_skill(&improved, Some(existing.path.clone()))?;
     memory_store
-        .write_page(scope.clone(), &existing.path, updated_page)
+        .write_page(&scope, &existing.path, updated_page)
         .await?;
     let report = run_skill_regression(
         config,
@@ -109,7 +109,7 @@ pub async fn maybe_improve_skill(
             .set_regression_count(restored.frontmatter.regression_count().saturating_add(1));
         let restored_page = wiki_page_from_skill(&restored, Some(existing.path.clone()))?;
         memory_store
-            .write_page(scope, &existing.path, restored_page)
+            .write_page(&scope, &existing.path, restored_page)
             .await?;
         return Ok(None);
     }

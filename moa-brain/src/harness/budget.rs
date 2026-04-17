@@ -42,7 +42,7 @@ pub(super) async fn enforce_workspace_budget(
     append_event(
         session_store,
         event_tx,
-        session_id.clone(),
+        *session_id,
         Event::Error {
             message: message.clone(),
             recoverable: false,
@@ -50,7 +50,9 @@ pub(super) async fn enforce_workspace_budget(
     )
     .await?;
     let _ = runtime_tx.send(RuntimeEvent::Notice(message.clone()));
-    let _ = runtime_tx.send(RuntimeEvent::Error(message.clone()));
+    if let Err(err) = runtime_tx.send(RuntimeEvent::Error(message.clone())) {
+        tracing::warn!(?err, "runtime receiver dropped while sending Error");
+    }
     Err(MoaError::BudgetExhausted(message))
 }
 

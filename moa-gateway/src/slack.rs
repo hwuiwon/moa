@@ -10,7 +10,7 @@ use moa_core::{
 };
 use slack_morphism::prelude::*;
 use tokio::{
-    sync::{Mutex, mpsc},
+    sync::{RwLock, mpsc},
     time::sleep,
 };
 use tracing::Instrument;
@@ -26,7 +26,7 @@ use crate::{
 #[derive(Clone)]
 struct SlackListenerState {
     event_tx: mpsc::Sender<InboundMessage>,
-    inbound_contexts: Arc<Mutex<HashMap<String, SlackMessageRef>>>,
+    inbound_contexts: Arc<RwLock<HashMap<String, SlackMessageRef>>>,
 }
 
 /// Slack adapter implementing the generic platform abstraction.
@@ -36,9 +36,9 @@ pub struct SlackAdapter {
     bot_token: SlackApiToken,
     app_token: SlackApiToken,
     renderer: SlackRenderer,
-    inbound_contexts: Arc<Mutex<HashMap<String, SlackMessageRef>>>,
-    outbound_messages: Arc<Mutex<HashMap<String, Vec<SlackMessageRef>>>>,
-    last_edits: Arc<Mutex<HashMap<String, Instant>>>,
+    inbound_contexts: Arc<RwLock<HashMap<String, SlackMessageRef>>>,
+    outbound_messages: Arc<RwLock<HashMap<String, Vec<SlackMessageRef>>>>,
+    last_edits: Arc<RwLock<HashMap<String, Instant>>>,
 }
 
 impl SlackAdapter {
@@ -64,9 +64,9 @@ impl SlackAdapter {
                 token_type: Some(SlackApiTokenType::App),
             },
             renderer: SlackRenderer::new(),
-            inbound_contexts: Arc::new(Mutex::new(HashMap::new())),
-            outbound_messages: Arc::new(Mutex::new(HashMap::new())),
-            last_edits: Arc::new(Mutex::new(HashMap::new())),
+            inbound_contexts: Arc::new(RwLock::new(HashMap::new())),
+            outbound_messages: Arc::new(RwLock::new(HashMap::new())),
+            last_edits: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -88,7 +88,7 @@ impl SlackAdapter {
 
         if let Some(last_ref) = self
             .outbound_messages
-            .lock()
+            .read()
             .await
             .get(reply_to)
             .and_then(|refs| refs.last().cloned())
@@ -96,7 +96,7 @@ impl SlackAdapter {
             return Ok(last_ref.target());
         }
 
-        if let Some(inbound_ref) = self.inbound_contexts.lock().await.get(reply_to).cloned() {
+        if let Some(inbound_ref) = self.inbound_contexts.read().await.get(reply_to).cloned() {
             return Ok(inbound_ref.target());
         }
 
@@ -163,7 +163,7 @@ impl SlackAdapter {
     async fn wait_for_edit_window(&self, message_id: &MessageId) {
         let min_interval = self.capabilities().min_edit_interval;
         let sleep_for = {
-            let last_edits = self.last_edits.lock().await;
+            let last_edits = self.last_edits.read().await;
             last_edits
                 .get(message_id.as_str())
                 .copied()
@@ -173,7 +173,7 @@ impl SlackAdapter {
             sleep(delay).await;
         }
         self.last_edits
-            .lock()
+            .write()
             .await
             .insert(message_id.as_str().to_string(), Instant::now());
     }
@@ -240,7 +240,7 @@ impl PlatformAdapter for SlackAdapter {
             sent_refs.push(sent_ref);
         }
         self.outbound_messages
-            .lock()
+            .write()
             .await
             .insert(synthetic_id.as_str().to_string(), sent_refs);
         Ok(synthetic_id)
@@ -253,7 +253,7 @@ impl PlatformAdapter for SlackAdapter {
 
         let existing = self
             .outbound_messages
-            .lock()
+            .read()
             .await
             .get(msg_id.as_str())
             .cloned()
@@ -300,7 +300,7 @@ impl PlatformAdapter for SlackAdapter {
         }
 
         self.outbound_messages
-            .lock()
+            .write()
             .await
             .insert(msg_id.as_str().to_string(), updated_refs);
         Ok(())
@@ -310,7 +310,7 @@ impl PlatformAdapter for SlackAdapter {
     async fn delete(&self, msg_id: &MessageId) -> Result<()> {
         let refs = self
             .outbound_messages
-            .lock()
+            .write()
             .await
             .remove(msg_id.as_str())
             .ok_or_else(|| {
@@ -352,7 +352,7 @@ async fn handle_push_event(
             if let Some(origin) = push_event_origin(&event) {
                 shared
                     .inbound_contexts
-                    .lock()
+                    .write()
                     .await
                     .insert(inbound.platform_msg_id.clone(), origin);
             }
@@ -395,13 +395,13 @@ async fn handle_interaction_event(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SlackTarget {
-    channel_id: String,
+    channel_id: Arc<str>,
     thread_ts: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SlackMessageRef {
-    channel_id: String,
+    channel_id: Arc<str>,
     ts: String,
     thread_ts: Option<String>,
 }
@@ -445,7 +445,7 @@ fn push_event_origin(event: &SlackPushEventCallback) -> Option<SlackMessageRef> 
 
 async fn inbound_from_interaction_event(
     event: &SlackInteractionEvent,
-    inbound_contexts: Arc<Mutex<HashMap<String, SlackMessageRef>>>,
+    inbound_contexts: Arc<RwLock<HashMap<String, SlackMessageRef>>>,
 ) -> Option<InboundMessage> {
     let block_actions = match event {
         SlackInteractionEvent::BlockActions(block_actions) => block_actions,
@@ -467,7 +467,7 @@ async fn inbound_from_interaction_event(
     );
 
     inbound_contexts
-        .lock()
+        .write()
         .await
         .insert(platform_msg_id.clone(), origin.clone());
     Some(InboundMessage {

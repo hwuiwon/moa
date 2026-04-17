@@ -234,7 +234,7 @@ async fn wait_for_status(
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let session = orchestrator
-            .get_session(session_id.clone())
+            .get_session(session_id)
             .await
             .expect("session metadata");
         if session.status == expected {
@@ -298,7 +298,7 @@ async fn live_observability_audit_tracks_cache_replay_and_latency() -> Result<()
             workspace_id,
             user_id: UserId::new("live-observability-user"),
             platform: Platform::Cli,
-            model: "claude-sonnet-4-6".to_string(),
+            model: moa_core::ModelId::new("claude-sonnet-4-6"),
             initial_message: Some(UserMessage {
                 text: "Reply with READY and nothing else.".to_string(),
                 attachments: Vec::new(),
@@ -310,26 +310,26 @@ async fn live_observability_audit_tracks_cache_replay_and_latency() -> Result<()
 
     queue_message(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         "Use the file_read tool to read moa-brain/Cargo.toml and answer with only the package name.",
     )
     .await?;
     queue_message(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         "Reply with STEADY and nothing else.",
     )
     .await?;
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await;
 
     let events = session_store
-        .get_events(session.session_id.clone(), EventRange::all())
+        .get_events(session.session_id, EventRange::all())
         .await?;
     let brain_responses = events
         .iter()
@@ -365,7 +365,7 @@ async fn live_observability_audit_tracks_cache_replay_and_latency() -> Result<()
         "expected a persisted BrainResponse event with cache-read tokens after the first turn"
     );
 
-    let session_meta = orchestrator.get_session(session.session_id.clone()).await?;
+    let session_meta = orchestrator.get_session(session.session_id).await?;
     assert!(
         session_meta.total_input_tokens_cache_read > 0,
         "expected session aggregate cache-read tokens to be non-zero"

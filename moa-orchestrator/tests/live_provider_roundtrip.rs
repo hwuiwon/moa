@@ -25,21 +25,21 @@ fn available_live_providers() -> Vec<LiveProvider> {
     if let Ok(provider) = OpenAIProvider::from_env("gpt-5.4") {
         providers.push(LiveProvider {
             label: "openai",
-            model: provider.capabilities().model_id,
+            model: provider.capabilities().model_id.to_string(),
             provider: Arc::new(provider),
         });
     }
     if let Ok(provider) = AnthropicProvider::from_env("claude-sonnet-4-6") {
         providers.push(LiveProvider {
             label: "anthropic",
-            model: provider.capabilities().model_id,
+            model: provider.capabilities().model_id.to_string(),
             provider: Arc::new(provider),
         });
     }
     if let Ok(provider) = GeminiProvider::from_env("gemini-2.5-flash") {
         providers.push(LiveProvider {
             label: "google",
-            model: provider.capabilities().model_id,
+            model: provider.capabilities().model_id.to_string(),
             provider: Arc::new(provider),
         });
     }
@@ -51,7 +51,7 @@ fn google_live_provider() -> Option<LiveProvider> {
         .ok()
         .map(|provider| LiveProvider {
             label: "google",
-            model: provider.capabilities().model_id,
+            model: provider.capabilities().model_id.to_string(),
             provider: Arc::new(provider),
         })
 }
@@ -94,7 +94,7 @@ async fn wait_for_status(
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let meta = orchestrator
-            .get_session(session_id.clone())
+            .get_session(session_id)
             .await
             .expect("session metadata");
         if meta.status == expected {
@@ -118,7 +118,7 @@ async fn wait_for_approval_request(
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let events = session_store
-            .get_events(session_id.clone(), EventRange::all())
+            .get_events(session_id, EventRange::all())
             .await
             .expect("events");
         if let Some(event) = events
@@ -143,7 +143,7 @@ async fn wait_for_successful_tool_result(
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let events = session_store
-            .get_events(session_id.clone(), EventRange::all())
+            .get_events(session_id, EventRange::all())
             .await
             .expect("events");
         if let Some(output) = events.iter().find_map(|record| match &record.event {
@@ -185,7 +185,7 @@ async fn wait_for_final_response(
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let events = session_store
-            .get_events(session_id.clone(), EventRange::all())
+            .get_events(session_id, EventRange::all())
             .await
             .expect("events");
         if events.iter().any(|record| {
@@ -222,8 +222,7 @@ async fn run_live_provider_tool_approval_roundtrip(provider: LiveProvider) {
             workspace_id: WorkspaceId::new(format!("ws-{label}")),
             user_id: UserId::new(format!("u-{label}")),
             platform: Platform::Cli,
-            model,
-            initial_message: Some(UserMessage {
+            model: model.into(),            initial_message: Some(UserMessage {
                 text: prompt,
                 attachments: Vec::new(),
             }),
@@ -235,11 +234,11 @@ async fn run_live_provider_tool_approval_roundtrip(provider: LiveProvider) {
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::WaitingApproval,
     )
     .await;
-    let approval = wait_for_approval_request(&session_store, session.session_id.clone()).await;
+    let approval = wait_for_approval_request(&session_store, session.session_id).await;
     let request_id = match approval.event {
         Event::ApprovalRequested { request_id, .. } => request_id,
         _ => unreachable!("approval helper returned non-approval event"),
@@ -247,7 +246,7 @@ async fn run_live_provider_tool_approval_roundtrip(provider: LiveProvider) {
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::ApprovalDecided {
                 request_id,
                 decision: ApprovalDecision::AllowOnce,
@@ -257,7 +256,7 @@ async fn run_live_provider_tool_approval_roundtrip(provider: LiveProvider) {
         .unwrap_or_else(|error| panic!("{label} approval signal failed: {error}"));
 
     let tool_output =
-        wait_for_successful_tool_result(&session_store, session.session_id.clone()).await;
+        wait_for_successful_tool_result(&session_store, session.session_id).await;
     assert!(
         tool_output
             .to_text()
@@ -267,7 +266,7 @@ async fn run_live_provider_tool_approval_roundtrip(provider: LiveProvider) {
     );
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::Completed,
     )
     .await;

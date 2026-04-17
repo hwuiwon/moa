@@ -153,8 +153,8 @@ impl LLMSpanRecorder {
     }
 
     /// Observes one streamed output block, capturing TTFT and partial output.
-    pub(crate) fn observe_block(&mut self, block: &CompletionContent) {
-        if !has_meaningful_output(block) {
+    pub(crate) fn observe_block(&mut self, block: CompletionContent) {
+        if !has_meaningful_output(&block) {
             return;
         }
 
@@ -170,7 +170,7 @@ impl LLMSpanRecorder {
             );
         }
 
-        self.streamed_output.push(block.clone());
+        self.streamed_output.push(block);
     }
 
     /// Finalizes the span with usage, cost, and response content.
@@ -193,7 +193,7 @@ impl LLMSpanRecorder {
         record_llm_span_attributes(
             &self.span,
             &LLMSpanAttributes {
-                response_model: Some(response.model.clone()),
+                response_model: Some(response.model.to_string()),
                 input_tokens: Some(usage.total_input_tokens()),
                 output_tokens: Some(usage.output_tokens),
                 total_tokens: Some(total_tokens),

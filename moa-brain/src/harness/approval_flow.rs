@@ -14,13 +14,12 @@ use crate::turn::{
 use moa_core::{
     ApprovalDecision, BufferedUserMessage, Event, EventRecord, MoaError, PolicyAction, Result,
     RiskLevel, RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore,
-    ToolCardStatus, ToolInvocation, ToolUpdate, UserId,
+    ToolCallId, ToolCardStatus, ToolInvocation, ToolUpdate, UserId,
 };
 use moa_hands::ToolRouter;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use uuid::Uuid;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn wait_for_signal_approval(
@@ -29,7 +28,7 @@ pub(super) async fn wait_for_signal_approval(
     session_store: Arc<dyn SessionStore>,
     tool_router: &ToolRouter,
     call: &ToolInvocation,
-    tool_id: Uuid,
+    tool_id: ToolCallId,
     summary: String,
     risk_level: RiskLevel,
     provider_thought_signature: Option<&str>,
@@ -58,7 +57,7 @@ pub(super) async fn wait_for_signal_approval(
                 Some(SessionSignal::ApprovalDecided {
                     request_id,
                     decision,
-                }) if request_id == tool_id => {
+                }) if request_id == tool_id.0 => {
                     approval_span.record(
                         "moa.approval.decision",
                         tracing::field::display(approval_decision_label(&decision)),
@@ -66,7 +65,7 @@ pub(super) async fn wait_for_signal_approval(
                     append_event(
                         &session_store,
                         event_tx,
-                        session_id.clone(),
+                        session_id,
                         Event::ApprovalDecided {
                             request_id,
                             decision: decision.clone(),
@@ -76,13 +75,13 @@ pub(super) async fn wait_for_signal_approval(
                     )
                     .await?;
                     session_store
-                        .update_status(session_id.clone(), SessionStatus::Running)
+                        .update_status(session_id, SessionStatus::Running)
                         .await?;
 
                     return match decision {
                         ApprovalDecision::AllowOnce => {
                             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                                tool_id,
+                                tool_id: tool_id.0,
                                 tool_name: call.name.clone(),
                                 status: ToolCardStatus::Running,
                                 summary,
@@ -117,7 +116,7 @@ pub(super) async fn wait_for_signal_approval(
                                 )
                                 .await?;
                             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                                tool_id,
+                                tool_id: tool_id.0,
                                 tool_name: call.name.clone(),
                                 status: ToolCardStatus::Running,
                                 summary,
@@ -158,7 +157,7 @@ pub(super) async fn wait_for_signal_approval(
                             )
                             .await?;
                             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                                tool_id,
+                                tool_id: tool_id.0,
                                 tool_name: call.name.clone(),
                                 status: ToolCardStatus::Failed,
                                 summary,
@@ -230,7 +229,7 @@ pub(super) async fn process_resolved_approval(
             };
             let prepared = tool_router.prepare_invocation(session, &invocation).await?;
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                tool_id: pending.tool_id,
+                tool_id: pending.tool_id.0,
                 tool_name: pending.tool_name.clone(),
                 status: ToolCardStatus::Running,
                 summary: prepared.input_summary().to_string(),
@@ -271,7 +270,7 @@ pub(super) async fn process_resolved_approval(
             };
             let prepared = tool_router.prepare_invocation(session, &invocation).await?;
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                tool_id: pending.tool_id,
+                tool_id: pending.tool_id.0,
                 tool_name: pending.tool_name.clone(),
                 status: ToolCardStatus::Running,
                 summary: prepared.input_summary().to_string(),
@@ -309,7 +308,7 @@ pub(super) async fn process_resolved_approval(
             )
             .await?;
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                tool_id: pending.tool_id,
+                tool_id: pending.tool_id.0,
                 tool_name: pending.tool_name,
                 status: ToolCardStatus::Failed,
                 summary: "tool denied".to_string(),
@@ -344,10 +343,10 @@ pub(super) async fn wait_for_approval(
         input: pending.input.clone(),
     };
     let prepared = tool_router.prepare_invocation(session, &invocation).await?;
-    let prompt = prepared.approval_prompt(pending.tool_id);
+    let prompt = prepared.approval_prompt(pending.tool_id.0);
     let _ = runtime_tx.send(RuntimeEvent::ApprovalRequested(prompt));
     let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-        tool_id: pending.tool_id,
+        tool_id: pending.tool_id.0,
         tool_name: pending.tool_name.clone(),
         status: ToolCardStatus::WaitingApproval,
         summary: prepared.input_summary().to_string(),
@@ -367,7 +366,7 @@ pub(super) async fn wait_for_approval(
                 Some(SessionSignal::ApprovalDecided {
                     request_id,
                     decision,
-                }) if request_id == pending.tool_id => {
+                }) if request_id == pending.tool_id.0 => {
                     approval_span.record(
                         "moa.approval.decision",
                         tracing::field::display(approval_decision_label(&decision)),
@@ -375,7 +374,7 @@ pub(super) async fn wait_for_approval(
                     append_event(
                         &session_store,
                         event_tx,
-                        session_id.clone(),
+                        session_id,
                         Event::ApprovalDecided {
                             request_id,
                             decision: decision.clone(),
@@ -387,7 +386,7 @@ pub(super) async fn wait_for_approval(
                     return match decision {
                         ApprovalDecision::AllowOnce => {
                             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                                tool_id: pending.tool_id,
+                                tool_id: pending.tool_id.0,
                                 tool_name: pending.tool_name.clone(),
                                 status: ToolCardStatus::Running,
                                 summary: prepared.input_summary().to_string(),
@@ -422,7 +421,7 @@ pub(super) async fn wait_for_approval(
                                 )
                                 .await?;
                             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                                tool_id: pending.tool_id,
+                                tool_id: pending.tool_id.0,
                                 tool_name: pending.tool_name.clone(),
                                 status: ToolCardStatus::Running,
                                 summary: prepared.input_summary().to_string(),
@@ -463,7 +462,7 @@ pub(super) async fn wait_for_approval(
                             )
                             .await?;
                             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                                tool_id: pending.tool_id,
+                                tool_id: pending.tool_id.0,
                                 tool_name: pending.tool_name,
                                 status: ToolCardStatus::Failed,
                                 summary: "tool denied".to_string(),

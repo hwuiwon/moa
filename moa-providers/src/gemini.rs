@@ -9,13 +9,14 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::sync::Arc;
 use std::time::Instant;
 
 use eventsource_stream::{Event as SseEvent, Eventsource};
 use futures_util::{Stream, StreamExt, pin_mut};
 use moa_core::{
     CacheTtl, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
-    ContextMessage, LLMProvider, MessageRole, MoaConfig, MoaError, ModelCapabilities,
+    ContextMessage, LLMProvider, MessageRole, MoaConfig, MoaError, ModelCapabilities, ModelId,
     ProviderNativeTool, ProviderToolCallMetadata, Result, StopReason, TokenPricing, TokenUsage,
     ToolCallContent, ToolCallFormat, ToolContent, ToolInvocation,
 };
@@ -42,8 +43,8 @@ const DEFAULT_MAX_RETRIES: usize = 3;
 /// Google Gemini provider backed by `streamGenerateContent`.
 pub struct GeminiProvider {
     client: reqwest::Client,
-    api_key: String,
-    api_base: String,
+    api_key: Arc<str>,
+    api_base: Arc<str>,
     default_model: String,
     default_reasoning_effort: String,
     default_capabilities: ModelCapabilities,
@@ -69,8 +70,8 @@ impl GeminiProvider {
 
         Ok(Self {
             client: build_http_client()?,
-            api_key: api_key.into(),
-            api_base: GEMINI_API_BASE.to_string(),
+            api_key: Arc::from(api_key.into()),
+            api_base: Arc::from(GEMINI_API_BASE),
             default_model,
             default_reasoning_effort: default_reasoning_effort.into(),
             default_capabilities,
@@ -112,7 +113,7 @@ impl GeminiProvider {
 
     /// Overrides the Gemini REST API base URL, primarily for tests.
     pub fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
-        self.api_base = api_base.into();
+        self.api_base = Arc::from(api_base.into().as_str());
         self
     }
 
@@ -142,7 +143,8 @@ impl LLMProvider for GeminiProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
         let requested_model = request
             .model
-            .as_deref()
+            .as_ref()
+            .map(ModelId::as_str)
             .unwrap_or(self.default_model.as_str())
             .to_string();
         let resolved_model = canonical_model_id(&requested_model)?;
@@ -180,8 +182,8 @@ impl LLMProvider for GeminiProvider {
         };
 
         let client = self.client.clone();
-        let api_key = self.api_key.clone();
-        let api_base = self.api_base.clone();
+        let api_key = Arc::clone(&self.api_key);
+        let api_base = Arc::clone(&self.api_base);
         let retry_policy = self.retry_policy.clone();
         let (tx, rx) = mpsc::channel(DEFAULT_STREAM_BUFFER);
 
@@ -200,7 +202,7 @@ impl LLMProvider for GeminiProvider {
                     .send(|| {
                         client
                             .post(&url)
-                            .header("x-goog-api-key", &api_key)
+                            .header("x-goog-api-key", &*api_key)
                             .header(ACCEPT, "text/event-stream")
                             .header(CONTENT_TYPE, "application/json")
                             .json(&request_body)
@@ -288,7 +290,7 @@ impl GeminiProvider {
                 "{}/cachedContents",
                 self.api_base.trim_end_matches('/')
             ))
-            .header("x-goog-api-key", &self.api_key)
+            .header("x-goog-api-key", &*self.api_key)
             .header(CONTENT_TYPE, "application/json")
             .json(&plan.cache_body)
             .send()
@@ -332,7 +334,7 @@ fn canonical_model_id(model: &str) -> Result<String> {
 fn capabilities_for_model(model: &str) -> ModelCapabilities {
     if model.starts_with("gemini-3.1-pro") {
         return ModelCapabilities {
-            model_id: model.to_string(),
+            model_id: ModelId::new(model),
             context_window: 1_000_000,
             max_output: 64_000,
             supports_tools: true,
@@ -351,7 +353,7 @@ fn capabilities_for_model(model: &str) -> ModelCapabilities {
 
     if model.starts_with("gemini-3-flash") || model.starts_with("gemini-3.1-flash") {
         return ModelCapabilities {
-            model_id: model.to_string(),
+            model_id: ModelId::new(model),
             context_window: 1_000_000,
             max_output: 64_000,
             supports_tools: true,
@@ -370,7 +372,7 @@ fn capabilities_for_model(model: &str) -> ModelCapabilities {
 
     if model.starts_with("gemini-2.5-pro") {
         return ModelCapabilities {
-            model_id: model.to_string(),
+            model_id: ModelId::new(model),
             context_window: 1_000_000,
             max_output: 65_000,
             supports_tools: true,
@@ -389,7 +391,7 @@ fn capabilities_for_model(model: &str) -> ModelCapabilities {
 
     if model.starts_with("gemini-2.5-flash") {
         return ModelCapabilities {
-            model_id: model.to_string(),
+            model_id: ModelId::new(model),
             context_window: 1_000_000,
             max_output: 65_000,
             supports_tools: true,
@@ -407,7 +409,7 @@ fn capabilities_for_model(model: &str) -> ModelCapabilities {
     }
 
     ModelCapabilities {
-        model_id: model.to_string(),
+        model_id: ModelId::new(model),
         context_window: 1_000_000,
         max_output: 65_000,
         supports_tools: true,
@@ -472,7 +474,7 @@ fn build_request_parts(
     tools: &[Value],
     options: GeminiRequestBuildOptions<'_>,
 ) -> Result<GeminiRequestParts> {
-    let (system_instruction, contents) = build_contents_from_messages(messages)?;
+    let (system_instruction, contents) = build_contents_from_messages(messages);
     let generation_config = build_generation_config(
         options.model,
         options.max_output_tokens,
@@ -526,7 +528,7 @@ fn build_request_body_from_parts(
 
 fn build_contents_from_messages(
     messages: &[ContextMessage],
-) -> Result<(Option<Value>, Vec<Value>)> {
+) -> (Option<Value>, Vec<Value>) {
     let mut system_parts = Vec::new();
     let mut contents = Vec::new();
     let mut model_parts = Vec::new();
@@ -598,7 +600,7 @@ fn build_contents_from_messages(
     flush_pending_parts(&mut contents, &mut model_parts, &mut tool_response_parts);
 
     let system_instruction = (!system_parts.is_empty()).then(|| json!({ "parts": system_parts }));
-    Ok((system_instruction, contents))
+    (system_instruction, contents)
 }
 
 fn build_generation_config(
@@ -695,7 +697,7 @@ fn build_explicit_cache_plan(
         return Ok(None);
     }
 
-    let cache_body = build_cache_create_body(model, ttl, &prefix_parts)?;
+    let cache_body = build_cache_create_body(model, ttl, prefix_parts);
     let cache_key = format!(
         "{model}:{message_count}:{:016x}",
         fingerprint_cache_body(&cache_body)
@@ -711,8 +713,8 @@ fn build_explicit_cache_plan(
 fn build_cache_create_body(
     model: &str,
     ttl: CacheTtl,
-    parts: &GeminiRequestParts,
-) -> Result<Value> {
+    parts: GeminiRequestParts,
+) -> Value {
     let mut body = Map::new();
     body.insert(
         "model".to_string(),
@@ -729,17 +731,17 @@ fn build_cache_create_body(
             CacheTtl::OneHour => "3600s".to_string(),
         }),
     );
-    if let Some(system_instruction) = parts.system_instruction.clone() {
+    if let Some(system_instruction) = parts.system_instruction {
         body.insert("systemInstruction".to_string(), system_instruction);
     }
     if !parts.contents.is_empty() {
-        body.insert("contents".to_string(), Value::Array(parts.contents.clone()));
+        body.insert("contents".to_string(), Value::Array(parts.contents));
     }
     if !parts.tools.is_empty() {
-        body.insert("tools".to_string(), Value::Array(parts.tools.clone()));
+        body.insert("tools".to_string(), Value::Array(parts.tools));
     }
 
-    Ok(Value::Object(body))
+    Value::Object(body)
 }
 
 fn deepest_cache_boundary(request: &CompletionRequest) -> Option<(usize, CacheTtl)> {
@@ -1024,7 +1026,7 @@ where
         };
 
         for block in state.apply_event(&event)? {
-            span_recorder.observe_block(&block);
+            span_recorder.observe_block(block.clone());
             if tx.send(Ok(block)).await.is_err() {
                 tracing::debug!("completion stream receiver dropped before the response finished");
                 span_recorder.record_raw_response(&state.debug_snapshot());
@@ -1144,22 +1146,23 @@ impl GeminiStreamState {
 
     fn apply_event(&mut self, event: &SseEvent) -> Result<Vec<CompletionContent>> {
         let response: GeminiGenerateContentResponse = parse_sse_json(event)?;
-        self.last_raw_response = Some(response.clone());
         if let Some(model_version) = response.model_version.clone()
             && !model_version.is_empty()
         {
             self.model = model_version;
         }
-        if let Some(usage) = response.usage_metadata {
+        if let Some(ref usage) = response.usage_metadata {
             self.input_tokens = usage.prompt_token_count.unwrap_or(self.input_tokens);
             self.output_tokens = usage.candidates_token_count.unwrap_or(self.output_tokens);
             self.cached_input_tokens = usage
                 .cached_content_token_count
                 .unwrap_or(self.cached_input_tokens);
         }
+        self.last_raw_response = Some(response);
+        let candidates = self.last_raw_response.as_ref().unwrap().candidates.clone();
 
         let mut emitted = Vec::new();
-        for candidate in response.candidates {
+        for candidate in candidates {
             if candidate.grounding_metadata.is_some() && !self.search_started_emitted {
                 self.search_started_emitted = true;
                 let block = web_search_started_block();
@@ -1234,7 +1237,7 @@ impl GeminiStreamState {
             text: self.text,
             content: self.content,
             stop_reason: self.stop_reason,
-            model: self.model,
+            model: ModelId::new(self.model),
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
             cached_input_tokens: self.cached_input_tokens,
@@ -1286,7 +1289,7 @@ fn finish_reason_to_stop_reason(finish_reason: &str) -> StopReason {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        CompletionContent, CompletionRequest, ContextMessage, LLMProvider,
+        CompletionContent, CompletionRequest, ContextMessage, LLMProvider, ModelId,
         ProviderToolCallMetadata, ToolCallContent, ToolContent, ToolInvocation,
     };
     use serde_json::{Value, json};
@@ -1391,7 +1394,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.text, "ok");
-        assert_eq!(response.model, "gemini-2.5-flash");
+        assert_eq!(response.model, ModelId::new("gemini-2.5-flash"));
         server.abort();
     }
 

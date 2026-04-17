@@ -41,7 +41,7 @@ pub async fn ingest_source(
         metadata: std::collections::HashMap::new(),
     };
     store
-        .write_page(scope.clone(), &source_path, source_page)
+        .write_page(scope, &source_path, source_page)
         .await?;
 
     for entity in extract_section_items(&source, "entities") {
@@ -139,7 +139,7 @@ async fn upsert_derived_page(
         source_path.as_str()
     );
 
-    let mut page = match store.read_page(scope.clone(), path).await {
+    let mut page = match store.read_page(scope, path).await {
         Ok(mut existing) => {
             if !existing.content.contains(update_block.trim()) {
                 if !existing.content.trim().is_empty() {
@@ -180,7 +180,7 @@ async fn upsert_derived_page(
     };
 
     page.path = Some(path.clone());
-    store.write_page(scope.clone(), path, page).await
+    store.write_page(scope, path, page).await
 }
 
 fn prepare_source_for_ingest(source: &str) -> String {
@@ -372,13 +372,13 @@ mod tests {
             "sources/rfc-0042-auth-redesign.md"
         );
         let source_page = store
-            .read_page(scope.clone(), &report.source_path)
+            .read_page(&scope, &report.source_path)
             .await
             .unwrap();
         assert_eq!(source_page.page_type, PageType::Source);
 
         let entity_page = store
-            .read_page(scope.clone(), &"entities/auth-service.md".into())
+            .read_page(&scope, &"entities/auth-service.md".into())
             .await
             .unwrap();
         assert!(entity_page.content.contains("Source update"));

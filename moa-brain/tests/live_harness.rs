@@ -28,7 +28,7 @@ async fn live_brain_turn_returns_brain_response() -> Result<()> {
         .create_session(SessionMeta {
             workspace_id: WorkspaceId::new("live-harness"),
             user_id: UserId::new("integration-test"),
-            model: config.general.default_model.clone(),
+            model: config.general.default_model.clone().into(),
             ..SessionMeta::default()
         })
         .await?;
@@ -36,7 +36,7 @@ async fn live_brain_turn_returns_brain_response() -> Result<()> {
 
     store
         .emit_event(
-            session_id.clone(),
+            session_id,
             Event::UserMessage {
                 text: "What is 2+2? Respond with just the answer.".to_string(),
                 attachments: Vec::new(),
@@ -45,7 +45,7 @@ async fn live_brain_turn_returns_brain_response() -> Result<()> {
         .await?;
 
     let turn_result =
-        run_brain_turn(session_id.clone(), store.clone(), provider, &pipeline).await?;
+        run_brain_turn(session_id, store.clone(), provider, &pipeline).await?;
     let events = store.get_events(session_id, EventRange::all()).await?;
     let response_text = events.into_iter().find_map(|record| match record.event {
         Event::BrainResponse { text, .. } => Some(text),

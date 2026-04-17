@@ -71,18 +71,22 @@ pub fn prepare_outbound_message(
     capabilities: &PlatformCapabilities,
     mut message: OutboundMessage,
 ) -> OutboundMessage {
-    let request = match &message.content {
-        MessageContent::ApprovalRequest { request } => request.clone(),
+    let request_id = match &message.content {
+        MessageContent::ApprovalRequest { request } => request.request_id,
         _ => return message,
     };
 
     if message.buttons.is_empty() && capabilities.supports_inline_buttons {
-        message.buttons = approval_buttons(platform, request.request_id);
+        message.buttons = approval_buttons(platform, request_id);
         return message;
     }
 
     if !capabilities.supports_inline_buttons {
-        message.content = MessageContent::Markdown(text_fallback(&request));
+        let request = match &message.content {
+            MessageContent::ApprovalRequest { request } => request,
+            _ => return message,
+        };
+        message.content = MessageContent::Markdown(text_fallback(request));
     }
 
     message

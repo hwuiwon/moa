@@ -134,7 +134,7 @@ impl SessionStore for CountedSessionStore {
         let started_at = Instant::now();
         let events = self
             .inner
-            .get_events(session_id.clone(), range.clone())
+            .get_events(session_id, range.clone())
             .await?;
         let duration = started_at.elapsed();
         let bytes = approx_event_bytes(&events);
@@ -240,7 +240,7 @@ fn event_payload_size(event: &Event) -> usize {
             workspace_id,
             user_id,
             model,
-        } => workspace_id.len() + user_id.len() + model.len(),
+        } => workspace_id.as_str().len() + user_id.as_str().len() + model.as_str().len(),
         Event::SessionStatusChanged { .. } => 32,
         Event::SessionCompleted { summary, .. } => summary.len(),
         Event::UserMessage { text, attachments } => {
@@ -253,7 +253,7 @@ fn event_payload_size(event: &Event) -> usize {
             thought_signature,
             model,
             ..
-        } => text.len() + model.len() + thought_signature.as_ref().map_or(0, String::len),
+        } => text.len() + model.as_str().len() + thought_signature.as_ref().map_or(0, String::len),
         Event::ToolCall {
             tool_name, input, ..
         } => tool_name.len() + json_size(input),
@@ -296,7 +296,7 @@ fn event_payload_size(event: &Event) -> usize {
         } => hand_id.len() + provider.len() + tier.len(),
         Event::HandDestroyed { hand_id, reason } => hand_id.len() + reason.len(),
         Event::HandError { hand_id, error } => hand_id.len() + error.len(),
-        Event::Checkpoint { summary, model, .. } => summary.len() + model.len(),
+        Event::Checkpoint { summary, model, .. } => summary.len() + model.as_str().len(),
         Event::CacheReport { report } => json_size(&serde_json::json!(report)),
         Event::Error { message, .. } | Event::Warning { message } => message.len(),
     }

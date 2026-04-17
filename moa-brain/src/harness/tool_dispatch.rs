@@ -6,7 +6,7 @@ use std::time::Instant;
 use moa_core::{
     ApprovalRequest, BufferedUserMessage, Event, EventRecord, MoaError, PolicyAction, Result,
     RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore,
-    ToolCallContent, ToolCardStatus, ToolInvocation, ToolUpdate,
+    ToolCallContent, ToolCallId, ToolCardStatus, ToolInvocation, ToolUpdate,
 };
 use moa_hands::ToolRouter;
 use moa_security::{InputClassification, check_canary, contains_canary_tokens, inspect_input};
@@ -55,7 +55,7 @@ pub(super) async fn handle_tool_call(
         append_tool_call_event(
             &session_store,
             event_tx,
-            session_id.clone(),
+            session_id,
             tool_id,
             invocation,
             provider_thought_signature(call).as_deref(),
@@ -65,7 +65,7 @@ pub(super) async fn handle_tool_call(
         append_event(
             &session_store,
             event_tx,
-            session_id.clone(),
+            session_id,
             Event::Warning {
                 message: format!(
                     "blocked tool {} because the active canary leaked into tool input",
@@ -91,7 +91,7 @@ pub(super) async fn handle_tool_call(
         )
         .await?;
         let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-            tool_id,
+            tool_id: tool_id.0,
             tool_name: invocation.name.clone(),
             status: ToolCardStatus::Failed,
             summary: format!("{} blocked", invocation.name),
@@ -126,7 +126,7 @@ pub(super) async fn handle_tool_call(
     match &prepared.policy().action {
         PolicyAction::Allow => {
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                tool_id,
+                tool_id: tool_id.0,
                 tool_name: invocation.name.clone(),
                 status: ToolCardStatus::Running,
                 summary,
@@ -155,7 +155,7 @@ pub(super) async fn handle_tool_call(
             append_event(
                 &session_store,
                 event_tx,
-                session_id.clone(),
+                session_id,
                 Event::ToolCall {
                     tool_id,
                     provider_tool_use_id: invocation.id.clone(),
@@ -181,7 +181,7 @@ pub(super) async fn handle_tool_call(
             )
             .await?;
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                tool_id,
+                tool_id: tool_id.0,
                 tool_name: invocation.name.clone(),
                 status: ToolCardStatus::Failed,
                 summary,
@@ -193,7 +193,7 @@ pub(super) async fn handle_tool_call(
             append_event(
                 &session_store,
                 event_tx,
-                session_id.clone(),
+                session_id,
                 Event::ToolCall {
                     tool_id,
                     provider_tool_use_id: invocation.id.clone(),
@@ -204,12 +204,12 @@ pub(super) async fn handle_tool_call(
                 },
             )
             .await?;
-            let prompt = prepared.approval_prompt(tool_id);
+            let prompt = prepared.approval_prompt(tool_id.0);
             let request = prompt.request.clone();
             append_event(
                 &session_store,
                 event_tx,
-                session_id.clone(),
+                session_id,
                 Event::ApprovalRequested {
                     request_id: request.request_id,
                     tool_name: request.tool_name.clone(),
@@ -220,10 +220,10 @@ pub(super) async fn handle_tool_call(
             )
             .await?;
             session_store
-                .update_status(session_id.clone(), SessionStatus::WaitingApproval)
+                .update_status(session_id, SessionStatus::WaitingApproval)
                 .await?;
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                tool_id,
+                tool_id: tool_id.0,
                 tool_name: invocation.name.clone(),
                 status: ToolCardStatus::WaitingApproval,
                 summary: summary.clone(),
@@ -268,7 +268,7 @@ pub(super) async fn execute_tool(
     session_store: Arc<dyn SessionStore>,
     tool_router: &ToolRouter,
     call: &ToolInvocation,
-    tool_id: Uuid,
+    tool_id: ToolCallId,
     emit_call_event: bool,
     provider_thought_signature: Option<&str>,
     active_canary: Option<&str>,
@@ -282,7 +282,7 @@ pub(super) async fn execute_tool(
         append_tool_call_event(
             &session_store,
             event_tx,
-            session_id.clone(),
+            session_id,
             tool_id,
             call,
             provider_thought_signature,
@@ -317,7 +317,7 @@ pub(super) async fn execute_tool(
             tool_span.record("moa.tool.success", true);
             let secured_output = secure_tool_output(&output, active_canary);
             emit_tool_output_warning(
-                session_id.clone(),
+                session_id,
                 &session_store,
                 event_tx,
                 tool_id,
@@ -339,7 +339,7 @@ pub(super) async fn execute_tool(
             )
             .await?;
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                tool_id,
+                tool_id: tool_id.0,
                 tool_name: call.name.clone(),
                 status: if output.is_error {
                     ToolCardStatus::Failed
@@ -367,7 +367,7 @@ pub(super) async fn execute_tool(
             )
             .await?;
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                tool_id,
+                tool_id: tool_id.0,
                 tool_name: call.name.clone(),
                 status: ToolCardStatus::Failed,
                 summary: format!("{} cancelled", call.name),
@@ -391,7 +391,7 @@ pub(super) async fn execute_tool(
             )
             .await?;
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
-                tool_id,
+                tool_id: tool_id.0,
                 tool_name: call.name.clone(),
                 status: ToolCardStatus::Failed,
                 summary: format!("{} failed", call.name),
@@ -406,7 +406,7 @@ async fn append_tool_call_event(
     session_store: &Arc<dyn SessionStore>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
     session_id: SessionId,
-    tool_id: Uuid,
+    tool_id: ToolCallId,
     invocation: &ToolInvocation,
     provider_thought_signature: Option<&str>,
     hand_id: Option<String>,
@@ -446,7 +446,7 @@ pub(super) async fn execute_pending_tool(
         name: pending.tool_name.clone(),
         input: pending.input.clone(),
     };
-    let _ = execute_tool(
+    let outcome = execute_tool(
         session_id,
         session,
         session_store,
@@ -463,6 +463,23 @@ pub(super) async fn execute_pending_tool(
         tool_dispatch_span,
     )
     .await?;
+    match outcome {
+        ToolCallOutcome::Executed | ToolCallOutcome::Skipped => {}
+        ToolCallOutcome::Cancelled => {
+            tracing::warn!(
+                session_id = %session_id,
+                tool_name = %pending.tool_name,
+                "pending tool execution was cancelled"
+            );
+        }
+        ToolCallOutcome::NeedsApproval(_) => {
+            tracing::warn!(
+                session_id = %session_id,
+                tool_name = %pending.tool_name,
+                "pending tool returned NeedsApproval unexpectedly"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -485,11 +502,12 @@ fn summarize_tool_completion(call: &ToolInvocation, output: &moa_core::ToolOutpu
     }
 }
 
-fn parse_tool_id(call: &ToolInvocation) -> Uuid {
+fn parse_tool_id(call: &ToolInvocation) -> ToolCallId {
     call.id
         .as_deref()
         .and_then(|value| Uuid::parse_str(value).ok())
-        .unwrap_or_else(Uuid::now_v7)
+        .map(ToolCallId::from)
+        .unwrap_or_default()
 }
 
 fn provider_thought_signature(call: &ToolCallContent) -> Option<String> {
@@ -528,7 +546,7 @@ async fn emit_tool_output_warning(
     session_id: SessionId,
     session_store: &Arc<dyn SessionStore>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
-    tool_id: Uuid,
+    tool_id: ToolCallId,
     tool_name: &str,
     secured_output: &SecuredToolOutput,
 ) -> Result<()> {

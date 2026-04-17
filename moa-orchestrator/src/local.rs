@@ -41,7 +41,7 @@ const TURN_EVENT_TAIL_LIMIT: usize = 16;
 /// Local orchestrator backed by Tokio tasks and broadcast channels.
 #[derive(Clone)]
 pub struct LocalOrchestrator {
-    config: MoaConfig,
+    config: Arc<MoaConfig>,
     session_store: Arc<PostgresSessionStore>,
     instrumented_session_store: Arc<dyn SessionStore>,
     memory_store: Arc<FileMemoryStore>,
@@ -64,7 +64,7 @@ struct LocalBrainHandle {
 
 #[derive(Clone)]
 struct SessionTaskContext {
-    config: MoaConfig,
+    config: Arc<MoaConfig>,
     session_store: Arc<dyn SessionStore>,
     memory_store: Arc<FileMemoryStore>,
     llm_provider: Arc<dyn LLMProvider>,
@@ -94,7 +94,7 @@ impl LocalOrchestrator {
         let instrumented_session_store: Arc<dyn SessionStore> =
             Arc::new(CountedSessionStore::new(session_store.clone()));
         let orchestrator = Self {
-            config,
+            config: Arc::new(config),
             session_store,
             instrumented_session_store,
             memory_store,
@@ -195,7 +195,7 @@ impl LocalOrchestrator {
             // entire histories just to confirm activity.
             let events = self
                 .session_store
-                .get_events(summary.session_id.clone(), EventRange::recent(16))
+                .get_events(summary.session_id, EventRange::recent(16))
                 .await?;
             let has_user_input = events.iter().any(|rec| {
                 matches!(
@@ -206,7 +206,7 @@ impl LocalOrchestrator {
             if !has_user_input {
                 if let Err(err) = self
                     .session_store
-                    .delete_session(summary.session_id.clone())
+                    .delete_session(summary.session_id)
                     .await
                 {
                     tracing::warn!(
@@ -287,7 +287,7 @@ impl LocalOrchestrator {
         let (runtime_tx, _) = broadcast::channel(128);
         let cancel_token = CancellationToken::new();
         let hard_cancel_token = CancellationToken::new();
-        let session = self.session_store.get_session(session_id.clone()).await?;
+        let session = self.session_store.get_session(session_id).await?;
         let status = Arc::new(RwLock::new(session.status.clone()));
         if initial_turn_requested
             && !matches!(
@@ -299,19 +299,19 @@ impl LocalOrchestrator {
                 &self.instrumented_session_store,
                 &event_tx,
                 &status,
-                session_id.clone(),
+                session_id,
                 SessionStatus::Running,
             )
             .await?;
         }
         let finished = Arc::new(AtomicBool::new(false));
         let context = SessionTaskContext {
-            config: self.config.clone(),
+            config: Arc::clone(&self.config),
             session_store: self.instrumented_session_store.clone(),
             memory_store: self.memory_store.clone(),
             llm_provider: self.llm_provider.clone(),
             tool_router: self.tool_router.clone(),
-            session_id: session_id.clone(),
+            session_id,
             discovered_workspace_instructions: self
                 .discovered_workspace_instructions
                 .read()
@@ -343,7 +343,7 @@ impl LocalOrchestrator {
         let supervisor_status = status.clone();
         let supervisor_finished = finished.clone();
         let supervisor_event_tx = event_tx.clone();
-        let supervisor_session_id = session_id.clone();
+        let supervisor_session_id = session_id;
         tokio::spawn(async move {
             match task.await {
                 Ok(Ok(())) => {}
@@ -360,7 +360,7 @@ impl LocalOrchestrator {
                             &supervisor_session_store,
                             &supervisor_event_tx,
                             &supervisor_status,
-                            supervisor_session_id.clone(),
+                            supervisor_session_id,
                             message,
                         )
                         .await
@@ -369,7 +369,7 @@ impl LocalOrchestrator {
                             &supervisor_session_store,
                             &supervisor_event_tx,
                             &supervisor_status,
-                            supervisor_session_id.clone(),
+                            supervisor_session_id,
                             message,
                         )
                         .await
@@ -388,7 +388,7 @@ impl LocalOrchestrator {
                         &supervisor_session_store,
                         &supervisor_event_tx,
                         &supervisor_status,
-                        supervisor_session_id.clone(),
+                        supervisor_session_id,
                         format!("session task panicked: {join_error}"),
                     )
                     .await
@@ -639,7 +639,7 @@ impl BrainOrchestrator for LocalOrchestrator {
         let session_id = SessionId::new();
         let now = Utc::now();
         let meta = SessionMeta {
-            id: session_id.clone(),
+            id: session_id,
             workspace_id: req.workspace_id.clone(),
             user_id: req.user_id.clone(),
             title: req.title.clone(),
@@ -648,17 +648,17 @@ impl BrainOrchestrator for LocalOrchestrator {
             model: req.model.clone(),
             created_at: now,
             updated_at: now,
-            parent_session_id: req.parent_session_id.clone(),
+            parent_session_id: req.parent_session_id,
             ..SessionMeta::default()
         };
         self.session_store.create_session(meta).await?;
         append_event(
             &self.instrumented_session_store,
             &broadcast::channel(1).0,
-            session_id.clone(),
+            session_id,
             Event::SessionCreated {
-                workspace_id: req.workspace_id.to_string(),
-                user_id: req.user_id.to_string(),
+                workspace_id: req.workspace_id.clone(),
+                user_id: req.user_id.clone(),
                 model: req.model.clone(),
             },
         )
@@ -670,7 +670,7 @@ impl BrainOrchestrator for LocalOrchestrator {
             append_event(
                 &self.instrumented_session_store,
                 &broadcast::channel(1).0,
-                session_id.clone(),
+                session_id,
                 Event::UserMessage {
                     text: message.text,
                     attachments: message.attachments,
@@ -679,7 +679,7 @@ impl BrainOrchestrator for LocalOrchestrator {
             .await?;
         }
         self.spawn_session(
-            session_id.clone(),
+            session_id,
             req.initial_message.is_some(),
             Vec::new(),
         )
@@ -697,7 +697,7 @@ impl BrainOrchestrator for LocalOrchestrator {
 
     /// Resumes an existing persisted session by spawning a new background task if needed.
     async fn resume_session(&self, session_id: SessionId) -> Result<SessionHandle> {
-        let session = self.session_store.get_session(session_id.clone()).await?;
+        let session = self.session_store.get_session(session_id).await?;
         if self.handle_is_active(&session_id).await {
             if matches!(
                 session.status,
@@ -712,7 +712,7 @@ impl BrainOrchestrator for LocalOrchestrator {
             }
         }
 
-        let wake = self.session_store.wake(session_id.clone()).await?;
+        let wake = self.session_store.wake(session_id).await?;
         self.remember_detected_workspace_root(&wake.session.workspace_id)
             .await;
         let initial_queued_messages = wake
@@ -724,7 +724,7 @@ impl BrainOrchestrator for LocalOrchestrator {
             session_requires_processing(&wake.session, &wake.recent_events)
                 || !initial_queued_messages.is_empty();
         self.spawn_session(
-            session_id.clone(),
+            session_id,
             initial_turn_requested,
             initial_queued_messages,
         )
@@ -734,17 +734,17 @@ impl BrainOrchestrator for LocalOrchestrator {
 
     /// Sends a signal to a running local session.
     async fn signal(&self, session_id: SessionId, signal: SessionSignal) -> Result<()> {
-        self.ensure_session_running(session_id.clone()).await?;
+        self.ensure_session_running(session_id).await?;
         if let SessionSignal::QueueMessage(message) = &signal {
-            let pending = PendingSignal::queue_message(session_id.clone(), message.clone())?;
+            let pending = PendingSignal::queue_message(session_id, message.clone())?;
             self.session_store
-                .store_pending_signal(session_id.clone(), pending)
+                .store_pending_signal(session_id, pending)
                 .await?;
         }
         let sessions = self.sessions.read().await;
         let handle = sessions
             .get(&session_id)
-            .ok_or_else(|| MoaError::SessionNotFound(session_id.clone()))?;
+            .ok_or_else(|| MoaError::SessionNotFound(session_id))?;
 
         if matches!(signal, SessionSignal::HardCancel) {
             handle.cancel_token.cancel();
@@ -767,10 +767,10 @@ impl BrainOrchestrator for LocalOrchestrator {
 
     /// Returns buffered history plus live updates via local broadcast or Postgres LISTEN.
     async fn observe(&self, session_id: SessionId, _level: ObserveLevel) -> Result<EventStream> {
-        let session = self.session_store.get_session(session_id.clone()).await?;
+        let session = self.session_store.get_session(session_id).await?;
         let history = self
             .session_store
-            .get_events(session_id.clone(), EventRange::all())
+            .get_events(session_id, EventRange::all())
             .await?;
         let sessions = self.sessions.read().await;
         if let Some(handle) = sessions.get(&session_id)
@@ -793,7 +793,7 @@ impl BrainOrchestrator for LocalOrchestrator {
                 .unwrap_or(0);
             let live = SessionEventStream::subscribe(
                 self.session_store.clone(),
-                session_id.clone(),
+                session_id,
                 Some(next_seq),
             )
             .await?;
@@ -814,7 +814,7 @@ impl BrainOrchestrator for LocalOrchestrator {
         &self,
         session_id: SessionId,
     ) -> Result<Option<broadcast::Receiver<RuntimeEvent>>> {
-        self.session_store.get_session(session_id.clone()).await?;
+        self.session_store.get_session(session_id).await?;
         let sessions = self.sessions.read().await;
         let Some(handle) = sessions.get(&session_id) else {
             return Ok(None);
@@ -906,7 +906,7 @@ async fn run_session_task(
                         &context.session_store,
                         &event_tx,
                         &status,
-                        context.session_id.clone(),
+                        context.session_id,
                         SessionStatus::Running,
                     )
                     .await?;
@@ -917,14 +917,16 @@ async fn run_session_task(
                         &context.session_store,
                         &event_tx,
                         &status,
-                        context.session_id.clone(),
+                        context.session_id,
                         SessionStatus::Cancelled,
                     )
                     .await?;
                     let _ = runtime_tx.send(RuntimeEvent::Notice(
                         "Cancelled current generation.".to_string(),
                     ));
-                    let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
+                    if let Err(err) = runtime_tx.send(RuntimeEvent::TurnCompleted) {
+                        tracing::warn!(?err, "runtime receiver dropped while sending TurnCompleted (cancel)");
+                    }
                     return Ok(());
                 }
                 Some(SessionSignal::ApprovalDecided {
@@ -934,7 +936,7 @@ async fn run_session_task(
                     append_event(
                         &context.session_store,
                         &event_tx,
-                        context.session_id.clone(),
+                        context.session_id,
                         Event::ApprovalDecided {
                             request_id,
                             decision,
@@ -954,12 +956,12 @@ async fn run_session_task(
         let turn_directive = scope_turn_replay_counters(turn_counters.clone(), async {
             let session = context
                 .session_store
-                .get_session(context.session_id.clone())
+                .get_session(context.session_id)
                 .await?;
             let events = context
                 .session_store
                 .get_events(
-                    context.session_id.clone(),
+                    context.session_id,
                     EventRange::recent(TURN_EVENT_TAIL_LIMIT),
                 )
                 .await?;
@@ -1032,7 +1034,7 @@ async fn run_session_task(
                     let turn_start_sequence_num =
                         events.last().map(|record| record.sequence_num).unwrap_or(0);
                     let turn_result = run_streamed_turn_with_signals_stepwise(
-                        context.session_id.clone(),
+                        context.session_id,
                         context.session_store.clone(),
                         context.llm_provider.clone(),
                         &pipeline,
@@ -1082,11 +1084,11 @@ async fn run_session_task(
 
                             let session = context
                                 .session_store
-                                .get_session(context.session_id.clone())
+                                .get_session(context.session_id)
                                 .await?;
                             let events = context
                                 .session_store
-                                .get_events(context.session_id.clone(), EventRange::all())
+                                .get_events(context.session_id, EventRange::all())
                                 .await?;
                             if let Some(skill) = maybe_distill_skill(
                                 &context.config,
@@ -1100,7 +1102,7 @@ async fn run_session_task(
                                 append_event(
                                     &context.session_store,
                                     &event_tx,
-                                    context.session_id.clone(),
+                                    context.session_id,
                                     Event::MemoryWrite {
                                         path: skill.path.to_string(),
                                         scope: session.workspace_id.to_string(),
@@ -1134,7 +1136,7 @@ async fn run_session_task(
                                     &context.session_store,
                                     &event_tx,
                                     &status,
-                                    context.session_id.clone(),
+                                    context.session_id,
                                     SessionStatus::Completed,
                                 )
                                 .await?;
@@ -1143,7 +1145,9 @@ async fn run_session_task(
                             .instrument(event_persist_span)
                             .await?;
                             record_turn_event_persist_duration(persist_started.elapsed(), 0);
-                            let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
+                            if let Err(err) = runtime_tx.send(RuntimeEvent::TurnCompleted) {
+                                tracing::warn!(?err, "runtime receiver dropped while sending TurnCompleted (completed)");
+                            }
                             Ok(TurnDirective::ContinueLoop)
                         }
                         Ok(StreamedTurnResult::Continue) => {
@@ -1196,7 +1200,7 @@ async fn run_session_task(
                                     &context.session_store,
                                     &event_tx,
                                     &status,
-                                    context.session_id.clone(),
+                                    context.session_id,
                                     SessionStatus::Cancelled,
                                 )
                                 .await?;
@@ -1205,7 +1209,9 @@ async fn run_session_task(
                             .instrument(event_persist_span)
                             .await?;
                             record_turn_event_persist_duration(persist_started.elapsed(), 0);
-                            let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
+                            if let Err(err) = runtime_tx.send(RuntimeEvent::TurnCompleted) {
+                                tracing::warn!(?err, "runtime receiver dropped while sending TurnCompleted (cancelled)");
+                            }
                             Ok(TurnDirective::FinishOk)
                         }
                         Err(error) => {
@@ -1214,7 +1220,7 @@ async fn run_session_task(
                                 append_event(
                                     &context.session_store,
                                     &event_tx,
-                                    context.session_id.clone(),
+                                    context.session_id,
                                     Event::Error {
                                         message: error.to_string(),
                                         recoverable: false,
@@ -1250,7 +1256,7 @@ async fn run_session_task(
                                     &context.session_store,
                                     &event_tx,
                                     &status,
-                                    context.session_id.clone(),
+                                    context.session_id,
                                     SessionStatus::Failed,
                                 )
                                 .await?;
@@ -1259,10 +1265,14 @@ async fn run_session_task(
                             .instrument(event_persist_span)
                             .await?;
                             record_turn_event_persist_duration(persist_started.elapsed(), 0);
-                            if !budget_exhausted {
-                                let _ = runtime_tx.send(RuntimeEvent::Error(error.to_string()));
+                            if !budget_exhausted
+                                && let Err(err) = runtime_tx.send(RuntimeEvent::Error(error.to_string()))
+                            {
+                                tracing::warn!(?err, "runtime receiver dropped while sending Error");
                             }
-                            let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
+                            if let Err(err) = runtime_tx.send(RuntimeEvent::TurnCompleted) {
+                                tracing::warn!(?err, "runtime receiver dropped while sending TurnCompleted (error)");
+                            }
                             Ok(TurnDirective::FinishErr(error))
                         }
                     }
@@ -1307,7 +1317,7 @@ async fn accept_user_message(
             attachments: message.attachments,
         }
     };
-    append_event(session_store, event_tx, session_id.clone(), event).await?;
+    append_event(session_store, event_tx, *session_id, event).await?;
     Ok(())
 }
 
@@ -1379,7 +1389,7 @@ async fn best_effort_resolve_pending_signal(
     signal_id: moa_core::PendingSignalId,
 ) -> Result<()> {
     match session_store
-        .resolve_pending_signal(signal_id.clone())
+        .resolve_pending_signal(signal_id)
         .await
     {
         Ok(()) => Ok(()),
@@ -1402,7 +1412,7 @@ async fn resolve_matching_pending_signal(
     message: &UserMessage,
 ) -> Result<Option<moa_core::PendingSignalId>> {
     let pending = session_store
-        .get_pending_signals(session_id.clone())
+        .get_pending_signals(*session_id)
         .await?;
     for signal in pending {
         if signal.user_message()? == *message {
@@ -1424,10 +1434,10 @@ async fn update_status(
         return Ok(());
     }
     session_store
-        .update_status(session_id.clone(), next_status.clone())
+        .update_status(session_id, next_status.clone())
         .await?;
     if matches!(next_status, SessionStatus::Cancelled) {
-        session_store.delete_snapshot(session_id.clone()).await?;
+        session_store.delete_snapshot(session_id).await?;
     }
     append_event(
         session_store,
@@ -1465,7 +1475,7 @@ async fn append_event(
     session_id: SessionId,
     event: Event,
 ) -> Result<EventRecord> {
-    let sequence_num = session_store.emit_event(session_id.clone(), event).await?;
+    let sequence_num = session_store.emit_event(session_id, event).await?;
     let mut records = session_store
         .get_events(
             session_id,
@@ -1556,7 +1566,7 @@ async fn report_session_task_failure(
     session_id: SessionId,
     message: String,
 ) -> Result<()> {
-    let current = session_store.get_session(session_id.clone()).await?;
+    let current = session_store.get_session(session_id).await?;
     if matches!(current.status, SessionStatus::Failed) {
         return Ok(());
     }
@@ -1564,7 +1574,7 @@ async fn report_session_task_failure(
     append_event(
         session_store,
         event_tx,
-        session_id.clone(),
+        session_id,
         Event::Error {
             message,
             recoverable: false,
@@ -1591,7 +1601,7 @@ async fn report_session_task_paused(
     session_id: SessionId,
     message: String,
 ) -> Result<()> {
-    let current = session_store.get_session(session_id.clone()).await?;
+    let current = session_store.get_session(session_id).await?;
     if matches!(
         current.status,
         SessionStatus::Failed | SessionStatus::Cancelled | SessionStatus::Completed
@@ -1602,7 +1612,7 @@ async fn report_session_task_paused(
     append_event(
         session_store,
         event_tx,
-        session_id.clone(),
+        session_id,
         Event::Warning { message },
     )
     .await?;
@@ -1637,13 +1647,15 @@ async fn pause_active_session(
         &context.session_store,
         event_tx,
         status,
-        session_id.clone(),
+        *session_id,
         message.clone(),
     )
     .await?;
     context.tool_router.destroy_session_hands(session_id).await;
     let _ = runtime_tx.send(RuntimeEvent::Notice(message));
-    let _ = runtime_tx.send(RuntimeEvent::TurnCompleted);
+    if let Err(err) = runtime_tx.send(RuntimeEvent::TurnCompleted) {
+        tracing::warn!(?err, "runtime receiver dropped while sending TurnCompleted (pause)");
+    }
     Ok(())
 }
 
@@ -1654,7 +1666,7 @@ async fn pause_session_task(
     session_id: SessionId,
     message: String,
 ) -> Result<()> {
-    let current = session_store.get_session(session_id.clone()).await?;
+    let current = session_store.get_session(session_id).await?;
     if matches!(
         current.status,
         SessionStatus::Failed | SessionStatus::Cancelled
@@ -1665,7 +1677,7 @@ async fn pause_session_task(
     append_event(
         session_store,
         event_tx,
-        session_id.clone(),
+        session_id,
         Event::Warning { message },
     )
     .await?;
@@ -1696,7 +1708,7 @@ async fn record_turn_boundary(
     let completed_turn_events = context
         .session_store
         .get_events(
-            session_id.clone(),
+            *session_id,
             EventRange {
                 from_seq: Some(turn_start_sequence_num.saturating_add(1)),
                 ..EventRange::default()
@@ -1710,7 +1722,7 @@ async fn record_turn_boundary(
 
     let updated_events = context
         .session_store
-        .get_events(session_id.clone(), EventRange::all())
+        .get_events(*session_id, EventRange::all())
         .await?;
     pause_active_session(
         context,
@@ -1893,10 +1905,10 @@ fn latest_brain_response_summary(events: &[EventRecord]) -> Option<String> {
 
 fn truncate_loop_output(value: &str) -> String {
     const MAX_CHARS: usize = 200;
-    let truncated = value.chars().take(MAX_CHARS).collect::<String>();
-    if value.chars().count() > MAX_CHARS {
-        format!("{truncated}...")
-    } else {
-        truncated
+    let mut iter = value.chars();
+    let mut buf: String = iter.by_ref().take(MAX_CHARS).collect();
+    if iter.next().is_some() {
+        buf.push_str("...");
     }
+    buf
 }

@@ -14,6 +14,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros", "json", "uuid", "chrono"] }
+futures-util = { workspace = true }
 tokio.workspace = true
 tracing.workspace = true
 url = "2"

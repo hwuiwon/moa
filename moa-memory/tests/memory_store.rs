@@ -37,9 +37,9 @@ async fn create_read_update_and_delete_wiki_pages() -> Result<()> {
         PageType::Topic,
         "# Authentication Architecture\n\nThe auth system uses JWT.\n",
     );
-    store.write_page(scope.clone(), &path, page.clone()).await?;
+    store.write_page(&scope, &path, page.clone()).await?;
 
-    let loaded = store.read_page(scope.clone(), &path).await?;
+    let loaded = store.read_page(&scope, &path).await?;
     assert_eq!(loaded.title, page.title);
     assert_eq!(loaded.page_type, PageType::Topic);
     assert!(loaded.content.contains("JWT"));
@@ -49,14 +49,14 @@ async fn create_read_update_and_delete_wiki_pages() -> Result<()> {
         .content
         .push_str("\nRefresh tokens rotate on every use.\n");
     store
-        .write_page(scope.clone(), &path, updated.clone())
+        .write_page(&scope, &path, updated.clone())
         .await?;
 
-    let reloaded = store.read_page(scope.clone(), &path).await?;
+    let reloaded = store.read_page(&scope, &path).await?;
     assert!(reloaded.content.contains("rotate on every use"));
 
-    store.delete_page(scope.clone(), &path).await?;
-    assert!(store.read_page(scope, &path).await.is_err());
+    store.delete_page(&scope, &path).await?;
+    assert!(store.read_page(&scope, &path).await.is_err());
 
     Ok(())
 }
@@ -77,14 +77,14 @@ async fn fts_search_finds_ranked_results() -> Result<()> {
         };
         store
             .write_page(
-                scope.clone(),
+                &scope,
                 &format!("topics/page-{index}.md").into(),
                 sample_page(&title, PageType::Topic, content),
             )
             .await?;
     }
 
-    let results = store.search("OAuth refresh", scope, 5).await?;
+    let results = store.search("OAuth refresh", &scope, 5).await?;
     assert!(!results.is_empty());
     assert!(results[0].snippet.contains("OAuth") || results[0].title.contains("OAuth"));
     assert_eq!(results[0].path.as_str(), "topics/page-0.md");
@@ -101,7 +101,7 @@ async fn fts_search_handles_hyphenated_queries() -> Result<()> {
 
     store
         .write_page(
-            scope.clone(),
+            &scope,
             &"skills/oauth-refresh/SKILL.md".into(),
             sample_page(
                 "OAuth Refresh",
@@ -111,7 +111,7 @@ async fn fts_search_handles_hyphenated_queries() -> Result<()> {
         )
         .await?;
 
-    let results = store.search("refresh-token", scope, 5).await?;
+    let results = store.search("refresh-token", &scope, 5).await?;
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].path.as_str(), "skills/oauth-refresh/SKILL.md");
@@ -128,7 +128,7 @@ async fn rebuild_search_index_from_files_restores_results() -> Result<()> {
 
     store
         .write_page(
-            scope.clone(),
+            &scope,
             &"entities/auth-service.md".into(),
             sample_page(
                 "Auth Service",
@@ -139,8 +139,8 @@ async fn rebuild_search_index_from_files_restores_results() -> Result<()> {
         .await?;
 
     let rebuilt = FileMemoryStore::new(dir.path()).await?;
-    rebuilt.rebuild_search_index(scope.clone()).await?;
-    let results = rebuilt.search("refresh token", scope, 5).await?;
+    rebuilt.rebuild_search_index(&scope).await?;
+    let results = rebuilt.search("refresh token", &scope, 5).await?;
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].path.as_str(), "entities/auth-service.md");
@@ -159,7 +159,7 @@ async fn user_and_workspace_scopes_are_separate() -> Result<()> {
 
     store
         .write_page(
-            user_scope.clone(),
+            &user_scope,
             &path,
             sample_page(
                 "Preferences",
@@ -170,7 +170,7 @@ async fn user_and_workspace_scopes_are_separate() -> Result<()> {
         .await?;
     store
         .write_page(
-            workspace_scope.clone(),
+            &workspace_scope,
             &path,
             sample_page(
                 "Preferences",
@@ -180,13 +180,13 @@ async fn user_and_workspace_scopes_are_separate() -> Result<()> {
         )
         .await?;
 
-    let user_page = store.read_page(user_scope.clone(), &path).await?;
-    let workspace_page = store.read_page(workspace_scope.clone(), &path).await?;
+    let user_page = store.read_page(&user_scope, &path).await?;
+    let workspace_page = store.read_page(&workspace_scope, &path).await?;
     assert!(user_page.content.contains("concise"));
     assert!(workspace_page.content.contains("release notes"));
 
-    let user_results = store.search("concise", user_scope, 5).await?;
-    let workspace_results = store.search("concise", workspace_scope, 5).await?;
+    let user_results = store.search("concise", &user_scope, 5).await?;
+    let workspace_results = store.search("concise", &workspace_scope, 5).await?;
     assert_eq!(user_results.len(), 1);
     assert!(workspace_results.is_empty());
 
@@ -211,7 +211,7 @@ async fn get_index_truncates_memory_md_to_200_lines() -> Result<()> {
     tokio::fs::create_dir_all(index_path.parent().unwrap()).await?;
     tokio::fs::write(index_path, content).await?;
 
-    let loaded = store.get_index(scope).await?;
+    let loaded = store.get_index(&scope).await?;
 
     assert_eq!(loaded.lines().count(), 200);
     assert!(loaded.contains("line 199"));
@@ -230,21 +230,21 @@ async fn write_page_creates_and_reads_pages_in_explicit_scopes() -> Result<()> {
 
     store
         .write_page(
-            user_scope.clone(),
+            &user_scope,
             &path,
             sample_page("Shared", PageType::Topic, "# Shared\n\nUser scope.\n"),
         )
         .await?;
     store
         .write_page(
-            workspace_scope.clone(),
+            &workspace_scope,
             &path,
             sample_page("Shared", PageType::Topic, "# Shared\n\nWorkspace scope.\n"),
         )
         .await?;
 
-    let user_page = store.read_page(user_scope, &path).await?;
-    let workspace_page = store.read_page(workspace_scope, &path).await?;
+    let user_page = store.read_page(&user_scope, &path).await?;
+    let workspace_page = store.read_page(&workspace_scope, &path).await?;
     assert!(user_page.content.contains("User scope."));
     assert!(workspace_page.content.contains("Workspace scope."));
 
@@ -261,25 +261,25 @@ async fn delete_page_removes_only_the_requested_scope() -> Result<()> {
 
     store
         .write_page(
-            user_scope.clone(),
+            &user_scope,
             &path,
             sample_page("Shared", PageType::Topic, "# Shared\n\nUser scope.\n"),
         )
         .await?;
     store
         .write_page(
-            workspace_scope.clone(),
+            &workspace_scope,
             &path,
             sample_page("Shared", PageType::Topic, "# Shared\n\nWorkspace scope.\n"),
         )
         .await?;
 
-    store.delete_page(user_scope.clone(), &path).await?;
+    store.delete_page(&user_scope, &path).await?;
 
-    assert!(store.read_page(user_scope, &path).await.is_err());
+    assert!(store.read_page(&user_scope, &path).await.is_err());
     assert!(
         store
-            .read_page(workspace_scope, &path)
+            .read_page(&workspace_scope, &path)
             .await?
             .content
             .contains("Workspace scope.")

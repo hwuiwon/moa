@@ -3,7 +3,7 @@ mod shared;
 use std::future::Future;
 use std::time::Duration;
 
-use moa_core::{Event, SessionMeta, SessionStore, ToolOutput, UserId, WorkspaceId};
+use moa_core::{Event, ModelId, SessionMeta, SessionStore, ToolOutput, UserId, WorkspaceId};
 use moa_session::{PostgresSessionStore, testing};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -80,13 +80,14 @@ async fn postgres_event_payloads_round_trip_as_jsonb() {
         .create_session(SessionMeta {
             workspace_id: WorkspaceId::new("pg-jsonb"),
             user_id: UserId::new("user"),
-            model: "test-model".to_string(),
+            model: ModelId::new("test-model"),
             ..SessionMeta::default()
         })
         .await
         .expect("create session");
 
-    let tool_id = Uuid::now_v7();
+    let tool_uuid = Uuid::now_v7();
+    let tool_id = moa_core::ToolCallId(tool_uuid);
     let output = ToolOutput::json(
         "structured",
         serde_json::json!({
@@ -148,7 +149,7 @@ async fn postgres_session_ids_are_native_uuid_and_concurrent_emits_are_serialize
         .create_session(SessionMeta {
             workspace_id: WorkspaceId::new("pg-concurrency"),
             user_id: UserId::new("user"),
-            model: "test-model".to_string(),
+            model: ModelId::new("test-model"),
             ..SessionMeta::default()
         })
         .await
@@ -170,7 +171,7 @@ async fn postgres_session_ids_are_native_uuid_and_concurrent_emits_are_serialize
     let mut tasks = Vec::new();
     for index in 0..10 {
         let store = store.clone();
-        let session_id = session_id.clone();
+
         tasks.push(tokio::spawn(async move {
             store
                 .emit_event(

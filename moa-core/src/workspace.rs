@@ -9,9 +9,46 @@ const MAX_INSTRUCTION_FILE_BYTES: usize = 32_768;
 ///
 /// The `AGENTS.md` file is the only supported source. Oversized files are truncated at a
 /// line boundary up to 32 KiB to keep prompt injection concise and predictable.
+///
+/// NOTE: caller must wrap in `tokio::task::spawn_blocking` when calling from an async context.
+/// Use [`discover_workspace_instructions_async`] for a fully async alternative.
 pub fn discover_workspace_instructions(workspace_root: &Path) -> Option<String> {
     let path = workspace_root.join(INSTRUCTION_FILE_NAME);
     let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(_) => return None,
+    };
+
+    if bytes.len() > MAX_INSTRUCTION_FILE_BYTES {
+        tracing::warn!(
+            path = %path.display(),
+            size = bytes.len(),
+            max = MAX_INSTRUCTION_FILE_BYTES,
+            "workspace instruction file exceeds size limit, truncating"
+        );
+        let truncated = &bytes[..MAX_INSTRUCTION_FILE_BYTES];
+        let end = truncated
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(MAX_INSTRUCTION_FILE_BYTES);
+        return Some(String::from_utf8_lossy(&bytes[..end]).into_owned());
+    }
+
+    tracing::info!(
+        path = %path.display(),
+        size = bytes.len(),
+        "loaded workspace instruction file"
+    );
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Async variant of [`discover_workspace_instructions`] that uses `tokio::fs`.
+///
+/// Prefer this over the sync version when calling from an `async` context.
+pub async fn discover_workspace_instructions_async(workspace_root: &Path) -> Option<String> {
+    let path = workspace_root.join(INSTRUCTION_FILE_NAME);
+    let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
         Err(_) => return None,
     };

@@ -76,7 +76,7 @@ impl FileMemoryStore {
         let scope_root = self.scope_root(scope);
         append_log_entry(&scope_root, &entry).await?;
         let log_path: MemoryPath = "_log.md".into();
-        let log_page = self.read_page(scope.clone(), &log_path).await?;
+        let log_page = self.read_page(scope, &log_path).await?;
         self.search_index
             .upsert_page(scope, &log_path, &log_page)
             .await?;
@@ -90,7 +90,7 @@ impl FileMemoryStore {
 
     /// Regenerates `MEMORY.md` from the current page summaries in a scope.
     pub async fn refresh_scope_index(&self, scope: &MemoryScope) -> Result<String> {
-        let pages = self.list_pages(scope.clone(), None).await?;
+        let pages = self.list_pages(scope, None).await?;
         let content = compile_index(scope, &pages);
         let index_path: MemoryPath = INDEX_FILENAME.into();
         let now = chrono::Utc::now();
@@ -120,7 +120,7 @@ impl FileMemoryStore {
             reference_count: 0,
             metadata: std::collections::HashMap::new(),
         };
-        self.write_page(scope.clone(), &index_path, page).await?;
+        self.write_page(scope, &index_path, page).await?;
         Ok(content)
     }
 
@@ -226,15 +226,15 @@ impl MemoryStore for FileMemoryStore {
     async fn search(
         &self,
         query: &str,
-        scope: MemoryScope,
+        scope: &MemoryScope,
         limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
-        self.search_index.search(query, &scope, limit).await
+        self.search_index.search(query, scope, limit).await
     }
 
     /// Reads a wiki page within an explicit scope.
-    async fn read_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
-        let file_path = self.file_path(&scope, path)?;
+    async fn read_page(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
+        let file_path = self.file_path(scope, path)?;
         let markdown =
             fs::read_to_string(&file_path)
                 .await
@@ -252,11 +252,11 @@ impl MemoryStore for FileMemoryStore {
     /// Writes a wiki page within an explicit scope.
     async fn write_page(
         &self,
-        scope: MemoryScope,
+        scope: &MemoryScope,
         path: &MemoryPath,
         mut page: WikiPage,
     ) -> Result<()> {
-        let file_path = self.file_path(&scope, path)?;
+        let file_path = self.file_path(scope, path)?;
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent).await?;
         }
@@ -264,14 +264,14 @@ impl MemoryStore for FileMemoryStore {
         page.path = Some(path.clone());
         let markdown = render_markdown(&page)?;
         fs::write(&file_path, markdown).await?;
-        self.search_index.upsert_page(&scope, path, &page).await?;
+        self.search_index.upsert_page(scope, path, &page).await?;
 
         Ok(())
     }
 
     /// Deletes a wiki page within an explicit scope.
-    async fn delete_page(&self, scope: MemoryScope, path: &MemoryPath) -> Result<()> {
-        let file_path = self.file_path(&scope, path)?;
+    async fn delete_page(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<()> {
+        let file_path = self.file_path(scope, path)?;
         match fs::remove_file(&file_path).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -282,7 +282,7 @@ impl MemoryStore for FileMemoryStore {
             }
             Err(error) => return Err(error.into()),
         }
-        self.search_index.delete_page(&scope, path).await?;
+        self.search_index.delete_page(scope, path).await?;
 
         Ok(())
     }
@@ -290,14 +290,14 @@ impl MemoryStore for FileMemoryStore {
     /// Lists all markdown pages stored in a scope.
     async fn list_pages(
         &self,
-        scope: MemoryScope,
+        scope: &MemoryScope,
         filter: Option<PageType>,
     ) -> Result<Vec<PageSummary>> {
-        let paths = self.list_scope_files(&scope).await?;
+        let paths = self.list_scope_files(scope).await?;
         let mut pages = Vec::new();
 
         for path in paths {
-            let page = self.read_page(scope.clone(), &path).await?;
+            let page = self.read_page(scope, &path).await?;
             if filter
                 .as_ref()
                 .is_some_and(|page_type| page.page_type != *page_type)
@@ -317,32 +317,32 @@ impl MemoryStore for FileMemoryStore {
     }
 
     /// Returns the truncated `MEMORY.md` contents for a scope.
-    async fn get_index(&self, scope: MemoryScope) -> Result<String> {
-        let index_path = self.scope_root(&scope).join(INDEX_FILENAME);
+    async fn get_index(&self, scope: &MemoryScope) -> Result<String> {
+        let index_path = self.scope_root(scope).join(INDEX_FILENAME);
         load_index_file(&index_path).await
     }
 
     /// Ingests a raw source document into the scoped wiki and updates derived pages.
     async fn ingest_source(
         &self,
-        scope: MemoryScope,
+        scope: &MemoryScope,
         source_name: &str,
         content: &str,
     ) -> Result<IngestReport> {
-        FileMemoryStore::ingest_source(self, &scope, source_name, content).await
+        FileMemoryStore::ingest_source(self, scope, source_name, content).await
     }
 
     /// Rebuilds the FTS index for a scope from markdown files on disk.
-    async fn rebuild_search_index(&self, scope: MemoryScope) -> Result<()> {
-        let paths = self.list_scope_files(&scope).await?;
+    async fn rebuild_search_index(&self, scope: &MemoryScope) -> Result<()> {
+        let paths = self.list_scope_files(scope).await?;
         let mut pages = Vec::with_capacity(paths.len());
 
         for path in paths {
-            let page = self.read_page(scope.clone(), &path).await?;
+            let page = self.read_page(scope, &path).await?;
             pages.push((path, page));
         }
 
-        self.search_index.rebuild_scope(&scope, &pages).await
+        self.search_index.rebuild_scope(scope, &pages).await
     }
 }
 

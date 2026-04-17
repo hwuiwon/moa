@@ -25,8 +25,8 @@ use async_openai::types::responses::{
 use futures_util::StreamExt;
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, MessageRole,
-    MoaError, ProviderNativeTool, Result, StopReason, TokenUsage, ToolCallContent, ToolContent,
-    ToolInvocation, stable_prefix_fingerprint,
+    MoaError, ModelId, ProviderNativeTool, Result, StopReason, TokenUsage, ToolCallContent,
+    ToolContent, ToolInvocation, stable_prefix_fingerprint,
 };
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -40,8 +40,8 @@ use crate::schema::compile_for_openai_strict;
 const OPENAI_METADATA_VALUE_LIMIT: usize = 512;
 
 /// Builds an async-openai client around MOA's shared OpenAI configuration.
-pub(crate) fn build_openai_client(config: OpenAIConfig) -> Result<OpenAiClient<OpenAIConfig>> {
-    Ok(OpenAiClient::with_config(config))
+pub(crate) fn build_openai_client(config: OpenAIConfig) -> OpenAiClient<OpenAIConfig> {
+    OpenAiClient::with_config(config)
 }
 
 /// Builds one stateless Responses API request from MOA completion inputs.
@@ -155,7 +155,7 @@ pub(crate) async fn stream_responses_with_retry(
     client: &OpenAiClient<OpenAIConfig>,
     request: &CreateResponse,
     tx: mpsc::Sender<Result<CompletionContent>>,
-    fallback_model: String,
+    fallback_model: ModelId,
     started_at: Instant,
     retry_policy: RetryPolicy,
     mut span_recorder: LLMSpanRecorder,
@@ -249,7 +249,7 @@ pub(crate) fn parse_reasoning_effort(value: &str) -> Result<ReasoningEffort> {
 async fn consume_responses_stream_once(
     mut stream: ResponseStream,
     tx: mpsc::Sender<Result<CompletionContent>>,
-    fallback_model: String,
+    fallback_model: ModelId,
     started_at: Instant,
     span_recorder: &mut LLMSpanRecorder,
 ) -> std::result::Result<CompletionResponse, ResponsesStreamError> {
@@ -282,7 +282,7 @@ async fn consume_responses_stream_once(
                 text.push_str(&event.delta);
                 let block = CompletionContent::Text(event.delta);
                 content.push(block.clone());
-                span_recorder.observe_block(&block);
+                span_recorder.observe_block(block.clone());
                 emitted_content = true;
                 if tx.send(Ok(block)).await.is_err() {
                     break;
@@ -307,13 +307,7 @@ async fn consume_responses_stream_once(
                     continue;
                 }
 
-                let input = parse_tool_arguments(&event.arguments).map_err(|error| {
-                    ResponsesStreamError {
-                        error,
-                        retryable: false,
-                        emitted_content,
-                    }
-                })?;
+                let input = parse_tool_arguments(&event.arguments);
                 let name = event
                     .name
                     .or_else(|| {
@@ -339,7 +333,7 @@ async fn consume_responses_stream_once(
                 });
                 emitted_function_items.insert(event.item_id);
                 content.push(call.clone());
-                span_recorder.observe_block(&call);
+                span_recorder.observe_block(call.clone());
                 emitted_content = true;
                 if tx.send(Ok(call)).await.is_err() {
                     break;
@@ -349,7 +343,7 @@ async fn consume_responses_stream_once(
             | ResponseStreamEvent::ResponseWebSearchCallSearching(_) => {
                 let block = web_search_started_block();
                 content.push(block.clone());
-                span_recorder.observe_block(&block);
+                span_recorder.observe_block(block.clone());
                 emitted_content = true;
                 if tx.send(Ok(block)).await.is_err() {
                     break;
@@ -358,7 +352,7 @@ async fn consume_responses_stream_once(
             ResponseStreamEvent::ResponseWebSearchCallCompleted(_) => {
                 let block = web_search_completed_block();
                 content.push(block.clone());
-                span_recorder.observe_block(&block);
+                span_recorder.observe_block(block.clone());
                 emitted_content = true;
                 if tx.send(Ok(block)).await.is_err() {
                     break;
@@ -430,7 +424,7 @@ async fn consume_responses_stream_once(
         model: if response.model.is_empty() {
             fallback_model
         } else {
-            response.model
+            ModelId::new(response.model)
         },
         input_tokens,
         output_tokens,
@@ -737,10 +731,10 @@ fn openai_tool_result_output(message: &ContextMessage) -> FunctionCallOutput {
     }
 }
 
-fn parse_tool_arguments(arguments: &str) -> Result<Value> {
+fn parse_tool_arguments(arguments: &str) -> Value {
     match serde_json::from_str(arguments) {
-        Ok(value) => Ok(value),
-        Err(_) => Ok(Value::String(arguments.to_string())),
+        Ok(value) => value,
+        Err(_) => Value::String(arguments.to_string()),
     }
 }
 
@@ -784,7 +778,7 @@ fn response_content_from_output(output: &[OutputItem]) -> Result<Vec<CompletionC
                     invocation: ToolInvocation {
                         id: call.id.clone(),
                         name: call.name.clone(),
-                        input: parse_tool_arguments(&call.arguments)?,
+                        input: parse_tool_arguments(&call.arguments),
                     },
                     provider_metadata: None,
                 }));

@@ -144,8 +144,8 @@ impl SessionList {
                         if this.auto_select_pending && this.selected.is_none() {
                             this.auto_select_pending = false;
                             if let Some(first) = this.previews.first() {
-                                let id = first.summary.session_id.clone();
-                                this.selected = Some(id.clone());
+                                let id = first.summary.session_id;
+                                this.selected = Some(id);
                                 cx.emit(SessionSelected(id));
                             }
                         }
@@ -176,7 +176,7 @@ impl SessionList {
             async move { chat.create_session().await },
             |this, result, cx| match result {
                 Ok(session_id) => {
-                    this.selected = Some(session_id.clone());
+                    this.selected = Some(session_id);
                     cx.emit(SessionSelected(session_id));
                     this.refresh(cx);
                 }
@@ -188,7 +188,7 @@ impl SessionList {
     }
 
     fn select_session(&mut self, id: SessionId, cx: &mut Context<Self>) {
-        self.selected = Some(id.clone());
+        self.selected = Some(id);
         cx.emit(SessionSelected(id));
         cx.notify();
     }
@@ -298,21 +298,21 @@ impl Render for SessionList {
                 .size_full()
                 .overflow_y_scroll();
             for preview in filtered {
-                let session_id = preview.summary.session_id.clone();
+                let session_id = preview.summary.session_id;
                 let title = preview
                     .summary
                     .title
                     .clone()
                     .unwrap_or_else(|| "Untitled".to_string());
                 let row = SessionRow {
-                    id: session_id.clone(),
+                    id: session_id,
                     title: SharedString::from(title),
                     status: preview.summary.status.clone(),
                     last_message: preview.last_message.clone().map(SharedString::from),
                     updated: preview.summary.updated_at,
                     selected: self.is_selected(&session_id),
                 };
-                let id_for_click = session_id.clone();
+                let id_for_click = session_id;
                 list = list.child(
                     div()
                         .id(ElementId::NamedInteger(
@@ -323,7 +323,7 @@ impl Render for SessionList {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, _, cx| {
-                                this.select_session(id_for_click.clone(), cx);
+                                this.select_session(id_for_click, cx);
                             }),
                         ),
                 );

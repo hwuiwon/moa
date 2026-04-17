@@ -89,7 +89,7 @@ pub fn events_to_messages(records: &[EventRecord]) -> Vec<ChatMessage> {
                 ..
             } => {
                 pending_tools.push(ToolInvocation {
-                    tool_id: *tool_id,
+                    tool_id: tool_id.0,
                     tool_name: tool_name.clone(),
                     input_preview: preview_json(input),
                     output_preview: None,
@@ -224,7 +224,7 @@ fn render_non_tool(event: &Event, timestamp: DateTime<Utc>) -> Option<ChatMessag
             ..
         } => Some(ChatMessage::Agent {
             text: text.clone(),
-            model: model.clone(),
+            model: model.as_str().to_string(),
             input_tokens: event.input_tokens(),
             output_tokens: *output_tokens,
             cost_cents: *cost_cents,

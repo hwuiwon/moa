@@ -230,7 +230,7 @@ async fn build_tool_router(
         validate_named_tools(&available_tools, enabled)?;
     }
 
-    let enabled_tools = resolve_enabled_tools(&available_tools, agent_config)?;
+    let enabled_tools = resolve_enabled_tools(&available_tools, agent_config);
     let policies = build_eval_policies(base_config, &agent_config.permissions, &enabled_tools);
 
     Ok(router
@@ -293,7 +293,7 @@ async fn apply_skill_overrides(
         let (page_path, page) = load_skill_page(skill_path).await?;
         memory_store
             .write_page(
-                MemoryScope::Workspace(workspace_id.clone()),
+                &MemoryScope::Workspace(workspace_id.clone()),
                 &page_path,
                 page,
             )
@@ -303,10 +303,10 @@ async fn apply_skill_overrides(
     if !agent_config.skills.exclude.is_empty() {
         let scope = MemoryScope::Workspace(workspace_id.clone());
         let summaries = memory_store
-            .list_pages(scope.clone(), Some(moa_core::PageType::Skill))
+            .list_pages(&scope, Some(moa_core::PageType::Skill))
             .await?;
         for summary in summaries {
-            let page = memory_store.read_page(scope.clone(), &summary.path).await?;
+            let page = memory_store.read_page(&scope, &summary.path).await?;
             let skill_name = skill_name_from_page(&page).unwrap_or_else(|| page.title.clone());
             if agent_config
                 .skills
@@ -315,7 +315,7 @@ async fn apply_skill_overrides(
                 .any(|selector| skill_selector_matches(selector, &summary.path, &skill_name))
             {
                 memory_store
-                    .delete_page(scope.clone(), &summary.path)
+                    .delete_page(&scope, &summary.path)
                     .await?;
             }
         }
@@ -330,11 +330,11 @@ async fn clear_workspace_skills(
 ) -> Result<()> {
     let scope = MemoryScope::Workspace(workspace_id.clone());
     let summaries = memory_store
-        .list_pages(scope.clone(), Some(moa_core::PageType::Skill))
+        .list_pages(&scope, Some(moa_core::PageType::Skill))
         .await?;
     for summary in summaries {
         memory_store
-            .delete_page(scope.clone(), &summary.path)
+            .delete_page(&scope, &summary.path)
             .await?;
     }
     Ok(())
@@ -345,8 +345,8 @@ async fn refresh_indices(memory_store: &FileMemoryStore, workspace_id: &Workspac
     let workspace_scope = MemoryScope::Workspace(workspace_id.clone());
     memory_store.refresh_scope_index(&user_scope).await?;
     memory_store.refresh_scope_index(&workspace_scope).await?;
-    memory_store.rebuild_search_index(user_scope).await?;
-    memory_store.rebuild_search_index(workspace_scope).await?;
+    memory_store.rebuild_search_index(&user_scope).await?;
+    memory_store.rebuild_search_index(&workspace_scope).await?;
     Ok(())
 }
 
@@ -434,7 +434,7 @@ fn build_eval_policies(
 fn resolve_enabled_tools(
     available_tools: &[String],
     agent_config: &AgentConfig,
-) -> Result<Vec<String>> {
+) -> Vec<String> {
     let mut enabled = if let Some(explicit) = &agent_config.tools.enabled {
         explicit.clone()
     } else {
@@ -444,7 +444,7 @@ fn resolve_enabled_tools(
     enabled.retain(|tool| !disabled.contains(tool));
     enabled.sort();
     enabled.dedup();
-    Ok(enabled)
+    enabled
 }
 
 fn validate_named_tools(available_tools: &[String], requested_tools: &[String]) -> Result<()> {
@@ -659,7 +659,7 @@ mod tests {
 
         fn capabilities(&self) -> ModelCapabilities {
             ModelCapabilities {
-                model_id: "mock-model".to_string(),
+                model_id: moa_core::ModelId::new("mock-model"),
                 context_window: 32_000,
                 max_output: 1_024,
                 supports_tools: true,
@@ -684,7 +684,7 @@ mod tests {
                 text: "ok".to_string(),
                 content: vec![moa_core::CompletionContent::Text("ok".to_string())],
                 stop_reason: StopReason::EndTurn,
-                model: "mock-model".to_string(),
+                model: moa_core::ModelId::new("mock-model"),
                 input_tokens: 1,
                 output_tokens: 1,
                 cached_input_tokens: 0,
@@ -763,7 +763,7 @@ mod tests {
         let page = environment
             .memory_store
             .read_page(
-                MemoryScope::Workspace(environment.workspace_id.clone()),
+                &MemoryScope::Workspace(environment.workspace_id.clone()),
                 &MemoryPath::new("notes.md"),
             )
             .await

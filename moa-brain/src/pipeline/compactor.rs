@@ -435,7 +435,7 @@ async fn apply_tier3(
     llm_provider: &dyn LLMProvider,
 ) -> Result<Option<Tier3Summary>> {
     let events = session_store
-        .get_events(ctx.session_id.clone(), moa_core::EventRange::all())
+        .get_events(ctx.session_id, moa_core::EventRange::all())
         .await?;
     let mut forced_config = config.clone();
     forced_config.enabled = true;
@@ -445,7 +445,7 @@ async fn apply_tier3(
         &forced_config,
         session_store,
         llm_provider,
-        ctx.session_id.clone(),
+        ctx.session_id,
         ctx.model_capabilities.context_window,
         &events,
     )
@@ -455,7 +455,7 @@ async fn apply_tier3(
     }
 
     let refreshed_events = session_store
-        .get_events(ctx.session_id.clone(), moa_core::EventRange::all())
+        .get_events(ctx.session_id, moa_core::EventRange::all())
         .await?;
     let Some(checkpoint) = latest_checkpoint_state(&refreshed_events) else {
         return Ok(None);
@@ -497,9 +497,10 @@ mod tests {
     use chrono::{DateTime, Utc};
     use moa_core::{
         BrainId, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, Event,
-        EventFilter, EventRange, EventRecord, ModelCapabilities, PendingSignal, PendingSignalId,
-        Platform, Result, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
-        SessionSummary, StopReason, TokenPricing, TokenUsage, ToolCallFormat, WorkspaceId,
+        EventFilter, EventRange, EventRecord, ModelCapabilities, ModelId, PendingSignal,
+        PendingSignalId, Platform, Result, SessionFilter, SessionId, SessionMeta, SessionStatus,
+        SessionStore, SessionSummary, StopReason, TokenPricing, TokenUsage, ToolCallFormat,
+        WorkspaceId,
     };
     use serde_json::json;
     use tokio::sync::Mutex;
@@ -524,7 +525,7 @@ mod tests {
     #[async_trait]
     impl SessionStore for MockSessionStore {
         async fn create_session(&self, meta: SessionMeta) -> Result<SessionId> {
-            let id = meta.id.clone();
+            let id = meta.id;
             *self.session.lock().await = meta;
             Ok(id)
         }
@@ -654,7 +655,7 @@ mod tests {
                     "## Goal\n- compact the older turns\n".to_string(),
                 )],
                 stop_reason: StopReason::EndTurn,
-                model: "claude-sonnet-4-6".to_string(),
+                model: ModelId::new("claude-sonnet-4-6"),
                 input_tokens: 120,
                 output_tokens: 40,
                 cached_input_tokens: 0,
@@ -672,7 +673,7 @@ mod tests {
 
     fn capabilities() -> ModelCapabilities {
         ModelCapabilities {
-            model_id: "claude-sonnet-4-6".to_string(),
+            model_id: ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -695,7 +696,7 @@ mod tests {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: moa_core::UserId::new("user"),
             platform: Platform::Desktop,
-            model: "claude-sonnet-4-6".to_string(),
+            model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         }
     }
@@ -703,7 +704,7 @@ mod tests {
     fn event_record(session_id: &SessionId, sequence_num: u64, event: Event) -> EventRecord {
         EventRecord {
             id: uuid::Uuid::now_v7(),
-            session_id: session_id.clone(),
+            session_id: *session_id,
             sequence_num,
             event_type: event.event_type(),
             event,
@@ -771,7 +772,7 @@ mod tests {
                 2,
                 Event::BrainResponse {
                     text: "first response".to_string(),
-                    model: "claude-sonnet-4-6".to_string(),
+                    model: ModelId::new("claude-sonnet-4-6"),
                     input_tokens_uncached: 10,
                     input_tokens_cache_write: 0,
                     input_tokens_cache_read: 0,
@@ -814,7 +815,7 @@ mod tests {
 
         let output = compactor.process(&mut ctx).await.unwrap();
         let events = store
-            .get_events(session.id.clone(), EventRange::all())
+            .get_events(session.id, EventRange::all())
             .await
             .unwrap();
 

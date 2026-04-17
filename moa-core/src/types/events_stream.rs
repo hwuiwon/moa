@@ -262,7 +262,7 @@ pub enum LiveEvent<T> {
 impl EventStream {
     /// Creates an event stream from buffered historical events.
     pub fn from_events(events: Vec<EventRecord>) -> Self {
-        let session_id = events.first().map(|record| record.session_id.clone());
+        let session_id = events.first().map(|record| record.session_id);
         Self {
             events,
             session_id,
@@ -333,6 +333,7 @@ impl EventStream {
     }
 
     /// Returns a clone of this stream that uses the supplied lag policy.
+    #[must_use]
     pub fn with_lag_policy(mut self, lag_policy: LagPolicy) -> Self {
         self.lag_policy = lag_policy;
         self
@@ -353,7 +354,7 @@ impl EventStream {
 
         match &mut self.receiver {
             Some(LiveReceiver::Broadcast(receiver)) => {
-                let session_id = self.session_id.clone().unwrap_or_default();
+                let session_id = self.session_id.unwrap_or_default();
                 match recv_with_lag_handling(
                     receiver,
                     BroadcastChannel::Event,
@@ -395,7 +396,7 @@ impl Clone for EventStream {
     fn clone(&self) -> Self {
         Self {
             events: self.events.clone(),
-            session_id: self.session_id.clone(),
+            session_id: self.session_id,
             receiver: self.receiver.as_ref().and_then(|receiver| match receiver {
                 LiveReceiver::Broadcast(receiver) => {
                     Some(LiveReceiver::Broadcast(receiver.resubscribe()))
@@ -451,12 +452,12 @@ mod tests {
     async fn event_stream_emits_gap_marker_when_lagged() {
         let (tx, rx) = broadcast::channel(1);
         let session_id = SessionId::new();
-        let mut stream = EventStream::from_broadcast(session_id.clone(), rx)
+        let mut stream = EventStream::from_broadcast(session_id, rx)
             .with_lag_policy(LagPolicy::SkipWithGap);
 
         let first = EventRecord {
             id: Uuid::now_v7(),
-            session_id: session_id.clone(),
+            session_id,
             sequence_num: 0,
             event_type: EventType::Warning,
             event: Event::Warning {
@@ -505,11 +506,11 @@ mod tests {
         let (tx, rx) = broadcast::channel(1);
         let session_id = SessionId::new();
         let mut stream =
-            EventStream::from_broadcast(session_id.clone(), rx).with_lag_policy(LagPolicy::Abort);
+            EventStream::from_broadcast(session_id, rx).with_lag_policy(LagPolicy::Abort);
 
         let first = EventRecord {
             id: Uuid::now_v7(),
-            session_id: session_id.clone(),
+            session_id,
             sequence_num: 0,
             event_type: EventType::Warning,
             event: Event::Warning {

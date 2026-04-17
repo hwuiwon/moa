@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::FutureExt as _;
 use chrono::Utc;
 use moa_brain::{
     TurnResult, build_default_pipeline_with_runtime, find_pending_tool_approval,
@@ -67,7 +68,7 @@ struct TemporalRuntime {
 
 #[derive(Clone)]
 struct TemporalActivities {
-    config: MoaConfig,
+    config: Arc<MoaConfig>,
     session_store: Arc<PostgresSessionStore>,
     memory_store: Arc<FileMemoryStore>,
     llm_provider: Arc<dyn LLMProvider>,
@@ -575,36 +576,43 @@ impl TemporalOrchestrator {
             .unwrap_or(0);
 
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(DEFAULT_OBSERVE_POLL_INTERVAL);
-            loop {
-                ticker.tick().await;
-                if tx.receiver_count() == 0 {
-                    break;
-                }
-
-                match session_store
-                    .get_events(
-                        session_id.clone(),
-                        EventRange {
-                            from_seq: Some(next_seq),
-                            to_seq: None,
-                            event_types: None,
-                            limit: None,
-                        },
-                    )
-                    .await
-                {
-                    Ok(events) => {
-                        for record in events {
-                            next_seq = record.sequence_num.saturating_add(1);
-                            let _ = tx.send(record);
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(error = %error, "temporal observe tail polling failed");
+            let result = std::panic::AssertUnwindSafe(async move {
+                let mut ticker = tokio::time::interval(DEFAULT_OBSERVE_POLL_INTERVAL);
+                loop {
+                    ticker.tick().await;
+                    if tx.receiver_count() == 0 {
                         break;
                     }
+
+                    match session_store
+                        .get_events(
+                            session_id.clone(),
+                            EventRange {
+                                from_seq: Some(next_seq),
+                                to_seq: None,
+                                event_types: None,
+                                limit: None,
+                            },
+                        )
+                        .await
+                    {
+                        Ok(events) => {
+                            for record in events {
+                                next_seq = record.sequence_num.saturating_add(1);
+                                let _ = tx.send(record);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(error = %error, "temporal observe tail polling failed");
+                            break;
+                        }
+                    }
                 }
+            })
+            .catch_unwind()
+            .await;
+            if let Err(panic) = result {
+                tracing::error!(?panic, "temporal observe-tail task panicked");
             }
         });
 
@@ -651,7 +659,7 @@ impl TemporalRuntime {
             "moa-temporal-orchestrator",
         )
         .await?;
-        let config_for_worker = config.clone();
+        let config_for_worker = Arc::new(config.clone());
         let session_store_for_worker = session_store.clone();
         let memory_store_for_worker = memory_store.clone();
         let llm_provider_for_worker = llm_provider.clone();
@@ -909,46 +917,53 @@ impl BrainOrchestrator for TemporalOrchestrator {
         let (tx, rx) = broadcast::channel(256);
         let session_store = self.session_store.clone();
         tokio::spawn(async move {
-            let mut last_seq = 0_u64;
-            loop {
-                tokio::time::sleep(DEFAULT_OBSERVE_POLL_INTERVAL).await;
-                let events = session_store
-                    .get_events(
-                        session_id.clone(),
-                        EventRange {
-                            from_seq: Some(last_seq + 1),
-                            ..EventRange::all()
-                        },
-                    )
-                    .await;
-                let new_events = match events {
-                    Ok(events) => events,
-                    Err(error) => {
-                        tracing::warn!(error = %error, "Temporal runtime polling failed");
-                        return;
-                    }
-                };
+            let result = std::panic::AssertUnwindSafe(async move {
+                let mut last_seq = 0_u64;
+                loop {
+                    tokio::time::sleep(DEFAULT_OBSERVE_POLL_INTERVAL).await;
+                    let events = session_store
+                        .get_events(
+                            session_id.clone(),
+                            EventRange {
+                                from_seq: Some(last_seq + 1),
+                                ..EventRange::all()
+                            },
+                        )
+                        .await;
+                    let new_events = match events {
+                        Ok(events) => events,
+                        Err(error) => {
+                            tracing::warn!(error = %error, "Temporal runtime polling failed");
+                            return;
+                        }
+                    };
 
-                for record in &new_events {
-                    last_seq = record.sequence_num;
-                    if let Some(event) = event_to_runtime_event(record)
-                        && tx.send(event).is_err()
-                    {
-                        return;
+                    for record in &new_events {
+                        last_seq = record.sequence_num;
+                        if let Some(event) = event_to_runtime_event(record)
+                            && tx.send(event).is_err()
+                        {
+                            return;
+                        }
+                    }
+
+                    match session_store.get_session(session_id.clone()).await {
+                        Ok(session) if session_is_terminal(&session.status) => {
+                            let _ = tx.send(RuntimeEvent::TurnCompleted);
+                            return;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(error = %error, "Temporal runtime session lookup failed");
+                            return;
+                        }
                     }
                 }
-
-                match session_store.get_session(session_id.clone()).await {
-                    Ok(session) if session_is_terminal(&session.status) => {
-                        let _ = tx.send(RuntimeEvent::TurnCompleted);
-                        return;
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(error = %error, "Temporal runtime session lookup failed");
-                        return;
-                    }
-                }
+            })
+            .catch_unwind()
+            .await;
+            if let Err(panic) = result {
+                tracing::error!(?panic, "temporal observe-runtime task panicked");
             }
         });
         Ok(Some(rx))

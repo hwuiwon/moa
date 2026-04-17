@@ -354,7 +354,7 @@ async fn main() -> Result<()> {
             Some(ConfigCommand::Set { key, value }) => {
                 let mut updated = config;
                 apply_config_update(&mut updated, &key, &value)?;
-                updated.save()?;
+                updated.save_async().await?;
                 print!("{}", toml::to_string_pretty(&updated)?);
             }
         },
@@ -398,7 +398,7 @@ async fn main() -> Result<()> {
                 }
             }
             EvalCommand::Plan(args) => {
-                handle_eval_plan(args, config).await?;
+                handle_eval_plan(args, config)?;
             }
             EvalCommand::Skill(args) => {
                 let exit_code = handle_eval_skill(args, config).await?;
@@ -407,7 +407,7 @@ async fn main() -> Result<()> {
                 }
             }
             EvalCommand::List { dir } => {
-                handle_eval_list(dir).await?;
+                handle_eval_list(dir)?;
             }
         },
     }
@@ -471,7 +471,7 @@ async fn handle_eval_run(args: EvalRunArgs, config: MoaConfig) -> Result<i32> {
     Ok(eval_exit_code(args.ci, &run))
 }
 
-async fn handle_eval_plan(args: EvalPlanArgs, config: MoaConfig) -> Result<()> {
+fn handle_eval_plan(args: EvalPlanArgs, config: MoaConfig) -> Result<()> {
     let suite = load_suite(&args.suite).context("loading eval suite")?;
     let configs = load_eval_configs(&args.config)?;
     let engine =
@@ -517,7 +517,7 @@ async fn handle_eval_skill(args: EvalSkillArgs, config: MoaConfig) -> Result<i32
     Ok(eval_exit_code(args.ci, &skill_run.run))
 }
 
-async fn handle_eval_list(dir: PathBuf) -> Result<()> {
+fn handle_eval_list(dir: PathBuf) -> Result<()> {
     let paths = discover_suites(&dir).context("discovering eval suites")?;
     for path in paths {
         let suite =
@@ -625,7 +625,7 @@ async fn sessions_report(config: &MoaConfig, workspace: Option<&str>) -> Result<
 async fn memory_search_report(config: &MoaConfig, query: &str) -> Result<String> {
     let store = FileMemoryStore::from_config(config).await?;
     let results = store
-        .search(query, MemoryScope::Workspace(current_workspace_id()), 20)
+        .search(query, &MemoryScope::Workspace(current_workspace_id()), 20)
         .await?;
     let mut report = String::new();
     for result in results {
@@ -641,7 +641,7 @@ async fn memory_show_report(config: &MoaConfig, path: &str) -> Result<String> {
     let store = FileMemoryStore::from_config(config).await?;
     let path = MemoryPath::new(path);
     let page = store
-        .read_page(MemoryScope::Workspace(current_workspace_id()), &path)
+        .read_page(&MemoryScope::Workspace(current_workspace_id()), &path)
         .await?;
     let rendered = toml::to_string(&page.metadata).unwrap_or_default();
     Ok(format!("---\n{}---\n{}", rendered, page.content))
@@ -677,7 +677,7 @@ async fn memory_ingest_report(
             None => derive_ingest_source_name(file),
         };
         let report =
-            MemoryStore::ingest_source(&store, scope.clone(), &source_name, &content).await?;
+            MemoryStore::ingest_source(&store, &scope, &source_name, &content).await?;
         sections.push(format_cli_ingest_section(file, &report));
     }
 
@@ -757,7 +757,7 @@ async fn daemon_status_report(config: &MoaConfig) -> Result<String> {
 async fn init_workspace(config: &MoaConfig) -> Result<()> {
     let config_path = MoaConfig::default_path()?;
     if !config_path.exists() {
-        config.save()?;
+        config.save_async().await?;
     }
     let workspace_id = current_workspace_id();
     let home = std::env::var_os("HOME").context("HOME is not set")?;
@@ -782,7 +782,7 @@ async fn load_session_store(config: &MoaConfig) -> Result<Arc<PostgresSessionSto
         .context("opening session store")
 }
 
-async fn load_branch_manager(config: &MoaConfig) -> Result<NeonBranchManager> {
+fn load_branch_manager(config: &MoaConfig) -> Result<NeonBranchManager> {
     NeonBranchManager::from_config(config).context("opening Neon branch manager")
 }
 
@@ -901,7 +901,7 @@ async fn doctor_database(config: &MoaConfig) -> String {
 async fn memory_index_status(config: &MoaConfig) -> String {
     match FileMemoryStore::from_config(config).await {
         Ok(store) => match store
-            .get_index(MemoryScope::Workspace(current_workspace_id()))
+            .get_index(&MemoryScope::Workspace(current_workspace_id()))
             .await
         {
             Ok(index) => format!("healthy ({} chars)", index.len()),
@@ -997,7 +997,7 @@ fn expand_tilde(path: &str) -> PathBuf {
 }
 
 async fn checkpoint_create_report(config: &MoaConfig, label: &str) -> Result<String> {
-    let manager = load_branch_manager(config).await?;
+    let manager = load_branch_manager(config)?;
     let handle = manager
         .create_checkpoint(label, None)
         .await
@@ -1009,7 +1009,7 @@ async fn checkpoint_create_report(config: &MoaConfig, label: &str) -> Result<Str
 }
 
 async fn checkpoint_list_report(config: &MoaConfig) -> Result<String> {
-    let manager = load_branch_manager(config).await?;
+    let manager = load_branch_manager(config)?;
     let checkpoints = manager
         .list_checkpoints()
         .await
@@ -1038,7 +1038,7 @@ async fn checkpoint_list_report(config: &MoaConfig) -> Result<String> {
 }
 
 async fn checkpoint_rollback_report(mut config: MoaConfig, id: &str) -> Result<String> {
-    let manager = load_branch_manager(&config).await?;
+    let manager = load_branch_manager(&config)?;
     let checkpoint = manager
         .get_checkpoint(id)
         .await
@@ -1049,7 +1049,7 @@ async fn checkpoint_rollback_report(mut config: MoaConfig, id: &str) -> Result<S
         .await
         .context("preparing checkpoint rollback")?;
     config.database.url = checkpoint.handle.connection_url.clone();
-    config.save().context("saving config")?;
+    config.save_async().await.context("saving config")?;
     Ok(format!(
         "rolled back to checkpoint\nid: {}\nlabel: {}\ndatabase_url: {}\n",
         checkpoint.handle.id, checkpoint.handle.label, checkpoint.handle.connection_url
@@ -1057,7 +1057,7 @@ async fn checkpoint_rollback_report(mut config: MoaConfig, id: &str) -> Result<S
 }
 
 async fn checkpoint_cleanup_report(config: &MoaConfig) -> Result<String> {
-    let manager = load_branch_manager(config).await?;
+    let manager = load_branch_manager(config)?;
     let deleted = manager
         .cleanup_expired()
         .await
@@ -1206,7 +1206,7 @@ mod tests {
             .expect("memory store");
         let source_page = store
             .read_page(
-                MemoryScope::Workspace(WorkspaceId::new("workspace-ingest")),
+                &MemoryScope::Workspace(WorkspaceId::new("workspace-ingest")),
                 &MemoryPath::new("sources/rfc-0042-auth-redesign.md"),
             )
             .await

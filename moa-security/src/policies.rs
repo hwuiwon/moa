@@ -209,8 +209,8 @@ mod tests {
     use chrono::Utc;
     use moa_core::shell::split_shell_chain;
     use moa_core::{
-        ApprovalRule, PolicyAction, PolicyScope, Result, RiskLevel, SessionMeta, ToolPolicyInput,
-        UserId, WorkspaceId,
+        ApprovalRule, ModelId, PolicyAction, PolicyScope, Result, RiskLevel, SessionMeta,
+        ToolPolicyInput, UserId, WorkspaceId,
     };
     use tokio::sync::Mutex;
     use uuid::Uuid;
@@ -273,7 +273,7 @@ mod tests {
         SessionMeta {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            model: "claude-sonnet-4-6".to_string(),
+            model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         }
     }

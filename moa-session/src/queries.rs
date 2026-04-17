@@ -2,8 +2,9 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ApprovalRule, EventType, MoaError, PendingSignal, PendingSignalId, PendingSignalType, Platform,
-    PolicyAction, PolicyScope, Result, SessionMeta, SessionStatus, SessionSummary, WorkspaceId,
+    ApprovalRule, EventType, MoaError, ModelId, PendingSignal, PendingSignalId, PendingSignalType,
+    Platform, PolicyAction, PolicyScope, Result, SessionMeta, SessionStatus, SessionSummary,
+    WorkspaceId,
 };
 use sqlx::{Row, postgres::PgRow};
 use uuid::Uuid;
@@ -221,7 +222,7 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
         platform_channel: row
             .try_get::<Option<String>, _>("platform_channel")
             .map_err(map_sqlx_error)?,
-        model,
+        model: ModelId::new(model),
         created_at: row
             .try_get::<DateTime<Utc>, _>("created_at")
             .map_err(map_sqlx_error)?,
@@ -285,7 +286,7 @@ pub(crate) fn session_summary_from_row(row: &PgRow) -> Result<SessionSummary> {
             &row.try_get::<String, _>("platform")
                 .map_err(map_sqlx_error)?,
         )?,
-        model: row.try_get::<String, _>("model").map_err(map_sqlx_error)?,
+        model: ModelId::new(row.try_get::<String, _>("model").map_err(map_sqlx_error)?,),
         updated_at: row
             .try_get::<DateTime<Utc>, _>("updated_at")
             .map_err(map_sqlx_error)?,

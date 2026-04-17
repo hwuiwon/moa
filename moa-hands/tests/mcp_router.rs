@@ -3,8 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_core::{
     McpCredentialConfig, McpServerConfig, McpTransportConfig, MemoryPath, MemoryScope,
-    MemorySearchResult, MemoryStore, MoaConfig, PageSummary, PageType, Result, SessionMeta,
-    ToolInvocation, UserId, WikiPage, WorkspaceId,
+    MemorySearchResult, MemoryStore, MoaConfig, ModelId, PageSummary, PageType, Result,
+    SessionMeta, ToolInvocation, UserId, WikiPage, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use serde_json::json;
@@ -21,42 +21,42 @@ impl MemoryStore for EmptyMemoryStore {
     async fn search(
         &self,
         _query: &str,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
         Ok(Vec::new())
     }
 
-    async fn read_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
+    async fn read_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
         Err(moa_core::MoaError::StorageError("not found".to_string()))
     }
 
     async fn write_page(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _path: &MemoryPath,
         _page: WikiPage,
     ) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_page(&self, _scope: MemoryScope, _path: &MemoryPath) -> Result<()> {
+    async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
         Ok(())
     }
 
     async fn list_pages(
         &self,
-        _scope: MemoryScope,
+        _scope: &MemoryScope,
         _filter: Option<PageType>,
     ) -> Result<Vec<PageSummary>> {
         Ok(Vec::new())
     }
 
-    async fn get_index(&self, _scope: MemoryScope) -> Result<String> {
+    async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
         Ok(String::new())
     }
 
-    async fn rebuild_search_index(&self, _scope: MemoryScope) -> Result<()> {
+    async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
         Ok(())
     }
 }
@@ -65,7 +65,7 @@ fn session() -> SessionMeta {
     SessionMeta {
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        model: "claude-sonnet-4-6".to_string(),
+        model: ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     }
 }

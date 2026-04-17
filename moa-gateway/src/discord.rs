@@ -16,7 +16,7 @@ use serenity::all::{
     User as DiscordUser, UserId as DiscordUserId,
 };
 use tokio::{
-    sync::{Mutex, mpsc},
+    sync::{RwLock, mpsc},
     time::sleep,
 };
 use tracing::Instrument;
@@ -32,31 +32,31 @@ use crate::{
 #[derive(Clone)]
 struct DiscordEventHandlerState {
     event_tx: mpsc::Sender<InboundMessage>,
-    inbound_contexts: Arc<Mutex<HashMap<String, DiscordInboundContext>>>,
+    inbound_contexts: Arc<RwLock<HashMap<String, DiscordInboundContext>>>,
 }
 
 /// Discord adapter implementing the generic platform abstraction.
 #[derive(Clone)]
 pub struct DiscordAdapter {
-    token: Arc<String>,
+    token: Arc<str>,
     http: Arc<Http>,
     renderer: DiscordRenderer,
-    inbound_contexts: Arc<Mutex<HashMap<String, DiscordInboundContext>>>,
-    outbound_messages: Arc<Mutex<HashMap<String, Vec<DiscordMessageRef>>>>,
-    last_edits: Arc<Mutex<HashMap<String, Instant>>>,
+    inbound_contexts: Arc<RwLock<HashMap<String, DiscordInboundContext>>>,
+    outbound_messages: Arc<RwLock<HashMap<String, Vec<DiscordMessageRef>>>>,
+    last_edits: Arc<RwLock<HashMap<String, Instant>>>,
 }
 
 impl DiscordAdapter {
     /// Creates a Discord adapter from a bot token.
     pub fn new(token: impl Into<String>) -> Self {
-        let token = token.into();
+        let token: String = token.into();
         Self {
             http: Arc::new(Http::new(&token)),
-            token: Arc::new(token),
+            token: Arc::from(token.as_str()),
             renderer: DiscordRenderer::new(),
-            inbound_contexts: Arc::new(Mutex::new(HashMap::new())),
-            outbound_messages: Arc::new(Mutex::new(HashMap::new())),
-            last_edits: Arc::new(Mutex::new(HashMap::new())),
+            inbound_contexts: Arc::new(RwLock::new(HashMap::new())),
+            outbound_messages: Arc::new(RwLock::new(HashMap::new())),
+            last_edits: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -75,7 +75,7 @@ impl DiscordAdapter {
 
         if let Some(last_ref) = self
             .outbound_messages
-            .lock()
+            .read()
             .await
             .get(reply_to)
             .and_then(|refs| refs.last().copied())
@@ -83,7 +83,7 @@ impl DiscordAdapter {
             return Ok(DiscordTarget::Channel(last_ref.channel_id));
         }
 
-        if let Some(inbound_ref) = self.inbound_contexts.lock().await.get(reply_to).cloned() {
+        if let Some(inbound_ref) = self.inbound_contexts.read().await.get(reply_to).cloned() {
             if inbound_ref.is_direct {
                 return Ok(DiscordTarget::Channel(inbound_ref.channel_id));
             }
@@ -107,7 +107,7 @@ impl DiscordAdapter {
     async fn wait_for_edit_window(&self, message_id: &MessageId) {
         let min_interval = self.capabilities().min_edit_interval;
         let sleep_for = {
-            let last_edits = self.last_edits.lock().await;
+            let last_edits = self.last_edits.read().await;
             last_edits
                 .get(message_id.as_str())
                 .copied()
@@ -117,7 +117,7 @@ impl DiscordAdapter {
             sleep(delay).await;
         }
         self.last_edits
-            .lock()
+            .write()
             .await
             .insert(message_id.as_str().to_string(), Instant::now());
     }
@@ -140,7 +140,7 @@ impl DiscordAdapter {
                     .await
                     .map_err(|error| MoaError::ProviderError(error.to_string()))?;
                 let thread_id = thread.id;
-                if let Some(context) = self.inbound_contexts.lock().await.get_mut(&context_key) {
+                if let Some(context) = self.inbound_contexts.write().await.get_mut(&context_key) {
                     context.thread_id = Some(thread_id);
                 }
                 Ok(thread_id)
@@ -202,7 +202,7 @@ impl PlatformAdapter for DiscordAdapter {
                 inbound_contexts: self.inbound_contexts.clone(),
             },
         };
-        let mut client = Client::builder(self.token.as_ref().as_str(), intents)
+        let mut client = Client::builder(&*self.token, intents)
             .event_handler(handler)
             .await
             .map_err(|error| MoaError::ProviderError(error.to_string()))?;
@@ -226,7 +226,7 @@ impl PlatformAdapter for DiscordAdapter {
             sent_refs.push(sent_ref);
         }
         self.outbound_messages
-            .lock()
+            .write()
             .await
             .insert(synthetic_id.as_str().to_string(), sent_refs);
         Ok(synthetic_id)
@@ -238,7 +238,7 @@ impl PlatformAdapter for DiscordAdapter {
         let msg = prepare_outbound_message(self.platform(), &self.capabilities(), msg);
         let existing = self
             .outbound_messages
-            .lock()
+            .read()
             .await
             .get(msg_id.as_str())
             .cloned()
@@ -279,7 +279,7 @@ impl PlatformAdapter for DiscordAdapter {
         }
 
         self.outbound_messages
-            .lock()
+            .write()
             .await
             .insert(msg_id.as_str().to_string(), updated_refs);
         Ok(())
@@ -289,7 +289,7 @@ impl PlatformAdapter for DiscordAdapter {
     async fn delete(&self, msg_id: &MessageId) -> Result<()> {
         let refs = self
             .outbound_messages
-            .lock()
+            .write()
             .await
             .remove(msg_id.as_str())
             .ok_or_else(|| {
@@ -323,7 +323,7 @@ impl EventHandler for DiscordGatewayHandler {
             async {
                 self.shared
                     .inbound_contexts
-                    .lock()
+                    .write()
                     .await
                     .insert(inbound.platform_msg_id.clone(), context_ref);
                 if self.shared.event_tx.send(inbound).await.is_err() {
@@ -349,7 +349,7 @@ impl EventHandler for DiscordGatewayHandler {
             async {
                 self.shared
                     .inbound_contexts
-                    .lock()
+                    .write()
                     .await
                     .insert(inbound.platform_msg_id.clone(), context_ref);
                 if self.shared.event_tx.send(inbound).await.is_err() {
@@ -544,8 +544,9 @@ fn attachments_from_message(message: &DiscordMessage) -> Vec<Attachment> {
 
 fn discord_user_name(user: &DiscordUser) -> String {
     user.global_name
-        .clone()
-        .unwrap_or_else(|| user.name.clone())
+        .as_deref()
+        .unwrap_or(&user.name)
+        .to_owned()
 }
 
 fn is_thread_kind(kind: ChannelType) -> bool {

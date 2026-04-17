@@ -1,6 +1,6 @@
 //! Eval execution engine for running suites against isolated agent configurations.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -192,10 +192,11 @@ impl EvalEngine {
         llm_provider: Option<Arc<dyn LLMProvider>>,
     ) -> Result<EvalRun> {
         let started_at = Utc::now();
-        let mut indexed_pairs = Vec::new();
+        let mut indexed_pairs: Vec<(usize, usize, Arc<AgentConfig>, Arc<TestCase>)> = Vec::new();
         for (config_index, config) in configs.iter().enumerate() {
+            let arc_config = Arc::new(config.clone());
             for (case_index, case) in suite.cases.iter().enumerate() {
-                indexed_pairs.push((config_index, case_index, config.clone(), case.clone()));
+                indexed_pairs.push((config_index, case_index, Arc::clone(&arc_config), Arc::new(case.clone())));
             }
         }
 
@@ -388,7 +389,7 @@ async fn run_environment(
     environment
         .session_store
         .emit_event(
-            environment.session_id.clone(),
+            environment.session_id,
             Event::UserMessage {
                 text: input,
                 attachments: Vec::new(),
@@ -402,7 +403,7 @@ async fn run_environment(
 
     for turn_index in 0..MAX_AGENT_TURNS {
         let outcome = run_streamed_turn(
-            environment.session_id.clone(),
+            environment.session_id,
             environment.session_store.clone(),
             environment.llm_provider.clone(),
             &environment.pipeline,
@@ -448,23 +449,23 @@ async fn run_environment(
     Ok(collector.finish())
 }
 
-async fn cleanup_workspace(path: &PathBuf) -> Result<()> {
+async fn cleanup_workspace(path: &Path) -> Result<()> {
     if fs_try_exists(path).await? {
         tokio::fs::remove_dir_all(path)
             .await
             .map_err(|source| crate::EvalError::Io {
-                path: path.clone(),
+                path: path.to_path_buf(),
                 source,
             })?;
     }
     Ok(())
 }
 
-async fn fs_try_exists(path: &PathBuf) -> Result<bool> {
+async fn fs_try_exists(path: &Path) -> Result<bool> {
     tokio::fs::try_exists(path)
         .await
         .map_err(|source| crate::EvalError::Io {
-            path: path.clone(),
+            path: path.to_path_buf(),
             source,
         })
 }
@@ -538,7 +539,7 @@ mod tests {
 
         fn capabilities(&self) -> ModelCapabilities {
             ModelCapabilities {
-                model_id: "mock-model".to_string(),
+                model_id: moa_core::ModelId::new("mock-model"),
                 context_window: 32_000,
                 max_output: 1_024,
                 supports_tools: true,
@@ -565,7 +566,7 @@ mod tests {
                     "hello from eval".to_string(),
                 )],
                 stop_reason: StopReason::EndTurn,
-                model: "mock-model".to_string(),
+                model: moa_core::ModelId::new("mock-model"),
                 input_tokens: 42,
                 output_tokens: 7,
                 cached_input_tokens: 0,

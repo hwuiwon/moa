@@ -52,7 +52,7 @@ impl BuiltInTool for MemoryReadTool {
         let page = match params.scope.as_deref() {
             Some(scope) => {
                 let resolved_scope = parse_scope(scope, ctx.session)?;
-                ctx.memory_store.read_page(resolved_scope, &path).await?
+                ctx.memory_store.read_page(&resolved_scope, &path).await?
             }
             None => read_page_with_fallback(ctx.memory_store, ctx.session, &path).await?,
         };
@@ -125,7 +125,7 @@ impl BuiltInTool for MemorySearchTool {
             };
             let mut results = ctx
                 .memory_store
-                .search(&params.query, scope, per_scope_limit)
+                .search(&params.query, &scope, per_scope_limit)
                 .await?;
             if let Some(page_type) = &type_filter {
                 results.retain(|result| &result.page_type == page_type);
@@ -267,7 +267,7 @@ impl BuiltInTool for MemoryWriteTool {
                 metadata: std::collections::HashMap::new(),
             },
         };
-        ctx.memory_store.write_page(scope, &path, page).await?;
+        ctx.memory_store.write_page(&scope, &path, page).await?;
 
         Ok(ToolOutput::text(
             format!("Wrote memory page {}", path.as_str()),
@@ -329,7 +329,7 @@ impl BuiltInTool for MemoryIngestTool {
         let report = ctx
             .memory_store
             .ingest_source(
-                MemoryScope::Workspace(ctx.session.workspace_id.clone()),
+                &MemoryScope::Workspace(ctx.session.workspace_id.clone()),
                 &source_name,
                 &params.content,
             )
@@ -338,7 +338,7 @@ impl BuiltInTool for MemoryIngestTool {
         if let Some(session_store) = ctx.session_store {
             session_store
                 .emit_event(
-                    ctx.session.id.clone(),
+                    ctx.session.id,
                     Event::MemoryIngest {
                         source_name: report.source_name.clone(),
                         source_path: report.source_path.to_string(),
@@ -452,12 +452,12 @@ async fn read_page_with_fallback(
     path: &MemoryPath,
 ) -> Result<WikiPage> {
     match memory_store
-        .read_page(MemoryScope::Workspace(session.workspace_id.clone()), path)
+        .read_page(&MemoryScope::Workspace(session.workspace_id.clone()), path)
         .await
     {
         Ok(page) => Ok(page),
         Err(error) if is_memory_not_found(&error) => memory_store
-            .read_page(MemoryScope::User(session.user_id.clone()), path)
+            .read_page(&MemoryScope::User(session.user_id.clone()), path)
             .await
             .map_err(|fallback_error| {
                 if is_memory_not_found(&fallback_error) {
@@ -479,14 +479,14 @@ async fn resolve_existing_scope(
     path: &MemoryPath,
 ) -> Result<(MemoryScope, Option<WikiPage>)> {
     let workspace_scope = MemoryScope::Workspace(session.workspace_id.clone());
-    match memory_store.read_page(workspace_scope.clone(), path).await {
+    match memory_store.read_page(&workspace_scope, path).await {
         Ok(page) => return Ok((workspace_scope, Some(page))),
         Err(error) if !is_memory_not_found(&error) => return Err(error),
         Err(_) => {}
     }
 
     let user_scope = MemoryScope::User(session.user_id.clone());
-    match memory_store.read_page(user_scope.clone(), path).await {
+    match memory_store.read_page(&user_scope, path).await {
         Ok(page) => Ok((user_scope, Some(page))),
         Err(error) if !is_memory_not_found(&error) => Err(error),
         Err(_) => Err(MoaError::ToolError(format!(

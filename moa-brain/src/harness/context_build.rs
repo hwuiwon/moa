@@ -138,7 +138,7 @@ async fn persist_context_snapshot(
     };
     if snapshot_value.is_null() {
         let started_at = Instant::now();
-        if let Err(error) = session_store.delete_snapshot(ctx.session_id.clone()).await {
+        if let Err(error) = session_store.delete_snapshot(ctx.session_id).await {
             tracing::warn!(
                 session_id = %ctx.session_id,
                 error = %error,
@@ -186,7 +186,7 @@ async fn persist_context_snapshot(
 
     let started_at = Instant::now();
     if let Err(error) = session_store
-        .put_snapshot(ctx.session_id.clone(), snapshot)
+        .put_snapshot(ctx.session_id, snapshot)
         .await
     {
         tracing::warn!(
@@ -302,7 +302,7 @@ pub(super) async fn append_event(
     );
     let started_at = Instant::now();
     let result = async {
-        let sequence_num = session_store.emit_event(session_id.clone(), event).await?;
+        let sequence_num = session_store.emit_event(session_id, event).await?;
         if let Some(event_tx) = event_tx {
             let mut records = session_store
                 .get_events(
@@ -340,7 +340,7 @@ mod tests {
             text: "done".to_string(),
             content: Vec::new(),
             stop_reason: StopReason::EndTurn,
-            model: "gpt-5.4".to_string(),
+            model: moa_core::ModelId::new("gpt-5.4"),
             input_tokens: 100_000,
             output_tokens: 10_000,
             cached_input_tokens: 50_000,

@@ -72,12 +72,14 @@ impl DaytonaHandProvider {
     }
 
     /// Overrides the default idle timeout sent during provisioning.
+    #[must_use]
     pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
         self.idle_timeout = idle_timeout;
         self
     }
 
     /// Overrides the default image used when the hand spec does not set one.
+    #[must_use]
     pub fn with_default_image(mut self, default_image: impl Into<String>) -> Self {
         self.default_image = default_image.into();
         self

@@ -20,6 +20,27 @@ uuid_id!(
     /// Identifier for a brain execution instance.
     pub struct BrainId
 );
+string_id!(
+    /// Stable identifier for an LLM model (e.g., "gpt-5.4", "claude-sonnet-4-6").
+    pub struct ModelId
+);
+
+impl Default for ModelId {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
+
+uuid_id!(
+    /// Stable identifier for a single tool call within a session.
+    pub struct ToolCallId
+);
+
+impl From<uuid::Uuid> for ToolCallId {
+    fn from(value: uuid::Uuid) -> Self {
+        Self(value)
+    }
+}
 
 #[cfg(test)]
 mod tests {

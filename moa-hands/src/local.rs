@@ -74,12 +74,14 @@ impl LocalHandProvider {
     }
 
     /// Overrides the default per-tool timeout.
+    #[must_use]
     pub fn with_command_timeout(mut self, command_timeout: Duration) -> Self {
         self.command_timeout = command_timeout;
         self
     }
 
     /// Overrides the default tool-output truncation settings.
+    #[must_use]
     pub fn with_tool_output_config(mut self, tool_output: ToolOutputConfig) -> Self {
         self.tool_output = tool_output;
         self

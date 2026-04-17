@@ -63,7 +63,7 @@ pub async fn maybe_distill_skill(
     let page = wiki_page_from_skill(&skill, Some(path.clone()))?;
     memory_store
         .write_page(
-            moa_core::MemoryScope::Workspace(session.workspace_id.clone()),
+            &moa_core::MemoryScope::Workspace(session.workspace_id.clone()),
             &path,
             page,
         )

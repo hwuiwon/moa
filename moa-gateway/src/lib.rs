@@ -41,7 +41,7 @@ pub use telegram::TelegramAdapter;
 #[cfg(any(feature = "discord", feature = "slack", feature = "telegram"))]
 pub(crate) fn gateway_receive_span(message: &InboundMessage) -> tracing::Span {
     let trace_name = trace_name_from_message(&message.text);
-    let platform = message.platform.to_string();
+    let platform = message.platform.as_str();
     let channel = gateway_channel_label(&message.channel);
     let tags = format!("[\"{platform}\"]");
     tracing::info_span!(

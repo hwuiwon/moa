@@ -126,8 +126,8 @@ mod tests {
         state.save(&tmp).expect("save");
         let loaded = WindowState::load(&tmp).expect("load");
 
-        assert_eq!(loaded.width, 1400.0);
-        assert_eq!(loaded.sidebar_width, 260.0);
+        assert!((loaded.width - 1400.0_f32).abs() < f32::EPSILON);
+        assert!((loaded.sidebar_width - 260.0_f32).abs() < f32::EPSILON);
         assert!(!loaded.sidebar_visible);
         assert!(loaded.detail_visible);
 
