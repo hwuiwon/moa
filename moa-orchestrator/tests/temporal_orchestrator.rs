@@ -250,14 +250,18 @@ async fn temporal_test_orchestrator_with_provider(
         .expect("temporal config")
         .api_key_env = None;
 
-    let (session_store, _database_url, _schema_name) = testing::create_isolated_test_store()
+    let (session_store, _database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("session store");
     let session_store = Arc::new(session_store);
     let memory_store = Arc::new(
-        FileMemoryStore::from_config(&config)
-            .await
-            .expect("memory store"),
+        FileMemoryStore::from_config_with_pool(
+            &config,
+            Arc::new(session_store.pool().clone()),
+            Some(&schema_name),
+        )
+        .await
+        .expect("memory store"),
     );
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())

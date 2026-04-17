@@ -123,6 +123,11 @@ impl PostgresSessionStore {
         &self.pool
     }
 
+    /// Returns the optional schema name used for this store.
+    pub fn schema_name(&self) -> Option<&str> {
+        self.schema_name.as_deref()
+    }
+
     async fn new_with_options_and_blob_store(
         database_url: &str,
         pool_min: u32,

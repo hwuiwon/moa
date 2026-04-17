@@ -130,7 +130,14 @@ impl LocalOrchestrator {
         config.general.default_model = selection.model_id;
 
         let session_store = create_session_store(&config).await?;
-        let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
+        let memory_store = Arc::new(
+            FileMemoryStore::from_config_with_pool(
+                &config,
+                Arc::new(session_store.pool().clone()),
+                session_store.schema_name(),
+            )
+            .await?,
+        );
         let tool_router = Arc::new(
             ToolRouter::from_config(&config, memory_store.clone())
                 .await?

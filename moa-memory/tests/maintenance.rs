@@ -1,10 +1,12 @@
 //! Integration coverage for consolidation, ingest, and branch reconciliation.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use chrono::{Duration, TimeZone, Utc};
 use moa_core::{ConfidenceLevel, MemoryScope, MemoryStore, PageType, WikiPage};
 use moa_memory::FileMemoryStore;
+use moa_session::testing;
 use tempfile::tempdir;
 
 fn sample_page(title: &str, page_type: PageType, content: &str) -> WikiPage {
@@ -25,6 +27,20 @@ fn sample_page(title: &str, page_type: PageType, content: &str) -> WikiPage {
         reference_count: 1,
         metadata: std::collections::HashMap::new(),
     }
+}
+
+async fn searchable_store() -> (tempfile::TempDir, FileMemoryStore) {
+    let dir = tempdir().unwrap();
+    let (session_store, _database_url, schema_name) =
+        testing::create_isolated_test_store().await.unwrap();
+    let store = FileMemoryStore::new_with_pool_and_schema(
+        dir.path(),
+        Arc::new(session_store.pool().clone()),
+        Some(&schema_name),
+    )
+    .await
+    .unwrap();
+    (dir, store)
 }
 
 #[derive(Clone)]
@@ -378,10 +394,8 @@ async fn reconciliation_merges_multiple_branches_and_cleans_branch_directory() {
 }
 
 #[tokio::test]
-#[ignore = "search disabled until step 90 lands the Postgres tsvector index"]
 async fn maintenance_operations_append_log_and_keep_results_searchable() {
-    let dir = tempdir().unwrap();
-    let store = FileMemoryStore::new(dir.path()).await.unwrap();
+    let (_dir, store) = searchable_store().await;
     let scope = MemoryScope::Workspace("ws1".into());
 
     store

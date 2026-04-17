@@ -204,7 +204,14 @@ async fn test_orchestrator_with_provider(
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
     let session_store = create_test_store().await?;
-    let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
+    let memory_store = Arc::new(
+        FileMemoryStore::from_config_with_pool(
+            &config,
+            Arc::new(session_store.pool().clone()),
+            session_store.schema_name(),
+        )
+        .await?,
+    );
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())
             .await?
@@ -230,7 +237,14 @@ async fn test_orchestrator_with_config_provider_and_store(
     provider: Arc<dyn LLMProvider>,
     session_store: Arc<PostgresSessionStore>,
 ) -> Result<LocalOrchestrator> {
-    let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
+    let memory_store = Arc::new(
+        FileMemoryStore::from_config_with_pool(
+            &config,
+            Arc::new(session_store.pool().clone()),
+            session_store.schema_name(),
+        )
+        .await?,
+    );
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())
             .await?
@@ -1336,7 +1350,14 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
     let mut reopened_config = MoaConfig::default();
     reopened_config.local.memory_dir = dir.path().join("memory").display().to_string();
     reopened_config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
-    let reopened_memory = Arc::new(FileMemoryStore::from_config(&reopened_config).await?);
+    let reopened_memory = Arc::new(
+        FileMemoryStore::from_config_with_pool(
+            &reopened_config,
+            Arc::new(reopened_store.pool().clone()),
+            reopened_store.schema_name(),
+        )
+        .await?,
+    );
     let reopened_provider: Arc<dyn LLMProvider> = Arc::new(MockProvider {
         model: reopened_config.general.default_model.clone(),
         first_turn_delay: Duration::from_millis(5),
@@ -2025,7 +2046,14 @@ async fn completed_tool_turn_destroys_cached_hand() -> Result<()> {
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
     let session_store = create_test_store().await?;
-    let memory_store = Arc::new(FileMemoryStore::from_config(&config).await?);
+    let memory_store = Arc::new(
+        FileMemoryStore::from_config_with_pool(
+            &config,
+            Arc::new(session_store.pool().clone()),
+            session_store.schema_name(),
+        )
+        .await?,
+    );
     let provider = Arc::new(DestroyTrackingHandProvider {
         provisioned: Arc::new(AtomicUsize::new(0)),
         destroyed: Arc::new(AtomicUsize::new(0)),

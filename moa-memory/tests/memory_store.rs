@@ -1,9 +1,12 @@
 //! Integration coverage for the file-backed memory store.
 
+use std::sync::Arc;
+
 use chrono::{TimeZone, Utc};
 use moa_core::{ConfidenceLevel, MemoryScope, MemoryStore, PageType, Result, WikiPage};
 use moa_memory::FileMemoryStore;
-use tempfile::tempdir;
+use moa_session::{PostgresSessionStore, testing};
+use tempfile::{TempDir, tempdir};
 
 fn sample_page(title: &str, page_type: PageType, content: &str) -> WikiPage {
     let timestamp = Utc.with_ymd_and_hms(2026, 4, 9, 16, 45, 0).unwrap();
@@ -23,6 +26,57 @@ fn sample_page(title: &str, page_type: PageType, content: &str) -> WikiPage {
         reference_count: 5,
         metadata: std::collections::HashMap::new(),
     }
+}
+
+struct SearchHarness {
+    _dir: TempDir,
+    store: FileMemoryStore,
+    session_store: PostgresSessionStore,
+    database_url: String,
+    schema_name: String,
+}
+
+impl SearchHarness {
+    async fn new() -> Result<Self> {
+        let dir = tempdir()?;
+        let (session_store, database_url, schema_name) =
+            testing::create_isolated_test_store().await?;
+        let store = FileMemoryStore::new_with_pool_and_schema(
+            dir.path(),
+            Arc::new(session_store.pool().clone()),
+            Some(&schema_name),
+        )
+        .await?;
+
+        Ok(Self {
+            _dir: dir,
+            store,
+            session_store,
+            database_url,
+            schema_name,
+        })
+    }
+
+    async fn cleanup(self) -> Result<()> {
+        let Self {
+            _dir,
+            store,
+            session_store,
+            database_url,
+            schema_name,
+        } = self;
+        drop(store);
+        drop(session_store);
+        testing::cleanup_test_schema(&database_url, &schema_name).await
+    }
+}
+
+fn qualified(schema_name: &str, table_name: &str) -> String {
+    format!("\"{}\".\"{}\"", schema_name, table_name)
+}
+
+fn workspace_scope_key(workspace_id: &str) -> String {
+    format!("workspace:{workspace_id}")
 }
 
 #[tokio::test]
@@ -60,10 +114,9 @@ async fn create_read_update_and_delete_wiki_pages() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "search disabled until step 90 lands the Postgres tsvector index"]
 async fn fts_search_finds_ranked_results() -> Result<()> {
-    let dir = tempdir()?;
-    let store = FileMemoryStore::new(dir.path()).await?;
+    let harness = SearchHarness::new().await?;
+    let store = &harness.store;
     let scope = MemoryScope::Workspace("ws1".into());
 
     for index in 0..10 {
@@ -87,14 +140,14 @@ async fn fts_search_finds_ranked_results() -> Result<()> {
     assert!(results[0].snippet.contains("OAuth") || results[0].title.contains("OAuth"));
     assert_eq!(results[0].path.as_str(), "topics/page-0.md");
 
+    harness.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-#[ignore = "search disabled until step 90 lands the Postgres tsvector index"]
 async fn fts_search_handles_hyphenated_queries() -> Result<()> {
-    let dir = tempdir()?;
-    let store = FileMemoryStore::new(dir.path()).await?;
+    let harness = SearchHarness::new().await?;
+    let store = &harness.store;
     let scope = MemoryScope::Workspace("ws1".into());
 
     store
@@ -114,14 +167,14 @@ async fn fts_search_handles_hyphenated_queries() -> Result<()> {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].path.as_str(), "skills/oauth-refresh/SKILL.md");
 
+    harness.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-#[ignore = "search disabled until step 90 lands the Postgres tsvector index"]
 async fn rebuild_search_index_from_files_restores_results() -> Result<()> {
-    let dir = tempdir()?;
-    let store = FileMemoryStore::new(dir.path()).await?;
+    let harness = SearchHarness::new().await?;
+    let store = &harness.store;
     let scope = MemoryScope::Workspace("ws1".into());
 
     store
@@ -136,21 +189,43 @@ async fn rebuild_search_index_from_files_restores_results() -> Result<()> {
         )
         .await?;
 
-    let rebuilt = FileMemoryStore::new(dir.path()).await?;
-    rebuilt.rebuild_search_index(&scope).await?;
-    let results = rebuilt.search("refresh token", &scope, 5).await?;
+    sqlx::query(&format!(
+        "INSERT INTO {} \
+         (scope, path, title, page_type, confidence, created, updated, last_referenced, reference_count, tags, content) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        qualified(&harness.schema_name, "wiki_pages")
+    ))
+    .bind(workspace_scope_key("ws1"))
+    .bind("topics/stale.md")
+    .bind("Stale")
+    .bind("topic")
+    .bind("low")
+    .bind(Utc::now())
+    .bind(Utc::now())
+    .bind(Utc::now())
+    .bind(0_i32)
+    .bind(vec!["stale".to_string()])
+    .bind("stale canary text")
+    .execute(harness.session_store.pool())
+    .await
+    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+
+    store.rebuild_search_index(&scope).await?;
+    let results = store.search("refresh token", &scope, 5).await?;
+    let stale = store.search("stale canary", &scope, 5).await?;
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].path.as_str(), "entities/auth-service.md");
+    assert!(stale.is_empty());
 
+    harness.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-#[ignore = "search disabled until step 90 lands the Postgres tsvector index"]
 async fn user_and_workspace_scopes_are_separate() -> Result<()> {
-    let dir = tempdir()?;
-    let store = FileMemoryStore::new(dir.path()).await?;
+    let harness = SearchHarness::new().await?;
+    let store = &harness.store;
     let user_scope = MemoryScope::User("u1".into());
     let workspace_scope = MemoryScope::Workspace("ws1".into());
     let path = "topics/preferences.md".into();
@@ -188,6 +263,72 @@ async fn user_and_workspace_scopes_are_separate() -> Result<()> {
     assert_eq!(user_results.len(), 1);
     assert!(workspace_results.is_empty());
 
+    harness.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn trigram_fallback_recovers_short_typos() -> Result<()> {
+    let harness = SearchHarness::new().await?;
+    let store = &harness.store;
+    let scope = MemoryScope::Workspace("ws1".into());
+
+    store
+        .write_page(
+            &scope,
+            &"topics/oauth.md".into(),
+            sample_page(
+                "OAuth Refresh",
+                PageType::Topic,
+                "# OAuth Refresh\n\nRefresh tokens rotate every 24 hours.\n",
+            ),
+        )
+        .await?;
+
+    let results = store.search("oatuh", &scope, 5).await?;
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].path.as_str(), "topics/oauth.md");
+
+    harness.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn recent_pages_outrank_equally_relevant_old_pages() -> Result<()> {
+    let harness = SearchHarness::new().await?;
+    let store = &harness.store;
+    let scope = MemoryScope::Workspace("ws1".into());
+
+    let mut recent = sample_page(
+        "Recent Rotation",
+        PageType::Topic,
+        "# Recent Rotation\n\nOAuth refresh tokens rotate every 24 hours.\n",
+    );
+    recent.updated = Utc::now();
+    recent.last_referenced = Utc::now();
+
+    let mut old = sample_page(
+        "Old Rotation",
+        PageType::Topic,
+        "# Old Rotation\n\nOAuth refresh tokens rotate every 24 hours.\n",
+    );
+    old.updated = Utc.with_ymd_and_hms(2024, 4, 9, 16, 45, 0).unwrap();
+    old.last_referenced = old.updated;
+
+    store
+        .write_page(&scope, &"topics/recent.md".into(), recent)
+        .await?;
+    store
+        .write_page(&scope, &"topics/old.md".into(), old)
+        .await?;
+
+    let results = store.search("OAuth refresh rotation", &scope, 5).await?;
+
+    assert!(!results.is_empty());
+    assert_eq!(results[0].path.as_str(), "topics/recent.md");
+
+    harness.cleanup().await?;
     Ok(())
 }
 
