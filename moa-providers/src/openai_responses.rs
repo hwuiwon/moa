@@ -1,4 +1,4 @@
-//! OpenAI Responses API request mapping and stream aggregation helpers.
+//! `OpenAI` Responses API request mapping and stream aggregation helpers.
 //!
 //! Internal adapter phases:
 //! 1. build one provider request from MOA's `CompletionRequest`
@@ -39,7 +39,7 @@ use crate::schema::compile_for_openai_strict;
 
 const OPENAI_METADATA_VALUE_LIMIT: usize = 512;
 
-/// Builds an async-openai client around MOA's shared OpenAI configuration.
+/// Builds an async-openai client around MOA's shared `OpenAI` configuration.
 pub(crate) fn build_openai_client(config: OpenAIConfig) -> OpenAiClient<OpenAIConfig> {
     OpenAiClient::with_config(config)
 }
@@ -522,7 +522,7 @@ fn is_rate_limit_message(message: &str) -> bool {
         || message.contains("too many requests")
 }
 
-/// Field names that can appear in OpenAI streaming payloads with a type
+/// Field names that can appear in `OpenAI` streaming payloads with a type
 /// async-openai 0.34 doesn't yet model. We log + skip the chunk instead
 /// of letting one quirk tear down the whole session. Add to this list
 /// when a new field shows up in production traces.

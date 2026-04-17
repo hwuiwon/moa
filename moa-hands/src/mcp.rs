@@ -640,7 +640,7 @@ mod tests {
                 let body = if request_index == 0 {
                     r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#
                 } else if request_index == 1 {
-                    r#"{}"#
+                    r"{}"
                 } else {
                     r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"pong"}]}}"#
                 };

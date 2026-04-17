@@ -324,14 +324,14 @@ mod tests {
 
     #[test]
     fn extracts_markdown_list_sections() {
-        let source = r#"
+        let source = r"
 ## Entities
 - Auth Service
 - Token Store
 
 ## Decisions
 - Adopt single-use refresh tokens
-"#;
+";
 
         assert_eq!(
             extract_section_items(source, "entities"),
@@ -353,7 +353,7 @@ mod tests {
             &store,
             &scope,
             "RFC 0042 Auth Redesign",
-            r#"
+            r"
 ## Entities
 - Auth Service
 
@@ -362,7 +362,7 @@ mod tests {
 
 ## Decisions
 - Adopt single-use refresh tokens
-"#,
+",
         )
         .await
         .unwrap();

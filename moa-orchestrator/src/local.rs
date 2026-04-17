@@ -460,7 +460,7 @@ impl LocalOrchestrator {
             Box::pin(async move {
                 match branch_manager.cleanup_expired().await {
                     Ok(count) if count > 0 => {
-                        tracing::info!(count, "cleaned up expired Neon checkpoint branches")
+                        tracing::info!(count, "cleaned up expired Neon checkpoint branches");
                     }
                     Ok(_) => {}
                     Err(error) => tracing::warn!(

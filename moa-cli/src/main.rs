@@ -923,31 +923,31 @@ fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result
         "database.url" => config.database.url = value.to_string(),
         "database.admin_url" => config.database.admin_url = Some(value.to_string()),
         "database.max_connections" => {
-            config.database.max_connections = value.parse().context("expected integer pool size")?
+            config.database.max_connections = value.parse().context("expected integer pool size")?;
         }
         "database.connect_timeout_seconds" => {
             config.database.connect_timeout_seconds =
-                value.parse().context("expected integer timeout")?
+                value.parse().context("expected integer timeout")?;
         }
         "database.neon.enabled" => config.database.neon.enabled = parse_bool(value)?,
         "database.neon.api_key_env" => config.database.neon.api_key_env = value.to_string(),
         "database.neon.project_id" => config.database.neon.project_id = value.to_string(),
         "database.neon.parent_branch_id" => {
-            config.database.neon.parent_branch_id = value.to_string()
+            config.database.neon.parent_branch_id = value.to_string();
         }
         "database.neon.max_checkpoints" => {
             config.database.neon.max_checkpoints =
-                value.parse().context("expected integer checkpoint count")?
+                value.parse().context("expected integer checkpoint count")?;
         }
         "database.neon.checkpoint_ttl_hours" => {
             config.database.neon.checkpoint_ttl_hours = value
                 .parse()
-                .context("expected integer checkpoint ttl hours")?
+                .context("expected integer checkpoint ttl hours")?;
         }
         "database.neon.pooled" => config.database.neon.pooled = parse_bool(value)?,
         "database.neon.suspend_timeout_seconds" => {
             config.database.neon.suspend_timeout_seconds =
-                value.parse().context("expected integer suspend timeout")?
+                value.parse().context("expected integer suspend timeout")?;
         }
         "local.memory_dir" => config.local.memory_dir = value.to_string(),
         "daemon.auto_connect" => config.daemon.auto_connect = parse_bool(value)?,
@@ -955,16 +955,16 @@ fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result
         "observability.enabled" => config.observability.enabled = parse_bool(value)?,
         "observability.service_name" => config.observability.service_name = value.to_string(),
         "observability.otlp_endpoint" => {
-            config.observability.otlp_endpoint = Some(value.to_string())
+            config.observability.otlp_endpoint = Some(value.to_string());
         }
         "observability.otlp_protocol" => {
-            config.observability.otlp_protocol = parse_otlp_protocol(value)?
+            config.observability.otlp_protocol = parse_otlp_protocol(value)?;
         }
         "observability.environment" => config.observability.environment = Some(value.to_string()),
         "observability.release" => config.observability.release = Some(value.to_string()),
         "observability.sample_rate" => {
             config.observability.sample_rate =
-                value.parse().context("expected decimal sample rate")?
+                value.parse().context("expected decimal sample rate")?;
         }
         _ => bail!("unsupported config key: {key}"),
     }

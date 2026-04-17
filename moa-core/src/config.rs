@@ -551,7 +551,7 @@ impl Default for ProviderCredentialConfig {
 pub struct ProvidersConfig {
     /// Anthropic credentials.
     pub anthropic: ProviderCredentialConfig,
-    /// OpenAI credentials.
+    /// `OpenAI` credentials.
     pub openai: ProviderCredentialConfig,
     /// Google Gemini credentials.
     pub google: ProviderCredentialConfig,
@@ -1269,10 +1269,10 @@ mod tests {
 
     #[test]
     fn observability_config_backward_compat() {
-        let toml = r#"
+        let toml = r"
             [observability]
             enabled = false
-        "#;
+        ";
         let config: MoaConfig = toml::from_str(toml).expect("config should deserialize");
         assert!(!config.observability.enabled);
         assert_eq!(config.observability.otlp_protocol, OtlpProtocol::Grpc);

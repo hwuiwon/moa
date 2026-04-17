@@ -1,4 +1,4 @@
-//! OpenAI Responses API provider implementation.
+//! `OpenAI` Responses API provider implementation.
 
 use std::env;
 use std::time::Instant;
@@ -26,7 +26,7 @@ const MODEL_GPT_5_4_NANO: &str = "gpt-5.4-nano";
 const MODEL_GPT_5_MINI: &str = "gpt-5-mini";
 const MODEL_GPT_5_NANO: &str = "gpt-5-nano";
 
-/// OpenAI provider backed by the Responses API.
+/// `OpenAI` provider backed by the Responses API.
 pub struct OpenAIProvider {
     client: async_openai::Client<OpenAIConfig>,
     api_key: String,
@@ -65,7 +65,7 @@ impl OpenAIProvider {
         })
     }
 
-    /// Creates a provider from the configured OpenAI environment variable.
+    /// Creates a provider from the configured `OpenAI` environment variable.
     pub fn from_config(config: &MoaConfig) -> Result<Self> {
         Self::from_config_with_model(config, config.general.default_model.clone())
     }

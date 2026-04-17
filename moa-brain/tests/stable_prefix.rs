@@ -222,7 +222,7 @@ fn stable_prefix_bytes(request: &CompletionRequest) -> Result<Vec<u8>> {
         .cache_controls
         .iter()
         .filter(|breakpoint| breakpoint.ttl == CacheTtl::OneHour)
-        .filter_map(|breakpoint| breakpoint.message_index())
+        .filter_map(moa_core::CacheBreakpoint::message_index)
         .max()
         .or_else(|| request.cache_breakpoints.last().copied())
         .unwrap_or_default()

@@ -294,7 +294,7 @@ fn query_matches_page(query: &str, title: &str, content: &str) -> bool {
         .split_whitespace()
         .map(str::trim)
         .filter(|token| !token.is_empty())
-        .map(|token| token.to_ascii_lowercase())
+        .map(str::to_ascii_lowercase)
         .any(|token| normalized_title.contains(&token) || normalized_content.contains(&token))
 }
 

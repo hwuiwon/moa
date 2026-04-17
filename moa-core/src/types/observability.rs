@@ -353,7 +353,7 @@ fn stable_prefix_message_count(request: &CompletionRequest) -> usize {
         .cache_controls
         .iter()
         .filter(|breakpoint| breakpoint.ttl == CacheTtl::OneHour)
-        .filter_map(|breakpoint| breakpoint.message_index())
+        .filter_map(super::completion::CacheBreakpoint::message_index)
         .max()
         .or_else(|| request.cache_breakpoints.last().copied())
         .unwrap_or_default()

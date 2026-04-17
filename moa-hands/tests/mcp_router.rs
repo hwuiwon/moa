@@ -138,7 +138,7 @@ async fn router_injects_mcp_credentials_via_proxy() {
                 0 => {
                     r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#
                 }
-                1 => r#"{}"#,
+                1 => r"{}",
                 2 => {
                     r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"ping","description":"Ping","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]}}"#
                 }
@@ -205,7 +205,7 @@ async fn router_calls_http_mcp_server_and_surfaces_jsonrpc_errors() {
                 }
                 1 => {
                     assert!(request.contains("\"method\":\"notifications/initialized\""));
-                    r#"{}"#
+                    r"{}"
                 }
                 2 => {
                     assert!(request.contains("\"method\":\"tools/list\""));

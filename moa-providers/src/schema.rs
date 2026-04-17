@@ -29,7 +29,7 @@ pub fn compile_for_gemini(schema: &Value) -> Value {
     compiled
 }
 
-/// Compiles a canonical tool schema into an OpenAI strict-mode compatible schema.
+/// Compiles a canonical tool schema into an `OpenAI` strict-mode compatible schema.
 pub fn compile_for_openai_strict(schema: &Value) -> Value {
     let mut compiled = schema.clone();
 

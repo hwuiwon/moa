@@ -126,7 +126,7 @@ async fn ingest_source_creates_summary_and_updates_related_pages() {
         .ingest_source(
             &scope,
             "RFC 0042 Auth Redesign",
-            r#"
+            r"
 ## Entities
 - Auth Service
 
@@ -138,7 +138,7 @@ async fn ingest_source_creates_summary_and_updates_related_pages() {
 
 ## Contradictions
 - Existing deployment docs still mention multi-use refresh tokens.
-"#,
+",
         )
         .await
         .unwrap();
@@ -267,13 +267,13 @@ async fn repeated_ingest_updates_existing_pages_without_duplicate_links() {
     let store = FileMemoryStore::new(dir.path()).await.unwrap();
     let scope = MemoryScope::Workspace("ws1".into());
 
-    let source = r#"
+    let source = r"
 ## Entities
 - Auth Service
 
 ## Topics
 - Token Rotation
-"#;
+";
 
     let first = store
         .ingest_source(&scope, "RFC 0042 Auth Redesign", source)
@@ -392,13 +392,13 @@ async fn maintenance_operations_append_log_and_keep_results_searchable() {
         .ingest_source(
             &scope,
             "RFC 0042 Auth Redesign",
-            r#"
+            r"
 ## Entities
 - Auth Service
 
 ## Topics
 - Token Rotation
-"#,
+",
         )
         .await
         .unwrap();

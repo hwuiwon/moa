@@ -422,7 +422,7 @@ async fn file_search_truncates_pathological_match_sets() {
     assert_eq!(
         structured
             .get("truncated")
-            .and_then(|value| value.as_bool()),
+            .and_then(serde_json::Value::as_bool),
         Some(true)
     );
 }
@@ -1209,7 +1209,7 @@ async fn docker_file_tools_roundtrip_inside_container_workspace() {
         return;
     }
 
-    let result = async {
+    let _result = async {
         let write = provider
             .execute(
                 &handle,
@@ -1283,7 +1283,6 @@ async fn docker_file_tools_roundtrip_inside_container_workspace() {
     .await;
 
     let _ = provider.destroy(&handle).await;
-    result
 }
 
 #[tokio::test]

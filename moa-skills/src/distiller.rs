@@ -144,7 +144,7 @@ fn similarity_score(summary_tokens: &HashSet<String>, skill: &SkillMetadata) -> 
 fn tokenize(text: &str) -> HashSet<String> {
     text.split(|character: char| !character.is_alphanumeric())
         .filter(|token| token.len() >= 3)
-        .map(|token| token.to_ascii_lowercase())
+        .map(str::to_ascii_lowercase)
         .collect()
 }
 

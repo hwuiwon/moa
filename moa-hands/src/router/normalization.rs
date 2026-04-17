@@ -98,7 +98,7 @@ pub(super) fn approval_pattern_for(input_shape: ToolInputShape, normalized_input
         let sub_commands = split_shell_chain(&effective_command);
         let target = sub_commands
             .first()
-            .map(|sub_command| sub_command.as_str())
+            .map(std::string::String::as_str)
             .unwrap_or(effective_command.as_str());
         let tokens = shell_words::split(target).unwrap_or_default();
         if let Some(command) = tokens.first() {

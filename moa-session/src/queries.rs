@@ -1,4 +1,4 @@
-//! Query helpers for mapping PostgreSQL rows into MOA core types.
+//! Query helpers for mapping `PostgreSQL` rows into MOA core types.
 
 use chrono::{DateTime, Utc};
 use moa_core::{

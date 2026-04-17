@@ -36,14 +36,14 @@ pub struct PostgresSessionStore {
 }
 
 impl PostgresSessionStore {
-    /// Creates a session store using the default MOA PostgreSQL pool settings.
+    /// Creates a session store using the default MOA `PostgreSQL` pool settings.
     pub async fn new(database_url: &str) -> Result<Self> {
         let blob_store: Arc<dyn BlobStore> =
             Arc::new(FileBlobStore::new(FileBlobStore::default_dir()?));
         Self::new_with_options_and_blob_store(database_url, 1, 5, 10, blob_store, 65_536).await
     }
 
-    /// Creates a session store from config using the configured PostgreSQL pool settings.
+    /// Creates a session store from config using the configured `PostgreSQL` pool settings.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
         Self::new_with_options_and_blob_store(
             config.database.runtime_url(),
@@ -56,7 +56,7 @@ impl PostgresSessionStore {
         .await
     }
 
-    /// Creates a session store from config using the direct/admin PostgreSQL URL when present.
+    /// Creates a session store from config using the direct/admin `PostgreSQL` URL when present.
     pub async fn from_admin_config(config: &MoaConfig) -> Result<Self> {
         Self::new_with_options_and_blob_store(
             config.database.admin_url(),
@@ -69,7 +69,7 @@ impl PostgresSessionStore {
         .await
     }
 
-    /// Creates a session store that uses an explicit PostgreSQL schema.
+    /// Creates a session store that uses an explicit `PostgreSQL` schema.
     ///
     /// This is primarily intended for ignored integration tests so multiple runs can isolate
     /// their tables without separate databases.
@@ -714,7 +714,7 @@ impl SessionStore for PostgresSessionStore {
         Ok(())
     }
 
-    /// Searches events using PostgreSQL full-text search and optional session filters.
+    /// Searches events using `PostgreSQL` full-text search and optional session filters.
     async fn search_events(
         &self,
         query_text: &str,
