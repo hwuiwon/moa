@@ -92,9 +92,7 @@ impl PostgresSessionStore {
     /// Reconstructs the session state needed to resume a brain.
     pub async fn wake(&self, session_id: moa_core::SessionId) -> Result<WakeContext> {
         let session = self.get_session(session_id).await?;
-        let all_events = self
-            .get_events(session_id, EventRange::all())
-            .await?;
+        let all_events = self.get_events(session_id, EventRange::all()).await?;
         let (checkpoint_summary, recent_events) = checkpoint_view(&all_events);
         let pending_signals = self.get_pending_signals(session_id).await?;
 

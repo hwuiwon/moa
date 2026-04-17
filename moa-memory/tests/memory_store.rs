@@ -48,9 +48,7 @@ async fn create_read_update_and_delete_wiki_pages() -> Result<()> {
     updated
         .content
         .push_str("\nRefresh tokens rotate on every use.\n");
-    store
-        .write_page(&scope, &path, updated.clone())
-        .await?;
+    store.write_page(&scope, &path, updated.clone()).await?;
 
     let reloaded = store.read_page(&scope, &path).await?;
     assert!(reloaded.content.contains("rotate on every use"));

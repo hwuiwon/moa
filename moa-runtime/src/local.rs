@@ -324,11 +324,7 @@ impl LocalChatRuntime {
         session_id: SessionId,
         event_tx: mpsc::UnboundedSender<SessionRuntimeEvent>,
     ) -> Result<()> {
-        let Some(mut runtime_rx) = self
-            .orchestrator
-            .observe_runtime(session_id)
-            .await?
-        else {
+        let Some(mut runtime_rx) = self.orchestrator.observe_runtime(session_id).await? else {
             return Ok(());
         };
         relay_session_runtime_events(&mut runtime_rx, session_id, event_tx).await
@@ -340,9 +336,7 @@ impl LocalChatRuntime {
             return Ok(());
         }
 
-        self.orchestrator
-            .ensure_session_running(session_id)
-            .await?;
+        self.orchestrator.ensure_session_running(session_id).await?;
         self.orchestrator
             .signal(
                 session_id,

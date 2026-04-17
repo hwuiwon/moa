@@ -197,9 +197,7 @@ impl ModelCapabilitiesBuilder {
                 .supports_prefix_caching
                 .unwrap_or(defaults.supports_prefix_caching),
             cache_ttl: self.cache_ttl,
-            tool_call_format: self
-                .tool_call_format
-                .unwrap_or(defaults.tool_call_format),
+            tool_call_format: self.tool_call_format.unwrap_or(defaults.tool_call_format),
             pricing: self.pricing.unwrap_or(defaults.pricing),
             native_tools: self.native_tools.unwrap_or(defaults.native_tools),
         }

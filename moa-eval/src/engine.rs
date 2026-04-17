@@ -196,7 +196,12 @@ impl EvalEngine {
         for (config_index, config) in configs.iter().enumerate() {
             let arc_config = Arc::new(config.clone());
             for (case_index, case) in suite.cases.iter().enumerate() {
-                indexed_pairs.push((config_index, case_index, Arc::clone(&arc_config), Arc::new(case.clone())));
+                indexed_pairs.push((
+                    config_index,
+                    case_index,
+                    Arc::clone(&arc_config),
+                    Arc::new(case.clone()),
+                ));
             }
         }
 

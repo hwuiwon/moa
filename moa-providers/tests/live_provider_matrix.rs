@@ -265,8 +265,8 @@ async fn live_providers_stream_incrementally_across_available_keys() {
         let mut streamed_text = String::new();
         let mut text_chunks = 0usize;
         while let Some(block) = stream.next().await {
-            let block = block
-                .unwrap_or_else(|e| panic!("{} streamed chunk error: {e}", provider.label()));
+            let block =
+                block.unwrap_or_else(|e| panic!("{} streamed chunk error: {e}", provider.label()));
             if let CompletionContent::Text(t) = block {
                 streamed_text.push_str(&t);
                 text_chunks += 1;

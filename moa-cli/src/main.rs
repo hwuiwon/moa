@@ -676,8 +676,7 @@ async fn memory_ingest_report(
             Some(value) => value.to_string(),
             None => derive_ingest_source_name(file),
         };
-        let report =
-            MemoryStore::ingest_source(&store, &scope, &source_name, &content).await?;
+        let report = MemoryStore::ingest_source(&store, &scope, &source_name, &content).await?;
         sections.push(format_cli_ingest_section(file, &report));
     }
 
@@ -923,7 +922,8 @@ fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result
         "database.url" => config.database.url = value.to_string(),
         "database.admin_url" => config.database.admin_url = Some(value.to_string()),
         "database.max_connections" => {
-            config.database.max_connections = value.parse().context("expected integer pool size")?;
+            config.database.max_connections =
+                value.parse().context("expected integer pool size")?;
         }
         "database.connect_timeout_seconds" => {
             config.database.connect_timeout_seconds =

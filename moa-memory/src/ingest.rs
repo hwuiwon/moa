@@ -40,9 +40,7 @@ pub async fn ingest_source(
         reference_count: 0,
         metadata: std::collections::HashMap::new(),
     };
-    store
-        .write_page(scope, &source_path, source_page)
-        .await?;
+    store.write_page(scope, &source_path, source_page).await?;
 
     for entity in extract_section_items(&source, "entities") {
         let path = MemoryPath::new(format!("entities/{}.md", slugify(&entity)));
@@ -371,10 +369,7 @@ mod tests {
             report.source_path.as_str(),
             "sources/rfc-0042-auth-redesign.md"
         );
-        let source_page = store
-            .read_page(&scope, &report.source_path)
-            .await
-            .unwrap();
+        let source_page = store.read_page(&scope, &report.source_path).await.unwrap();
         assert_eq!(source_page.page_type, PageType::Source);
 
         let entity_page = store

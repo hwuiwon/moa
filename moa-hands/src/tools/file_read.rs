@@ -23,7 +23,11 @@ pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     let content = fs::read_to_string(&path).await?;
     let display_path = path.strip_prefix(sandbox_dir).unwrap_or(&path).display();
 
-    Ok(render_file_read_output(&content, &display_path.to_string(), &params))
+    Ok(render_file_read_output(
+        &content,
+        &display_path.to_string(),
+        &params,
+    ))
 }
 
 /// Executes the `file_read` tool inside an existing Docker sandbox.

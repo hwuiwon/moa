@@ -452,8 +452,8 @@ mod tests {
     async fn event_stream_emits_gap_marker_when_lagged() {
         let (tx, rx) = broadcast::channel(1);
         let session_id = SessionId::new();
-        let mut stream = EventStream::from_broadcast(session_id, rx)
-            .with_lag_policy(LagPolicy::SkipWithGap);
+        let mut stream =
+            EventStream::from_broadcast(session_id, rx).with_lag_policy(LagPolicy::SkipWithGap);
 
         let first = EventRecord {
             id: Uuid::now_v7(),

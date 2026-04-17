@@ -163,9 +163,7 @@ pub async fn maybe_compact(
     session_id: SessionId,
     _pipeline: &ContextPipeline,
 ) -> Result<bool> {
-    let events = store
-        .get_events(session_id, EventRange::all())
-        .await?;
+    let events = store.get_events(session_id, EventRange::all()).await?;
     maybe_compact_events(
         &CompactionConfig::default(),
         store,

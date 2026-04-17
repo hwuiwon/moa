@@ -185,10 +185,7 @@ async fn persist_context_snapshot(
     }
 
     let started_at = Instant::now();
-    if let Err(error) = session_store
-        .put_snapshot(ctx.session_id, snapshot)
-        .await
-    {
+    if let Err(error) = session_store.put_snapshot(ctx.session_id, snapshot).await {
         tracing::warn!(
             session_id = %ctx.session_id,
             error = %error,

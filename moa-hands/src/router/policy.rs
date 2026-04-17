@@ -83,8 +83,7 @@ impl ToolRouter {
             .registry
             .get(&invocation.name)
             .ok_or_else(|| MoaError::ToolError(format!("unknown tool: {}", invocation.name)))?;
-        let policy_input = self
-            .describe_invocation(tool_definition, invocation)?;
+        let policy_input = self.describe_invocation(tool_definition, invocation)?;
         let rules = if let Some(rule_store) = &self.rule_store {
             rule_store
                 .list_approval_rules(&session.workspace_id)

@@ -204,11 +204,7 @@ impl LocalOrchestrator {
                 )
             });
             if !has_user_input {
-                if let Err(err) = self
-                    .session_store
-                    .delete_session(summary.session_id)
-                    .await
-                {
+                if let Err(err) = self.session_store.delete_session(summary.session_id).await {
                     tracing::warn!(
                         %err,
                         session_id = %summary.session_id,
@@ -678,12 +674,8 @@ impl BrainOrchestrator for LocalOrchestrator {
             )
             .await?;
         }
-        self.spawn_session(
-            session_id,
-            req.initial_message.is_some(),
-            Vec::new(),
-        )
-        .await?;
+        self.spawn_session(session_id, req.initial_message.is_some(), Vec::new())
+            .await?;
         if bootstrap_report.is_some() {
             let sessions = self.sessions.read().await;
             if let Some(handle) = sessions.get(&session_id) {
@@ -723,12 +715,8 @@ impl BrainOrchestrator for LocalOrchestrator {
         let initial_turn_requested =
             session_requires_processing(&wake.session, &wake.recent_events)
                 || !initial_queued_messages.is_empty();
-        self.spawn_session(
-            session_id,
-            initial_turn_requested,
-            initial_queued_messages,
-        )
-        .await?;
+        self.spawn_session(session_id, initial_turn_requested, initial_queued_messages)
+            .await?;
         Ok(SessionHandle { session_id })
     }
 
@@ -925,7 +913,10 @@ async fn run_session_task(
                         "Cancelled current generation.".to_string(),
                     ));
                     if let Err(err) = runtime_tx.send(RuntimeEvent::TurnCompleted) {
-                        tracing::warn!(?err, "runtime receiver dropped while sending TurnCompleted (cancel)");
+                        tracing::warn!(
+                            ?err,
+                            "runtime receiver dropped while sending TurnCompleted (cancel)"
+                        );
                     }
                     return Ok(());
                 }
@@ -1388,10 +1379,7 @@ async fn best_effort_resolve_pending_signal(
     session_id: &SessionId,
     signal_id: moa_core::PendingSignalId,
 ) -> Result<()> {
-    match session_store
-        .resolve_pending_signal(signal_id)
-        .await
-    {
+    match session_store.resolve_pending_signal(signal_id).await {
         Ok(()) => Ok(()),
         Err(MoaError::StorageError(message)) => {
             tracing::warn!(
@@ -1411,9 +1399,7 @@ async fn resolve_matching_pending_signal(
     session_id: &SessionId,
     message: &UserMessage,
 ) -> Result<Option<moa_core::PendingSignalId>> {
-    let pending = session_store
-        .get_pending_signals(*session_id)
-        .await?;
+    let pending = session_store.get_pending_signals(*session_id).await?;
     for signal in pending {
         if signal.user_message()? == *message {
             return Ok(Some(signal.id));
@@ -1654,7 +1640,10 @@ async fn pause_active_session(
     context.tool_router.destroy_session_hands(session_id).await;
     let _ = runtime_tx.send(RuntimeEvent::Notice(message));
     if let Err(err) = runtime_tx.send(RuntimeEvent::TurnCompleted) {
-        tracing::warn!(?err, "runtime receiver dropped while sending TurnCompleted (pause)");
+        tracing::warn!(
+            ?err,
+            "runtime receiver dropped while sending TurnCompleted (pause)"
+        );
     }
     Ok(())
 }

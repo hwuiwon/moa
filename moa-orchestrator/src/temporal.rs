@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures_util::FutureExt as _;
 use chrono::Utc;
+use futures_util::FutureExt as _;
 use moa_brain::{
     TurnResult, build_default_pipeline_with_runtime, find_pending_tool_approval,
     find_resolved_pending_tool_approval, run_brain_turn_with_tools_stepwise,

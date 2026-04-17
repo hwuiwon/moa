@@ -307,8 +307,8 @@ mod tests {
     use chrono::Utc;
     use moa_core::{
         ContextProcessor, MemoryPath, MemoryScope, MemorySearchResult, MemoryStore,
-        ModelCapabilities, ModelId, PageSummary, PageType, Platform, Result, SessionId, SessionMeta,
-        TokenPricing, ToolCallFormat, UserId, WikiPage, WorkspaceId,
+        ModelCapabilities, ModelId, PageSummary, PageType, Platform, Result, SessionId,
+        SessionMeta, TokenPricing, ToolCallFormat, UserId, WikiPage, WorkspaceId,
     };
 
     use super::{MEMORY_REMINDER_PREFIX, MemoryRetriever, extract_search_keywords};

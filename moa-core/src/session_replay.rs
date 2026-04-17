@@ -132,10 +132,7 @@ impl SessionStore for CountedSessionStore {
         range: EventRange,
     ) -> Result<Vec<EventRecord>> {
         let started_at = Instant::now();
-        let events = self
-            .inner
-            .get_events(session_id, range.clone())
-            .await?;
+        let events = self.inner.get_events(session_id, range.clone()).await?;
         let duration = started_at.elapsed();
         let bytes = approx_event_bytes(&events);
 

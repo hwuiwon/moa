@@ -1553,15 +1553,10 @@ async fn run_brain_turn_records_tool_call_before_auto_allowed_tool_error() {
     );
     let llm = Arc::new(OpenAiFailedReadLoopLlmProvider::default());
 
-    let result = run_brain_turn_with_tools(
-        session.id,
-        store.clone(),
-        llm,
-        &pipeline,
-        Some(tool_router),
-    )
-    .await
-    .unwrap();
+    let result =
+        run_brain_turn_with_tools(session.id, store.clone(), llm, &pipeline, Some(tool_router))
+            .await
+            .unwrap();
 
     assert_eq!(result, TurnResult::Complete);
 
@@ -1668,15 +1663,10 @@ async fn run_brain_turn_memory_write_creates_workspace_page_after_approval() {
         .await
         .unwrap();
 
-    let resumed = run_brain_turn_with_tools(
-        session.id,
-        store.clone(),
-        llm,
-        &pipeline,
-        Some(tool_router),
-    )
-    .await
-    .unwrap();
+    let resumed =
+        run_brain_turn_with_tools(session.id, store.clone(), llm, &pipeline, Some(tool_router))
+            .await
+            .unwrap();
 
     assert_eq!(resumed, TurnResult::Complete);
     let page = memory_store
@@ -1736,15 +1726,10 @@ async fn run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event
     );
     let llm = Arc::new(MemoryIngestLoopLlmProvider::default());
 
-    let result = run_brain_turn_with_tools(
-        session.id,
-        store.clone(),
-        llm,
-        &pipeline,
-        Some(tool_router),
-    )
-    .await
-    .unwrap();
+    let result =
+        run_brain_turn_with_tools(session.id, store.clone(), llm, &pipeline, Some(tool_router))
+            .await
+            .unwrap();
 
     assert_eq!(result, TurnResult::Complete);
 
@@ -1871,15 +1856,10 @@ async fn run_brain_turn_can_search_recently_ingested_memory_on_follow_up_turn() 
         .await
         .unwrap();
 
-    let resumed = run_brain_turn_with_tools(
-        session.id,
-        store.clone(),
-        llm,
-        &pipeline,
-        Some(tool_router),
-    )
-    .await
-    .unwrap();
+    let resumed =
+        run_brain_turn_with_tools(session.id, store.clone(), llm, &pipeline, Some(tool_router))
+            .await
+            .unwrap();
 
     assert_eq!(resumed, TurnResult::Complete);
 
@@ -2228,15 +2208,10 @@ async fn canary_leaks_in_tool_input_are_detected_and_blocked() {
     );
     let llm = Arc::new(CanaryLeakLlmProvider::default());
 
-    let result = run_brain_turn_with_tools(
-        session_id,
-        store.clone(),
-        llm,
-        &pipeline,
-        Some(tool_router),
-    )
-    .await
-    .unwrap();
+    let result =
+        run_brain_turn_with_tools(session_id, store.clone(), llm, &pipeline, Some(tool_router))
+            .await
+            .unwrap();
 
     assert_eq!(result, TurnResult::Complete);
     let events = store

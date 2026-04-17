@@ -314,9 +314,7 @@ async fn apply_skill_overrides(
                 .iter()
                 .any(|selector| skill_selector_matches(selector, &summary.path, &skill_name))
             {
-                memory_store
-                    .delete_page(&scope, &summary.path)
-                    .await?;
+                memory_store.delete_page(&scope, &summary.path).await?;
             }
         }
     }
@@ -333,9 +331,7 @@ async fn clear_workspace_skills(
         .list_pages(&scope, Some(moa_core::PageType::Skill))
         .await?;
     for summary in summaries {
-        memory_store
-            .delete_page(&scope, &summary.path)
-            .await?;
+        memory_store.delete_page(&scope, &summary.path).await?;
     }
     Ok(())
 }
@@ -431,10 +427,7 @@ fn build_eval_policies(
     ToolPolicies::from_config(&config)
 }
 
-fn resolve_enabled_tools(
-    available_tools: &[String],
-    agent_config: &AgentConfig,
-) -> Vec<String> {
+fn resolve_enabled_tools(available_tools: &[String], agent_config: &AgentConfig) -> Vec<String> {
     let mut enabled = if let Some(explicit) = &agent_config.tools.enabled {
         explicit.clone()
     } else {

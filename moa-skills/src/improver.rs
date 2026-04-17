@@ -27,9 +27,7 @@ pub async fn maybe_improve_skill(
     llm: Arc<dyn LLMProvider>,
 ) -> Result<Option<SkillMetadata>> {
     let scope = MemoryScope::Workspace(session.workspace_id.clone());
-    let page = memory_store
-        .read_page(&scope, &existing.path)
-        .await?;
+    let page = memory_store.read_page(&scope, &existing.path).await?;
     let mut current = skill_from_wiki_page(&page)?;
     let current_markdown = render_skill_markdown(&current)?;
     let prompt = build_improvement_prompt(&current_markdown, events);

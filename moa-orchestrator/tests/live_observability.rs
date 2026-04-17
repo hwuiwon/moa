@@ -321,12 +321,7 @@ async fn live_observability_audit_tracks_cache_replay_and_latency() -> Result<()
     )
     .await?;
 
-    wait_for_status(
-        &orchestrator,
-        session.session_id,
-        SessionStatus::Completed,
-    )
-    .await;
+    wait_for_status(&orchestrator, session.session_id, SessionStatus::Completed).await;
 
     let events = session_store
         .get_events(session.session_id, EventRange::all())

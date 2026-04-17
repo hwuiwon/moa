@@ -135,21 +135,15 @@ pub async fn reconcile_branches(
                                     && main_page.content.trim() != branch_page.content.trim()) =>
                         {
                             let merged = merge_pages(&main_page, &branch_page);
-                            store
-                                .write_page(scope, &change.path, merged)
-                                .await?;
+                            store.write_page(scope, &change.path, merged).await?;
                             report.conflicts_resolved += 1;
                         }
                         Ok(_) => {
-                            store
-                                .write_page(scope, &change.path, branch_page)
-                                .await?;
+                            store.write_page(scope, &change.path, branch_page).await?;
                             report.pages_merged += 1;
                         }
                         Err(_) => {
-                            store
-                                .write_page(scope, &change.path, branch_page)
-                                .await?;
+                            store.write_page(scope, &change.path, branch_page).await?;
                             report.pages_created += 1;
                         }
                     }

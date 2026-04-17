@@ -103,10 +103,7 @@ async fn run_prompt(
     tool_router: Arc<ToolRouter>,
     prompt: &str,
 ) -> Result<()> {
-    let event_count_before = store
-        .get_events(session_id, EventRange::all())
-        .await?
-        .len();
+    let event_count_before = store.get_events(session_id, EventRange::all()).await?.len();
 
     store
         .emit_event(

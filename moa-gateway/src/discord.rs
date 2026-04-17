@@ -543,10 +543,7 @@ fn attachments_from_message(message: &DiscordMessage) -> Vec<Attachment> {
 }
 
 fn discord_user_name(user: &DiscordUser) -> String {
-    user.global_name
-        .as_deref()
-        .unwrap_or(&user.name)
-        .to_owned()
+    user.global_name.as_deref().unwrap_or(&user.name).to_owned()
 }
 
 fn is_thread_kind(kind: ChannelType) -> bool {

@@ -648,14 +648,9 @@ async fn run_turn(
         )
         .await?;
 
-    let result = run_brain_turn_with_tools(
-        session_id,
-        store.clone(),
-        provider,
-        pipeline,
-        tool_router,
-    )
-    .await?;
+    let result =
+        run_brain_turn_with_tools(session_id, store.clone(), provider, pipeline, tool_router)
+            .await?;
 
     assert_eq!(result, moa_brain::TurnResult::Complete);
     let _events = store.get_events(session_id, EventRange::all()).await?;

@@ -235,8 +235,12 @@ pub trait MemoryStore: Send + Sync {
     async fn read_page(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<WikiPage>;
 
     /// Writes a wiki page by logical path within an explicit scope.
-    async fn write_page(&self, scope: &MemoryScope, path: &MemoryPath, page: WikiPage)
-    -> Result<()>;
+    async fn write_page(
+        &self,
+        scope: &MemoryScope,
+        path: &MemoryPath,
+        page: WikiPage,
+    ) -> Result<()>;
 
     /// Deletes a wiki page by logical path within an explicit scope.
     async fn delete_page(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<()>;

@@ -85,17 +85,13 @@ pub async fn run_bootstrap(
         ),
         _ => minimal_index_page(index_path.clone(), workspace_name, workspace_path, now),
     };
-    store
-        .write_page(scope, &index_path, index_page)
-        .await?;
+    store.write_page(scope, &index_path, index_page).await?;
     pages_created.push(INDEX_FILENAME.to_string());
 
     if let (Some(filename), Some(contents)) = (&source_file, content.as_deref()) {
         let project_path = MemoryPath::new("topics/project.md");
         let project_page = project_instructions_page(project_path.clone(), filename, contents, now);
-        store
-            .write_page(scope, &project_path, project_page)
-            .await?;
+        store.write_page(scope, &project_path, project_page).await?;
         pages_created.push(project_path.as_str().to_string());
     } else {
         let project_path = MemoryPath::new("topics/project.md");

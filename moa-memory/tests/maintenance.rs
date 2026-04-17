@@ -65,11 +65,7 @@ async fn consolidation_normalizes_dates_and_resolves_conflicts() {
     architecture.updated -= Duration::days(40);
     architecture.reference_count = 0;
     store
-        .write_page(
-            &scope,
-            &"topics/architecture.md".into(),
-            architecture,
-        )
+        .write_page(&scope, &"topics/architecture.md".into(), architecture)
         .await
         .unwrap();
 
@@ -558,15 +554,9 @@ async fn manual_seeded_memory_fuzz_preserves_core_invariants() {
                     let term = format!("seed{seed}-direct-{round}-{page_index}");
                     tracked_terms.push(term.clone());
                     let path = format!("topics/base-{page_index}.md");
-                    let mut page = store
-                        .read_page(&scope, &path.clone().into())
-                        .await
-                        .unwrap();
+                    let mut page = store.read_page(&scope, &path.clone().into()).await.unwrap();
                     page.content.push_str(&format!("\nDirect update {term}.\n"));
-                    store
-                        .write_page(&scope, &path.into(), page)
-                        .await
-                        .unwrap();
+                    store.write_page(&scope, &path.into(), page).await.unwrap();
                 }
                 1 => {
                     let page_index = rng.next_usize(10);
@@ -606,10 +596,7 @@ async fn manual_seeded_memory_fuzz_preserves_core_invariants() {
                 3 => {
                     let page_index = rng.next_usize(10);
                     let mut page = store
-                        .read_page(
-                            &scope,
-                            &format!("topics/base-{page_index}.md").into(),
-                        )
+                        .read_page(&scope, &format!("topics/base-{page_index}.md").into())
                         .await
                         .unwrap();
                     page.content.push_str("\nThis was noted today.\n");
@@ -617,11 +604,7 @@ async fn manual_seeded_memory_fuzz_preserves_core_invariants() {
                     page.last_referenced -= Duration::days(35);
                     page.reference_count = 0;
                     store
-                        .write_page(
-                            &scope,
-                            &format!("topics/base-{page_index}.md").into(),
-                            page,
-                        )
+                        .write_page(&scope, &format!("topics/base-{page_index}.md").into(), page)
                         .await
                         .unwrap();
                     store.run_consolidation(&scope).await.unwrap();
