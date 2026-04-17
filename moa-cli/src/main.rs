@@ -26,6 +26,7 @@ use moa_session::{NeonBranchManager, PostgresSessionStore, create_session_store}
 use moa_skills::run_skill_suite;
 use tokio::fs;
 use tokio::process::Command;
+use uuid::Uuid;
 /// Top-level MOA command line interface.
 #[derive(Debug, Parser)]
 #[command(name = "moa", about = "MOA local terminal agent", version)]
@@ -55,6 +56,26 @@ enum CommandKind {
     Status,
     /// Lists persisted sessions.
     Sessions(SessionsArgs),
+    /// Session-specific analytics.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+    /// Workspace-scoped analytics.
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
+    },
+    /// Tool analytics.
+    Tool {
+        #[command(subcommand)]
+        command: ToolCommand,
+    },
+    /// Cache analytics.
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
     /// Memory-related CLI operations.
     Memory {
         #[command(subcommand)]
@@ -102,6 +123,69 @@ struct SessionsArgs {
     /// Restrict sessions to one workspace id or `.` for the current directory.
     #[arg(long)]
     workspace: Option<String>,
+}
+
+/// Session analytics commands.
+#[derive(Debug, Subcommand)]
+enum SessionCommand {
+    /// Shows summary stats for one session.
+    Stats {
+        /// Session id to inspect.
+        id: String,
+    },
+}
+
+/// Workspace analytics commands.
+#[derive(Debug, Subcommand)]
+enum WorkspaceCommand {
+    /// Shows workspace rollups over a recent window.
+    Stats(WorkspaceStatsArgs),
+}
+
+/// Tool analytics commands.
+#[derive(Debug, Subcommand)]
+enum ToolCommand {
+    /// Shows per-tool latency and success metrics.
+    Stats(ToolStatsArgs),
+}
+
+/// Cache analytics commands.
+#[derive(Debug, Subcommand)]
+enum CacheCommand {
+    /// Shows cache usage trends for a workspace.
+    Stats(CacheStatsArgs),
+}
+
+/// Arguments for `moa workspace stats`.
+#[derive(Debug, Args)]
+struct WorkspaceStatsArgs {
+    /// Workspace id override. Use `.` for the current directory workspace.
+    #[arg(long)]
+    workspace: Option<String>,
+
+    /// Number of days to include.
+    #[arg(long, default_value_t = 30)]
+    days: u32,
+}
+
+/// Arguments for `moa tool stats`.
+#[derive(Debug, Args)]
+struct ToolStatsArgs {
+    /// Optional workspace filter. Use `.` for the current directory workspace.
+    #[arg(long)]
+    workspace: Option<String>,
+}
+
+/// Arguments for `moa cache stats`.
+#[derive(Debug, Args)]
+struct CacheStatsArgs {
+    /// Workspace id override. Use `.` for the current directory workspace.
+    #[arg(long)]
+    workspace: Option<String>,
+
+    /// Number of days to include.
+    #[arg(long, default_value_t = 30)]
+    days: u32,
 }
 
 /// Memory CLI commands.
@@ -362,6 +446,35 @@ async fn main() -> Result<()> {
                 sessions_report(&config, args.workspace.as_deref()).await?
             );
         }
+        Some(CommandKind::Session { command }) => match command {
+            SessionCommand::Stats { id } => {
+                print!("{}", session_stats_report(&config, &id).await?);
+            }
+        },
+        Some(CommandKind::Workspace { command }) => match command {
+            WorkspaceCommand::Stats(args) => {
+                print!(
+                    "{}",
+                    workspace_stats_report(&config, args.workspace.as_deref(), args.days).await?
+                );
+            }
+        },
+        Some(CommandKind::Tool { command }) => match command {
+            ToolCommand::Stats(args) => {
+                print!(
+                    "{}",
+                    tool_stats_report(&config, args.workspace.as_deref()).await?
+                );
+            }
+        },
+        Some(CommandKind::Cache { command }) => match command {
+            CacheCommand::Stats(args) => {
+                print!(
+                    "{}",
+                    cache_stats_report(&config, args.workspace.as_deref(), args.days).await?
+                );
+            }
+        },
         Some(CommandKind::Memory { command }) => match command {
             MemoryCommand::Search { query } => {
                 print!("{}", memory_search_report(&config, &query).await?);
@@ -682,6 +795,128 @@ async fn sessions_report(config: &MoaConfig, workspace: Option<&str>) -> Result<
     Ok(report)
 }
 
+async fn session_stats_report(config: &MoaConfig, id: &str) -> Result<String> {
+    let session_id = moa_core::SessionId(
+        Uuid::parse_str(id).with_context(|| format!("invalid session id `{id}`"))?,
+    );
+    let store = load_session_store(config).await?;
+    let summary = store.get_session_summary(session_id).await?;
+
+    Ok(format!(
+        "session: {}\nworkspace: {}\nuser: {}\nstatus: {:?}\nturns: {}\nevents: {}\ntools: {}\nerrors: {}\nduration_seconds: {:.3}\ntokens: in {} · out {}\ncost: {}\ncache_hit_rate: {:.2}%\n",
+        summary.session_id,
+        summary.workspace_id,
+        summary.user_id,
+        summary.status,
+        summary.turn_count,
+        summary.event_count,
+        summary.tool_call_count,
+        summary.error_count,
+        summary.duration_seconds,
+        summary.total_input_tokens,
+        summary.total_output_tokens,
+        format_cents(summary.total_cost_cents),
+        summary.cache_hit_rate * 100.0
+    ))
+}
+
+async fn workspace_stats_report(
+    config: &MoaConfig,
+    workspace: Option<&str>,
+    days: u32,
+) -> Result<String> {
+    let workspace_id = workspace
+        .map(resolve_workspace_arg)
+        .unwrap_or_else(current_workspace_id);
+    let store = load_session_store(config).await?;
+    store.refresh_analytics_materialized_views().await?;
+    let summary = store.get_workspace_stats(&workspace_id, days).await?;
+
+    Ok(format!(
+        "workspace: {}\nwindow_days: {}\nsessions: {}\nturns: {}\ntokens: in {} · cache_read {} · out {}\ncost: {}\ncache_hit_rate: {:.2}%\n",
+        summary.workspace_id,
+        summary.days,
+        summary.session_count,
+        summary.turn_count,
+        summary.total_input_tokens,
+        summary.total_cache_read_tokens,
+        summary.total_output_tokens,
+        format_cents(summary.total_cost_cents),
+        summary.cache_hit_rate * 100.0
+    ))
+}
+
+async fn tool_stats_report(config: &MoaConfig, workspace: Option<&str>) -> Result<String> {
+    let workspace_id = workspace.map(resolve_workspace_arg);
+    let store = load_session_store(config).await?;
+    let rows = store
+        .list_tool_call_summaries(workspace_id.as_ref())
+        .await?;
+
+    let mut report = String::new();
+    if let Some(workspace_id) = workspace_id {
+        report.push_str(&format!("workspace: {}\n", workspace_id));
+    }
+    if rows.is_empty() {
+        report.push_str("tool stats: none\n");
+        return Ok(report);
+    }
+
+    report.push_str("tool\tcalls\tsuccess\tavg_ms\tp50_ms\tp95_ms\n");
+    for row in rows {
+        report.push_str(&format!(
+            "{}\t{}\t{:.2}%\t{:.2}\t{:.2}\t{:.2}\n",
+            row.tool_name,
+            row.call_count,
+            row.success_rate * 100.0,
+            row.avg_duration_ms,
+            row.p50_ms,
+            row.p95_ms
+        ));
+    }
+    Ok(report)
+}
+
+async fn cache_stats_report(
+    config: &MoaConfig,
+    workspace: Option<&str>,
+    days: u32,
+) -> Result<String> {
+    let workspace_id = workspace
+        .map(resolve_workspace_arg)
+        .unwrap_or_else(current_workspace_id);
+    let store = load_session_store(config).await?;
+    store.refresh_analytics_materialized_views().await?;
+    let summary = store.get_workspace_stats(&workspace_id, days).await?;
+    let daily = store.list_cache_daily_metrics(&workspace_id, days).await?;
+
+    let mut report = format!(
+        "workspace: {}\nwindow_days: {}\ncache_hit_rate: {:.2}%\ncached_input_tokens: {}\ntotal_input_tokens: {}\nestimated_savings: unavailable (pricing history is not normalized in SQL yet)\n",
+        summary.workspace_id,
+        summary.days,
+        summary.cache_hit_rate * 100.0,
+        summary.total_cache_read_tokens,
+        summary.total_input_tokens
+    );
+    if daily.is_empty() {
+        report.push_str("daily: none\n");
+        return Ok(report);
+    }
+
+    report.push_str("day\tcache_hit_rate\tcached_input_tokens\ttotal_input_tokens\tcost\n");
+    for row in daily {
+        report.push_str(&format!(
+            "{}\t{:.2}%\t{}\t{}\t{}\n",
+            row.day.format("%Y-%m-%d"),
+            row.avg_cache_hit_rate * 100.0,
+            row.total_cache_read_tokens,
+            row.total_input_tokens,
+            format_cents(row.total_cost_cents)
+        ));
+    }
+    Ok(report)
+}
+
 async fn memory_search_report(config: &MoaConfig, query: &str) -> Result<String> {
     let store = load_memory_store(config).await?;
     let results = store
@@ -884,6 +1119,10 @@ fn current_user_id() -> moa_core::UserId {
             .or_else(|_| env::var("USERNAME"))
             .unwrap_or_else(|_| "local-user".to_string()),
     )
+}
+
+fn format_cents(cost_cents: u64) -> String {
+    format!("${:.2}", cost_cents as f64 / 100.0)
 }
 
 fn derive_ingest_source_name(path: &Path) -> String {

@@ -165,6 +165,8 @@ pub async fn run_daemon_server(config: MoaConfig) -> Result<()> {
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let signal_task = spawn_signal_listener(shutdown_tx.clone());
     let api_task = spawn_api_server(&config, orchestrator, shutdown_tx.subscribe()).await?;
+    let analytics_refresh_task =
+        spawn_analytics_refresh_task(state.session_store.clone(), shutdown_tx.subscribe());
 
     let mut connection_tasks: JoinSet<()> = JoinSet::new();
 
@@ -211,6 +213,8 @@ pub async fn run_daemon_server(config: MoaConfig) -> Result<()> {
     let shutdown_grace = graceful_shutdown_timeout(&config);
     wait_for_active_turns(state.session_store.as_ref(), shutdown_grace).await?;
     signal_task.abort();
+    analytics_refresh_task.abort();
+    let _ = analytics_refresh_task.await;
     if let Some(task) = api_task {
         task.abort();
         let _ = task.await;
@@ -218,6 +222,30 @@ pub async fn run_daemon_server(config: MoaConfig) -> Result<()> {
     fs::remove_file(&socket_path).await.ok();
     fs::remove_file(&pid_path).await.ok();
     Ok(())
+}
+
+fn spawn_analytics_refresh_task(
+    session_store: Arc<PostgresSessionStore>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                changed = shutdown_rx.changed() => {
+                    if changed.is_ok() && *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = interval.tick() => {
+                    if let Err(error) = session_store.refresh_analytics_materialized_views().await {
+                        tracing::warn!(%error, "failed to refresh analytics materialized views");
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Sends one request to the daemon and returns the unary reply.
