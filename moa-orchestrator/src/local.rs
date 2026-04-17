@@ -11,7 +11,6 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_brain::{
     LoopDetector, StreamedTurnResult, build_default_pipeline_with_runtime_and_instructions,
-    find_pending_tool_approval, find_resolved_pending_tool_approval,
     run_streamed_turn_with_signals_stepwise, update_workspace_tool_stats,
 };
 use moa_core::{
@@ -35,6 +34,8 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
+
+use crate::session_engine::session_requires_processing;
 
 const TURN_EVENT_TAIL_LIMIT: usize = 16;
 
@@ -1426,22 +1427,12 @@ async fn update_status(
     if previous_status == next_status {
         return Ok(());
     }
-    session_store
-        .update_status(session_id, next_status.clone())
-        .await?;
-    if matches!(next_status, SessionStatus::Cancelled) {
-        session_store.delete_snapshot(session_id).await?;
+    if let Some(record) = session_store
+        .transition_status(session_id, next_status.clone())
+        .await?
+    {
+        let _ = event_tx.send(record);
     }
-    append_event(
-        session_store,
-        event_tx,
-        session_id,
-        Event::SessionStatusChanged {
-            from: previous_status,
-            to: next_status.clone(),
-        },
-    )
-    .await?;
     *status.write().await = next_status;
     Ok(())
 }
@@ -1485,38 +1476,6 @@ async fn append_event(
         .ok_or_else(|| MoaError::StorageError("failed to reload appended event".to_string()))?;
     let _ = event_tx.send(record.clone());
     Ok(record)
-}
-
-fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) -> bool {
-    if matches!(session.status, SessionStatus::Cancelled) {
-        return false;
-    }
-
-    if find_pending_tool_approval(events).is_some()
-        || find_resolved_pending_tool_approval(events).is_some()
-    {
-        return true;
-    }
-
-    events
-        .iter()
-        .rev()
-        .find_map(|record| match record.event {
-            Event::SessionStatusChanged { .. }
-            | Event::Warning { .. }
-            | Event::MemoryWrite { .. }
-            | Event::HandDestroyed { .. }
-            | Event::HandError { .. }
-            | Event::Checkpoint { .. } => None,
-            Event::UserMessage { .. }
-            | Event::QueuedMessage { .. }
-            | Event::ToolResult { .. }
-            | Event::ToolError { .. }
-            | Event::ApprovalDecided { .. }
-            | Event::ToolCall { .. } => Some(true),
-            _ => Some(false),
-        })
-        .unwrap_or(false)
 }
 
 async fn detect_workspace_path(workspace_id: &WorkspaceId) -> Result<PathBuf> {

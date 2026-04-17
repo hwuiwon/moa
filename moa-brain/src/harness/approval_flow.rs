@@ -74,9 +74,13 @@ pub(super) async fn wait_for_signal_approval(
                         },
                     )
                     .await?;
-                    session_store
-                        .update_status(session_id, SessionStatus::Running)
-                        .await?;
+                    if let Some(record) = session_store
+                        .transition_status(session_id, SessionStatus::Running)
+                        .await?
+                        && let Some(event_tx) = event_tx
+                    {
+                        let _ = event_tx.send(record);
+                    }
 
                     return match decision {
                         ApprovalDecision::AllowOnce => {

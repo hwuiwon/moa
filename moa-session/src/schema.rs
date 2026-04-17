@@ -27,15 +27,28 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
     let users = qualified_name(schema_name, "users");
     let pending_signals = qualified_name(schema_name, "pending_signals");
     let context_snapshots = qualified_name(schema_name, "context_snapshots");
+    let tool_call_analytics = qualified_name(schema_name, "tool_call_analytics");
+    let tool_call_summary = qualified_name(schema_name, "tool_call_summary");
+    let session_summary = qualified_name(schema_name, "session_summary");
+    let session_turn_metrics = qualified_name(schema_name, "session_turn_metrics");
+    let daily_workspace_metrics = qualified_name(schema_name, "daily_workspace_metrics");
+    let update_session_aggregates = qualified_name(schema_name, "update_session_aggregates");
     let idx_sessions_workspace = quote_identifier("idx_sessions_workspace");
     let idx_sessions_user = quote_identifier("idx_sessions_user");
     let idx_sessions_status = quote_identifier("idx_sessions_status");
+    let idx_sessions_cache_hit_rate = quote_identifier("idx_sessions_cache_hit_rate");
+    let idx_sessions_cost_cents = quote_identifier("idx_sessions_cost_cents");
     let idx_events_session_seq = quote_identifier("idx_events_session_seq");
     let idx_events_session_type = quote_identifier("idx_events_session_type");
     let idx_events_timestamp = quote_identifier("idx_events_timestamp");
     let idx_events_fts = quote_identifier("idx_events_fts");
     let idx_pending_signals_session = quote_identifier("idx_pending_signals_session");
     let idx_context_snapshots_last_seq = quote_identifier("idx_context_snapshots_last_seq");
+    let idx_session_turn_metrics_session_turn =
+        quote_identifier("idx_session_turn_metrics_session_turn");
+    let idx_daily_workspace_metrics_workspace_day =
+        quote_identifier("idx_daily_workspace_metrics_workspace_day");
+    let trg_update_session_aggregates = quote_identifier("trg_update_session_aggregates");
 
     let sql = format!(
         r"
@@ -52,13 +65,33 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             completed_at TIMESTAMPTZ,
             parent_session_id UUID REFERENCES {sessions}(id),
-            total_input_tokens BIGINT DEFAULT 0,
             total_input_tokens_uncached BIGINT DEFAULT 0,
             total_input_tokens_cache_write BIGINT DEFAULT 0,
             total_input_tokens_cache_read BIGINT DEFAULT 0,
+            total_input_tokens BIGINT GENERATED ALWAYS AS (
+                COALESCE(total_input_tokens_uncached, 0)
+                + COALESCE(total_input_tokens_cache_write, 0)
+                + COALESCE(total_input_tokens_cache_read, 0)
+            ) STORED,
             total_output_tokens BIGINT DEFAULT 0,
             total_cost_cents BIGINT DEFAULT 0,
             event_count BIGINT DEFAULT 0,
+            turn_count BIGINT DEFAULT 0,
+            cache_hit_rate DOUBLE PRECISION GENERATED ALWAYS AS (
+                CASE
+                    WHEN (
+                        COALESCE(total_input_tokens_uncached, 0)
+                        + COALESCE(total_input_tokens_cache_write, 0)
+                        + COALESCE(total_input_tokens_cache_read, 0)
+                    ) = 0 THEN 0.0
+                    ELSE COALESCE(total_input_tokens_cache_read, 0)::DOUBLE PRECISION
+                        / (
+                            COALESCE(total_input_tokens_uncached, 0)
+                            + COALESCE(total_input_tokens_cache_write, 0)
+                            + COALESCE(total_input_tokens_cache_read, 0)
+                        )::DOUBLE PRECISION
+                END
+            ) STORED,
             last_checkpoint_seq BIGINT
         );
 
@@ -68,10 +101,14 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
             ADD COLUMN IF NOT EXISTS total_input_tokens_cache_write BIGINT DEFAULT 0;
         ALTER TABLE {sessions}
             ADD COLUMN IF NOT EXISTS total_input_tokens_cache_read BIGINT DEFAULT 0;
+        ALTER TABLE {sessions}
+            ADD COLUMN IF NOT EXISTS turn_count BIGINT DEFAULT 0;
 
         CREATE INDEX IF NOT EXISTS {idx_sessions_workspace} ON {sessions}(workspace_id, updated_at DESC);
         CREATE INDEX IF NOT EXISTS {idx_sessions_user} ON {sessions}(user_id, updated_at DESC);
         CREATE INDEX IF NOT EXISTS {idx_sessions_status} ON {sessions}(status);
+        CREATE INDEX IF NOT EXISTS {idx_sessions_cache_hit_rate} ON {sessions}(cache_hit_rate);
+        CREATE INDEX IF NOT EXISTS {idx_sessions_cost_cents} ON {sessions}(total_cost_cents DESC);
 
         CREATE TABLE IF NOT EXISTS {events} (
             id UUID PRIMARY KEY,
@@ -146,6 +183,264 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS {idx_context_snapshots_last_seq}
             ON {context_snapshots}(session_id, last_sequence_num);
+
+        CREATE OR REPLACE FUNCTION {update_session_aggregates}() RETURNS TRIGGER AS $$
+        DECLARE
+            event_data JSONB := COALESCE(NEW.payload -> 'data', '{{}}'::JSONB);
+        BEGIN
+            UPDATE {sessions}
+            SET
+                event_count = event_count + 1,
+                turn_count = turn_count + CASE WHEN NEW.event_type = 'BrainResponse' THEN 1 ELSE 0 END,
+                total_input_tokens_uncached = total_input_tokens_uncached + CASE
+                    WHEN NEW.event_type = 'BrainResponse' THEN COALESCE((event_data ->> 'input_tokens_uncached')::BIGINT, 0)
+                    WHEN NEW.event_type = 'Checkpoint' THEN COALESCE((event_data ->> 'input_tokens')::BIGINT, 0)
+                    ELSE 0
+                END,
+                total_input_tokens_cache_write = total_input_tokens_cache_write + CASE
+                    WHEN NEW.event_type = 'BrainResponse' THEN COALESCE((event_data ->> 'input_tokens_cache_write')::BIGINT, 0)
+                    ELSE 0
+                END,
+                total_input_tokens_cache_read = total_input_tokens_cache_read + CASE
+                    WHEN NEW.event_type = 'BrainResponse' THEN COALESCE((event_data ->> 'input_tokens_cache_read')::BIGINT, 0)
+                    ELSE 0
+                END,
+                total_output_tokens = total_output_tokens + CASE
+                    WHEN NEW.event_type IN ('BrainResponse', 'Checkpoint') THEN COALESCE((event_data ->> 'output_tokens')::BIGINT, 0)
+                    ELSE 0
+                END,
+                total_cost_cents = total_cost_cents + CASE
+                    WHEN NEW.event_type IN ('BrainResponse', 'Checkpoint') THEN COALESCE((event_data ->> 'cost_cents')::BIGINT, 0)
+                    ELSE 0
+                END,
+                last_checkpoint_seq = CASE
+                    WHEN NEW.event_type = 'Checkpoint' THEN NEW.sequence_num
+                    ELSE last_checkpoint_seq
+                END,
+                updated_at = GREATEST(updated_at, NEW.timestamp)
+            WHERE id = NEW.session_id;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        DROP TRIGGER IF EXISTS {trg_update_session_aggregates} ON {events};
+
+        CREATE TRIGGER {trg_update_session_aggregates}
+            AFTER INSERT ON {events}
+            FOR EACH ROW
+            EXECUTE FUNCTION {update_session_aggregates}();
+
+        CREATE OR REPLACE VIEW {tool_call_analytics} AS
+        WITH tool_calls AS (
+            SELECT
+                s.workspace_id,
+                s.user_id,
+                e.session_id,
+                e.sequence_num AS call_sequence_num,
+                e.timestamp AS called_at,
+                e.payload -> 'data' AS call_data
+            FROM {events} e
+            JOIN {sessions} s
+                ON s.id = e.session_id
+            WHERE e.event_type = 'ToolCall'
+        )
+        SELECT
+            tc.workspace_id,
+            tc.user_id,
+            tc.session_id,
+            tc.call_sequence_num,
+            tc.called_at,
+            tc.call_data ->> 'tool_name' AS tool_name,
+            (tc.call_data ->> 'tool_id')::UUID AS tool_id,
+            COALESCE(result_event.timestamp, error_event.timestamp) AS finished_at,
+            CASE
+                WHEN result_event.id IS NOT NULL THEN COALESCE((result_event.payload -> 'data' ->> 'success')::BOOLEAN, FALSE)
+                WHEN error_event.id IS NOT NULL THEN FALSE
+                ELSE FALSE
+            END AS success,
+            CASE
+                WHEN result_event.id IS NOT NULL THEN COALESCE(
+                    (result_event.payload -> 'data' ->> 'duration_ms')::DOUBLE PRECISION,
+                    EXTRACT(EPOCH FROM (result_event.timestamp - tc.called_at)) * 1000.0
+                )
+                WHEN error_event.id IS NOT NULL THEN EXTRACT(EPOCH FROM (error_event.timestamp - tc.called_at)) * 1000.0
+                ELSE NULL
+            END AS duration_ms
+        FROM tool_calls tc
+        LEFT JOIN LATERAL (
+            SELECT e.id, e.payload, e.timestamp
+            FROM {events} e
+            WHERE e.session_id = tc.session_id
+              AND e.event_type = 'ToolResult'
+              AND (e.payload -> 'data' ->> 'tool_id') = (tc.call_data ->> 'tool_id')
+            ORDER BY e.sequence_num ASC
+            LIMIT 1
+        ) result_event ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT e.id, e.payload, e.timestamp
+            FROM {events} e
+            WHERE e.session_id = tc.session_id
+              AND e.event_type = 'ToolError'
+              AND (e.payload -> 'data' ->> 'tool_id') = (tc.call_data ->> 'tool_id')
+            ORDER BY e.sequence_num ASC
+            LIMIT 1
+        ) error_event ON TRUE;
+
+        CREATE OR REPLACE VIEW {tool_call_summary} AS
+        SELECT
+            tool_name,
+            COUNT(*)::BIGINT AS call_count,
+            AVG(duration_ms)::DOUBLE PRECISION AS avg_duration_ms,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duration_ms) AS p50_ms,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_ms,
+            AVG(CASE WHEN success THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS success_rate
+        FROM {tool_call_analytics}
+        WHERE finished_at IS NOT NULL
+        GROUP BY tool_name;
+
+        CREATE OR REPLACE VIEW {session_summary} AS
+        SELECT
+            s.id,
+            s.workspace_id,
+            s.user_id,
+            s.status,
+            s.turn_count,
+            s.event_count,
+            s.total_input_tokens,
+            s.total_output_tokens,
+            s.total_cost_cents,
+            s.cache_hit_rate,
+            s.created_at,
+            s.updated_at,
+            EXTRACT(EPOCH FROM (s.updated_at - s.created_at))::DOUBLE PRECISION AS duration_seconds,
+            COALESCE(tool_counts.tool_call_count, 0)::BIGINT AS tool_call_count,
+            COALESCE(error_counts.error_count, 0)::BIGINT AS error_count
+        FROM {sessions} s
+        LEFT JOIN (
+            SELECT session_id, COUNT(*)::BIGINT AS tool_call_count
+            FROM {events}
+            WHERE event_type = 'ToolCall'
+            GROUP BY session_id
+        ) tool_counts
+            ON tool_counts.session_id = s.id
+        LEFT JOIN (
+            SELECT session_id, COUNT(*)::BIGINT AS error_count
+            FROM {events}
+            WHERE event_type = 'Error'
+            GROUP BY session_id
+        ) error_counts
+            ON error_counts.session_id = s.id;
+
+        DROP MATERIALIZED VIEW IF EXISTS {session_turn_metrics};
+
+        CREATE MATERIALIZED VIEW {session_turn_metrics} AS
+        WITH brain_turns AS (
+            SELECT
+                e.session_id,
+                e.sequence_num AS response_sequence_num,
+                ROW_NUMBER() OVER (
+                    PARTITION BY e.session_id
+                    ORDER BY e.sequence_num
+                )::BIGINT AS turn_number,
+                    LAG(e.sequence_num, 1, -1) OVER (
+                        PARTITION BY e.session_id
+                        ORDER BY e.sequence_num
+                    )::BIGINT AS previous_response_sequence_num,
+                e.timestamp AS finished_at,
+                e.payload -> 'data' AS response_data
+            FROM {events} e
+            WHERE e.event_type = 'BrainResponse'
+        ),
+        tool_metrics AS (
+            SELECT
+                bt.session_id,
+                bt.turn_number,
+                COUNT(tc.id)::BIGINT AS tool_call_count,
+                COALESCE(SUM(
+                    CASE
+                        WHEN tr.id IS NOT NULL THEN COALESCE(
+                            (tr.payload -> 'data' ->> 'duration_ms')::DOUBLE PRECISION,
+                            EXTRACT(EPOCH FROM (tr.timestamp - tc.timestamp)) * 1000.0
+                        )
+                        WHEN te.id IS NOT NULL THEN EXTRACT(EPOCH FROM (te.timestamp - tc.timestamp)) * 1000.0
+                        ELSE 0.0
+                    END
+                ), 0.0)::DOUBLE PRECISION AS tool_ms
+            FROM brain_turns bt
+            LEFT JOIN {events} tc
+                ON tc.session_id = bt.session_id
+               AND tc.event_type = 'ToolCall'
+               AND tc.sequence_num > bt.previous_response_sequence_num
+               AND tc.sequence_num < bt.response_sequence_num
+            LEFT JOIN LATERAL (
+                SELECT e.id, e.payload, e.timestamp
+                FROM {events} e
+                WHERE e.session_id = tc.session_id
+                  AND e.event_type = 'ToolResult'
+                  AND (e.payload -> 'data' ->> 'tool_id') = (tc.payload -> 'data' ->> 'tool_id')
+                ORDER BY e.sequence_num ASC
+                LIMIT 1
+            ) tr ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT e.id, e.payload, e.timestamp
+                FROM {events} e
+                WHERE e.session_id = tc.session_id
+                  AND e.event_type = 'ToolError'
+                  AND (e.payload -> 'data' ->> 'tool_id') = (tc.payload -> 'data' ->> 'tool_id')
+                ORDER BY e.sequence_num ASC
+                LIMIT 1
+            ) te ON TRUE
+            GROUP BY bt.session_id, bt.turn_number
+        )
+        SELECT
+            s.workspace_id,
+            s.user_id,
+            bt.session_id,
+            bt.turn_number,
+            bt.finished_at,
+            bt.response_data ->> 'model' AS model,
+            NULL::DOUBLE PRECISION AS pipeline_ms,
+            COALESCE((bt.response_data ->> 'duration_ms')::DOUBLE PRECISION, 0.0) AS llm_ms,
+            COALESCE(tm.tool_ms, 0.0) AS tool_ms,
+            COALESCE(tm.tool_call_count, 0)::BIGINT AS tool_call_count,
+            COALESCE((bt.response_data ->> 'input_tokens_uncached')::BIGINT, 0)::BIGINT AS input_tokens_uncached,
+            COALESCE((bt.response_data ->> 'input_tokens_cache_write')::BIGINT, 0)::BIGINT AS input_tokens_cache_write,
+            COALESCE((bt.response_data ->> 'input_tokens_cache_read')::BIGINT, 0)::BIGINT AS input_tokens_cache_read,
+            (
+                COALESCE((bt.response_data ->> 'input_tokens_uncached')::BIGINT, 0)
+                + COALESCE((bt.response_data ->> 'input_tokens_cache_write')::BIGINT, 0)
+                + COALESCE((bt.response_data ->> 'input_tokens_cache_read')::BIGINT, 0)
+            )::BIGINT AS total_input_tokens,
+            COALESCE((bt.response_data ->> 'output_tokens')::BIGINT, 0)::BIGINT AS output_tokens,
+            COALESCE((bt.response_data ->> 'cost_cents')::BIGINT, 0)::BIGINT AS cost_cents
+        FROM brain_turns bt
+        JOIN {sessions} s
+            ON s.id = bt.session_id
+        LEFT JOIN tool_metrics tm
+            ON tm.session_id = bt.session_id
+           AND tm.turn_number = bt.turn_number;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS {idx_session_turn_metrics_session_turn}
+            ON {session_turn_metrics}(session_id, turn_number);
+
+        DROP MATERIALIZED VIEW IF EXISTS {daily_workspace_metrics};
+
+        CREATE MATERIALIZED VIEW {daily_workspace_metrics} AS
+        SELECT
+            workspace_id,
+            DATE_TRUNC('day', created_at) AS day,
+            COUNT(*)::BIGINT AS session_count,
+            SUM(turn_count)::BIGINT AS turn_count,
+            SUM(total_input_tokens)::BIGINT AS total_input_tokens,
+            SUM(total_input_tokens_cache_read)::BIGINT AS total_cache_read_tokens,
+            SUM(total_output_tokens)::BIGINT AS total_output_tokens,
+            SUM(total_cost_cents)::BIGINT AS total_cost_cents,
+            AVG(cache_hit_rate)::DOUBLE PRECISION AS avg_cache_hit_rate
+        FROM {sessions}
+        GROUP BY workspace_id, DATE_TRUNC('day', created_at);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS {idx_daily_workspace_metrics_workspace_day}
+            ON {daily_workspace_metrics}(workspace_id, day);
         "
     );
 

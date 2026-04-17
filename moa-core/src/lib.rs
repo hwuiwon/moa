@@ -1,5 +1,6 @@
 //! Shared MOA types, traits, configuration, and error definitions.
 
+pub mod analytics;
 pub mod broadcast_recv;
 pub mod config;
 pub mod daemon;
@@ -14,6 +15,11 @@ pub mod turn_latency;
 pub mod types;
 pub mod workspace;
 
+pub use analytics::{
+    CacheDailyMetric, SessionAnalyticsSummary, SessionTurnMetric, ToolCallSummary,
+    WorkspaceAnalyticsSummary, get_session_summary, get_workspace_stats, list_cache_daily_metrics,
+    list_session_turn_metrics, list_tool_call_summaries,
+};
 pub use broadcast_recv::{RecvResult, recv_with_lag_handling};
 pub use config::{
     CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, CompactionConfig,

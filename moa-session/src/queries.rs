@@ -10,11 +10,19 @@ use sqlx::{Row, postgres::PgRow};
 use uuid::Uuid;
 
 /// Canonical column list for selecting session rows.
-pub(crate) const SESSION_COLUMNS: &str = concat!(
+pub(crate) const SESSION_SELECT_COLUMNS: &str = concat!(
     "id, workspace_id, user_id, title, status, platform, platform_channel, model, ",
     "created_at, updated_at, completed_at, parent_session_id, total_input_tokens, ",
     "total_input_tokens_uncached, total_input_tokens_cache_write, total_input_tokens_cache_read, ",
     "total_output_tokens, total_cost_cents, event_count, last_checkpoint_seq"
+);
+
+/// Canonical column list for inserting session rows.
+pub(crate) const SESSION_INSERT_COLUMNS: &str = concat!(
+    "id, workspace_id, user_id, title, status, platform, platform_channel, model, ",
+    "created_at, updated_at, completed_at, parent_session_id, total_input_tokens_uncached, ",
+    "total_input_tokens_cache_write, total_input_tokens_cache_read, total_output_tokens, ",
+    "total_cost_cents, event_count, turn_count, last_checkpoint_seq"
 );
 
 /// Canonical column list for selecting event rows.

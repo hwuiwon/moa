@@ -25,6 +25,7 @@ use crate::tools::{bash, file_outline, file_read, file_search, file_write, grep,
 
 const DEFAULT_DOCKER_IMAGE: &str = "alpine:3.20";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
+const DOCKER_DETECTION_TIMEOUT: Duration = Duration::from_secs(2);
 const DOCKER_TMPFS_OPTIONS: &str = "rw,nosuid,nodev,size=64m";
 const DEFAULT_DOCKER_WORKSPACE: &str = "/workspace";
 
@@ -55,12 +56,24 @@ pub struct LocalHandProvider {
 impl LocalHandProvider {
     /// Creates a new local hand provider rooted at a sandbox work directory.
     pub async fn new(work_dir: impl AsRef<Path>) -> Result<Self> {
+        Self::new_with_docker_detection(work_dir, true).await
+    }
+
+    /// Creates a new local hand provider with optional Docker detection.
+    pub async fn new_with_docker_detection(
+        work_dir: impl AsRef<Path>,
+        detect_docker_availability: bool,
+    ) -> Result<Self> {
         let work_dir = work_dir.as_ref().to_path_buf();
         fs::create_dir_all(&work_dir).await?;
 
         Ok(Self {
             work_dir: Arc::new(work_dir),
-            docker_available: detect_docker().await,
+            docker_available: if detect_docker_availability {
+                detect_docker().await
+            } else {
+                false
+            },
             command_timeout: DEFAULT_TOOL_TIMEOUT,
             tool_output: ToolOutputConfig::default(),
             local_sandboxes: Arc::new(RwLock::new(HashMap::new())),
@@ -526,10 +539,13 @@ impl HandProvider for LocalHandProvider {
 
 async fn detect_docker() -> bool {
     let started_at = Instant::now();
-    let result = Command::new("docker").args(["info"]).output().await;
-    let available = result
-        .map(|output| output.status.success())
-        .unwrap_or(false);
+    let mut command = Command::new("docker");
+    command.args(["info"]).kill_on_drop(true);
+    let available = match tokio::time::timeout(DOCKER_DETECTION_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => output.status.success(),
+        Ok(Err(_)) => false,
+        Err(_) => false,
+    };
     tracing::debug!(
         docker_available = available,
         elapsed_ms = started_at.elapsed().as_millis(),

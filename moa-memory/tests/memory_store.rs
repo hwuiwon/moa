@@ -473,7 +473,10 @@ async fn embedding_failures_keep_keyword_search_and_stop_after_five_attempts() -
     }
 
     assert_eq!(store.run_embedding_queue_once().await?, 0);
-    assert_eq!(store.search("OAuth refresh", &scope, 5).await?[0].path, path);
+    assert_eq!(
+        store.search("OAuth refresh", &scope, 5).await?[0].path,
+        path
+    );
 
     drop(store);
     drop(session_store);

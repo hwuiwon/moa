@@ -1237,8 +1237,16 @@ mod tests {
         let fused = reciprocal_rank_fusion(&keyword, &semantic, HYBRID_RRF_K);
 
         assert_eq!(fused.len(), 2);
-        assert!(fused.iter().any(|result| result.path.as_str() == "topics/oauth.md"));
-        assert!(fused.iter().any(|result| result.path.as_str() == "topics/cache.md"));
+        assert!(
+            fused
+                .iter()
+                .any(|result| result.path.as_str() == "topics/oauth.md")
+        );
+        assert!(
+            fused
+                .iter()
+                .any(|result| result.path.as_str() == "topics/cache.md")
+        );
     }
 
     #[test]

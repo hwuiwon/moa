@@ -585,7 +585,7 @@ mod tests {
             .execute(&handle, "bash", r#"{"cmd":"echo hello"}"#)
             .await
             .unwrap();
-        assert_eq!(output.process_stdout().as_deref(), Some("hello\n"));
+        assert_eq!(output.process_stdout(), Some("hello\n"));
 
         provider.destroy(&handle).await.unwrap();
 

@@ -40,7 +40,7 @@ pub struct ProviderModel {
 ///
 /// Context-window numbers reflect 2026-04 provider docs:
 /// Claude Opus/Sonnet 4.6 → 1M; Haiku 4.5 → 200K; GPT-5.4 → 1.05M;
-/// GPT-5.4 mini → 400K; GPT-4o → 128K; Gemini 2.5 family → ~1.05M.
+/// GPT-5.4 mini → 400K; GPT-4o → 128K; Gemini 2.5/3 family → ~1.05M.
 pub const CATALOG: &[ProviderModel] = &[
     // ---- Anthropic ----
     ProviderModel {
@@ -124,6 +124,27 @@ pub const CATALOG: &[ProviderModel] = &[
     // ---- Google ----
     ProviderModel {
         provider: PROVIDER_GOOGLE,
+        id: "gemini-3.1-pro-preview",
+        display_name: "Gemini 3.1 Pro",
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+    },
+    ProviderModel {
+        provider: PROVIDER_GOOGLE,
+        id: "gemini-3-flash-preview",
+        display_name: "Gemini 3 Flash",
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+    },
+    ProviderModel {
+        provider: PROVIDER_GOOGLE,
+        id: "gemini-3.1-flash-lite-preview",
+        display_name: "Gemini 3.1 Flash-Lite",
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+    },
+    ProviderModel {
+        provider: PROVIDER_GOOGLE,
         id: "gemini-2.5-pro",
         display_name: "Gemini 2.5 Pro",
         context_window: 1_048_576,
@@ -141,20 +162,6 @@ pub const CATALOG: &[ProviderModel] = &[
         id: "gemini-2.5-flash-lite",
         display_name: "Gemini 2.5 Flash-Lite",
         context_window: 1_048_576,
-        max_output_tokens: 65_536,
-    },
-    ProviderModel {
-        provider: PROVIDER_GOOGLE,
-        id: "gemini-3-flash",
-        display_name: "Gemini 3 Flash",
-        context_window: 1_048_576,
-        max_output_tokens: 65_536,
-    },
-    ProviderModel {
-        provider: PROVIDER_GOOGLE,
-        id: "gemini-3.1-pro",
-        display_name: "Gemini 3.1 Pro",
-        context_window: 2_000_000,
         max_output_tokens: 65_536,
     },
 ];
@@ -213,5 +220,12 @@ mod tests {
             CATALOG.len(),
             "catalog has an entry with unknown provider"
         );
+    }
+
+    #[test]
+    fn google_catalog_includes_latest_gemini_3_series() {
+        assert!(find("gemini-3.1-pro-preview").is_some());
+        assert!(find("gemini-3-flash-preview").is_some());
+        assert!(find("gemini-3.1-flash-lite-preview").is_some());
     }
 }

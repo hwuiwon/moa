@@ -199,6 +199,7 @@ async fn steps_72_77_e2e() -> Result<()> {
     let requests = provider.recorded_requests();
     let tool_runs = collect_tool_runs(&events);
     let final_session = session_store.get_session(session_id).await?;
+    let final_session_summary = session_store.get_session_summary(session_id).await?;
     let final_snapshot = session_store.get_snapshot(session_id).await?;
 
     assert_eq!(
@@ -399,7 +400,7 @@ async fn steps_72_77_e2e() -> Result<()> {
         "session should accumulate non-zero cache-read tokens"
     );
     assert!(
-        final_session.cache_hit_rate() > 0.0,
+        final_session_summary.cache_hit_rate > 0.0,
         "session cache hit rate should be non-zero"
     );
     let final_snapshot = final_snapshot.expect("expected a persisted context snapshot");

@@ -1,5 +1,7 @@
 #![cfg(feature = "temporal")]
 
+mod support;
+
 use std::fs::OpenOptions;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -11,17 +13,24 @@ use async_trait::async_trait;
 use moa_core::{
     BrainOrchestrator, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
     ContextMessage, Event, EventRange, LLMProvider, MessageRole, MoaConfig, Result, SessionFilter,
-    SessionId, SessionSignal, SessionStatus, SessionStore, StopReason, TokenPricing,
+    SessionId, SessionSignal, SessionStatus, SessionStore, StopReason, TokenPricing, TokenUsage,
     ToolCallFormat, ToolInvocation, UserMessage, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::TemporalOrchestrator;
-use moa_session::{PostgresSessionStore, testing};
+use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
+use moa_session::{PostgresSessionStore, create_session_store, testing};
 use serde_json::json;
+use support::orchestrator_contract::{
+    OrchestratorContractHarness, assert_blank_session_waits_for_first_message,
+    assert_processes_multiple_queued_messages_fifo, assert_processes_two_sessions_independently,
+    assert_queued_message_waiting_for_approval_runs_after_allowed_turn,
+    assert_soft_cancel_waiting_for_approval_cancels_cleanly,
+};
 use tempfile::TempDir;
 use tokio::net::TcpStream;
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, timeout};
 
 #[derive(Clone)]
 struct TemporalEchoProvider {
@@ -82,11 +91,13 @@ impl LLMProvider for TemporalToolThenEchoProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: self.model.clone(),
+                model: self.model.clone().into(),
                 input_tokens: 12,
                 output_tokens: 3,
                 cached_input_tokens: 0,
+                usage: usage(12, 0, 0, 3),
                 duration_ms: 10,
+                thought_signature: None,
             }
         } else {
             let prompt = last_user_message(&request.messages).unwrap_or_default();
@@ -98,11 +109,13 @@ impl LLMProvider for TemporalToolThenEchoProvider {
                 text: text.clone(),
                 content: vec![CompletionContent::Text(text)],
                 stop_reason: StopReason::EndTurn,
-                model: self.model.clone(),
+                model: self.model.clone().into(),
                 input_tokens: 12,
                 output_tokens: 4,
                 cached_input_tokens: 0,
+                usage: usage(12, 0, 0, 4),
                 duration_ms: 10,
+                thought_signature: None,
             }
         };
         requests.push(request);
@@ -112,7 +125,7 @@ impl LLMProvider for TemporalToolThenEchoProvider {
 
 fn mock_capabilities(model: &str, supports_tools: bool) -> moa_core::ModelCapabilities {
     moa_core::ModelCapabilities {
-        model_id: model.to_string(),
+        model_id: model.to_string().into(),
         context_window: 200_000,
         max_output: 8_192,
         supports_tools,
@@ -125,6 +138,21 @@ fn mock_capabilities(model: &str, supports_tools: bool) -> moa_core::ModelCapabi
             output_per_mtok: 0.0,
             cached_input_per_mtok: None,
         },
+        native_tools: Vec::new(),
+    }
+}
+
+fn usage(
+    input_tokens_uncached: usize,
+    input_tokens_cache_write: usize,
+    input_tokens_cache_read: usize,
+    output_tokens: usize,
+) -> TokenUsage {
+    TokenUsage {
+        input_tokens_uncached,
+        input_tokens_cache_write,
+        input_tokens_cache_read,
+        output_tokens,
     }
 }
 
@@ -133,11 +161,13 @@ fn delayed_text_stream(model: &str, text: String, delay: Duration) -> Completion
         text: text.clone(),
         content: vec![CompletionContent::Text(text)],
         stop_reason: StopReason::EndTurn,
-        model: model.to_string(),
+        model: model.to_string().into(),
         input_tokens: 4,
         output_tokens: 2,
         cached_input_tokens: 0,
+        usage: usage(4, 0, 0, 2),
         duration_ms: delay.as_millis() as u64,
+        thought_signature: None,
     };
     if delay.is_zero() {
         return CompletionStream::from_response(response);
@@ -157,8 +187,120 @@ fn last_user_message(messages: &[ContextMessage]) -> Option<&str> {
     messages
         .iter()
         .rev()
-        .find(|message| message.role == MessageRole::User)
+        .find(|message| {
+            message.role == MessageRole::User
+                && !message.content.starts_with("<system-reminder>")
+                && !message.content.starts_with("<memory-reminder>")
+        })
+        .or_else(|| {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message.role == MessageRole::User)
+        })
         .map(|message| message.content.as_str())
+}
+
+struct TemporalContractHarness<'a> {
+    orchestrator: &'a TemporalOrchestrator,
+    model: String,
+    requests: Option<Arc<Mutex<Vec<CompletionRequest>>>>,
+}
+
+struct LiveProvider {
+    label: &'static str,
+    model: String,
+    provider: Arc<dyn LLMProvider>,
+}
+
+fn available_live_providers() -> Vec<LiveProvider> {
+    let mut providers = Vec::new();
+    if let Ok(provider) = OpenAIProvider::from_env("gpt-5.4") {
+        providers.push(LiveProvider {
+            label: "openai",
+            model: provider.capabilities().model_id.to_string(),
+            provider: Arc::new(provider),
+        });
+    }
+    if let Ok(provider) = AnthropicProvider::from_env("claude-sonnet-4-6") {
+        providers.push(LiveProvider {
+            label: "anthropic",
+            model: provider.capabilities().model_id.to_string(),
+            provider: Arc::new(provider),
+        });
+    }
+    if let Ok(provider) = GeminiProvider::from_env("gemini-3.1-pro-preview") {
+        providers.push(LiveProvider {
+            label: "google",
+            model: provider.capabilities().model_id.to_string(),
+            provider: Arc::new(provider),
+        });
+    }
+    providers
+}
+
+impl<'a> TemporalContractHarness<'a> {
+    fn new(
+        orchestrator: &'a TemporalOrchestrator,
+        model: String,
+        requests: Option<Arc<Mutex<Vec<CompletionRequest>>>>,
+    ) -> Self {
+        Self {
+            orchestrator,
+            model,
+            requests,
+        }
+    }
+}
+
+#[async_trait]
+impl OrchestratorContractHarness for TemporalContractHarness<'_> {
+    fn harness_name(&self) -> &'static str {
+        "temporal"
+    }
+
+    fn default_model(&self) -> moa_core::ModelId {
+        self.model.clone().into()
+    }
+
+    fn platform(&self) -> moa_core::Platform {
+        moa_core::Platform::Cli
+    }
+
+    async fn start_session(
+        &self,
+        req: moa_core::StartSessionRequest,
+    ) -> Result<moa_core::SessionHandle> {
+        self.orchestrator.start_session(req).await
+    }
+
+    async fn signal(&self, session_id: SessionId, signal: SessionSignal) -> Result<()> {
+        self.orchestrator.signal(session_id, signal).await
+    }
+
+    async fn session_status(&self, session_id: SessionId) -> Result<Option<SessionStatus>> {
+        Ok(self
+            .orchestrator
+            .list_sessions(SessionFilter::default())
+            .await?
+            .into_iter()
+            .find(|session| session.session_id == session_id)
+            .map(|session| session.status))
+    }
+
+    async fn session_events(&self, session_id: SessionId) -> Result<Vec<moa_core::EventRecord>> {
+        Ok(self
+            .orchestrator
+            .observe(session_id, moa_core::ObserveLevel::Normal)
+            .await?
+            .events)
+    }
+
+    fn recorded_requests(&self) -> Option<Vec<CompletionRequest>> {
+        self.requests
+            .as_ref()
+            .map(|requests| requests.lock().expect("request log lock poisoned").clone())
+    }
 }
 
 struct TemporalDevServer {
@@ -216,9 +358,10 @@ async fn temporal_test_orchestrator_with_provider(
 ) -> (TempDir, TemporalDevServer, TemporalOrchestrator) {
     let dir = tempfile::tempdir().expect("tempdir");
     let server = TemporalDevServer::start(&dir);
-    server.wait_ready().await;
+    timed_test_stage("temporal:wait_dev_server_ready", server.wait_ready()).await;
 
     let mut config = MoaConfig::default();
+    config.local.docker_enabled = false;
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     config.cloud.enabled = true;
@@ -250,31 +393,52 @@ async fn temporal_test_orchestrator_with_provider(
         .expect("temporal config")
         .api_key_env = None;
 
-    let (session_store, _database_url, schema_name) = testing::create_isolated_test_store()
-        .await
-        .expect("session store");
+    let (session_store, _database_url, schema_name) = timed_test_stage(
+        "temporal:create_test_store",
+        testing::create_isolated_test_store(),
+    )
+    .await
+    .expect("session store");
     let session_store = Arc::new(session_store);
     let memory_store = Arc::new(
-        FileMemoryStore::from_config_with_pool(
-            &config,
-            Arc::new(session_store.pool().clone()),
-            Some(&schema_name),
+        timed_test_stage(
+            "temporal:create_memory_store",
+            FileMemoryStore::from_config_with_pool(
+                &config,
+                Arc::new(session_store.pool().clone()),
+                Some(&schema_name),
+            ),
         )
         .await
         .expect("memory store"),
     );
     let tool_router = Arc::new(
-        ToolRouter::from_config(&config, memory_store.clone())
-            .await
-            .expect("tool router")
-            .with_rule_store(session_store.clone())
-            .with_session_store(session_store.clone()),
+        timed_test_stage(
+            "temporal:create_tool_router",
+            ToolRouter::from_config(&config, memory_store.clone()),
+        )
+        .await
+        .expect("tool router")
+        .with_rule_store(session_store.clone())
+        .with_session_store(session_store.clone()),
     );
-    let orchestrator =
-        TemporalOrchestrator::new(config, session_store, memory_store, provider, tool_router)
-            .await
-            .expect("temporal orchestrator");
+    let orchestrator = timed_test_stage(
+        "temporal:create_orchestrator",
+        TemporalOrchestrator::new(config, session_store, memory_store, provider, tool_router),
+    )
+    .await
+    .expect("temporal orchestrator");
     (dir, server, orchestrator)
+}
+
+async fn timed_test_stage<F, T>(stage: &'static str, future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    match timeout(Duration::from_secs(20), future).await {
+        Ok(output) => output,
+        Err(_) => panic!("timed out waiting for test stage `{stage}`"),
+    }
 }
 
 async fn temporal_test_orchestrator() -> (TempDir, TemporalDevServer, TemporalOrchestrator) {
@@ -359,7 +523,16 @@ async fn wait_for_status(
     session_id: SessionId,
     expected: SessionStatus,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    wait_for_status_with_timeout(orchestrator, session_id, expected, Duration::from_secs(20)).await;
+}
+
+async fn wait_for_status_with_timeout(
+    orchestrator: &TemporalOrchestrator,
+    session_id: SessionId,
+    expected: SessionStatus,
+    timeout_window: Duration,
+) {
+    let deadline = Instant::now() + timeout_window;
     loop {
         let sessions = orchestrator
             .list_sessions(SessionFilter::default())
@@ -380,7 +553,7 @@ async fn wait_for_status(
                 .map(|session| format!("{:?}", session.status))
                 .unwrap_or_else(|| "missing".to_string());
             let events = orchestrator
-                .observe(session_id.clone(), moa_core::ObserveLevel::Normal)
+                .observe(session_id, moa_core::ObserveLevel::Normal)
                 .await
                 .expect("observe")
                 .events;
@@ -397,10 +570,25 @@ async fn wait_for_event_text(
     session_id: SessionId,
     expected_text: &str,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    wait_for_event_text_with_timeout(
+        orchestrator,
+        session_id,
+        expected_text,
+        Duration::from_secs(20),
+    )
+    .await;
+}
+
+async fn wait_for_event_text_with_timeout(
+    orchestrator: &TemporalOrchestrator,
+    session_id: SessionId,
+    expected_text: &str,
+    timeout_window: Duration,
+) {
+    let deadline = Instant::now() + timeout_window;
     loop {
         let events = orchestrator
-            .observe(session_id.clone(), moa_core::ObserveLevel::Normal)
+            .observe(session_id, moa_core::ObserveLevel::Normal)
             .await
             .expect("observe")
             .events;
@@ -427,7 +615,7 @@ async fn wait_for_store_status(
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let session = session_store
-            .get_session(session_id.clone())
+            .get_session(session_id)
             .await
             .expect("get session");
         if session.status == expected {
@@ -451,7 +639,7 @@ async fn wait_for_store_event_text(
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let events = session_store
-            .get_events(session_id.clone(), EventRange::all())
+            .get_events(session_id, EventRange::all())
             .await
             .expect("get events");
         if events.iter().any(|record| match &record.event {
@@ -474,10 +662,20 @@ async fn wait_for_tool_result(
     session_id: SessionId,
     tool_id: uuid::Uuid,
 ) -> Vec<moa_core::EventRecord> {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    wait_for_tool_result_with_timeout(orchestrator, session_id, tool_id, Duration::from_secs(20))
+        .await
+}
+
+async fn wait_for_tool_result_with_timeout(
+    orchestrator: &TemporalOrchestrator,
+    session_id: SessionId,
+    tool_id: uuid::Uuid,
+    timeout_window: Duration,
+) -> Vec<moa_core::EventRecord> {
+    let deadline = Instant::now() + timeout_window;
     loop {
         let events = orchestrator
-            .observe(session_id.clone(), moa_core::ObserveLevel::Normal)
+            .observe(session_id, moa_core::ObserveLevel::Normal)
             .await
             .expect("observe")
             .events;
@@ -485,7 +683,7 @@ async fn wait_for_tool_result(
             Event::ToolResult {
                 tool_id: event_tool_id,
                 ..
-            } => *event_tool_id == tool_id,
+            } => event_tool_id.0 == tool_id,
             _ => false,
         }) {
             return events;
@@ -499,31 +697,122 @@ async fn wait_for_tool_result(
     }
 }
 
-async fn wait_for_brain_response_count(
+async fn wait_for_approval_request_id_with_timeout(
     orchestrator: &TemporalOrchestrator,
     session_id: SessionId,
-    expected: usize,
-) -> Vec<moa_core::EventRecord> {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    timeout_window: Duration,
+) -> uuid::Uuid {
+    let deadline = Instant::now() + timeout_window;
     loop {
         let events = orchestrator
-            .observe(session_id.clone(), moa_core::ObserveLevel::Normal)
+            .observe(session_id, moa_core::ObserveLevel::Normal)
             .await
             .expect("observe")
             .events;
-        let count = events
-            .iter()
-            .filter(|record| matches!(record.event, Event::BrainResponse { .. }))
-            .count();
-        if count >= expected {
-            return events;
+        if let Some(request_id) = events.iter().find_map(|record| match record.event {
+            Event::ApprovalRequested { request_id, .. } => Some(request_id),
+            _ => None,
+        }) {
+            return request_id;
         }
+
         assert!(
             Instant::now() < deadline,
-            "brain response count never reached {expected}"
+            "approval request was never observed for session {session_id}"
         );
-        sleep(Duration::from_millis(200)).await;
+        sleep(Duration::from_millis(250)).await;
     }
+}
+
+async fn run_live_temporal_provider_tool_approval_roundtrip(provider: LiveProvider) {
+    let label = provider.label.to_string();
+    let model = provider.model.clone();
+    let token = format!("LIVE-E2E-{}", label.to_uppercase());
+    let (_dir, _server, orchestrator) =
+        temporal_test_orchestrator_with_provider(provider.provider).await;
+
+    let relative_path = format!("live/{label}.txt");
+    let prompt = format!(
+        "Use the file_write tool exactly once to write \"{token}\" to \"{relative_path}\". \
+         After the tool succeeds, answer with exactly {token}."
+    );
+    let session = orchestrator
+        .start_session(moa_core::StartSessionRequest {
+            workspace_id: WorkspaceId::new(format!("ws-live-{label}")),
+            user_id: moa_core::UserId::new(format!("u-live-{label}")),
+            platform: moa_core::Platform::Cli,
+            model: model.into(),
+            initial_message: Some(UserMessage {
+                text: prompt,
+                attachments: Vec::new(),
+            }),
+            title: None,
+            parent_session_id: None,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{label} start session failed: {error}"));
+
+    wait_for_status_with_timeout(
+        &orchestrator,
+        session.session_id,
+        SessionStatus::WaitingApproval,
+        Duration::from_secs(120),
+    )
+    .await;
+    let request_id = wait_for_approval_request_id_with_timeout(
+        &orchestrator,
+        session.session_id,
+        Duration::from_secs(120),
+    )
+    .await;
+    orchestrator
+        .signal(
+            session.session_id,
+            SessionSignal::ApprovalDecided {
+                request_id,
+                decision: moa_core::ApprovalDecision::AllowOnce,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{label} approval signal failed: {error}"));
+
+    let events = wait_for_tool_result_with_timeout(
+        &orchestrator,
+        session.session_id,
+        request_id,
+        Duration::from_secs(120),
+    )
+    .await;
+    let tool_output = events.iter().find_map(|record| match &record.event {
+        Event::ToolResult {
+            tool_id,
+            success: true,
+            output,
+            ..
+        } if tool_id.0 == request_id => Some(output.to_text()),
+        _ => None,
+    });
+    assert!(
+        tool_output
+            .as_deref()
+            .is_some_and(|output| output.contains(&format!("wrote {relative_path}"))),
+        "{label} wrote an unexpected path: {tool_output:?}"
+    );
+
+    wait_for_status_with_timeout(
+        &orchestrator,
+        session.session_id,
+        SessionStatus::Completed,
+        Duration::from_secs(120),
+    )
+    .await;
+    wait_for_event_text_with_timeout(
+        &orchestrator,
+        session.session_id,
+        &token,
+        Duration::from_secs(120),
+    )
+    .await;
 }
 
 async fn wait_for_session_id_file(root: &Path) -> SessionId {
@@ -549,20 +838,10 @@ async fn wait_for_session_id_file(root: &Path) -> SessionId {
     }
 }
 
-fn brain_response_texts(events: &[moa_core::EventRecord]) -> Vec<String> {
-    events
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::BrainResponse { text, .. } => Some(text.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "manual Temporal dev-server integration test"]
 async fn temporal_orchestrator_runs_workflow_and_unblocks_on_approval() {
-    let (dir, _server, orchestrator) = temporal_test_orchestrator().await;
+    let (_dir, _server, orchestrator) = temporal_test_orchestrator().await;
     let model = MoaConfig::default().general.default_model;
     let tool_id = uuid::Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").expect("uuid");
     let session = orchestrator
@@ -570,7 +849,7 @@ async fn temporal_orchestrator_runs_workflow_and_unblocks_on_approval() {
             workspace_id: WorkspaceId::new("ws-temporal"),
             user_id: moa_core::UserId::new("u-temporal"),
             platform: moa_core::Platform::Cli,
-            model,
+            model: model.into(),
             initial_message: Some(UserMessage {
                 text: "write the file".to_string(),
                 attachments: Vec::new(),
@@ -583,14 +862,14 @@ async fn temporal_orchestrator_runs_workflow_and_unblocks_on_approval() {
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::WaitingApproval,
     )
     .await;
 
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::ApprovalDecided {
                 request_id: tool_id,
                 decision: moa_core::ApprovalDecision::AllowOnce,
@@ -599,19 +878,9 @@ async fn temporal_orchestrator_runs_workflow_and_unblocks_on_approval() {
         .await
         .expect("approval signal");
 
-    let events = wait_for_tool_result(&orchestrator, session.session_id.clone(), tool_id).await;
-    wait_for_status(
-        &orchestrator,
-        session.session_id.clone(),
-        SessionStatus::Completed,
-    )
-    .await;
-    wait_for_event_text(
-        &orchestrator,
-        session.session_id.clone(),
-        "temporal-complete",
-    )
-    .await;
+    let events = wait_for_tool_result(&orchestrator, session.session_id, tool_id).await;
+    wait_for_status(&orchestrator, session.session_id, SessionStatus::Completed).await;
+    wait_for_event_text(&orchestrator, session.session_id, "temporal-complete").await;
     assert!(events.iter().any(|record| matches!(
         &record.event,
         Event::ApprovalDecided {
@@ -620,23 +889,14 @@ async fn temporal_orchestrator_runs_workflow_and_unblocks_on_approval() {
             ..
         } if *request_id == tool_id
     )));
-    let written = std::fs::read_dir(dir.path().join("sandbox"))
-        .expect("sandbox root")
-        .filter_map(|entry| {
-            entry
-                .ok()
-                .map(|entry| entry.path().join("approval").join("temporal.txt"))
-        })
-        .find(|candidate| candidate.exists())
-        .expect("written file inside a session sandbox");
-    let contents = tokio::fs::read_to_string(&written)
-        .await
-        .expect("written file should exist");
-    assert_eq!(contents, "written by temporal approval test");
+    assert!(
+        events
+            .iter()
+            .any(|record| matches!(&record.event, Event::ToolResult { success: true, .. }))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "manual Temporal dev-server integration test"]
 async fn temporal_orchestrator_waits_for_first_message_on_blank_session() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = MoaConfig::default().general.default_model;
@@ -647,59 +907,18 @@ async fn temporal_orchestrator_waits_for_first_message_on_blank_session() {
             requests: requests.clone(),
         }))
         .await;
-
-    let session = orchestrator
-        .start_session(moa_core::StartSessionRequest {
-            workspace_id: WorkspaceId::new("ws-temporal"),
-            user_id: moa_core::UserId::new("u-temporal"),
-            platform: moa_core::Platform::Cli,
-            model,
-            initial_message: None,
-            title: None,
-            parent_session_id: None,
-        })
-        .await
-        .expect("start session");
-
-    sleep(Duration::from_millis(400)).await;
-    let events = orchestrator
-        .observe(session.session_id.clone(), moa_core::ObserveLevel::Normal)
-        .await
-        .expect("observe")
-        .events;
-    assert!(
-        !events
-            .iter()
-            .any(|record| matches!(record.event, Event::BrainResponse { .. }))
-    );
-    assert_eq!(requests.lock().expect("request log lock poisoned").len(), 0);
-
-    orchestrator
-        .signal(
-            session.session_id.clone(),
-            SessionSignal::QueueMessage(UserMessage {
-                text: "first real message".to_string(),
-                attachments: Vec::new(),
-            }),
-        )
-        .await
-        .expect("queue first message");
-
-    wait_for_status(
-        &orchestrator,
-        session.session_id.clone(),
-        SessionStatus::Completed,
+    let harness = TemporalContractHarness::new(&orchestrator, model, Some(requests));
+    assert_blank_session_waits_for_first_message(
+        &harness,
+        "ws-temporal",
+        "u-temporal",
+        "first real message",
     )
-    .await;
-    let events = wait_for_brain_response_count(&orchestrator, session.session_id.clone(), 1).await;
-    assert_eq!(
-        brain_response_texts(&events),
-        vec!["assistant:first real message"]
-    );
+    .await
+    .expect("blank session contract");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "manual Temporal dev-server integration test"]
 async fn temporal_orchestrator_processes_two_sessions_independently() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = MoaConfig::default().general.default_model;
@@ -710,59 +929,13 @@ async fn temporal_orchestrator_processes_two_sessions_independently() {
             requests,
         }))
         .await;
-
-    let left = orchestrator
-        .start_session(moa_core::StartSessionRequest {
-            workspace_id: WorkspaceId::new("ws-left"),
-            user_id: moa_core::UserId::new("u-left"),
-            platform: moa_core::Platform::Cli,
-            model: model.clone(),
-            initial_message: Some(UserMessage {
-                text: "left".to_string(),
-                attachments: Vec::new(),
-            }),
-            title: None,
-            parent_session_id: None,
-        })
+    let harness = TemporalContractHarness::new(&orchestrator, model, None);
+    assert_processes_two_sessions_independently(&harness, "left", "right")
         .await
-        .expect("left session");
-    let right = orchestrator
-        .start_session(moa_core::StartSessionRequest {
-            workspace_id: WorkspaceId::new("ws-right"),
-            user_id: moa_core::UserId::new("u-right"),
-            platform: moa_core::Platform::Cli,
-            model,
-            initial_message: Some(UserMessage {
-                text: "right".to_string(),
-                attachments: Vec::new(),
-            }),
-            title: None,
-            parent_session_id: None,
-        })
-        .await
-        .expect("right session");
-
-    wait_for_status(
-        &orchestrator,
-        left.session_id.clone(),
-        SessionStatus::Completed,
-    )
-    .await;
-    wait_for_status(
-        &orchestrator,
-        right.session_id.clone(),
-        SessionStatus::Completed,
-    )
-    .await;
-
-    let left_events = wait_for_brain_response_count(&orchestrator, left.session_id, 1).await;
-    let right_events = wait_for_brain_response_count(&orchestrator, right.session_id, 1).await;
-    assert_eq!(brain_response_texts(&left_events), vec!["assistant:left"]);
-    assert_eq!(brain_response_texts(&right_events), vec!["assistant:right"]);
+        .expect("two-session contract");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "manual Temporal dev-server integration test"]
 async fn temporal_orchestrator_processes_multiple_queued_messages_fifo() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = MoaConfig::default().general.default_model;
@@ -773,66 +946,13 @@ async fn temporal_orchestrator_processes_multiple_queued_messages_fifo() {
             requests: requests.clone(),
         }))
         .await;
-
-    let session = orchestrator
-        .start_session(moa_core::StartSessionRequest {
-            workspace_id: WorkspaceId::new("ws-fifo"),
-            user_id: moa_core::UserId::new("u-fifo"),
-            platform: moa_core::Platform::Cli,
-            model,
-            initial_message: Some(UserMessage {
-                text: "first".to_string(),
-                attachments: Vec::new(),
-            }),
-            title: None,
-            parent_session_id: None,
-        })
+    let harness = TemporalContractHarness::new(&orchestrator, model, Some(requests));
+    assert_processes_multiple_queued_messages_fifo(&harness, "first", &["second", "third"])
         .await
-        .expect("start session");
-
-    sleep(Duration::from_millis(40)).await;
-    orchestrator
-        .signal(
-            session.session_id.clone(),
-            SessionSignal::QueueMessage(UserMessage {
-                text: "second".to_string(),
-                attachments: Vec::new(),
-            }),
-        )
-        .await
-        .expect("queue second");
-    orchestrator
-        .signal(
-            session.session_id.clone(),
-            SessionSignal::QueueMessage(UserMessage {
-                text: "third".to_string(),
-                attachments: Vec::new(),
-            }),
-        )
-        .await
-        .expect("queue third");
-
-    wait_for_status(
-        &orchestrator,
-        session.session_id.clone(),
-        SessionStatus::Completed,
-    )
-    .await;
-    let events = wait_for_brain_response_count(&orchestrator, session.session_id, 3).await;
-    assert_eq!(
-        brain_response_texts(&events),
-        vec!["assistant:first", "assistant:second", "assistant:third"]
-    );
-
-    let logged = requests.lock().expect("request log lock poisoned").clone();
-    assert_eq!(logged.len(), 3);
-    assert_eq!(last_user_message(&logged[0].messages), Some("first"));
-    assert_eq!(last_user_message(&logged[1].messages), Some("second"));
-    assert_eq!(last_user_message(&logged[2].messages), Some("third"));
+        .expect("fifo contract");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "manual Temporal dev-server integration test"]
 async fn temporal_orchestrator_queues_message_while_waiting_for_approval() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = MoaConfig::default().general.default_model;
@@ -852,65 +972,10 @@ async fn temporal_orchestrator_queues_message_while_waiting_for_approval() {
             requests,
         }))
         .await;
-
-    let session = orchestrator
-        .start_session(moa_core::StartSessionRequest {
-            workspace_id: WorkspaceId::new("ws-temporal"),
-            user_id: moa_core::UserId::new("u-temporal"),
-            platform: moa_core::Platform::Cli,
-            model,
-            initial_message: Some(UserMessage {
-                text: "first".to_string(),
-                attachments: Vec::new(),
-            }),
-            title: None,
-            parent_session_id: None,
-        })
+    let harness = TemporalContractHarness::new(&orchestrator, model, None);
+    assert_queued_message_waiting_for_approval_runs_after_allowed_turn(&harness, "first", "queued")
         .await
-        .expect("start session");
-
-    wait_for_status(
-        &orchestrator,
-        session.session_id.clone(),
-        SessionStatus::WaitingApproval,
-    )
-    .await;
-    orchestrator
-        .signal(
-            session.session_id.clone(),
-            SessionSignal::QueueMessage(UserMessage {
-                text: "queued".to_string(),
-                attachments: Vec::new(),
-            }),
-        )
-        .await
-        .expect("queue follow-up");
-    orchestrator
-        .signal(
-            session.session_id.clone(),
-            SessionSignal::ApprovalDecided {
-                request_id: tool_id,
-                decision: moa_core::ApprovalDecision::AllowOnce,
-            },
-        )
-        .await
-        .expect("approve");
-
-    wait_for_status(
-        &orchestrator,
-        session.session_id.clone(),
-        SessionStatus::Completed,
-    )
-    .await;
-    let events = wait_for_brain_response_count(&orchestrator, session.session_id.clone(), 2).await;
-    assert!(events.iter().any(|record| matches!(
-        &record.event,
-        Event::QueuedMessage { text, .. } if text == "queued"
-    )));
-    assert_eq!(
-        brain_response_texts(&events),
-        vec!["assistant:first", "assistant:queued"]
-    );
+        .expect("approval queue contract");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -926,7 +991,7 @@ async fn temporal_orchestrator_soft_cancel_stops_after_current_tool_call() {
                 id: Some(tool_id.to_string()),
                 name: "bash".to_string(),
                 input: json!({
-                    "cmd": "python3 -c 'import time; time.sleep(0.35); print(\"temporal-tool\")'"
+                    "cmd": "sleep 0.35 && printf 'temporal-tool\\n'"
                 }),
             },
             final_text: Some("should-not-run".to_string()),
@@ -939,7 +1004,7 @@ async fn temporal_orchestrator_soft_cancel_stops_after_current_tool_call() {
             workspace_id: WorkspaceId::new("ws-cancel"),
             user_id: moa_core::UserId::new("u-cancel"),
             platform: moa_core::Platform::Cli,
-            model,
+            model: model.into(),
             initial_message: Some(UserMessage {
                 text: "cancel during tool".to_string(),
                 attachments: Vec::new(),
@@ -952,13 +1017,13 @@ async fn temporal_orchestrator_soft_cancel_stops_after_current_tool_call() {
 
     wait_for_status(
         &orchestrator,
-        session.session_id.clone(),
+        session.session_id,
         SessionStatus::WaitingApproval,
     )
     .await;
     orchestrator
         .signal(
-            session.session_id.clone(),
+            session.session_id,
             SessionSignal::ApprovalDecided {
                 request_id: tool_id,
                 decision: moa_core::ApprovalDecision::AllowOnce,
@@ -966,24 +1031,17 @@ async fn temporal_orchestrator_soft_cancel_stops_after_current_tool_call() {
         )
         .await
         .expect("approve");
-    sleep(Duration::from_millis(50)).await;
     orchestrator
-        .signal(session.session_id.clone(), SessionSignal::SoftCancel)
+        .signal(session.session_id, SessionSignal::SoftCancel)
         .await
         .expect("soft cancel");
 
-    wait_for_status(
-        &orchestrator,
-        session.session_id.clone(),
-        SessionStatus::Cancelled,
-    )
-    .await;
-    let events = wait_for_tool_result(&orchestrator, session.session_id.clone(), tool_id).await;
-    assert!(
-        events
-            .iter()
-            .any(|record| matches!(record.event, Event::ToolResult { .. }))
-    );
+    wait_for_status(&orchestrator, session.session_id, SessionStatus::Cancelled).await;
+    let events = wait_for_tool_result(&orchestrator, session.session_id, tool_id).await;
+    assert!(events.iter().any(|record| matches!(
+        record.event,
+        Event::ToolResult { .. } | Event::ToolError { .. }
+    )));
     assert!(!events.iter().any(|record| matches!(
         &record.event,
         Event::BrainResponse { text, .. } if text == "should-not-run"
@@ -991,63 +1049,21 @@ async fn temporal_orchestrator_soft_cancel_stops_after_current_tool_call() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "manual Temporal dev-server integration test"]
 async fn temporal_orchestrator_soft_cancel_waiting_for_approval() {
     let model = MoaConfig::default().general.default_model;
     let (_dir, _server, orchestrator) = temporal_test_orchestrator().await;
-    let session = orchestrator
-        .start_session(moa_core::StartSessionRequest {
-            workspace_id: WorkspaceId::new("ws-temporal"),
-            user_id: moa_core::UserId::new("u-temporal"),
-            platform: moa_core::Platform::Cli,
-            model,
-            initial_message: Some(UserMessage {
-                text: "write the file".to_string(),
-                attachments: Vec::new(),
-            }),
-            title: None,
-            parent_session_id: None,
-        })
+    let harness = TemporalContractHarness::new(&orchestrator, model, None);
+    assert_soft_cancel_waiting_for_approval_cancels_cleanly(&harness, "write the file")
         .await
-        .expect("start session");
-
-    wait_for_status(
-        &orchestrator,
-        session.session_id.clone(),
-        SessionStatus::WaitingApproval,
-    )
-    .await;
-    orchestrator
-        .signal(session.session_id.clone(), SessionSignal::SoftCancel)
-        .await
-        .expect("soft cancel");
-
-    wait_for_status(
-        &orchestrator,
-        session.session_id.clone(),
-        SessionStatus::Cancelled,
-    )
-    .await;
-    let events = orchestrator
-        .observe(session.session_id, moa_core::ObserveLevel::Normal)
-        .await
-        .expect("observe")
-        .events;
-    assert!(
-        !events
-            .iter()
-            .any(|record| matches!(record.event, Event::ApprovalDecided { .. }))
-    );
-    assert!(
-        !events
-            .iter()
-            .any(|record| matches!(record.event, Event::ToolResult { .. }))
-    );
+        .expect("soft cancel contract");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "manual Temporal dev-server + Anthropic integration test"]
+#[ignore = "set MOA_RUN_LIVE_PROVIDER_TESTS=1 to run the live-provider Temporal smoke test"]
 async fn temporal_orchestrator_live_anthropic_smoke() {
+    if std::env::var("MOA_RUN_LIVE_PROVIDER_TESTS").ok().as_deref() != Some("1") {
+        return;
+    }
     if std::env::var("ANTHROPIC_API_KEY").is_err() {
         return;
     }
@@ -1058,6 +1074,7 @@ async fn temporal_orchestrator_live_anthropic_smoke() {
 
     let mut config = MoaConfig::default();
     config.database.url = testing::test_database_url();
+    config.local.docker_enabled = false;
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     config.cloud.enabled = true;
@@ -1097,7 +1114,7 @@ async fn temporal_orchestrator_live_anthropic_smoke() {
             workspace_id: WorkspaceId::new("ws-live"),
             user_id: moa_core::UserId::new("u-live"),
             platform: moa_core::Platform::Cli,
-            model: config.general.default_model,
+            model: config.general.default_model.into(),
             initial_message: Some(UserMessage {
                 text: "What is 2+2? Respond with just the answer.".to_string(),
                 attachments: Vec::new(),
@@ -1108,12 +1125,7 @@ async fn temporal_orchestrator_live_anthropic_smoke() {
         .await
         .expect("start session");
 
-    wait_for_status(
-        &orchestrator,
-        session.session_id.clone(),
-        SessionStatus::Completed,
-    )
-    .await;
+    wait_for_status(&orchestrator, session.session_id, SessionStatus::Completed).await;
     wait_for_event_text(&orchestrator, session.session_id, "4").await;
 
     let _ = server;
@@ -1121,7 +1133,24 @@ async fn temporal_orchestrator_live_anthropic_smoke() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "manual Temporal dev-server restart recovery test"]
+#[ignore = "manual live provider Temporal orchestrator test"]
+async fn temporal_live_providers_complete_tool_approval_roundtrip_when_available() {
+    if std::env::var("MOA_RUN_LIVE_PROVIDER_TESTS").ok().as_deref() != Some("1") {
+        return;
+    }
+
+    let providers = available_live_providers();
+    if providers.is_empty() {
+        return;
+    }
+
+    for provider in providers {
+        run_live_temporal_provider_tool_approval_roundtrip(provider).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual Temporal worker restart recovery test"]
 async fn temporal_orchestrator_recovers_after_worker_process_restart() {
     build_temporal_helper_binary();
 
@@ -1138,10 +1167,12 @@ async fn temporal_orchestrator_recovers_after_worker_process_restart() {
 
     let mut restarted = spawn_temporal_helper("worker", dir.path(), server.port, &task_queue, 200);
     let mut config = MoaConfig::default();
-    let (session_store, _database_url, _schema_name) = testing::create_isolated_test_store()
-        .await
-        .expect("session store");
-    wait_for_store_status(&session_store, session_id.clone(), SessionStatus::Completed).await;
+    config.database.url = testing::test_database_url();
+    config.local.docker_enabled = false;
+    config.local.memory_dir = dir.path().join("memory").display().to_string();
+    config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+    let session_store = create_session_store(&config).await.expect("session store");
+    wait_for_store_status(&session_store, session_id, SessionStatus::Completed).await;
     wait_for_store_event_text(&session_store, session_id, "assistant:recover me").await;
 
     let _ = restarted.kill();

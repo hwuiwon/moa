@@ -6,9 +6,11 @@ use std::{path::Path, sync::Arc};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ApprovalRule, BlobStore, ContextSnapshot, Event, EventFilter, EventRange, EventRecord,
-    MoaConfig, MoaError, PendingSignal, PendingSignalId, Result, SessionFilter, SessionMeta,
-    SessionStatus, SessionStore, SessionSummary, WakeContext, WorkspaceId,
+    ApprovalRule, BlobStore, CacheDailyMetric, ContextSnapshot, Event, EventFilter, EventRange,
+    EventRecord, MoaConfig, MoaError, PendingSignal, PendingSignalId, Result,
+    SessionAnalyticsSummary, SessionFilter, SessionMeta, SessionStatus, SessionStore,
+    SessionSummary, SessionTurnMetric, ToolCallSummary, WakeContext, WorkspaceAnalyticsSummary,
+    WorkspaceId,
 };
 use moa_security::ApprovalRuleStore;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};
@@ -18,10 +20,10 @@ use uuid::Uuid;
 use crate::blob::{FileBlobStore, decode_event_from_storage, encode_event_for_storage};
 use crate::listener::{GLOBAL_EVENTS_CHANNEL, session_channel_name};
 use crate::queries::{
-    EVENT_COLUMNS, SESSION_COLUMNS, SESSION_SUMMARY_COLUMNS, approval_rule_from_row,
-    event_type_from_db, event_type_to_db, map_sqlx_error, pending_signal_from_row,
-    pending_signal_type_to_db, platform_to_db, policy_action_to_db, policy_scope_to_db,
-    session_meta_from_row, session_status_to_db, session_summary_from_row,
+    EVENT_COLUMNS, SESSION_INSERT_COLUMNS, SESSION_SELECT_COLUMNS, SESSION_SUMMARY_COLUMNS,
+    approval_rule_from_row, event_type_from_db, event_type_to_db, map_sqlx_error,
+    pending_signal_from_row, pending_signal_type_to_db, platform_to_db, policy_action_to_db,
+    policy_scope_to_db, session_meta_from_row, session_status_to_db, session_summary_from_row,
 };
 use crate::schema;
 
@@ -126,6 +128,62 @@ impl PostgresSessionStore {
     /// Returns the optional schema name used for this store.
     pub fn schema_name(&self) -> Option<&str> {
         self.schema_name.as_deref()
+    }
+
+    /// Loads one session analytics summary row.
+    pub async fn get_session_summary(
+        &self,
+        session_id: moa_core::SessionId,
+    ) -> Result<SessionAnalyticsSummary> {
+        moa_core::get_session_summary(&self.pool, self.schema_name(), session_id).await
+    }
+
+    /// Lists per-tool analytics rows, optionally scoped to one workspace.
+    pub async fn list_tool_call_summaries(
+        &self,
+        workspace_id: Option<&WorkspaceId>,
+    ) -> Result<Vec<ToolCallSummary>> {
+        moa_core::list_tool_call_summaries(&self.pool, self.schema_name(), workspace_id).await
+    }
+
+    /// Lists per-turn analytics rows for one session.
+    pub async fn list_session_turn_metrics(
+        &self,
+        session_id: moa_core::SessionId,
+    ) -> Result<Vec<SessionTurnMetric>> {
+        moa_core::list_session_turn_metrics(&self.pool, self.schema_name(), session_id).await
+    }
+
+    /// Loads aggregated workspace analytics over a recent day window.
+    pub async fn get_workspace_stats(
+        &self,
+        workspace_id: &WorkspaceId,
+        days: u32,
+    ) -> Result<WorkspaceAnalyticsSummary> {
+        moa_core::get_workspace_stats(&self.pool, self.schema_name(), workspace_id, days).await
+    }
+
+    /// Lists daily cache trend rows for one workspace.
+    pub async fn list_cache_daily_metrics(
+        &self,
+        workspace_id: &WorkspaceId,
+        days: u32,
+    ) -> Result<Vec<CacheDailyMetric>> {
+        moa_core::list_cache_daily_metrics(&self.pool, self.schema_name(), workspace_id, days).await
+    }
+
+    /// Refreshes materialized analytics views using concurrent refreshes.
+    pub async fn refresh_analytics_materialized_views(&self) -> Result<()> {
+        for view_name in ["session_turn_metrics", "daily_workspace_metrics"] {
+            let qualified = self.table_name(view_name);
+            sqlx::query(&format!(
+                "REFRESH MATERIALIZED VIEW CONCURRENTLY {qualified}"
+            ))
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+        Ok(())
     }
 
     async fn new_with_options_and_blob_store(
@@ -346,7 +404,7 @@ impl SessionStore for PostgresSessionStore {
         let session_id = meta.id;
         let sessions = self.table_name("sessions");
         sqlx::query(&format!(
-            "INSERT INTO {sessions} ({SESSION_COLUMNS}) VALUES \
+            "INSERT INTO {sessions} ({SESSION_INSERT_COLUMNS}) VALUES \
              ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)"
         ))
         .bind(session_id.0)
@@ -361,13 +419,13 @@ impl SessionStore for PostgresSessionStore {
         .bind(meta.updated_at)
         .bind(meta.completed_at)
         .bind(meta.parent_session_id.map(|value| value.0))
-        .bind(meta.total_input_tokens as i64)
         .bind(meta.total_input_tokens_uncached as i64)
         .bind(meta.total_input_tokens_cache_write as i64)
         .bind(meta.total_input_tokens_cache_read as i64)
         .bind(meta.total_output_tokens as i64)
         .bind(meta.total_cost_cents as i64)
         .bind(meta.event_count as i64)
+        .bind(0_i64)
         .bind(meta.last_checkpoint_seq.map(|value| value as i64))
         .execute(&self.pool)
         .await
@@ -376,7 +434,7 @@ impl SessionStore for PostgresSessionStore {
         Ok(session_id)
     }
 
-    /// Appends an event to the session log and updates session counters.
+    /// Appends an event to the session log.
     async fn emit_event(&self, session_id: moa_core::SessionId, event: Event) -> Result<u64> {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
         let event_id = Uuid::now_v7();
@@ -402,11 +460,6 @@ impl SessionStore for PostgresSessionStore {
         let sequence_num = locked_session
             .try_get::<i64, _>("event_count")
             .map_err(map_sqlx_error)? as u64;
-        let checkpoint_seq = if matches!(event, Event::Checkpoint { .. }) {
-            Some(sequence_num as i64)
-        } else {
-            None
-        };
 
         sqlx::query(&format!(
             "INSERT INTO {events} \
@@ -423,32 +476,8 @@ impl SessionStore for PostgresSessionStore {
         .bind(event_hand_id(&event))
         .bind(event.token_count() as i32)
         .execute(&mut *transaction)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        sqlx::query(&format!(
-            "UPDATE {sessions} SET updated_at = $1, event_count = event_count + 1, \
-             total_input_tokens = total_input_tokens + $2, \
-             total_input_tokens_uncached = total_input_tokens_uncached + $3, \
-             total_input_tokens_cache_write = total_input_tokens_cache_write + $4, \
-             total_input_tokens_cache_read = total_input_tokens_cache_read + $5, \
-             total_output_tokens = total_output_tokens + $6, \
-             total_cost_cents = total_cost_cents + $7, \
-             last_checkpoint_seq = COALESCE($8, last_checkpoint_seq) \
-             WHERE id = $9"
-        ))
-        .bind(now)
-        .bind(event.input_tokens() as i64)
-        .bind(event.input_tokens_uncached() as i64)
-        .bind(event.input_tokens_cache_write() as i64)
-        .bind(event.input_tokens_cache_read() as i64)
-        .bind(event.output_tokens() as i64)
-        .bind(event.cost_cents() as i64)
-        .bind(checkpoint_seq)
-        .bind(session_id.0)
-        .execute(&mut *transaction)
-        .await
-        .map_err(map_sqlx_error)?;
+            .await
+            .map_err(map_sqlx_error)?;
 
         let session_channel = session_channel_name(&session_id);
         sqlx::query("SELECT pg_notify($1, $2)")
@@ -535,7 +564,8 @@ impl SessionStore for PostgresSessionStore {
     /// Loads a persisted session metadata record.
     async fn get_session(&self, session_id: moa_core::SessionId) -> Result<SessionMeta> {
         let sessions = self.table_name("sessions");
-        let query = format!("SELECT {SESSION_COLUMNS} FROM {sessions} WHERE id = $1 LIMIT 1");
+        let query =
+            format!("SELECT {SESSION_SELECT_COLUMNS} FROM {sessions} WHERE id = $1 LIMIT 1");
         let row = sqlx::query(&query)
             .bind(session_id.0)
             .fetch_optional(&self.pool)

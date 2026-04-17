@@ -71,6 +71,49 @@ pub trait SessionStore: Send + Sync {
     /// Updates the status of an existing session.
     async fn update_status(&self, session_id: SessionId, status: SessionStatus) -> Result<()>;
 
+    /// Transitions a session to a new status and persists the matching
+    /// `SessionStatusChanged` event when the status actually changes.
+    async fn transition_status(
+        &self,
+        session_id: SessionId,
+        status: SessionStatus,
+    ) -> Result<Option<EventRecord>> {
+        let previous = self.get_session(session_id).await?.status;
+        if previous == status {
+            return Ok(None);
+        }
+
+        self.update_status(session_id, status.clone()).await?;
+        if matches!(status, SessionStatus::Cancelled) {
+            self.delete_snapshot(session_id).await?;
+        }
+
+        let sequence_num = self
+            .emit_event(
+                session_id,
+                Event::SessionStatusChanged {
+                    from: previous,
+                    to: status,
+                },
+            )
+            .await?;
+        let mut events = self
+            .get_events(
+                session_id,
+                EventRange {
+                    from_seq: Some(sequence_num),
+                    to_seq: Some(sequence_num),
+                    event_types: None,
+                    limit: Some(1),
+                },
+            )
+            .await?;
+        let record = events.pop().ok_or_else(|| {
+            MoaError::StorageError("failed to reload status transition event".to_string())
+        })?;
+        Ok(Some(record))
+    }
+
     /// Stores the latest compiled-context snapshot for a session.
     async fn put_snapshot(&self, _session_id: SessionId, _snapshot: ContextSnapshot) -> Result<()> {
         Ok(())

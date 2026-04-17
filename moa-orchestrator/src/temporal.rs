@@ -9,8 +9,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use futures_util::FutureExt as _;
 use moa_brain::{
-    TurnResult, build_default_pipeline_with_runtime, find_pending_tool_approval,
-    find_resolved_pending_tool_approval, run_brain_turn_with_tools_stepwise,
+    TurnResult, build_default_pipeline_with_runtime, run_brain_turn_with_tools_stepwise,
     update_workspace_tool_stats,
 };
 use moa_core::{
@@ -43,6 +42,8 @@ use tokio::sync::broadcast;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use url::Url;
 use uuid::Uuid;
+
+use crate::session_engine::session_requires_processing;
 
 const DEFAULT_WORKFLOW_EXECUTION_TIMEOUT: Duration = Duration::from_secs(60 * 60 * 24);
 const DEFAULT_ACTIVITY_START_TO_CLOSE_TIMEOUT: Duration = Duration::from_secs(60 * 5);
@@ -168,12 +169,12 @@ impl SessionWorkflow {
                     (
                         state.approval_decisions.first().cloned(),
                         state.cancel_requested.take(),
-                        state.session_id.clone(),
+                        state.session_id,
                     )
                 });
 
                 if let Some(cancel_mode) = cancel_requested {
-                    flush_all_queued_messages(ctx, session_id.clone()).await?;
+                    flush_all_queued_messages(ctx, session_id).await?;
                     mark_cancelled(ctx, session_id, cancel_mode).await?;
                     return Ok(());
                 }
@@ -194,7 +195,7 @@ impl SessionWorkflow {
                 && !ctx.state(|state| state.queued_messages.is_empty())
             {
                 let activity_input = ctx.state_mut(|state| QueueMessageActivityInput {
-                    session_id: state.session_id.clone(),
+                    session_id: state.session_id,
                     message: state.queued_messages.remove(0),
                 });
                 ctx.start_activity(
@@ -209,21 +210,21 @@ impl SessionWorkflow {
             }
 
             if !ctx.state(|state| state.turn_requested) {
-                let (cancel_requested, session_id) = ctx
-                    .state_mut(|state| (state.cancel_requested.take(), state.session_id.clone()));
+                let (cancel_requested, session_id) =
+                    ctx.state_mut(|state| (state.cancel_requested.take(), state.session_id));
                 if let Some(cancel_mode) = cancel_requested {
-                    flush_all_queued_messages(ctx, session_id.clone()).await?;
+                    flush_all_queued_messages(ctx, session_id).await?;
                     mark_cancelled(ctx, session_id, cancel_mode).await?;
                     return Ok(());
                 }
                 continue;
             }
 
-            let session_id = ctx.state(|state| state.session_id.clone());
+            let session_id = ctx.state(|state| state.session_id);
             let outcome = ctx
                 .start_activity(
                     TemporalActivities::brain_turn,
-                    session_id.clone(),
+                    session_id,
                     brain_turn_activity_options(),
                 )
                 .await
@@ -233,7 +234,7 @@ impl SessionWorkflow {
             match outcome {
                 TemporalTurnResult::Continue => {
                     if ctx.state(|state| state.cancel_requested.is_some()) {
-                        flush_all_queued_messages(ctx, session_id.clone()).await?;
+                        flush_all_queued_messages(ctx, session_id).await?;
                         mark_cancelled(ctx, session_id, CancelMode::Soft).await?;
                         return Ok(());
                     }
@@ -244,7 +245,7 @@ impl SessionWorkflow {
                 }
                 TemporalTurnResult::Complete => {
                     if ctx.state(|state| state.cancel_requested.is_some()) {
-                        flush_all_queued_messages(ctx, session_id.clone()).await?;
+                        flush_all_queued_messages(ctx, session_id).await?;
                         mark_cancelled(ctx, session_id, CancelMode::Soft).await?;
                         return Ok(());
                     }
@@ -293,7 +294,7 @@ impl TemporalActivities {
         session_id: SessionId,
     ) -> std::result::Result<TemporalTurnResult, ActivityError> {
         self.session_store
-            .update_status(session_id.clone(), SessionStatus::Running)
+            .transition_status(session_id, SessionStatus::Running)
             .await
             .map_err(non_retryable_activity_error)?;
         let heartbeat_ctx = ctx.clone();
@@ -366,7 +367,7 @@ impl TemporalActivities {
         for message in input.messages {
             self.session_store
                 .emit_event(
-                    input.session_id.clone(),
+                    input.session_id,
                     Event::QueuedMessage {
                         text: message.text,
                         queued_at: Utc::now(),
@@ -386,12 +387,12 @@ impl TemporalActivities {
     ) -> std::result::Result<(), ActivityError> {
         let session = self
             .session_store
-            .get_session(input.session_id.clone())
+            .get_session(input.session_id)
             .await
             .map_err(non_retryable_activity_error)?;
         self.session_store
             .emit_event(
-                input.session_id.clone(),
+                input.session_id,
                 Event::ApprovalDecided {
                     request_id: input.request_id,
                     decision: input.decision,
@@ -402,7 +403,7 @@ impl TemporalActivities {
             .await
             .map_err(non_retryable_activity_error)?;
         self.session_store
-            .update_status(input.session_id, SessionStatus::Running)
+            .transition_status(input.session_id, SessionStatus::Running)
             .await
             .map_err(non_retryable_activity_error)?;
         Ok(())
@@ -415,7 +416,7 @@ impl TemporalActivities {
         input: SessionStatusActivityInput,
     ) -> std::result::Result<(), ActivityError> {
         self.session_store
-            .update_status(input.session_id, input.status)
+            .transition_status(input.session_id, input.status)
             .await
             .map_err(non_retryable_activity_error)?;
         Ok(())
@@ -429,12 +430,12 @@ impl TemporalActivities {
     ) -> std::result::Result<(), ActivityError> {
         let session = self
             .session_store
-            .get_session(session_id.clone())
+            .get_session(session_id)
             .await
             .map_err(non_retryable_activity_error)?;
         let events = self
             .session_store
-            .get_events(session_id.clone(), EventRange::all())
+            .get_events(session_id, EventRange::all())
             .await
             .map_err(non_retryable_activity_error)?;
 
@@ -450,7 +451,7 @@ impl TemporalActivities {
         {
             self.session_store
                 .emit_event(
-                    session_id.clone(),
+                    session_id,
                     Event::MemoryWrite {
                         path: skill.path.to_string(),
                         scope: session.workspace_id.to_string(),
@@ -468,9 +469,10 @@ impl TemporalActivities {
         )
         .await
         .map_err(non_retryable_activity_error)?;
+        self.tool_router.destroy_session_hands(&session_id).await;
 
         self.session_store
-            .update_status(session_id, SessionStatus::Completed)
+            .transition_status(session_id, SessionStatus::Completed)
             .await
             .map_err(non_retryable_activity_error)?;
         Ok(())
@@ -552,7 +554,7 @@ impl TemporalOrchestrator {
     }
 
     async fn ensure_workflow_started(&self, session_id: SessionId) -> MoaResult<()> {
-        let handle = self.runtime.workflow_handle(session_id.clone());
+        let handle = self.runtime.workflow_handle(session_id);
         if handle
             .describe(WorkflowDescribeOptions::default())
             .await
@@ -561,7 +563,7 @@ impl TemporalOrchestrator {
             return Ok(());
         }
 
-        let wake = self.session_store.wake(session_id.clone()).await?;
+        let wake = self.session_store.wake(session_id).await?;
         self.runtime
             .start_session_workflow(
                 session_id,
@@ -593,7 +595,7 @@ impl TemporalOrchestrator {
 
                     match session_store
                         .get_events(
-                            session_id.clone(),
+                            session_id,
                             EventRange {
                                 from_seq: Some(next_seq),
                                 to_seq: None,
@@ -789,7 +791,7 @@ impl BrainOrchestrator for TemporalOrchestrator {
         let session_id = SessionId::new();
         let now = Utc::now();
         let meta = SessionMeta {
-            id: session_id.clone(),
+            id: session_id,
             workspace_id: req.workspace_id.clone(),
             user_id: req.user_id.clone(),
             title: req.title.clone(),
@@ -798,16 +800,16 @@ impl BrainOrchestrator for TemporalOrchestrator {
             model: req.model.clone(),
             created_at: now,
             updated_at: now,
-            parent_session_id: req.parent_session_id.clone(),
+            parent_session_id: req.parent_session_id,
             ..SessionMeta::default()
         };
         self.session_store.create_session(meta).await?;
         self.session_store
             .emit_event(
-                session_id.clone(),
+                session_id,
                 Event::SessionCreated {
-                    workspace_id: req.workspace_id.to_string(),
-                    user_id: req.user_id.to_string(),
+                    workspace_id: req.workspace_id.clone(),
+                    user_id: req.user_id.clone(),
                     model: req.model,
                 },
             )
@@ -816,7 +818,7 @@ impl BrainOrchestrator for TemporalOrchestrator {
         if let Some(message) = req.initial_message {
             self.session_store
                 .emit_event(
-                    session_id.clone(),
+                    session_id,
                     Event::UserMessage {
                         text: message.text,
                         attachments: message.attachments,
@@ -825,21 +827,21 @@ impl BrainOrchestrator for TemporalOrchestrator {
                 .await?;
         }
         self.runtime
-            .start_session_workflow(session_id.clone(), has_initial_message)
+            .start_session_workflow(session_id, has_initial_message)
             .await?;
         Ok(SessionHandle { session_id })
     }
 
     /// Resumes an existing Temporal workflow or restarts it from the persisted session log.
     async fn resume_session(&self, session_id: SessionId) -> MoaResult<SessionHandle> {
-        self.ensure_workflow_started(session_id.clone()).await?;
+        self.ensure_workflow_started(session_id).await?;
         Ok(SessionHandle { session_id })
     }
 
     /// Delivers a queue, approval, or cancel signal to a Temporal workflow.
     async fn signal(&self, session_id: SessionId, signal: SessionSignal) -> MoaResult<()> {
-        self.ensure_workflow_started(session_id.clone()).await?;
-        let handle = self.runtime.workflow_handle(session_id.clone());
+        self.ensure_workflow_started(session_id).await?;
+        let handle = self.runtime.workflow_handle(session_id);
 
         match signal {
             SessionSignal::QueueMessage(message) => handle
@@ -880,7 +882,7 @@ impl BrainOrchestrator for TemporalOrchestrator {
                 }),
             SessionSignal::HardCancel => {
                 self.session_store
-                    .update_status(session_id.clone(), SessionStatus::Cancelled)
+                    .transition_status(session_id, SessionStatus::Cancelled)
                     .await?;
                 handle
                     .terminate(
@@ -907,9 +909,9 @@ impl BrainOrchestrator for TemporalOrchestrator {
     async fn observe(&self, session_id: SessionId, _level: ObserveLevel) -> MoaResult<EventStream> {
         let history = self
             .session_store
-            .get_events(session_id.clone(), EventRange::all())
+            .get_events(session_id, EventRange::all())
             .await?;
-        let receiver = self.observe_live_tail(session_id.clone(), &history).await;
+        let receiver = self.observe_live_tail(session_id, &history).await;
         Ok(EventStream::from_history_and_broadcast(
             session_id, history, receiver,
         ))
@@ -920,7 +922,7 @@ impl BrainOrchestrator for TemporalOrchestrator {
         &self,
         session_id: SessionId,
     ) -> MoaResult<Option<broadcast::Receiver<RuntimeEvent>>> {
-        self.session_store.get_session(session_id.clone()).await?;
+        self.session_store.get_session(session_id).await?;
         let (tx, rx) = broadcast::channel(256);
         let session_store = self.session_store.clone();
         tokio::spawn(async move {
@@ -930,7 +932,7 @@ impl BrainOrchestrator for TemporalOrchestrator {
                     tokio::time::sleep(DEFAULT_OBSERVE_POLL_INTERVAL).await;
                     let events = session_store
                         .get_events(
-                            session_id.clone(),
+                            session_id,
                             EventRange {
                                 from_seq: Some(last_seq + 1),
                                 ..EventRange::all()
@@ -954,7 +956,7 @@ impl BrainOrchestrator for TemporalOrchestrator {
                         }
                     }
 
-                    match session_store.get_session(session_id.clone()).await {
+                    match session_store.get_session(session_id).await {
                         Ok(session) if session_is_terminal(&session.status) => {
                             let _ = tx.send(RuntimeEvent::TurnCompleted);
                             return;
@@ -1022,7 +1024,7 @@ async fn apply_approval_decision(
     ctx: &WorkflowContext<SessionWorkflow>,
     decision: ApprovalSignalInput,
 ) -> WorkflowResult<()> {
-    let session_id = ctx.state(|state| state.session_id.clone());
+    let session_id = ctx.state(|state| state.session_id);
     ctx.start_activity(
         TemporalActivities::append_approval_decision,
         ApprovalDecisionActivityInput {
@@ -1083,7 +1085,7 @@ fn event_to_runtime_event(record: &EventRecord) -> Option<RuntimeEvent> {
         Event::ToolCall {
             tool_id, tool_name, ..
         } => Some(RuntimeEvent::ToolUpdate(ToolUpdate {
-            tool_id: *tool_id,
+            tool_id: tool_id.0,
             tool_name: tool_name.clone(),
             status: ToolCardStatus::Pending,
             summary: format!("Queued {}", tool_name),
@@ -1095,7 +1097,7 @@ fn event_to_runtime_event(record: &EventRecord) -> Option<RuntimeEvent> {
             output,
             ..
         } => Some(RuntimeEvent::ToolUpdate(ToolUpdate {
-            tool_id: *tool_id,
+            tool_id: tool_id.0,
             tool_name: "tool".to_string(),
             status: if *success {
                 ToolCardStatus::Succeeded
@@ -1111,7 +1113,7 @@ fn event_to_runtime_event(record: &EventRecord) -> Option<RuntimeEvent> {
             detail: None,
         })),
         Event::ToolError { tool_id, error, .. } => Some(RuntimeEvent::ToolUpdate(ToolUpdate {
-            tool_id: *tool_id,
+            tool_id: tool_id.0,
             tool_name: "tool".to_string(),
             status: ToolCardStatus::Failed,
             summary: "Tool failed".to_string(),
@@ -1192,38 +1194,6 @@ where
     T: Serialize + 'static,
 {
     RawValue::from_value(value, &PayloadConverter::serde_json())
-}
-
-fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) -> bool {
-    if matches!(session.status, SessionStatus::Cancelled) {
-        return false;
-    }
-
-    if find_pending_tool_approval(events).is_some()
-        || find_resolved_pending_tool_approval(events).is_some()
-    {
-        return true;
-    }
-
-    events
-        .iter()
-        .rev()
-        .find_map(|record| match record.event {
-            Event::SessionStatusChanged { .. }
-            | Event::Warning { .. }
-            | Event::MemoryWrite { .. }
-            | Event::HandDestroyed { .. }
-            | Event::HandError { .. }
-            | Event::Checkpoint { .. } => None,
-            Event::UserMessage { .. }
-            | Event::QueuedMessage { .. }
-            | Event::ToolResult { .. }
-            | Event::ToolError { .. }
-            | Event::ApprovalDecided { .. }
-            | Event::ToolCall { .. } => Some(true),
-            _ => Some(false),
-        })
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

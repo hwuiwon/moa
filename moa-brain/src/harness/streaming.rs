@@ -215,9 +215,13 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                             }
                         }
                     } else if let Some(request) = find_pending_approval_request(&events) {
-                        session_store
-                            .update_status(session_id, SessionStatus::WaitingApproval)
-                            .await?;
+                        if let Some(record) = session_store
+                            .transition_status(session_id, SessionStatus::WaitingApproval)
+                            .await?
+                            && let Some(event_tx) = event_tx
+                        {
+                            let _ = event_tx.send(record);
+                        }
                         record_turn_span_metrics(
                             &turn_span,
                             total_tool_calls,

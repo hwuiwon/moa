@@ -33,6 +33,11 @@ impl LiveProvider {
     }
 }
 
+fn looks_like_four_answer(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    normalized.contains('4') || normalized.contains("four")
+}
+
 fn available_live_providers() -> Vec<LiveProvider> {
     let mut providers = Vec::new();
     if let Ok(provider) = OpenAIProvider::from_env("gpt-5.4") {
@@ -41,7 +46,7 @@ fn available_live_providers() -> Vec<LiveProvider> {
     if let Ok(provider) = AnthropicProvider::from_env("claude-sonnet-4-6") {
         providers.push(LiveProvider::Anthropic(Box::new(provider)));
     }
-    if let Ok(provider) = GeminiProvider::from_env("gemini-2.5-flash") {
+    if let Ok(provider) = GeminiProvider::from_env("gemini-3.1-pro-preview") {
         providers.push(LiveProvider::Google(Box::new(provider)));
     }
     providers
@@ -89,8 +94,8 @@ async fn live_providers_answer_simple_prompt_across_available_keys() {
             });
 
         assert!(
-            response.text.contains('4'),
-            "{} response did not contain 4: {:?}",
+            looks_like_four_answer(&response.text),
+            "{} response did not look like a 4-answer: {:?}",
             provider.label(),
             response.text
         );

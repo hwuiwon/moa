@@ -160,6 +160,14 @@ impl SessionStore for CountedSessionStore {
         self.inner.update_status(session_id, status).await
     }
 
+    async fn transition_status(
+        &self,
+        session_id: SessionId,
+        status: SessionStatus,
+    ) -> Result<Option<EventRecord>> {
+        self.inner.transition_status(session_id, status).await
+    }
+
     async fn put_snapshot(&self, session_id: SessionId, snapshot: ContextSnapshot) -> Result<()> {
         self.inner.put_snapshot(session_id, snapshot).await
     }

@@ -367,6 +367,10 @@ async fn live_observability_audit_tracks_cache_replay_and_latency() -> Result<()
     );
 
     let session_meta = orchestrator.get_session(session.session_id).await?;
+    let session_summary = orchestrator
+        .session_store()
+        .get_session_summary(session.session_id)
+        .await?;
     assert!(
         session_meta.total_input_tokens_cache_read > 0,
         "expected session aggregate cache-read tokens to be non-zero"
@@ -464,7 +468,7 @@ async fn live_observability_audit_tracks_cache_replay_and_latency() -> Result<()
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "brain_responses": brain_responses,
-            "session_cache_hit_rate": session_meta.cache_hit_rate(),
+            "session_cache_hit_rate": session_summary.cache_hit_rate,
             "session_cache_read_tokens": session_meta.total_input_tokens_cache_read,
             "replay_counts": replay_counts,
             "latency_summaries": latency_events
