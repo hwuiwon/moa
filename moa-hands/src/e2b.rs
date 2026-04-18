@@ -15,6 +15,9 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 
+use crate::tools::edit_output::{
+    ExistingFileContent, build_file_write_output, build_text_edit_output,
+};
 use crate::tools::str_replace::plan_str_replace;
 
 const DEFAULT_E2B_API_URL: &str = "https://api.e2b.dev";
@@ -274,6 +277,22 @@ impl E2BHandProvider {
         path: &str,
         content: &str,
     ) -> Result<ToolOutput> {
+        let existing = match self.read_file(sandbox_id, sandbox, path).await {
+            Ok(output) => ExistingFileContent::Text(output.to_text()),
+            Err(MoaError::HttpStatus { status: 404, .. }) => ExistingFileContent::Missing,
+            Err(error) => return Err(error),
+        };
+        let duration = self.upload_file(sandbox_id, sandbox, path, content).await?;
+        Ok(build_file_write_output(path, &existing, content, duration))
+    }
+
+    async fn upload_file(
+        &self,
+        sandbox_id: &str,
+        sandbox: &ConnectedSandbox,
+        path: &str,
+        content: &str,
+    ) -> Result<Duration> {
         let started_at = Instant::now();
         let url = build_url(
             &format!("{}/files", self.envd_url(sandbox_id, sandbox)),
@@ -291,10 +310,7 @@ impl E2BHandProvider {
                 MoaError::ProviderError(format!("failed to write E2B file: {error}"))
             })?;
         let _ = expect_success_json(response).await?;
-        Ok(ToolOutput::text(
-            format!("wrote {path}"),
-            started_at.elapsed(),
-        ))
+        Ok(started_at.elapsed())
     }
 
     async fn str_replace_file(
@@ -310,10 +326,15 @@ impl E2BHandProvider {
             Err(error) => return Err(error),
         };
         let planned = plan_str_replace(input, existing_content.as_deref(), path, 4)?;
-        let write_output = self
-            .write_file(sandbox_id, sandbox, path, &planned.updated_content)
+        let duration = self
+            .upload_file(sandbox_id, sandbox, path, &planned.updated_content)
             .await?;
-        Ok(ToolOutput::text(planned.message, write_output.duration))
+        Ok(build_text_edit_output(
+            path,
+            existing_content.as_deref().unwrap_or_default(),
+            &planned.updated_content,
+            duration,
+        ))
     }
 }
 

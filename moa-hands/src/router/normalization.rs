@@ -269,7 +269,6 @@ pub(super) async fn approval_diffs_for(
                         .to_string();
                     crate::tools::str_replace::PlannedStrReplace {
                         updated_content: String::new(),
-                        message: String::new(),
                         preview_before: fallback_before,
                         preview_after: fallback_after,
                     }

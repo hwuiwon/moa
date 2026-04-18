@@ -221,7 +221,7 @@ async fn str_replace_updates_only_the_target_region() {
         .await
         .unwrap();
 
-    router
+    let (_, replace_output) = router
         .execute_authorized(
             &session,
             &ToolInvocation {
@@ -236,6 +236,11 @@ async fn str_replace_updates_only_the_target_region() {
         )
         .await
         .unwrap();
+    let rendered = replace_output.to_text();
+    assert!(rendered.starts_with("--- a/src/lib.rs\n+++ b/src/lib.rs\n"));
+    assert!(rendered.contains("-    alpha();"));
+    assert!(rendered.contains("+    gamma();"));
+    assert!(!rendered.contains("replaced 1 lines with 1 lines"));
 
     let (_, output) = router
         .execute_authorized(
@@ -253,6 +258,63 @@ async fn str_replace_updates_only_the_target_region() {
         output.to_text(),
         "fn demo() {\n    gamma();\n    beta();\n}"
     );
+}
+
+#[tokio::test]
+async fn file_write_overwrite_returns_compact_diff() {
+    let dir = tempdir().unwrap();
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let router = ToolRouter::new_local(memory_store, dir.path())
+        .await
+        .unwrap();
+    let session = session();
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({
+                    "path": "src/demo.rs",
+                    "content": (1..=500)
+                        .map(|index| format!("{index:03}: {}", "x".repeat(48)))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let updated = (1..=500)
+        .map(|index| match index {
+            120 => "120: changed alpha".to_string(),
+            121 => "121: changed beta".to_string(),
+            122 => "122: changed gamma".to_string(),
+            _ => format!("{index:03}: {}", "x".repeat(48)),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "src/demo.rs", "content": updated.clone() }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let rendered = output.to_text();
+    assert!(rendered.starts_with("--- a/src/demo.rs\n+++ b/src/demo.rs\n"));
+    assert!(rendered.contains("@@"));
+    assert!(rendered.contains("-120:"));
+    assert!(rendered.contains("+120: changed alpha"));
+    assert!(approximate_tokens(&rendered) * 10 <= approximate_tokens(&updated) * 3);
 }
 
 #[tokio::test]
@@ -1480,7 +1542,10 @@ async fn docker_file_tools_roundtrip_inside_container_workspace() {
             )
             .await
             .unwrap();
-        assert_eq!(write.to_text(), "wrote nested/demo.txt");
+        assert_eq!(
+            write.to_text(),
+            "[new file created: nested/demo.txt, 1 lines]"
+        );
 
         let read = provider
             .execute(
@@ -1508,7 +1573,7 @@ async fn docker_file_tools_roundtrip_inside_container_workspace() {
         assert!(
             replace
                 .to_text()
-                .contains("replaced 1 lines with 1 lines in nested/demo.txt")
+                .contains("--- a/nested/demo.txt\n+++ b/nested/demo.txt\n")
         );
 
         let replaced = provider
