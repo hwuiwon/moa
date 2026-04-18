@@ -13,15 +13,18 @@ use moa_core::{
     MemorySearchResult, MemoryStore, MoaConfig, ModelCapabilities, PageSummary, PageType,
     PendingSignal, PendingSignalId, Result, RuntimeEvent, SequenceNum, SessionFilter, SessionId,
     SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason, TokenPricing, TokenUsage,
-    ToolCallContent, ToolCallFormat, ToolInvocation, UserId, WikiPage, WorkspaceId,
+    ToolCallContent, ToolCallFormat, ToolCallId, ToolInvocation, ToolOutput, UserId, WikiPage,
+    WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_memory::wiki::parse_markdown;
+use moa_security::ToolPolicies;
 use moa_session::{PostgresSessionStore, testing};
 use serde_json::json;
 use tempfile::tempdir;
 use tokio::sync::{Mutex, broadcast};
+use uuid::Uuid;
 
 #[derive(Clone)]
 struct MockSessionStore {
@@ -55,6 +58,14 @@ fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
 fn approximate_tokens(text: &str) -> u32 {
     let chars = text.chars().count() as u32;
     if chars == 0 { 0 } else { chars.div_ceil(4) }
+}
+
+fn filler_text(label: &str, count: usize) -> String {
+    format!("{label} {}", "x".repeat(count))
+}
+
+fn count_lines(text: &str) -> usize {
+    text.lines().count()
 }
 
 #[async_trait]
@@ -528,6 +539,412 @@ impl LLMProvider for LargeToolOutputLlmProvider {
                 usage: token_usage(18, 5),
                 duration_ms: 11,
                 thought_signature: None,
+            }
+        };
+        requests.push(request);
+        Ok(CompletionStream::from_response(response))
+    }
+}
+
+#[derive(Default)]
+struct ArtifactRetrievalLlmProvider {
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl LLMProvider for ArtifactRetrievalLlmProvider {
+    fn name(&self) -> &str {
+        "artifact-retrieval"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+            },
+            native_tools: Vec::new(),
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let mut requests = self.requests.lock().await;
+        let response = match requests.len() {
+            0 => CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("33333333-3333-3333-3333-333333333333".to_string()),
+                        name: "bash".to_string(),
+                        input: json!({
+                            "cmd": "python3 -c \"for i in range(1, 261): print(f'bash-line-{i}-' + ('x' * 120))\""
+                        }),
+                    },
+                    provider_metadata: None,
+                })],
+                stop_reason: StopReason::ToolUse,
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                input_tokens: 18,
+                output_tokens: 8,
+                cached_input_tokens: 0,
+                usage: token_usage(18, 8),
+                duration_ms: 10,
+                thought_signature: None,
+            },
+            1 => {
+                let artifact_message = request
+                    .messages
+                    .iter()
+                    .find(|message| {
+                        message.content.contains("<tool_result id=\"")
+                            && message.content.contains("artifact=\"stored\"")
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("expected artifact-backed tool result, request was: {request:?}")
+                    });
+                assert!(
+                    !artifact_message.content.contains("bash-line-140"),
+                    "artifact replay should not inline the middle of the large bash output"
+                );
+                assert!(
+                    artifact_message.content.contains("tool_result_search"),
+                    "artifact summary should advertise retrieval tools"
+                );
+                let tool_id = extract_tool_result_id(&artifact_message.content)
+                    .expect("tool result id should be present");
+
+                CompletionResponse {
+                    text: String::new(),
+                    content: vec![CompletionContent::ToolCall(ToolCallContent {
+                        invocation: ToolInvocation {
+                            id: Some("44444444-4444-4444-4444-444444444444".to_string()),
+                            name: "tool_result_search".to_string(),
+                            input: json!({
+                                "tool_id": tool_id,
+                                "pattern": "bash-line-140-",
+                                "literal": true,
+                            }),
+                        },
+                        provider_metadata: None,
+                    })],
+                    stop_reason: StopReason::ToolUse,
+                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    input_tokens: 22,
+                    output_tokens: 10,
+                    cached_input_tokens: 0,
+                    usage: token_usage(22, 10),
+                    duration_ms: 11,
+                    thought_signature: None,
+                }
+            }
+            _ => {
+                assert!(
+                    request
+                        .messages
+                        .iter()
+                        .any(|message| message.content.contains("bash-line-140-")),
+                    "expected tool_result_search output in replayed context; request was: {request:?}"
+                );
+                CompletionResponse {
+                    text: "Recovered bash-line-140 via tool_result_search".to_string(),
+                    content: vec![CompletionContent::Text(
+                        "Recovered bash-line-140 via tool_result_search".to_string(),
+                    )],
+                    stop_reason: StopReason::EndTurn,
+                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    input_tokens: 26,
+                    output_tokens: 9,
+                    cached_input_tokens: 0,
+                    usage: token_usage(26, 9),
+                    duration_ms: 12,
+                    thought_signature: None,
+                }
+            }
+        };
+        requests.push(request);
+        Ok(CompletionStream::from_response(response))
+    }
+}
+
+fn extract_tool_result_id(message: &str) -> Option<String> {
+    let marker = "<tool_result id=\"";
+    let start = message.find(marker)? + marker.len();
+    let rest = &message[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+fn extract_tool_id_field(message: &str) -> Option<String> {
+    let marker = "tool_id=";
+    let start = message.find(marker)? + marker.len();
+    let rest = &message[start..];
+    let candidate = &rest[..rest.len().min(36)];
+    if Uuid::parse_str(candidate).is_ok() {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
+}
+
+#[derive(Default)]
+struct ArtifactStderrLlmProvider {
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl LLMProvider for ArtifactStderrLlmProvider {
+    fn name(&self) -> &str {
+        "artifact-stderr"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+            },
+            native_tools: Vec::new(),
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let mut requests = self.requests.lock().await;
+        let response = match requests.len() {
+            0 => CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("55555555-5555-5555-5555-555555555555".to_string()),
+                        name: "bash".to_string(),
+                        input: json!({
+                            "cmd": "python3 -c \"import sys\nfor i in range(1, 261):\n    print(f'stdout-line-{i}-' + ('x' * 120))\nsys.stderr.write('warning: deprecated config\\nwarning: retrying fallback\\n')\""
+                        }),
+                    },
+                    provider_metadata: None,
+                })],
+                stop_reason: StopReason::ToolUse,
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                input_tokens: 18,
+                output_tokens: 9,
+                cached_input_tokens: 0,
+                usage: token_usage(18, 9),
+                duration_ms: 10,
+                thought_signature: None,
+            },
+            1 => {
+                let artifact_message = request
+                    .messages
+                    .iter()
+                    .find(|message| message.content.contains("artifact_streams=\"combined,stdout,stderr\""))
+                    .unwrap_or_else(|| panic!("expected artifact-backed stderr-capable tool result, request was: {request:?}"));
+                let tool_id =
+                    extract_tool_result_id(&artifact_message.content).expect("tool result id");
+                CompletionResponse {
+                    text: String::new(),
+                    content: vec![CompletionContent::ToolCall(ToolCallContent {
+                        invocation: ToolInvocation {
+                            id: Some("66666666-6666-6666-6666-666666666666".to_string()),
+                            name: "tool_result_read".to_string(),
+                            input: json!({
+                                "tool_id": tool_id,
+                                "stream": "stderr",
+                                "start_line": 1,
+                                "end_line": 5,
+                            }),
+                        },
+                        provider_metadata: None,
+                    })],
+                    stop_reason: StopReason::ToolUse,
+                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    input_tokens: 20,
+                    output_tokens: 8,
+                    cached_input_tokens: 0,
+                    usage: token_usage(20, 8),
+                    duration_ms: 11,
+                    thought_signature: None,
+                }
+            }
+            _ => {
+                assert!(
+                    request
+                        .messages
+                        .iter()
+                        .any(|message| message.content.contains("warning: retrying fallback")),
+                    "expected stderr retrieval in replayed context; request was: {request:?}"
+                );
+                CompletionResponse {
+                    text: "stderr warning recovered via tool_result_read".to_string(),
+                    content: vec![CompletionContent::Text(
+                        "stderr warning recovered via tool_result_read".to_string(),
+                    )],
+                    stop_reason: StopReason::EndTurn,
+                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    input_tokens: 24,
+                    output_tokens: 8,
+                    cached_input_tokens: 0,
+                    usage: token_usage(24, 8),
+                    duration_ms: 12,
+                    thought_signature: None,
+                }
+            }
+        };
+        requests.push(request);
+        Ok(CompletionStream::from_response(response))
+    }
+}
+
+struct SessionSearchArtifactLlmProvider {
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    expected_tool_id: ToolCallId,
+}
+
+impl SessionSearchArtifactLlmProvider {
+    fn new(expected_tool_id: ToolCallId) -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            expected_tool_id,
+        }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for SessionSearchArtifactLlmProvider {
+    fn name(&self) -> &str {
+        "session-search-artifact"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
+            context_window: 8_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+            },
+            native_tools: Vec::new(),
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let mut requests = self.requests.lock().await;
+        let response = match requests.len() {
+            0 => {
+                assert!(
+                    !request.messages.iter().any(|message| message
+                        .content
+                        .contains(&self.expected_tool_id.to_string())),
+                    "expected old tool id to be absent from active context so the model must use session_search; request was: {request:?}"
+                );
+                CompletionResponse {
+                    text: String::new(),
+                    content: vec![CompletionContent::ToolCall(ToolCallContent {
+                        invocation: ToolInvocation {
+                            id: Some("77777777-7777-7777-7777-777777777777".to_string()),
+                            name: "session_search".to_string(),
+                            input: json!({
+                                "query": "bash",
+                                "event_type": "tool_call",
+                                "last_n": 5,
+                            }),
+                        },
+                        provider_metadata: None,
+                    })],
+                    stop_reason: StopReason::ToolUse,
+                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    input_tokens: 19,
+                    output_tokens: 9,
+                    cached_input_tokens: 0,
+                    usage: token_usage(19, 9),
+                    duration_ms: 10,
+                    thought_signature: None,
+                }
+            }
+            1 => {
+                let session_search_message = request
+                    .messages
+                    .iter()
+                    .find(|message| message.content.contains("## #"))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "expected session_search output in context; request was: {request:?}"
+                        )
+                    });
+                let tool_id = extract_tool_id_field(&session_search_message.content)
+                    .expect("tool id from session_search");
+                assert_eq!(tool_id, self.expected_tool_id.to_string());
+                CompletionResponse {
+                    text: String::new(),
+                    content: vec![CompletionContent::ToolCall(ToolCallContent {
+                        invocation: ToolInvocation {
+                            id: Some("88888888-8888-8888-8888-888888888888".to_string()),
+                            name: "tool_result_search".to_string(),
+                            input: json!({
+                                "tool_id": tool_id,
+                                "pattern": "bash-line-140-",
+                                "literal": true,
+                            }),
+                        },
+                        provider_metadata: None,
+                    })],
+                    stop_reason: StopReason::ToolUse,
+                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    input_tokens: 22,
+                    output_tokens: 10,
+                    cached_input_tokens: 0,
+                    usage: token_usage(22, 10),
+                    duration_ms: 11,
+                    thought_signature: None,
+                }
+            }
+            _ => {
+                assert!(
+                    request
+                        .messages
+                        .iter()
+                        .any(|message| message.content.contains("bash-line-140-")),
+                    "expected tool_result_search output in replayed context; request was: {request:?}"
+                );
+                CompletionResponse {
+                    text: "Recovered old artifact via session_search and tool_result_search"
+                        .to_string(),
+                    content: vec![CompletionContent::Text(
+                        "Recovered old artifact via session_search and tool_result_search"
+                            .to_string(),
+                    )],
+                    stop_reason: StopReason::EndTurn,
+                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    input_tokens: 25,
+                    output_tokens: 9,
+                    cached_input_tokens: 0,
+                    usage: token_usage(25, 9),
+                    duration_ms: 12,
+                    thought_signature: None,
+                }
             }
         };
         requests.push(request);
@@ -1691,6 +2108,408 @@ async fn run_brain_turn_persists_truncated_tool_result_metadata() {
     assert!(events.iter().any(|record| matches!(
         &record.event,
         Event::BrainResponse { text, .. } if text == "Large tool output handled"
+    )));
+}
+
+#[tokio::test]
+async fn run_brain_turn_uses_tool_result_search_for_artifact_backed_output() {
+    let store = test_session_store().await;
+    let session = SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        ..SessionMeta::default()
+    };
+    store.create_session(session.clone()).await.unwrap();
+    store
+        .emit_event(
+            session.id,
+            Event::UserMessage {
+                text: "Find bash-line-140 in a noisy command output".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(MockMemoryStore);
+    let sandbox_dir = tempdir().unwrap();
+    let mut config = MoaConfig::default();
+    config.permissions.auto_approve = vec!["bash".to_string()];
+    let tool_router = Arc::new(
+        ToolRouter::new_local(memory_store.clone(), sandbox_dir.path())
+            .await
+            .unwrap()
+            .with_policies(ToolPolicies::from_config(&config))
+            .with_session_store(store.clone()),
+    );
+    let pipeline = build_default_pipeline_with_tools(
+        &config,
+        store.clone(),
+        memory_store,
+        tool_router.tool_schemas(),
+    );
+    let llm = Arc::new(ArtifactRetrievalLlmProvider::default());
+
+    let result = run_brain_turn_with_tools(
+        session.id,
+        store.clone(),
+        llm.clone(),
+        &pipeline,
+        Some(tool_router),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result, TurnResult::Complete);
+
+    let events = store
+        .get_events(session.id, EventRange::all())
+        .await
+        .unwrap();
+    let bash_result = events
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::ToolResult {
+                output, success, ..
+            } if *success && output.artifact.is_some() => Some(output.clone()),
+            _ => None,
+        })
+        .expect("expected artifact-backed bash tool result");
+    let artifact = bash_result
+        .artifact
+        .as_ref()
+        .expect("artifact metadata should be present");
+    assert!(artifact.estimated_tokens > 4_000);
+    assert!(
+        bash_result
+            .to_text()
+            .contains("full output stored separately"),
+        "artifactized tool result should keep only a compact summary"
+    );
+
+    let search_result = events
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::ToolResult {
+                output,
+                success,
+                provider_tool_use_id: Some(provider_tool_use_id),
+                ..
+            } if *success && provider_tool_use_id == "44444444-4444-4444-4444-444444444444" => {
+                Some(output.clone())
+            }
+            _ => None,
+        })
+        .expect("expected tool_result_search output");
+    assert!(search_result.to_text().contains("bash-line-140-"));
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::BrainResponse { text, .. } if text == "Recovered bash-line-140 via tool_result_search"
+    )));
+}
+
+#[tokio::test]
+async fn run_brain_turn_reads_stderr_stream_from_artifact_backed_output() {
+    let store = test_session_store().await;
+    let session = SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        ..SessionMeta::default()
+    };
+    store.create_session(session.clone()).await.unwrap();
+    store
+        .emit_event(
+            session.id,
+            Event::UserMessage {
+                text: "Run the command and tell me what warning appeared on stderr".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(MockMemoryStore);
+    let sandbox_dir = tempdir().unwrap();
+    let mut config = MoaConfig::default();
+    config.permissions.auto_approve = vec!["bash".to_string()];
+    let tool_router = Arc::new(
+        ToolRouter::new_local(memory_store.clone(), sandbox_dir.path())
+            .await
+            .unwrap()
+            .with_policies(ToolPolicies::from_config(&config))
+            .with_session_store(store.clone()),
+    );
+    let pipeline = build_default_pipeline_with_tools(
+        &config,
+        store.clone(),
+        memory_store,
+        tool_router.tool_schemas(),
+    );
+    let llm = Arc::new(ArtifactStderrLlmProvider::default());
+
+    let result = run_brain_turn_with_tools(
+        session.id,
+        store.clone(),
+        llm.clone(),
+        &pipeline,
+        Some(tool_router),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result, TurnResult::Complete);
+
+    let events = store
+        .get_events(session.id, EventRange::all())
+        .await
+        .unwrap();
+    let bash_result = events
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::ToolResult {
+                output, success, ..
+            } if *success && output.artifact.is_some() => Some(output.clone()),
+            _ => None,
+        })
+        .expect("expected artifact-backed bash tool result");
+    let artifact = bash_result
+        .artifact
+        .as_ref()
+        .expect("artifact metadata should be present");
+    assert!(artifact.stderr.is_some());
+    let stderr_read = events
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::ToolResult {
+                output,
+                success,
+                provider_tool_use_id: Some(provider_tool_use_id),
+                ..
+            } if *success && provider_tool_use_id == "66666666-6666-6666-6666-666666666666" => {
+                Some(output.clone())
+            }
+            _ => None,
+        })
+        .expect("expected tool_result_read output");
+    assert!(stderr_read.to_text().contains("warning: retrying fallback"));
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::BrainResponse { text, .. } if text == "stderr warning recovered via tool_result_read"
+    )));
+}
+
+#[tokio::test]
+async fn run_brain_turn_recovers_old_artifact_via_session_search() {
+    let store = test_session_store().await;
+    let session = SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        ..SessionMeta::default()
+    };
+    store.create_session(session.clone()).await.unwrap();
+
+    let old_tool_id = ToolCallId::new();
+    let old_output_text = (1..=260)
+        .map(|index| format!("bash-line-{index}-{}", "x".repeat(120)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let combined = store
+        .store_text_artifact(session.id, &old_output_text)
+        .await
+        .unwrap();
+    let stdout = store
+        .store_text_artifact(session.id, &old_output_text)
+        .await
+        .unwrap();
+
+    store
+        .emit_event(
+            session.id,
+            Event::UserMessage {
+                text: "Run a noisy bash command".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .emit_event(
+            session.id,
+            Event::ToolCall {
+                tool_id: old_tool_id,
+                provider_tool_use_id: Some("toolu_old_bash".to_string()),
+                provider_thought_signature: None,
+                tool_name: "bash".to_string(),
+                input: json!({
+                    "cmd": "python3 -c \"for i in range(1, 261): print(f'bash-line-{i}-' + ('x' * 120))\""
+                }),
+                hand_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .emit_event(
+            session.id,
+            Event::ToolResult {
+                tool_id: old_tool_id,
+                provider_tool_use_id: Some("toolu_old_bash".to_string()),
+                output: ToolOutput::text(
+                    "available_streams: combined, stdout\nrecovery_hint: use the tool_result id from this message; call tool_result_search for exact patterns, then tool_result_read for a narrow range or a specific stream\n[full output stored separately: ~8000 tokens, 260 lines, 32000 bytes; use tool_result_search first to locate exact matches, then tool_result_read to inspect a narrow span or stream]",
+                    std::time::Duration::from_millis(7),
+                )
+                .with_truncated(true)
+                .with_original_output_tokens(Some(8_000))
+                .with_artifact(Some(moa_core::ToolOutputArtifact {
+                    combined,
+                    estimated_tokens: 8_000,
+                    line_count: count_lines(&old_output_text),
+                    stdout: Some(stdout),
+                    stderr: None,
+                })),
+                original_output_tokens: Some(8_000),
+                success: true,
+                duration_ms: 7,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .emit_event(
+            session.id,
+            Event::BrainResponse {
+                text: "The noisy command ran successfully.".to_string(),
+                thought_signature: None,
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model_tier: moa_core::ModelTier::Main,
+                input_tokens_uncached: 20,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 8,
+                cost_cents: 1,
+                duration_ms: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+    for index in 0..8 {
+        store
+            .emit_event(
+                session.id,
+                Event::UserMessage {
+                    text: filler_text(&format!("Follow-up user turn {index}"), 1_200),
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .emit_event(
+                session.id,
+                Event::BrainResponse {
+                    text: filler_text(&format!("Follow-up assistant turn {index}"), 1_200),
+                    thought_signature: None,
+                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    model_tier: moa_core::ModelTier::Main,
+                    input_tokens_uncached: 24,
+                    input_tokens_cache_write: 0,
+                    input_tokens_cache_read: 0,
+                    output_tokens: 10,
+                    cost_cents: 1,
+                    duration_ms: 10,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    store
+        .emit_event(
+            session.id,
+            Event::UserMessage {
+                text: "Find bash-line-140 from that old noisy bash run".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(MockMemoryStore);
+    let sandbox_dir = tempdir().unwrap();
+    let tool_router = Arc::new(
+        ToolRouter::new_local(memory_store.clone(), sandbox_dir.path())
+            .await
+            .unwrap()
+            .with_session_store(store.clone()),
+    );
+    let pipeline = build_default_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        memory_store,
+        tool_router.tool_schemas(),
+    );
+    let llm = Arc::new(SessionSearchArtifactLlmProvider::new(old_tool_id));
+
+    let result = run_brain_turn_with_tools(
+        session.id,
+        store.clone(),
+        llm.clone(),
+        &pipeline,
+        Some(tool_router),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result, TurnResult::Complete);
+
+    let events = store
+        .get_events(session.id, EventRange::all())
+        .await
+        .unwrap();
+    let session_search_result = events
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::ToolResult {
+                output,
+                success,
+                provider_tool_use_id: Some(provider_tool_use_id),
+                ..
+            } if *success && provider_tool_use_id == "77777777-7777-7777-7777-777777777777" => {
+                Some(output.clone())
+            }
+            _ => None,
+        })
+        .expect("expected session_search output");
+    assert!(
+        session_search_result
+            .to_text()
+            .contains(&old_tool_id.to_string())
+    );
+    let artifact_search_result = events
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::ToolResult {
+                output,
+                success,
+                provider_tool_use_id: Some(provider_tool_use_id),
+                ..
+            } if *success && provider_tool_use_id == "88888888-8888-8888-8888-888888888888" => {
+                Some(output.clone())
+            }
+            _ => None,
+        })
+        .expect("expected tool_result_search output");
+    assert!(artifact_search_result.to_text().contains("bash-line-140-"));
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::BrainResponse { text, .. } if text == "Recovered old artifact via session_search and tool_result_search"
     )));
 }
 

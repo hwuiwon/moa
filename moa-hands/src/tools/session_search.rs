@@ -83,6 +83,7 @@ impl BuiltInTool for SessionSearchTool {
                     "sequence_num": record.sequence_num,
                     "timestamp": record.timestamp,
                     "event_type": record.event_type,
+                    "tool_id": event_tool_id(record),
                     "snippet": event_snippet(record),
                 })
             })
@@ -153,18 +154,33 @@ fn event_snippet(record: &EventRecord) -> String {
         Event::UserMessage { text, .. } | Event::QueuedMessage { text, .. } => text.clone(),
         Event::BrainResponse { text, .. } => text.clone(),
         Event::ToolCall {
-            tool_name, input, ..
-        } => format!("{tool_name}: {}", input),
+            tool_id,
+            tool_name,
+            input,
+            ..
+        } => format!("tool_id={tool_id} {tool_name}: {}", input),
         Event::ToolResult {
-            output, success, ..
+            tool_id,
+            output,
+            success,
+            ..
         } => {
-            format!("success={success}: {}", output.to_text())
+            format!("tool_id={tool_id} success={success}: {}", output.to_text())
         }
-        Event::ToolError { error, .. } => error.clone(),
+        Event::ToolError { tool_id, error, .. } => format!("tool_id={tool_id} {error}"),
         Event::Error { message, .. } | Event::Warning { message } => message.clone(),
         Event::Checkpoint { summary, .. } => summary.clone(),
         other => serde_json::to_string(other).unwrap_or_else(|_| format!("{other:?}")),
     })
+}
+
+fn event_tool_id(record: &EventRecord) -> Option<String> {
+    match &record.event {
+        Event::ToolCall { tool_id, .. }
+        | Event::ToolResult { tool_id, .. }
+        | Event::ToolError { tool_id, .. } => Some(tool_id.to_string()),
+        _ => None,
+    }
 }
 
 fn truncate(text: String) -> String {

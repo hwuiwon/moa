@@ -795,6 +795,7 @@ mod tests {
                         duration: std::time::Duration::from_secs(2),
                         truncated: false,
                         original_output_tokens: None,
+                        artifact: None,
                     },
                     original_output_tokens: None,
                     success: true,

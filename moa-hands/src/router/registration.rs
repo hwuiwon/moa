@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::mcp::McpDiscoveredTool;
-use crate::tools::{memory, session_search};
+use crate::tools::{memory, session_search, tool_result};
 use moa_core::{
     BuiltInTool, PolicyAction, SandboxTier, ToolBudgetConfig, ToolDefinition, ToolDiffStrategy,
     ToolInputShape, ToolPolicySpec, read_tool_policy, write_tool_policy,
@@ -101,6 +101,8 @@ impl ToolRegistry {
         registry.register_builtin(Arc::new(memory::MemoryWriteTool));
         registry.register_builtin(Arc::new(memory::MemoryIngestTool));
         registry.register_builtin(Arc::new(session_search::SessionSearchTool));
+        registry.register_builtin(Arc::new(tool_result::ToolResultReadTool));
+        registry.register_builtin(Arc::new(tool_result::ToolResultSearchTool));
         registry.register_hand(
             "bash",
             "Run a non-interactive shell command inside the active workspace root. Use bash for tests, builds, and commands the native file tools cannot express. Do not use bash for routine repository navigation or source inspection when file_search, grep, file_outline, file_read, or str_replace can handle the task.",
@@ -208,6 +210,8 @@ impl ToolRegistry {
             "memory_write".to_string(),
             "memory_ingest".to_string(),
             "session_search".to_string(),
+            "tool_result_read".to_string(),
+            "tool_result_search".to_string(),
             "file_search".to_string(),
             "grep".to_string(),
             "file_outline".to_string(),

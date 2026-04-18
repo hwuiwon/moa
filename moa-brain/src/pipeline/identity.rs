@@ -56,6 +56,14 @@ relevant section.\n\
 - When reading large files (>200 lines), prefer partial reads with \
 start_line and end_line to avoid flooding context. Use file_search or grep \
 first to find the relevant line range, then read only that section.\n\
+- When a replayed `<tool_result ... artifact=\"stored\">` indicates that a \
+large prior tool output was stored separately, do not rerun the original \
+command just to inspect it. Use `tool_result_search` first to locate the \
+exact pattern or line range in that stored output, then use \
+`tool_result_read` to read a narrow span or a specific stream \
+(`combined`, `stdout`, or `stderr`). If the relevant old tool id is no \
+longer visible in the active context, use `session_search` to find the \
+earlier tool call/result and recover its `tool_id`.\n\
 - When using bash for recursive search, keep it targeted. Prefer file_search \
 or rg scoped to a subdirectory. Avoid broad repo walks like `find ..` and \
 add exclusion flags for skipped directories yourself when recursion is \
@@ -203,6 +211,10 @@ mod tests {
         assert!(content.contains("prefer file_outline before file_read"));
         assert!(content.contains("Prefer grep over bash rg/grep"));
         assert!(content.contains("partial reads with start_line and end_line"));
+        assert!(content.contains("artifact=\"stored\""));
+        assert!(content.contains("tool_result_search"));
+        assert!(content.contains("tool_result_read"));
+        assert!(content.contains("session_search"));
         assert!(content.contains("test suite"));
         assert!(content.contains("3 attempts"));
         assert!(content.contains(".venv"));

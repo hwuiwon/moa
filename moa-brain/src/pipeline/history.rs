@@ -692,11 +692,23 @@ fn tool_result_context_message(
     file_read_path: Option<String>,
 ) -> CompiledRecordMessage {
     let replayable_text = truncate_tool_result_text(&output.to_text(), tool_output);
+    let artifact_attrs = output
+        .artifact
+        .as_ref()
+        .map(|artifact| {
+            format!(
+                " artifact=\"stored\" artifact_tokens=\"{}\" artifact_lines=\"{}\" artifact_streams=\"{}\"",
+                artifact.estimated_tokens,
+                artifact.line_count,
+                artifact.available_streams().join(",")
+            )
+        })
+        .unwrap_or_default();
     CompiledRecordMessage {
         message: ContextMessage::tool_result(
             tool_use_id.clone(),
             format!(
-                "<tool_result id=\"{tool_id}\" success=\"{success}\">\n{}\n</tool_result>",
+                "<tool_result id=\"{tool_id}\" success=\"{success}\"{artifact_attrs}>\n{}\n</tool_result>",
                 wrap_untrusted_tool_output(&replayable_text)
             ),
             replayable_tool_content_blocks(output, &replayable_text, tool_output),
@@ -1304,6 +1316,7 @@ mod tests {
                     duration: Duration::from_millis(7),
                     truncated: false,
                     original_output_tokens: None,
+                    artifact: None,
                 },
                 original_output_tokens: None,
                 success: true,

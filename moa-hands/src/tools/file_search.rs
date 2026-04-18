@@ -277,6 +277,7 @@ fn build_file_search_output(
         duration,
         truncated: false,
         original_output_tokens: None,
+        artifact: None,
     }
 }
 

@@ -367,6 +367,7 @@ impl BuiltInTool for MemoryIngestTool {
             duration: started_at.elapsed(),
             truncated: false,
             original_output_tokens: None,
+            artifact: None,
         })
     }
 }

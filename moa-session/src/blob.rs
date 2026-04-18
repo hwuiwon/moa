@@ -270,7 +270,7 @@ fn replace_value_at_path(root: &mut Value, path: &[PathSegment], replacement: Va
     }
 }
 
-fn preview_text(text: &str) -> String {
+pub(crate) fn preview_text(text: &str) -> String {
     let mut preview = String::new();
     let mut used_bytes = 0usize;
 

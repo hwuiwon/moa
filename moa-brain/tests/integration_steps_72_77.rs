@@ -296,11 +296,15 @@ async fn steps_72_77_e2e() -> Result<()> {
         bash_run.output.truncated,
         "bash output should be marked truncated"
     );
+    assert!(
+        bash_run.output.artifact.is_some(),
+        "large bash output should be stored behind an artifact reference"
+    );
     assert!(bash_text.contains("bash-line-1"));
     assert!(bash_text.contains("bash-line-260"));
-    assert!(bash_text.contains("[output truncated from ~"));
+    assert!(bash_text.contains("[full output stored separately:"));
     assert!(!bash_text.contains("bash-line-140"));
-    assert!((bash_text.chars().count() as u32).div_ceil(4) <= 4_000);
+    assert!((bash_text.chars().count() as u32).div_ceil(4) <= 1_024);
 
     assert!(
         requests
@@ -396,6 +400,13 @@ async fn steps_72_77_e2e() -> Result<()> {
         }),
         "deduplicated tool results must preserve tool_use_id for provider replay"
     );
+    let bash_artifact_message = turn_seven_tool_messages
+        .iter()
+        .find(|message| message.content.contains("artifact=\"stored\""))
+        .expect("expected artifact-backed bash output in replayed history");
+    assert!(bash_artifact_message.content.contains("tool_result_read"));
+    assert!(bash_artifact_message.content.contains("tool_result_search"));
+    assert!(!bash_artifact_message.content.contains("bash-line-140"));
     assert!(
         final_session.total_input_tokens_cache_read > 0,
         "session should accumulate non-zero cache-read tokens"
