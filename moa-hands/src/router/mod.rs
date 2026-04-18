@@ -15,7 +15,7 @@ use moa_core::{
     HandHandle, HandProvider, HandResources, HandSpec, McpServerConfig, MemoryStore, MoaError,
     Result, SandboxTier, SessionMeta, SessionStore, ToolBudgetConfig, ToolContent, ToolDefinition,
     ToolInvocation, ToolOutput, ToolOutputArtifact, ToolOutputConfig, WorkspaceId,
-    truncate_head_tail,
+    record_sandbox_provision_duration, truncate_head_tail,
 };
 use moa_security::{ApprovalRuleStore, MCPCredentialProxy, ToolPolicies};
 use serde_json::json;
@@ -170,7 +170,12 @@ impl ToolRouter {
                 }
             };
 
-            record_tool_execution_result(&tool_span, started_at.elapsed(), &result);
+            record_tool_execution_result(
+                &tool_span,
+                &invocation.name,
+                started_at.elapsed(),
+                &result,
+            );
             result
         }
         .instrument(instrument_tool_span)
@@ -214,7 +219,12 @@ impl ToolRouter {
             let result = self
                 .execute_authorized_inner(session, invocation, cancel_token, hard_cancel_token)
                 .await;
-            record_tool_execution_result(&tool_span, started_at.elapsed(), &result);
+            record_tool_execution_result(
+                &tool_span,
+                &invocation.name,
+                started_at.elapsed(),
+                &result,
+            );
             result
         }
         .instrument(instrument_tool_span)
@@ -603,6 +613,8 @@ impl ToolRouter {
             } else {
                 None
             };
+        let tier_label = sandbox_tier_label(&tier);
+        let started_at = Instant::now();
         let handle = provider_impl
             .provision(HandSpec {
                 sandbox_tier: tier,
@@ -614,6 +626,7 @@ impl ToolRouter {
                 max_lifetime: DEFAULT_TOOL_TIMEOUT,
             })
             .await?;
+        record_sandbox_provision_duration(provider, tier_label, started_at.elapsed());
 
         self.active_hands.write().await.insert(key, handle.clone());
         Ok(handle)
@@ -687,6 +700,15 @@ fn append_footer(text: &str, footer: &str) -> String {
 
 fn session_provider_key(session: &SessionMeta, provider: &str) -> String {
     format!("{}:{provider}", session.id)
+}
+
+fn sandbox_tier_label(tier: &SandboxTier) -> &'static str {
+    match tier {
+        SandboxTier::None => "none",
+        SandboxTier::Container => "container",
+        SandboxTier::MicroVM => "microvm",
+        SandboxTier::Local => "local",
+    }
 }
 
 fn hand_id(handle: &HandHandle) -> String {

@@ -14,7 +14,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use moa_core::{
     BranchManager, MemoryPath, MemoryScope, MemoryStore, MoaConfig, OtlpProtocol, SessionFilter,
     SessionStatus, SessionStore, TelemetryConfig, WorkspaceId, default_log_path,
-    init_observability,
+    init_observability, metrics_endpoint_url,
 };
 use moa_eval::{
     AgentConfig, EngineOptions, EvalEngine, EvalRun, EvalStatus, EvaluatorOptions, ReporterOptions,
@@ -1027,6 +1027,7 @@ async fn doctor_report(config: &MoaConfig, log_path: &Path) -> Result<String> {
             }
         ),
     ];
+    lines.push(doctor_metrics(config).await);
 
     if let Ok(info) = daemon::daemon_info(config).await {
         lines.push(format!(
@@ -1038,6 +1039,37 @@ async fn doctor_report(config: &MoaConfig, log_path: &Path) -> Result<String> {
     }
 
     Ok(lines.join("\n") + "\n")
+}
+
+async fn doctor_metrics(config: &MoaConfig) -> String {
+    if !config.metrics.enabled {
+        return "Metrics endpoint: disabled".to_string();
+    }
+
+    let Some(url) = metrics_endpoint_url(&config.metrics) else {
+        return format!(
+            "Metrics endpoint: invalid listen address `{}`",
+            config.metrics.listen
+        );
+    };
+
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    else {
+        return format!("Metrics endpoint: {url} - unavailable");
+    };
+
+    match client.get(&url).send().await {
+        Ok(response) if response.status().is_success() => format!("Metrics endpoint: {url} - OK"),
+        Ok(response) => {
+            format!(
+                "Metrics endpoint: {url} - HTTP {}",
+                response.status().as_u16()
+            )
+        }
+        Err(_) => format!("Metrics endpoint: {url} - unavailable"),
+    }
 }
 
 async fn daemon_status_report(config: &MoaConfig) -> Result<String> {
@@ -1439,6 +1471,8 @@ fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result
             config.observability.sample_rate =
                 value.parse().context("expected decimal sample rate")?;
         }
+        "metrics.enabled" => config.metrics.enabled = parse_bool(value)?,
+        "metrics.listen" => config.metrics.listen = value.to_string(),
         _ => bail!("unsupported config key: {key}"),
     }
 
@@ -1575,6 +1609,11 @@ mod tests {
         apply_config_update(&mut config, "database.max_connections", "5")
             .expect("update max connections");
         assert_eq!(config.database.max_connections, 5);
+        apply_config_update(&mut config, "metrics.enabled", "true").expect("enable metrics");
+        apply_config_update(&mut config, "metrics.listen", "127.0.0.1:19090")
+            .expect("set metrics listen");
+        assert!(config.metrics.enabled);
+        assert_eq!(config.metrics.listen, "127.0.0.1:19090");
     }
 
     #[test]
@@ -1599,6 +1638,7 @@ mod tests {
             .await
             .expect("doctor report");
         assert!(report.contains("log_file: "));
+        assert!(report.contains("Metrics endpoint: disabled"));
         assert!(
             report.contains("--debug to enable")
                 || report.contains("set via --debug/--log-file or RUST_LOG")
@@ -1622,6 +1662,7 @@ mod tests {
             .await
             .expect("doctor report");
         assert!(report.contains(&format!("log_file: {}", custom_log.display())));
+        assert!(report.contains("Metrics endpoint: disabled"));
     }
 
     #[test]

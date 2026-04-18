@@ -1,14 +1,11 @@
 //! Tracing helpers for tool execution spans and result metadata.
 
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use moa_core::{
     MoaError, Result, SandboxTier, SessionMeta, ToolInvocation, ToolOutput, TraceContext,
+    record_tool_call, record_tool_output_truncated_metric,
 };
-use opentelemetry::KeyValue;
-use opentelemetry::global;
-use opentelemetry::metrics::Counter;
 use opentelemetry::trace::Status;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -56,6 +53,7 @@ pub(super) fn record_tool_invocation_metadata(
 
 pub(super) fn record_tool_execution_result(
     span: &tracing::Span,
+    tool_name: &str,
     duration: Duration,
     result: &Result<(Option<String>, ToolOutput)>,
 ) {
@@ -66,25 +64,33 @@ pub(super) fn record_tool_execution_result(
             let succeeded = !output.is_error;
             span.set_attribute("moa.tool.success", succeeded);
             span.set_attribute("moa.tool.output", truncate_tool_span_text(output.to_text()));
+            record_tool_call(
+                tool_name,
+                if succeeded { "success" } else { "error" },
+                duration,
+            );
             if output.is_error {
                 span.set_status(Status::error(output.to_text()));
             }
         }
         Err(MoaError::PermissionDenied(_)) => {
             span.set_attribute("moa.tool.success", false);
+            record_tool_call(tool_name, "error", duration);
         }
         Err(MoaError::Cancelled) => {
             span.set_attribute("moa.tool.success", false);
+            record_tool_call(tool_name, "error", duration);
         }
         Err(error) => {
             span.set_attribute("moa.tool.success", false);
             span.set_status(Status::error(error.to_string()));
+            record_tool_call(tool_name, "error", duration);
         }
     }
 }
 
 pub(super) fn record_tool_output_truncated(tool_name: &str) {
-    tool_output_truncated_counter().add(1, &[KeyValue::new("tool_name", tool_name.to_string())]);
+    record_tool_output_truncated_metric(tool_name);
 }
 
 fn sandbox_tier_label(tier: &SandboxTier) -> &'static str {
@@ -109,16 +115,4 @@ fn truncate_tool_span_text(mut value: String) -> String {
     value.truncate(truncate_at);
     value.push('…');
     value
-}
-
-fn tool_output_truncated_counter() -> &'static Counter<u64> {
-    static COUNTER: OnceLock<Counter<u64>> = OnceLock::new();
-    COUNTER.get_or_init(|| {
-        global::meter("moa.hands")
-            .u64_counter("moa_tool_output_truncated_total")
-            .with_description(
-                "Number of successful tool calls whose outputs were truncated by router budgets.",
-            )
-            .build()
-    })
 }

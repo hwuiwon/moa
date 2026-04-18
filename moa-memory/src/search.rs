@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use moa_core::{
     ConfidenceLevel, MemoryPath, MemoryScope, MemorySearchMode, MemorySearchResult, MoaError,
-    PageType, Result, WikiPage,
+    PageType, Result, WikiPage, record_embedding_queue_depth,
 };
 use moa_providers::EmbeddingProvider;
 use opentelemetry::global;
@@ -985,6 +985,7 @@ async fn queue_depth(backend: &WikiSearchBackend) -> Result<u64> {
 async fn refresh_queue_depth(backend: &WikiSearchBackend) -> Result<()> {
     let depth = queue_depth(backend).await?;
     EMBEDDING_QUEUE_DEPTH.store(depth, AtomicOrdering::Relaxed);
+    record_embedding_queue_depth(depth);
     Ok(())
 }
 

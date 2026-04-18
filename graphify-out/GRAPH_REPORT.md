@@ -179,7 +179,7 @@ Nodes (25): checkpoint_branch_names_follow_moa_prefix(), checkpoint_info_from_br
 Cohesion: 0.08
 Nodes (40): canonical_port_claims(), confidence_rank(), consolidation_due_for_scope(), consolidation_resolves_dates_prunes_and_refreshes_index(), ConsolidationReport, decay_confidence(), extract_port_claims(), inbound_reference_counts() (+32 more)
 
-### Community 33 - "moa-hands/tools · tool_result.rs"
+### Community 33 - "Tool Result Store"
 Cohesion: 0.06
 Nodes (16): collect_context(), load_tool_result_text(), MockSessionStore, parse_tool_id(), render_search_summary(), search_tool_result(), SearchContextLine, SearchMatch (+8 more)
 
@@ -187,7 +187,7 @@ Nodes (16): collect_context(), load_tool_result_text(), MockSessionStore, parse_
 Cohesion: 0.1
 Nodes (36): annotate_schema(), annotation_warns_on_low_success(), apply_tool_rankings(), cache_stability_preserves_identical_ranked_output(), collect_session_tool_observations(), compare_f64_asc(), compare_f64_desc(), compare_failure_last() (+28 more)
 
-### Community 35 - "moa-core · events_stream.rs"
+### Community 35 - "Broadcast Lag Handling"
 Cohesion: 0.07
 Nodes (18): lag_counter(), lag_counter_by_channel(), record_broadcast_lag(), recv_with_lag_handling(), RecvResult, BroadcastChannel, ClaimCheck, event_stream_abort_policy_surfaces_error() (+10 more)
 
@@ -247,7 +247,7 @@ Nodes (28): AgentEnvironment, apply_skill_overrides(), build_agent_environment()
 Cohesion: 0.11
 Nodes (25): append_skill_regression_log(), build_generated_suite(), compare_scores(), default_skill_evaluators(), estimate_suite_cost(), estimate_tokens(), execute_skill_suite(), extract_task_input() (+17 more)
 
-### Community 50 - "moa-providers · factory.rs"
+### Community 50 - "Provider Selection & Routing"
 Cohesion: 0.11
 Nodes (21): build_provider_from_config(), build_provider_from_selection(), explicit_provider_prefix_overrides_inference(), infer_provider_name(), infers_anthropic_for_claude_models(), infers_google_for_gemini_models(), infers_openai_for_gpt_models(), is_openai_model() (+13 more)
 
@@ -343,15 +343,15 @@ Nodes (18): agent_bubble(), approval_card(), decision_button(), detail_card(), e
 Cohesion: 0.1
 Nodes (21): Approval card (Y/A/N), Drag-and-drop attachment chip, Command palette, ~/.moa/config.toml, Environment-sourced provider API keys, GPUI framework, MOA runtime (sessions/memory/skills/providers), rustup.rs toolchain installer (+13 more)
 
-### Community 74 - "moa-core/types · ModelCapabilitiesBuilder"
+### Community 74 - "Model Capabilities"
 Cohesion: 0.11
 Nodes (6): Credential, ModelCapabilities, ModelCapabilitiesBuilder, ProviderNativeTool, TokenPricing, ToolCallFormat
 
-### Community 75 - "moa-orchestrator/tests/support · orchestrator_contract.rs"
+### Community 75 - "Orchestrator Contract Harness"
 Cohesion: 0.22
 Nodes (13): assert_blank_session_waits_for_first_message(), assert_processes_multiple_queued_messages_fifo(), assert_processes_two_sessions_independently(), assert_queued_message_waiting_for_approval_runs_after_allowed_turn(), assert_soft_cancel_waiting_for_approval_cancels_cleanly(), OrchestratorContractHarness, start_request(), start_session_with_timeout() (+5 more)
 
-### Community 76 - "moa-hands/tools · file_outline.rs"
+### Community 76 - "File Outline Tool"
 Cohesion: 0.19
 Nodes (17): build_python_outline(), execute(), execute_docker(), file_outline_can_focus_on_a_single_method(), file_outline_errors_when_symbol_is_missing(), file_outline_keeps_class_context_across_multiline_docstrings(), file_outline_lists_python_class_methods(), file_outline_rejects_non_python_files() (+9 more)
 
@@ -363,7 +363,7 @@ Nodes (18): compile_for_gemini(), compile_for_gemini_removes_additional_properti
 Cohesion: 0.22
 Nodes (15): openai_provider_does_not_retry_after_partial_stream_output(), openai_provider_drops_oversized_metadata_values(), openai_provider_includes_native_web_search_when_enabled(), openai_provider_omits_native_web_search_when_disabled(), openai_provider_retries_after_rate_limit(), openai_provider_serializes_assistant_tool_calls_as_function_call_items(), openai_provider_serializes_tool_result_messages_as_function_call_output(), openai_provider_streams_parallel_tool_calls_in_order() (+7 more)
 
-### Community 79 - "moa-brain/pipeline · cache.rs"
+### Community 79 - "Cache Breakpoint Planner"
 Cohesion: 0.24
 Nodes (11): cache_optimizer_plans_tool_static_and_conversation_breakpoints(), cache_optimizer_skips_conversation_breakpoint_for_short_sessions(), CacheOptimizer, history_end_index(), latest_conversation_cache_candidate(), place_bp4_conversation(), plan_cache_controls(), replan_on_lookback_overflow() (+3 more)
 
@@ -391,7 +391,7 @@ Nodes (6): event_snippet(), render_results(), SessionSearchEventType, SessionSea
 Cohesion: 0.27
 Nodes (2): ChatPanel, PendingToast
 
-### Community 86 - "moa-security · injection.rs"
+### Community 86 - "Prompt Injection Defense"
 Cohesion: 0.26
 Nodes (12): canary_detection_works(), check_canary(), classifier_flags_known_attack_patterns(), classify_input(), contains_canary_tokens(), inject_canary(), InputClassification, InputInspection (+4 more)
 
@@ -455,7 +455,7 @@ Nodes (4): contains_rules_pass_when_all_terms_match(), evaluate_output(), missin
 Cohesion: 0.38
 Nodes (1): SkillList
 
-### Community 102 - "live · LIVE-E2E-ANTHROPIC Fixture"
+### Community 102 - "Live E2E Fixtures"
 Cohesion: 0.43
 Nodes (7): LIVE-E2E-ANTHROPIC Fixture, LIVE-E2E-GOOGLE Fixture, Live End-to-End Test Marker, LIVE-E2E-OPENAI Fixture, Anthropic Provider, Google Provider, OpenAI Provider
 
@@ -479,7 +479,7 @@ Nodes (2): empty_state(), empty_state_any()
 Cohesion: 0.5
 Nodes (2): push_sub_command(), split_shell_chain()
 
-### Community 108 - "moa-core · diff.rs"
+### Community 108 - "Unified Diff"
 Cohesion: 0.6
 Nodes (3): compute_unified_diff(), small_edit_diff_is_substantially_smaller_than_full_file(), unified_diff_contains_standard_headers_and_hunks()
 

@@ -49,6 +49,10 @@ sample_rate = 1.0
 # Authorization = "Basic <base64(public_key:secret_key)>"
 # x-langfuse-ingestion-version = "4"
 
+[metrics]
+enabled = false
+listen = "0.0.0.0:9090"
+
 [cloud]
 enabled = false
 # memory_dir = "/data/memory"

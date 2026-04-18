@@ -1,13 +1,8 @@
 //! Shared broadcast receiver helpers with explicit lag handling and metrics.
 
-use std::sync::OnceLock;
-
-use opentelemetry::KeyValue;
-use opentelemetry::global;
-use opentelemetry::metrics::Counter;
 use tokio::sync::broadcast;
 
-use crate::{BroadcastChannel, LagPolicy, SessionId};
+use crate::{BroadcastChannel, LagPolicy, SessionId, record_broadcast_lag as emit_broadcast_lag};
 
 /// Result of receiving from a broadcast channel with lag-aware handling.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,36 +53,8 @@ pub async fn recv_with_lag_handling<T: Clone>(
 }
 
 fn record_broadcast_lag(channel: BroadcastChannel, session_id: &SessionId, dropped: u64) {
-    let channel_label = channel.as_str().to_string();
-    lag_counter().add(
-        dropped,
-        &[
-            KeyValue::new("channel", channel_label.clone()),
-            KeyValue::new("session_id", session_id.to_string()),
-        ],
-    );
-    lag_counter_by_channel().add(dropped, &[KeyValue::new("channel", channel_label)]);
-}
-
-fn lag_counter() -> &'static Counter<u64> {
-    static COUNTER: OnceLock<Counter<u64>> = OnceLock::new();
-    COUNTER.get_or_init(|| {
-        global::meter("moa.broadcast")
-            .u64_counter("moa_broadcast_lag_events_dropped_total")
-            .with_description(
-                "Number of live broadcast events dropped because a subscriber lagged behind.",
-            )
-            .build()
-    })
-}
-
-fn lag_counter_by_channel() -> &'static Counter<u64> {
-    static COUNTER: OnceLock<Counter<u64>> = OnceLock::new();
-    COUNTER.get_or_init(|| {
-        global::meter("moa.broadcast").u64_counter("moa_broadcast_lag_events_dropped_by_channel_total")
-            .with_description("Number of live broadcast events dropped because a subscriber lagged behind, aggregated without session labels.")
-            .build()
-    })
+    let _ = session_id;
+    emit_broadcast_lag(channel.as_str(), dropped);
 }
 
 #[cfg(test)]
