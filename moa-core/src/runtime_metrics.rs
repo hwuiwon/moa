@@ -1,11 +1,17 @@
 //! Shared Prometheus-backed runtime metrics helpers for MOA.
 
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+#[cfg(tokio_unstable)]
+use tokio_metrics::{RuntimeMonitor, TaskMetrics, TaskMonitor};
+#[cfg(tokio_unstable)]
+use tracing::debug;
 
 use crate::config::MetricsConfig;
 use crate::error::{MoaError, Result};
@@ -13,31 +19,115 @@ use crate::types::{ModelId, ModelTier, SessionStatus, WorkspaceId};
 
 const LATENCY_BUCKETS: &[f64] = &[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0];
 const CACHE_HIT_RATE_BUCKETS: &[f64] = &[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
+#[cfg(tokio_unstable)]
+const TOKIO_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 
 static PROMETHEUS_ENDPOINT: OnceLock<SocketAddr> = OnceLock::new();
+#[cfg(tokio_unstable)]
+static TOKIO_RUNTIME_MONITOR_STARTED: OnceLock<()> = OnceLock::new();
+static SESSION_TASK_MONITOR: OnceLock<SessionTaskMonitor> = OnceLock::new();
+#[cfg(tokio_unstable)]
+static SESSION_TASK_MONITOR_PUBLISHER_STARTED: OnceLock<()> = OnceLock::new();
+
+/// Aggregates scheduler metrics for the local orchestrator's session task class.
+#[derive(Clone, Debug)]
+pub struct SessionTaskMonitor {
+    #[cfg(tokio_unstable)]
+    inner: TaskMonitor,
+}
+
+impl Default for SessionTaskMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SessionTaskMonitor {
+    /// Creates a new session-task monitor.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            #[cfg(tokio_unstable)]
+            inner: TaskMonitor::new(),
+        }
+    }
+
+    /// Returns the shared process-level session-task monitor.
+    #[must_use]
+    pub fn shared() -> Self {
+        SESSION_TASK_MONITOR.get_or_init(Self::new).clone()
+    }
+
+    /// Instruments a spawned session future, falling back to the original future when
+    /// Tokio unstable runtime metrics are disabled.
+    pub fn instrument_task<F>(&self, future: F) -> Pin<Box<dyn Future<Output = F::Output> + Send>>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        #[cfg(tokio_unstable)]
+        {
+            Box::pin(self.inner.instrument(future))
+        }
+
+        #[cfg(not(tokio_unstable))]
+        {
+            Box::pin(future)
+        }
+    }
+
+    /// Starts the background publisher that exports aggregated session-task metrics.
+    pub fn spawn_publisher(&self, enabled: bool) {
+        if !enabled {
+            return;
+        }
+
+        #[cfg(tokio_unstable)]
+        {
+            if SESSION_TASK_MONITOR_PUBLISHER_STARTED.get().is_some() {
+                return;
+            }
+            let monitor = self.inner.clone();
+            tokio::spawn(async move {
+                let mut intervals = monitor.intervals();
+                loop {
+                    if let Some(interval) = intervals.next() {
+                        record_session_task_metrics(&interval);
+                    }
+                    tokio::time::sleep(TOKIO_MONITOR_INTERVAL).await;
+                }
+            });
+            let _ = SESSION_TASK_MONITOR_PUBLISHER_STARTED.set(());
+        }
+    }
+}
 
 /// Initializes the global Prometheus exporter when metrics are enabled.
 pub fn init_metrics(config: &MetricsConfig) -> Result<()> {
-    if !config.enabled || PROMETHEUS_ENDPOINT.get().is_some() {
+    if !config.enabled {
         return Ok(());
     }
 
-    let addr = parse_metrics_listen_addr(config)?;
-    let builder = PrometheusBuilder::new()
-        .with_http_listener(addr)
-        .set_buckets(LATENCY_BUCKETS)
-        .map_err(|error| MoaError::ConfigError(error.to_string()))?
-        .set_buckets_for_metric(
-            Matcher::Full("moa_cache_hit_rate".to_string()),
-            CACHE_HIT_RATE_BUCKETS,
-        )
-        .map_err(|error| MoaError::ConfigError(error.to_string()))?;
+    if PROMETHEUS_ENDPOINT.get().is_none() {
+        let addr = parse_metrics_listen_addr(config)?;
+        let builder = PrometheusBuilder::new()
+            .with_http_listener(addr)
+            .set_buckets(LATENCY_BUCKETS)
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full("moa_cache_hit_rate".to_string()),
+                CACHE_HIT_RATE_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?;
 
-    builder
-        .install()
-        .map_err(|error| MoaError::ProviderError(error.to_string()))?;
-    register_metric_descriptions();
-    let _ = PROMETHEUS_ENDPOINT.set(addr);
+        builder
+            .install()
+            .map_err(|error| MoaError::ProviderError(error.to_string()))?;
+        register_metric_descriptions();
+        let _ = PROMETHEUS_ENDPOINT.set(addr);
+    }
+
+    spawn_tokio_runtime_metrics_publisher();
 
     Ok(())
 }
@@ -228,6 +318,47 @@ pub fn record_embedding_queue_depth(depth: u64) {
     gauge!("moa_embedding_queue_depth").set(depth as f64);
 }
 
+#[cfg(tokio_unstable)]
+fn spawn_tokio_runtime_metrics_publisher() {
+    if TOKIO_RUNTIME_MONITOR_STARTED.get().is_some() {
+        return;
+    }
+
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        debug!("tokio runtime metrics not started because no runtime handle is active");
+        return;
+    };
+
+    let monitor = RuntimeMonitor::new(&handle);
+    tokio::spawn(async move {
+        let mut intervals = monitor.intervals();
+        loop {
+            if let Some(interval) = intervals.next() {
+                gauge!("tokio_workers_count").set(interval.workers_count as f64);
+                counter!("tokio_total_park_count").increment(interval.total_park_count);
+                gauge!("tokio_global_queue_depth").set(interval.global_queue_depth as f64);
+                gauge!("tokio_worker_mean_poll_time_us")
+                    .set(interval.mean_poll_duration.as_micros() as f64);
+                counter!("tokio_budget_forced_yield_count")
+                    .increment(interval.budget_forced_yield_count);
+            }
+            tokio::time::sleep(TOKIO_MONITOR_INTERVAL).await;
+        }
+    });
+    let _ = TOKIO_RUNTIME_MONITOR_STARTED.set(());
+}
+
+#[cfg(not(tokio_unstable))]
+fn spawn_tokio_runtime_metrics_publisher() {}
+
+#[cfg(tokio_unstable)]
+fn record_session_task_metrics(interval: &TaskMetrics) {
+    gauge!("moa_session_task_mean_poll_duration_us")
+        .set(interval.mean_poll_duration().as_micros() as f64);
+    gauge!("moa_session_task_mean_first_poll_delay_us")
+        .set(interval.mean_first_poll_delay().as_micros() as f64);
+}
+
 fn parse_metrics_listen_addr(config: &MetricsConfig) -> Result<SocketAddr> {
     config.listen.parse::<SocketAddr>().map_err(|error| {
         MoaError::ConfigError(format!(
@@ -251,6 +382,34 @@ fn register_metric_descriptions() {
     describe_gauge!(
         "moa_embedding_queue_depth",
         "Approximate number of wiki pages waiting for embeddings."
+    );
+    describe_gauge!(
+        "tokio_workers_count",
+        "Number of worker threads in the active Tokio runtime."
+    );
+    describe_counter!(
+        "tokio_total_park_count",
+        "Total number of worker parks observed across runtime sampling intervals."
+    );
+    describe_gauge!(
+        "tokio_global_queue_depth",
+        "Current depth of the Tokio runtime global scheduler queue."
+    );
+    describe_gauge!(
+        "tokio_worker_mean_poll_time_us",
+        "Mean Tokio worker poll time in microseconds."
+    );
+    describe_counter!(
+        "tokio_budget_forced_yield_count",
+        "Number of task budget forced yields observed across runtime sampling intervals."
+    );
+    describe_gauge!(
+        "moa_session_task_mean_poll_duration_us",
+        "Mean poll duration for instrumented MOA session tasks in microseconds."
+    );
+    describe_gauge!(
+        "moa_session_task_mean_first_poll_delay_us",
+        "Mean first-poll delay for instrumented MOA session tasks in microseconds."
     );
     describe_counter!(
         "moa_sessions_total",
@@ -395,5 +554,28 @@ mod tests {
         assert!(scrape.contains("moa_tokens_output_total"));
         assert!(scrape.contains("moa_cache_hit_rate"));
         assert!(scrape.contains("moa_turn_latency_seconds"));
+
+        #[cfg(tokio_unstable)]
+        {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let tokio_scrape = loop {
+                let response = client.get(&url).send().await.expect("tokio metrics scrape");
+                let body = response.text().await.expect("tokio scrape body");
+                if body.contains("tokio_workers_count")
+                    && body.contains("tokio_global_queue_depth")
+                    && body.contains("tokio_worker_mean_poll_time_us")
+                {
+                    break body;
+                }
+                if Instant::now() >= deadline {
+                    panic!("tokio runtime metrics never appeared in scrape output");
+                }
+                sleep(Duration::from_millis(50)).await;
+            };
+
+            assert!(tokio_scrape.contains("tokio_workers_count"));
+            assert!(tokio_scrape.contains("tokio_global_queue_depth"));
+            assert!(tokio_scrape.contains("tokio_worker_mean_poll_time_us"));
+        }
     }
 }

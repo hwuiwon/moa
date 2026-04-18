@@ -257,5 +257,34 @@ async fn prometheus_endpoint_exports_turn_metrics() -> Result<()> {
     assert!(metric_sum(&scrape, "moa_turns_total") >= 3.0);
     assert!(metric_sum(&scrape, "moa_sessions_total") >= 3.0);
 
+    #[cfg(tokio_unstable)]
+    {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let tokio_scrape = loop {
+            let body = scrape_metrics(&metrics_url).await?;
+            if body.contains("tokio_workers_count")
+                && body.contains("tokio_global_queue_depth")
+                && body.contains("tokio_worker_mean_poll_time_us")
+                && body.contains("moa_session_task_mean_poll_duration_us")
+                && body.contains("moa_session_task_mean_first_poll_delay_us")
+            {
+                break body;
+            }
+
+            if Instant::now() >= deadline {
+                return Err(moa_core::MoaError::ProviderError(
+                    "tokio runtime metrics did not appear in Prometheus scrape".to_string(),
+                ));
+            }
+            sleep(Duration::from_millis(50)).await;
+        };
+
+        assert!(tokio_scrape.contains("tokio_workers_count"));
+        assert!(tokio_scrape.contains("tokio_global_queue_depth"));
+        assert!(tokio_scrape.contains("tokio_worker_mean_poll_time_us"));
+        assert!(tokio_scrape.contains("moa_session_task_mean_poll_duration_us"));
+        assert!(tokio_scrape.contains("moa_session_task_mean_first_poll_delay_us"));
+    }
+
     Ok(())
 }

@@ -1,0 +1,5 @@
+[build]
+# Tokio runtime metrics currently require the unstable runtime metrics hooks.
+# Override with `cargo --config 'build.rustflags=[]' ...` when validating a
+# stable-only build path.
+rustflags = ["--cfg", "tokio_unstable"]
