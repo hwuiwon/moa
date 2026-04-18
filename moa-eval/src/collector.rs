@@ -250,6 +250,7 @@ mod tests {
             tool_id,
             provider_tool_use_id: None,
             output: ToolOutput::text("file1\nfile2", Duration::from_millis(5)),
+            original_output_tokens: None,
             success: true,
             duration_ms: 5,
         });

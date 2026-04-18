@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use moa_core::{
     HandHandle, HandProvider, HandResources, HandSpec, McpServerConfig, MemoryStore, MoaError,
-    Result, SandboxTier, SessionMeta, SessionStore, ToolInvocation, ToolOutput, WorkspaceId,
+    Result, SandboxTier, SessionMeta, SessionStore, ToolBudgetConfig, ToolContent, ToolDefinition,
+    ToolInvocation, ToolOutput, ToolOutputConfig, WorkspaceId, truncate_head_tail,
 };
 use moa_security::{ApprovalRuleStore, MCPCredentialProxy, ToolPolicies};
 use tokio::sync::RwLock;
@@ -27,7 +28,8 @@ use crate::mcp::MCPClient;
 pub use policy::PreparedToolInvocation;
 pub use registration::{ToolExecution, ToolRegistry};
 use telemetry::{
-    record_tool_execution_result, record_tool_invocation_metadata, tool_execution_span,
+    record_tool_execution_result, record_tool_invocation_metadata, record_tool_output_truncated,
+    tool_execution_span,
 };
 
 const DEFAULT_PROVIDER_NAME: &str = "local";
@@ -48,6 +50,8 @@ pub struct ToolRouter {
     rule_store: Option<Arc<dyn ApprovalRuleStore>>,
     session_store: Option<Arc<dyn SessionStore>>,
     sandbox_root: Option<PathBuf>,
+    tool_output: ToolOutputConfig,
+    tool_budgets: ToolBudgetConfig,
 }
 
 impl ToolRouter {
@@ -237,7 +241,10 @@ impl ToolRouter {
                     cancel_token,
                 };
                 let output = tool.execute(&invocation.input, &ctx).await?;
-                Ok((None, output))
+                Ok((
+                    None,
+                    self.apply_output_budget(&registered_tool.definition, output),
+                ))
             }
             ToolExecution::Hand { provider, tier } => {
                 let hand = self
@@ -278,7 +285,10 @@ impl ToolRouter {
                         .execute(&hand, &invocation.name, &serialized_input)
                         .await?
                 };
-                Ok((Some(hand_id(&hand)), output))
+                Ok((
+                    Some(hand_id(&hand)),
+                    self.apply_output_budget(&registered_tool.definition, output),
+                ))
             }
             ToolExecution::Mcp { server_name } => {
                 let server = self.mcp_servers.get(server_name).ok_or_else(|| {
@@ -306,9 +316,146 @@ impl ToolRouter {
                 let output = client
                     .call_tool(&invocation.name, invocation.input.clone(), extra_headers)
                     .await?;
-                Ok((None, output))
+                Ok((
+                    None,
+                    self.apply_output_budget(&registered_tool.definition, output),
+                ))
             }
         }
+    }
+
+    /// Overrides the router's replay truncation settings used for head/tail shaping.
+    #[must_use]
+    pub fn with_tool_output_config(mut self, tool_output: ToolOutputConfig) -> Self {
+        self.tool_output = tool_output;
+        self
+    }
+
+    /// Overrides the router's per-tool output budgets.
+    #[must_use]
+    pub fn with_tool_budgets(mut self, tool_budgets: ToolBudgetConfig) -> Self {
+        self.registry.apply_budgets(&tool_budgets);
+        self.tool_budgets = tool_budgets;
+        self
+    }
+
+    fn apply_output_budget(
+        &self,
+        tool_definition: &ToolDefinition,
+        output: ToolOutput,
+    ) -> ToolOutput {
+        if output.is_error {
+            return output.with_original_output_tokens(None);
+        }
+
+        let existing_truncated = output.truncated;
+        let original_output_tokens = estimate_tokens(&output.to_text());
+        let (stream_budgeted_output, stream_truncated) =
+            self.apply_stream_budget(tool_definition, output);
+
+        let (mut final_output, text_truncated) = self.apply_text_budget(
+            tool_definition,
+            original_output_tokens,
+            stream_budgeted_output,
+        );
+        let router_truncated = stream_truncated || text_truncated;
+        let truncated = existing_truncated || router_truncated;
+        if router_truncated && !text_truncated {
+            let footer =
+                truncation_footer(original_output_tokens, tool_definition.max_output_tokens);
+            let rendered = final_output.to_text();
+            let with_footer = append_footer(&rendered, &footer);
+            if estimate_tokens(&with_footer) > tool_definition.max_output_tokens {
+                let available_chars = tool_definition
+                    .max_output_tokens
+                    .saturating_mul(4)
+                    .saturating_sub(footer.chars().count() as u32)
+                    as usize;
+                let (truncated_text, _) = truncate_head_tail(
+                    &rendered,
+                    available_chars.max(1),
+                    self.tool_output.head_ratio,
+                );
+                final_output.content = vec![ToolContent::Text {
+                    text: append_footer(&truncated_text, &footer),
+                }];
+                final_output.structured = None;
+            } else {
+                final_output.content = vec![ToolContent::Text { text: with_footer }];
+            }
+        }
+        final_output.truncated = truncated;
+        final_output.original_output_tokens = router_truncated.then_some(original_output_tokens);
+
+        if router_truncated {
+            record_tool_output_truncated(&tool_definition.name);
+        }
+
+        final_output
+    }
+
+    fn apply_stream_budget(
+        &self,
+        tool_definition: &ToolDefinition,
+        output: ToolOutput,
+    ) -> (ToolOutput, bool) {
+        if tool_definition.name != "bash" {
+            return (output, false);
+        }
+
+        let Some(exit_code) = output.process_exit_code() else {
+            return (output, false);
+        };
+        let stdout = output.process_stdout().unwrap_or_default();
+        let stderr = output.process_stderr().unwrap_or_default();
+
+        let stdout_budget = self.tool_budgets.bash_stdout;
+        let stderr_budget = self.tool_budgets.bash_stderr;
+        let (stdout, stdout_truncated) =
+            truncate_text_for_budget(stdout, stdout_budget, self.tool_output.head_ratio);
+        let (stderr, stderr_truncated) =
+            truncate_text_for_budget(stderr, stderr_budget, self.tool_output.head_ratio);
+
+        if !stdout_truncated && !stderr_truncated {
+            return (output, false);
+        }
+
+        (
+            ToolOutput::from_process(stdout, stderr, exit_code, output.duration),
+            true,
+        )
+    }
+
+    fn apply_text_budget(
+        &self,
+        tool_definition: &ToolDefinition,
+        original_output_tokens: u32,
+        output: ToolOutput,
+    ) -> (ToolOutput, bool) {
+        let rendered = output.to_text();
+        let budget = tool_definition.max_output_tokens;
+        if estimate_tokens(&rendered) <= budget {
+            return (output, false);
+        }
+
+        let footer = truncation_footer(original_output_tokens, budget);
+        let available_chars = budget
+            .saturating_mul(4)
+            .saturating_sub(footer.chars().count() as u32) as usize;
+        let available_chars = available_chars.max(1);
+        let (truncated_text, _) =
+            truncate_head_tail(&rendered, available_chars, self.tool_output.head_ratio);
+
+        (
+            ToolOutput {
+                content: vec![ToolContent::Text {
+                    text: append_footer(&truncated_text, &footer),
+                }],
+                structured: None,
+                ..output
+            },
+            true,
+        )
     }
 
     async fn get_or_provision_hand(
@@ -350,6 +497,36 @@ impl ToolRouter {
 
         self.active_hands.write().await.insert(key, handle.clone());
         Ok(handle)
+    }
+}
+
+fn estimate_tokens(text: &str) -> u32 {
+    let char_count = text.chars().count() as u32;
+    if char_count == 0 {
+        0
+    } else {
+        char_count.div_ceil(4)
+    }
+}
+
+fn truncate_text_for_budget(text: &str, budget_tokens: u32, head_ratio: f64) -> (String, bool) {
+    if estimate_tokens(text) <= budget_tokens {
+        return (text.to_string(), false);
+    }
+
+    let max_chars = budget_tokens.saturating_mul(4) as usize;
+    truncate_head_tail(text, max_chars.max(1), head_ratio)
+}
+
+fn truncation_footer(original_output_tokens: u32, budget_tokens: u32) -> String {
+    format!("[output truncated from ~{original_output_tokens} to ~{budget_tokens} tokens]")
+}
+
+fn append_footer(text: &str, footer: &str) -> String {
+    if text.trim().is_empty() {
+        footer.to_string()
+    } else {
+        format!("{text}\n{footer}")
     }
 }
 

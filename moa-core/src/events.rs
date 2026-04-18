@@ -112,6 +112,9 @@ pub enum Event {
         provider_tool_use_id: Option<String>,
         /// Full tool output.
         output: ToolOutput,
+        /// Approximate token count before router-level truncation, when truncation occurred.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        original_output_tokens: Option<u32>,
         /// Whether execution succeeded.
         success: bool,
         /// Duration in milliseconds.
@@ -639,12 +642,14 @@ mod tests {
                 tool_id: decoded_id,
                 provider_tool_use_id,
                 output,
+                original_output_tokens,
                 success,
                 duration_ms,
             } => {
                 assert_eq!(decoded_id, tool_id);
                 assert_eq!(provider_tool_use_id, None);
                 assert_eq!(output.to_text(), "ok");
+                assert_eq!(original_output_tokens, None);
                 assert!(success);
                 assert_eq!(duration_ms, 5);
             }

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use moa_core::{
     Event, HandProvider, HandResources, HandSpec, MemoryPath, MemoryScope, MemorySearchMode,
     MemorySearchResult, MemoryStore, ModelId, PageSummary, PageType, Result, SandboxTier,
-    SessionMeta, SessionStore, ToolInvocation, UserId, WikiPage, WorkspaceId,
+    SessionMeta, SessionStore, ToolBudgetConfig, ToolInvocation, UserId, WikiPage, WorkspaceId,
 };
 use moa_hands::{LocalHandProvider, ToolRouter};
 use moa_memory::FileMemoryStore;
@@ -131,6 +131,11 @@ fn session() -> SessionMeta {
         model: ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     }
+}
+
+fn approximate_tokens(text: &str) -> u32 {
+    let chars = text.chars().count() as u32;
+    if chars == 0 { 0 } else { chars.div_ceil(4) }
 }
 
 async fn test_session_store() -> Arc<PostgresSessionStore> {
@@ -645,6 +650,158 @@ async fn bash_captures_stdout_and_stderr() {
     assert_eq!(output.process_stdout(), Some("out"));
     assert_eq!(output.process_stderr(), Some("err"));
     assert_eq!(output.process_exit_code(), Some(0));
+}
+
+#[tokio::test]
+async fn bash_success_output_is_truncated_to_router_budget() {
+    let dir = tempdir().unwrap();
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let router = ToolRouter::new_local(memory_store, dir.path())
+        .await
+        .unwrap();
+    let session = session();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({
+                    "cmd": "python3 -c \"print('x' * 120000)\""
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let text = output.to_text();
+    assert!(output.truncated);
+    assert!(output.original_output_tokens.is_some());
+    assert!(text.contains("[output truncated from ~"));
+    assert!(approximate_tokens(&text) <= 4_000);
+}
+
+#[tokio::test]
+async fn bash_error_output_is_not_truncated() {
+    let dir = tempdir().unwrap();
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let router = ToolRouter::new_local(memory_store, dir.path())
+        .await
+        .unwrap();
+    let session = session();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({
+                    "cmd": "python3 -c \"import sys; sys.stderr.write('e' * 20000); sys.exit(7)\""
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let text = output.to_text();
+    assert!(output.is_error);
+    assert!(!output.truncated);
+    assert_eq!(output.original_output_tokens, None);
+    assert!(!text.contains("[output truncated from ~"));
+    assert!(approximate_tokens(&text) > 4_000);
+}
+
+#[tokio::test]
+async fn file_read_within_budget_is_not_router_truncated() {
+    let dir = tempdir().unwrap();
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let router = ToolRouter::new_local(memory_store, dir.path())
+        .await
+        .unwrap();
+    let session = session();
+    let content = (1..=100)
+        .map(|index| format!("{index:03}: {}", "a".repeat(48)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "notes.txt", "content": content }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_read".to_string(),
+                input: json!({ "path": "notes.txt", "start_line": 1, "end_line": 100 }),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(!output.truncated);
+    assert_eq!(output.original_output_tokens, None);
+    assert!(!output.to_text().contains("[output truncated from ~"));
+}
+
+#[tokio::test]
+async fn file_read_budget_override_truncates_large_results() {
+    let dir = tempdir().unwrap();
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
+    let router = ToolRouter::new_local(memory_store, dir.path())
+        .await
+        .unwrap()
+        .with_tool_budgets(ToolBudgetConfig {
+            file_read: 2_000,
+            ..ToolBudgetConfig::default()
+        });
+    let session = session();
+    let content = (1..=200)
+        .map(|index| format!("{index:03}: {}", "b".repeat(96)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "large.txt", "content": content }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_read".to_string(),
+                input: json!({ "path": "large.txt", "start_line": 1, "end_line": 200 }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let text = output.to_text();
+    assert!(output.truncated);
+    assert!(output.original_output_tokens.is_some());
+    assert!(text.contains("[output truncated from ~"));
+    assert!(text.contains("to ~2000 tokens]"));
+    assert!(approximate_tokens(&text) <= 2_000);
 }
 
 #[tokio::test]

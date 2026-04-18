@@ -3,10 +3,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use moa_core::{
-    MoaError, Result, ToolContent, ToolOutput, ToolOutputConfig, truncate_head_tail,
-    truncate_head_tail_lines,
-};
+use moa_core::{MoaError, Result, ToolOutput};
 use serde::Deserialize;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
@@ -16,7 +13,6 @@ pub async fn execute_local(
     sandbox_dir: &Path,
     input: &str,
     default_timeout: Duration,
-    tool_output: &ToolOutputConfig,
     hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<ToolOutput> {
     let params: BashToolInput = serde_json::from_str(input)?;
@@ -63,7 +59,6 @@ pub async fn execute_local(
         String::from_utf8_lossy(&output.stderr).to_string(),
         output.status.code().unwrap_or(-1),
         started_at.elapsed(),
-        tool_output,
     ))
 }
 
@@ -73,7 +68,6 @@ pub async fn execute_docker(
     workspace_root: &str,
     input: &str,
     default_timeout: Duration,
-    tool_output: &ToolOutputConfig,
     hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<ToolOutput> {
     let params: BashToolInput = serde_json::from_str(input)?;
@@ -119,7 +113,6 @@ pub async fn execute_docker(
         String::from_utf8_lossy(&output.stderr).to_string(),
         output.status.code().unwrap_or(-1),
         started_at.elapsed(),
-        tool_output,
     ))
 }
 
@@ -143,37 +136,8 @@ fn build_bash_output(
     stderr: String,
     exit_code: i32,
     duration: Duration,
-    tool_output: &ToolOutputConfig,
 ) -> ToolOutput {
-    let (stdout, stdout_truncated) = truncate_shell_stream(&stdout, tool_output);
-    let (stderr, stderr_truncated) = truncate_shell_stream(&stderr, tool_output);
-
-    let mut output = ToolOutput::from_process(stdout, stderr, exit_code, duration);
-    let mut truncated = stdout_truncated || stderr_truncated;
-
-    let (combined, combined_truncated) = truncate_head_tail(
-        &output.to_text(),
-        tool_output.max_replay_chars,
-        tool_output.head_ratio,
-    );
-    if combined_truncated {
-        output.content = vec![ToolContent::Text { text: combined }];
-        truncated = true;
-    }
-
-    output.with_truncated(truncated)
-}
-
-fn truncate_shell_stream(text: &str, tool_output: &ToolOutputConfig) -> (String, bool) {
-    let (line_truncated, truncated_by_lines) =
-        truncate_head_tail_lines(text, tool_output.max_bash_lines, tool_output.head_ratio);
-    let (char_truncated, truncated_by_chars) = truncate_head_tail(
-        &line_truncated,
-        tool_output.max_replay_chars,
-        tool_output.head_ratio,
-    );
-
-    (char_truncated, truncated_by_lines || truncated_by_chars)
+    ToolOutput::from_process(stdout, stderr, exit_code, duration)
 }
 
 async fn stop_container(container_id: &str) -> Result<()> {
@@ -197,28 +161,20 @@ mod tests {
     use std::time::Duration;
 
     use super::build_bash_output;
-    use moa_core::ToolOutputConfig;
 
     #[test]
-    fn bash_output_truncates_with_head_and_tail_preserved() {
+    fn bash_output_preserves_full_process_streams() {
         let stdout = (1..=1_000)
             .map(|index| format!("line {index}"))
             .collect::<Vec<_>>()
             .join("\n");
 
-        let output = build_bash_output(
-            stdout,
-            String::new(),
-            0,
-            Duration::from_secs(1),
-            &ToolOutputConfig::default(),
-        );
+        let output = build_bash_output(stdout, String::new(), 0, Duration::from_secs(1));
         let text = output.to_text();
 
-        assert!(output.truncated);
+        assert!(!output.truncated);
         assert!(text.contains("line 1"));
         assert!(text.contains("line 1000"));
-        assert!(text.contains("[..."));
     }
 
     #[test]
@@ -228,7 +184,6 @@ mod tests {
             "err".to_string(),
             0,
             Duration::from_secs(1),
-            &ToolOutputConfig::default(),
         );
 
         assert!(!output.truncated);

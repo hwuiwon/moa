@@ -298,8 +298,9 @@ async fn steps_72_77_e2e() -> Result<()> {
     );
     assert!(bash_text.contains("bash-line-1"));
     assert!(bash_text.contains("bash-line-260"));
-    assert!(bash_text.contains("[... 60 lines omitted ...]"));
+    assert!(bash_text.contains("[output truncated from ~"));
     assert!(!bash_text.contains("bash-line-140"));
+    assert!((bash_text.chars().count() as u32).div_ceil(4) <= 4_000);
 
     assert!(
         requests
@@ -461,7 +462,9 @@ fn build_scripted_provider() -> ScriptedProvider {
         .push_response(
             ScriptedResponse::tool_call(
                 "bash",
-                json!({ "cmd": "for i in $(seq 1 260); do echo bash-line-$i; done" }),
+                json!({
+                    "cmd": "python3 -c \"for i in range(1, 261): print(f'bash-line-{i}-' + ('x' * 120))\""
+                }),
                 "tc_006",
             )
             .with_usage(cached_usage(144, 88)),

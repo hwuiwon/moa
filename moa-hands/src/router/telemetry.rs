@@ -1,10 +1,14 @@
 //! Tracing helpers for tool execution spans and result metadata.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use moa_core::{
     MoaError, Result, SandboxTier, SessionMeta, ToolInvocation, ToolOutput, TraceContext,
 };
+use opentelemetry::KeyValue;
+use opentelemetry::global;
+use opentelemetry::metrics::Counter;
 use opentelemetry::trace::Status;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -79,6 +83,10 @@ pub(super) fn record_tool_execution_result(
     }
 }
 
+pub(super) fn record_tool_output_truncated(tool_name: &str) {
+    tool_output_truncated_counter().add(1, &[KeyValue::new("tool_name", tool_name.to_string())]);
+}
+
 fn sandbox_tier_label(tier: &SandboxTier) -> &'static str {
     match tier {
         SandboxTier::None => "none",
@@ -101,4 +109,16 @@ fn truncate_tool_span_text(mut value: String) -> String {
     value.truncate(truncate_at);
     value.push('…');
     value
+}
+
+fn tool_output_truncated_counter() -> &'static Counter<u64> {
+    static COUNTER: OnceLock<Counter<u64>> = OnceLock::new();
+    COUNTER.get_or_init(|| {
+        global::meter("moa.hands")
+            .u64_counter("moa_tool_output_truncated_total")
+            .with_description(
+                "Number of successful tool calls whose outputs were truncated by router budgets.",
+            )
+            .build()
+    })
 }
