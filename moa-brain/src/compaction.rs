@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use moa_core::{
     CompactionConfig, CompletionRequest, ContextMessage, Event, EventRange, EventRecord,
-    LLMProvider, ModelId, Result, SessionId, SessionStore, TokenPricing,
+    LLMProvider, ModelTask, ModelTier, Result, SessionId, SessionStore, TokenPricing,
 };
 use tracing::Instrument;
 
@@ -98,6 +98,7 @@ pub(crate) async fn maybe_compact_events(
     config: &CompactionConfig,
     store: &dyn SessionStore,
     llm: &dyn LLMProvider,
+    model_tier: ModelTier,
     session_id: SessionId,
     token_budget: usize,
     events: &[EventRecord],
@@ -118,7 +119,6 @@ pub(crate) async fn maybe_compact_events(
         let candidate = &unsummarized[..candidate_end];
         let response = llm
             .complete(compaction_request(
-                config.summarizer_model.as_deref(),
                 checkpoint.as_ref().map(|state| state.summary.as_str()),
                 candidate,
             ))
@@ -143,6 +143,7 @@ pub(crate) async fn maybe_compact_events(
                     events_summarized: summarized_events as u64,
                     token_count: estimate_tokens(&summary),
                     model: response.model.clone(),
+                    model_tier,
                     input_tokens: response.input_tokens,
                     output_tokens: response.output_tokens,
                     cost_cents,
@@ -168,6 +169,7 @@ pub async fn maybe_compact(
         &CompactionConfig::default(),
         store,
         llm,
+        ModelTask::Summarization.tier(),
         session_id,
         llm.capabilities().context_window,
         &events,
@@ -176,7 +178,6 @@ pub async fn maybe_compact(
 }
 
 fn compaction_request(
-    summarizer_model: Option<&str>,
     previous_summary: Option<&str>,
     events: &[&EventRecord],
 ) -> CompletionRequest {
@@ -194,7 +195,7 @@ fn compaction_request(
     }
 
     CompletionRequest {
-        model: summarizer_model.map(ModelId::new),
+        model: None,
         messages: vec![
             ContextMessage::system(include_str!("prompts/summarizer.txt")),
             ContextMessage::user(prompt),

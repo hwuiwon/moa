@@ -10,6 +10,7 @@ use moa_core::{
     TokenUsage, ToolCallFormat, UserId, WorkspaceId,
 };
 use moa_memory::FileMemoryStore;
+use moa_providers::ModelRouter;
 use moa_skills::{
     SkillRegistry, build_skill_path, maybe_distill_skill, maybe_improve_skill,
     parse_skill_markdown, skill_from_wiki_page, wiki_page_from_skill,
@@ -236,6 +237,10 @@ fn session() -> SessionMeta {
     }
 }
 
+fn model_router(provider: Arc<dyn LLMProvider>) -> Arc<ModelRouter> {
+    Arc::new(ModelRouter::new(provider, None))
+}
+
 fn tool_rich_events() -> Vec<EventRecord> {
     let session_id = SessionId::new();
     (0..7)
@@ -350,7 +355,7 @@ async fn distills_skill_after_tool_heavy_session() -> Result<()> {
         &session,
         &events,
         memory.clone(),
-        llm,
+        model_router(llm),
     )
     .await?;
 
@@ -396,7 +401,7 @@ async fn improves_existing_skill_when_better_flow_is_found() -> Result<()> {
         &existing,
         &tool_rich_events(),
         memory.clone(),
-        llm,
+        model_router(llm),
     )
     .await?;
 
@@ -443,7 +448,7 @@ async fn improvement_accepted_when_scores_better() -> Result<()> {
         &existing,
         &tool_rich_events(),
         memory.clone(),
-        llm,
+        model_router(llm),
     )
     .await?;
 
@@ -491,7 +496,7 @@ async fn improvement_rejected_on_regression() -> Result<()> {
         &existing,
         &tool_rich_events(),
         memory.clone(),
-        llm,
+        model_router(llm),
     )
     .await?;
 
@@ -529,7 +534,7 @@ async fn no_tests_means_unconditional_accept() -> Result<()> {
         &existing,
         &tool_rich_events(),
         memory.clone(),
-        llm,
+        model_router(llm),
     )
     .await?;
 
@@ -568,7 +573,7 @@ async fn log_entry_written_for_regression_attempt() -> Result<()> {
         &existing,
         &tool_rich_events(),
         memory.clone(),
-        llm,
+        model_router(llm),
     )
     .await?;
 
@@ -613,7 +618,7 @@ async fn budget_limit_skips_expensive_tests() -> Result<()> {
         &existing,
         &tool_rich_events(),
         memory.clone(),
-        llm,
+        model_router(llm),
     )
     .await?;
 

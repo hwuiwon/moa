@@ -26,6 +26,7 @@ use moa_session::{NeonBranchManager, PostgresSessionStore, create_session_store}
 use moa_skills::run_skill_suite;
 use tokio::fs;
 use tokio::process::Command;
+use tokio::time::timeout;
 use uuid::Uuid;
 /// Top-level MOA command line interface.
 #[derive(Debug, Parser)]
@@ -1170,10 +1171,16 @@ fn env_presence(key: &str) -> &'static str {
 }
 
 async fn docker_status() -> String {
-    match Command::new("docker").arg("info").output().await {
-        Ok(output) if output.status.success() => "available".to_string(),
-        Ok(output) => format!("unhealthy (exit {})", output.status),
-        Err(_) => "missing".to_string(),
+    match timeout(
+        std::time::Duration::from_secs(5),
+        Command::new("docker").arg("info").output(),
+    )
+    .await
+    {
+        Err(_) => "unavailable (timed out)".to_string(),
+        Ok(Ok(output)) if output.status.success() => "available".to_string(),
+        Ok(Ok(output)) => format!("unhealthy (exit {})", output.status),
+        Ok(Err(_)) => "missing".to_string(),
     }
 }
 
@@ -1367,7 +1374,17 @@ async fn discover_memory_scopes(store: &FileMemoryStore) -> Result<Vec<MemorySco
 fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result<()> {
     match key {
         "general.default_provider" => config.general.default_provider = value.to_string(),
-        "general.default_model" => config.general.default_model = value.to_string(),
+        "general.default_model" => {
+            config.general.default_model = value.to_string();
+            config.models.main = value.to_string();
+        }
+        "models.main" => {
+            config.models.main = value.to_string();
+            config.general.default_model = value.to_string();
+        }
+        "models.auxiliary" => {
+            config.models.auxiliary = (!value.trim().is_empty()).then(|| value.to_string());
+        }
         "general.reasoning_effort" => config.general.reasoning_effort = value.to_string(),
         "cloud.enabled" => config.cloud.enabled = parse_bool(value)?,
         "cloud.memory_dir" => config.cloud.memory_dir = Some(value.to_string()),

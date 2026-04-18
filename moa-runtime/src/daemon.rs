@@ -118,8 +118,8 @@ impl DaemonChatRuntime {
         let requested_model = model.into();
         let selection = resolve_provider_selection(&self.config, Some(requested_model.as_str()))?;
         self.model = selection.model_id.clone().into();
-        self.config.general.default_model = selection.model_id;
-        self.config.general.default_provider = selection.provider_name;
+        self.config
+            .set_main_model(selection.provider_name, selection.model_id);
         self.reset_session().await
     }
 

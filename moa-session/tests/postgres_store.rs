@@ -247,6 +247,7 @@ async fn postgres_trigger_populates_generated_session_rollups() {
                     text: "turn".to_string(),
                     thought_signature: None,
                     model: "test-model".into(),
+                    model_tier: moa_core::ModelTier::Main,
                     input_tokens_uncached: uncached,
                     input_tokens_cache_write: cache_write,
                     input_tokens_cache_read: cache_read,
@@ -282,6 +283,120 @@ async fn postgres_trigger_populates_generated_session_rollups() {
     .expect("fetch generated session columns");
     assert_eq!(turn_count, 3);
     assert!(approx_eq(cache_hit_rate, 30.0 / 70.0, 1e-9));
+
+    pool.close().await;
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_session_summary_tracks_model_tier_costs() {
+    let (store, database_url, schema_name) = create_test_store().await;
+    let session_id = store
+        .create_session(SessionMeta {
+            workspace_id: WorkspaceId::new("tiered-costs-ws"),
+            user_id: UserId::new("user"),
+            model: ModelId::new("claude-sonnet-4-6"),
+            ..SessionMeta::default()
+        })
+        .await
+        .expect("create session");
+
+    let tool_id = ToolCallId::new();
+    store
+        .emit_event(
+            session_id,
+            Event::ToolCall {
+                tool_id,
+                provider_tool_use_id: None,
+                provider_thought_signature: None,
+                tool_name: "bash".to_string(),
+                input: serde_json::json!({ "cmd": "echo hi" }),
+                hand_id: None,
+            },
+        )
+        .await
+        .expect("emit tool call");
+    store
+        .emit_event(
+            session_id,
+            Event::ToolResult {
+                tool_id,
+                provider_tool_use_id: None,
+                output: ToolOutput::text("hi", Duration::from_millis(10)),
+                success: true,
+                duration_ms: 10,
+            },
+        )
+        .await
+        .expect("emit tool result");
+    store
+        .emit_event(
+            session_id,
+            Event::BrainResponse {
+                text: "main turn".to_string(),
+                thought_signature: None,
+                model: "claude-sonnet-4-6".into(),
+                model_tier: moa_core::ModelTier::Main,
+                input_tokens_uncached: 12,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 6,
+                cost_cents: 20,
+                duration_ms: 30,
+            },
+        )
+        .await
+        .expect("emit brain response");
+    store
+        .emit_event(
+            session_id,
+            Event::Checkpoint {
+                summary: "summarized prior turns".to_string(),
+                events_summarized: 2,
+                token_count: 8,
+                model: "claude-haiku-4-5".into(),
+                model_tier: moa_core::ModelTier::Auxiliary,
+                input_tokens: 9,
+                output_tokens: 4,
+                cost_cents: 6,
+            },
+        )
+        .await
+        .expect("emit checkpoint");
+
+    let summary = store
+        .get_session_summary(session_id)
+        .await
+        .expect("load session summary");
+    assert_eq!(summary.total_cost_cents, 26);
+    assert_eq!(summary.main_cost_cents, 20);
+    assert_eq!(summary.auxiliary_cost_cents, 6);
+
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("postgres inspection pool");
+    let (main_cost_cents, auxiliary_cost_cents): (i64, i64) = sqlx::query_as(&format!(
+        "SELECT main_cost_cents, auxiliary_cost_cents FROM {} WHERE id = $1",
+        qualified(&schema_name, "session_summary")
+    ))
+    .bind(session_id.0)
+    .fetch_one(&pool)
+    .await
+    .expect("query session_summary view");
+    assert_eq!(main_cost_cents, 20);
+    assert_eq!(auxiliary_cost_cents, 6);
+
+    let tool_model_tier: String = sqlx::query_scalar(&format!(
+        "SELECT model_tier FROM {} WHERE session_id = $1 LIMIT 1",
+        qualified(&schema_name, "tool_call_analytics")
+    ))
+    .bind(session_id.0)
+    .fetch_one(&pool)
+    .await
+    .expect("query tool_call_analytics view");
+    assert_eq!(tool_model_tier, "main");
 
     pool.close().await;
     drop(store);
@@ -524,6 +639,7 @@ async fn postgres_materialized_analytics_views_refresh() {
                     text: "turn".to_string(),
                     thought_signature: None,
                     model: "test-model".into(),
+                    model_tier: moa_core::ModelTier::Main,
                     input_tokens_uncached: uncached,
                     input_tokens_cache_write: 0,
                     input_tokens_cache_read: cache_read,

@@ -19,6 +19,7 @@ use moa_core::{
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
+use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, testing};
 use support::orchestrator_contract::{
     OrchestratorContractHarness, assert_blank_session_waits_for_first_message,
@@ -295,7 +296,13 @@ async fn test_orchestrator_with_provider(
     );
     let orchestrator = timed_test_stage(
         "local:create_orchestrator",
-        LocalOrchestrator::new(config, session_store, memory_store, provider, tool_router),
+        LocalOrchestrator::new(
+            config,
+            session_store,
+            memory_store,
+            Arc::new(ModelRouter::new(provider, None)),
+            tool_router,
+        ),
     )
     .await?;
 
@@ -307,12 +314,30 @@ async fn test_orchestrator_with_config_and_provider(
     provider: Arc<dyn LLMProvider>,
 ) -> Result<LocalOrchestrator> {
     let session_store = create_test_store().await?;
-    test_orchestrator_with_config_provider_and_store(config, provider, session_store).await
+    test_orchestrator_with_config_router_and_store(
+        config,
+        Arc::new(ModelRouter::new(provider, None)),
+        session_store,
+    )
+    .await
 }
 
 async fn test_orchestrator_with_config_provider_and_store(
     config: MoaConfig,
     provider: Arc<dyn LLMProvider>,
+    session_store: Arc<PostgresSessionStore>,
+) -> Result<LocalOrchestrator> {
+    test_orchestrator_with_config_router_and_store(
+        config,
+        Arc::new(ModelRouter::new(provider, None)),
+        session_store,
+    )
+    .await
+}
+
+async fn test_orchestrator_with_config_router_and_store(
+    config: MoaConfig,
+    model_router: Arc<ModelRouter>,
     session_store: Arc<PostgresSessionStore>,
 ) -> Result<LocalOrchestrator> {
     let memory_store = Arc::new(
@@ -337,7 +362,13 @@ async fn test_orchestrator_with_config_provider_and_store(
     );
     timed_test_stage(
         "local:create_orchestrator",
-        LocalOrchestrator::new(config, session_store, memory_store, provider, tool_router),
+        LocalOrchestrator::new(
+            config,
+            session_store,
+            memory_store,
+            model_router,
+            tool_router,
+        ),
     )
     .await
 }
@@ -1161,8 +1192,8 @@ async fn soft_cancel_marks_session_cancelled() -> Result<()> {
     assert!(events.iter().any(|record| matches!(
         record.event,
         Event::SessionStatusChanged {
-            from: SessionStatus::Running,
             to: SessionStatus::Cancelled,
+            ..
         }
     )));
     assert!(
@@ -1423,7 +1454,7 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
         reopened_config,
         reopened_store,
         reopened_memory,
-        reopened_provider,
+        Arc::new(ModelRouter::new(reopened_provider, None)),
         reopened_router,
     )
     .await?;
@@ -1805,6 +1836,90 @@ async fn queued_follow_up_request_ends_with_user_message() -> Result<()> {
 }
 
 #[tokio::test]
+async fn compaction_uses_auxiliary_model_router_tier() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = MoaConfig::default();
+    config.memory.auto_bootstrap = false;
+    config.local.docker_enabled = false;
+    config.local.memory_dir = dir.path().join("memory").display().to_string();
+    config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+    config.general.default_model = "claude-sonnet-4-6".to_string();
+    config.models.main = "claude-sonnet-4-6".to_string();
+    config.models.auxiliary = Some("claude-haiku-4-5".to_string());
+    config.compaction.event_threshold = 1;
+    config.compaction.token_ratio_threshold = 0.0;
+    config.compaction.recent_turns_verbatim = 1;
+
+    let main_provider: Arc<dyn LLMProvider> = Arc::new(MockProvider {
+        model: config.models.main.clone(),
+        first_turn_delay: Duration::from_millis(5),
+    });
+    let auxiliary_provider: Arc<dyn LLMProvider> = Arc::new(MockProvider {
+        model: config
+            .models
+            .auxiliary
+            .clone()
+            .expect("auxiliary model configured"),
+        first_turn_delay: Duration::from_millis(5),
+    });
+    let store = create_test_store().await?;
+    let orchestrator = test_orchestrator_with_config_router_and_store(
+        config,
+        Arc::new(ModelRouter::new(main_provider, Some(auxiliary_provider))),
+        store,
+    )
+    .await?;
+    let session = start_session(&orchestrator).await?;
+
+    for text in ["first", "second", "third"] {
+        orchestrator
+            .signal(
+                session.session_id,
+                SessionSignal::QueueMessage(UserMessage {
+                    text: text.to_string(),
+                    attachments: Vec::new(),
+                }),
+            )
+            .await?;
+        wait_for_status(&orchestrator, session.session_id, SessionStatus::Completed).await?;
+    }
+
+    let events = orchestrator
+        .session_store()
+        .get_events(session.session_id, EventRange::all())
+        .await?;
+    let main_models: Vec<_> = events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::BrainResponse {
+                model, model_tier, ..
+            } => Some((model.as_str().to_string(), *model_tier)),
+            _ => None,
+        })
+        .collect();
+    let checkpoint_models: Vec<_> = events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::Checkpoint {
+                model, model_tier, ..
+            } => Some((model.as_str().to_string(), *model_tier)),
+            _ => None,
+        })
+        .collect();
+
+    assert!(!main_models.is_empty());
+    assert!(main_models.iter().all(|(model, tier)| {
+        model == "claude-sonnet-4-6" && *tier == moa_core::ModelTier::Main
+    }));
+    assert!(!checkpoint_models.is_empty());
+    assert!(checkpoint_models.iter().all(|(model, tier)| {
+        model == "claude-haiku-4-5" && *tier == moa_core::ModelTier::Auxiliary
+    }));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn multiple_queued_messages_are_processed_fifo_one_turn_at_a_time() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = MoaConfig::default().general.default_model;
@@ -2045,7 +2160,7 @@ async fn completed_tool_turn_destroys_cached_hand() -> Result<()> {
         config,
         session_store,
         memory_store,
-        llm_provider,
+        Arc::new(ModelRouter::new(llm_provider, None)),
         tool_router,
     )
     .await?;

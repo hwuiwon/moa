@@ -13,7 +13,7 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
-use moa_providers::build_provider_from_config;
+use moa_providers::{ModelRouter, build_provider_from_config};
 use moa_session::{PostgresSessionStore, testing};
 use tempfile::TempDir;
 use tokio::time::{Instant, sleep};
@@ -224,7 +224,7 @@ async fn live_orchestrator(
         config,
         session_store.clone(),
         memory_store,
-        provider,
+        Arc::new(ModelRouter::new(provider, None)),
         tool_router,
     )
     .await?;

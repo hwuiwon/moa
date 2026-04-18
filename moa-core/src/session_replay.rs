@@ -257,8 +257,14 @@ fn event_payload_size(event: &Event) -> usize {
             text,
             thought_signature,
             model,
+            model_tier,
             ..
-        } => text.len() + model.as_str().len() + thought_signature.as_ref().map_or(0, String::len),
+        } => {
+            text.len()
+                + model.as_str().len()
+                + model_tier.as_str().len()
+                + thought_signature.as_ref().map_or(0, String::len)
+        }
         Event::ToolCall {
             tool_name, input, ..
         } => tool_name.len() + json_size(input),
@@ -301,7 +307,12 @@ fn event_payload_size(event: &Event) -> usize {
         } => hand_id.len() + provider.len() + tier.len(),
         Event::HandDestroyed { hand_id, reason } => hand_id.len() + reason.len(),
         Event::HandError { hand_id, error } => hand_id.len() + error.len(),
-        Event::Checkpoint { summary, model, .. } => summary.len() + model.as_str().len(),
+        Event::Checkpoint {
+            summary,
+            model,
+            model_tier,
+            ..
+        } => summary.len() + model.as_str().len() + model_tier.as_str().len(),
         Event::CacheReport { report } => json_size(&serde_json::json!(report)),
         Event::Error { message, .. } | Event::Warning { message } => message.len(),
     }

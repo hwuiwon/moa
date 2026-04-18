@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use moa_core::{
     BufferedUserMessage, CompletionContent, Event, EventRange, EventRecord, LLMProvider, MoaError,
-    Result, RuntimeEvent, SessionId, SessionSignal, SessionStatus, SessionStore, StopReason,
-    TraceContext, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
+    ModelTask, Result, RuntimeEvent, SessionId, SessionSignal, SessionStatus, SessionStore,
+    StopReason, TraceContext, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
 };
 use moa_hands::ToolRouter;
 use tokio::sync::{broadcast, mpsc};
@@ -384,6 +384,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                         text: streamed.streamed_text.clone(),
                         thought_signature: response.thought_signature.clone(),
                         model: response.model.clone(),
+                        model_tier: ModelTask::MainLoop.tier(),
                         input_tokens_uncached: response_usage.input_tokens_uncached,
                         input_tokens_cache_write: response_usage.input_tokens_cache_write,
                         input_tokens_cache_read: response_usage.input_tokens_cache_read,

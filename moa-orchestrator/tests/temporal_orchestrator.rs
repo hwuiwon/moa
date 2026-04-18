@@ -19,7 +19,7 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::TemporalOrchestrator;
-use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
+use moa_providers::{AnthropicProvider, GeminiProvider, ModelRouter, OpenAIProvider};
 use moa_session::{PostgresSessionStore, create_session_store, testing};
 use serde_json::json;
 use support::orchestrator_contract::{
@@ -424,7 +424,13 @@ async fn temporal_test_orchestrator_with_provider(
     );
     let orchestrator = timed_test_stage(
         "temporal:create_orchestrator",
-        TemporalOrchestrator::new(config, session_store, memory_store, provider, tool_router),
+        TemporalOrchestrator::new(
+            config,
+            session_store,
+            memory_store,
+            Arc::new(ModelRouter::new(provider, None)),
+            tool_router,
+        ),
     )
     .await
     .expect("temporal orchestrator");

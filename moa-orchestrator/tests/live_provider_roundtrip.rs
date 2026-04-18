@@ -9,7 +9,7 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
-use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
+use moa_providers::{AnthropicProvider, GeminiProvider, ModelRouter, OpenAIProvider};
 use moa_session::{PostgresSessionStore, testing};
 use tempfile::TempDir;
 use tokio::time::{Instant, sleep};
@@ -85,7 +85,7 @@ async fn live_orchestrator_with_provider(
         config,
         session_store.clone(),
         memory_store,
-        provider,
+        Arc::new(ModelRouter::new(provider, None)),
         tool_router,
     )
     .await?;

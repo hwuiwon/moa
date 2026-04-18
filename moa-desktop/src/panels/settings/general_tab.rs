@@ -53,7 +53,8 @@ pub fn render_general_tab(
             this.mutate(cx, |cfg| {
                 cfg.general.default_provider = new_provider;
                 if let Some(model) = next_model {
-                    cfg.general.default_model = model;
+                    cfg.general.default_model = model.clone();
+                    cfg.models.main = model;
                 }
             });
         },
@@ -208,7 +209,8 @@ fn render_model_card(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
                     this.mutate(cx, |cfg| {
-                        cfg.general.default_model = id_for_click.to_string()
+                        cfg.general.default_model = id_for_click.to_string();
+                        cfg.models.main = id_for_click.to_string();
                     });
                 }),
             )

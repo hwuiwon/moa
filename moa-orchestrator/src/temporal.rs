@@ -14,13 +14,13 @@ use moa_brain::{
 };
 use moa_core::{
     BrainOrchestrator, CronHandle, CronSpec, Event, EventRange, EventRecord, EventStream,
-    LLMProvider, MoaConfig, MoaError, ObserveLevel, Result as MoaResult, RuntimeEvent,
-    SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus,
-    SessionStore, SessionSummary, StartSessionRequest, ToolCardStatus, ToolUpdate, UserMessage,
+    MoaConfig, MoaError, ModelTask, ObserveLevel, Result as MoaResult, RuntimeEvent, SessionFilter,
+    SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore,
+    SessionSummary, StartSessionRequest, ToolCardStatus, ToolUpdate, UserMessage,
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
-use moa_providers::build_provider_from_config;
+use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, create_session_store};
 use moa_skills::maybe_distill_skill;
 use serde::{Deserialize, Serialize};
@@ -72,7 +72,7 @@ struct TemporalActivities {
     config: Arc<MoaConfig>,
     session_store: Arc<PostgresSessionStore>,
     memory_store: Arc<FileMemoryStore>,
-    llm_provider: Arc<dyn LLMProvider>,
+    model_router: Arc<ModelRouter>,
     tool_router: Arc<ToolRouter>,
 }
 
@@ -317,13 +317,13 @@ impl TemporalActivities {
             &self.config,
             self.session_store.clone(),
             self.memory_store.clone(),
-            Some(self.llm_provider.clone()),
+            Some(self.model_router.provider_for(ModelTask::Summarization)),
             self.tool_router.tool_schemas(),
         );
         let turn_result = run_brain_turn_with_tools_stepwise(
             session_id,
             self.session_store.clone(),
-            self.llm_provider.clone(),
+            self.model_router.provider_for(ModelTask::MainLoop),
             &pipeline,
             Some(self.tool_router.clone()),
         )
@@ -444,7 +444,7 @@ impl TemporalActivities {
             &session,
             &events,
             self.memory_store.clone(),
-            self.llm_provider.clone(),
+            self.model_router.clone(),
         )
         .await
         .map_err(non_retryable_activity_error)?
@@ -485,7 +485,7 @@ impl TemporalOrchestrator {
         config: MoaConfig,
         session_store: Arc<PostgresSessionStore>,
         memory_store: Arc<FileMemoryStore>,
-        llm_provider: Arc<dyn LLMProvider>,
+        model_router: Arc<ModelRouter>,
         tool_router: Arc<ToolRouter>,
     ) -> MoaResult<Self> {
         let scheduler = JobScheduler::new()
@@ -501,7 +501,7 @@ impl TemporalOrchestrator {
                 &config,
                 session_store.clone(),
                 memory_store.clone(),
-                llm_provider.clone(),
+                model_router.clone(),
                 tool_router.clone(),
             )
             .await?,
@@ -532,12 +532,12 @@ impl TemporalOrchestrator {
                 .with_rule_store(session_store.clone())
                 .with_session_store(session_store.clone()),
         );
-        let llm_provider = build_provider_from_config(&config)?;
+        let model_router = Arc::new(ModelRouter::from_config(&config)?);
         Self::new(
             config,
             session_store,
             memory_store,
-            llm_provider,
+            model_router,
             tool_router,
         )
         .await
@@ -635,7 +635,7 @@ impl TemporalRuntime {
         config: &MoaConfig,
         session_store: Arc<PostgresSessionStore>,
         memory_store: Arc<FileMemoryStore>,
-        llm_provider: Arc<dyn LLMProvider>,
+        model_router: Arc<ModelRouter>,
         tool_router: Arc<ToolRouter>,
     ) -> MoaResult<Self> {
         let temporal = config.cloud.temporal.as_ref().ok_or_else(|| {
@@ -671,7 +671,7 @@ impl TemporalRuntime {
         let config_for_worker = Arc::new(config.clone());
         let session_store_for_worker = session_store.clone();
         let memory_store_for_worker = memory_store.clone();
-        let llm_provider_for_worker = llm_provider.clone();
+        let model_router_for_worker = model_router.clone();
         let tool_router_for_worker = tool_router.clone();
         let address_for_worker = address.to_string();
         let namespace_for_worker = namespace.to_string();
@@ -725,7 +725,7 @@ impl TemporalRuntime {
                         config: config_for_worker,
                         session_store: session_store_for_worker,
                         memory_store: memory_store_for_worker,
-                        llm_provider: llm_provider_for_worker,
+                        model_router: model_router_for_worker,
                         tool_router: tool_router_for_worker,
                     };
                     let worker_options = WorkerOptions::new(task_queue_for_worker.clone())

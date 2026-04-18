@@ -9,6 +9,7 @@ chrono.workspace = true
 moa-core = { path = "../moa-core" }
 moa-eval = { path = "../moa-eval" }
 moa-memory = { path = "../moa-memory" }
+moa-providers = { path = "../moa-providers" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
