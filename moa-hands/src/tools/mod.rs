@@ -10,3 +10,4 @@ pub mod grep;
 pub mod memory;
 pub mod session_search;
 pub mod str_replace;
+pub mod tool_result;

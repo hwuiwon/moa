@@ -14,9 +14,11 @@ use std::time::{Duration, Instant};
 use moa_core::{
     HandHandle, HandProvider, HandResources, HandSpec, McpServerConfig, MemoryStore, MoaError,
     Result, SandboxTier, SessionMeta, SessionStore, ToolBudgetConfig, ToolContent, ToolDefinition,
-    ToolInvocation, ToolOutput, ToolOutputConfig, WorkspaceId, truncate_head_tail,
+    ToolInvocation, ToolOutput, ToolOutputArtifact, ToolOutputConfig, WorkspaceId,
+    truncate_head_tail,
 };
 use moa_security::{ApprovalRuleStore, MCPCredentialProxy, ToolPolicies};
+use serde_json::json;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -243,7 +245,8 @@ impl ToolRouter {
                 let output = tool.execute(&invocation.input, &ctx).await?;
                 Ok((
                     None,
-                    self.apply_output_budget(&registered_tool.definition, output),
+                    self.apply_output_budget(session, &registered_tool.definition, output)
+                        .await,
                 ))
             }
             ToolExecution::Hand { provider, tier } => {
@@ -287,7 +290,8 @@ impl ToolRouter {
                 };
                 Ok((
                     Some(hand_id(&hand)),
-                    self.apply_output_budget(&registered_tool.definition, output),
+                    self.apply_output_budget(session, &registered_tool.definition, output)
+                        .await,
                 ))
             }
             ToolExecution::Mcp { server_name } => {
@@ -318,7 +322,8 @@ impl ToolRouter {
                     .await?;
                 Ok((
                     None,
-                    self.apply_output_budget(&registered_tool.definition, output),
+                    self.apply_output_budget(session, &registered_tool.definition, output)
+                        .await,
                 ))
             }
         }
@@ -339,8 +344,9 @@ impl ToolRouter {
         self
     }
 
-    fn apply_output_budget(
+    async fn apply_output_budget(
         &self,
+        session: &SessionMeta,
         tool_definition: &ToolDefinition,
         output: ToolOutput,
     ) -> ToolOutput {
@@ -350,6 +356,14 @@ impl ToolRouter {
 
         let existing_truncated = output.truncated;
         let original_output_tokens = estimate_tokens(&output.to_text());
+        if let Some(artifactized_output) = self
+            .artifactize_output(session, tool_definition, &output, original_output_tokens)
+            .await
+        {
+            record_tool_output_truncated(&tool_definition.name);
+            return artifactized_output.with_truncated(true);
+        }
+
         let (stream_budgeted_output, stream_truncated) =
             self.apply_stream_budget(tool_definition, output);
 
@@ -392,6 +406,112 @@ impl ToolRouter {
         }
 
         final_output
+    }
+
+    async fn artifactize_output(
+        &self,
+        session: &SessionMeta,
+        tool_definition: &ToolDefinition,
+        output: &ToolOutput,
+        original_output_tokens: u32,
+    ) -> Option<ToolOutput> {
+        if original_output_tokens <= tool_definition.max_output_tokens {
+            return None;
+        }
+
+        let session_store = self.session_store.as_ref()?;
+
+        let rendered = output.to_text();
+        let combined = match session_store
+            .store_text_artifact(session.id, &rendered)
+            .await
+        {
+            Ok(claim_check) => claim_check,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session.id,
+                    tool_name = %tool_definition.name,
+                    error = %error,
+                    "failed to persist oversized tool output artifact; falling back to inline truncation"
+                );
+                return None;
+            }
+        };
+        let stdout = match output.process_stdout() {
+            Some(stdout) if !stdout.is_empty() => {
+                match session_store.store_text_artifact(session.id, stdout).await {
+                    Ok(claim_check) => Some(claim_check),
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = %session.id,
+                            tool_name = %tool_definition.name,
+                            error = %error,
+                            "failed to persist tool stdout artifact; continuing with combined artifact only"
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        let stderr = match output.process_stderr() {
+            Some(stderr) if !stderr.is_empty() => {
+                match session_store.store_text_artifact(session.id, stderr).await {
+                    Ok(claim_check) => Some(claim_check),
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = %session.id,
+                            tool_name = %tool_definition.name,
+                            error = %error,
+                            "failed to persist tool stderr artifact; continuing with combined artifact only"
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+
+        let artifact = ToolOutputArtifact {
+            combined,
+            estimated_tokens: original_output_tokens,
+            line_count: count_lines(&rendered),
+            stdout,
+            stderr,
+        };
+        let inline_preview_tokens =
+            inline_artifact_preview_budget(tool_definition.max_output_tokens);
+        let preview_footer = artifact_storage_footer(&artifact);
+        let preview_budget_chars = inline_preview_tokens
+            .saturating_mul(4)
+            .saturating_sub(preview_footer.chars().count() as u32)
+            as usize;
+        let (preview, _) = truncate_head_tail(
+            &rendered,
+            preview_budget_chars.max(1),
+            self.tool_output.head_ratio,
+        );
+        let summary = format_artifact_summary(
+            output.process_exit_code(),
+            artifact.available_streams(),
+            append_footer(&preview, &preview_footer),
+        );
+
+        Some(ToolOutput {
+            content: vec![ToolContent::Text { text: summary }],
+            is_error: false,
+            structured: Some(json!({
+                "artifact_available": true,
+                "estimated_tokens": artifact.estimated_tokens,
+                "line_count": artifact.line_count,
+                "available_streams": artifact.available_streams(),
+                "exit_code": output.process_exit_code(),
+            })),
+            duration: output.duration,
+            truncated: true,
+            original_output_tokens: Some(original_output_tokens),
+            artifact: Some(artifact),
+        })
     }
 
     fn apply_stream_budget(
@@ -507,6 +627,41 @@ fn estimate_tokens(text: &str) -> u32 {
     } else {
         char_count.div_ceil(4)
     }
+}
+
+fn count_lines(text: &str) -> usize {
+    text.lines().count()
+}
+
+fn inline_artifact_preview_budget(tool_budget_tokens: u32) -> u32 {
+    tool_budget_tokens.div_ceil(4).clamp(256, 1_024)
+}
+
+fn artifact_storage_footer(artifact: &ToolOutputArtifact) -> String {
+    format!(
+        "[full output stored separately: ~{} tokens, {} lines, {} bytes; use tool_result_search first to locate exact matches, then tool_result_read to inspect a narrow span or stream]",
+        artifact.estimated_tokens, artifact.line_count, artifact.combined.size
+    )
+}
+
+fn format_artifact_summary(
+    exit_code: Option<i32>,
+    available_streams: Vec<&'static str>,
+    preview: String,
+) -> String {
+    let mut lines = Vec::new();
+    if let Some(exit_code) = exit_code {
+        lines.push(format!("exit_code: {exit_code}"));
+    }
+    lines.push(format!(
+        "available_streams: {}",
+        available_streams.join(", ")
+    ));
+    lines.push(
+        "recovery_hint: use the tool_result id from this message; call tool_result_search for exact patterns, then tool_result_read for a narrow range or a specific stream".to_string(),
+    );
+    lines.push(preview);
+    lines.join("\n")
 }
 
 fn truncate_text_for_budget(text: &str, budget_tokens: u32, head_ratio: f64) -> (String, bool) {

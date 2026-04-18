@@ -11,9 +11,9 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::{
-    ApprovalDecision, ApprovalPrompt, ContextSnapshot, Event, EventFilter, EventRange, EventRecord,
-    PendingSignal, PendingSignalId, Result, SessionFilter, SessionId, SessionMeta, SessionStatus,
-    SessionStore, SessionSummary, ToolContent, ToolOutput, WorkspaceId,
+    ApprovalDecision, ApprovalPrompt, ClaimCheck, ContextSnapshot, Event, EventFilter, EventRange,
+    EventRecord, PendingSignal, PendingSignalId, Result, SessionFilter, SessionId, SessionMeta,
+    SessionStatus, SessionStore, SessionSummary, ToolContent, ToolOutput, WorkspaceId,
 };
 
 tokio::task_local! {
@@ -124,6 +124,18 @@ impl SessionStore for CountedSessionStore {
 
     async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<u64> {
         self.inner.emit_event(session_id, event).await
+    }
+
+    async fn store_text_artifact(&self, session_id: SessionId, text: &str) -> Result<ClaimCheck> {
+        self.inner.store_text_artifact(session_id, text).await
+    }
+
+    async fn load_text_artifact(
+        &self,
+        session_id: SessionId,
+        claim_check: &ClaimCheck,
+    ) -> Result<String> {
+        self.inner.load_text_artifact(session_id, claim_check).await
     }
 
     async fn get_events(
@@ -367,8 +379,18 @@ fn tool_output_size(output: &ToolOutput) -> usize {
         })
         .sum::<usize>();
     let structured_bytes = output.structured.as_ref().map_or(0, json_size);
+    let artifact_bytes = output.artifact.as_ref().map_or(0, |artifact| {
+        artifact.combined.blob_id.len()
+            + artifact.combined.preview.len()
+            + artifact.stdout.as_ref().map_or(0, |claim_check| {
+                claim_check.blob_id.len() + claim_check.preview.len()
+            })
+            + artifact.stderr.as_ref().map_or(0, |claim_check| {
+                claim_check.blob_id.len() + claim_check.preview.len()
+            })
+    });
 
-    content_bytes + structured_bytes
+    content_bytes + structured_bytes + artifact_bytes
 }
 
 fn json_size(value: &Value) -> usize {
@@ -397,6 +419,22 @@ mod tests {
 
         async fn emit_event(&self, _session_id: SessionId, _event: Event) -> Result<u64> {
             Ok(0)
+        }
+
+        async fn store_text_artifact(
+            &self,
+            _session_id: SessionId,
+            _text: &str,
+        ) -> Result<ClaimCheck> {
+            unreachable!("not used in test")
+        }
+
+        async fn load_text_artifact(
+            &self,
+            _session_id: SessionId,
+            _claim_check: &ClaimCheck,
+        ) -> Result<String> {
+            unreachable!("not used in test")
         }
 
         async fn get_events(

@@ -9,14 +9,14 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{MoaError, Result};
 use crate::events::Event;
 use crate::types::{
-    CheckpointHandle, CheckpointInfo, CompletionRequest, CompletionStream, ContextSnapshot,
-    Credential, CronHandle, CronSpec, EventFilter, EventRange, EventRecord, EventStream,
-    HandHandle, HandSpec, HandStatus, InboundMessage, IngestReport, MemoryPath, MemoryScope,
-    MemorySearchResult, MessageId, ModelCapabilities, ObserveLevel, OutboundMessage, PageSummary,
-    PageType, PendingSignal, PendingSignalId, Platform, PlatformCapabilities, ProcessorOutput,
-    RuntimeEvent, SequenceNum, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
-    SessionStatus, SessionSummary, StartSessionRequest, ToolOutput, WikiPage, WorkingContext,
-    WorkspaceId,
+    CheckpointHandle, CheckpointInfo, ClaimCheck, CompletionRequest, CompletionStream,
+    ContextSnapshot, Credential, CronHandle, CronSpec, EventFilter, EventRange, EventRecord,
+    EventStream, HandHandle, HandSpec, HandStatus, InboundMessage, IngestReport, MemoryPath,
+    MemoryScope, MemorySearchResult, MessageId, ModelCapabilities, ObserveLevel, OutboundMessage,
+    PageSummary, PageType, PendingSignal, PendingSignalId, Platform, PlatformCapabilities,
+    ProcessorOutput, RuntimeEvent, SequenceNum, SessionFilter, SessionHandle, SessionId,
+    SessionMeta, SessionSignal, SessionStatus, SessionSummary, StartSessionRequest, ToolOutput,
+    WikiPage, WorkingContext, WorkspaceId,
 };
 
 /// Orchestrates session lifecycle and observation.
@@ -57,6 +57,24 @@ pub trait SessionStore: Send + Sync {
 
     /// Appends an event to the session log.
     async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<SequenceNum>;
+
+    /// Stores a large text artifact behind a session-scoped claim check.
+    async fn store_text_artifact(&self, _session_id: SessionId, _text: &str) -> Result<ClaimCheck> {
+        Err(MoaError::Unsupported(
+            "text artifacts are not supported by this session store".to_string(),
+        ))
+    }
+
+    /// Resolves a previously stored text artifact.
+    async fn load_text_artifact(
+        &self,
+        _session_id: SessionId,
+        _claim_check: &ClaimCheck,
+    ) -> Result<String> {
+        Err(MoaError::Unsupported(
+            "text artifacts are not supported by this session store".to_string(),
+        ))
+    }
 
     /// Retrieves events for a session within a range.
     async fn get_events(

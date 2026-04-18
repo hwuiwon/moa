@@ -6,8 +6,8 @@ use std::{path::Path, sync::Arc};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ApprovalRule, BlobStore, CacheDailyMetric, ContextSnapshot, Event, EventFilter, EventRange,
-    EventRecord, MoaConfig, MoaError, PendingSignal, PendingSignalId, Result,
+    ApprovalRule, BlobStore, CacheDailyMetric, ClaimCheck, ContextSnapshot, Event, EventFilter,
+    EventRange, EventRecord, MoaConfig, MoaError, PendingSignal, PendingSignalId, Result,
     SessionAnalyticsSummary, SessionFilter, SessionMeta, SessionStatus, SessionStore,
     SessionSummary, SessionTurnMetric, ToolCallSummary, WakeContext, WorkspaceAnalyticsSummary,
     WorkspaceId,
@@ -17,7 +17,9 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::blob::{FileBlobStore, decode_event_from_storage, encode_event_for_storage};
+use crate::blob::{
+    FileBlobStore, decode_event_from_storage, encode_event_for_storage, preview_text,
+};
 use crate::listener::{GLOBAL_EVENTS_CHANNEL, session_channel_name};
 use crate::queries::{
     EVENT_COLUMNS, SESSION_INSERT_COLUMNS, SESSION_SELECT_COLUMNS, SESSION_SUMMARY_COLUMNS,
@@ -498,6 +500,36 @@ impl SessionStore for PostgresSessionStore {
 
         transaction.commit().await.map_err(map_sqlx_error)?;
         Ok(sequence_num)
+    }
+
+    async fn store_text_artifact(
+        &self,
+        session_id: moa_core::SessionId,
+        text: &str,
+    ) -> Result<ClaimCheck> {
+        let blob_id = self.blob_store.store(&session_id, text.as_bytes()).await?;
+        Ok(ClaimCheck {
+            blob_id,
+            size: text.len(),
+            preview: preview_text(text),
+        })
+    }
+
+    async fn load_text_artifact(
+        &self,
+        session_id: moa_core::SessionId,
+        claim_check: &ClaimCheck,
+    ) -> Result<String> {
+        let bytes = self
+            .blob_store
+            .get(&session_id, &claim_check.blob_id)
+            .await?;
+        String::from_utf8(bytes).map_err(|error| {
+            MoaError::StorageError(format!(
+                "blob `{}` did not contain valid UTF-8: {error}",
+                claim_check.blob_id
+            ))
+        })
     }
 
     /// Retrieves events for a session within a sequence and type range.

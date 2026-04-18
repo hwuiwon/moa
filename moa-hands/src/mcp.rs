@@ -587,6 +587,7 @@ fn flatten_call_result(result: Value) -> ToolOutput {
         duration: Duration::default(),
         truncated: false,
         original_output_tokens: None,
+        artifact: None,
     }
 }
 

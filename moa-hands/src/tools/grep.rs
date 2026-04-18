@@ -210,6 +210,7 @@ fn build_grep_output(outcome: SearchOutcome, duration: Duration) -> ToolOutput {
         duration,
         truncated: false,
         original_output_tokens: None,
+        artifact: None,
     }
 }
 

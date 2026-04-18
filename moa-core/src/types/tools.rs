@@ -5,10 +5,73 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{PolicyAction, RiskLevel};
+use super::{ClaimCheck, PolicyAction, RiskLevel};
 
 fn default_tool_max_output_tokens() -> u32 {
     8_000
+}
+
+/// Addressable stream within a persisted tool-result artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolArtifactStream {
+    /// Combined rendered tool output.
+    Combined,
+    /// Process stdout stream when available.
+    Stdout,
+    /// Process stderr stream when available.
+    Stderr,
+}
+
+impl ToolArtifactStream {
+    /// Returns the stable string form used in prompts and structured payloads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Combined => "combined",
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
+}
+
+/// Durable reference to a large tool output persisted outside the event row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolOutputArtifact {
+    /// Combined rendered tool output used for default reads and searches.
+    pub combined: ClaimCheck,
+    /// Approximate token count of the original persisted output.
+    pub estimated_tokens: u32,
+    /// Total number of lines in the combined output.
+    pub line_count: usize,
+    /// Persisted stdout stream for process-backed tools when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<ClaimCheck>,
+    /// Persisted stderr stream for process-backed tools when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<ClaimCheck>,
+}
+
+impl ToolOutputArtifact {
+    /// Returns the claim check for one artifact stream when present.
+    pub fn claim_check(&self, stream: ToolArtifactStream) -> Option<&ClaimCheck> {
+        match stream {
+            ToolArtifactStream::Combined => Some(&self.combined),
+            ToolArtifactStream::Stdout => self.stdout.as_ref(),
+            ToolArtifactStream::Stderr => self.stderr.as_ref(),
+        }
+    }
+
+    /// Returns the available stream names for prompting and diagnostics.
+    pub fn available_streams(&self) -> Vec<&'static str> {
+        let mut streams = vec![ToolArtifactStream::Combined.as_str()];
+        if self.stdout.is_some() {
+            streams.push(ToolArtifactStream::Stdout.as_str());
+        }
+        if self.stderr.is_some() {
+            streams.push(ToolArtifactStream::Stderr.as_str());
+        }
+        streams
+    }
 }
 
 /// Standard tool execution result.
@@ -110,6 +173,9 @@ pub struct ToolOutput {
     /// Approximate token count before router-level truncation, when truncation occurred.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_output_tokens: Option<u32>,
+    /// Durable artifact reference for oversized successful tool output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<ToolOutputArtifact>,
 }
 
 impl ToolOutput {
@@ -122,6 +188,7 @@ impl ToolOutput {
             duration,
             truncated: false,
             original_output_tokens: None,
+            artifact: None,
         }
     }
 
@@ -160,6 +227,7 @@ impl ToolOutput {
             duration,
             truncated: false,
             original_output_tokens: None,
+            artifact: None,
         }
     }
 
@@ -177,6 +245,7 @@ impl ToolOutput {
             duration,
             truncated: false,
             original_output_tokens: None,
+            artifact: None,
         }
     }
 
@@ -191,6 +260,7 @@ impl ToolOutput {
             duration,
             truncated: false,
             original_output_tokens: None,
+            artifact: None,
         }
     }
 
@@ -205,6 +275,13 @@ impl ToolOutput {
     #[must_use]
     pub fn with_original_output_tokens(mut self, original_output_tokens: Option<u32>) -> Self {
         self.original_output_tokens = original_output_tokens;
+        self
+    }
+
+    /// Attaches a durable artifact reference for oversized successful output.
+    #[must_use]
+    pub fn with_artifact(mut self, artifact: Option<ToolOutputArtifact>) -> Self {
+        self.artifact = artifact;
         self
     }
 
@@ -305,7 +382,7 @@ pub struct ToolPolicyInput {
 mod tests {
     use std::time::Duration;
 
-    use super::{ToolContent, ToolOutput};
+    use super::{ClaimCheck, ToolArtifactStream, ToolContent, ToolOutput};
 
     #[test]
     fn tool_output_text_creates_single_text_block() {
@@ -392,5 +469,40 @@ mod tests {
         let decoded: ToolOutput = serde_json::from_str(&encoded).expect("deserialize tool output");
 
         assert_eq!(decoded, output);
+    }
+
+    #[test]
+    fn tool_output_artifact_streams_report_available_entries() {
+        let artifact = super::ToolOutputArtifact {
+            combined: ClaimCheck {
+                blob_id: "combined".to_string(),
+                size: 12,
+                preview: "hello".to_string(),
+            },
+            estimated_tokens: 10,
+            line_count: 3,
+            stdout: Some(ClaimCheck {
+                blob_id: "stdout".to_string(),
+                size: 5,
+                preview: "out".to_string(),
+            }),
+            stderr: None,
+        };
+
+        assert_eq!(
+            artifact.available_streams(),
+            vec![
+                ToolArtifactStream::Combined.as_str(),
+                ToolArtifactStream::Stdout.as_str()
+            ]
+        );
+        assert_eq!(
+            artifact
+                .claim_check(ToolArtifactStream::Stdout)
+                .expect("stdout claim check")
+                .blob_id,
+            "stdout"
+        );
+        assert!(artifact.claim_check(ToolArtifactStream::Stderr).is_none());
     }
 }
