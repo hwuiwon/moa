@@ -337,6 +337,7 @@ pub(super) async fn execute_tool(
                     tool_id,
                     provider_tool_use_id: call.id.clone(),
                     output: output.clone(),
+                    original_output_tokens: output.original_output_tokens,
                     success: !output.is_error,
                     duration_ms: output.duration.as_millis() as u64,
                 },

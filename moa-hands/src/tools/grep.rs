@@ -209,6 +209,7 @@ fn build_grep_output(outcome: SearchOutcome, duration: Duration) -> ToolOutput {
         structured: Some(structured),
         duration,
         truncated: false,
+        original_output_tokens: None,
     }
 }
 

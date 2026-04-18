@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use moa_core::{HandProvider, MemoryStore, MoaConfig, MoaError, Result, SandboxTier, SessionStore};
+use moa_core::{
+    HandProvider, MemoryStore, MoaConfig, MoaError, Result, SandboxTier, SessionStore,
+    ToolBudgetConfig, ToolOutputConfig,
+};
 use moa_security::{
     ApprovalRuleStore, EnvironmentCredentialVault, MCPCredentialProxy, ToolPolicies,
 };
@@ -40,6 +43,8 @@ impl ToolRouter {
             rule_store: None,
             session_store: None,
             sandbox_root: None,
+            tool_output: ToolOutputConfig::default(),
+            tool_budgets: ToolBudgetConfig::default(),
         }
     }
 
@@ -51,17 +56,18 @@ impl ToolRouter {
         let local_provider = Arc::new(
             LocalHandProvider::new(sandbox_root.as_ref())
                 .await?
-                .with_command_timeout(DEFAULT_TOOL_TIMEOUT)
-                .with_tool_output_config(MoaConfig::default().tool_output),
+                .with_command_timeout(DEFAULT_TOOL_TIMEOUT),
         );
         let provider: Arc<dyn HandProvider> = local_provider.clone();
         let mut providers = HashMap::new();
         providers.insert(DEFAULT_PROVIDER_NAME.to_string(), provider);
+        let mut registry = ToolRegistry::default_local();
+        registry.apply_budgets(&MoaConfig::default().tool_budgets);
 
         Ok(Self {
             sandbox_root: Some(sandbox_root.as_ref().to_path_buf()),
             local_provider: Some(local_provider),
-            ..Self::new(ToolRegistry::default_local(), memory_store, providers)
+            ..Self::new(registry, memory_store, providers)
         })
     }
 
@@ -77,8 +83,7 @@ impl ToolRouter {
                 config.local.docker_enabled,
             )
             .await?
-            .with_command_timeout(DEFAULT_TOOL_TIMEOUT)
-            .with_tool_output_config(config.tool_output.clone()),
+            .with_command_timeout(DEFAULT_TOOL_TIMEOUT),
         );
         let local_provider_trait: Arc<dyn HandProvider> = local_provider.clone();
         let mut providers = HashMap::new();
@@ -115,6 +120,7 @@ impl ToolRouter {
         }
 
         let mut registry = ToolRegistry::default_local();
+        registry.apply_budgets(&config.tool_budgets);
         if let Some((provider, tier)) = default_cloud_provider(config)? {
             registry.retarget_hand_tools(&provider, tier);
         }
@@ -124,6 +130,8 @@ impl ToolRouter {
             local_provider: Some(local_provider),
             ..Self::new(registry, memory_store, providers)
         }
+        .with_tool_output_config(config.tool_output.clone())
+        .with_tool_budgets(config.tool_budgets.clone())
         .with_policies(ToolPolicies::from_config(config));
 
         if !config.mcp_servers.is_empty() {
@@ -212,6 +220,7 @@ impl ToolRouter {
             self.mcp_clients.insert(server.name.clone(), client);
         }
 
+        registry.apply_budgets(&self.tool_budgets);
         self.registry = registry;
         Ok(())
     }

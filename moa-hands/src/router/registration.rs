@@ -6,8 +6,8 @@ use std::sync::Arc;
 use crate::mcp::McpDiscoveredTool;
 use crate::tools::{memory, session_search};
 use moa_core::{
-    BuiltInTool, PolicyAction, SandboxTier, ToolDefinition, ToolDiffStrategy, ToolInputShape,
-    ToolPolicySpec, read_tool_policy, write_tool_policy,
+    BuiltInTool, PolicyAction, SandboxTier, ToolBudgetConfig, ToolDefinition, ToolDiffStrategy,
+    ToolInputShape, ToolPolicySpec, read_tool_policy, write_tool_policy,
 };
 use serde_json::{Value, json};
 
@@ -52,6 +52,7 @@ impl RegisteredTool {
                 description: description.to_string(),
                 schema,
                 policy,
+                max_output_tokens: default_budget_for_tool(name),
             },
             execution: ToolExecution::Hand {
                 provider: DEFAULT_PROVIDER_NAME.to_string(),
@@ -68,6 +69,7 @@ impl RegisteredTool {
                 description: tool.description,
                 schema: tool.input_schema,
                 policy: execute_tool_policy(ToolInputShape::Json),
+                max_output_tokens: 8_000,
             },
             execution: ToolExecution::Mcp {
                 server_name: server_name.to_string(),
@@ -292,10 +294,27 @@ impl ToolRegistry {
         self.tools.retain(|name, _| allowed.contains(name));
         self.default_loadout.retain(|name| allowed.contains(name));
     }
+
+    /// Applies configured per-tool output budgets to all registered tools.
+    pub fn apply_budgets(&mut self, tool_budgets: &ToolBudgetConfig) {
+        for (name, registered_tool) in &mut self.tools {
+            registered_tool.definition.max_output_tokens = tool_budgets.for_tool(name);
+        }
+    }
 }
 
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::default_local()
+    }
+}
+
+fn default_budget_for_tool(tool_name: &str) -> u32 {
+    match tool_name {
+        "bash" => 4_000,
+        "file_outline" => 2_000,
+        "grep" | "file_search" => 4_000,
+        "file_read" => 8_000,
+        _ => 8_000,
     }
 }

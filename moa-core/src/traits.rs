@@ -353,6 +353,11 @@ pub trait BuiltInTool: Send + Sync {
     /// Returns the policy and approval metadata for the tool.
     fn policy_spec(&self) -> crate::types::ToolPolicySpec;
 
+    /// Returns the approximate maximum successful output size persisted for one call.
+    fn max_output_tokens(&self) -> u32 {
+        8_000
+    }
+
     /// Returns the canonical shared tool definition for this built-in tool.
     fn definition(&self) -> crate::types::ToolDefinition {
         crate::types::ToolDefinition {
@@ -360,6 +365,7 @@ pub trait BuiltInTool: Send + Sync {
             description: self.description().to_string(),
             schema: self.input_schema(),
             policy: self.policy_spec(),
+            max_output_tokens: self.max_output_tokens(),
         }
     }
 

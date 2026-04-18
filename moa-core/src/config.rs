@@ -46,6 +46,8 @@ pub struct MoaConfig {
     pub session_limits: SessionLimitsConfig,
     /// Tool-output truncation settings for storage and replay.
     pub tool_output: ToolOutputConfig,
+    /// Per-tool router-level output budgets enforced before event persistence.
+    pub tool_budgets: ToolBudgetConfig,
     /// Incremental context snapshot settings.
     pub context_snapshot: ContextSnapshotConfig,
     /// External MCP server connections.
@@ -210,6 +212,38 @@ impl MoaConfig {
             .set_default(
                 "tool_output.head_ratio",
                 Self::default().tool_output.head_ratio,
+            )?
+            .set_default(
+                "tool_budgets.file_read",
+                Self::default().tool_budgets.file_read as i64,
+            )?
+            .set_default(
+                "tool_budgets.bash_stdout",
+                Self::default().tool_budgets.bash_stdout as i64,
+            )?
+            .set_default(
+                "tool_budgets.bash_stderr",
+                Self::default().tool_budgets.bash_stderr as i64,
+            )?
+            .set_default(
+                "tool_budgets.grep",
+                Self::default().tool_budgets.grep as i64,
+            )?
+            .set_default(
+                "tool_budgets.file_search",
+                Self::default().tool_budgets.file_search as i64,
+            )?
+            .set_default(
+                "tool_budgets.memory_search",
+                Self::default().tool_budgets.memory_search as i64,
+            )?
+            .set_default(
+                "tool_budgets.file_outline",
+                Self::default().tool_budgets.file_outline as i64,
+            )?
+            .set_default(
+                "tool_budgets.default",
+                Self::default().tool_budgets.default as i64,
             )?
             .set_default(
                 "context_snapshot.enabled",
@@ -911,6 +945,58 @@ impl Default for ToolOutputConfig {
     }
 }
 
+/// Per-tool router-level output budgets enforced before event persistence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolBudgetConfig {
+    /// Approximate token budget for `file_read`.
+    pub file_read: u32,
+    /// Approximate token budget for successful `bash` stdout.
+    pub bash_stdout: u32,
+    /// Approximate token budget for successful `bash` stderr.
+    pub bash_stderr: u32,
+    /// Approximate token budget for `grep`.
+    pub grep: u32,
+    /// Approximate token budget for `file_search`.
+    pub file_search: u32,
+    /// Approximate token budget for `memory_search`.
+    pub memory_search: u32,
+    /// Approximate token budget for `file_outline`.
+    pub file_outline: u32,
+    /// Approximate token budget for tools without a dedicated override, including MCP tools.
+    pub default: u32,
+}
+
+impl ToolBudgetConfig {
+    /// Returns the configured total output budget for one successful tool invocation.
+    pub fn for_tool(&self, tool_name: &str) -> u32 {
+        match tool_name {
+            "bash" => self.bash_stdout,
+            "file_read" => self.file_read,
+            "grep" => self.grep,
+            "file_search" => self.file_search,
+            "memory_search" => self.memory_search,
+            "file_outline" => self.file_outline,
+            _ => self.default,
+        }
+    }
+}
+
+impl Default for ToolBudgetConfig {
+    fn default() -> Self {
+        Self {
+            file_read: 8_000,
+            bash_stdout: 4_000,
+            bash_stderr: 2_000,
+            grep: 4_000,
+            file_search: 4_000,
+            memory_search: 3_000,
+            file_outline: 2_000,
+            default: 8_000,
+        }
+    }
+}
+
 /// Incremental context snapshot configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1394,6 +1480,14 @@ mod tests {
         assert_eq!(config.tool_output.max_replay_chars, 20_000);
         assert_eq!(config.tool_output.max_bash_lines, 200);
         assert!((config.tool_output.head_ratio - 0.4_f64).abs() < f64::EPSILON);
+        assert_eq!(config.tool_budgets.file_read, 8_000);
+        assert_eq!(config.tool_budgets.bash_stdout, 4_000);
+        assert_eq!(config.tool_budgets.bash_stderr, 2_000);
+        assert_eq!(config.tool_budgets.grep, 4_000);
+        assert_eq!(config.tool_budgets.file_search, 4_000);
+        assert_eq!(config.tool_budgets.memory_search, 3_000);
+        assert_eq!(config.tool_budgets.file_outline, 2_000);
+        assert_eq!(config.tool_budgets.default, 8_000);
     }
 
     #[test]

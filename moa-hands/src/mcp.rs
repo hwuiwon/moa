@@ -586,6 +586,7 @@ fn flatten_call_result(result: Value) -> ToolOutput {
         structured: result.get("structuredContent").cloned(),
         duration: Duration::default(),
         truncated: false,
+        original_output_tokens: None,
     }
 }
 

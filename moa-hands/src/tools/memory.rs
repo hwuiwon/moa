@@ -101,6 +101,10 @@ impl BuiltInTool for MemorySearchTool {
         read_tool_policy(ToolInputShape::Query)
     }
 
+    fn max_output_tokens(&self) -> u32 {
+        3_000
+    }
+
     async fn execute(
         &self,
         input: &serde_json::Value,
@@ -362,6 +366,7 @@ impl BuiltInTool for MemoryIngestTool {
             structured: Some(ingest_report_json(&report)),
             duration: started_at.elapsed(),
             truncated: false,
+            original_output_tokens: None,
         })
     }
 }

@@ -7,6 +7,10 @@ use serde_json::Value;
 
 use super::{PolicyAction, RiskLevel};
 
+fn default_tool_max_output_tokens() -> u32 {
+    8_000
+}
+
 /// Standard tool execution result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -103,6 +107,9 @@ pub struct ToolOutput {
     /// Whether the tool output was truncated before storage or replay.
     #[serde(default)]
     pub truncated: bool,
+    /// Approximate token count before router-level truncation, when truncation occurred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_output_tokens: Option<u32>,
 }
 
 impl ToolOutput {
@@ -114,6 +121,7 @@ impl ToolOutput {
             structured: None,
             duration,
             truncated: false,
+            original_output_tokens: None,
         }
     }
 
@@ -151,6 +159,7 @@ impl ToolOutput {
             })),
             duration,
             truncated: false,
+            original_output_tokens: None,
         }
     }
 
@@ -167,6 +176,7 @@ impl ToolOutput {
             structured: Some(data),
             duration,
             truncated: false,
+            original_output_tokens: None,
         }
     }
 
@@ -180,6 +190,7 @@ impl ToolOutput {
             structured: None,
             duration,
             truncated: false,
+            original_output_tokens: None,
         }
     }
 
@@ -187,6 +198,13 @@ impl ToolOutput {
     #[must_use]
     pub fn with_truncated(mut self, truncated: bool) -> Self {
         self.truncated = truncated;
+        self
+    }
+
+    /// Records the approximate token count before truncation.
+    #[must_use]
+    pub fn with_original_output_tokens(mut self, original_output_tokens: Option<u32>) -> Self {
+        self.original_output_tokens = original_output_tokens;
         self
     }
 
@@ -252,6 +270,9 @@ pub struct ToolDefinition {
     pub schema: Value,
     /// Static policy and approval metadata.
     pub policy: ToolPolicySpec,
+    /// Approximate maximum output tokens persisted for one successful call.
+    #[serde(default = "default_tool_max_output_tokens")]
+    pub max_output_tokens: u32,
 }
 
 impl ToolDefinition {

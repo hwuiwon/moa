@@ -276,6 +276,7 @@ fn build_file_search_output(
         structured: Some(structured),
         duration,
         truncated: false,
+        original_output_tokens: None,
     }
 }
 

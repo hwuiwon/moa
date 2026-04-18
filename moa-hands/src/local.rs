@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use moa_core::{
     HandHandle, HandProvider, HandSpec, HandStatus, MoaError, Result, SandboxTier, ToolOutput,
-    ToolOutputConfig,
 };
 use opentelemetry::trace::Status;
 use tokio::fs;
@@ -48,7 +47,6 @@ pub struct LocalHandProvider {
     work_dir: Arc<PathBuf>,
     docker_available: bool,
     command_timeout: Duration,
-    tool_output: ToolOutputConfig,
     local_sandboxes: Arc<RwLock<HashMap<PathBuf, LocalSandbox>>>,
     docker_sandboxes: Arc<RwLock<HashMap<String, DockerSandbox>>>,
 }
@@ -75,7 +73,6 @@ impl LocalHandProvider {
                 false
             },
             command_timeout: DEFAULT_TOOL_TIMEOUT,
-            tool_output: ToolOutputConfig::default(),
             local_sandboxes: Arc::new(RwLock::new(HashMap::new())),
             docker_sandboxes: Arc::new(RwLock::new(HashMap::new())),
         })
@@ -90,13 +87,6 @@ impl LocalHandProvider {
     #[must_use]
     pub fn with_command_timeout(mut self, command_timeout: Duration) -> Self {
         self.command_timeout = command_timeout;
-        self
-    }
-
-    /// Overrides the default tool-output truncation settings.
-    #[must_use]
-    pub fn with_tool_output_config(mut self, tool_output: ToolOutputConfig) -> Self {
-        self.tool_output = tool_output;
         self
     }
 
@@ -213,7 +203,6 @@ impl LocalHandProvider {
                     &sandbox.execution_root,
                     input,
                     self.command_timeout,
-                    &self.tool_output,
                     hard_cancel_token,
                 )
                 .await
@@ -258,7 +247,6 @@ impl LocalHandProvider {
                 &sandbox.workspace_mount,
                 input,
                 self.command_timeout,
-                &self.tool_output,
                 hard_cancel_token,
             )
             .await;

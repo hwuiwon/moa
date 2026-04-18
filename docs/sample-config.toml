@@ -98,6 +98,16 @@ max_replay_chars = 20000
 max_bash_lines = 200
 head_ratio = 0.4
 
+[tool_budgets]
+file_read = 8000
+bash_stdout = 4000
+bash_stderr = 2000
+grep = 4000
+file_search = 4000
+memory_search = 3000
+file_outline = 2000
+default = 8000
+
 [compaction]
 enabled = true
 event_threshold = 100

@@ -52,6 +52,11 @@ fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
     }
 }
 
+fn approximate_tokens(text: &str) -> u32 {
+    let chars = text.chars().count() as u32;
+    if chars == 0 { 0 } else { chars.div_ceil(4) }
+}
+
 #[async_trait]
 impl SessionStore for MockSessionStore {
     async fn create_session(&self, meta: SessionMeta) -> Result<SessionId> {
@@ -440,6 +445,88 @@ impl LLMProvider for ToolLoopLlmProvider {
                 cached_input_tokens: 0,
                 usage: token_usage(20, 7),
                 duration_ms: 12,
+                thought_signature: None,
+            }
+        };
+        requests.push(request);
+        Ok(CompletionStream::from_response(response))
+    }
+}
+
+#[derive(Default)]
+struct LargeToolOutputLlmProvider {
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl LLMProvider for LargeToolOutputLlmProvider {
+    fn name(&self) -> &str {
+        "large-tool-output"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+            },
+            native_tools: Vec::new(),
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let mut requests = self.requests.lock().await;
+        let response = if requests.is_empty() {
+            CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("22222222-2222-2222-2222-222222222222".to_string()),
+                        name: "bash".to_string(),
+                        input: json!({
+                            "cmd": "python3 -c \"print('x' * 120000)\""
+                        }),
+                    },
+                    provider_metadata: None,
+                })],
+                stop_reason: StopReason::ToolUse,
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                input_tokens: 14,
+                output_tokens: 6,
+                cached_input_tokens: 0,
+                usage: token_usage(14, 6),
+                duration_ms: 10,
+                thought_signature: None,
+            }
+        } else {
+            assert!(
+                request
+                    .messages
+                    .iter()
+                    .any(|message| message.content.contains("[output truncated from ~")),
+                "expected truncated tool result in replayed context; request was: {request:?}"
+            );
+            CompletionResponse {
+                text: "Large tool output handled".to_string(),
+                content: vec![CompletionContent::Text(
+                    "Large tool output handled".to_string(),
+                )],
+                stop_reason: StopReason::EndTurn,
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                input_tokens: 18,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+                usage: token_usage(18, 5),
+                duration_ms: 11,
                 thought_signature: None,
             }
         };
@@ -1519,6 +1606,91 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_approval() {
     assert!(events.iter().any(|record| matches!(
         &record.event,
         Event::BrainResponse { text, .. } if text == "Approved tool completed"
+    )));
+}
+
+#[tokio::test]
+async fn run_brain_turn_persists_truncated_tool_result_metadata() {
+    let session = SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new("workspace"),
+        user_id: UserId::new("user"),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        ..SessionMeta::default()
+    };
+    let initial_events = vec![make_event_record(
+        &session.id,
+        0,
+        Event::UserMessage {
+            text: "Use a tool with a lot of output".to_string(),
+            attachments: Vec::new(),
+        },
+    )];
+    let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
+    let memory_store: Arc<dyn MemoryStore> = Arc::new(MockMemoryStore);
+    let sandbox_dir = tempdir().unwrap();
+    let tool_router = Arc::new(
+        ToolRouter::new_local(memory_store.clone(), sandbox_dir.path())
+            .await
+            .unwrap(),
+    );
+    let pipeline = build_default_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        memory_store,
+        tool_router.tool_schemas(),
+    );
+    let llm = Arc::new(LargeToolOutputLlmProvider::default());
+
+    let result = run_brain_turn_with_tools(
+        session.id,
+        store.clone(),
+        llm.clone(),
+        &pipeline,
+        Some(tool_router.clone()),
+    )
+    .await
+    .unwrap();
+
+    let request = match result {
+        TurnResult::NeedsApproval(request) => request,
+        other => panic!("expected pending approval, got {other:?}"),
+    };
+    store
+        .emit_event(
+            session.id,
+            Event::ApprovalDecided {
+                request_id: request.request_id,
+                decision: ApprovalDecision::AllowOnce,
+                decided_by: "user".to_string(),
+                decided_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let resumed =
+        run_brain_turn_with_tools(session.id, store.clone(), llm, &pipeline, Some(tool_router))
+            .await
+            .unwrap();
+
+    assert_eq!(resumed, TurnResult::Complete);
+
+    let events = store.events.lock().await.clone();
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::ToolResult {
+            success: true,
+            original_output_tokens: Some(original_output_tokens),
+            output,
+            ..
+        } if *original_output_tokens > 4_000
+            && output.to_text().contains("[output truncated from ~")
+            && approximate_tokens(&output.to_text()) <= 4_000
+    )));
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::BrainResponse { text, .. } if text == "Large tool output handled"
     )));
 }
 
