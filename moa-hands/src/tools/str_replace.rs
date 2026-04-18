@@ -13,6 +13,7 @@ use crate::tools::docker_file::{
     display_container_relative_path, docker_file_read, docker_file_write,
     resolve_container_workspace_path,
 };
+use crate::tools::edit_output::build_text_edit_output;
 use crate::tools::file_read::resolve_sandbox_path;
 
 const MAX_CONTEXT_LINES: usize = 4;
@@ -23,8 +24,6 @@ const MAX_DISAMBIGUATION_MATCHES: usize = 5;
 pub(crate) struct PlannedStrReplace {
     /// Full file contents after the edit is applied.
     pub updated_content: String,
-    /// Human-readable execution summary.
-    pub message: String,
     /// Existing snippet shown in approval previews.
     pub preview_before: String,
     /// Proposed snippet shown in approval previews.
@@ -45,9 +44,14 @@ pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
     }
-    fs::write(&path, planned.updated_content).await?;
+    fs::write(&path, &planned.updated_content).await?;
 
-    Ok(ToolOutput::text(planned.message, Duration::default()))
+    Ok(build_text_edit_output(
+        &display_path(sandbox_dir, &path),
+        existing_content.as_deref().unwrap_or_default(),
+        &planned.updated_content,
+        Duration::default(),
+    ))
 }
 
 /// Executes the `str_replace` tool inside an existing Docker sandbox.
@@ -82,7 +86,12 @@ pub async fn execute_docker(
     )
     .await?;
 
-    Ok(ToolOutput::text(planned.message, Duration::default()))
+    Ok(build_text_edit_output(
+        &display_container_relative_path(workspace_root, &path),
+        existing_content.as_deref().unwrap_or_default(),
+        &planned.updated_content,
+        Duration::default(),
+    ))
 }
 
 /// Computes the file mutation and approval preview for a `str_replace` invocation.
@@ -120,7 +129,6 @@ pub(crate) fn plan_str_replace(
         1 => Ok(plan_unique_replacement(
             &params,
             content,
-            display_path,
             matches[0],
             context_lines,
         )),
@@ -138,7 +146,6 @@ pub(crate) fn plan_str_replace(
 fn plan_unique_replacement(
     params: &StrReplaceInput,
     content: &str,
-    display_path: &str,
     match_start: usize,
     context_lines: usize,
 ) -> PlannedStrReplace {
@@ -160,15 +167,11 @@ fn plan_unique_replacement(
         .max(start_line)
         .saturating_add(context_lines);
 
-    let message = format!(
-        "replaced {old_line_count} lines with {new_line_count} lines in {display_path} (starting at line {start_line})"
-    );
     let preview_before = preview_lines(content, preview_start, preview_end_before);
     let preview_after = preview_lines(&updated_content, preview_start, preview_end_after);
 
     PlannedStrReplace {
         updated_content,
-        message,
         preview_before,
         preview_after,
     }
@@ -302,7 +305,11 @@ mod tests {
             .expect("read");
         assert!(content.contains("return 42"));
         assert!(!content.contains("return 1"));
-        assert!(output.to_text().contains("starting at line 2"));
+        let rendered = output.to_text();
+        assert!(rendered.starts_with("--- a/test.py\n+++ b/test.py\n"));
+        assert!(rendered.contains("-    return 1"));
+        assert!(rendered.contains("+    return 42"));
+        assert!(!rendered.contains("starting at line 2"));
     }
 
     #[tokio::test]
@@ -361,6 +368,23 @@ mod tests {
             .expect("read");
         assert!(!content.contains("delete_me"));
         assert!(content.contains("line1\nline3"));
+    }
+
+    #[tokio::test]
+    async fn str_replace_no_op_returns_notice() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("test.py"), "line1\nline2\n")
+            .await
+            .expect("write");
+
+        let rendered = execute(
+            dir.path(),
+            r#"{"path":"test.py","old_str":"line2","new_str":"line2"}"#,
+        )
+        .await
+        .expect("no-op diff")
+        .to_text();
+        assert_eq!(rendered, "[no changes written: test.py]");
     }
 
     #[tokio::test]

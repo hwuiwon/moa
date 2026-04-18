@@ -279,12 +279,10 @@ async fn steps_72_77_e2e() -> Result<()> {
         .find(|run| run.name == "str_replace")
         .expect("expected str_replace tool run");
     assert!(str_replace_run.success);
-    assert!(
-        str_replace_run
-            .output
-            .to_text()
-            .contains("replaced 2 lines with 2 lines in auth.rs")
-    );
+    let str_replace_text = str_replace_run.output.to_text();
+    assert!(str_replace_text.starts_with("--- a/auth.rs\n+++ b/auth.rs\n"));
+    assert!(str_replace_text.contains("@@"));
+    assert!(!str_replace_text.contains("replaced 2 lines with 2 lines in auth.rs"));
 
     let bash_run = tool_runs
         .iter()

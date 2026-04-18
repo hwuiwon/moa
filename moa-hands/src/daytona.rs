@@ -11,6 +11,9 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 
+use crate::tools::edit_output::{
+    ExistingFileContent, build_file_write_output, build_text_edit_output,
+};
 use crate::tools::str_replace::plan_str_replace;
 
 const DEFAULT_DAYTONA_API_URL: &str = "https://app.daytona.io/api";
@@ -197,6 +200,16 @@ impl DaytonaHandProvider {
         path: &str,
         content: &str,
     ) -> Result<ToolOutput> {
+        let existing = match self.read_file(workspace_id, path).await {
+            Ok(output) => ExistingFileContent::Text(output.to_text()),
+            Err(MoaError::HttpStatus { status: 404, .. }) => ExistingFileContent::Missing,
+            Err(error) => return Err(error),
+        };
+        let duration = self.upload_file(workspace_id, path, content).await?;
+        Ok(build_file_write_output(path, &existing, content, duration))
+    }
+
+    async fn upload_file(&self, workspace_id: &str, path: &str, content: &str) -> Result<Duration> {
         let started_at = Instant::now();
         let url = build_url(
             &format!("{}/{}/files/upload", self.toolbox_url, workspace_id),
@@ -221,10 +234,7 @@ impl DaytonaHandProvider {
                 MoaError::ProviderError(format!("failed to write Daytona file: {error}"))
             })?;
         expect_success(response).await?;
-        Ok(ToolOutput::text(
-            format!("wrote {path}"),
-            started_at.elapsed(),
-        ))
+        Ok(started_at.elapsed())
     }
 
     async fn str_replace_file(
@@ -239,10 +249,15 @@ impl DaytonaHandProvider {
             Err(error) => return Err(error),
         };
         let planned = plan_str_replace(input, existing_content.as_deref(), path, 4)?;
-        let write_output = self
-            .write_file(workspace_id, path, &planned.updated_content)
+        let duration = self
+            .upload_file(workspace_id, path, &planned.updated_content)
             .await?;
-        Ok(ToolOutput::text(planned.message, write_output.duration))
+        Ok(build_text_edit_output(
+            path,
+            existing_content.as_deref().unwrap_or_default(),
+            &planned.updated_content,
+            duration,
+        ))
     }
 
     async fn search_files(&self, workspace_id: &str, pattern: &str) -> Result<ToolOutput> {

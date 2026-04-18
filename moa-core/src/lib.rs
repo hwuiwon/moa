@@ -4,6 +4,7 @@ pub mod analytics;
 pub mod broadcast_recv;
 pub mod config;
 pub mod daemon;
+pub mod diff;
 pub mod error;
 pub mod events;
 pub mod session_replay;
@@ -30,6 +31,7 @@ pub use config::{
     ToolOutputConfig,
 };
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
+pub use diff::compute_unified_diff;
 pub use error::{MoaError, Result};
 pub use events::Event;
 pub use session_replay::{

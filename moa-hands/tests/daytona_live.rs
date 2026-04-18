@@ -178,7 +178,7 @@ async fn daytona_live_provider_handles_roundtrip_and_lifecycle() {
         .await
         .expect("failed to provision Daytona sandbox");
 
-    let file_path = format!("/tmp/moa-daytona-live-{}.txt", Uuid::now_v7().simple());
+    let file_path = format!("tmp/moa-daytona-live-{}.txt", Uuid::now_v7().simple());
     let marker = format!("marker-{}", Uuid::now_v7().simple());
 
     let result = AssertUnwindSafe(async {
@@ -224,7 +224,10 @@ async fn daytona_live_provider_handles_roundtrip_and_lifecycle() {
                 &json!({ "path": file_path, "content": marker }).to_string(),
             )
             .await?;
-        assert_eq!(write.process_exit_code(), Some(0));
+        assert_eq!(
+            write.to_text(),
+            format!("[new file created: {file_path}, 1 lines]")
+        );
 
         let read = provider
             .execute(
@@ -317,8 +320,8 @@ async fn daytona_live_router_lazy_provisions_reuses_and_isolates_sessions() {
 
     let session_one = session("one");
     let session_two = session("two");
-    let file_one = format!("/tmp/moa-router-one-{}.txt", Uuid::now_v7().simple());
-    let file_two = format!("/tmp/moa-router-two-{}.txt", Uuid::now_v7().simple());
+    let file_one = format!("tmp/moa-router-one-{}.txt", Uuid::now_v7().simple());
+    let file_two = format!("tmp/moa-router-two-{}.txt", Uuid::now_v7().simple());
     let content_one = format!("router-one-{}", Uuid::now_v7().simple());
     let content_two = format!("router-two-{}", Uuid::now_v7().simple());
 
@@ -334,7 +337,10 @@ async fn daytona_live_router_lazy_provisions_reuses_and_isolates_sessions() {
             )
             .await
             .expect("first router write should provision a hand");
-        assert_eq!(write.process_exit_code(), Some(0));
+        assert_eq!(
+            write.to_text(),
+            format!("[new file created: {file_one}, 1 lines]")
+        );
         hand_id.expect("cloud hand execution should return a hand id")
     };
 
@@ -385,7 +391,10 @@ async fn daytona_live_router_lazy_provisions_reuses_and_isolates_sessions() {
                 },
             )
             .await?;
-        assert_eq!(second_write.process_exit_code(), Some(0));
+        assert_eq!(
+            second_write.to_text(),
+            format!("[new file created: {file_two}, 1 lines]")
+        );
         let hand_two_id = hand_two_id.expect("second session should receive a distinct hand");
         assert_ne!(hand_two_id, handle_one_id);
         handle_two = Some(HandHandle::daytona(hand_two_id.clone()));
