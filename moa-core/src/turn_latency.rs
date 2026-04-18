@@ -6,6 +6,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::{record_compaction_tier_applied, record_pipeline_compile_duration_metric};
+
 tokio::task_local! {
     static TURN_LATENCY_COUNTERS: Arc<TurnLatencyCounters>;
 }
@@ -253,6 +255,7 @@ pub fn current_turn_root_span() -> Option<tracing::Span> {
 
 /// Records pipeline compile duration for the current turn.
 pub fn record_turn_pipeline_compile_duration(duration: Duration) {
+    record_pipeline_compile_duration_metric(duration);
     let _ = TURN_LATENCY_COUNTERS.try_with(|counters| {
         counters.record_pipeline_compile_duration(duration);
     });
@@ -308,6 +311,15 @@ pub fn record_turn_compaction(
     tokens_reclaimed: usize,
     messages_elided: usize,
 ) {
+    if tier1 {
+        record_compaction_tier_applied(1);
+    }
+    if tier2 {
+        record_compaction_tier_applied(2);
+    }
+    if tier3 {
+        record_compaction_tier_applied(3);
+    }
     let _ = TURN_LATENCY_COUNTERS.try_with(|counters| {
         counters.record_compaction(tier1, tier2, tier3, tokens_reclaimed, messages_elided);
     });

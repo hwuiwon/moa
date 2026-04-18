@@ -20,6 +20,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::{MoaConfig, ObservabilityConfig, OtlpProtocol};
 use crate::error::{MoaError, Result};
+use crate::runtime_metrics::init_metrics;
 
 /// Keeps the configured OTLP tracer provider alive for the process lifetime.
 #[derive(Debug, Default)]
@@ -113,6 +114,7 @@ pub fn init_observability(
             .with(console_layer)
             .with(file_layer)
             .try_init();
+        init_metrics(&config.metrics)?;
         return Ok(TelemetryGuard {
             provider: None,
             _log_writer_guard: log_writer_guard,
@@ -134,6 +136,7 @@ pub fn init_observability(
         .with(file_layer)
         .with(otel_layer)
         .try_init();
+    init_metrics(&config.metrics)?;
 
     Ok(TelemetryGuard {
         provider: Some(provider),

@@ -28,6 +28,7 @@ moa-orchestrator = { path = "../moa-orchestrator" }
 moa-runtime = { path = "../moa-runtime" }
 moa-session = { path = "../moa-session" }
 moa-skills = { path = "../moa-skills" }
+reqwest.workspace = true
 serde_json.workspace = true
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 tokio.workspace = true
@@ -39,5 +40,4 @@ uuid.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 expectrl = "0.7"
-reqwest.workspace = true
 tempfile = "3"

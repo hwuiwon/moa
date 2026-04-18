@@ -20,7 +20,8 @@ use moa_core::{
     SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, SessionSummary,
     StartSessionRequest, TraceContext, TurnLatencyCounters, TurnLatencySnapshot,
     TurnReplayCounters, TurnReplaySnapshot, UserMessage, WorkspaceId,
-    record_turn_event_persist_duration, scope_turn_latency_counters, scope_turn_replay_counters,
+    record_turn_event_persist_duration, record_turn_latency, scope_turn_latency_counters,
+    scope_turn_replay_counters,
 };
 use moa_hands::ToolRouter;
 use moa_memory::{ConsolidationReport, FileMemoryStore, bootstrap};
@@ -998,6 +999,7 @@ async fn run_session_task(
 
             let turn_latency_counters = Arc::new(TurnLatencyCounters::new(turn_root_span.clone()));
             let turn_latency_scope = turn_latency_counters.clone();
+            let turn_started = std::time::Instant::now();
             let turn_outcome = scope_turn_latency_counters(turn_latency_counters, async {
                 let turn_outcome: Result<TurnDirective> = async {
                     if max_turns > 0 && turn_count >= max_turns {
@@ -1278,6 +1280,7 @@ async fn run_session_task(
                 .instrument(turn_root_span.clone())
                 .await;
                 let turn_latency_snapshot = turn_latency_scope.snapshot();
+                record_turn_latency(turn_started.elapsed());
                 emit_turn_latency_summary(&turn_root_span, turn_number, &turn_latency_snapshot);
                 turn_outcome
             })

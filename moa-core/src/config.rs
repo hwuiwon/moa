@@ -40,6 +40,8 @@ pub struct MoaConfig {
     pub daemon: DaemonConfig,
     /// Observability and OTLP export settings.
     pub observability: ObservabilityConfig,
+    /// Prometheus metrics export settings.
+    pub metrics: MetricsConfig,
     /// Workspace budget enforcement settings.
     pub budgets: BudgetConfig,
     /// Per-session turn and loop guardrails.
@@ -189,6 +191,8 @@ impl MoaConfig {
                 "observability.sample_rate",
                 Self::default().observability.sample_rate,
             )?
+            .set_default("metrics.enabled", Self::default().metrics.enabled)?
+            .set_default("metrics.listen", Self::default().metrics.listen.clone())?
             .set_default(
                 "budgets.daily_workspace_cents",
                 Self::default().budgets.daily_workspace_cents as i64,
@@ -888,6 +892,25 @@ impl Default for ObservabilityConfig {
     }
 }
 
+/// Prometheus metrics export configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MetricsConfig {
+    /// Whether the Prometheus scrape endpoint should be exposed.
+    pub enabled: bool,
+    /// Listener address for the Prometheus scrape endpoint.
+    pub listen: String,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: "0.0.0.0:9090".to_string(),
+        }
+    }
+}
+
 /// Workspace-level cost budget settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1441,6 +1464,25 @@ mod tests {
     }
 
     #[test]
+    fn metrics_config_defaults_are_applied() {
+        let config = MoaConfig::default();
+        assert!(!config.metrics.enabled);
+        assert_eq!(config.metrics.listen, "0.0.0.0:9090");
+    }
+
+    #[test]
+    fn metrics_config_deserializes() {
+        let toml = r#"
+            [metrics]
+            enabled = true
+            listen = "127.0.0.1:19090"
+        "#;
+        let config: MoaConfig = toml::from_str(toml).expect("config should deserialize");
+        assert!(config.metrics.enabled);
+        assert_eq!(config.metrics.listen, "127.0.0.1:19090");
+    }
+
+    #[test]
     fn config_loads_mcp_server_configuration() {
         let toml = r#"
             [[mcp_servers]]
@@ -1488,6 +1530,8 @@ mod tests {
         assert_eq!(config.tool_budgets.memory_search, 3_000);
         assert_eq!(config.tool_budgets.file_outline, 2_000);
         assert_eq!(config.tool_budgets.default, 8_000);
+        assert!(!config.metrics.enabled);
+        assert_eq!(config.metrics.listen, "0.0.0.0:9090");
     }
 
     #[test]

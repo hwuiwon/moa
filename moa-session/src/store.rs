@@ -10,7 +10,7 @@ use moa_core::{
     EventRange, EventRecord, MoaConfig, MoaError, PendingSignal, PendingSignalId, Result,
     SessionAnalyticsSummary, SessionFilter, SessionMeta, SessionStatus, SessionStore,
     SessionSummary, SessionTurnMetric, ToolCallSummary, WakeContext, WorkspaceAnalyticsSummary,
-    WorkspaceId,
+    WorkspaceId, record_session_created, record_sessions_active, record_turn_completed,
 };
 use moa_security::ApprovalRuleStore;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};
@@ -221,13 +221,15 @@ impl PostgresSessionStore {
             Self::connect_with_retry(database_url, pool_min, pool_max, connect_timeout_secs, 3)
                 .await?;
         schema::migrate(&pool, schema_name).await?;
-        Ok(Self {
+        let store = Self {
             url: database_url.to_string(),
             pool,
             schema_name: schema_name.map(ToOwned::to_owned),
             blob_store,
             blob_threshold_bytes,
-        })
+        };
+        store.refresh_active_session_metric().await?;
+        Ok(store)
     }
 
     async fn connect_with_retry(
@@ -432,6 +434,8 @@ impl SessionStore for PostgresSessionStore {
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
+        record_session_created(&meta.workspace_id, &meta.status);
+        self.refresh_active_session_metric().await?;
 
         Ok(session_id)
     }
@@ -499,6 +503,12 @@ impl SessionStore for PostgresSessionStore {
             .map_err(map_sqlx_error)?;
 
         transaction.commit().await.map_err(map_sqlx_error)?;
+        if let Event::BrainResponse {
+            model, model_tier, ..
+        } = &event
+        {
+            record_turn_completed(model, *model_tier);
+        }
         Ok(sequence_num)
     }
 
@@ -639,6 +649,7 @@ impl SessionStore for PostgresSessionStore {
         if affected == 0 {
             return Err(MoaError::SessionNotFound(session_id));
         }
+        self.refresh_active_session_metric().await?;
 
         Ok(())
     }
@@ -946,6 +957,7 @@ impl SessionStore for PostgresSessionStore {
                 .map_err(map_sqlx_error)?;
         }
         transaction.commit().await.map_err(map_sqlx_error)?;
+        self.refresh_active_session_metric().await?;
 
         if let Err(err) = self.blob_store.delete_session(&session_id).await {
             tracing::warn!(%err, session_id = %session_id, "blob cleanup failed after session delete");
@@ -956,6 +968,23 @@ impl SessionStore for PostgresSessionStore {
 }
 
 impl PostgresSessionStore {
+    async fn refresh_active_session_metric(&self) -> Result<()> {
+        let sessions = self.table_name("sessions");
+        let active = sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT COUNT(*)::BIGINT FROM {sessions} WHERE status IN ($1, $2)"
+        ))
+        .bind(session_status_to_db(&SessionStatus::Running))
+        .bind(session_status_to_db(&SessionStatus::WaitingApproval))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        let active = u64::try_from(active).map_err(|_| {
+            MoaError::StorageError("active session count exceeded u64 range".to_string())
+        })?;
+        record_sessions_active(active);
+        Ok(())
+    }
+
     async fn event_record_from_row(&self, row: &sqlx::postgres::PgRow) -> Result<EventRecord> {
         let event_type_text = row
             .try_get::<String, _>("event_type")

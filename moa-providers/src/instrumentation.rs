@@ -3,10 +3,13 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, TokenPricing, TokenUsage,
+    record_cache_hit_rate, record_llm_request, record_llm_streaming_duration, record_llm_ttft,
+    record_tokens_input_cached, record_tokens_input_uncached, record_tokens_output,
 };
 use opentelemetry::trace::Status;
 use serde::Serialize;
 use serde_json::Value;
+use std::time::Instant;
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -68,10 +71,13 @@ pub(crate) struct LLMSpanAttributes {
 #[derive(Debug, Clone)]
 pub(crate) struct LLMSpanRecorder {
     span: Span,
+    system: &'static str,
     pricing: TokenPricing,
     cached_input_tokens: usize,
     cache_creation_input_tokens: usize,
+    started_at: Instant,
     first_output_at: Option<DateTime<Utc>>,
+    first_output_elapsed: Option<std::time::Duration>,
     streamed_output: Vec<CompletionContent>,
 }
 
@@ -93,7 +99,7 @@ impl LLMSpanRecorder {
             &LLMSpanAttributes {
                 system: Some(system),
                 operation: Some(OPERATION_CHAT),
-                request_model: Some(request_model),
+                request_model: Some(request_model.clone()),
                 temperature: request.temperature.map(f64::from),
                 max_tokens,
                 input_content: serialize_input_content(request),
@@ -107,13 +113,17 @@ impl LLMSpanRecorder {
                 ..LLMSpanAttributes::default()
             },
         );
+        record_llm_request(system, &request_model);
 
         Self {
             span,
+            system,
             pricing,
             cached_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            started_at: Instant::now(),
             first_output_at: None,
+            first_output_elapsed: None,
             streamed_output: Vec::new(),
         }
     }
@@ -161,6 +171,7 @@ impl LLMSpanRecorder {
         if self.first_output_at.is_none() {
             let now = Utc::now();
             self.first_output_at = Some(now);
+            self.first_output_elapsed = Some(self.started_at.elapsed());
             record_llm_span_attributes(
                 &self.span,
                 &LLMSpanAttributes {
@@ -215,6 +226,20 @@ impl LLMSpanRecorder {
             cache_hit_rate = %format!("{:.1}%", provider_cache_hit_rate * 100.0),
             "completion received"
         );
+        let provider = self.system;
+        let model = response.model.to_string();
+        record_tokens_input_uncached(
+            provider,
+            &model,
+            (usage.input_tokens_uncached + usage.input_tokens_cache_write) as u64,
+        );
+        record_tokens_input_cached(provider, &model, usage.input_tokens_cache_read as u64);
+        record_tokens_output(provider, &model, usage.output_tokens as u64);
+        record_cache_hit_rate(provider, &model, provider_cache_hit_rate);
+        record_llm_streaming_duration(provider, &model, self.started_at.elapsed());
+        if let Some(ttft) = self.first_output_elapsed {
+            record_llm_ttft(provider, &model, ttft);
+        }
     }
 
     /// Marks the span as failed and records any partial output that was seen.
