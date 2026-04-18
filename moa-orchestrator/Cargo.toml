@@ -50,3 +50,6 @@ uuid.workspace = true
 reqwest.workspace = true
 tempfile = "3"
 tracing-subscriber.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }

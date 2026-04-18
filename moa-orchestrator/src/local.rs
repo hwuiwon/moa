@@ -18,8 +18,8 @@ use moa_core::{
     CronSpec, Event, EventRange, EventRecord, EventStream, MemoryScope, MoaConfig, MoaError,
     ModelTask, ObserveLevel, PendingSignal, Result, RuntimeEvent, SessionFilter, SessionHandle,
     SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, SessionSummary,
-    StartSessionRequest, TraceContext, TurnLatencyCounters, TurnLatencySnapshot,
-    TurnReplayCounters, TurnReplaySnapshot, UserMessage, WorkspaceId,
+    SessionTaskMonitor, StartSessionRequest, TraceContext, TurnLatencyCounters,
+    TurnLatencySnapshot, TurnReplayCounters, TurnReplaySnapshot, UserMessage, WorkspaceId,
     record_turn_event_persist_duration, record_turn_latency, scope_turn_latency_counters,
     scope_turn_replay_counters,
 };
@@ -53,6 +53,7 @@ pub struct LocalOrchestrator {
     branch_manager: Option<Arc<NeonBranchManager>>,
     sessions: Arc<RwLock<HashMap<SessionId, LocalBrainHandle>>>,
     discovered_workspace_instructions: Arc<RwLock<HashMap<WorkspaceId, String>>>,
+    session_task_monitor: SessionTaskMonitor,
 }
 
 struct LocalBrainHandle {
@@ -95,6 +96,7 @@ impl LocalOrchestrator {
         let branch_manager = NeonBranchManager::maybe_from_config(&config)?.map(Arc::new);
         let instrumented_session_store: Arc<dyn SessionStore> =
             Arc::new(CountedSessionStore::new(session_store.clone()));
+        let session_task_monitor = SessionTaskMonitor::shared();
         let orchestrator = Self {
             config: Arc::new(config),
             session_store,
@@ -106,7 +108,11 @@ impl LocalOrchestrator {
             branch_manager,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             discovered_workspace_instructions: Arc::new(RwLock::new(HashMap::new())),
+            session_task_monitor,
         };
+        orchestrator
+            .session_task_monitor
+            .spawn_publisher(orchestrator.config.metrics.enabled);
         orchestrator.register_memory_maintenance_job().await?;
         orchestrator.register_neon_checkpoint_cleanup_job().await?;
         // Non-fatal: if the sweep errors out, the app still boots and the
@@ -328,7 +334,7 @@ impl LocalOrchestrator {
         let task_runtime_tx = runtime_tx.clone();
         let task_cancel_token = cancel_token.clone();
         let task_hard_cancel_token = hard_cancel_token.clone();
-        let task = tokio::spawn(async move {
+        let task = tokio::spawn(self.session_task_monitor.instrument_task(async move {
             run_session_task(
                 context,
                 signal_rx,
@@ -341,7 +347,7 @@ impl LocalOrchestrator {
                 task_hard_cancel_token,
             )
             .await
-        });
+        }));
         let supervisor_session_store = self.instrumented_session_store.clone();
         let supervisor_tool_router = self.tool_router.clone();
         let supervisor_status = status.clone();
