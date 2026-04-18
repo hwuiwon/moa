@@ -37,6 +37,7 @@ const DEFAULT_MAX_RETRIES: usize = 3;
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4_096;
 const MAX_CACHE_BREAKPOINTS: usize = 4;
 const MIN_CACHEABLE_TOKENS: usize = 1_024;
+const MODEL_HAIKU_4_5: &str = "claude-haiku-4-5";
 const MODEL_OPUS_4_6: &str = "claude-opus-4-6";
 const MODEL_SONNET_4_6: &str = "claude-sonnet-4-6";
 
@@ -99,6 +100,21 @@ impl AnthropicProvider {
             .map_err(|_| MoaError::MissingEnvironmentVariable("ANTHROPIC_API_KEY".to_string()))?;
 
         Self::new(api_key, default_model)
+    }
+
+    /// Clones this provider while swapping the default model id.
+    pub(crate) fn clone_with_model(&self, default_model: impl Into<String>) -> Result<Self> {
+        let default_model = canonical_model_id(&default_model.into())?;
+        let default_capabilities = capabilities_for_model(&default_model)?;
+        Ok(Self {
+            client: self.client.clone(),
+            api_key: self.api_key.clone(),
+            default_model,
+            default_capabilities,
+            messages_url: self.messages_url.clone(),
+            retry_policy: self.retry_policy.clone(),
+            web_search_enabled: self.web_search_enabled,
+        })
     }
 
     /// Overrides the Messages API URL, primarily for tests.
@@ -228,6 +244,7 @@ impl LLMProvider for AnthropicProvider {
 
 fn canonical_model_id(model: &str) -> Result<String> {
     match model {
+        MODEL_HAIKU_4_5 => Ok(MODEL_HAIKU_4_5.to_string()),
         MODEL_OPUS_4_6 => Ok(MODEL_OPUS_4_6.to_string()),
         MODEL_SONNET_4_6 => Ok(MODEL_SONNET_4_6.to_string()),
         unsupported => Err(MoaError::Unsupported(format!(
@@ -238,6 +255,22 @@ fn canonical_model_id(model: &str) -> Result<String> {
 
 fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
     match model {
+        MODEL_HAIKU_4_5 => Ok(ModelCapabilities {
+            model_id: ModelId::new(MODEL_HAIKU_4_5),
+            context_window: 200_000,
+            max_output: 16_000,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: Some(Duration::from_secs(300)),
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 0.8,
+                output_per_mtok: 4.0,
+                cached_input_per_mtok: Some(0.08),
+            },
+            native_tools: native_web_search_tools(),
+        }),
         MODEL_OPUS_4_6 => Ok(ModelCapabilities {
             model_id: ModelId::new(MODEL_OPUS_4_6),
             context_window: 1_000_000,
@@ -1243,9 +1276,9 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        AnthropicProvider, MODEL_OPUS_4_6, MODEL_SONNET_4_6, anthropic_content_blocks,
-        anthropic_message, anthropic_tool_from_schema, build_request_body, canonical_model_id,
-        capabilities_for_model, consume_sse_events,
+        AnthropicProvider, MODEL_HAIKU_4_5, MODEL_OPUS_4_6, MODEL_SONNET_4_6,
+        anthropic_content_blocks, anthropic_message, anthropic_tool_from_schema,
+        build_request_body, canonical_model_id, capabilities_for_model, consume_sse_events,
     };
     use crate::instrumentation::LLMSpanRecorder;
 
@@ -1705,23 +1738,33 @@ mod tests {
 
     #[test]
     fn supported_models_return_expected_capabilities() {
+        let haiku_caps =
+            capabilities_for_model(&canonical_model_id(MODEL_HAIKU_4_5).unwrap()).unwrap();
         let opus_caps =
             capabilities_for_model(&canonical_model_id(MODEL_OPUS_4_6).unwrap()).unwrap();
         let sonnet_caps =
             capabilities_for_model(&canonical_model_id(MODEL_SONNET_4_6).unwrap()).unwrap();
 
+        assert_eq!(haiku_caps.context_window, 200_000);
         assert_eq!(opus_caps.context_window, 1_000_000);
         assert_eq!(sonnet_caps.context_window, 1_000_000);
+        assert_eq!(haiku_caps.max_output, 16_000);
         assert_eq!(opus_caps.max_output, 128_000);
         assert_eq!(sonnet_caps.max_output, 64_000);
+        assert!((haiku_caps.pricing.input_per_mtok - 0.8_f64).abs() < f64::EPSILON);
         assert!((opus_caps.pricing.input_per_mtok - 5.0_f64).abs() < f64::EPSILON);
         assert!((sonnet_caps.pricing.input_per_mtok - 3.0_f64).abs() < f64::EPSILON);
+        assert_eq!(haiku_caps.model_id, ModelId::new(MODEL_HAIKU_4_5));
         assert_eq!(opus_caps.model_id, ModelId::new(MODEL_OPUS_4_6));
         assert_eq!(sonnet_caps.model_id, ModelId::new(MODEL_SONNET_4_6));
     }
 
     #[test]
     fn model_ids_resolve_without_aliasing() {
+        assert_eq!(
+            canonical_model_id(MODEL_HAIKU_4_5).unwrap(),
+            MODEL_HAIKU_4_5
+        );
         assert_eq!(canonical_model_id(MODEL_OPUS_4_6).unwrap(), MODEL_OPUS_4_6);
         assert_eq!(
             canonical_model_id(MODEL_SONNET_4_6).unwrap(),
@@ -1731,6 +1774,12 @@ mod tests {
 
     #[test]
     fn provider_accepts_documented_default_models() {
+        let provider = AnthropicProvider::new("test-key", MODEL_HAIKU_4_5).unwrap();
+        assert_eq!(
+            provider.capabilities().model_id,
+            ModelId::new(MODEL_HAIKU_4_5)
+        );
+
         let provider = AnthropicProvider::new("test-key", MODEL_SONNET_4_6).unwrap();
         assert_eq!(
             provider.capabilities().model_id,

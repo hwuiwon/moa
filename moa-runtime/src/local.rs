@@ -13,7 +13,7 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::LocalOrchestrator;
-use moa_providers::{build_provider_from_config, resolve_provider_selection};
+use moa_providers::{ModelRouter, resolve_provider_selection};
 use moa_session::{create_session_store, testing};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -50,9 +50,8 @@ impl LocalChatRuntime {
         session_id: Option<SessionId>,
     ) -> Result<Self> {
         let selection = resolve_provider_selection(&config, None)?;
-        config.general.default_provider = selection.provider_name;
-        config.general.default_model = selection.model_id;
-        let model = config.general.default_model.clone();
+        config.set_main_model(selection.provider_name, selection.model_id);
+        let model = config.models.main.clone();
         let orchestrator = Arc::new(LocalOrchestrator::from_config(config.clone()).await?);
         let workspace_root = detect_local_workspace_root()?;
         let mut workspace_id = workspace_id_for_root(&workspace_root);
@@ -149,8 +148,8 @@ impl LocalChatRuntime {
         let requested_model = model.into();
         let selection = resolve_provider_selection(&self.config, Some(requested_model.as_str()))?;
         self.model = selection.model_id.clone();
-        self.config.general.default_model = selection.model_id;
-        self.config.general.default_provider = selection.provider_name;
+        self.config
+            .set_main_model(selection.provider_name, selection.model_id);
         self.orchestrator = Arc::new(
             LocalOrchestrator::from_config_with_model(
                 self.config.clone(),
@@ -461,13 +460,13 @@ impl ChatRuntime {
                 .with_rule_store(session_store.clone())
                 .with_session_store(session_store.clone()),
         );
-        let llm_provider = build_provider_from_config(&config)?;
+        let model_router = Arc::new(ModelRouter::from_config(&config)?);
         let orchestrator = Arc::new(
             LocalOrchestrator::new(
                 config.clone(),
                 session_store,
                 memory_store,
-                llm_provider,
+                model_router,
                 tool_router,
             )
             .await?,
@@ -478,7 +477,7 @@ impl ChatRuntime {
             .remember_workspace_root(workspace_id.clone(), workspace_root)
             .await;
         let user_id = UserId::new("tester");
-        let model = config.general.default_model.clone();
+        let model = config.models.main.clone();
         let session_id =
             start_empty_session(&orchestrator, &workspace_id, &user_id, &platform, &model).await?;
 

@@ -257,6 +257,7 @@ mod tests {
             text: "done".to_string(),
             thought_signature: None,
             model: moa_core::ModelId::new("mock"),
+            model_tier: moa_core::ModelTier::Main,
             input_tokens_uncached: 100,
             input_tokens_cache_write: 0,
             input_tokens_cache_read: 0,

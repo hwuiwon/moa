@@ -15,8 +15,8 @@ use moa_brain::{
 };
 use moa_core::{
     BrainOrchestrator, BranchManager, BufferedUserMessage, CountedSessionStore, CronHandle,
-    CronSpec, Event, EventRange, EventRecord, EventStream, LLMProvider, MemoryScope, MoaConfig,
-    MoaError, ObserveLevel, PendingSignal, Result, RuntimeEvent, SessionFilter, SessionHandle,
+    CronSpec, Event, EventRange, EventRecord, EventStream, MemoryScope, MoaConfig, MoaError,
+    ModelTask, ObserveLevel, PendingSignal, Result, RuntimeEvent, SessionFilter, SessionHandle,
     SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, SessionSummary,
     StartSessionRequest, TraceContext, TurnLatencyCounters, TurnLatencySnapshot,
     TurnReplayCounters, TurnReplaySnapshot, UserMessage, WorkspaceId,
@@ -24,7 +24,7 @@ use moa_core::{
 };
 use moa_hands::ToolRouter;
 use moa_memory::{ConsolidationReport, FileMemoryStore, bootstrap};
-use moa_providers::{build_provider_from_config, resolve_provider_selection};
+use moa_providers::{ModelRouter, resolve_provider_selection};
 use moa_security::cleanup_overly_broad_shell_rules;
 use moa_session::{
     NeonBranchManager, PostgresSessionStore, SessionEventStream, create_session_store,
@@ -46,7 +46,7 @@ pub struct LocalOrchestrator {
     session_store: Arc<PostgresSessionStore>,
     instrumented_session_store: Arc<dyn SessionStore>,
     memory_store: Arc<FileMemoryStore>,
-    llm_provider: Arc<dyn LLMProvider>,
+    model_router: Arc<ModelRouter>,
     tool_router: Arc<ToolRouter>,
     scheduler: Arc<JobScheduler>,
     branch_manager: Option<Arc<NeonBranchManager>>,
@@ -68,7 +68,7 @@ struct SessionTaskContext {
     config: Arc<MoaConfig>,
     session_store: Arc<dyn SessionStore>,
     memory_store: Arc<FileMemoryStore>,
-    llm_provider: Arc<dyn LLMProvider>,
+    model_router: Arc<ModelRouter>,
     tool_router: Arc<ToolRouter>,
     session_id: SessionId,
     discovered_workspace_instructions: Option<String>,
@@ -80,7 +80,7 @@ impl LocalOrchestrator {
         config: MoaConfig,
         session_store: Arc<PostgresSessionStore>,
         memory_store: Arc<FileMemoryStore>,
-        llm_provider: Arc<dyn LLMProvider>,
+        model_router: Arc<ModelRouter>,
         tool_router: Arc<ToolRouter>,
     ) -> Result<Self> {
         let scheduler = JobScheduler::new()
@@ -99,7 +99,7 @@ impl LocalOrchestrator {
             session_store,
             instrumented_session_store,
             memory_store,
-            llm_provider,
+            model_router,
             tool_router,
             scheduler: Arc::new(scheduler),
             branch_manager,
@@ -127,8 +127,7 @@ impl LocalOrchestrator {
         model_override: Option<String>,
     ) -> Result<Self> {
         let selection = resolve_provider_selection(&config, model_override.as_deref())?;
-        config.general.default_provider = selection.provider_name;
-        config.general.default_model = selection.model_id;
+        config.set_main_model(selection.provider_name, selection.model_id);
 
         let session_store = create_session_store(&config).await?;
         let memory_store = Arc::new(
@@ -145,12 +144,12 @@ impl LocalOrchestrator {
                 .with_rule_store(session_store.clone())
                 .with_session_store(session_store.clone()),
         );
-        let llm_provider = build_provider_from_config(&config)?;
+        let model_router = Arc::new(ModelRouter::from_config(&config)?);
         Self::new(
             config,
             session_store,
             memory_store,
-            llm_provider,
+            model_router,
             tool_router,
         )
         .await
@@ -173,7 +172,7 @@ impl LocalOrchestrator {
 
     /// Returns the configured default model identifier.
     pub fn model(&self) -> &str {
-        &self.config.general.default_model
+        self.config.model_for_task(ModelTask::MainLoop)
     }
 
     /// Deletes sessions whose event log contains no user-authored events.
@@ -313,7 +312,7 @@ impl LocalOrchestrator {
             config: Arc::clone(&self.config),
             session_store: self.instrumented_session_store.clone(),
             memory_store: self.memory_store.clone(),
-            llm_provider: self.llm_provider.clone(),
+            model_router: self.model_router.clone(),
             tool_router: self.tool_router.clone(),
             session_id,
             discovered_workspace_instructions: self
@@ -858,7 +857,7 @@ async fn run_session_task(
         &context.config,
         context.session_store.clone(),
         context.memory_store.clone(),
-        Some(context.llm_provider.clone()),
+        Some(context.model_router.provider_for(ModelTask::Summarization)),
         context.discovered_workspace_instructions.clone(),
         context.tool_router.tool_schemas(),
     );
@@ -1035,7 +1034,7 @@ async fn run_session_task(
                     let turn_result = run_streamed_turn_with_signals_stepwise(
                         context.session_id,
                         context.session_store.clone(),
-                        context.llm_provider.clone(),
+                        context.model_router.provider_for(ModelTask::MainLoop),
                         &pipeline,
                         Some(context.tool_router.clone()),
                         &runtime_tx,
@@ -1094,7 +1093,7 @@ async fn run_session_task(
                                 &session,
                                 &events,
                                 context.memory_store.clone(),
-                                context.llm_provider.clone(),
+                                context.model_router.clone(),
                             )
                             .await?
                             {

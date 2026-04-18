@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use moa_core::{
     CONTEXT_SNAPSHOT_FORMAT_VERSION, CompactionConfig, ContextMessage, ContextProcessor,
     ContextSnapshot, ContextSnapshotConfig, Event, EventRange, EventRecord, FileReadDedupState,
-    LLMProvider, ProcessorOutput, Result, SequenceNum, SessionStore, SnapshotFileReadState,
-    ToolCallId, ToolContent, ToolOutput, ToolOutputConfig, WorkingContext,
+    LLMProvider, ModelTask, ProcessorOutput, Result, SequenceNum, SessionStore,
+    SnapshotFileReadState, ToolCallId, ToolContent, ToolOutput, ToolOutputConfig, WorkingContext,
     record_turn_snapshot_load, truncate_head_tail,
 };
 use moa_security::wrap_untrusted_tool_output;
@@ -460,6 +460,7 @@ impl HistoryCompiler {
                 &self.compaction,
                 &*self.session_store,
                 &**llm_provider,
+                ModelTask::Summarization.tier(),
                 ctx.session_id,
                 ctx.token_budget,
                 &events,
@@ -1220,6 +1221,7 @@ mod tests {
                 Event::BrainResponse {
                     text: "Hi there".to_string(),
                     model: ModelId::new("claude-sonnet-4-6"),
+                    model_tier: moa_core::ModelTier::Main,
                     input_tokens_uncached: 10,
                     input_tokens_cache_write: 0,
                     input_tokens_cache_read: 0,
@@ -1796,6 +1798,7 @@ mod tests {
                 events_summarized: 8,
                 token_count: 12,
                 model: ModelId::new("claude-sonnet-4-6"),
+                model_tier: moa_core::ModelTier::Auxiliary,
                 input_tokens: 60,
                 output_tokens: 20,
                 cost_cents: 1,
@@ -1907,6 +1910,7 @@ mod tests {
                     text: "noted".to_string(),
                     thought_signature: None,
                     model: ModelId::new("claude-sonnet-4-6"),
+                    model_tier: moa_core::ModelTier::Main,
                     input_tokens_uncached: 1,
                     input_tokens_cache_write: 0,
                     input_tokens_cache_read: 0,
@@ -2112,6 +2116,7 @@ mod tests {
                                 text: format!("assistant-{turn_index}-{seed}"),
                                 thought_signature: None,
                                 model: ModelId::new("claude-sonnet-4-6"),
+                                model_tier: moa_core::ModelTier::Main,
                                 input_tokens_uncached: 1,
                                 input_tokens_cache_write: 0,
                                 input_tokens_cache_read: 0,

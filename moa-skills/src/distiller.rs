@@ -5,10 +5,11 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_core::{
-    CompletionRequest, Event, EventRecord, LLMProvider, MemoryStore, MoaConfig, Result,
-    SessionMeta, SkillMetadata,
+    CompletionRequest, Event, EventRecord, MemoryStore, MoaConfig, ModelTask, Result, SessionMeta,
+    SkillMetadata,
 };
 use moa_memory::FileMemoryStore;
+use moa_providers::ModelRouter;
 
 use crate::format::{
     SkillDocument, build_skill_path, parse_skill_markdown, skill_metadata_from_document,
@@ -27,7 +28,7 @@ pub async fn maybe_distill_skill(
     session: &SessionMeta,
     events: &[EventRecord],
     memory_store: Arc<FileMemoryStore>,
-    llm: Arc<dyn LLMProvider>,
+    model_router: Arc<ModelRouter>,
 ) -> Result<Option<SkillMetadata>> {
     if count_tool_calls(events) < MIN_TOOL_CALLS_FOR_DISTILLATION {
         return Ok(None);
@@ -45,11 +46,12 @@ pub async fn maybe_distill_skill(
             existing,
             events,
             memory_store,
-            llm,
+            model_router,
         )
         .await;
     }
 
+    let llm = model_router.provider_for(ModelTask::SkillDistillation);
     let prompt = build_distillation_prompt(&task_summary, events);
     let response = llm
         .complete(CompletionRequest::simple(prompt))

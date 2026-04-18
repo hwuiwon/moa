@@ -1252,6 +1252,7 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
             Event::BrainResponse {
                 text: "Existing reply".to_string(),
                 model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model_tier: moa_core::ModelTier::Main,
                 input_tokens_uncached: 20,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,
@@ -1318,6 +1319,7 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
             Event::BrainResponse {
                 text: "Existing reply".to_string(),
                 model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model_tier: moa_core::ModelTier::Main,
                 input_tokens_uncached: 20,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,

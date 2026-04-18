@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_core::{
     CompactionConfig, ContextMessage, ContextProcessor, ContextSnapshot, LLMProvider, MessageRole,
-    ProcessorOutput, Result, SessionStore, ToolContent, WorkingContext,
+    ModelTask, ProcessorOutput, Result, SessionStore, ToolContent, WorkingContext,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -445,6 +445,7 @@ async fn apply_tier3(
         &forced_config,
         session_store,
         llm_provider,
+        ModelTask::Summarization.tier(),
         ctx.session_id,
         ctx.model_capabilities.context_window,
         &events,
@@ -773,6 +774,7 @@ mod tests {
                 Event::BrainResponse {
                     text: "first response".to_string(),
                     model: ModelId::new("claude-sonnet-4-6"),
+                    model_tier: moa_core::ModelTier::Main,
                     input_tokens_uncached: 10,
                     input_tokens_cache_write: 0,
                     input_tokens_cache_read: 0,

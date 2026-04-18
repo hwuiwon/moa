@@ -5,10 +5,11 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_core::{
-    CompletionRequest, Event, EventRecord, LLMProvider, MemoryScope, MemoryStore, MoaConfig,
-    Result, SessionMeta, SkillMetadata,
+    CompletionRequest, Event, EventRecord, MemoryScope, MemoryStore, MoaConfig, ModelTask, Result,
+    SessionMeta, SkillMetadata,
 };
 use moa_memory::FileMemoryStore;
+use moa_providers::ModelRouter;
 use tokio::fs;
 
 use crate::format::{
@@ -24,13 +25,14 @@ pub async fn maybe_improve_skill(
     existing: &SkillMetadata,
     events: &[EventRecord],
     memory_store: Arc<FileMemoryStore>,
-    llm: Arc<dyn LLMProvider>,
+    model_router: Arc<ModelRouter>,
 ) -> Result<Option<SkillMetadata>> {
     let scope = MemoryScope::Workspace(session.workspace_id.clone());
     let page = memory_store.read_page(&scope, &existing.path).await?;
     let mut current = skill_from_wiki_page(&page)?;
     let current_markdown = render_skill_markdown(&current)?;
     let prompt = build_improvement_prompt(&current_markdown, events);
+    let llm = model_router.provider_for(ModelTask::SkillDistillation);
     let response = llm
         .complete(CompletionRequest::simple(prompt))
         .await?
@@ -86,7 +88,7 @@ pub async fn maybe_improve_skill(
         &current_markdown,
         &candidate_markdown,
         memory_store.clone(),
-        llm,
+        llm.clone(),
     )
     .await?;
     append_skill_regression_log(

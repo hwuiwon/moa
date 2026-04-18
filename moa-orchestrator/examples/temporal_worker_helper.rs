@@ -20,6 +20,7 @@ mod temporal_helper {
     use moa_hands::ToolRouter;
     use moa_memory::FileMemoryStore;
     use moa_orchestrator::TemporalOrchestrator;
+    use moa_providers::ModelRouter;
     use moa_session::{create_session_store, testing};
     use tokio::time::sleep;
 
@@ -177,7 +178,7 @@ mod temporal_helper {
             config.clone(),
             session_store,
             memory_store,
-            provider,
+            Arc::new(ModelRouter::new(provider, None)),
             tool_router,
         )
         .await?;

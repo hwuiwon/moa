@@ -27,6 +27,10 @@ pub struct SessionAnalyticsSummary {
     pub total_output_tokens: u64,
     /// Total session cost in cents.
     pub total_cost_cents: u64,
+    /// Total main-loop cost in cents.
+    pub main_cost_cents: u64,
+    /// Total auxiliary-tier cost in cents.
+    pub auxiliary_cost_cents: u64,
     /// Fraction of input tokens served from cache.
     pub cache_hit_rate: f64,
     /// Session wall-clock duration in seconds.
@@ -148,6 +152,7 @@ pub async fn get_session_summary(
         "SELECT \
              id, workspace_id, user_id, status, turn_count, event_count, \
              total_input_tokens, total_output_tokens, total_cost_cents, \
+             main_cost_cents, auxiliary_cost_cents, \
              cache_hit_rate, duration_seconds, tool_call_count, error_count \
          FROM {session_summary} \
          WHERE id = $1 \
@@ -357,6 +362,12 @@ fn session_analytics_from_row(row: &PgRow) -> Result<SessionAnalyticsSummary> {
             .map_err(map_sqlx_error)? as u64,
         total_cost_cents: row
             .try_get::<i64, _>("total_cost_cents")
+            .map_err(map_sqlx_error)? as u64,
+        main_cost_cents: row
+            .try_get::<i64, _>("main_cost_cents")
+            .map_err(map_sqlx_error)? as u64,
+        auxiliary_cost_cents: row
+            .try_get::<i64, _>("auxiliary_cost_cents")
             .map_err(map_sqlx_error)? as u64,
         cache_hit_rate: row
             .try_get::<f64, _>("cache_hit_rate")

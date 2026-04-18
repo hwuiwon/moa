@@ -738,13 +738,11 @@ mod tests {
             return Some(config);
         }
         if std::env::var(&config.providers.anthropic.api_key_env).is_ok() {
-            config.general.default_provider = "anthropic".to_string();
-            config.general.default_model = "claude-sonnet-4-6".to_string();
+            config.set_main_model("anthropic", "claude-sonnet-4-6");
             return Some(config);
         }
         if std::env::var(&config.providers.google.api_key_env).is_ok() {
-            config.general.default_provider = "google".to_string();
-            config.general.default_model = "gemini-3.1-pro-preview".to_string();
+            config.set_main_model("google", "gemini-3.1-pro-preview");
             return Some(config);
         }
 

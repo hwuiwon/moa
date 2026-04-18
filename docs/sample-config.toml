@@ -4,6 +4,10 @@ default_model = "gpt-5.4"
 reasoning_effort = "medium"
 web_search_enabled = true
 
+[models]
+main = "gpt-5.4"
+auxiliary = "gpt-5.4-mini"
+
 [providers.anthropic]
 api_key_env = "ANTHROPIC_API_KEY"
 
@@ -103,4 +107,3 @@ preserve_errors = true
 tier2_trigger_blocks_past_bp4 = 14
 tier3_trigger_fraction = 0.9
 max_input_tokens_per_turn = 160000
-summarizer_model = "gpt-5.4-mini"

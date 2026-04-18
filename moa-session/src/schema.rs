@@ -265,7 +265,8 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
                 )
                 WHEN error_event.id IS NOT NULL THEN EXTRACT(EPOCH FROM (error_event.timestamp - tc.called_at)) * 1000.0
                 ELSE NULL
-            END AS duration_ms
+            END AS duration_ms,
+            'main'::TEXT AS model_tier
         FROM tool_calls tc
         LEFT JOIN LATERAL (
             SELECT e.id, e.payload, e.timestamp
@@ -314,7 +315,9 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
             s.updated_at,
             EXTRACT(EPOCH FROM (s.updated_at - s.created_at))::DOUBLE PRECISION AS duration_seconds,
             COALESCE(tool_counts.tool_call_count, 0)::BIGINT AS tool_call_count,
-            COALESCE(error_counts.error_count, 0)::BIGINT AS error_count
+            COALESCE(error_counts.error_count, 0)::BIGINT AS error_count,
+            COALESCE(tier_costs.main_cost_cents, 0)::BIGINT AS main_cost_cents,
+            COALESCE(tier_costs.auxiliary_cost_cents, 0)::BIGINT AS auxiliary_cost_cents
         FROM {sessions} s
         LEFT JOIN (
             SELECT session_id, COUNT(*)::BIGINT AS tool_call_count
@@ -329,7 +332,39 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
             WHERE event_type = 'Error'
             GROUP BY session_id
         ) error_counts
-            ON error_counts.session_id = s.id;
+            ON error_counts.session_id = s.id
+        LEFT JOIN (
+            SELECT
+                e.session_id,
+                SUM(
+                    CASE
+                        WHEN COALESCE(
+                            e.payload -> 'data' ->> 'model_tier',
+                            CASE
+                                WHEN e.event_type = 'Checkpoint' THEN 'auxiliary'
+                                ELSE 'main'
+                            END
+                        ) = 'main' THEN COALESCE((e.payload -> 'data' ->> 'cost_cents')::BIGINT, 0)
+                        ELSE 0
+                    END
+                )::BIGINT AS main_cost_cents,
+                SUM(
+                    CASE
+                        WHEN COALESCE(
+                            e.payload -> 'data' ->> 'model_tier',
+                            CASE
+                                WHEN e.event_type = 'Checkpoint' THEN 'auxiliary'
+                                ELSE 'main'
+                            END
+                        ) = 'auxiliary' THEN COALESCE((e.payload -> 'data' ->> 'cost_cents')::BIGINT, 0)
+                        ELSE 0
+                    END
+                )::BIGINT AS auxiliary_cost_cents
+            FROM {events} e
+            WHERE e.event_type IN ('BrainResponse', 'Checkpoint')
+            GROUP BY e.session_id
+        ) tier_costs
+            ON tier_costs.session_id = s.id;
 
         DROP MATERIALIZED VIEW IF EXISTS {session_turn_metrics};
 

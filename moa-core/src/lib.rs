@@ -25,7 +25,7 @@ pub use config::{
     CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, CompactionConfig,
     ContextSnapshotConfig, DaemonConfig, DatabaseConfig, DatabaseNeonConfig, DesktopConfig,
     GatewayConfig, GeneralConfig, LocalConfig, McpCredentialConfig, McpServerConfig,
-    McpTransportConfig, MemoryConfig, MoaConfig, ObservabilityConfig, OtlpProtocol,
+    McpTransportConfig, MemoryConfig, MoaConfig, ModelsConfig, ObservabilityConfig, OtlpProtocol,
     PermissionsConfig, ProviderCredentialConfig, ProvidersConfig, ToolOutputConfig,
 };
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};

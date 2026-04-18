@@ -111,6 +111,23 @@ impl GeminiProvider {
         Self::new(api_key, default_model)
     }
 
+    /// Clones this provider while swapping the default model id.
+    pub(crate) fn clone_with_model(&self, default_model: impl Into<String>) -> Result<Self> {
+        let default_model = canonical_model_id(&default_model.into())?;
+        let default_capabilities = capabilities_for_model(&default_model);
+        Ok(Self {
+            client: self.client.clone(),
+            api_key: self.api_key.clone(),
+            api_base: self.api_base.clone(),
+            default_model,
+            default_reasoning_effort: self.default_reasoning_effort.clone(),
+            default_capabilities,
+            retry_policy: self.retry_policy.clone(),
+            web_search_enabled: self.web_search_enabled,
+            explicit_cache_names: Mutex::new(HashMap::new()),
+        })
+    }
+
     /// Overrides the Gemini REST API base URL, primarily for tests.
     pub fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
         self.api_base = Arc::from(api_base.into().as_str());

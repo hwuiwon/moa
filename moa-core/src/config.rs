@@ -14,6 +14,8 @@ use crate::error::{MoaError, Result};
 pub struct MoaConfig {
     /// General runtime settings.
     pub general: GeneralConfig,
+    /// Tiered model-routing settings.
+    pub models: ModelsConfig,
     /// Provider settings.
     pub providers: ProvidersConfig,
     /// Session database settings.
@@ -76,6 +78,8 @@ impl MoaConfig {
                 "general.default_model",
                 Self::default().general.default_model,
             )?
+            .set_default("models.main", Self::default().models.main.clone())?
+            .set_default("models.auxiliary", Self::default().models.auxiliary.clone())?
             .set_default(
                 "general.reasoning_effort",
                 Self::default().general.reasoning_effort,
@@ -426,14 +430,11 @@ impl MoaConfig {
                 "compaction.max_input_tokens_per_turn",
                 Self::default().compaction.max_input_tokens_per_turn as i64,
             )?
-            .set_default(
-                "compaction.summarizer_model",
-                Self::default().compaction.summarizer_model.clone(),
-            )?
             .add_source(File::from(path).required(false))
             .add_source(Environment::with_prefix("MOA").separator("__"));
 
-        let config: Self = builder.build()?.try_deserialize()?;
+        let mut config: Self = builder.build()?.try_deserialize()?;
+        config.general.default_model = config.models.main.clone();
         config.validate()?;
         Ok(config)
     }
@@ -479,7 +480,9 @@ impl MoaConfig {
 
 impl MoaConfig {
     fn serialize_config(&self) -> Result<String> {
-        toml::to_string_pretty(self).map_err(|error| MoaError::ConfigError(error.to_string()))
+        let mut config = self.clone();
+        config.models.main = config.general.default_model.clone();
+        toml::to_string_pretty(&config).map_err(|error| MoaError::ConfigError(error.to_string()))
     }
 
     fn validate(&self) -> Result<()> {
@@ -498,6 +501,33 @@ impl MoaConfig {
         }
 
         Ok(())
+    }
+}
+
+impl MoaConfig {
+    /// Returns the configured model identifier for one routing task.
+    #[must_use]
+    pub fn model_for_task(&self, task: crate::ModelTask) -> &str {
+        match task {
+            crate::ModelTask::MainLoop => self.models.main.as_str(),
+            crate::ModelTask::Summarization
+            | crate::ModelTask::Consolidation
+            | crate::ModelTask::SkillDistillation
+            | crate::ModelTask::Subagent => self
+                .models
+                .auxiliary
+                .as_deref()
+                .unwrap_or(self.models.main.as_str()),
+        }
+    }
+
+    /// Sets the configured main-loop provider/model pair and mirrors it into routing config.
+    pub fn set_main_model(&mut self, provider: impl Into<String>, model: impl Into<String>) {
+        let provider = provider.into();
+        let model = model.into();
+        self.general.default_provider = provider;
+        self.general.default_model = model.clone();
+        self.models.main = model;
     }
 }
 
@@ -533,6 +563,25 @@ impl Default for GeneralConfig {
             web_search_enabled: true,
             workspace_instructions: None,
             user_instructions: None,
+        }
+    }
+}
+
+/// Tiered model-routing settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelsConfig {
+    /// Default model for the primary user-facing agent loop.
+    pub main: String,
+    /// Optional lower-cost model for auxiliary tasks.
+    pub auxiliary: Option<String>,
+}
+
+impl Default for ModelsConfig {
+    fn default() -> Self {
+        Self {
+            main: GeneralConfig::default().default_model,
+            auxiliary: None,
         }
     }
 }
@@ -1158,8 +1207,6 @@ pub struct CompactionConfig {
     pub tier3_trigger_fraction: f64,
     /// Hard ceiling for input tokens per turn after compaction.
     pub max_input_tokens_per_turn: usize,
-    /// Optional model override used for tier-3 summarization requests.
-    pub summarizer_model: Option<String>,
 }
 
 impl Default for CompactionConfig {
@@ -1173,7 +1220,6 @@ impl Default for CompactionConfig {
             tier2_trigger_blocks_past_bp4: 14,
             tier3_trigger_fraction: 0.9,
             max_input_tokens_per_turn: 160_000,
-            summarizer_model: None,
         }
     }
 }
@@ -1191,6 +1237,8 @@ mod tests {
         let config = MoaConfig::default();
         assert_eq!(config.general.default_provider, "openai");
         assert_eq!(config.general.default_model, "gpt-5.4");
+        assert_eq!(config.models.main, "gpt-5.4");
+        assert!(config.models.auxiliary.is_none());
     }
 
     #[test]
@@ -1201,6 +1249,10 @@ mod tests {
             default_model = "gpt-4o"
             reasoning_effort = "high"
 
+            [models]
+            main = "claude-sonnet-4-6"
+            auxiliary = "claude-haiku-4-5"
+
             [database]
             admin_url = "postgres://direct.example/moa"
 
@@ -1209,6 +1261,9 @@ mod tests {
         "#;
         let config: MoaConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.general.default_provider, "openai");
+        assert_eq!(config.general.default_model, "gpt-4o");
+        assert_eq!(config.models.main, "claude-sonnet-4-6");
+        assert_eq!(config.models.auxiliary.as_deref(), Some("claude-haiku-4-5"));
         assert!(!config.local.docker_enabled);
         assert_eq!(config.database.admin_url(), "postgres://direct.example/moa");
     }
@@ -1223,7 +1278,6 @@ mod tests {
         assert_eq!(config.compaction.tier2_trigger_blocks_past_bp4, 14);
         assert!((config.compaction.tier3_trigger_fraction - 0.9_f64).abs() < f64::EPSILON);
         assert_eq!(config.compaction.max_input_tokens_per_turn, 160_000);
-        assert!(config.compaction.summarizer_model.is_none());
     }
 
     #[test]

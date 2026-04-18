@@ -6,8 +6,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::types::{
-    ApprovalDecision, ApprovalPrompt, Attachment, CacheReport, EventType, ModelId, RiskLevel,
-    SessionStatus, ToolCallId, ToolOutput, UserId, WorkspaceId,
+    ApprovalDecision, ApprovalPrompt, Attachment, CacheReport, EventType, ModelId, ModelTier,
+    RiskLevel, SessionStatus, ToolCallId, ToolOutput, UserId, WorkspaceId,
 };
 
 /// Append-only session event payload.
@@ -67,6 +67,9 @@ pub enum Event {
         thought_signature: Option<String>,
         /// Model identifier.
         model: ModelId,
+        /// Routing tier that produced this response.
+        #[serde(default = "default_main_model_tier")]
+        model_tier: ModelTier,
         /// Input tokens billed at the provider's standard uncached rate.
         #[serde(default, alias = "input_tokens")]
         input_tokens_uncached: usize,
@@ -216,6 +219,9 @@ pub enum Event {
         /// Model identifier used to generate the summary.
         #[serde(default)]
         model: ModelId,
+        /// Routing tier that produced this checkpoint.
+        #[serde(default = "default_auxiliary_model_tier")]
+        model_tier: ModelTier,
         /// Input token count used to generate the summary.
         #[serde(default)]
         input_tokens: usize,
@@ -386,6 +392,14 @@ impl Event {
     }
 }
 
+fn default_main_model_tier() -> ModelTier {
+    ModelTier::Main
+}
+
+fn default_auxiliary_model_tier() -> ModelTier {
+    ModelTier::Auxiliary
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -469,6 +483,7 @@ mod tests {
             text: "Hi there".to_string(),
             thought_signature: None,
             model: ModelId::new("claude-sonnet-4-6"),
+            model_tier: ModelTier::Main,
             input_tokens_uncached: 100,
             input_tokens_cache_write: 0,
             input_tokens_cache_read: 0,
@@ -500,12 +515,14 @@ mod tests {
 
         match parsed {
             Event::BrainResponse {
+                model_tier,
                 input_tokens_uncached,
                 input_tokens_cache_write,
                 input_tokens_cache_read,
                 output_tokens,
                 ..
             } => {
+                assert_eq!(model_tier, ModelTier::Main);
                 assert_eq!(input_tokens_uncached, 42);
                 assert_eq!(input_tokens_cache_write, 0);
                 assert_eq!(input_tokens_cache_read, 0);
@@ -547,6 +564,7 @@ mod tests {
                 events_summarized: 10,
                 token_count: 500,
                 model: ModelId::new("claude-sonnet-4-6"),
+                model_tier: ModelTier::Auxiliary,
                 input_tokens: 120,
                 output_tokens: 45,
                 cost_cents: 1,
