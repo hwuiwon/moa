@@ -1,0 +1,24 @@
+[package]
+name = "moa-loadtest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+moa-core = { path = "../moa-core" }
+moa-hands = { path = "../moa-hands" }
+moa-memory = { path = "../moa-memory" }
+moa-orchestrator = { path = "../moa-orchestrator" }
+moa-providers = { path = "../moa-providers", features = ["test-util"] }
+moa-session = { path = "../moa-session" }
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+tokio.workspace = true
+uuid.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }

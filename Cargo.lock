@@ -5348,6 +5348,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-loadtest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "moa-core",
+ "moa-hands",
+ "moa-memory",
+ "moa-orchestrator",
+ "moa-providers",
+ "moa-session",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "moa-memory"
 version = "0.1.0"
 dependencies = [
