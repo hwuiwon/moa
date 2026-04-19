@@ -617,6 +617,19 @@ impl LocalOrchestrator {
     }
 
     async fn remember_detected_workspace_root(&self, workspace_id: &WorkspaceId) {
+        if let Some(workspace_root) = self.tool_router.workspace_root(workspace_id).await {
+            let discovered_instructions =
+                moa_core::workspace::discover_workspace_instructions(&workspace_root);
+            let mut discovered_workspace_instructions =
+                self.discovered_workspace_instructions.write().await;
+            if let Some(instructions) = discovered_instructions {
+                discovered_workspace_instructions.insert(workspace_id.clone(), instructions);
+            } else {
+                discovered_workspace_instructions.remove(workspace_id);
+            }
+            return;
+        }
+
         match detect_workspace_path(workspace_id).await {
             Ok(workspace_path) => {
                 self.remember_workspace_root(workspace_id.clone(), workspace_path.clone())
