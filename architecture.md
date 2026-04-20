@@ -36,7 +36,7 @@ Everything else in this document is a consequence of those two ideas.
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │           BRAIN ORCHESTRATOR (moa-orchestrator)                 │
-│  Cloud:  TemporalOrchestrator — Temporal workflows + Fly.io     │
+│  Cloud:  Restate-backed runtime on Kubernetes                   │
 │  Local:  LocalOrchestrator   — tokio tasks + mpsc/broadcast     │
 │                                                                 │
 │  · spawn / recover brains from session log                      │
@@ -82,7 +82,7 @@ All stable interfaces live in [`moa-core`](moa-core/). Implementations swap free
 
 | Trait | Responsibility | Local impl | Cloud impl |
 |---|---|---|---|
-| `BrainOrchestrator` | Session lifecycle, signals, observation, cron | `LocalOrchestrator` | `TemporalOrchestrator` |
+| `BrainOrchestrator` | Session lifecycle, signals, observation, cron | `LocalOrchestrator` | Restate-backed runtime |
 | `SessionStore` | Append-only event log + queryable metadata | `PostgresSessionStore` | `PostgresSessionStore` (managed) |
 | `HandProvider` | `provision` / `execute` / `pause` / `resume` / `destroy` | `LocalHandProvider` | `DaytonaHandProvider`, `E2BHandProvider` |
 | `LLMProvider` | Streaming completion + capabilities (context window, caching, tools) | Anthropic / OpenAI / Gemini | Same |
@@ -105,7 +105,7 @@ moa/
 ├── moa-memory/        # File-wiki, ingest, consolidation, git-branch writes
 ├── moa-hands/         # Local/Docker/Daytona/E2B/MCP, ToolRouter
 ├── moa-providers/     # Anthropic, OpenAI, Gemini — streaming + prompt caching
-├── moa-orchestrator/  # LocalOrchestrator (tokio), TemporalOrchestrator (cloud)
+├── moa-orchestrator/  # LocalOrchestrator (tokio) + Restate-backed cloud runtime
 ├── moa-gateway/       # Telegram / Slack / Discord + platform renderers + approvals
 ├── moa-security/      # Credential vault, MCP proxy, sandbox policies, injection
 ├── moa-skills/        # Agent Skills registry, distillation, self-improvement
@@ -144,14 +144,14 @@ CredentialVault    →  FileVault (age-encrypted ~/.moa/vault.enc)
 ### Cloud mode — `MOA__CLOUD__ENABLED=true`
 
 ```
-BrainOrchestrator  →  TemporalOrchestrator (each session = a Temporal workflow)
+BrainOrchestrator  →  Restate-backed runtime (objects, services, workflows)
 SessionStore       →  PostgresSessionStore (Neon / managed Postgres)
 HandProvider       →  DaytonaHandProvider (default) or E2BHandProvider (Tier 2)
 PlatformAdapter    →  Telegram / Slack / Discord adapters
 CredentialVault    →  HashiCorpVault
 ```
 
-- Durable execution via Temporal — activities are idempotent (`UNIQUE(session_id, sequence_num)`), retries are safe.
+- Durable execution via Restate — journaled handlers and idempotent writes (`UNIQUE(session_id, sequence_num)`) keep retries safe.
 - Fly.io Machines host brains. Auto-suspend on idle (~5 min) → only storage cost when nobody's active. Auto-resume in sub-second when a message arrives.
 - Multi-session: orchestrator tracks many concurrent workflows.
 
@@ -423,7 +423,7 @@ Details: [`docs/09-skills-and-learning.md`](docs/09-skills-and-learning.md).
 | LLM | `async-openai`, `reqwest`, `eventsource-stream`, `tiktoken-rs` |
 | Messaging | `teloxide`, `serenity`, `slack-morphism-rust` |
 | Desktop | `gpui`, `gpui-component`, `tray-icon`, `pulldown-cmark`, `syntect`, `similar` |
-| Orchestration | `temporalio-sdk`, `tokio-cron-scheduler` |
+| Orchestration | `restate-sdk`, `tokio-cron-scheduler` |
 | Security | `age`, `secrecy`, `vaultrs`, `shell-words` |
 | Hands / MCP | `bollard`, `reqwest`, MCP (SDK or custom) |
 | Errors / CLI / config | `thiserror`, `anyhow` (bins only), `clap`, `config` |
@@ -443,7 +443,7 @@ Full list with versions: [`docs/10-technology-stack.md`](docs/10-technology-stac
 | Memory writes conflicting in cloud | [`docs/04-memory-architecture.md`](docs/04-memory-architecture.md) — branch reconciler |
 | Approval not reaching the user | [`docs/03-communication-layer.md`](docs/03-communication-layer.md) — platform rate limits, edit window |
 | Hand won't provision / destroy | [`docs/06-hands-and-mcp.md`](docs/06-hands-and-mcp.md) — orchestrator cleanup contract |
-| Temporal workflow stuck | [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md) — signal mapping, activity timeouts |
+| Session orchestration stuck | [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md) — state transitions, awakeables, runtime wiring |
 
 ---
 

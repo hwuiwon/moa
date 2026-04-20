@@ -371,6 +371,9 @@ pub trait BuiltInTool: Send + Sync {
     /// Returns the policy and approval metadata for the tool.
     fn policy_spec(&self) -> crate::types::ToolPolicySpec;
 
+    /// Returns the declared replay/idempotency contract for the tool.
+    fn idempotency_class(&self) -> crate::types::IdempotencyClass;
+
     /// Returns the approximate maximum successful output size persisted for one call.
     fn max_output_tokens(&self) -> u32 {
         8_000
@@ -383,6 +386,7 @@ pub trait BuiltInTool: Send + Sync {
             description: self.description().to_string(),
             schema: self.input_schema(),
             policy: self.policy_spec(),
+            idempotency_class: self.idempotency_class(),
             max_output_tokens: self.max_output_tokens(),
         }
     }

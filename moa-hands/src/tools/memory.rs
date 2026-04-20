@@ -5,9 +5,10 @@ use std::time::Instant;
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    BuiltInTool, Event, IngestReport, MemoryPath, MemoryScope, MemorySearchMode, MoaError,
-    PageType, PolicyAction, Result, RiskLevel, ToolContent, ToolContext, ToolDiffStrategy,
-    ToolInputShape, ToolOutput, ToolPolicySpec, WikiPage, read_tool_policy, write_tool_policy,
+    BuiltInTool, Event, IdempotencyClass, IngestReport, MemoryPath, MemoryScope, MemorySearchMode,
+    MoaError, PageType, PolicyAction, Result, RiskLevel, ToolContent, ToolContext,
+    ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec, WikiPage, read_tool_policy,
+    write_tool_policy,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -39,6 +40,10 @@ impl BuiltInTool for MemoryReadTool {
 
     fn policy_spec(&self) -> ToolPolicySpec {
         read_tool_policy(ToolInputShape::Path)
+    }
+
+    fn idempotency_class(&self) -> IdempotencyClass {
+        IdempotencyClass::Idempotent
     }
 
     async fn execute(
@@ -99,6 +104,10 @@ impl BuiltInTool for MemorySearchTool {
 
     fn policy_spec(&self) -> ToolPolicySpec {
         read_tool_policy(ToolInputShape::Query)
+    }
+
+    fn idempotency_class(&self) -> IdempotencyClass {
+        IdempotencyClass::Idempotent
     }
 
     fn max_output_tokens(&self) -> u32 {
@@ -214,6 +223,10 @@ impl BuiltInTool for MemoryWriteTool {
         write_tool_policy(ToolInputShape::Path, ToolDiffStrategy::None)
     }
 
+    fn idempotency_class(&self) -> IdempotencyClass {
+        IdempotencyClass::NonIdempotent
+    }
+
     async fn execute(
         &self,
         input: &serde_json::Value,
@@ -319,6 +332,10 @@ impl BuiltInTool for MemoryIngestTool {
             input_shape: ToolInputShape::Json,
             diff_strategy: ToolDiffStrategy::None,
         }
+    }
+
+    fn idempotency_class(&self) -> IdempotencyClass {
+        IdempotencyClass::NonIdempotent
     }
 
     async fn execute(

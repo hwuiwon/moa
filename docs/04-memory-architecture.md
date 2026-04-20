@@ -398,7 +398,7 @@ Both must be true:
 
 ### Process
 
-Runs as a scheduled brain task (Temporal timer or local cron):
+Runs as a scheduled brain task (Restate workflow or local cron):
 
 ```rust
 async fn run_consolidation(
@@ -412,7 +412,7 @@ async fn run_consolidation(
     
     let prompt = format!(
         "You are maintaining a knowledge wiki. Review the following pages and perform:\n\
-         1. TEMPORAL NORMALIZATION: Convert relative dates to absolute\n\
+         1. TIME NORMALIZATION: Convert relative dates to absolute\n\
          2. CONTRADICTION RESOLUTION: If pages disagree, update the wrong one\n\
          3. STALE PRUNING: Remove entries about deleted files, completed tasks, outdated info\n\
          4. DEDUPLICATION: Merge overlapping entries\n\
@@ -677,7 +677,7 @@ Behavior:
 | Storage | `~/.moa/memory/` filesystem | Synced filesystem or mounted volume |
 | Search index | Postgres tsvector + GIN (step 90) | Postgres tsvector + GIN (step 90) |
 | Concurrent writes | Single brain — no branching needed | Git-branch model with LLM reconciler |
-| Consolidation | Local cron (tokio-cron-scheduler) | Temporal timer workflow |
+| Consolidation | Local cron (tokio-cron-scheduler) | Restate workflow schedule |
 | Editing | Any text editor | Web dashboard or messaging commands |
 | Backup | Git (wiki is markdown files) | Git + cloud backup |
 | Migration | Copy `memory/` directory plus Postgres data | Managed via Postgres backups / Neon branches |

@@ -1,0 +1,65 @@
+{
+  "title": "MOA Sandbox Fleet",
+  "uid": "moa-sandbox-fleet",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Sandbox Provision Rate",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(moa_sandbox_provision_seconds_count[5m])) by (provider, tier)",
+          "legendFormat": "{{provider}} {{tier}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "title": "Sandbox Provision p95",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(moa_sandbox_provision_seconds_bucket[5m])) by (le, provider, tier))",
+          "legendFormat": "{{provider}} {{tier}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "id": 3,
+      "title": "Tool Calls / Category",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(moa_tool_calls_total[5m])) by (category, sandbox_tier, status)",
+          "legendFormat": "{{category}} {{sandbox_tier}} {{status}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 }
+    }
+  ]
+}

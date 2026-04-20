@@ -622,6 +622,7 @@ mod tests {
             content: MessageContent::ApprovalRequest {
                 request: ApprovalRequest {
                     request_id,
+                    sub_agent_id: None,
                     tool_name: "bash".to_string(),
                     input_summary: "npm test".to_string(),
                     risk_level: RiskLevel::High,
@@ -675,6 +676,7 @@ mod tests {
             content: MessageContent::ApprovalRequest {
                 request: ApprovalRequest {
                     request_id,
+                    sub_agent_id: None,
                     tool_name: "bash".to_string(),
                     input_summary: "npm test".to_string(),
                     risk_level: RiskLevel::High,
@@ -734,6 +736,7 @@ mod tests {
             content: MessageContent::ApprovalRequest {
                 request: ApprovalRequest {
                     request_id,
+                    sub_agent_id: None,
                     tool_name: "file_write".to_string(),
                     input_summary: "update src/lib.rs".to_string(),
                     risk_level: RiskLevel::Medium,

@@ -1,0 +1,98 @@
+{
+  "title": "MOA Restate Internals",
+  "uid": "moa-restate-internals",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Ingress Requests / State",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(restate_ingress_requests_total[5m])) by (state)",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "title": "Invoker Tasks / Handler",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(restate_invoker_invocation_task_total[5m])) by (handler)",
+          "legendFormat": "{{handler}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "id": 3,
+      "title": "Ingress p99 Latency",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "restate_ingress_request_duration_seconds{quantile=\"0.99\"}",
+          "legendFormat": "p99",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 }
+    },
+    {
+      "id": 4,
+      "title": "RocksDB Live Data Size",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(restate_rocksdb_estimate_live_data_size_bytes)",
+          "legendFormat": "bytes",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 }
+    },
+    {
+      "id": 5,
+      "title": "NodeCtl Up Targets",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "count(up{job=\"restate\"} == 1)",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 }
+    }
+  ]
+}

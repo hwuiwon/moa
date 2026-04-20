@@ -84,8 +84,8 @@ async fn observe_runtime(&self, session_id: SessionId) -> Result<Option<broadcas
 }
 ```
 
-### 6. Implement `observe_runtime()` on `TemporalOrchestrator`
-Return `Ok(None)` for now — Temporal doesn't have local broadcast channels. Add a `// TODO: implement via SSE/WebSocket transport` comment. The trait returns `Option` specifically to handle this case.
+### 6. Implement `observe_runtime()` on the cloud runtime
+Return `Ok(None)` for now — the cloud runtime does not have local broadcast channels. Add a `// TODO: implement via SSE/WebSocket transport` comment. The trait returns `Option` specifically to handle this case.
 
 ### 7. Simplify `LocalChatRuntime` in `moa-tui/src/runner.rs`
 Remove the turn execution logic from the TUI runtime. Replace with:
@@ -103,7 +103,7 @@ The CLI exec mode should also consume `RuntimeEvent`s from the orchestrator rath
 ```
 moa-core/src/traits.rs              # + observe_runtime() on BrainOrchestrator
 moa-orchestrator/src/local.rs       # Unified turn engine, trait impl
-moa-orchestrator/src/temporal.rs    # Stub observe_runtime()
+moa-orchestrator/src/cloud_runtime.rs # Stub observe_runtime()
 moa-brain/src/harness.rs            # Wrapper around streamed turn
 moa-tui/src/runner.rs               # Simplified to stream consumer
 moa-cli/src/exec.rs                 # Simplified to stream consumer

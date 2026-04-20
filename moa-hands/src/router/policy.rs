@@ -48,6 +48,7 @@ impl PreparedToolInvocation {
         ApprovalPrompt {
             request: ApprovalRequest {
                 request_id,
+                sub_agent_id: None,
                 tool_name: self.policy_input.tool_name.clone(),
                 input_summary: self.policy_input.input_summary.clone(),
                 risk_level: self.policy_input.risk_level.clone(),

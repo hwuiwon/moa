@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - 00-namespace.yaml
+  - 10-restate-cluster.yaml
+  - 20-orchestrator-deployment.yaml
+  - 25-orchestrator-service.yaml
+  - 30-orchestrator-hpa.yaml
+  - 40-orchestrator-pdb.yaml
+  - observability
+images:
+  - name: ghcr.io/hwuiwon/moa-orchestrator
+    newTag: latest

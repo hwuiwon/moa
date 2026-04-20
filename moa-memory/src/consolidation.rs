@@ -464,12 +464,12 @@ mod tests {
             .await
             .unwrap();
 
-        let mut stale = page("# Legacy Service\n\nRetired.", PageType::Entity);
+        let mut stale = page("# Retired Service\n\nRetired.", PageType::Entity);
         stale
             .metadata
             .insert("entity_exists".to_string(), serde_json::Value::Bool(false));
         store
-            .write_page(&scope, &"entities/legacy-service.md".into(), stale)
+            .write_page(&scope, &"entities/retired-service.md".into(), stale)
             .await
             .unwrap();
 
@@ -485,7 +485,7 @@ mod tests {
         assert!(deployment.content.contains("port 3000"));
         assert!(
             store
-                .read_page(&scope, &"entities/legacy-service.md".into())
+                .read_page(&scope, &"entities/retired-service.md".into())
                 .await
                 .is_err()
         );

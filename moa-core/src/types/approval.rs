@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{UserId, WorkspaceId};
+use super::{SubAgentId, UserId, WorkspaceId};
 
 /// Risk level for approval decisions.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -35,6 +35,9 @@ pub enum ApprovalDecision {
 pub struct ApprovalRequest {
     /// Approval request identifier.
     pub request_id: Uuid,
+    /// Nested sub-agent that owns the request, when the approval came from a child actor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_agent_id: Option<SubAgentId>,
     /// Tool name being approved.
     pub tool_name: String,
     /// Human-readable input summary.

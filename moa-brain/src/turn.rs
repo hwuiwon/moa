@@ -250,6 +250,7 @@ pub fn find_pending_approval_request(events: &[EventRecord]) -> Option<ApprovalR
                     record.sequence_num,
                     ApprovalRequest {
                         request_id: *request_id,
+                        sub_agent_id: None,
                         tool_name: tool_name.clone(),
                         input_summary: input_summary.clone(),
                         risk_level: risk_level.clone(),
@@ -479,9 +480,6 @@ mod tests {
                     ],
                     stop_reason: StopReason::EndTurn,
                     model: moa_core::ModelId::new("mock-model"),
-                    input_tokens: 4,
-                    output_tokens: 2,
-                    cached_input_tokens: 0,
                     usage: token_usage(4, 2),
                     duration_ms: 1,
                     thought_signature: None,
@@ -529,12 +527,15 @@ mod tests {
                 1,
                 Event::ApprovalRequested {
                     request_id: tool_id.0,
+                    awakeable_id: None,
+                    sub_agent_id: None,
                     tool_name: "bash".to_string(),
                     input_summary: "pwd".to_string(),
                     risk_level: moa_core::RiskLevel::Medium,
                     prompt: moa_core::ApprovalPrompt {
                         request: ApprovalRequest {
                             request_id: tool_id.0,
+                            sub_agent_id: None,
                             tool_name: "bash".to_string(),
                             input_summary: "pwd".to_string(),
                             risk_level: moa_core::RiskLevel::Medium,
@@ -549,6 +550,7 @@ mod tests {
                 2,
                 Event::ApprovalDecided {
                     request_id: tool_id.0,
+                    sub_agent_id: None,
                     decision: ApprovalDecision::AllowOnce,
                     decided_by: "user".to_string(),
                     decided_at: Utc::now(),

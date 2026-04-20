@@ -63,9 +63,6 @@ impl LLMProvider for StreamingMockProvider {
                 content: vec![CompletionContent::Text(text.clone())],
                 stop_reason: moa_core::StopReason::EndTurn,
                 model: model.into(),
-                input_tokens: 8,
-                output_tokens: 4,
-                cached_input_tokens: 0,
                 usage: TokenUsage {
                     input_tokens_uncached: 8,
                     input_tokens_cache_write: 0,

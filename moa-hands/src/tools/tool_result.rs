@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use moa_core::{
-    BuiltInTool, Event, EventRange, MoaError, Result, ToolArtifactStream, ToolCallId, ToolContext,
-    ToolInputShape, ToolOutput, ToolPolicySpec, read_tool_policy,
+    BuiltInTool, Event, EventRange, IdempotencyClass, MoaError, Result, ToolArtifactStream,
+    ToolCallId, ToolContext, ToolInputShape, ToolOutput, ToolPolicySpec, read_tool_policy,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -65,6 +65,10 @@ impl BuiltInTool for ToolResultReadTool {
 
     fn policy_spec(&self) -> ToolPolicySpec {
         read_tool_policy(ToolInputShape::Json)
+    }
+
+    fn idempotency_class(&self) -> IdempotencyClass {
+        IdempotencyClass::Idempotent
     }
 
     fn max_output_tokens(&self) -> u32 {
@@ -216,6 +220,10 @@ impl BuiltInTool for ToolResultSearchTool {
 
     fn policy_spec(&self) -> ToolPolicySpec {
         read_tool_policy(ToolInputShape::Pattern)
+    }
+
+    fn idempotency_class(&self) -> IdempotencyClass {
+        IdempotencyClass::Idempotent
     }
 
     fn max_output_tokens(&self) -> u32 {

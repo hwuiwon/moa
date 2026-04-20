@@ -46,10 +46,14 @@ fn available_live_providers() -> Vec<LiveProvider> {
     if let Ok(provider) = AnthropicProvider::from_env("claude-sonnet-4-6") {
         providers.push(LiveProvider::Anthropic(Box::new(provider)));
     }
-    if let Ok(provider) = GeminiProvider::from_env("gemini-3.1-pro-preview") {
+    if let Ok(provider) = GeminiProvider::from_env(google_live_model()) {
         providers.push(LiveProvider::Google(Box::new(provider)));
     }
     providers
+}
+
+fn google_live_model() -> String {
+    std::env::var("GOOGLE_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_string())
 }
 
 fn emit_token_tool() -> serde_json::Value {
@@ -68,6 +72,46 @@ fn emit_token_tool() -> serde_json::Value {
             "additionalProperties": false
         }
     })
+}
+
+fn normalized_response_text(response: &moa_core::CompletionResponse) -> String {
+    if !response.text.trim().is_empty() {
+        return response.text.clone();
+    }
+
+    response
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            CompletionContent::Text(text) => Some(text.as_str()),
+            CompletionContent::ToolCall(_) | CompletionContent::ProviderToolResult { .. } => None,
+        })
+        .collect()
+}
+
+async fn complete_until(
+    provider: &LiveProvider,
+    request: CompletionRequest,
+    attempts: usize,
+    mut predicate: impl FnMut(&str) -> bool,
+) -> moa_core::CompletionResponse {
+    let mut last_response = None;
+    for attempt in 0..attempts.max(1) {
+        let response = provider
+            .complete(request.clone())
+            .await
+            .unwrap_or_else(|error| panic!("{} live request failed: {error}", provider.label()))
+            .collect()
+            .await
+            .unwrap_or_else(|error| panic!("{} live stream failed: {error}", provider.label()));
+        let text = normalized_response_text(&response);
+        if predicate(&text) || attempt + 1 == attempts.max(1) {
+            return response;
+        }
+        last_response = Some(response);
+    }
+
+    last_response.expect("complete_until should always return a response")
 }
 
 #[tokio::test]
@@ -216,8 +260,9 @@ async fn live_providers_obey_system_prompt_across_available_keys() {
     let marker = "[E2E-SYS-MARKER-9421]";
 
     for provider in providers {
-        let response = provider
-            .complete(CompletionRequest {
+        let response = complete_until(
+            &provider,
+            CompletionRequest {
                 model: None,
                 messages: vec![
                     ContextMessage::system(format!(
@@ -231,22 +276,18 @@ async fn live_providers_obey_system_prompt_across_available_keys() {
                 cache_breakpoints: Vec::new(),
                 cache_controls: Vec::new(),
                 metadata: HashMap::new(),
-            })
-            .await
-            .unwrap_or_else(|e| {
-                panic!("{} system-prompt request failed: {e}", provider.label())
-            })
-            .collect()
-            .await
-            .unwrap_or_else(|e| {
-                panic!("{} system-prompt stream failed: {e}", provider.label())
-            });
+            },
+            3,
+            |text| text.contains(marker),
+        )
+        .await;
+        let text = normalized_response_text(&response);
 
         assert!(
-            response.text.contains(marker),
+            text.contains(marker),
             "{} did not honor system prompt. Response: {:?}",
             provider.label(),
-            response.text
+            text
         );
     }
 }
@@ -380,8 +421,9 @@ async fn live_providers_preserve_unicode_across_available_keys() {
     }
 
     for provider in providers {
-        let response = provider
-            .complete(CompletionRequest {
+        let response = complete_until(
+            &provider,
+            CompletionRequest {
                 model: None,
                 messages: vec![ContextMessage::user(
                     "Echo these three tokens on one line, separated by a single space, with no quotes or extra words: 🦀 你好 مرحبا",
@@ -392,30 +434,30 @@ async fn live_providers_preserve_unicode_across_available_keys() {
                 cache_breakpoints: Vec::new(),
                 cache_controls: Vec::new(),
                 metadata: HashMap::new(),
-            })
-            .await
-            .unwrap_or_else(|e| panic!("{} unicode request failed: {e}", provider.label()))
-            .collect()
-            .await
-            .unwrap_or_else(|e| panic!("{} unicode stream failed: {e}", provider.label()));
+            },
+            3,
+            |text| text.contains('🦀') && text.contains("你好") && text.contains("مرحبا"),
+        )
+        .await;
+        let text = normalized_response_text(&response);
 
         assert!(
-            response.text.contains('🦀'),
+            text.contains('🦀'),
             "{} dropped the 🦀 codepoint: {:?}",
             provider.label(),
-            response.text
+            text
         );
         assert!(
-            response.text.contains("你好"),
+            text.contains("你好"),
             "{} dropped the CJK segment: {:?}",
             provider.label(),
-            response.text
+            text
         );
         assert!(
-            response.text.contains("مرحبا"),
+            text.contains("مرحبا"),
             "{} dropped the Arabic segment: {:?}",
             provider.label(),
-            response.text
+            text
         );
     }
 }

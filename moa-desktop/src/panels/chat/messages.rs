@@ -147,6 +147,7 @@ pub fn events_to_messages(records: &[EventRecord]) -> Vec<ChatMessage> {
                 input_summary,
                 risk_level,
                 prompt,
+                ..
             } => {
                 flush_tools(&mut out, &mut pending_tools, &mut pending_timestamp);
                 let mut resolved_prompt = prompt.clone();
@@ -167,6 +168,7 @@ pub fn events_to_messages(records: &[EventRecord]) -> Vec<ChatMessage> {
                 decision,
                 decided_by,
                 decided_at,
+                ..
             } => {
                 // Patch the most recent matching Approval message.
                 for msg in out.iter_mut().rev() {

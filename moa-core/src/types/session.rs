@@ -53,6 +53,30 @@ pub struct UserMessage {
     pub attachments: Vec<Attachment>,
 }
 
+/// Cancellation mode requested for a session virtual object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelMode {
+    /// Finish the current step, then stop at the next cooperative boundary.
+    Soft,
+    /// Abort as soon as the session reaches the next cancellation check.
+    Hard,
+}
+
+/// Outcome returned by one `Session::run_turn` invocation in the Restate VO loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOutcome {
+    /// Another turn should run immediately.
+    Continue,
+    /// No more work is pending right now.
+    Idle,
+    /// The session is paused on an approval boundary.
+    WaitingApproval,
+    /// The session has been cancelled.
+    Cancelled,
+}
+
 /// Signals delivered to a running session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -28,3 +28,6 @@ dist
 
 # OMC
 .omc/
+
+.restate-dev/
+restate-data/

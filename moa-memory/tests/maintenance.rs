@@ -96,12 +96,12 @@ async fn consolidation_normalizes_dates_and_resolves_conflicts() {
         .await
         .unwrap();
 
-    let mut removed = sample_page("Legacy", PageType::Entity, "# Legacy\n\nDeprecated.\n");
+    let mut removed = sample_page("Retired", PageType::Entity, "# Retired\n\nDeprecated.\n");
     removed
         .metadata
         .insert("entity_exists".to_string(), serde_json::Value::Bool(false));
     store
-        .write_page(&scope, &"entities/legacy.md".into(), removed)
+        .write_page(&scope, &"entities/retired.md".into(), removed)
         .await
         .unwrap();
 
@@ -122,7 +122,7 @@ async fn consolidation_normalizes_dates_and_resolves_conflicts() {
     assert!(architecture.content.contains("2026-"));
     assert!(
         store
-            .read_page(&scope, &"entities/legacy.md".into())
+            .read_page(&scope, &"entities/retired.md".into())
             .await
             .is_err()
     );

@@ -340,12 +340,16 @@ struct TurnPlan {
 }
 
 #[derive(Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
 enum MockTurnBehavior {
     Simple,
     FileRead {
         path: String,
         start_line: Option<usize>,
         end_line: Option<usize>,
+    },
+    Bash {
+        cmd: String,
     },
 }
 
@@ -518,9 +522,6 @@ fn completion_stream_from_scripted_response(
         content: response.content,
         stop_reason: response.stop_reason,
         model: capabilities.model_id.clone(),
-        input_tokens: response.input_tokens,
-        output_tokens,
-        cached_input_tokens: response.cached_input_tokens,
         usage: TokenUsage {
             input_tokens_uncached: response
                 .input_tokens
@@ -1035,7 +1036,12 @@ async fn simulate_session(
                             last_sequence_num = record.sequence_num;
                             match &record.event {
                                 Event::ToolCall { .. } => tool_calls += 1,
-                                Event::ToolError { .. } | Event::Error { .. } => error_count += 1,
+                                Event::ToolError { error, .. }
+                                    if !is_expected_harness_denial(error) =>
+                                {
+                                    error_count += 1;
+                                }
+                                Event::Error { .. } => error_count += 1,
                                 _ => {}
                             }
                         }
@@ -1137,6 +1143,10 @@ fn latest_session_note(events: &[EventRecord]) -> Option<String> {
         Event::Error { message, .. } => Some(message.clone()),
         _ => None,
     })
+}
+
+fn is_expected_harness_denial(message: &str) -> bool {
+    message.contains("auto-denied by moa-loadtest")
 }
 
 fn merge_failure_reason(
@@ -1622,6 +1632,28 @@ fn scripted_responses_for_plan(plan: &SessionPlan) -> VecDeque<ScriptedResponse>
                     turn_index,
                 ));
             }
+            MockTurnBehavior::Bash { cmd } => {
+                let tool_id = Uuid::now_v7().to_string();
+                responses.push_back(
+                    ScriptedResponse::tool_call(
+                        "bash",
+                        serde_json::json!({
+                            "cmd": cmd,
+                        }),
+                        tool_id,
+                    )
+                    .with_usage(TokenUsage {
+                        input_tokens_uncached: 24,
+                        input_tokens_cache_write: 0,
+                        input_tokens_cache_read: if turn_index == 0 { 0 } else { 52 },
+                        output_tokens: 0,
+                    }),
+                );
+                responses.push_back(scripted_text_response(
+                    format!("mock approval turn {} complete", turn_index + 1),
+                    turn_index,
+                ));
+            }
         }
     }
 
@@ -1714,6 +1746,10 @@ impl SessionProfileKind {
 mod tests {
     use super::*;
 
+    fn repo_root() -> PathBuf {
+        PathBuf::from("/Users/hwuiwon/Github/moa")
+    }
+
     fn inspection_files() -> InspectionFiles {
         InspectionFiles {
             summary_file: "Cargo.toml".to_string(),
@@ -1732,9 +1768,78 @@ mod tests {
             output: OutputFormat::Json,
             model: None,
             config_path: None,
-            workspace_root: Some(PathBuf::from("/Users/hwuiwon/Github/moa")),
+            workspace_root: Some(repo_root()),
             daemon_socket: None,
         }
+    }
+
+    async fn run_custom_mock_loadtest(
+        options: LoadTestOptions,
+        plans: Vec<SessionPlan>,
+    ) -> Result<LoadTestReport> {
+        let mut config = load_config(options.config_path.as_deref())?;
+        config.observability.enabled = false;
+        config.metrics.enabled = false;
+        config.memory.auto_bootstrap = false;
+        config.compaction.enabled = false;
+        config.session_limits.max_turns = 0;
+        config.session_limits.loop_detection_threshold = 0;
+
+        let workspace_root = Some(resolve_workspace_root(options.workspace_root.as_deref())?);
+        let backend = build_backend(&options, &mut config, workspace_root.clone()).await?;
+        let started = Instant::now();
+        let run_result = run_sessions(
+            backend.clone(),
+            &options,
+            plans,
+            workspace_root.clone(),
+            started,
+        )
+        .await;
+        let cleanup_result = backend.cleanup().await;
+
+        match (run_result, cleanup_result) {
+            (Ok(report), Ok(())) => Ok(report),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+            (Err(error), Err(_cleanup_error)) => Err(error),
+        }
+    }
+
+    fn approval_heavy_plans(sessions: usize) -> Vec<SessionPlan> {
+        (0..sessions)
+            .map(|index| SessionPlan {
+                profile: SessionProfileKind::Long,
+                title: format!("approval-heavy-{index:04}"),
+                turns: vec![
+                    TurnPlan {
+                        prompt: "Summarize the active workspace in one sentence.".to_string(),
+                        mock_behavior: MockTurnBehavior::Simple,
+                    },
+                    TurnPlan {
+                        prompt: "Use bash to print an approval marker before answering."
+                            .to_string(),
+                        mock_behavior: MockTurnBehavior::Bash {
+                            cmd: format!("printf 'approval-{index}-1\\n'"),
+                        },
+                    },
+                    TurnPlan {
+                        prompt: "Report one likely runtime bottleneck.".to_string(),
+                        mock_behavior: MockTurnBehavior::Simple,
+                    },
+                    TurnPlan {
+                        prompt: "Use bash to print a second approval marker.".to_string(),
+                        mock_behavior: MockTurnBehavior::Bash {
+                            cmd: format!("printf 'approval-{index}-2\\n'"),
+                        },
+                    },
+                    TurnPlan {
+                        prompt: "Give a short readiness recommendation.".to_string(),
+                        mock_behavior: MockTurnBehavior::Simple,
+                    },
+                ],
+            })
+            .collect()
     }
 
     #[tokio::test]
@@ -1782,6 +1887,61 @@ mod tests {
                 .turns
                 .iter()
                 .any(|turn| matches!(turn.mock_behavior, MockTurnBehavior::FileRead { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_heavy_sessions_auto_deny_cleanly_under_concurrency() {
+        let session_count = 24;
+        let options = LoadTestOptions {
+            mode: LoadMode::Mock,
+            target: LoadTarget::Local,
+            sessions: session_count,
+            profile: SessionProfileKind::Long,
+            inter_message_delay: Duration::ZERO,
+            turn_timeout: Duration::from_secs(20),
+            output: OutputFormat::Json,
+            model: None,
+            config_path: None,
+            workspace_root: Some(repo_root()),
+            daemon_socket: None,
+        };
+
+        let report = run_custom_mock_loadtest(options, approval_heavy_plans(session_count))
+            .await
+            .expect("approval-heavy loadtest report");
+
+        assert_eq!(report.sessions_requested, session_count);
+        assert_eq!(report.sessions_completed, session_count);
+        assert_eq!(report.sessions_failed, 0);
+        assert_eq!(report.auto_denied_approvals, session_count * 2);
+        assert_eq!(report.error_count, 0);
+        assert!(
+            report.sessions.iter().all(|session| {
+                session.failure_reason.is_none() && session.auto_denied_approvals == 2
+            }),
+            "approval-heavy sessions should complete after automatic denials"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "stress validation for realistic mock traffic"]
+    async fn mock_short_profile_handles_hundred_sessions_within_throughput_budget() {
+        let mut options = test_options(SessionProfileKind::Short);
+        options.sessions = 100;
+        options.inter_message_delay = Duration::ZERO;
+        options.turn_timeout = Duration::from_secs(20);
+
+        let started = Instant::now();
+        let report = run_loadtest(options).await.expect("loadtest report");
+
+        assert_eq!(report.sessions_requested, 100);
+        assert_eq!(report.sessions_completed, 100);
+        assert_eq!(report.sessions_failed, 0);
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "mock mixed profile exceeded 30s: {:?}",
+            started.elapsed()
         );
     }
 }

@@ -657,9 +657,6 @@ mod tests {
                 )],
                 stop_reason: StopReason::EndTurn,
                 model: ModelId::new("claude-sonnet-4-6"),
-                input_tokens: 120,
-                output_tokens: 40,
-                cached_input_tokens: 0,
                 usage: TokenUsage {
                     input_tokens_uncached: 120,
                     input_tokens_cache_write: 0,

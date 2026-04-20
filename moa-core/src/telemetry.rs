@@ -54,6 +54,8 @@ pub struct TelemetryConfig {
     pub debug: bool,
     /// Optional explicit log file path.
     pub log_file: Option<PathBuf>,
+    /// Emits structured JSON logs to stdout instead of the human-readable console formatter.
+    pub json_stdout: bool,
 }
 
 /// Returns the default MOA operator log file path.
@@ -69,9 +71,23 @@ pub fn init_observability(
     config: &MoaConfig,
     telemetry: &TelemetryConfig,
 ) -> Result<TelemetryGuard> {
-    let console_layer = tracing_subscriber::fmt::layer()
-        .with_target(true)
-        .with_filter(LevelFilter::WARN);
+    let console_layer = if telemetry.json_stdout {
+        Some(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_target(true)
+                .with_current_span(true)
+                .flatten_event(true)
+                .boxed(),
+        )
+    } else {
+        Some(
+            tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_filter(LevelFilter::WARN)
+                .boxed(),
+        )
+    };
     let env_filter = Some(
         EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new(default_env_filter_directive())),

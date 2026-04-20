@@ -81,7 +81,7 @@ async fn provider_streams_tokens_incrementally() {
 
     let response = stream.collect().await.unwrap();
     assert_eq!(response.text, "Hello");
-    assert_eq!(response.output_tokens, 5);
+    assert_eq!(response.usage.output_tokens, 5);
 
     server.abort();
 }

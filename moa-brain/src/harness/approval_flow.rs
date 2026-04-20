@@ -68,6 +68,7 @@ pub(super) async fn wait_for_signal_approval(
                         session_id,
                         Event::ApprovalDecided {
                             request_id,
+                            sub_agent_id: None,
                             decision: decision.clone(),
                             decided_by: session.user_id.to_string(),
                             decided_at: chrono::Utc::now(),
@@ -381,6 +382,7 @@ pub(super) async fn wait_for_approval(
                         session_id,
                         Event::ApprovalDecided {
                             request_id,
+                            sub_agent_id: None,
                             decision: decision.clone(),
                             decided_by: session.user_id.to_string(),
                             decided_at: chrono::Utc::now(),

@@ -1,0 +1,31 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: moa-orchestrator
+  namespace: moa-system
+spec:
+  scaleTargetRef:
+    apiVersion: restate.dev/v1beta1
+    kind: RestateDeployment
+    name: moa-orchestrator
+  minReplicas: 2
+  maxReplicas: 50
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+  behavior:
+    scaleUp:
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60

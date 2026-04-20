@@ -26,7 +26,6 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::{ConsolidationReport, FileMemoryStore, bootstrap};
 use moa_providers::{ModelRouter, resolve_provider_selection};
-use moa_security::cleanup_overly_broad_shell_rules;
 use moa_session::{
     NeonBranchManager, PostgresSessionStore, SessionEventStream, create_session_store,
 };
@@ -589,23 +588,6 @@ impl LocalOrchestrator {
         }
         drop(discovered_workspace_instructions);
 
-        match cleanup_overly_broad_shell_rules(self.session_store.as_ref(), &workspace_id).await {
-            Ok(cleaned) if cleaned > 0 => {
-                tracing::info!(
-                    workspace_id = %workspace_id,
-                    cleaned,
-                    "removed legacy shell approval rules during workspace initialization"
-                );
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(
-                    workspace_id = %workspace_id,
-                    %error,
-                    "failed to clean up legacy shell approval rules during workspace initialization"
-                );
-            }
-        }
         self.tool_router
             .remember_workspace_root(workspace_id.clone(), workspace_root.clone())
             .await;
@@ -957,6 +939,7 @@ async fn run_session_task(
                         context.session_id,
                         Event::ApprovalDecided {
                             request_id,
+                            sub_agent_id: None,
                             decision,
                             decided_by: "orchestrator".to_string(),
                             decided_at: Utc::now(),

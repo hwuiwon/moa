@@ -1,6 +1,6 @@
 # 02 — Brain Orchestration
 
-_Temporal workflows, Fly.io hosting, local runtime mode, brain lifecycle._
+_Restate-backed cloud orchestration, local runtime mode, brain lifecycle._
 
 ---
 
@@ -8,12 +8,16 @@ _Temporal workflows, Fly.io hosting, local runtime mode, brain lifecycle._
 
 Brains are stateless harness loops. They wake from a session log, compile context, call an LLM, route tool calls to hands, and emit events. Nothing in a brain needs to survive a crash — the session log is the recovery mechanism.
 
-Two orchestrator implementations share the same `BrainOrchestrator` trait:
+Two runtime shapes share the same brain harness and durable event log:
 
 | Mode | Orchestrator | When |
 |---|---|---|
-| Cloud | `TemporalOrchestrator` | Production: `moa --cloud` |
+| Cloud | Restate `Session` / `SubAgent` objects plus Services and Workflows | Production deployment |
 | Local | `LocalOrchestrator` | Zero-setup: `moa` |
+
+Migration history: MOA previously used a different cloud orchestration stack.
+The production design is now Restate-only; older rollout notes remain only
+for historical reference.
 
 ## Converged lifecycle layer
 
@@ -26,11 +30,11 @@ re-implementing session wakeup semantics:
   persisted status changes. It updates the session row, emits the
   matching `SessionStatusChanged` event, and clears snapshots on cancel.
 - The brain harness uses that same `transition_status(...)` API when it
-  enters `WaitingApproval` or resumes `Running`, so Local and Temporal
+  enters `WaitingApproval` or resumes `Running`, so Local and Restate
   persist identical status transitions.
-- Local and Temporal keep only adapter-specific concerns:
+- Local and Restate keep only adapter-specific concerns:
   - Local: Tokio task supervision, runtime broadcasts, local filesystem root wiring
-  - Temporal: workflow signals, activity boundaries, worker/runtime connectivity
+  - Restate: Virtual Object turn boundaries, awakeables, service/workflow connectivity
 
 This means new orchestrator backends should reuse the shared session
 engine and the store-level transition API instead of copying lifecycle
@@ -38,186 +42,82 @@ rules into a new adapter.
 
 ---
 
-## Cloud mode: Temporal.io
+## Cloud mode: Restate
 
-### Workflow structure
+Production orchestration runs through Restate. Each session is a keyed
+`Session` Virtual Object, tool execution and provider calls live behind
+stateless Services, and one-shot scheduled work such as consolidation runs
+as Workflows. The full handler map and Kubernetes deployment topology live
+in [`12-restate-architecture.md`](12-restate-architecture.md); this document
+focuses on the lifecycle shape.
 
-Each session maps to one Temporal workflow:
+### Session structure
 
 ```rust
-// Pseudocode for the Temporal workflow definition
-#[workflow]
-async fn session_workflow(ctx: WorkflowContext, session_id: SessionId) -> Result<()> {
-    // 1. Wake: load session metadata
-    let session = activity!(get_session, session_id).await?;
-    
-    loop {
-        // 2. Run one brain turn (activity)
-        let turn_result = activity!(brain_turn, session_id).await?;
-        
-        match turn_result {
-            TurnResult::Continue => continue,
-            TurnResult::Complete => break,
-            TurnResult::NeedsApproval(request) => {
-                // 3. Wait for human signal (indefinitely)
-                emit_event(session_id, Event::ApprovalRequested(request));
-                let decision = ctx.wait_for_signal::<ApprovalDecided>().await;
-                emit_event(session_id, Event::ApprovalDecided(decision));
-            }
-            TurnResult::Error(e) => {
-                emit_event(session_id, Event::Error(e));
-                break;
-            }
-        }
-        
-        // 4. Check for queued messages
-        if let Some(msg) = ctx.try_receive_signal::<QueuedMessage>() {
-            emit_event(session_id, Event::QueuedMessage(msg));
-        }
-        
-        // 5. Check for cancellation
-        if ctx.try_receive_signal::<CancelRequested>().is_some() {
-            emit_event(session_id, Event::SessionCancelled);
-            break;
-        }
-    }
-    
-    Ok(())
+#[restate_sdk::object]
+trait Session {
+    async fn post_message(ctx: ObjectContext<'_>, msg: UserMessage) -> Result<(), HandlerError>;
+    async fn approve(ctx: ObjectContext<'_>, decision: ApprovalDecision) -> Result<(), HandlerError>;
+    async fn cancel(ctx: ObjectContext<'_>, mode: CancelMode) -> Result<(), HandlerError>;
+    #[shared]
+    async fn status(ctx: SharedObjectContext<'_>) -> Result<SessionStatus, HandlerError>;
+    async fn run_turn(ctx: ObjectContext<'_>) -> Result<TurnOutcome, HandlerError>;
 }
 ```
 
-### Activity: `brain_turn`
+The important properties are:
 
-One turn of the brain loop, implemented as a Temporal activity:
+- One session key has single-writer semantics, so concurrent messages queue
+  naturally without extra locking.
+- Durable state keeps only orchestration hot-path data such as pending
+  messages, awakeable ids, and turn counters.
+- Product-visible history remains in Postgres through `SessionStore`.
+- LLM calls and tool calls are delegated to `LLMGateway` and `ToolExecutor`
+  services so the side effects can be wrapped in `ctx.run()` and replayed
+  safely.
 
-```rust
-#[activity]
-async fn brain_turn(session_id: SessionId) -> Result<TurnResult> {
-    let store = get_session_store();
-    let memory = get_memory_store();
-    let llm = get_llm_provider();
-    let hands = get_hand_router();
-    
-    // 1. Load recent events
-    let events = store.get_events(session_id, EventRange::recent(100)).await?;
-    
-    // 2. Compile context through 7-stage pipeline
-    let mut ctx = WorkingContext::new(session_id, llm.capabilities());
-    for processor in get_pipeline() {
-        processor.process(&mut ctx)?;
-    }
-    
-    // 3. Call LLM
-    let response = llm.complete(ctx.into_request()).await?;
-    
-    // 4. Process response
-    for block in response.content {
-        match block {
-            ContentBlock::Text(text) => {
-                store.emit_event(session_id, Event::BrainResponse(text)).await?;
-            }
-            ContentBlock::ToolCall(call) => {
-                // Check if approval needed
-                if needs_approval(&call, &session.permissions) {
-                    return Ok(TurnResult::NeedsApproval(call.into()));
-                }
-                
-                // Execute tool
-                store.emit_event(session_id, Event::ToolCall(call.clone())).await?;
-                let result = hands.execute(&call.tool, &call.input).await;
-                store.emit_event(session_id, Event::ToolResult(result)).await?;
-            }
-        }
-    }
-    
-    // 5. Check if done
-    if response.stop_reason == StopReason::EndTurn {
-        // Consider writing memory
-        maybe_write_memory(session_id, &events, &response).await?;
-        return Ok(TurnResult::Complete);
-    }
-    
-    Ok(TurnResult::Continue)
-}
-```
+### Durable control flow
 
-### Temporal signals mapping
-
-| User action | Temporal signal | Handler |
+| User action | Restate primitive | Effect |
 |---|---|---|
-| Send message while running | `QueuedMessage` | Appended to session, processed next turn |
-| Tap "Allow Once" | `ApprovalDecided { decision: AllowOnce }` | Unblocks waiting workflow |
-| Tap "Always Allow" | `ApprovalDecided { decision: AlwaysAllow }` | Unblocks + stores permission rule |
-| Tap "Deny" | `ApprovalDecided { decision: Deny }` | Unblocks + brain handles denial |
-| Tap "Stop" | `CancelRequested { mode: Soft }` | Complete current tool, then stop |
-| Force stop | `CancelRequested { mode: Hard }` | Abort immediately |
+| Send message while running | `Session::post_message` | Queued by the object and processed in order |
+| Tap "Allow Once" | `Session::approve` resolving an awakeable | Resumes the waiting turn |
+| Tap "Always Allow" | `Session::approve` + policy write | Resumes turn and persists a rule |
+| Tap "Deny" | `Session::approve` | Resumes turn with denial |
+| Tap "Stop" | `Session::cancel(Soft)` | Finish current tool, then stop |
+| Force stop | `Session::cancel(Hard)` | Exit at the next durable cancellation point |
 
-### Sub-brains via child workflows
+### Sub-agents
 
-When the main brain needs to dispatch parallel specialist work:
+When the main brain needs specialist work, it dispatches a `SubAgent`
+Virtual Object and awaits its durable result rather than spawning a second
+workflow engine:
 
 ```rust
-// Main brain spawns a child workflow for a sub-task
-let child = ctx.spawn_child_workflow(
-    "session_workflow",
-    ChildSessionRequest {
-        parent_session_id: session_id,
-        task: "Research current Fly.io pricing",
-        tools: vec!["web_search", "web_fetch"],
-        max_turns: 10,
-    }
+let result = dispatch_sub_agent(
+    &ctx,
+    parent_session_id,
+    None,
+    current_depth,
+    "Research current provider pricing".to_string(),
+    vec!["web_search".to_string(), "web_fetch".to_string()],
+    10_000,
 ).await?;
-
-// Wait for child to complete and get summary
-let result = child.result().await?;
 ```
 
-### Temporal configuration
+### Hosting: Kubernetes + Restate
 
-```toml
-# ~/.moa/config.toml (cloud section)
-[temporal]
-address = "your-namespace.tmprl.cloud:7233"
-namespace = "moa-production"
-task_queue = "moa-brains"
-api_key = "..." # or via TEMPORAL_API_KEY env var
+Production deployment now runs as:
 
-# Workflow settings
-workflow_execution_timeout = "24h"
-activity_start_to_close_timeout = "5m"
-activity_retry_max_attempts = 3
-activity_retry_initial_interval = "1s"
-activity_retry_backoff_coefficient = 2.0
+- A `RestateCluster` in Kubernetes
+- A `RestateDeployment` for `moa-orchestrator`
+- Managed Postgres / Neon for the event log and memory state
+- Alloy / Grafana for traces, metrics, and logs
+- Daytona or E2B for remote hands
 
-[flyio]
-api_token = "..." # or via FLY_API_TOKEN
-app_name = "moa-brains"
-region = "iad"  # primary region
-min_machines = 0
-max_machines = 10
-machine_size = "shared-cpu-1x"
-memory_mb = 256
-auto_suspend_timeout = "5m"
-```
-
-### Hosting: Fly.io Machines
-
-Brains run as Fly.io Machines. Key behaviors:
-
-- **Auto-suspend**: Idle brains suspend after 5 minutes (only storage cost: $0.15/GB/month)
-- **Auto-resume**: Sub-second resume when a new message arrives
-- **Scale-to-zero**: No sessions active → no machines running
-- **Multi-region**: Deploy close to users for lower latency
-- **Single binary**: The `moa-cli` binary is the Machine entrypoint
-
-Deployment:
-```bash
-# Build the single binary
-cargo build --release --features cloud,temporal
-
-# Deploy to Fly.io
-fly deploy --image moa:latest
-```
+See [`12-restate-architecture.md`](12-restate-architecture.md) for the
+durable-execution design and [`../k8s/`](../k8s/) for the deployment
+manifests.
 
 ---
 
@@ -237,9 +137,10 @@ The orchestrator test strategy is split in two layers:
   - approval resume ordering is stable
   - soft cancel while waiting for approval cancels cleanly
 - Adapter tests:
-  `local_orchestrator.rs` and `temporal_orchestrator.rs`
+  `local_orchestrator.rs` and the Restate integration suites under
+  `tests/integration/`
   These keep only backend-specific checks such as local runtime
-  broadcasts or Temporal worker-restart recovery.
+  broadcasts or Restate replay/recovery behavior.
 
 Recommended commands:
 
@@ -247,11 +148,11 @@ Recommended commands:
 # Local adapter + shared contract suite
 cargo test -p moa-orchestrator --test local_orchestrator
 
-# Temporal adapter + shared contract suite against a local dev server
-cargo test -p moa-orchestrator --features temporal --test temporal_orchestrator -- --test-threads=1
+# Restate integration coverage against a local restate-server
+cargo test -p moa-orchestrator --test integration
 
-# Optional live-provider Temporal smoke
-MOA_RUN_LIVE_PROVIDER_TESTS=1 cargo test -p moa-orchestrator --features temporal --test temporal_orchestrator temporal_orchestrator_live_anthropic_smoke -- --ignored --exact --nocapture
+# Optional live-provider Restate smoke
+MOA_RUN_LIVE_PROVIDER_TESTS=1 cargo test -p moa-orchestrator --test llm_gateway_e2e -- --ignored --exact --nocapture
 ```
 
 ### Implementation
@@ -395,7 +296,7 @@ impl BrainOrchestrator for LocalOrchestrator {
 }
 ```
 
-### The brain loop (shared between local and Temporal)
+### The brain loop (shared between local runtime and Restate)
 
 ```rust
 async fn brain_loop(
@@ -522,7 +423,7 @@ impl HandProvider for LocalHandProvider {
 
 ### Local cron (memory consolidation)
 
-Without Temporal, consolidation runs via `tokio-cron-scheduler`:
+In the local runtime, consolidation runs via `tokio-cron-scheduler`:
 
 ```rust
 // In LocalOrchestrator initialization
@@ -560,20 +461,15 @@ scheduler.add(consolidation_job).await?;
 6. Open the desktop window and connect it to the local runtime
 ```
 
-### `moa --cloud`
+### Cloud deployment
 
 ```
-1. Parse CLI args (--cloud → connect to Temporal)
-2. Load config from ~/.moa/config.toml
-3. Initialize:
-   - SessionStore → PostgresSessionStore(config.database.url)
-   - MemoryStore → FileMemoryStore
-   - LLMProvider → from config
-   - HandProvider → DaytonaHandProvider
-   - Orchestrator → TemporalOrchestrator
-4. Start messaging gateway (Telegram + Slack + Discord per config)
-5. Gateway receives messages → routes to Orchestrator
-6. Optionally also start a local desktop client for monitoring
+1. Build and push the `moa-orchestrator` image
+2. Apply the `k8s/` manifests for the Restate cluster and orchestrator deployment
+3. Configure secrets for Postgres, provider API keys, and observability
+4. Register the orchestrator handlers with Restate
+5. Route gateway traffic to the Restate ingress
+6. Observe sessions through the cluster dashboards and traces
 ```
 
 ### `moa exec "deploy to staging"` (non-interactive)
@@ -621,17 +517,6 @@ memory_dir = "~/.moa/memory"
 [cloud]
 enabled = false                 # set to true for cloud mode
 # memory_dir = "/data/memory"
-
-[cloud.temporal]
-address = ""
-namespace = ""
-task_queue = "moa-brains"
-api_key_env = "TEMPORAL_API_KEY"
-
-[cloud.flyio]
-api_token_env = "FLY_API_TOKEN"
-app_name = ""
-region = "iad"
 
 [cloud.hands]
 default_provider = "daytona"    # daytona | e2b | local

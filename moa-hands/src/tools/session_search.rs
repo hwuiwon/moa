@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use moa_core::{
-    BuiltInTool, Event, EventFilter, EventRecord, EventType, MoaError, Result, ToolContext,
-    ToolInputShape, ToolOutput, ToolPolicySpec, read_tool_policy,
+    BuiltInTool, Event, EventFilter, EventRecord, EventType, IdempotencyClass, MoaError, Result,
+    ToolContext, ToolInputShape, ToolOutput, ToolPolicySpec, read_tool_policy,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -47,6 +47,10 @@ impl BuiltInTool for SessionSearchTool {
 
     fn policy_spec(&self) -> ToolPolicySpec {
         read_tool_policy(ToolInputShape::Query)
+    }
+
+    fn idempotency_class(&self) -> IdempotencyClass {
+        IdempotencyClass::Idempotent
     }
 
     async fn execute(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<ToolOutput> {

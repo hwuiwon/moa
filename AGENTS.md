@@ -10,7 +10,7 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 |---|---|
 | `docs/00-direction.md` | Product identity and philosophy |
 | `docs/01-architecture-overview.md` | System diagram, all trait definitions, workspace layout |
-| `docs/02-brain-orchestration.md` | Temporal, Fly.io, LocalOrchestrator, brain loop |
+| `docs/02-brain-orchestration.md` | Restate orchestration, local runtime mode, brain loop |
 | `docs/03-communication-layer.md` | Gateway, desktop/CLI communication, approvals, observation |
 | `docs/04-memory-architecture.md` | File-wiki, search indexing, scoping, consolidation |
 | `docs/05-session-event-log.md` | Postgres event schema, event types, compaction |
@@ -31,7 +31,7 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 7. **All tests go in a `tests/` directory within each crate** (integration tests) or inline `#[cfg(test)] mod tests` (unit tests).
 8. **Run `cargo clippy` and `cargo fmt` before considering any step complete.**
 9. **No `unwrap()` in library code.** Use `?` or explicit error handling.
-10. **Feature flags** control optional dependencies: `telegram`, `slack`, `discord`, `cloud`, `temporal`.
+10. **Feature flags** control optional dependencies: `telegram`, `slack`, `discord`, `cloud`.
 11. **If `graphify-out/GRAPH_REPORT.md` exists, consult it before broad repo exploration or raw-file search.**
 
 ## Conventions

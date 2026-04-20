@@ -147,6 +147,7 @@ mod tests {
     fn approval_request() -> ApprovalRequest {
         ApprovalRequest {
             request_id: Uuid::now_v7(),
+            sub_agent_id: None,
             tool_name: "bash".to_string(),
             input_summary: "npm test".to_string(),
             risk_level: RiskLevel::High,

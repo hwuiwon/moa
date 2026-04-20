@@ -24,25 +24,25 @@ pub use analytics::{
 };
 pub use broadcast_recv::{RecvResult, recv_with_lag_handling};
 pub use config::{
-    CloudConfig, CloudFlyioConfig, CloudHandsConfig, CloudTemporalConfig, CompactionConfig,
-    ContextSnapshotConfig, DaemonConfig, DatabaseConfig, DatabaseNeonConfig, DesktopConfig,
-    GatewayConfig, GeneralConfig, LocalConfig, McpCredentialConfig, McpServerConfig,
-    McpTransportConfig, MemoryConfig, MetricsConfig, MoaConfig, ModelsConfig, ObservabilityConfig,
-    OtlpProtocol, PermissionsConfig, ProviderCredentialConfig, ProvidersConfig, ToolBudgetConfig,
-    ToolOutputConfig,
+    CloudConfig, CloudFlyioConfig, CloudHandsConfig, CompactionConfig, ContextSnapshotConfig,
+    DaemonConfig, DatabaseConfig, DatabaseNeonConfig, DesktopConfig, GatewayConfig, GeneralConfig,
+    LocalConfig, McpCredentialConfig, McpServerConfig, McpTransportConfig, MemoryConfig,
+    MetricsConfig, MoaConfig, ModelsConfig, ObservabilityConfig, OtlpProtocol, PermissionsConfig,
+    ProviderCredentialConfig, ProvidersConfig, ToolBudgetConfig, ToolOutputConfig,
 };
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
 pub use diff::compute_unified_diff;
 pub use error::{MoaError, Result};
 pub use events::Event;
 pub use runtime_metrics::{
-    SessionTaskMonitor, init_metrics, metrics_endpoint_url, record_broadcast_lag,
-    record_cache_hit_rate, record_compaction_tier_applied, record_embedding_queue_depth,
-    record_llm_request, record_llm_streaming_duration, record_llm_ttft,
-    record_pipeline_compile_duration_metric, record_sandbox_provision_duration,
-    record_session_created, record_sessions_active, record_tokens_input_cached,
-    record_tokens_input_uncached, record_tokens_output, record_tool_call,
-    record_tool_output_truncated_metric, record_turn_completed, record_turn_latency,
+    SessionTaskMonitor, init_metrics, metrics_endpoint_url, record_approval_wait,
+    record_broadcast_lag, record_cache_hit_rate, record_compaction_tier_applied,
+    record_embedding_queue_depth, record_llm_cost_cents, record_llm_request,
+    record_llm_streaming_duration, record_llm_ttft, record_pipeline_compile_duration_metric,
+    record_sandbox_provision_duration, record_session_created, record_session_error,
+    record_sessions_active, record_tokens_input_cached, record_tokens_input_uncached,
+    record_tokens_output, record_tool_call, record_tool_output_truncated_metric,
+    record_turn_completed, record_turn_latency,
 };
 pub use session_replay::{
     CountedSessionStore, TurnReplayCounters, TurnReplaySnapshot, record_pipeline_compile_duration,

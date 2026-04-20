@@ -264,9 +264,6 @@ impl LLMProvider for ScriptedProvider {
             content: response.content,
             stop_reason: response.stop_reason,
             model: self.capabilities.model_id.clone(),
-            input_tokens: response.input_tokens,
-            output_tokens,
-            cached_input_tokens: response.cached_input_tokens,
             usage: TokenUsage {
                 input_tokens_uncached: response
                     .input_tokens

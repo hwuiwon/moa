@@ -186,6 +186,26 @@ impl ToolRouter {
         self.registry.tools.contains_key(name)
     }
 
+    /// Returns one registered tool definition by name.
+    pub fn tool_definition(&self, name: &str) -> Option<moa_core::ToolDefinition> {
+        self.registry
+            .tools
+            .get(name)
+            .map(|registered| registered.definition.clone())
+    }
+
+    /// Returns every registered tool definition in stable name order.
+    pub fn tool_definitions(&self) -> Vec<moa_core::ToolDefinition> {
+        let mut definitions = self
+            .registry
+            .tools
+            .values()
+            .map(|registered| registered.definition.clone())
+            .collect::<Vec<_>>();
+        definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        definitions
+    }
+
     /// Restricts the router to an explicit set of enabled tool names.
     #[must_use]
     pub fn with_enabled_tools<I, S>(mut self, tool_names: I) -> Self

@@ -9,7 +9,7 @@ MOA's runtime assumes a single local process with in-memory `broadcast` channels
 - `moa-core/src/daemon.rs` — `DaemonCommand`, `DaemonReply`, `DaemonStreamEvent`
 - `moa-core/src/telemetry.rs` — `init_observability()`, `LevelFilter::WARN` default
 - `moa-orchestrator/src/local.rs` — `LocalOrchestrator::observe_runtime()` (concrete, not on trait)
-- `moa-orchestrator/src/temporal.rs` — `TemporalOrchestrator` (no observe_runtime)
+- `moa-orchestrator/src/cloud_runtime.rs` — cloud runtime without `observe_runtime`
 - `moa-cli/src/daemon.rs` — `DaemonState` with `Arc<Mutex<ChatRuntime>>`, `ObserveSession` handler
 - `moa-cli/src/main.rs` — CLI entry point, telemetry init
 - `moa-tui/src/runner.rs` — `DaemonChatRuntime`, how TUI consumes daemon events
@@ -24,7 +24,7 @@ MOA's runtime assumes a single local process with in-memory `broadcast` channels
 ## Part A: SSE Observation Bridge
 
 ### Goal
-Promote `observe_runtime()` to the `BrainOrchestrator` trait and add an HTTP/SSE endpoint that bridges `broadcast::Receiver<RuntimeEvent>` to remote clients. The `TemporalOrchestrator` implements this by polling Temporal workflow history for new events.
+Promote `observe_runtime()` to the `BrainOrchestrator` trait and add an HTTP/SSE endpoint that bridges `broadcast::Receiver<RuntimeEvent>` to remote clients. The cloud runtime implements this by polling workflow history for new events.
 
 ### Tasks
 
@@ -42,8 +42,8 @@ async fn observe_runtime(
 #### A2. Implement on `LocalOrchestrator`
 Move the existing concrete `observe_runtime()` into the trait impl. It already returns `broadcast::Receiver<RuntimeEvent>` — just wrap in `Ok(Some(...))`.
 
-#### A3. Implement on `TemporalOrchestrator`
-Temporal has no push-based event stream. Use a poll-and-emit pattern:
+#### A3. Implement on the cloud runtime
+The cloud runtime has no push-based event stream. Use a poll-and-emit pattern:
 ```rust
 async fn observe_runtime(&self, session_id: SessionId) -> Result<Option<broadcast::Receiver<RuntimeEvent>>> {
     let (tx, rx) = broadcast::channel(256);
@@ -310,7 +310,7 @@ Log file: ~/.moa/moa.log (--debug to enable)
 moa-core/src/traits.rs              # + observe_runtime() on BrainOrchestrator
 moa-core/src/types.rs               # + RuntimeEvent::event_type()
 moa-orchestrator/src/local.rs       # Move observe_runtime into trait impl
-moa-orchestrator/src/temporal.rs    # Poll-based observe_runtime
+moa-orchestrator/src/cloud_runtime.rs # Poll-based observe_runtime
 moa-cli/src/api.rs                  # (new) Axum SSE server
 moa-cli/src/main.rs                 # Start API server in cloud mode
 
@@ -328,7 +328,7 @@ moa-cli/src/main.rs                 # --debug, --log-file flags
 **Part A:**
 1. `BrainOrchestrator::observe_runtime()` is on the trait.
 2. `LocalOrchestrator` returns a `broadcast::Receiver<RuntimeEvent>`.
-3. `TemporalOrchestrator` returns a poll-based receiver that emits events from the session store.
+3. The cloud runtime returns a poll-based receiver that emits events from the session store.
 4. `GET /sessions/{id}/stream` returns an SSE stream of `RuntimeEvent`s (when API server is running).
 5. Multiple SSE clients can observe the same session concurrently.
 6. SSE `KeepAlive` prevents idle connection timeouts.

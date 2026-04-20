@@ -354,7 +354,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 "gen_ai.usage.input_tokens",
                 response_usage.total_input_tokens() as i64,
             );
-            llm_call_span.record("gen_ai.usage.output_tokens", response.output_tokens as i64);
+            llm_call_span.record("gen_ai.usage.output_tokens", response_usage.output_tokens as i64);
             llm_call_span.record(
                 "gen_ai.usage.cache_read_tokens",
                 response_usage.input_tokens_cache_read as i64,
@@ -363,8 +363,8 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 "gen_ai.usage.cache_write_tokens",
                 response_usage.input_tokens_cache_write as i64,
             );
-            total_input_tokens += response.input_tokens;
-            total_output_tokens += response.output_tokens;
+            total_input_tokens += response_usage.total_input_tokens();
+            total_output_tokens += response_usage.output_tokens;
             append_event(
                 &session_store,
                 event_tx,
@@ -388,7 +388,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                         input_tokens_uncached: response_usage.input_tokens_uncached,
                         input_tokens_cache_write: response_usage.input_tokens_cache_write,
                         input_tokens_cache_read: response_usage.input_tokens_cache_read,
-                        output_tokens: response.output_tokens,
+                        output_tokens: response_usage.output_tokens,
                         cost_cents: response_cost_cents,
                         duration_ms: response.duration_ms,
                     },

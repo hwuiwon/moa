@@ -212,6 +212,8 @@ pub(super) async fn handle_tool_call(
                 session_id,
                 Event::ApprovalRequested {
                     request_id: request.request_id,
+                    awakeable_id: None,
+                    sub_agent_id: None,
                     tool_name: request.tool_name.clone(),
                     input_summary: request.input_summary.clone(),
                     risk_level: request.risk_level.clone(),

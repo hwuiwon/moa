@@ -14,19 +14,19 @@ _System diagram, component interactions, trait hierarchy, Rust workspace layout.
       │         │        │       │         │
       ▼         ▼        ▼       ▼         ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    GATEWAY / ROUTER                              │
+│                    GATEWAY / ROUTER                             │
 │  Normalizes inbound messages → routes to BrainOrchestrator      │
 │  Receives outbound events → renders per-platform                │
-│  PlatformAdapter trait per channel                               │
+│  PlatformAdapter trait per channel                              │
 └───────────────────────────┬─────────────────────────────────────┘
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                   BRAIN ORCHESTRATOR                             │
-│  Cloud: Temporal.io workflows + Fly.io Machines                 │
+│                   BRAIN ORCHESTRATOR                            │
+│  Cloud: Restate services, objects, and workflows on Kubernetes  │
 │  Local: LocalOrchestrator (tokio tasks + mpsc channels)         │
-│                                                                  │
-│  Responsibilities:                                               │
+│                                                                 │
+│  Responsibilities:                                              │
 │  - Spawn/recover brains from session log                        │
 │  - Route signals (approvals, stop, queue) to running brains     │
 │  - Manage brain lifecycle (health check, crash recovery)        │
@@ -42,21 +42,21 @@ _System diagram, component interactions, trait hierarchy, Rust workspace layout.
    │   │   │        │   │   │        │   │   │
    ▼   ▼   ▼        ▼   ▼   ▼        ▼   ▼   ▼
 ┌──────────────────────────────────────────────────────┐
-│                    HANDS (pluggable)                  │
-│  Daytona containers │ E2B microVMs │ MCP servers │..│
+│                    HANDS (pluggable)                 │
+│  Daytona containers │ E2B microVMs │ MCP servers │.. │
 │  execute(name, input) → output                       │
 └──────────────────────────────────────────────────────┘
          │               │               │
          ▼               ▼               ▼
 ┌──────────────────────────────────────────────────────┐
-│                 DURABLE SESSION LOG                   │
-│             Postgres (append-only events)             │
+│                 DURABLE SESSION LOG                  │
+│             Postgres (append-only events)            │
 │            getEvents() │ emitEvent() │ wake()        │
 └──────────────────────────────────────────────────────┘
          │
          ▼
 ┌──────────────────────────────────────────────────────┐
-│                   MEMORY (file-wiki)                  │
+│                   MEMORY (file-wiki)                 │
 │  User wiki │ Workspace wiki │ Search index │ Skills  │
 │  Consolidation cron │ Git-branch concurrent writes   │
 └──────────────────────────────────────────────────────┘
@@ -282,7 +282,7 @@ moa/
 ├── moa-providers/                # LLM provider implementations
 │   └── src/ { lib, anthropic, openai, gemini, common }
 ├── moa-orchestrator/             # Brain orchestration
-│   └── src/ { lib, temporal, local, cron }
+│   └── src/ { main, services, objects, workflows, local, cron }
 ├── moa-gateway/                  # Messaging gateway
 │   └── src/ { lib, telegram, slack, discord, renderer, approval }
 ├── moa-desktop/                  # Desktop application (GPUI)
@@ -304,7 +304,7 @@ The same trait hierarchy supports both cloud and local operation:
 ### Cloud mode (`moa --cloud`)
 
 ```
-BrainOrchestrator  →  TemporalOrchestrator
+BrainOrchestrator  →  Restate-backed orchestrator runtime
 SessionStore       →  PostgresSessionStore
 HandProvider       →  DaytonaHandProvider / E2BHandProvider
 PlatformAdapter    →  TelegramAdapter, SlackAdapter, DiscordAdapter

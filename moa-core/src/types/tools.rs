@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{ClaimCheck, PolicyAction, RiskLevel};
+use super::{ClaimCheck, PolicyAction, RiskLevel, SessionId, ToolCallId, UserId, WorkspaceId};
 
 fn default_tool_max_output_tokens() -> u32 {
     8_000
@@ -118,6 +118,18 @@ pub enum ToolDiffStrategy {
     FileWrite,
     /// The tool replaces a single matched region and can show a surgical diff preview.
     StrReplace,
+}
+
+/// Replay and retry semantics declared for one tool definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdempotencyClass {
+    /// Safe to retry freely because the effect is deterministic for the same input.
+    Idempotent,
+    /// Safe to retry only when the caller also supplies an explicit idempotency key.
+    IdempotentWithKey,
+    /// Unsafe to retry automatically because repeated execution may duplicate side effects.
+    NonIdempotent,
 }
 
 /// Static policy and approval metadata for a tool.
@@ -336,6 +348,30 @@ impl ToolOutput {
     }
 }
 
+/// Durable request envelope for one tool execution routed through `ToolExecutor`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallRequest {
+    /// Stable MOA tool-call identifier used for event-log correlation and replay.
+    pub tool_call_id: ToolCallId,
+    /// Provider-issued tool-use identifier when the request originated from an LLM turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_tool_use_id: Option<String>,
+    /// Stable registered tool name.
+    pub tool_name: String,
+    /// Raw JSON input passed to the tool implementation.
+    pub input: Value,
+    /// Owning session when the tool call is part of a durable MOA turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    /// Workspace scope used when the call is executed without a persisted session.
+    pub workspace_id: WorkspaceId,
+    /// User scope used when the call is executed without a persisted session.
+    pub user_id: UserId,
+    /// Explicit idempotency key required by `IdempotentWithKey` tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
 /// Shared metadata that describes one callable tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -347,6 +383,8 @@ pub struct ToolDefinition {
     pub schema: Value,
     /// Static policy and approval metadata.
     pub policy: ToolPolicySpec,
+    /// Declared retry/idempotency semantics for the tool implementation.
+    pub idempotency_class: IdempotencyClass,
     /// Approximate maximum output tokens persisted for one successful call.
     #[serde(default = "default_tool_max_output_tokens")]
     pub max_output_tokens: u32,
@@ -360,6 +398,11 @@ impl ToolDefinition {
             "description": self.description,
             "input_schema": self.schema,
         })
+    }
+
+    /// Returns whether the tool requires explicit approval by default.
+    pub fn requires_approval(&self) -> bool {
+        matches!(self.policy.default_action, PolicyAction::RequireApproval)
     }
 }
 

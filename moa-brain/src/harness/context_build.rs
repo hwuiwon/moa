@@ -237,15 +237,16 @@ pub(super) fn calculate_response_cost_cents(
     pricing: &TokenPricing,
 ) -> u32 {
     let usage = response.token_usage();
-    let cached_input_tokens = usage.input_tokens_cache_read.min(response.input_tokens);
-    let uncached_input_tokens = response.input_tokens.saturating_sub(cached_input_tokens);
+    let total_input_tokens = usage.total_input_tokens();
+    let cached_input_tokens = usage.input_tokens_cache_read.min(total_input_tokens);
+    let uncached_input_tokens = total_input_tokens.saturating_sub(cached_input_tokens);
     let cached_input_rate = pricing
         .cached_input_per_mtok
         .unwrap_or(pricing.input_per_mtok);
 
     let cost_dollars = ((uncached_input_tokens as f64 * pricing.input_per_mtok)
         + (cached_input_tokens as f64 * cached_input_rate)
-        + (response.output_tokens as f64 * pricing.output_per_mtok))
+        + (usage.output_tokens as f64 * pricing.output_per_mtok))
         / 1_000_000.0;
 
     (cost_dollars * 100.0).round() as u32
@@ -273,7 +274,7 @@ pub(super) fn build_cache_report(
         stable_prefix_reused,
         response.token_usage().total_input_tokens(),
         response.token_usage().input_tokens_cache_read,
-        response.output_tokens,
+        response.token_usage().output_tokens,
     )
 }
 
@@ -338,9 +339,6 @@ mod tests {
             content: Vec::new(),
             stop_reason: StopReason::EndTurn,
             model: moa_core::ModelId::new("gpt-5.4"),
-            input_tokens: 100_000,
-            output_tokens: 10_000,
-            cached_input_tokens: 50_000,
             usage: moa_core::TokenUsage {
                 input_tokens_uncached: 50_000,
                 input_tokens_cache_write: 0,

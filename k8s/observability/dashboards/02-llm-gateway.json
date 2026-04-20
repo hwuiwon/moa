@@ -1,0 +1,99 @@
+{
+  "title": "MOA LLM Gateway",
+  "uid": "moa-llm-gateway",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "LLM Requests / Provider",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(moa_llm_requests_total[5m])) by (provider)",
+          "legendFormat": "{{provider}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "title": "Tokens / Sec by Model",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(moa_tokens_input_uncached_total[5m]) + rate(moa_tokens_input_cached_total[5m]) + rate(moa_tokens_output_total[5m])) by (model)",
+          "legendFormat": "{{model}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "id": 3,
+      "title": "Cache Hit Rate",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "moa_cache_hit_rate",
+          "legendFormat": "cache hit rate",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 }
+    },
+    {
+      "id": 4,
+      "title": "LLM TTFT p95",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(moa_llm_ttft_seconds_bucket[5m])) by (le, provider, model))",
+          "legendFormat": "{{provider}} {{model}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 }
+    },
+    {
+      "id": 5,
+      "title": "Cost / Min",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(moa_llm_cost_cents_total[1m])) / 100",
+          "legendFormat": "usd/min",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 }
+    }
+  ]
+}
