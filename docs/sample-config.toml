@@ -57,12 +57,6 @@ listen = "0.0.0.0:9090"
 enabled = false
 # memory_dir = "/data/memory"
 
-[cloud.temporal]
-address = ""
-namespace = ""
-task_queue = "moa-brains"
-api_key_env = "TEMPORAL_API_KEY"
-
 [cloud.flyio]
 api_token_env = "FLY_API_TOKEN"
 app_name = ""

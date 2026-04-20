@@ -260,38 +260,6 @@ impl MoaConfig {
             .set_default("cloud.enabled", Self::default().cloud.enabled)?
             .set_default("cloud.memory_dir", Self::default().cloud.memory_dir.clone())?
             .set_default(
-                "cloud.temporal.address",
-                Self::default()
-                    .cloud
-                    .temporal
-                    .as_ref()
-                    .and_then(|config| config.address.clone()),
-            )?
-            .set_default(
-                "cloud.temporal.namespace",
-                Self::default()
-                    .cloud
-                    .temporal
-                    .as_ref()
-                    .and_then(|config| config.namespace.clone()),
-            )?
-            .set_default(
-                "cloud.temporal.task_queue",
-                Self::default()
-                    .cloud
-                    .temporal
-                    .as_ref()
-                    .map(|config| config.task_queue.clone()),
-            )?
-            .set_default(
-                "cloud.temporal.api_key_env",
-                Self::default()
-                    .cloud
-                    .temporal
-                    .as_ref()
-                    .and_then(|config| config.api_key_env.clone()),
-            )?
-            .set_default(
                 "cloud.flyio.api_token_env",
                 Self::default()
                     .cloud
@@ -1047,8 +1015,6 @@ pub struct CloudConfig {
     pub enabled: bool,
     /// Optional alternate memory root for cloud deployments.
     pub memory_dir: Option<String>,
-    /// Optional Temporal configuration.
-    pub temporal: Option<CloudTemporalConfig>,
     /// Optional Fly.io configuration.
     pub flyio: Option<CloudFlyioConfig>,
     /// Optional hands configuration.
@@ -1060,34 +1026,8 @@ impl Default for CloudConfig {
         Self {
             enabled: false,
             memory_dir: None,
-            temporal: Some(CloudTemporalConfig::default()),
             flyio: Some(CloudFlyioConfig::default()),
             hands: Some(CloudHandsConfig::default()),
-        }
-    }
-}
-
-/// Temporal configuration for cloud mode.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CloudTemporalConfig {
-    /// Temporal address.
-    pub address: Option<String>,
-    /// Temporal namespace.
-    pub namespace: Option<String>,
-    /// Temporal task queue.
-    pub task_queue: String,
-    /// Environment variable containing the Temporal API key.
-    pub api_key_env: Option<String>,
-}
-
-impl Default for CloudTemporalConfig {
-    fn default() -> Self {
-        Self {
-            address: None,
-            namespace: None,
-            task_queue: "moa-brains".to_string(),
-            api_key_env: Some("TEMPORAL_API_KEY".to_string()),
         }
     }
 }
@@ -1167,7 +1107,7 @@ pub enum McpTransportConfig {
     /// Launch a local MCP server over stdio.
     #[default]
     Stdio,
-    /// Connect to a legacy server-sent-event MCP endpoint.
+    /// Connect to a server-sent-event MCP endpoint.
     Sse,
     /// Connect to a Streamable HTTP MCP endpoint.
     Http,

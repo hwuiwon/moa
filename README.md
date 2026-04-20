@@ -90,7 +90,7 @@ Config lives at `~/.moa/config.toml`. A commented reference copy is at [`docs/sa
 | `[providers.*]` | per-provider API key env vars |
 | `[database]` | Postgres connection string (required) |
 | `[local]` | sandbox dir, memory dir, Docker preference |
-| `[cloud]` | cloud-mode enablement, Temporal, Fly.io, hand providers |
+| `[cloud]` | cloud-mode enablement and hand-provider settings |
 | `[gateway]` | Telegram / Slack / Discord tokens |
 | `[permissions]` | default posture, auto-approve list, deny list |
 | `[compaction]` | event threshold, preserve-errors, recent-turns-verbatim |
@@ -102,14 +102,14 @@ Environment variables override TOML via the `MOA__` prefix (e.g. `MOA__DATABASE_
 
 ## Deploying to the cloud
 
-Cloud mode uses **Temporal** for durable orchestration, **Fly.io Machines** for brain hosting, and **Daytona** (or E2B) for container/microVM hands.
+Production deployment uses **Restate** for durable orchestration, Kubernetes manifests under [`k8s/`](k8s/) for runtime deployment, and **Daytona** (or E2B) for container/microVM hands.
 
 ```bash
 # Build the production image
 docker build -t moa:latest .
 
 # Deploy
-fly deploy --image moa:latest
+kubectl apply -k k8s/
 ```
 
 Required environment in cloud mode:
@@ -117,9 +117,7 @@ Required environment in cloud mode:
 ```bash
 MOA__CLOUD__ENABLED=true
 MOA__DATABASE__URL=postgres://...            # managed Postgres / Neon
-TEMPORAL_ADDRESS=your-ns.tmprl.cloud:7233
-TEMPORAL_API_KEY=...
-FLY_API_TOKEN=...
+RESTATE_ADMIN_URL=http://moa-restate.moa-system.svc.cluster.local:9070
 DAYTONA_API_KEY=...                          # or E2B_API_KEY
 ANTHROPIC_API_KEY=...                        # at least one LLM provider
 TELEGRAM_BOT_TOKEN=...                       # optional messaging channels
@@ -136,7 +134,7 @@ Full cloud-deployment details: [`docs/02-brain-orchestration.md`](docs/02-brain-
 ```
 Messaging  ─┐
 Desktop    ─┼─►  Gateway  ─►  Brain Orchestrator  ─►  Brain (stateless harness)
-CLI        ─┘                  (Temporal | Local)           │
+CLI        ─┘                  (Restate | Local)            │
                                                             ├─► LLM Provider
                                                             │   (Anthropic / OpenAI / Gemini)
                                                             │
@@ -163,7 +161,7 @@ For the full picture, read **[`architecture.md`](architecture.md)**. For runtime
 | [`moa-memory`](moa-memory/) | File-wiki memory, FTS index, ingestion, consolidation, git-branch concurrent writes |
 | [`moa-hands`](moa-hands/) | `LocalHandProvider`, Daytona, E2B, MCP client, tool router |
 | [`moa-providers`](moa-providers/) | Anthropic, OpenAI, Gemini LLM providers with streaming + caching |
-| [`moa-orchestrator`](moa-orchestrator/) | `LocalOrchestrator` (tokio) and `TemporalOrchestrator` (cloud) |
+| [`moa-orchestrator`](moa-orchestrator/) | `LocalOrchestrator` (tokio) and the Restate-backed orchestrator binary |
 | [`moa-gateway`](moa-gateway/) | Telegram / Slack / Discord adapters, platform-adaptive rendering, approvals |
 | [`moa-security`](moa-security/) | Credential vault, MCP proxy, sandbox policies, injection detection |
 | [`moa-skills`](moa-skills/) | Agent Skills registry, distillation, self-improvement |
@@ -205,7 +203,7 @@ Short description of each file in [`docs/`](docs/):
 |---|---|
 | [`00-direction.md`](docs/00-direction.md) | Product identity, philosophy, target users |
 | [`01-architecture-overview.md`](docs/01-architecture-overview.md) | System diagram, trait definitions, workspace layout |
-| [`02-brain-orchestration.md`](docs/02-brain-orchestration.md) | Temporal workflows, Fly.io, `LocalOrchestrator`, brain loop |
+| [`02-brain-orchestration.md`](docs/02-brain-orchestration.md) | Restate orchestration, local runtime mode, brain loop |
 | [`03-communication-layer.md`](docs/03-communication-layer.md) | Gateway, desktop/CLI, approvals, thread observation |
 | [`04-memory-architecture.md`](docs/04-memory-architecture.md) | File-wiki, FTS, consolidation, concurrent writes |
 | [`05-session-event-log.md`](docs/05-session-event-log.md) | Postgres schema, event types, compaction, replay |
@@ -215,6 +213,8 @@ Short description of each file in [`docs/`](docs/):
 | [`09-skills-and-learning.md`](docs/09-skills-and-learning.md) | Agent Skills format, distillation, self-improvement |
 | [`10-technology-stack.md`](docs/10-technology-stack.md) | Crates, external services, phases, deployment |
 | [`11-event-replay-runbook.md`](docs/11-event-replay-runbook.md) | Operational runbook for event replay |
+| [`12-restate-architecture.md`](docs/12-restate-architecture.md) | Restate services, virtual objects, workflows, and Kubernetes deployment |
+| [`14-post-migration-notes.md`](docs/14-post-migration-notes.md) | Final migration notes, cost comparison, and follow-up debt |
 
 ---
 

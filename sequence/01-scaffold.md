@@ -23,7 +23,7 @@ A compilable Rust workspace with 12 crates. `moa-core` contains all shared types
 - All newtypes must derive: `Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize`
 - Enums must derive: `Debug, Clone, Serialize, Deserialize`
 - Use `#[serde(tag = "type", content = "data")]` for the `Event` enum
-- Feature flags in workspace root: `default = ["tui"]`, `telegram`, `slack`, `discord`, `cloud`, `temporal`
+- Feature flags in workspace root: `default = ["tui"]`, `telegram`, `slack`, `discord`, `cloud`
 - Use Rust 2021 edition, resolver = "2"
 
 ## Tasks

@@ -59,7 +59,7 @@ _Crates, external services, implementation phases, build and deployment._
 
 | Crate | Purpose |
 |---|---|
-| `temporalio-sdk` | Temporal Rust SDK (prerelease) |
+| `restate-sdk` | Restate Rust SDK |
 | `tokio-cron-scheduler` | Local cron jobs (consolidation, etc.) |
 
 ### Security
@@ -87,8 +87,8 @@ _Crates, external services, implementation phases, build and deployment._
 
 | Service | Purpose | Cost |
 |---|---|---|
-| Temporal Cloud | Workflow orchestration | $25/mo base + $0.01/1K actions |
-| Fly.io | Brain hosting | ~$2/mo per always-on machine; $0/mo if suspended |
+| Kubernetes | Control plane for Restate + MOA workloads | Varies by cluster |
+| Restate | Durable orchestration engine | Cluster-hosted |
 | Neon / managed Postgres | Session database and checkpoint branches | Varies by plan |
 | Daytona | Container hands (default) | ~$0.067/hr per container |
 | LLM API | Anthropic, OpenAI, or Google Gemini | Pay-per-token |
@@ -146,22 +146,21 @@ Deliverables:
 
 Test: `moa "Create a hello world Express app"` → agent writes files, user approves, files exist on disk.
 
-### Phase 3: Temporal + cloud (3-4 weeks)
+### Phase 3: Restate + Kubernetes (3-4 weeks)
 
 **Goal**: Agent runs in the cloud with durable execution.
 
 Deliverables:
-- [ ] `moa-orchestrator`: TemporalOrchestrator (Rust SDK integration)
-- [ ] Temporal workflows: session workflow, brain turn activity
-- [ ] Temporal signals: approval, queue, stop
-- [ ] Fly.io deployment config (Dockerfile, fly.toml)
+- [ ] `moa-orchestrator`: Restate-backed orchestrator binary
+- [ ] Restate services, virtual objects, and workflows for session orchestration
+- [ ] Kubernetes deployment config (`Dockerfile`, `k8s/`)
 - [ ] `moa-session`: Managed Postgres / Neon configuration
 - [ ] `moa-hands`: DaytonaHandProvider
 - [ ] Multi-session support in orchestrator
 - [ ] Session observation (event streaming)
 - [ ] `moa --cloud` startup mode
 
-Test: Start session via `moa --cloud`. Kill the process. Restart. Session resumes from last event.
+Test: Start a cloud session through the deployed gateway. Kill one orchestrator pod. Restate replays the invocation and the session resumes from the last durable event.
 
 ### Phase 4: Messaging gateway (3-4 weeks)
 
@@ -190,7 +189,7 @@ Deliverables:
 - [ ] Skill distillation from successful runs
 - [ ] Skill self-improvement during use
 - [ ] Wiki compilation (ingest sources → update entity/topic/decision pages)
-- [ ] Memory consolidation cron (Temporal timer)
+- [ ] Memory consolidation workflow (Restate workflow + delayed send)
 - [ ] Git-branch concurrent writes + LLM reconciler
 - [ ] Memory per-user scoping
 - [ ] Desktop app: Memory browser (two-pane wiki view)
@@ -256,26 +255,10 @@ COPY --from=builder /app/target/release/moa /usr/local/bin/moa
 ENTRYPOINT ["moa", "--cloud"]
 ```
 
-### Fly.io
+### Kubernetes deployment
 
-```toml
-# fly.toml
-app = "moa-brains"
-primary_region = "iad"
-
-[build]
-  dockerfile = "Dockerfile"
-
-[http_service]
-  internal_port = 8080
-  force_https = true
-  auto_stop_machines = "suspend"
-  auto_start_machines = true
-  min_machines_running = 0
-
-[[vm]]
-  size = "shared-cpu-1x"
-  memory = "256mb"
+```bash
+kubectl apply -k k8s/
 ```
 
 ---
@@ -290,9 +273,7 @@ GOOGLE_API_KEY=AIza...
 
 # Cloud mode (optional)
 MOA__DATABASE__URL=postgres://moa:moa@localhost:5432/moa
-TEMPORAL_API_KEY=...
-TEMPORAL_ADDRESS=your-ns.tmprl.cloud:7233
-FLY_API_TOKEN=...
+RESTATE_ADMIN_URL=http://moa-restate.moa-system.svc.cluster.local:9070
 
 # Hands (optional, cloud mode)
 DAYTONA_API_KEY=...
@@ -321,8 +302,8 @@ VAULT_TOKEN=...
 - Docker: Optional (for container hands)
 
 ### Cloud mode
-- Fly.io account (free tier sufficient for testing)
-- Temporal Cloud account ($25/mo)
+- Kubernetes cluster
+- Restate cluster
 - Managed Postgres / Neon database
 - Daytona account (pay-per-use)
 - At least one LLM API key

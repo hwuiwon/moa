@@ -55,7 +55,7 @@ The root `Cargo.toml` has a `[package]` section defining `moa-workspace` as a cr
 
 **Option A (recommended):** Remove `[package]`, `[lib]`, `[dependencies]`, and `[features]` sections entirely. Delete `src/lib.rs`. Keep only `[workspace]`, `[workspace.package]`, `[workspace.dependencies]`, `[profile.dev]`, `[profile.release]`.
 
-**Option B (if Option A causes issues):** Keep the `[package]` but remove the empty `[features]` block (all feature flags except `postgres` are vestigial — `telegram`, `slack`, `discord`, `cloud`, `temporal`, `daytona`, `e2b` do nothing).
+**Option B (if Option A causes issues):** Keep the `[package]` but remove the empty `[features]` block (all feature flags except `postgres` are vestigial — `telegram`, `slack`, `discord`, `cloud`, `daytona`, `e2b` do nothing).
 
 **Caveat:** The root `src/lib.rs` is used by the Tauri frontend (it's the Vite entry point for the web portion). Check if `vite.config.ts` or `index.html` references it. If so, the file is serving a different purpose and should NOT be deleted. In that case, only clean up the `[features]` block.
 

@@ -18,6 +18,7 @@ mod runtime_events;
 mod scheduling;
 mod session;
 mod snapshot;
+mod sub_agent;
 mod tools;
 
 pub use approval::*;
@@ -35,6 +36,7 @@ pub use runtime_events::*;
 pub use scheduling::*;
 pub use session::*;
 pub use snapshot::*;
+pub use sub_agent::*;
 pub use tools::*;
 
 #[cfg(test)]

@@ -1,0 +1,11 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: moa-orchestrator
+  namespace: moa-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: moa-orchestrator
+      app.kubernetes.io/part-of: moa

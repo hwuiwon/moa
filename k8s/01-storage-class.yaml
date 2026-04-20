@@ -1,0 +1,16 @@
+# Optional example StorageClass.
+# This file is intentionally not referenced by k8s/kustomization.yaml because the
+# provisioner and parameters are cluster-specific. Apply or adapt it only when
+# your cluster does not already provide a `fast-ssd` StorageClass.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast-ssd
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  iops: "6000"
+  throughput: "500"
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain

@@ -169,7 +169,7 @@ manifest_path = Path('graphify-out/manifest.json')
 # Load stored labels WITH their content signatures. Cluster IDs from Louvain/
 # Leiden are not stable across runs — the same cluster can be renumbered when
 # the graph changes. So we match labels by *membership overlap*, not by raw ID.
-# Legacy manifests (dict labels, no signatures) are dropped because their
+# Older manifests (dict labels, no signatures) are dropped because their
 # label→cluster mapping is known-unreliable after any graph edit.
 stored_label_entries = []  # list of (label, frozenset(member_ids))
 if manifest_path.exists():

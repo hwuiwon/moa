@@ -11,7 +11,7 @@ pub use injection::{
 };
 pub use mcp_proxy::{EnvironmentCredentialVault, MCPCredentialProxy, McpSessionToken};
 pub use policies::{
-    ApprovalRuleStore, PolicyCheck, ToolPolicies, ToolPolicyContext,
-    cleanup_overly_broad_shell_rules, glob_match, parse_and_match_bash,
+    ApprovalRuleStore, PolicyCheck, ToolPolicies, ToolPolicyContext, glob_match,
+    parse_and_match_bash,
 };
 pub use vault::FileVault;

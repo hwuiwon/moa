@@ -1,34 +1,15 @@
-FROM rust:1.94.1-trixie AS builder
-WORKDIR /app
+# syntax=docker/dockerfile:1.6
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        clang \
-        libprotobuf-dev \
-        pkg-config \
-        protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/*
+FROM rust:1.82 AS builder
+WORKDIR /build
 
 COPY . .
-ENV PROTOC=/usr/bin/protoc
-ENV PROTOC_INCLUDE=/usr/include
-RUN cargo build --locked --release -p moa-cli --features "cloud"
+RUN cargo build --locked --release -p moa-orchestrator
 
-FROM debian:trixie-slim
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=builder /build/target/release/moa-orchestrator /usr/local/bin/moa-orchestrator
+COPY --from=builder /build/moa-orchestrator/migrations /migrations
 
-COPY --from=builder /app/target/release/moa /usr/local/bin/moa
-
-ENV MOA__CLOUD__ENABLED=true \
-    MOA__CLOUD__HANDS__DEFAULT_PROVIDER=local \
-    MOA__LOCAL__MEMORY_DIR=/data/memory \
-    MOA__LOCAL__SANDBOX_DIR=/data/sandbox \
-    MOA__CLOUD__MEMORY_DIR=/data/memory \
-    MOA__CLOUD__FLYIO__INTERNAL_PORT=8080
-
-EXPOSE 8080
-VOLUME ["/data"]
-
-ENTRYPOINT ["moa", "daemon", "serve"]
+USER nonroot
+ENTRYPOINT ["/usr/local/bin/moa-orchestrator"]
+CMD ["--port", "9080", "--health-port", "9081"]

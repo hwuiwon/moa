@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: moa-system
+  labels:
+    name: moa-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: moa-restate
+  labels:
+    name: moa-restate

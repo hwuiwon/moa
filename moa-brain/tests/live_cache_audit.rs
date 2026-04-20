@@ -168,10 +168,11 @@ impl CacheTurnPlan {
         response: &CompletionResponse,
         stable_prefix_reused_from_previous_request: bool,
     ) -> CacheTurnAudit {
+        let usage = response.token_usage();
         let cached_vs_stable_estimate_ratio = if self.stable_total_tokens_estimate == 0 {
             0.0
         } else {
-            response.cached_input_tokens as f64 / self.stable_total_tokens_estimate as f64
+            usage.input_tokens_cache_read as f64 / self.stable_total_tokens_estimate as f64
         };
 
         CacheTurnAudit {
@@ -191,9 +192,9 @@ impl CacheTurnPlan {
             full_request_fingerprint: self.full_request_fingerprint,
             request_tools: self.request_tools,
             request_messages: self.request_messages,
-            input_tokens: response.input_tokens,
-            cached_input_tokens: response.cached_input_tokens,
-            output_tokens: response.output_tokens,
+            input_tokens: usage.total_input_tokens(),
+            cached_input_tokens: usage.input_tokens_cache_read,
+            output_tokens: usage.output_tokens,
             cached_vs_stable_estimate_ratio,
             stable_prefix_reused_from_previous_request,
         }

@@ -5,7 +5,7 @@ use moa_providers::GeminiProvider;
 use tokio::time::timeout;
 
 fn gemini_live_model() -> String {
-    std::env::var("GOOGLE_MODEL").unwrap_or_else(|_| "gemini-3.1-pro-preview".to_string())
+    std::env::var("GOOGLE_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_string())
 }
 
 fn looks_like_four_answer(text: &str) -> bool {
@@ -46,15 +46,13 @@ async fn gemini_live_web_search_returns_current_information() {
             provider.complete(CompletionRequest {
                 model: None,
                 messages: vec![moa_core::ContextMessage::user(
-                    "Search the web for one current news headline from today. \
-                     Do not answer from memory. Return exactly one short sentence with a source link. \
-                     If you do not search, respond with NO_SEARCH.",
+                    "Use web search to find one current news headline from today and cite the source in one short sentence.",
                 )],
                 tools: Vec::new(),
                 max_output_tokens: Some(128),
                 temperature: Some(0.0),
                 cache_breakpoints: Vec::new(),
-        cache_controls: Vec::new(),
+                cache_controls: Vec::new(),
                 metadata: Default::default(),
             })
             .await

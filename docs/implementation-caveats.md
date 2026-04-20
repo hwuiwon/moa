@@ -111,37 +111,6 @@ These caveats are deliberate security trade-offs where the current implementatio
 
 ---
 
-## Temporal / cloud orchestration maturity
-
-The Temporal integration works for the current prototype but is not yet production-grade in lifecycle management, child workflow semantics, or scaling topology.
-
-### Temporal approval resume had a real wait-condition bug
-
-- `moa-orchestrator/src/temporal.rs` now gates the workflow loop differently while paused for approval. When `waiting_for_approval` is true, the workflow waits only for an approval decision or cancel request.
-- This was a real correctness bug in the initial implementation, not just a missing test. `ApprovalRequested` no longer deadlocks the workflow.
-- The Temporal path should keep at least one ignored live dev-server integration test because replay-only or unit tests would not have caught this specific bug.
-
-### Temporal child workflows are not true Temporal child workflows
-
-- `TemporalOrchestrator::spawn_child_workflow()` currently delegates to `start_session()`, creating another top-level session workflow with normal session metadata.
-- Sub-brain work can be started as an independent Temporal-backed session, and the public API surface is usable without blocking later cloud work.
-- This is not yet using Temporal's actual child-workflow semantics. Parent/child cancellation propagation, parent-close behavior, and Temporal-native child observability are not implemented.
-
-### Worker lifetime is process-scoped and not gracefully stoppable
-
-- `TemporalRuntime::connect()` starts a dedicated OS thread that owns a current-thread Tokio runtime and runs the Temporal worker. The `JoinHandle` is retained only to keep the thread alive.
-- The worker polls workflows and activities correctly without violating the SDK's non-`Send` constraints.
-- Dropping `TemporalOrchestrator` does not perform a graceful worker shutdown; it detaches the worker thread until process exit. A production deployment likely needs an explicit worker lifecycle manager.
-
-### Cloud deploy runs the local runtime shape with cloud-backed storage
-
-- `moa-cli/src/daemon.rs` exposes a cloud-friendly daemon entrypoint with an HTTP `/health` endpoint and graceful shutdown handling.
-- `Dockerfile`, `fly.toml`, and `.github/workflows/deploy.yml` build and launch `moa` with the `cloud` feature set and Fly health-check wiring.
-- `moa-session` now speaks Postgres only; local development assumes Docker-backed Postgres and cloud deployments use managed Postgres / Neon.
-- This is still the local daemon/runtime shape running in a cloud container, not a dedicated Temporal worker/service topology. A Fly deployment today is effectively "local orchestrator plus cloud-backed Postgres storage."
-
----
-
 ## Deployment and boot configuration
 
 These caveats relate to the gap between "cloud build succeeds" and "cloud deployment is fully self-service."
@@ -150,7 +119,7 @@ These caveats relate to the gap between "cloud build succeeds" and "cloud deploy
 
 - `moa-cli/src/main.rs` exposes `moa sync enable`. The command writes cloud sync config only after it can open the embedded replica and perform an initial database sync.
 - The command only validates the session-store sync path; it does not validate Fly deployment readiness, memory storage readiness, or platform gateway credentials.
-- On this machine, Temporal/cloud-feature builds require `PROTOC=/opt/homebrew/bin/protoc` because the earlier `~/.local/bin/protoc` in `PATH` is not executable.
+- On this machine, full cloud-feature builds require `PROTOC=/opt/homebrew/bin/protoc` because the earlier `~/.local/bin/protoc` in `PATH` is not executable.
 
 ### Fly deployment requires explicit cloud-hand and provider boot configuration
 

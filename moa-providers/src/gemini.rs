@@ -1278,9 +1278,6 @@ impl GeminiStreamState {
             content: self.content,
             stop_reason: self.stop_reason,
             model: ModelId::new(self.model),
-            input_tokens: self.input_tokens,
-            output_tokens: self.output_tokens,
-            cached_input_tokens: self.cached_input_tokens,
             usage: token_usage_from_gemini_usage(&GeminiUsageMetadata {
                 prompt_token_count: Some(self.input_tokens),
                 candidates_token_count: Some(self.output_tokens),

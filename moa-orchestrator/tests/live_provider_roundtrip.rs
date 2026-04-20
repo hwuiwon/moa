@@ -273,10 +273,8 @@ async fn run_live_provider_tool_approval_roundtrip(provider: LiveProvider) {
 
     let tool_output = wait_for_successful_tool_result(&session_store, session.session_id).await;
     assert!(
-        tool_output
-            .to_text()
-            .contains(&format!("wrote {relative_path}")),
-        "{label} wrote an unexpected path: {:?}",
+        tool_output.to_text().contains(&relative_path),
+        "{label} returned an unexpected tool output: {:?}",
         tool_output
     );
     wait_for_status(

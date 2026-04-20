@@ -93,6 +93,24 @@ impl PostgresSessionStore {
         .await
     }
 
+    /// Creates a session store from an existing Postgres pool without running migrations.
+    ///
+    /// This is intended for binaries that own pool construction and migration orchestration
+    /// themselves while still reusing the canonical store implementation.
+    pub async fn from_existing_pool(database_url: &str, pool: PgPool) -> Result<Self> {
+        let blob_store: Arc<dyn BlobStore> =
+            Arc::new(FileBlobStore::new(FileBlobStore::default_dir()?));
+        let store = Self {
+            url: database_url.to_string(),
+            pool,
+            schema_name: None,
+            blob_store,
+            blob_threshold_bytes: 65_536,
+        };
+        store.refresh_active_session_metric().await?;
+        Ok(store)
+    }
+
     /// Reconstructs the session state needed to resume a brain.
     pub async fn wake(&self, session_id: moa_core::SessionId) -> Result<WakeContext> {
         let session = self.get_session(session_id).await?;

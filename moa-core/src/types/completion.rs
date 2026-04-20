@@ -203,16 +203,12 @@ impl CacheBreakpoint {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     /// Input tokens billed at the provider's standard uncached rate.
-    #[serde(default, alias = "input_tokens")]
     pub input_tokens_uncached: usize,
     /// Input tokens billed to create or refresh a cache entry.
-    #[serde(default)]
     pub input_tokens_cache_write: usize,
     /// Input tokens served from an existing cache entry.
-    #[serde(default, alias = "cached_input_tokens")]
     pub input_tokens_cache_read: usize,
     /// Output tokens emitted by the provider.
-    #[serde(default)]
     pub output_tokens: usize,
 }
 
@@ -244,14 +240,7 @@ pub struct CompletionResponse {
     pub stop_reason: StopReason,
     /// Model identifier used.
     pub model: ModelId,
-    /// Total input token usage, retained for compatibility with existing call sites.
-    pub input_tokens: usize,
-    /// Output token usage, retained for compatibility with existing call sites.
-    pub output_tokens: usize,
-    /// Cached input token usage served from cache, retained for compatibility with existing call sites.
-    pub cached_input_tokens: usize,
     /// Normalized provider token-usage counters.
-    #[serde(default)]
     pub usage: TokenUsage,
     /// Total request duration in milliseconds.
     pub duration_ms: u64,
@@ -263,16 +252,7 @@ pub struct CompletionResponse {
 impl CompletionResponse {
     /// Returns normalized token usage for the response.
     pub fn token_usage(&self) -> TokenUsage {
-        if self.usage != TokenUsage::default() {
-            return self.usage;
-        }
-
-        TokenUsage {
-            input_tokens_uncached: self.input_tokens.saturating_sub(self.cached_input_tokens),
-            input_tokens_cache_write: 0,
-            input_tokens_cache_read: self.cached_input_tokens,
-            output_tokens: self.output_tokens,
-        }
+        self.usage
     }
 }
 
@@ -402,9 +382,6 @@ mod tests {
                 content: vec![CompletionContent::Text("late".to_string())],
                 stop_reason: StopReason::EndTurn,
                 model: ModelId::new("test"),
-                input_tokens: 0,
-                output_tokens: 0,
-                cached_input_tokens: 0,
                 usage: TokenUsage::default(),
                 duration_ms: 30_000,
                 thought_signature: None,

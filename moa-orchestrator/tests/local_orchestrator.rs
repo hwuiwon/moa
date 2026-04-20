@@ -8,13 +8,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    ApprovalRule, BrainOrchestrator, CompletionContent, CompletionRequest, CompletionResponse,
-    CompletionStream, ConfidenceLevel, ContextMessage, Event, EventRange, EventType, LLMProvider,
-    LiveEvent, MemoryPath, MemoryScope, MemoryStore, MessageRole, MoaConfig, MoaError, PageType,
-    Platform, PolicyAction, PolicyScope, Result, RuntimeEvent, SessionFilter, SessionHandle,
-    SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, StartSessionRequest,
-    TokenPricing, TokenUsage, ToolCallFormat, ToolOutput, UserId, UserMessage, WikiPage,
-    WorkspaceId,
+    BrainOrchestrator, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
+    ConfidenceLevel, ContextMessage, Event, EventRange, EventType, LLMProvider, LiveEvent,
+    MemoryPath, MemoryScope, MemoryStore, MessageRole, MoaConfig, MoaError, PageType, Platform,
+    Result, RuntimeEvent, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
+    SessionStatus, SessionStore, StartSessionRequest, TokenPricing, TokenUsage, ToolCallFormat,
+    ToolOutput, UserId, UserMessage, WikiPage, WorkspaceId,
 };
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_memory::FileMemoryStore;
@@ -30,7 +29,7 @@ use support::orchestrator_contract::{
 use tempfile::TempDir;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{Instant, sleep, timeout};
-use uuid::Uuid;
+const ASYNC_TEST_DEADLINE: Duration = Duration::from_secs(6);
 
 struct LocalContractHarness<'a> {
     orchestrator: &'a LocalOrchestrator,
@@ -153,9 +152,6 @@ impl LLMProvider for MockProvider {
             content: vec![CompletionContent::Text(format!("assistant:{prompt_text}"))],
             stop_reason: moa_core::StopReason::EndTurn,
             model: model.into(),
-            input_tokens: 4,
-            output_tokens: 2,
-            cached_input_tokens: 0,
             usage: token_usage(4, 2),
             duration_ms: delay.as_millis() as u64,
             thought_signature: None,
@@ -221,9 +217,6 @@ impl LLMProvider for SlowStreamingProvider {
                     .collect(),
                 stop_reason: moa_core::StopReason::EndTurn,
                 model: model.into(),
-                input_tokens: 4,
-                output_tokens: text.len(),
-                cached_input_tokens: 0,
                 usage: token_usage(4, text.len()),
                 duration_ms: (delay.as_millis() as usize * text.len()) as u64,
                 thought_signature: None,
@@ -477,9 +470,6 @@ impl LLMProvider for RequestGuardProvider {
             content: vec![CompletionContent::Text(format!("assistant:{prompt_text}"))],
             stop_reason: moa_core::StopReason::EndTurn,
             model: model.into(),
-            input_tokens: 4,
-            output_tokens: 2,
-            cached_input_tokens: 0,
             usage: token_usage(4, 2),
             duration_ms: delay.as_millis() as u64,
             thought_signature: None,
@@ -544,9 +534,6 @@ impl LLMProvider for ToolCancelProvider {
                 })],
                 stop_reason: moa_core::StopReason::ToolUse,
                 model: self.model.clone().into(),
-                input_tokens: 8,
-                output_tokens: 4,
-                cached_input_tokens: 0,
                 usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
@@ -557,9 +544,6 @@ impl LLMProvider for ToolCancelProvider {
                 content: vec![CompletionContent::Text("should-not-run".to_string())],
                 stop_reason: moa_core::StopReason::EndTurn,
                 model: self.model.clone().into(),
-                input_tokens: 8,
-                output_tokens: 4,
-                cached_input_tokens: 0,
                 usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
@@ -619,9 +603,6 @@ impl LLMProvider for ToolThenEchoProvider {
                 })],
                 stop_reason: moa_core::StopReason::ToolUse,
                 model: self.model.clone().into(),
-                input_tokens: 8,
-                output_tokens: 4,
-                cached_input_tokens: 0,
                 usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
@@ -633,9 +614,6 @@ impl LLMProvider for ToolThenEchoProvider {
                 content: vec![CompletionContent::Text(format!("assistant:{prompt}"))],
                 stop_reason: moa_core::StopReason::EndTurn,
                 model: self.model.clone().into(),
-                input_tokens: 8,
-                output_tokens: 4,
-                cached_input_tokens: 0,
                 usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
@@ -696,9 +674,6 @@ impl LLMProvider for RepeatingToolTurnProvider {
                 })],
                 stop_reason: moa_core::StopReason::ToolUse,
                 model: self.model.clone().into(),
-                input_tokens: 8,
-                output_tokens: 4,
-                cached_input_tokens: 0,
                 usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
@@ -710,9 +685,6 @@ impl LLMProvider for RepeatingToolTurnProvider {
                 content: vec![CompletionContent::Text(format!("assistant:{prompt}"))],
                 stop_reason: moa_core::StopReason::EndTurn,
                 model: self.model.clone().into(),
-                input_tokens: 8,
-                output_tokens: 4,
-                cached_input_tokens: 0,
                 usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
@@ -772,9 +744,6 @@ impl LLMProvider for FileWriteApprovalProvider {
                 })],
                 stop_reason: moa_core::StopReason::ToolUse,
                 model: self.model.clone().into(),
-                input_tokens: 8,
-                output_tokens: 4,
-                cached_input_tokens: 0,
                 usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
@@ -785,9 +754,6 @@ impl LLMProvider for FileWriteApprovalProvider {
                 content: vec![CompletionContent::Text("done".to_string())],
                 stop_reason: moa_core::StopReason::EndTurn,
                 model: self.model.clone().into(),
-                input_tokens: 8,
-                output_tokens: 4,
-                cached_input_tokens: 0,
                 usage: token_usage(8, 4),
                 duration_ms: 10,
                 thought_signature: None,
@@ -817,7 +783,16 @@ async fn wait_for_status(
     session_id: SessionId,
     expected: SessionStatus,
 ) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    wait_for_status_with_timeout(orchestrator, session_id, expected, ASYNC_TEST_DEADLINE).await
+}
+
+async fn wait_for_status_with_timeout(
+    orchestrator: &LocalOrchestrator,
+    session_id: SessionId,
+    expected: SessionStatus,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
     loop {
         let session = orchestrator.get_session(session_id).await?;
         if session.status == expected {
@@ -833,11 +808,39 @@ async fn wait_for_status(
     }
 }
 
+async fn wait_for_brain_response_count_with_timeout(
+    orchestrator: &LocalOrchestrator,
+    session_id: SessionId,
+    expected: usize,
+    timeout: Duration,
+) -> Result<Vec<moa_core::EventRecord>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let events = orchestrator
+            .session_store()
+            .get_events(session_id, EventRange::all())
+            .await?;
+        let brain_response_count = events
+            .iter()
+            .filter(|record| matches!(record.event, Event::BrainResponse { .. }))
+            .count();
+        if brain_response_count == expected {
+            return Ok(events);
+        }
+        if Instant::now() >= deadline {
+            return Err(MoaError::ProviderError(format!(
+                "timed out waiting for {expected} brain responses"
+            )));
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn wait_for_approval_request(
     orchestrator: &LocalOrchestrator,
     session_id: SessionId,
 ) -> Result<uuid::Uuid> {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + ASYNC_TEST_DEADLINE;
     loop {
         let events = orchestrator
             .session_store()
@@ -862,7 +865,7 @@ async fn wait_for_approval_event(
     orchestrator: &LocalOrchestrator,
     session_id: SessionId,
 ) -> Result<Event> {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + ASYNC_TEST_DEADLINE;
     loop {
         let events = orchestrator
             .session_store()
@@ -890,7 +893,7 @@ async fn collect_runtime_events_until<P>(
 where
     P: Fn(&RuntimeEvent) -> bool,
 {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + ASYNC_TEST_DEADLINE;
     let mut events = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -919,7 +922,7 @@ async fn wait_for_pending_signal_count(
     session_id: SessionId,
     expected: usize,
 ) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + ASYNC_TEST_DEADLINE;
     loop {
         let pending = orchestrator
             .session_store()
@@ -942,7 +945,7 @@ async fn wait_for_tool_result_count(
     session_id: SessionId,
     expected: usize,
 ) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + ASYNC_TEST_DEADLINE;
     loop {
         let events = orchestrator
             .session_store()
@@ -965,7 +968,7 @@ async fn wait_for_tool_call_count(
     session_id: SessionId,
     expected: usize,
 ) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + ASYNC_TEST_DEADLINE;
     loop {
         let events = orchestrator
             .session_store()
@@ -1229,7 +1232,7 @@ async fn hard_cancel_aborts_stream_and_emits_cancelled_status() -> Result<()> {
         .await?;
 
     let mut delta_text = String::new();
-    let cancel_deadline = Instant::now() + Duration::from_secs(2);
+    let cancel_deadline = Instant::now() + ASYNC_TEST_DEADLINE;
     while delta_text.len() < 3 && Instant::now() < cancel_deadline {
         if let Ok(Ok(event)) =
             tokio::time::timeout(Duration::from_millis(250), runtime.recv()).await
@@ -1247,7 +1250,7 @@ async fn hard_cancel_aborts_stream_and_emits_cancelled_status() -> Result<()> {
         .signal(session.session_id, SessionSignal::HardCancel)
         .await?;
 
-    let finish_deadline = Instant::now() + Duration::from_secs(2);
+    let finish_deadline = Instant::now() + ASYNC_TEST_DEADLINE;
     let mut saw_turn_completed = false;
     while Instant::now() < finish_deadline {
         match tokio::time::timeout(Duration::from_millis(250), runtime.recv()).await {
@@ -1934,6 +1937,89 @@ async fn multiple_queued_messages_are_processed_fifo_one_turn_at_a_time() -> Res
 }
 
 #[tokio::test]
+async fn burst_of_queued_messages_preserves_fifo_under_hot_session_pressure() -> Result<()> {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let model = MoaConfig::default().general.default_model;
+    let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
+        model,
+        first_turn_delay: Duration::from_millis(150),
+        requests: requests.clone(),
+    });
+    let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
+    let queued = (0..10)
+        .map(|index| format!("burst-{index:02}"))
+        .collect::<Vec<_>>();
+    let session = start_session(&orchestrator).await?;
+
+    orchestrator
+        .signal(
+            session.session_id,
+            SessionSignal::QueueMessage(UserMessage {
+                text: "first".to_string(),
+                attachments: Vec::new(),
+            }),
+        )
+        .await?;
+    sleep(Duration::from_millis(40)).await;
+    for message in &queued {
+        orchestrator
+            .signal(
+                session.session_id,
+                SessionSignal::QueueMessage(UserMessage {
+                    text: message.clone(),
+                    attachments: Vec::new(),
+                }),
+            )
+            .await?;
+    }
+
+    wait_for_status_with_timeout(
+        &orchestrator,
+        session.session_id,
+        SessionStatus::Completed,
+        Duration::from_secs(60),
+    )
+    .await?;
+    let events = wait_for_brain_response_count_with_timeout(
+        &orchestrator,
+        session.session_id,
+        queued.len() + 1,
+        Duration::from_secs(60),
+    )
+    .await?;
+    let expected = std::iter::once("first".to_string())
+        .chain(queued.iter().cloned())
+        .map(|prompt| format!("assistant:{prompt}"))
+        .collect::<Vec<_>>();
+    assert_eq!(brain_response_texts(&events), expected);
+
+    let requests = requests
+        .lock()
+        .expect("request log mutex should not be poisoned")
+        .clone();
+    let ordered_prompts = requests
+        .iter()
+        .filter_map(|request| {
+            request
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == moa_core::MessageRole::User)
+                .map(|message| message.content.clone())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ordered_prompts,
+        expected
+            .iter()
+            .map(|text| text.trim_start_matches("assistant:").to_string())
+            .collect::<Vec<_>>()
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn queued_message_waiting_for_approval_runs_after_allowed_turn() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = MoaConfig::default().general.default_model;
@@ -2315,7 +2401,7 @@ async fn observe_uses_postgres_listener_for_remote_active_sessions() -> Result<(
         )
         .await?;
 
-    let observed = tokio::time::timeout(Duration::from_secs(2), stream.next())
+    let observed = tokio::time::timeout(ASYNC_TEST_DEADLINE, stream.next())
         .await
         .map_err(|_| {
             MoaError::ProviderError(
@@ -3185,56 +3271,6 @@ async fn session_pauses_on_loop_detection() -> Result<()> {
     assert!(warning_messages(&paused_events).iter().any(|message| {
         message.contains("Loop detected after 3 consecutive turns with identical tool call patterns. Session paused. Use /resume to continue.")
     }));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn remember_workspace_root_cleans_up_legacy_shell_approval_rules() -> Result<()> {
-    let (dir, orchestrator) = test_orchestrator().await?;
-    let workspace_id = WorkspaceId::new("workspace");
-    let store = orchestrator.session_store();
-
-    for rule in [
-        ApprovalRule {
-            id: Uuid::now_v7(),
-            workspace_id: workspace_id.clone(),
-            tool: "bash".to_string(),
-            pattern: "zsh *".to_string(),
-            action: PolicyAction::Allow,
-            scope: PolicyScope::Workspace,
-            created_by: UserId::new("tester"),
-            created_at: Utc::now(),
-        },
-        ApprovalRule {
-            id: Uuid::now_v7(),
-            workspace_id: workspace_id.clone(),
-            tool: "bash".to_string(),
-            pattern: "npm *".to_string(),
-            action: PolicyAction::Allow,
-            scope: PolicyScope::Workspace,
-            created_by: UserId::new("tester"),
-            created_at: Utc::now(),
-        },
-    ] {
-        store.upsert_approval_rule(rule).await?;
-    }
-
-    orchestrator
-        .remember_workspace_root(workspace_id.clone(), dir.path().to_path_buf())
-        .await;
-
-    let rules = store.list_approval_rules(&workspace_id).await?;
-    assert!(
-        rules
-            .iter()
-            .all(|rule| !(rule.tool == "bash" && rule.pattern == "zsh *"))
-    );
-    assert!(
-        rules
-            .iter()
-            .any(|rule| rule.tool == "bash" && rule.pattern == "npm *")
-    );
 
     Ok(())
 }

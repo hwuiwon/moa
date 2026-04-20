@@ -405,16 +405,7 @@ async fn consume_responses_stream_once(
         .as_ref()
         .map(token_usage_from_openai_usage)
         .unwrap_or_default();
-    let cached_input_tokens = token_usage.input_tokens_cache_read;
-    span_recorder.set_cached_input_tokens(cached_input_tokens);
-    let input_tokens = usage
-        .as_ref()
-        .map(|usage| usage.input_tokens as usize)
-        .unwrap_or(0);
-    let output_tokens = usage
-        .as_ref()
-        .map(|usage| usage.output_tokens as usize)
-        .unwrap_or(0);
+    span_recorder.set_cached_input_tokens(token_usage.input_tokens_cache_read);
     span_recorder.record_raw_response(&response);
 
     Ok(CompletionResponse {
@@ -426,9 +417,6 @@ async fn consume_responses_stream_once(
         } else {
             ModelId::new(response.model)
         },
-        input_tokens,
-        output_tokens,
-        cached_input_tokens,
         usage: token_usage,
         duration_ms: started_at.elapsed().as_millis() as u64,
         thought_signature: None,

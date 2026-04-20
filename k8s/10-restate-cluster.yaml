@@ -1,0 +1,29 @@
+apiVersion: restate.dev/v1
+kind: RestateCluster
+metadata:
+  name: moa-restate
+  namespace: moa-restate
+spec:
+  cluster:
+    autoProvision: true
+  compute:
+    replicas: 3
+    image: docker.restate.dev/restatedev/restate:1.5.6
+    resources:
+      requests:
+        cpu: "2"
+        memory: 8Gi
+      limits:
+        cpu: "4"
+        memory: 16Gi
+  storage:
+    storageClassName: fast-ssd
+    storageRequestBytes: 214748364800
+  security:
+    disableNetworkPolicies: true
+  config: |
+    shutdown-timeout = "10m"
+    default-num-partitions = 128
+    default-replication = 2
+    tracing-endpoint = "http://alloy.observability.svc.cluster.local:4317"
+    tracing-filter = "info"

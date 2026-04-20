@@ -103,7 +103,7 @@ pub const CATALOG: &[ProviderModel] = &[
     ProviderModel {
         provider: PROVIDER_OPENAI,
         id: "gpt-4o",
-        display_name: "GPT-4o (legacy)",
+        display_name: "GPT-4o",
         context_window: 128_000,
         max_output_tokens: 16_384,
     },

@@ -19,6 +19,4 @@ pub struct CronSpec {
 pub enum CronHandle {
     /// Local scheduler handle.
     Local { id: String },
-    /// Temporal scheduler handle.
-    Temporal { id: String },
 }

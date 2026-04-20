@@ -8,8 +8,6 @@ use moa_core::{
     UserId, WorkspaceId,
 };
 
-const OVERLY_BROAD_SHELL_RULE_PATTERNS: &[&str] = &["zsh *", "bash *", "sh *", "dash *"];
-
 /// Persistent approval rule storage used by policy-aware tool routing.
 #[async_trait]
 pub trait ApprovalRuleStore: Send + Sync {
@@ -160,35 +158,6 @@ pub fn parse_and_match_bash(command: &str, rule_pattern: &str) -> bool {
         .unwrap_or_else(|_| glob_match(rule_pattern, command.trim()))
 }
 
-/// Deletes legacy shell approval rules that accidentally matched every wrapped command.
-pub async fn cleanup_overly_broad_shell_rules(
-    store: &dyn ApprovalRuleStore,
-    workspace_id: &WorkspaceId,
-) -> Result<usize> {
-    let rules = store.list_approval_rules(workspace_id).await?;
-    let mut cleaned = 0;
-
-    for rule in rules {
-        if rule.tool != "bash" || !OVERLY_BROAD_SHELL_RULE_PATTERNS.contains(&rule.pattern.as_str())
-        {
-            continue;
-        }
-
-        tracing::warn!(
-            workspace_id = %workspace_id,
-            rule_workspace_id = %rule.workspace_id,
-            pattern = %rule.pattern,
-            "deleting overly broad shell approval rule"
-        );
-        store
-            .delete_approval_rule(&rule.workspace_id, &rule.tool, &rule.pattern)
-            .await?;
-        cleaned += 1;
-    }
-
-    Ok(cleaned)
-}
-
 fn rule_visible_to_workspace(rule: &ApprovalRule, workspace_id: &WorkspaceId) -> bool {
     matches!(rule.scope, PolicyScope::Global) || &rule.workspace_id == workspace_id
 }
@@ -203,71 +172,15 @@ fn rule_matches(rule: &ApprovalRule, tool: &str, normalized_input: &str) -> bool
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use async_trait::async_trait;
     use chrono::Utc;
     use moa_core::shell::split_shell_chain;
     use moa_core::{
-        ApprovalRule, ModelId, PolicyAction, PolicyScope, Result, RiskLevel, SessionMeta,
-        ToolPolicyInput, UserId, WorkspaceId,
+        ModelId, PolicyAction, PolicyScope, RiskLevel, SessionMeta, ToolPolicyInput, UserId,
+        WorkspaceId,
     };
-    use tokio::sync::Mutex;
     use uuid::Uuid;
 
-    use super::{
-        ApprovalRuleStore, ToolPolicies, ToolPolicyContext, cleanup_overly_broad_shell_rules,
-        parse_and_match_bash,
-    };
-
-    #[derive(Clone, Default)]
-    struct MemoryApprovalRuleStore {
-        rules: Arc<Mutex<Vec<ApprovalRule>>>,
-    }
-
-    #[async_trait]
-    impl ApprovalRuleStore for MemoryApprovalRuleStore {
-        async fn list_approval_rules(
-            &self,
-            workspace_id: &WorkspaceId,
-        ) -> Result<Vec<ApprovalRule>> {
-            let rules = self.rules.lock().await;
-            Ok(rules
-                .iter()
-                .filter(|rule| {
-                    rule.workspace_id == *workspace_id || matches!(rule.scope, PolicyScope::Global)
-                })
-                .cloned()
-                .collect())
-        }
-
-        async fn upsert_approval_rule(&self, rule: ApprovalRule) -> Result<()> {
-            let mut rules = self.rules.lock().await;
-            if let Some(existing) = rules.iter_mut().find(|existing| {
-                existing.workspace_id == rule.workspace_id
-                    && existing.tool == rule.tool
-                    && existing.pattern == rule.pattern
-            }) {
-                *existing = rule;
-            } else {
-                rules.push(rule);
-            }
-            Ok(())
-        }
-
-        async fn delete_approval_rule(
-            &self,
-            workspace_id: &WorkspaceId,
-            tool: &str,
-            pattern: &str,
-        ) -> Result<()> {
-            let mut rules = self.rules.lock().await;
-            rules.retain(|rule| {
-                rule.workspace_id != *workspace_id || rule.tool != tool || rule.pattern != pattern
-            });
-            Ok(())
-        }
-    }
+    use super::{ToolPolicies, ToolPolicyContext, parse_and_match_bash};
 
     fn session() -> SessionMeta {
         SessionMeta {
@@ -355,76 +268,5 @@ mod tests {
         );
         assert!(!parse_and_match_bash("npm test && rm -rf /", "npm test*"));
         assert!(parse_and_match_bash("npm test -- --watch", "npm test*"));
-    }
-
-    #[tokio::test]
-    async fn cleanup_overly_broad_shell_rules_removes_visible_legacy_patterns() {
-        let workspace_id = WorkspaceId::new("workspace");
-        let other_workspace_id = WorkspaceId::new("other");
-        let store = MemoryApprovalRuleStore::default();
-
-        for rule in [
-            approval_rule(&workspace_id, "bash", "zsh *", PolicyScope::Workspace),
-            approval_rule(&workspace_id, "bash", "npm *", PolicyScope::Workspace),
-            approval_rule(&workspace_id, "file_write", "zsh *", PolicyScope::Workspace),
-            approval_rule(&other_workspace_id, "bash", "bash *", PolicyScope::Global),
-            approval_rule(&other_workspace_id, "bash", "sh *", PolicyScope::Workspace),
-        ] {
-            store.upsert_approval_rule(rule).await.unwrap();
-        }
-
-        let cleaned = cleanup_overly_broad_shell_rules(&store, &workspace_id)
-            .await
-            .unwrap();
-
-        assert_eq!(cleaned, 2);
-
-        let visible_rules = store.list_approval_rules(&workspace_id).await.unwrap();
-        assert!(
-            visible_rules
-                .iter()
-                .all(|rule| !(rule.tool == "bash" && rule.pattern == "zsh *"))
-        );
-        assert!(
-            visible_rules
-                .iter()
-                .all(|rule| !(rule.tool == "bash" && rule.pattern == "bash *"))
-        );
-        assert!(
-            visible_rules
-                .iter()
-                .any(|rule| rule.tool == "bash" && rule.pattern == "npm *")
-        );
-        assert!(
-            visible_rules
-                .iter()
-                .any(|rule| rule.tool == "file_write" && rule.pattern == "zsh *")
-        );
-        assert!(
-            store
-                .list_approval_rules(&other_workspace_id)
-                .await
-                .unwrap()
-                .iter()
-                .any(|rule| rule.tool == "bash" && rule.pattern == "sh *")
-        );
-    }
-
-    fn approval_rule(
-        workspace_id: &WorkspaceId,
-        tool: &str,
-        pattern: &str,
-        scope: PolicyScope,
-    ) -> ApprovalRule {
-        ApprovalRule {
-            id: Uuid::now_v7(),
-            workspace_id: workspace_id.clone(),
-            tool: tool.to_string(),
-            pattern: pattern.to_string(),
-            action: PolicyAction::Allow,
-            scope,
-            created_by: UserId::new("user"),
-            created_at: Utc::now(),
-        }
     }
 }

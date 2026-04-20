@@ -51,7 +51,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_or_legacy_values_fall_back_to_dark() {
+    fn unknown_values_fall_back_to_dark() {
         assert_eq!(canonical_theme_key("default"), "dark");
         assert_eq!(canonical_theme_key("system"), "dark");
         assert_eq!(canonical_theme_key(""), "dark");

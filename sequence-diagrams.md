@@ -9,7 +9,7 @@ Mermaid sequence diagrams showing how MOA actually moves at runtime. Start with 
 | `User` | Person sending messages | — |
 | `Platform` | Telegram / Slack / Discord / Desktop / CLI | `moa-gateway` (and `moa-desktop`, `moa-cli`) |
 | `Gateway` | Normalizes inbound, renders outbound | `moa-gateway` |
-| `Orch` | `BrainOrchestrator` (`LocalOrchestrator` or `TemporalOrchestrator`) | `moa-orchestrator` |
+| `Orch` | `BrainOrchestrator` (`LocalOrchestrator` or Restate-backed runtime) | `moa-orchestrator` |
 | `Brain` | Stateless harness loop | `moa-brain` |
 | `Pipe` | 7-stage context compilation pipeline | `moa-brain` |
 | `LLM` | LLM provider (Anthropic / OpenAI / Gemini) | `moa-providers` |
@@ -18,7 +18,7 @@ Mermaid sequence diagrams showing how MOA actually moves at runtime. Start with 
 | `Log` | `SessionStore` (Postgres) | `moa-session` |
 | `Memory` | `MemoryStore` (file-wiki + FTS) | `moa-memory` |
 | `Vault` | `CredentialVault` (file or HashiCorp) | `moa-security` |
-| `Cron` | Scheduled-task runner (tokio-cron or Temporal timer) | `moa-orchestrator` |
+| `Cron` | Scheduled-task runner (tokio-cron or Restate workflow delay) | `moa-orchestrator` |
 
 ---
 
@@ -393,7 +393,7 @@ sequenceDiagram
     NewBrain->>Log: get_events(from_seq = N+1)
     Log-->>NewBrain: events since checkpoint
 
-    Note over NewBrain: Reconstructs context from log alone.<br/>No filesystem state required.<br/>Temporal activities are idempotent<br/>via UNIQUE(session_id, sequence_num).
+    Note over NewBrain: Reconstructs context from log alone.<br/>No filesystem state required.<br/>Durable retries stay safe<br/>via UNIQUE(session_id, sequence_num).
 
     NewBrain->>NewBrain: run turn
 ```
@@ -444,62 +444,55 @@ sequenceDiagram
 
 ---
 
-## 10. Cloud mode — Temporal workflow + Fly.io Machines
+## 10. Cloud mode — Restate + Kubernetes
 
-In cloud mode, each session is a Temporal workflow; each brain turn is a Temporal activity. Approval is a durable `waitForSignal`.
+In cloud mode, each session is a Restate Virtual Object. Turns execute as durable handler invocations, approvals pause on awakeables, and the orchestrator scales as a standard Kubernetes deployment.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Platform
     participant Gateway
-    participant Temporal
-    participant Workflow as session_workflow
-    participant Activity as brain_turn activity
+    participant Restate
+    participant Session as Session VO
+    participant LLM as LLMGateway
     participant Log as Postgres (Neon)
     participant Hand as Daytona / E2B
-    participant Fly as Fly.io Machine
+    participant K8s as Orchestrator pod
 
     Platform->>Gateway: inbound message
-    Gateway->>Temporal: start workflow / signal(QueuedMessage)
-    Temporal->>Fly: auto-resume Machine (if suspended)
-    Fly-->>Temporal: ready
-    Temporal->>Workflow: run session_workflow(session_id)
+    Gateway->>Restate: invoke Session/post_message
+    Restate->>K8s: route invocation
+    K8s->>Session: post_message(session_id)
 
     loop Until SessionCompleted
-        Workflow->>Activity: brain_turn(session_id)
-        Activity->>Log: get_events + compile context + call LLM
+        Session->>Log: get_events + compile context
+        Session->>LLM: complete(request)
         alt ToolCall needs approval
-            Activity->>Log: emit ApprovalRequested
-            Activity-->>Workflow: TurnResult::NeedsApproval
-            Workflow->>Temporal: waitForSignal(ApprovalDecided)
-            Note over Workflow,Temporal: Workflow sleeps durably.<br/>Machine may suspend → auto-resume on signal.
+            Session->>Log: emit ApprovalRequested
+            Session->>Restate: await awakeable
+            Note over Session,Restate: Invocation sleeps durably until resolved.
             Platform->>Gateway: user tapped button
-            Gateway->>Temporal: signal(ApprovalDecided)
-            Temporal->>Workflow: resume
+            Gateway->>Restate: resolve awakeable
+            Restate->>Session: resume
         else Tool executes
-            Activity->>Hand: provision (lazy) + execute
-            Hand-->>Activity: ToolOutput
-            Activity->>Log: emit ToolCall + ToolResult
-        end
-        alt Turn complete
-            Activity-->>Workflow: TurnResult::Complete
-        else Continue
-            Activity-->>Workflow: TurnResult::Continue
+            Session->>Hand: provision (lazy) + execute
+            Hand-->>Session: ToolOutput
+            Session->>Log: emit ToolCall + ToolResult
         end
     end
 
-    Workflow->>Log: emit SessionCompleted
-    Note over Fly: Idle ≥5m → auto-suspend.<br/>Only storage cost while asleep.
+    Session->>Log: emit SessionCompleted
+    Note over K8s: Rolling restarts are safe.<br/>Restate replays durable state on retry.
 
-    Note over Activity,Log: emit_event is idempotent:<br/>UNIQUE(session_id, sequence_num)<br/>→ Temporal retries are safe
+    Note over Session,Log: emit_event is idempotent:<br/>UNIQUE(session_id, sequence_num)<br/>→ replay and retry remain safe
 ```
 
 ---
 
 ## 11. Consolidation ("Dream") — scheduled memory maintenance
 
-Fires when ≥3 sessions complete AND ≥24h since last run. Runs as a Temporal timer (cloud) or `tokio-cron-scheduler` job (local).
+Fires when ≥3 sessions complete AND ≥24h since last run. Runs as a delayed Restate workflow (cloud) or `tokio-cron-scheduler` job (local).
 
 ```mermaid
 sequenceDiagram
@@ -667,7 +660,7 @@ sequenceDiagram
 
 - [`architecture.md`](architecture.md) — structural overview of all the components shown above
 - [`docs/01-architecture-overview.md`](docs/01-architecture-overview.md) — full trait signatures
-- [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md) — Temporal + local orchestrator internals
+- [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md) — Restate + local orchestrator internals
 - [`docs/03-communication-layer.md`](docs/03-communication-layer.md) — approval UX, observation verbosity, rate limits
 - [`docs/04-memory-architecture.md`](docs/04-memory-architecture.md) — file-wiki, FTS, consolidation, git-branch writes
 - [`docs/05-session-event-log.md`](docs/05-session-event-log.md) — event schema, compaction, replay

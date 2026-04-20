@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::types::{
     ApprovalDecision, ApprovalPrompt, Attachment, CacheReport, EventType, ModelId, ModelTier,
-    RiskLevel, SessionStatus, ToolCallId, ToolOutput, UserId, WorkspaceId,
+    RiskLevel, SessionStatus, SubAgentId, ToolCallId, ToolOutput, UserId, WorkspaceId,
 };
 
 /// Append-only session event payload.
@@ -63,21 +63,17 @@ pub enum Event {
         /// Response text.
         text: String,
         /// Provider-specific thought signature that should be replayed on the next turn when present.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         thought_signature: Option<String>,
         /// Model identifier.
         model: ModelId,
         /// Routing tier that produced this response.
-        #[serde(default = "default_main_model_tier")]
         model_tier: ModelTier,
         /// Input tokens billed at the provider's standard uncached rate.
-        #[serde(default, alias = "input_tokens")]
         input_tokens_uncached: usize,
         /// Input tokens billed to create or refresh a cache entry.
-        #[serde(default)]
         input_tokens_cache_write: usize,
         /// Input tokens served from cache.
-        #[serde(default)]
         input_tokens_cache_read: usize,
         /// Output token count.
         output_tokens: usize,
@@ -108,12 +104,12 @@ pub enum Event {
         /// Matching tool call identifier.
         tool_id: ToolCallId,
         /// Provider-specific tool-use identifier, when available.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         provider_tool_use_id: Option<String>,
         /// Full tool output.
         output: ToolOutput,
         /// Approximate token count before router-level truncation, when truncation occurred.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         original_output_tokens: Option<u32>,
         /// Whether execution succeeded.
         success: bool,
@@ -125,10 +121,9 @@ pub enum Event {
         /// Matching tool call identifier.
         tool_id: ToolCallId,
         /// Provider-specific tool-use identifier, when available.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         provider_tool_use_id: Option<String>,
         /// Tool name.
-        #[serde(default)]
         tool_name: String,
         /// Error message.
         error: String,
@@ -139,6 +134,12 @@ pub enum Event {
     ApprovalRequested {
         /// Approval request identifier.
         request_id: Uuid,
+        /// Restate awakeable identifier used to resume the blocked turn.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        awakeable_id: Option<String>,
+        /// Child sub-agent that owns the approval, when the request originated from a nested actor.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sub_agent_id: Option<SubAgentId>,
         /// Tool name.
         tool_name: String,
         /// Concise input summary.
@@ -154,6 +155,9 @@ pub enum Event {
     ApprovalDecided {
         /// Approval request identifier.
         request_id: Uuid,
+        /// Child sub-agent that owned the approval, when the decision came from a nested actor.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sub_agent_id: Option<SubAgentId>,
         /// User decision.
         decision: ApprovalDecision,
         /// User who decided.
@@ -220,19 +224,14 @@ pub enum Event {
         /// Tokens in the summary.
         token_count: usize,
         /// Model identifier used to generate the summary.
-        #[serde(default)]
         model: ModelId,
         /// Routing tier that produced this checkpoint.
-        #[serde(default = "default_auxiliary_model_tier")]
         model_tier: ModelTier,
         /// Input token count used to generate the summary.
-        #[serde(default)]
         input_tokens: usize,
         /// Output token count used to generate the summary.
-        #[serde(default)]
         output_tokens: usize,
         /// Cost in cents attributed to the summary generation.
-        #[serde(default)]
         cost_cents: u32,
     },
     /// Durable cache-planning and cache-usage report for one provider request.
@@ -395,14 +394,6 @@ impl Event {
     }
 }
 
-fn default_main_model_tier() -> ModelTier {
-    ModelTier::Main
-}
-
-fn default_auxiliary_model_tier() -> ModelTier {
-    ModelTier::Auxiliary
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -419,6 +410,7 @@ mod tests {
         ApprovalPrompt {
             request: crate::types::ApprovalRequest {
                 request_id,
+                sub_agent_id: None,
                 tool_name: tool_name.to_string(),
                 input_summary: input_summary.to_string(),
                 risk_level: risk_level.clone(),
@@ -500,42 +492,6 @@ mod tests {
     }
 
     #[test]
-    fn brain_response_deserializes_pre_step_79_payload() {
-        let payload = serde_json::json!({
-            "type": "BrainResponse",
-            "data": {
-                "text": "done",
-                "model": "claude-sonnet-4-6",
-                "input_tokens": 42,
-                "output_tokens": 9,
-                "cost_cents": 3,
-                "duration_ms": 120
-            }
-        });
-
-        let parsed: Event =
-            serde_json::from_value(payload).expect("legacy BrainResponse should deserialize");
-
-        match parsed {
-            Event::BrainResponse {
-                model_tier,
-                input_tokens_uncached,
-                input_tokens_cache_write,
-                input_tokens_cache_read,
-                output_tokens,
-                ..
-            } => {
-                assert_eq!(model_tier, ModelTier::Main);
-                assert_eq!(input_tokens_uncached, 42);
-                assert_eq!(input_tokens_cache_write, 0);
-                assert_eq!(input_tokens_cache_read, 0);
-                assert_eq!(output_tokens, 9);
-            }
-            other => panic!("expected BrainResponse, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn all_event_types_serialize() {
         let events = vec![
             Event::SessionCreated {
@@ -557,6 +513,8 @@ mod tests {
             },
             Event::ApprovalRequested {
                 request_id: Uuid::nil(),
+                awakeable_id: None,
+                sub_agent_id: None,
                 tool_name: "bash".into(),
                 input_summary: "ls".into(),
                 risk_level: RiskLevel::Low,
@@ -594,6 +552,8 @@ mod tests {
         let request_id = Uuid::now_v7();
         let event = Event::ApprovalRequested {
             request_id,
+            awakeable_id: None,
+            sub_agent_id: None,
             tool_name: "file_write".to_string(),
             input_summary: "notes/today.md".to_string(),
             risk_level: RiskLevel::Medium,
@@ -608,52 +568,5 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serialize approval request");
         let decoded: Event = serde_json::from_str(&json).expect("deserialize approval request");
         assert_eq!(decoded, event);
-    }
-
-    #[test]
-    fn tool_result_event_deserializes_without_provider_tool_use_id() {
-        let tool_id = ToolCallId::new();
-        let json = serde_json::json!({
-            "type": "ToolResult",
-            "data": {
-                "tool_id": tool_id,
-                "output": {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "ok"
-                        }
-                    ],
-                    "is_error": false,
-                    "structured": null,
-                    "duration": {
-                        "secs": 0,
-                        "nanos": 0
-                    }
-                },
-                "success": true,
-                "duration_ms": 5
-            }
-        });
-
-        let decoded: Event = serde_json::from_value(json).expect("deserialize legacy tool result");
-        match decoded {
-            Event::ToolResult {
-                tool_id: decoded_id,
-                provider_tool_use_id,
-                output,
-                original_output_tokens,
-                success,
-                duration_ms,
-            } => {
-                assert_eq!(decoded_id, tool_id);
-                assert_eq!(provider_tool_use_id, None);
-                assert_eq!(output.to_text(), "ok");
-                assert_eq!(original_output_tokens, None);
-                assert!(success);
-                assert_eq!(duration_ms, 5);
-            }
-            other => panic!("expected tool result event, got {other:?}"),
-        }
     }
 }

@@ -12,7 +12,7 @@ This specification is split into standalone documents. Each is self-contained bu
 |---|----------|-------|
 | 00 | [Direction](00-direction.md) | Product identity, philosophy, target users |
 | 01 | [Architecture Overview](01-architecture-overview.md) | System diagram, component interactions, trait hierarchy, Rust workspace |
-| 02 | [Brain Orchestration](02-brain-orchestration.md) | Temporal workflows, Fly.io hosting, local runtime mode, brain lifecycle |
+| 02 | [Brain Orchestration](02-brain-orchestration.md) | Restate orchestration, local runtime mode, brain lifecycle |
 | 03 | [Communication Layer](03-communication-layer.md) | Messaging gateway, approval UX, thread observation, desktop app, CLI |
 | 04 | [Memory Architecture](04-memory-architecture.md) | File-wiki, FTS5, scoping, consolidation, concurrent writes |
 | 05 | [Session & Event Log](05-session-event-log.md) | Postgres event schema, compaction, replay |
@@ -21,12 +21,15 @@ This specification is split into standalone documents. Each is self-contained bu
 | 08 | [Security](08-security.md) | Credential vault, sandbox tiers, prompt injection, approval policies |
 | 09 | [Skills & Learning](09-skills-and-learning.md) | Agent Skills format, distillation, self-improvement |
 | 10 | [Technology Stack](10-technology-stack.md) | Crates, dependencies, implementation phases, deployment |
+| 11 | [Event Replay Runbook](11-event-replay-runbook.md) | Operational playbook for replay, repair, and recovery |
+| 12 | [Restate Architecture](12-restate-architecture.md) | Restate services, virtual objects, workflows, and Kubernetes deployment |
+| 14 | [Post-Migration Notes](14-post-migration-notes.md) | Final cutover record, cost comparison, and follow-up debt |
 
 ## Decisions register
 
 | # | Topic | Decision |
 |---|---|---|
-| 1 | Brain orchestration | Temporal.io + Fly.io Machines; `LocalOrchestrator` for zero-cloud local |
+| 1 | Brain orchestration | Restate + Kubernetes in production; `LocalOrchestrator` for zero-cloud local |
 | 2 | Skill format | Agent Skills standard (agentskills.io) with MOA extensions |
 | 3 | Memory | Hybrid file-wiki + Postgres-backed indexing, per-user + per-workspace scoping |
 | 4 | Messaging gateway | Single Rust binary, adapter pattern (teloxide / serenity / slack-morphism) |

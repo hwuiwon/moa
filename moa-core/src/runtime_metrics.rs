@@ -247,6 +247,38 @@ pub fn record_llm_streaming_duration(provider: &str, model: &str, duration: Dura
     .record(duration.as_secs_f64());
 }
 
+/// Records one LLM completion cost sample in cents.
+pub fn record_llm_cost_cents(provider: &str, model: &str, cost_cents: u64) {
+    if cost_cents == 0 {
+        return;
+    }
+
+    counter!(
+        "moa_llm_cost_cents_total",
+        "provider" => provider.to_string(),
+        "model" => model.to_string()
+    )
+    .increment(cost_cents);
+}
+
+/// Records one session-level error that should appear on operational dashboards.
+pub fn record_session_error(scope: &str) {
+    counter!(
+        "moa_session_errors_total",
+        "scope" => scope.to_string()
+    )
+    .increment(1);
+}
+
+/// Records approval wait latency until a decision is made or timed out.
+pub fn record_approval_wait(duration: Duration, outcome: &str) {
+    histogram!(
+        "moa_approval_wait_seconds",
+        "outcome" => outcome.to_string()
+    )
+    .record(duration.as_secs_f64());
+}
+
 /// Records one tool call completion and its latency.
 pub fn record_tool_call(tool_name: &str, status: &str, duration: Duration) {
     counter!(
@@ -440,6 +472,14 @@ fn register_metric_descriptions() {
         "Total tool calls completed, labeled by tool name and status."
     );
     describe_counter!(
+        "moa_session_errors_total",
+        "Total session-scoped error events surfaced by the orchestrator."
+    );
+    describe_counter!(
+        "moa_llm_cost_cents_total",
+        "Total LLM completion cost in cents."
+    );
+    describe_counter!(
         "moa_tool_output_truncated_total",
         "Number of successful tool calls whose outputs were truncated."
     );
@@ -462,6 +502,10 @@ fn register_metric_descriptions() {
     describe_histogram!(
         "moa_llm_streaming_seconds",
         "Total LLM request streaming duration in seconds."
+    );
+    describe_histogram!(
+        "moa_approval_wait_seconds",
+        "Approval wait duration in seconds."
     );
     describe_histogram!(
         "moa_tool_call_duration_seconds",

@@ -1,6 +1,6 @@
 # 05 — Session & Event Log
 
-_Postgres event schema, compaction, Temporal integration, replay._
+_Postgres event schema, compaction, and replay._
 
 ---
 
@@ -425,21 +425,6 @@ If no checkpoint:
   
 Errors are ALWAYS preserved regardless of compaction.
 ```
-
----
-
-## Temporal persistence model
-
-Events persist in two places:
-
-| Store | Purpose | Guarantees |
-|---|---|---|
-| Temporal event history | Crash recovery, workflow replay | Exactly-once, ordered |
-| Postgres | Querying, observation, session replay, cross-session search | Durable, queryable source of truth |
-
-The brain emits to Postgres within each Temporal activity. If the activity fails and retries, the Postgres write is idempotent (UNIQUE constraint on session_id + sequence_num).
-
-In local mode (no Temporal), Postgres is still the only store. Crash recovery works by reading the last event and resuming from there.
 
 ---
 

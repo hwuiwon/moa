@@ -194,9 +194,9 @@ impl LLMSpanRecorder {
             serialize_output_content(&response.content)
         };
         let cost = calculate_cost_with_cached(
-            response.input_tokens,
+            usage.total_input_tokens(),
             usage.input_tokens_cache_read,
-            response.output_tokens,
+            usage.output_tokens,
             &self.pricing,
         );
         let provider_cache_hit_rate = usage.cache_hit_rate();
@@ -270,7 +270,6 @@ impl LLMSpanRecorder {
         if usage.input_tokens_cache_write == 0 && self.cache_creation_input_tokens > 0 {
             usage.input_tokens_cache_write = self.cache_creation_input_tokens;
         }
-        usage.output_tokens = response.output_tokens;
         usage
     }
 }

@@ -1,0 +1,167 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: observability
+data:
+  config.alloy: |
+    otelcol.receiver.otlp "default" {
+      grpc {
+        endpoint = "0.0.0.0:4317"
+      }
+
+      http {
+        endpoint = "0.0.0.0:4318"
+      }
+
+      output {
+        traces  = [otelcol.processor.batch.default.input]
+        metrics = [otelcol.exporter.prometheus.otlp.input]
+      }
+    }
+
+    otelcol.processor.batch "default" {
+      output {
+        traces = [otelcol.exporter.otlphttp.tempo.input]
+      }
+    }
+
+    otelcol.auth.basic "tempo" {
+      username = sys.env("GRAFANA_CLOUD_TRACES_USER")
+      password = sys.env("GRAFANA_CLOUD_TRACES_KEY")
+    }
+
+    otelcol.exporter.otlphttp "tempo" {
+      client {
+        endpoint = sys.env("GRAFANA_TEMPO_OTLP_ENDPOINT")
+        auth     = otelcol.auth.basic.tempo.handler
+      }
+    }
+
+    otelcol.exporter.prometheus "otlp" {
+      forward_to = [prometheus.remote_write.mimir.receiver]
+    }
+
+    prometheus.remote_write "mimir" {
+      external_labels = {
+        cluster = "moa",
+      }
+
+      endpoint {
+        url = sys.env("GRAFANA_MIMIR_REMOTE_WRITE_URL")
+
+        basic_auth {
+          username = sys.env("GRAFANA_CLOUD_METRICS_USER")
+          password = sys.env("GRAFANA_CLOUD_METRICS_KEY")
+        }
+      }
+    }
+
+    prometheus.scrape "moa_orchestrator" {
+      scrape_interval = "15s"
+      targets = [{
+        "__address__" = "moa-orchestrator.moa-system.svc.cluster.local:9090",
+        "job"         = "moa-orchestrator",
+      }]
+      forward_to = [prometheus.remote_write.mimir.receiver]
+    }
+
+    prometheus.scrape "restate" {
+      scrape_interval = "15s"
+      metrics_path    = "/metrics"
+      targets = [{
+        "__address__" = "restate.moa-restate.svc.cluster.local:5122",
+        "job"         = "restate",
+      }]
+      forward_to = [prometheus.remote_write.mimir.receiver]
+    }
+
+    discovery.kubernetes "pods" {
+      role = "pod"
+
+      namespaces {
+        names = ["moa-system", "moa-restate"]
+      }
+    }
+
+    loki.source.kubernetes "pods" {
+      targets    = discovery.kubernetes.pods.targets
+      forward_to = [loki.process.moa.receiver]
+    }
+
+    loki.process "moa" {
+      forward_to = [loki.relabel.moa.receiver]
+
+      stage.json {
+        expressions = {
+          level        = "level",
+          message      = "message",
+          target       = "target",
+          session_id   = "\"moa.session.id\"",
+          workspace_id = "\"moa.workspace.id\"",
+          user_id      = "\"moa.user.id\"",
+        }
+      }
+
+      stage.structured_metadata {
+        values = {
+          session_id   = "",
+          workspace_id = "",
+          user_id      = "",
+          target       = "",
+        }
+      }
+
+      stage.static_labels {
+        values = {
+          cluster = "moa",
+          env     = "production",
+        }
+      }
+
+      stage.labels {
+        values = {
+          level = "",
+        }
+      }
+
+      stage.output {
+        source = "message"
+      }
+    }
+
+    loki.relabel "moa" {
+      forward_to = [loki.write.loki.receiver]
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+        action        = "replace"
+        target_label  = "service"
+      }
+
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        action        = "replace"
+        target_label  = "namespace"
+      }
+
+      rule {
+        action = "labelkeep"
+        regex  = "^(service|namespace|level|cluster|env)$"
+      }
+    }
+
+    loki.write "loki" {
+      external_labels = {
+        cluster = "moa",
+      }
+
+      endpoint {
+        url = sys.env("GRAFANA_LOKI_WRITE_URL")
+
+        basic_auth {
+          username = sys.env("GRAFANA_CLOUD_LOGS_USER")
+          password = sys.env("GRAFANA_CLOUD_LOGS_KEY")
+        }
+      }
+    }

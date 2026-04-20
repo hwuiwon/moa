@@ -354,16 +354,16 @@ Delete any `setup_turso_test_store` helpers. Delete `tempfile`-based DB test hel
 
 For fast CI, consider a session-scoped container (testcontainers shared across tests) or share the dev docker-compose instance when `TEST_DATABASE_URL` is set.
 
-### 5i. Legacy data detection
+### 5i. Stale data detection
 
 If `~/.moa/sessions.db` OR `~/.moa/**/search.db` exists at startup, log **once** per file:
 
 ```
-warning: Legacy SQLite file detected at {path}.
+warning: Stale SQLite file detected at {path}.
          MOA 0.X+ uses Postgres only. This file is ignored and can be deleted.
 ```
 
-Store a sentinel at `~/.moa/.sqlite-legacy-ack` after first warning. Ship no migration tooling in this step; fresh-start is the expected path.
+Store a sentinel at `~/.moa/.sqlite-stale-ack` after first warning. Ship no migration tooling in this step; fresh-start is the expected path.
 
 ### 5j. Documentation updates
 
@@ -407,7 +407,7 @@ Store a sentinel at `~/.moa/.sqlite-legacy-ack` after first warning. Ship no mig
 - [ ] `moa doctor` reports Postgres version and pgvector presence.
 - [ ] All `#[cfg(feature = "turso")]` removed workspace-wide.
 - [ ] All tests migrated to testcontainers Postgres.
-- [ ] Legacy SQLite file detection with one-time warning.
+- [ ] Stale SQLite file detection with one-time warning.
 - [ ] Docs 04, 05, 10, 11, README updated.
 - [ ] `cargo build --release` produces a binary with no `libsqlite3` or `libsql` linkage anywhere in the MOA workspace.
 - [ ] `cargo test --workspace` green (step 90 implements real search; `search` tests in `moa-memory` are temporarily `#[ignore]`d with a TODO referencing step 90).

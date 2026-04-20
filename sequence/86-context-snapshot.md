@@ -8,7 +8,7 @@ _Stop rebuilding the compiled context from the full event log every turn. After 
 
 Step 80's instrumentation will tell us precisely how many events are replayed per turn. The research report's prediction: `events_replayed` grows linearly with turn number, making a long session O(N²) in event-read work. Even if the per-event cost is tiny, the compounding of full replays during a 40-turn coding session is the dominant contributor to context-compile latency.
 
-LangGraph solves this with `checkpointer`. Temporal solves it with event history snapshots. Claude Code implicitly solves it by rebuilding compact context representations internally. MOA currently solves it the simplest way — not at all — and pays every turn.
+LangGraph solves this with `checkpointer`. Workflow engines solve it with event history snapshots. Claude Code implicitly solves it by rebuilding compact context representations internally. MOA currently solves it the simplest way — not at all — and pays every turn.
 
 The fix: after each turn's pipeline run completes, serialize the resulting `WorkingContext` (or a carefully-chosen subset) as a "context snapshot." Key it by session_id and the sequence_num of the last event included. On the next turn, load the snapshot and feed only new events (since that sequence_num) through the incremental compiler path (step 87).
 

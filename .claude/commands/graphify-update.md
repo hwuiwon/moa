@@ -1,22 +1,18 @@
 ---
-description: Smart graphify update — LLM only where it pays off (semantic extraction + inline labeling), then deterministic rebuild
+description: Smart graphify update — deterministic rebuild plus inline community labeling
 argument-hint: "[path]"
-allowed-tools: Bash, Read, Write, Agent
+allowed-tools: Bash, Read, Write
 ---
 
 # /graphify-update
 
-Smart incremental refresh of `graphify-out/`. Uses the LLM only for the two things it's actually good at and AST cannot do:
+Smart incremental refresh of `graphify-out/`. Uses the LLM only for one thing AST cannot do: **community labeling** — done inline by the main assistant after the fast script has already clustered the graph. No subagent, no file reads on non-code, just reasoning over `graph.json`'s community structure. Typically ~5 seconds.
 
-1. **Semantic extraction** (hyperedges, rationale edges, cross-document similarity) — only for changed non-code files. Dispatched to a subagent so the main context stays clean.
-2. **Community labeling** — done **inline by the main assistant** after the fast script has already clustered the graph. No subagent, no file reads, just reasoning over `graph.json`'s community structure. Typically ~5 seconds.
+Everything else (AST extraction, clustering, rendering) is deterministic Python via `scripts/graphify-fast.sh`.
 
-Everything else (AST extraction, clustering, rendering) is deterministic Python via `scripts/graphify-fast.sh` and runs in ~0.2s.
+Non-code files (markdown, docs) are intentionally **not** re-extracted by an LLM subagent — deterministic AST + clustering is enough for this repo, and the subagent overhead isn't worth it.
 
-Expected cost:
-- **Code-only change set** → no subagent, inline labeling only → **~5–10s total**
-- **Any non-code change** → one subagent for the changed docs + inline labeling → **~30–45s total**
-- Old `/graphify . --update` took ~130s regardless of change type.
+Expected cost: **~5–10s total** regardless of change type. Old `/graphify . --update` took ~130s.
 
 Path defaults to `.` (the repo root). Pass an explicit path to scope the run: `/graphify-update moa-brain`.
 
@@ -27,8 +23,6 @@ Path defaults to `.` (the repo root). Pass an explicit path to scope the run: `/
 ```bash
 rm -f \
   graphify-out/.update_changed.json \
-  graphify-out/.update_noncode.json \
-  graphify-out/.update_semantic.json \
   graphify-out/.update_communities.json \
   graphify-out/.update_labels.json \
   graphify-out/.graphify_python \
@@ -41,12 +35,12 @@ Idempotent. Guards against a prior run that crashed before its EXIT trap fired.
 
 ---
 
-## Step 1 — Detect what changed, split code vs non-code
+## Step 1 — Detect what changed (informational only)
 
 ```bash
 TARGET="${1:-.}"
 python3 - "$TARGET" <<'PYEOF'
-import json, sys
+import sys
 from pathlib import Path
 from graphify.detect import detect_incremental
 
@@ -57,17 +51,13 @@ unchanged = {f for files in detect.get('unchanged_files', {}).values() for f in 
 all_files = [f for files in detect.get('files', {}).values() for f in files]
 changed   = [f for f in all_files if f not in unchanged]
 
-code_exts = {'.rs','.py','.ts','.js','.go','.java','.cpp','.c','.rb','.swift','.kt','.cs','.scala','.php','.cc','.cxx','.hpp','.h','.kts','.lua'}
-non_code_changed = [f for f in changed if Path(f).suffix.lower() not in code_exts]
-
-Path('graphify-out/.update_noncode.json').write_text(json.dumps(non_code_changed))
-print(f'CHANGED={len(changed)} NONCODE={len(non_code_changed)}')
-for f in non_code_changed[:10]:
-    print(f'  noncode: {f}')
+print(f'CHANGED={len(changed)}')
+for f in changed[:10]:
+    print(f'  changed: {f}')
 PYEOF
 ```
 
-Read `graphify-out/.update_noncode.json`. If it is `[]`, **skip Step 2** and jump to Step 3.
+This is informational. The fast rebuild in Step 3 handles changed files through the cache; we don't branch on file type.
 
 ---
 
@@ -121,75 +111,21 @@ PYEOF
 
 ---
 
-## Step 2 — Single semantic-extraction subagent (only if non-code changed)
-
-Dispatch **exactly one** `Agent` call with `subagent_type: general-purpose`. The subagent reads each changed non-code file with the `Read` tool, extracts nodes/edges/hyperedges, and returns **JSON only** — no prose, no fences.
-
-### Subagent prompt template
-
-```
-You are a graphify semantic-extraction subagent. Read the files listed and extract a knowledge graph fragment focused on what AST extraction CANNOT see:
-- rationale_for edges (docs that explain a design decision in code)
-- semantically_similar_to edges (cross-cutting conceptual matches)
-- hyperedges (3+ nodes participating in one shared flow/pattern)
-- named concepts and entities from prose
-
-Files:
-<FILE_LIST>
-
-Rules:
-- EXTRACTED: explicit in source (citation, "see §3.2", inline link)
-- INFERRED: reasonable inference from prose (most edges here)
-- AMBIGUOUS: uncertain — include with confidence 0.1–0.3, do not omit
-
-Doc/markdown files: extract named concepts, sections, design rationales. If a doc explains WHY a code module exists, emit a `rationale_for` edge from the doc-section node to the code-entity node (use the code entity's snake_case ID — e.g. `lib_file_memory_store`, `pipeline_context_pipeline`).
-
-Hyperedges: only when 3+ nodes form a shared concept that pairwise edges miss (e.g. "Stage 5 memory preload flow" linking the pipeline + retriever + data struct + store impl). Max 3 per file.
-
-confidence_score is REQUIRED on every edge:
-- EXTRACTED → 1.0
-- INFERRED → 0.6–0.9 based on evidence strength
-- AMBIGUOUS → 0.1–0.3
-
-Use relative paths from the repo root in source_file fields.
-
-Output exactly this JSON shape (no other text, no fences):
-{"nodes":[{"id":"snake_case_id","label":"Human Readable","file_type":"document|paper|image","source_file":"relative/path","source_location":null,"source_url":null,"captured_at":null,"author":null,"contributor":null}],"edges":[{"source":"node_id","target":"node_id","relation":"references|cites|conceptually_related_to|rationale_for|semantically_similar_to","confidence":"EXTRACTED|INFERRED|AMBIGUOUS","confidence_score":1.0,"source_file":"relative/path","source_location":null,"weight":1.0}],"hyperedges":[{"id":"snake_case_id","label":"Human Readable","nodes":["id1","id2","id3"],"relation":"participate_in|implement|form","confidence":"EXTRACTED|INFERRED","confidence_score":0.85,"source_file":"relative/path"}],"input_tokens":0,"output_tokens":0}
-```
-
-Substitute `<FILE_LIST>` with absolute paths from `graphify-out/.update_noncode.json` (absolute so the subagent's `Read` tool works regardless of its CWD).
-
-When the subagent returns, save its raw JSON to `graphify-out/.update_semantic.json` via the `Write` tool, then commit to cache:
-
-```bash
-python3 - <<'PYEOF'
-import json
-from pathlib import Path
-from graphify.cache import save_semantic_cache
-
-result = json.loads(Path('graphify-out/.update_semantic.json').read_text())
-n = save_semantic_cache(result.get('nodes', []), result.get('edges', []), result.get('hyperedges', []))
-print(f'Cached semantic data for {n} files')
-PYEOF
-```
-
-If the subagent returned invalid JSON: log a warning and continue to Step 3 anyway — the fast script will rebuild from whatever is still cached.
-
----
-
-## Step 3 — First fast rebuild (produces auto-labeled graph)
+## Step 2 — First fast rebuild (produces auto-labeled graph)
 
 ```bash
 ./scripts/graphify-fast.sh "$TARGET"
 ```
 
-This runs AST extraction on the full code corpus, merges in every still-valid cache entry (including whatever Step 2 just wrote), and produces `graph.json` / `graph.html` / `GRAPH_REPORT.md` / `manifest.json`.
+This runs AST extraction on the full code corpus, merges in every still-valid cache entry, and produces `graph.json` / `graph.html` / `GRAPH_REPORT.md` / `manifest.json`.
 
 Any community that doesn't already have a stored label gets a **path-based auto-label** from the fast script's deterministic labeler (e.g. `moa-brain/pipeline · CacheOptimizer`). These are the baseline the next step will refine.
 
+The script may report "N files have no/stale cache" for non-code files that changed — that's expected and harmless; we don't refresh them.
+
 ---
 
-## Step 4 — Inline community labeling (main assistant, no subagent)
+## Step 3 — Inline community labeling (main assistant, no subagent)
 
 **This is where the LLM earns its keep without the subagent overhead.** You (the main assistant) read `graph.json` directly, look at each community's member labels, and propose a plain-English 2–5 word name that reflects what the cluster actually represents.
 
@@ -271,7 +207,7 @@ PYEOF
 
 ---
 
-## Step 5 — Second fast rebuild (re-export with the new labels)
+## Step 4 — Second fast rebuild (re-export with the new labels)
 
 ```bash
 ./scripts/graphify-fast.sh "$TARGET"
@@ -288,13 +224,11 @@ The `0 auto-labeled, N preserved` line is the success signal: every community no
 
 ---
 
-## Step 6 — Cleanup + report back to the user
+## Step 5 — Cleanup + report back to the user
 
 ```bash
 rm -f \
   graphify-out/.update_changed.json \
-  graphify-out/.update_noncode.json \
-  graphify-out/.update_semantic.json \
   graphify-out/.update_communities.json \
   graphify-out/.update_labels.json \
   graphify-out/.graphify_python \
@@ -313,7 +247,6 @@ If `ls -lA graphify-out/` shows anything else, something left scratch behind —
 
 Tell the user (keep it terse):
 - Final node/edge/community/hyperedge counts from the second fast rebuild
-- Which non-code files (if any) the subagent re-extracted
 - How long the whole thing took
 
 If `GRAPH_REPORT.md` gained interesting new "Surprising Connections" or "Suggested Questions", paste **only** those two sections. Do not dump the whole report.

@@ -1068,11 +1068,6 @@ impl AnthropicStreamState {
             content,
             stop_reason: self.stop_reason,
             model: ModelId::new(self.model),
-            input_tokens: self.input_tokens
-                + self.cached_input_tokens
-                + self.cache_creation_input_tokens,
-            output_tokens: self.output_tokens,
-            cached_input_tokens: self.cached_input_tokens,
             usage: TokenUsage {
                 input_tokens_uncached: self.input_tokens,
                 input_tokens_cache_write: self.cache_creation_input_tokens,
@@ -1727,9 +1722,9 @@ mod tests {
         }
         assert_eq!(response.text, "Hello");
         assert_eq!(response.model, ModelId::new(MODEL_SONNET_4_6));
-        assert_eq!(response.input_tokens, 15);
-        assert_eq!(response.cached_input_tokens, 3);
-        assert_eq!(response.output_tokens, 5);
+        assert_eq!(response.usage.total_input_tokens(), 15);
+        assert_eq!(response.usage.input_tokens_cache_read, 3);
+        assert_eq!(response.usage.output_tokens, 5);
         assert_eq!(response.usage.input_tokens_uncached, 12);
         assert_eq!(response.usage.input_tokens_cache_write, 0);
         assert_eq!(response.usage.input_tokens_cache_read, 3);

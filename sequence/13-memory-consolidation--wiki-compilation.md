@@ -10,7 +10,7 @@ The consolidation "dream" cycle that cleans up memory, and the wiki compilation 
 Memory stays healthy over time. Stale entries are pruned, contradictions resolved, dates normalized. New sources are compiled into wiki pages with cross-references. Multiple brains can write concurrently without conflicts.
 
 ## Tasks
-1. **`moa-memory/src/consolidation.rs`**: `run_consolidation()` — temporal normalization, contradiction resolution, stale pruning, dedup, orphan detection, confidence decay, index maintenance. Triggered when ≥3 sessions AND ≥24h since last.
+1. **`moa-memory/src/consolidation.rs`**: `run_consolidation()` — time normalization, contradiction resolution, stale pruning, dedup, orphan detection, confidence decay, index maintenance. Triggered when ≥3 sessions AND ≥24h since last.
 2. **`moa-memory/src/ingest.rs`**: `ingest_source()` — read source, generate summary page, update entity/topic/decision pages, flag contradictions, update index and log.
 3. **`moa-memory/src/branching.rs`**: Git-branch concurrent writes. Each brain writes to a branch directory. `reconcile_branches()` uses LLM to merge, resolve conflicts, clean up branches.
 4. **Register consolidation as a cron job** in the orchestrator (every hour, check conditions).
@@ -35,4 +35,3 @@ Memory stays healthy over time. Stale entries are pruned, contradictions resolve
 - Integration test: Ingest a source → verify summary page created and related pages updated
 
 ---
-

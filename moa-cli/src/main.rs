@@ -422,6 +422,7 @@ async fn main() -> Result<()> {
         &TelemetryConfig {
             debug: cli.debug,
             log_file: cli.log_file.clone(),
+            json_stdout: false,
         },
     )?;
 

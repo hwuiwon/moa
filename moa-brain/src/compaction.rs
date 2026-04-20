@@ -127,8 +127,9 @@ pub(crate) async fn maybe_compact_events(
             .await?;
         let summary = normalize_summary(&response.text);
         let pricing = &llm.capabilities().pricing;
+        let usage = response.token_usage();
         let cost_cents =
-            calculate_cost_cents(response.input_tokens, response.output_tokens, pricing);
+            calculate_cost_cents(usage.total_input_tokens(), usage.output_tokens, pricing);
         let summarized_events = checkpoint
             .as_ref()
             .map(|state| state.events_summarized)
@@ -144,8 +145,8 @@ pub(crate) async fn maybe_compact_events(
                     token_count: estimate_tokens(&summary),
                     model: response.model.clone(),
                     model_tier,
-                    input_tokens: response.input_tokens,
-                    output_tokens: response.output_tokens,
+                    input_tokens: usage.total_input_tokens(),
+                    output_tokens: usage.output_tokens,
                     cost_cents,
                 },
             )

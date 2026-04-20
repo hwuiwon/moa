@@ -6,8 +6,8 @@ use std::sync::Arc;
 use crate::mcp::McpDiscoveredTool;
 use crate::tools::{memory, session_search, tool_result};
 use moa_core::{
-    BuiltInTool, PolicyAction, SandboxTier, ToolBudgetConfig, ToolDefinition, ToolDiffStrategy,
-    ToolInputShape, ToolPolicySpec, read_tool_policy, write_tool_policy,
+    BuiltInTool, IdempotencyClass, PolicyAction, SandboxTier, ToolBudgetConfig, ToolDefinition,
+    ToolDiffStrategy, ToolInputShape, ToolPolicySpec, read_tool_policy, write_tool_policy,
 };
 use serde_json::{Value, json};
 
@@ -45,13 +45,20 @@ impl RegisteredTool {
         }
     }
 
-    fn hand(name: &str, description: &str, schema: Value, policy: ToolPolicySpec) -> Self {
+    fn hand(
+        name: &str,
+        description: &str,
+        schema: Value,
+        policy: ToolPolicySpec,
+        idempotency_class: IdempotencyClass,
+    ) -> Self {
         Self {
             definition: ToolDefinition {
                 name: name.to_string(),
                 description: description.to_string(),
                 schema,
                 policy,
+                idempotency_class,
                 max_output_tokens: default_budget_for_tool(name),
             },
             execution: ToolExecution::Hand {
@@ -69,6 +76,7 @@ impl RegisteredTool {
                 description: tool.description,
                 schema: tool.input_schema,
                 policy: execute_tool_policy(ToolInputShape::Json),
+                idempotency_class: IdempotencyClass::NonIdempotent,
                 max_output_tokens: 8_000,
             },
             execution: ToolExecution::Mcp {
@@ -116,6 +124,7 @@ impl ToolRegistry {
                 "additionalProperties": false
             }),
             execute_tool_policy(ToolInputShape::Command),
+            IdempotencyClass::NonIdempotent,
         );
         registry.register_hand(
             "file_outline",
@@ -130,6 +139,7 @@ impl ToolRegistry {
                 "additionalProperties": false
             }),
             read_tool_policy(ToolInputShape::Path),
+            IdempotencyClass::Idempotent,
         );
         registry.register_hand(
             "grep",
@@ -146,6 +156,7 @@ impl ToolRegistry {
                 "additionalProperties": false
             }),
             read_tool_policy(ToolInputShape::Pattern),
+            IdempotencyClass::Idempotent,
         );
         registry.register_hand(
             "file_read",
@@ -161,6 +172,7 @@ impl ToolRegistry {
                 "additionalProperties": false
             }),
             read_tool_policy(ToolInputShape::Path),
+            IdempotencyClass::Idempotent,
         );
         registry.register_hand(
             "str_replace",
@@ -176,6 +188,7 @@ impl ToolRegistry {
                 "additionalProperties": false
             }),
             write_tool_policy(ToolInputShape::Path, ToolDiffStrategy::StrReplace),
+            IdempotencyClass::NonIdempotent,
         );
         registry.register_hand(
             "file_write",
@@ -190,6 +203,7 @@ impl ToolRegistry {
                 "additionalProperties": false
             }),
             write_tool_policy(ToolInputShape::Path, ToolDiffStrategy::FileWrite),
+            IdempotencyClass::NonIdempotent,
         );
         registry.register_hand(
             "file_search",
@@ -203,6 +217,7 @@ impl ToolRegistry {
                 "additionalProperties": false
             }),
             read_tool_policy(ToolInputShape::Pattern),
+            IdempotencyClass::Idempotent,
         );
         registry.default_loadout = vec![
             "memory_read".to_string(),
@@ -236,10 +251,11 @@ impl ToolRegistry {
         description: &str,
         schema: Value,
         policy: ToolPolicySpec,
+        idempotency_class: IdempotencyClass,
     ) {
         self.tools.insert(
             name.to_string(),
-            RegisteredTool::hand(name, description, schema, policy),
+            RegisteredTool::hand(name, description, schema, policy, idempotency_class),
         );
     }
 
