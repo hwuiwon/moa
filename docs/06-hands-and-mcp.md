@@ -257,6 +257,11 @@ impl ToolRouter {
 }
 ```
 
+Recovery rule: hand providers now participate in execution recovery through two extra hooks:
+
+- `classify_error(handle, error, consecutive_timeouts) -> ToolFailureClass` maps raw transport/provider failures into `Retryable`, `ReProvision`, or `Fatal`.
+- `health_check(handle) -> Result<bool>` lets the router proactively replace dead sandboxes before the next tool call instead of discovering the failure mid-execution.
+
 The orchestrator, not the brain harness, is responsible for terminal cleanup. When a session completes, is cancelled, fails, or its local task panics, the orchestrator calls `destroy_session_hands(session_id)` to tear down any cached hands for that session.
 
 ## Tool registry

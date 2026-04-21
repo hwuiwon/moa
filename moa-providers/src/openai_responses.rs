@@ -468,6 +468,7 @@ fn map_openai_error(error: OpenAIError) -> MoaError {
             if let Some(status) = error.status() {
                 return MoaError::HttpStatus {
                     status: status.as_u16(),
+                    retry_after: None,
                     message: error.to_string(),
                 };
             }

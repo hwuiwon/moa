@@ -5,9 +5,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moa_core::{
     HandHandle, HandProvider, HandSpec, HandStatus, MoaConfig, MoaError, Result, SandboxTier,
-    ToolOutput,
+    ToolFailureClass, ToolOutput, classify_tool_error,
 };
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, RETRY_AFTER};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 
@@ -338,6 +338,23 @@ impl HandProvider for DaytonaHandProvider {
         }
     }
 
+    async fn classify_error(
+        &self,
+        handle: &HandHandle,
+        error: &MoaError,
+        consecutive_timeouts: u32,
+    ) -> ToolFailureClass {
+        let status = self.status(handle).await.ok();
+        self::classify_error(error, status, consecutive_timeouts)
+    }
+
+    async fn health_check(&self, handle: &HandHandle) -> Result<bool> {
+        Ok(matches!(
+            self.status(handle).await?,
+            HandStatus::Running | HandStatus::Paused | HandStatus::Provisioning
+        ))
+    }
+
     async fn status(&self, handle: &HandHandle) -> Result<HandStatus> {
         let workspace_id = handle.daytona_id()?;
         let response = self
@@ -428,6 +445,7 @@ impl HandProvider for DaytonaHandProvider {
                 }
                 return Err(MoaError::HttpStatus {
                     status: reqwest::StatusCode::CONFLICT.as_u16(),
+                    retry_after: None,
                     message,
                 });
             }
@@ -476,11 +494,20 @@ async fn expect_success(response: reqwest::Response) -> Result<()> {
 
 async fn http_error(response: reqwest::Response) -> MoaError {
     let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_retry_after);
     let message = response
         .text()
         .await
         .unwrap_or_else(|_| "failed to read response body".to_string());
-    MoaError::HttpStatus { status, message }
+    MoaError::HttpStatus {
+        status,
+        retry_after,
+        message,
+    }
 }
 
 fn derive_toolbox_url(api_url: &str) -> &str {
@@ -517,6 +544,59 @@ fn build_url(base: &str, params: &[(&str, &str)]) -> Result<reqwest::Url> {
         }
     }
     Ok(url)
+}
+
+/// Classifies one Daytona execution error for retry and re-provision decisions.
+pub fn classify_error(
+    error: &MoaError,
+    status: Option<HandStatus>,
+    consecutive_timeouts: u32,
+) -> ToolFailureClass {
+    if matches!(
+        status,
+        Some(HandStatus::Stopped | HandStatus::Destroyed | HandStatus::Failed)
+    ) {
+        return ToolFailureClass::ReProvision {
+            reason: format!(
+                "Daytona sandbox is no longer healthy ({})",
+                status_label(status)
+            ),
+        };
+    }
+
+    if matches!(error, MoaError::HttpStatus { status: 404, .. }) {
+        return ToolFailureClass::ReProvision {
+            reason: "Daytona sandbox no longer exists".to_string(),
+        };
+    }
+
+    if let MoaError::HttpStatus {
+        status: 502..=504, ..
+    } = error
+    {
+        return ToolFailureClass::Retryable {
+            reason: format!("Daytona sandbox gateway is temporarily unavailable: {error}"),
+            backoff_hint: Duration::from_secs(1),
+        };
+    }
+
+    classify_tool_error(error, consecutive_timeouts)
+}
+
+fn status_label(status: Option<HandStatus>) -> &'static str {
+    match status {
+        Some(HandStatus::Provisioning) => "provisioning",
+        Some(HandStatus::Running) => "running",
+        Some(HandStatus::Paused) => "paused",
+        Some(HandStatus::Stopped) => "stopped",
+        Some(HandStatus::Destroyed) => "destroyed",
+        Some(HandStatus::Failed) => "failed",
+        None => "unknown",
+    }
+}
+
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    value.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 
 #[cfg(test)]

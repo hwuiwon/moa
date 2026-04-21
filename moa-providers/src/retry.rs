@@ -104,6 +104,7 @@ impl RetryPolicy {
 
             return Err(MoaError::HttpStatus {
                 status: status.as_u16(),
+                retry_after: retry_after_delay(status, Some(&headers)),
                 message,
             });
         }

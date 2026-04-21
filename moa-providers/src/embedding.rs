@@ -98,6 +98,7 @@ impl EmbeddingProvider for OpenAIEmbedding {
                 .unwrap_or_else(|error| format!("failed to read error body: {error}"));
             return Err(MoaError::HttpStatus {
                 status: status.as_u16(),
+                retry_after: None,
                 message,
             });
         }

@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use moa_core::{
     Event, EventRange, EventRecord, EventType, IdempotencyClass, MoaError, SessionId, SessionMeta,
-    SessionStatus, ToolCallId, ToolCallRequest, ToolDefinition, ToolInvocation, ToolOutput,
+    SessionStatus, ToolCallId, ToolCallRequest, ToolDefinition, ToolFailureClass, ToolInvocation,
+    ToolOutput, classify_tool_error,
 };
 use moa_hands::ToolRouter;
 use restate_sdk::prelude::*;
@@ -74,7 +75,10 @@ impl ToolExecutorImpl {
             name: request.tool_name.clone(),
             input: request.input.clone(),
         };
-        let (_hand_id, output) = self.router.execute_authorized(session, &invocation).await?;
+        let (_hand_id, output) = self
+            .router
+            .execute_authorized_with_recovery(session, &invocation)
+            .await?;
         Ok(output)
     }
 
@@ -97,17 +101,27 @@ impl ToolExecutor for ToolExecutorImpl {
     ) -> Result<Json<ToolOutput>, HandlerError> {
         annotate_restate_handler_span("ToolExecutor", "execute");
         let request = request.into_inner();
-        let definition = self
-            .router
-            .tool_definition(&request.tool_name)
-            .ok_or_else(|| {
-                to_handler_error(MoaError::ToolError(format!(
-                    "unknown tool: {}",
-                    request.tool_name
-                )))
-            })?;
-        validate_request(&definition, &request).map_err(to_handler_error)?;
         let session = resolve_session(&ctx, &request).await?;
+
+        if !prior_tool_call_event_exists(&ctx, &request).await? {
+            append_tool_call_event(&ctx, &request).await?;
+        }
+
+        let definition = match self.router.tool_definition(&request.tool_name) {
+            Some(definition) => definition,
+            None => {
+                let output = ToolOutput::from(ToolFailureClass::Fatal {
+                    reason: format!("unknown tool: {}", request.tool_name),
+                });
+                append_tool_result_event(&ctx, &request, &output).await?;
+                return Ok(Json::from(output));
+            }
+        };
+        if let Err(error) = validate_request(&definition, &request) {
+            let output = ToolOutput::from(classify_tool_error(&error, 0));
+            append_tool_result_event(&ctx, &request, &output).await?;
+            return Ok(Json::from(output));
+        }
 
         if matches!(
             definition.idempotency_class,
@@ -119,10 +133,6 @@ impl ToolExecutor for ToolExecutorImpl {
                 request.tool_name, request.tool_call_id
             ))
             .into());
-        }
-
-        if !prior_tool_call_event_exists(&ctx, &request).await? {
-            append_tool_call_event(&ctx, &request).await?;
         }
 
         let run_plan = build_tool_run_plan(&definition, &request).map_err(to_handler_error)?;
@@ -468,10 +478,8 @@ fn tool_run_retry_policy(idempotency_class: IdempotencyClass) -> RunRetryPolicy 
 }
 
 fn retry_max_attempts_for(idempotency_class: IdempotencyClass) -> u32 {
-    match idempotency_class {
-        IdempotencyClass::Idempotent | IdempotencyClass::IdempotentWithKey => 3,
-        IdempotencyClass::NonIdempotent => 1,
-    }
+    let _ = idempotency_class;
+    1
 }
 
 fn to_handler_error(error: MoaError) -> HandlerError {

@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use moa_core::{McpServerConfig, McpTransportConfig, MoaError, Result, ToolContent, ToolOutput};
+use moa_core::{
+    McpServerConfig, McpTransportConfig, MoaError, Result, ToolContent, ToolFailureClass,
+    ToolOutput, classify_tool_error,
+};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -97,6 +100,19 @@ impl MCPClient {
             )
             .await?;
         Ok(flatten_call_result(response))
+    }
+
+    /// Returns whether the current MCP transport is still healthy enough for another request.
+    pub async fn health_check(&self) -> Result<bool> {
+        Ok(match &self.transport {
+            McpTransport::Stdio(transport) => !transport.closed.load(Ordering::Acquire),
+            McpTransport::Remote(_) => true,
+        })
+    }
+
+    /// Classifies one MCP execution error for retry and reconnect decisions.
+    pub fn classify_error(error: &MoaError, consecutive_timeouts: u32) -> ToolFailureClass {
+        self::classify_error(error, consecutive_timeouts)
     }
 
     async fn initialize(&self) -> Result<()> {
@@ -404,6 +420,7 @@ impl RemoteClient {
         if !response.status().is_success() {
             return Err(MoaError::HttpStatus {
                 status: response.status().as_u16(),
+                retry_after: None,
                 message: response
                     .text()
                     .await
@@ -421,6 +438,7 @@ impl RemoteClient {
         if !response.status().is_success() {
             return Err(MoaError::HttpStatus {
                 status: response.status().as_u16(),
+                retry_after: None,
                 message: response
                     .text()
                     .await
@@ -589,6 +607,22 @@ fn flatten_call_result(result: Value) -> ToolOutput {
         original_output_tokens: None,
         artifact: None,
     }
+}
+
+/// Classifies one MCP client error for retry and reconnect decisions.
+pub fn classify_error(error: &MoaError, consecutive_timeouts: u32) -> ToolFailureClass {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("mcp stdio transport is closed")
+        || message.contains("mcp stdio process exited")
+        || message.contains("mcp stdio stream closed")
+        || message.contains("mcp stdio reader task closed")
+    {
+        return ToolFailureClass::ReProvision {
+            reason: "MCP server disconnected".to_string(),
+        };
+    }
+
+    classify_tool_error(error, consecutive_timeouts)
 }
 
 fn header_map_from_pairs(headers: HashMap<String, String>) -> Result<HeaderMap> {

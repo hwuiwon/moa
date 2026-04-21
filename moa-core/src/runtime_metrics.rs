@@ -294,6 +294,36 @@ pub fn record_tool_call(tool_name: &str, status: &str, duration: Duration) {
     .record(duration.as_secs_f64());
 }
 
+/// Records one classified tool execution failure.
+pub fn record_tool_failure(provider: &str, tool_name: &str, class: &str) {
+    counter!(
+        "moa_tool_failure_total",
+        "class" => class.to_string(),
+        "provider" => provider.to_string(),
+        "tool" => tool_name.to_string()
+    )
+    .increment(1);
+}
+
+/// Records one automatic sandbox re-provision.
+pub fn record_tool_reprovision(provider: &str) {
+    counter!(
+        "moa_tool_reprovision_total",
+        "provider" => provider.to_string()
+    )
+    .increment(1);
+}
+
+/// Records one automatic in-place retry attempt.
+pub fn record_tool_retry(provider: &str, attempt: u32) {
+    counter!(
+        "moa_tool_retry_total",
+        "attempt" => attempt.to_string(),
+        "provider" => provider.to_string()
+    )
+    .increment(1);
+}
+
 /// Records one tool-output truncation event.
 pub fn record_tool_output_truncated_metric(tool_name: &str) {
     counter!(
@@ -470,6 +500,18 @@ fn register_metric_descriptions() {
     describe_counter!(
         "moa_tool_calls_total",
         "Total tool calls completed, labeled by tool name and status."
+    );
+    describe_counter!(
+        "moa_tool_failure_total",
+        "Total classified tool execution failures, labeled by class, provider, and tool."
+    );
+    describe_counter!(
+        "moa_tool_reprovision_total",
+        "Total automatic sandbox re-provisions, labeled by provider."
+    );
+    describe_counter!(
+        "moa_tool_retry_total",
+        "Total automatic in-place tool retries, labeled by provider and retry attempt."
     );
     describe_counter!(
         "moa_session_errors_total",

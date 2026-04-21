@@ -34,7 +34,7 @@ impl ToolRouter {
             memory_store,
             providers,
             local_provider: None,
-            mcp_clients: HashMap::new(),
+            mcp_clients: tokio::sync::RwLock::new(HashMap::new()),
             mcp_servers: HashMap::new(),
             mcp_proxy: None,
             active_hands: tokio::sync::RwLock::new(HashMap::new()),
@@ -237,7 +237,10 @@ impl ToolRouter {
                 registry.register_mcp_tool(&server.name, tool);
             }
             self.mcp_servers.insert(server.name.clone(), server.clone());
-            self.mcp_clients.insert(server.name.clone(), client);
+            self.mcp_clients
+                .write()
+                .await
+                .insert(server.name.clone(), client);
         }
 
         registry.apply_budgets(&self.tool_budgets);

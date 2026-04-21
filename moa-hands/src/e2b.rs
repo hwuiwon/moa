@@ -8,9 +8,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_core::{
     HandHandle, HandProvider, HandSpec, HandStatus, MoaConfig, MoaError, Result, SandboxTier,
-    ToolOutput,
+    ToolFailureClass, ToolOutput, classify_tool_error,
 };
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use tokio::time::Instant;
@@ -415,6 +415,23 @@ impl HandProvider for E2BHandProvider {
         }
     }
 
+    async fn classify_error(
+        &self,
+        handle: &HandHandle,
+        error: &MoaError,
+        consecutive_timeouts: u32,
+    ) -> ToolFailureClass {
+        let status = self.status(handle).await.ok();
+        self::classify_error(error, status, consecutive_timeouts)
+    }
+
+    async fn health_check(&self, handle: &HandHandle) -> Result<bool> {
+        Ok(matches!(
+            self.status(handle).await?,
+            HandStatus::Running | HandStatus::Paused | HandStatus::Provisioning
+        ))
+    }
+
     async fn status(&self, handle: &HandHandle) -> Result<HandStatus> {
         let sandbox_id = match handle {
             HandHandle::E2B { sandbox_id } => sandbox_id.as_str(),
@@ -576,11 +593,20 @@ async fn expect_success(response: reqwest::Response) -> Result<()> {
 
 async fn http_error(response: reqwest::Response) -> MoaError {
     let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_retry_after);
     let message = response
         .text()
         .await
         .unwrap_or_else(|_| "failed to read response body".to_string());
-    MoaError::HttpStatus { status, message }
+    MoaError::HttpStatus {
+        status,
+        retry_after,
+        message,
+    }
 }
 
 fn encode_connect_request(value: &Value) -> Result<Vec<u8>> {
@@ -671,6 +697,52 @@ fn parse_e2b_connect_stream(body: &[u8], duration: Duration) -> Result<ToolOutpu
     Ok(ToolOutput::from_process(
         stdout, stderr, exit_code, duration,
     ))
+}
+
+/// Classifies one E2B execution error for retry and re-provision decisions.
+pub fn classify_error(
+    error: &MoaError,
+    status: Option<HandStatus>,
+    consecutive_timeouts: u32,
+) -> ToolFailureClass {
+    if matches!(
+        status,
+        Some(HandStatus::Stopped | HandStatus::Destroyed | HandStatus::Failed)
+    ) {
+        return ToolFailureClass::ReProvision {
+            reason: "E2B sandbox is no longer healthy".to_string(),
+        };
+    }
+
+    match error {
+        MoaError::HttpStatus { status: 404, .. } => ToolFailureClass::ReProvision {
+            reason: "E2B sandbox no longer exists".to_string(),
+        },
+        MoaError::ProviderError(message)
+        | MoaError::StreamError(message)
+        | MoaError::ToolError(message) => {
+            let message_lower = message.to_ascii_lowercase();
+            if message_lower.contains("timeoutexception")
+                && (message_lower.contains("unavailable") || message_lower.contains("unknown"))
+            {
+                return ToolFailureClass::ReProvision {
+                    reason: "E2B sandbox became unavailable".to_string(),
+                };
+            }
+            if message_lower.contains("deadline_exceeded") {
+                return ToolFailureClass::Retryable {
+                    reason: message.clone(),
+                    backoff_hint: Duration::ZERO,
+                };
+            }
+            classify_tool_error(error, consecutive_timeouts)
+        }
+        _ => classify_tool_error(error, consecutive_timeouts),
+    }
+}
+
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    value.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 
 fn decode_stream_chunk(value: &str) -> String {
