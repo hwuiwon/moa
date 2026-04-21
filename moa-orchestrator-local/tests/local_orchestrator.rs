@@ -17,7 +17,7 @@ use moa_core::{
 };
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_memory::FileMemoryStore;
-use moa_orchestrator::LocalOrchestrator;
+use moa_orchestrator_local::LocalOrchestrator;
 use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, testing};
 use support::orchestrator_contract::{

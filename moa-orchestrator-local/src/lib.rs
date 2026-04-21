@@ -1,4 +1,13 @@
 //! Tokio-task local orchestrator for multi-session MOA execution.
+//!
+//! This crate provides a `LocalOrchestrator` that runs the MOA brain loop
+//! in-process using Tokio tasks and broadcast channels. It is used by the
+//! `moa-cli` and `moa-runtime` crates as the local execution path.
+//!
+//! The Restate-based multi-tenant orchestrator lives in `moa-orchestrator`
+//! and does not share handler code with this crate, only the session
+//! lifecycle helpers re-exported from `moa_orchestrator::session_engine`
+//! and the tracing helpers in `moa_orchestrator::observability`.
 
 use std::collections::HashMap;
 use std::env;
@@ -18,10 +27,9 @@ use moa_core::{
     CronSpec, Event, EventRange, EventRecord, EventStream, MemoryScope, MoaConfig, MoaError,
     ModelTask, ObserveLevel, PendingSignal, Result, RuntimeEvent, SessionFilter, SessionHandle,
     SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, SessionSummary,
-    SessionTaskMonitor, StartSessionRequest, TraceContext, TurnLatencyCounters,
-    TurnLatencySnapshot, TurnReplayCounters, TurnReplaySnapshot, UserMessage, WorkspaceId,
-    record_turn_event_persist_duration, record_turn_latency, scope_turn_latency_counters,
-    scope_turn_replay_counters,
+    SessionTaskMonitor, StartSessionRequest, TurnLatencyCounters, TurnReplayCounters, UserMessage,
+    WorkspaceId, record_turn_event_persist_duration, record_turn_latency,
+    scope_turn_latency_counters, scope_turn_replay_counters,
 };
 use moa_hands::ToolRouter;
 use moa_memory::{ConsolidationReport, FileMemoryStore, bootstrap};
@@ -35,7 +43,10 @@ use tokio_cron_scheduler::{Job, JobScheduler};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use crate::session_engine::session_requires_processing;
+use moa_orchestrator::observability::{
+    emit_turn_latency_summary, emit_turn_replay_summary, event_persist_span, session_turn_span,
+};
+use moa_orchestrator::session_engine::session_requires_processing;
 
 const TURN_EVENT_TAIL_LIMIT: usize = 16;
 
@@ -967,37 +978,12 @@ async fn run_session_task(
                 )
                 .await?;
             let turn_number = turn_count as i64 + 1;
-            let trace_context =
-                TraceContext::from_session_meta(&session, last_user_message_text(&events))
-                    .with_environment(context.config.observability.environment.clone());
-            let trace_name = trace_context
-                .trace_name
-                .clone()
-                .unwrap_or_else(|| format!("MOA turn {turn_number}"));
-            let turn_root_span = tracing::info_span!(
-                "session_turn",
-                otel.name = %trace_name,
-                moa.turn.number = turn_number,
-                moa.turn.get_events_calls = tracing::field::Empty,
-                moa.turn.events_replayed = tracing::field::Empty,
-                moa.turn.events_bytes = tracing::field::Empty,
-                moa.turn.get_events_total_ms = tracing::field::Empty,
-                moa.turn.snapshot_load_ms = tracing::field::Empty,
-                moa.turn.snapshot_hit = tracing::field::Empty,
-                moa.turn.snapshot_write_ms = tracing::field::Empty,
-                moa.turn.pipeline_compile_ms = tracing::field::Empty,
-                moa.turn.llm_call_ms = tracing::field::Empty,
-                moa.turn.tool_dispatch_ms = tracing::field::Empty,
-                moa.turn.event_persist_ms = tracing::field::Empty,
-                moa.turn.llm_ttft_ms = tracing::field::Empty,
-                moa.turn.compaction_tier1 = tracing::field::Empty,
-                moa.turn.compaction_tier2 = tracing::field::Empty,
-                moa.turn.compaction_tier3 = tracing::field::Empty,
-                moa.turn.compaction_tokens_reclaimed = tracing::field::Empty,
-                moa.turn.compaction_messages_elided = tracing::field::Empty,
-                langfuse.trace.metadata.turn_number = turn_number,
+            let turn_root_span = session_turn_span(
+                &session,
+                last_user_message_text(&events),
+                turn_number,
+                context.config.observability.environment.as_deref(),
             );
-            trace_context.apply_to_span(&turn_root_span);
 
             let turn_latency_counters = Arc::new(TurnLatencyCounters::new(turn_root_span.clone()));
             let turn_latency_scope = turn_latency_counters.clone();
@@ -1117,11 +1103,7 @@ async fn run_session_task(
                                     skill.name
                                 )));
                             }
-                            let event_persist_span = tracing::info_span!(
-                                parent: &turn_root_span,
-                                "event_persist",
-                                moa.persist.events_written = 0i64,
-                            );
+                            let persist_span = event_persist_span(0);
                             let persist_started = std::time::Instant::now();
                             async {
                                 refresh_workspace_tool_stats(
@@ -1144,7 +1126,7 @@ async fn run_session_task(
                                 .await?;
                                 Result::<()>::Ok(())
                             }
-                            .instrument(event_persist_span)
+                            .instrument(persist_span)
                             .await?;
                             record_turn_event_persist_duration(persist_started.elapsed(), 0);
                             if let Err(err) = runtime_tx.send(RuntimeEvent::TurnCompleted) {
@@ -1181,11 +1163,7 @@ async fn run_session_task(
                                 &mut queued_messages,
                             )
                             .await?;
-                            let event_persist_span = tracing::info_span!(
-                                parent: &turn_root_span,
-                                "event_persist",
-                                moa.persist.events_written = 0i64,
-                            );
+                            let persist_span = event_persist_span(0);
                             let persist_started = std::time::Instant::now();
                             async {
                                 refresh_workspace_tool_stats(
@@ -1208,7 +1186,7 @@ async fn run_session_task(
                                 .await?;
                                 Result::<()>::Ok(())
                             }
-                            .instrument(event_persist_span)
+                            .instrument(persist_span)
                             .await?;
                             record_turn_event_persist_duration(persist_started.elapsed(), 0);
                             if let Err(err) = runtime_tx.send(RuntimeEvent::TurnCompleted) {
@@ -1237,11 +1215,7 @@ async fn run_session_task(
                                 &mut queued_messages,
                             )
                             .await?;
-                            let event_persist_span = tracing::info_span!(
-                                parent: &turn_root_span,
-                                "event_persist",
-                                moa.persist.events_written = 0i64,
-                            );
+                            let persist_span = event_persist_span(0);
                             let persist_started = std::time::Instant::now();
                             async {
                                 refresh_workspace_tool_stats(
@@ -1264,7 +1238,7 @@ async fn run_session_task(
                                 .await?;
                                 Result::<()>::Ok(())
                             }
-                            .instrument(event_persist_span)
+                            .instrument(persist_span)
                             .await?;
                             record_turn_event_persist_duration(persist_started.elapsed(), 0);
                             if !budget_exhausted
@@ -1694,100 +1668,6 @@ async fn record_turn_boundary(
     )
     .await?;
     Ok(true)
-}
-
-fn emit_turn_replay_summary(
-    turn_root_span: &tracing::Span,
-    turn_number: i64,
-    snapshot: &TurnReplaySnapshot,
-) {
-    turn_root_span.record(
-        "moa.turn.get_events_calls",
-        snapshot.get_events_calls as i64,
-    );
-    turn_root_span.record("moa.turn.events_replayed", snapshot.events_replayed as i64);
-    turn_root_span.record("moa.turn.events_bytes", snapshot.events_bytes as i64);
-    turn_root_span.record(
-        "moa.turn.get_events_total_ms",
-        snapshot.get_events_total_ms() as i64,
-    );
-    turn_root_span.record(
-        "moa.turn.pipeline_compile_ms",
-        snapshot.pipeline_compile_ms() as i64,
-    );
-
-    tracing::info!(
-        parent: turn_root_span,
-        turn_number,
-        get_events_calls = snapshot.get_events_calls,
-        events_replayed = snapshot.events_replayed,
-        events_bytes = snapshot.events_bytes,
-        get_events_total_ms = snapshot.get_events_total_ms(),
-        pipeline_compile_ms = snapshot.pipeline_compile_ms(),
-        "turn event replay summary"
-    );
-}
-
-fn emit_turn_latency_summary(
-    turn_root_span: &tracing::Span,
-    turn_number: i64,
-    snapshot: &TurnLatencySnapshot,
-) {
-    turn_root_span.record(
-        "moa.turn.snapshot_load_ms",
-        snapshot.snapshot_load_ms() as i64,
-    );
-    turn_root_span.record("moa.turn.snapshot_hit", snapshot.snapshot_hit);
-    turn_root_span.record(
-        "moa.turn.snapshot_write_ms",
-        snapshot.snapshot_write_ms() as i64,
-    );
-    turn_root_span.record(
-        "moa.turn.pipeline_compile_ms",
-        snapshot.pipeline_compile_ms() as i64,
-    );
-    turn_root_span.record("moa.turn.llm_call_ms", snapshot.llm_call_ms() as i64);
-    turn_root_span.record(
-        "moa.turn.tool_dispatch_ms",
-        snapshot.tool_dispatch_ms() as i64,
-    );
-    turn_root_span.record(
-        "moa.turn.event_persist_ms",
-        snapshot.event_persist_ms() as i64,
-    );
-    turn_root_span.record("moa.turn.compaction_tier1", snapshot.compaction_tier1);
-    turn_root_span.record("moa.turn.compaction_tier2", snapshot.compaction_tier2);
-    turn_root_span.record("moa.turn.compaction_tier3", snapshot.compaction_tier3);
-    turn_root_span.record(
-        "moa.turn.compaction_tokens_reclaimed",
-        snapshot.compaction_tokens_reclaimed as i64,
-    );
-    turn_root_span.record(
-        "moa.turn.compaction_messages_elided",
-        snapshot.compaction_messages_elided as i64,
-    );
-    if let Some(ttft_ms) = snapshot.llm_ttft_ms() {
-        turn_root_span.record("moa.turn.llm_ttft_ms", ttft_ms as i64);
-    }
-
-    tracing::info!(
-        parent: turn_root_span,
-        turn_number,
-        snapshot_load_ms = snapshot.snapshot_load_ms(),
-        snapshot_hit = snapshot.snapshot_hit,
-        snapshot_write_ms = snapshot.snapshot_write_ms(),
-        pipeline_compile_ms = snapshot.pipeline_compile_ms(),
-        llm_call_ms = snapshot.llm_call_ms(),
-        tool_dispatch_ms = snapshot.tool_dispatch_ms(),
-        event_persist_ms = snapshot.event_persist_ms(),
-        compaction_tier1 = snapshot.compaction_tier1,
-        compaction_tier2 = snapshot.compaction_tier2,
-        compaction_tier3 = snapshot.compaction_tier3,
-        compaction_tokens_reclaimed = snapshot.compaction_tokens_reclaimed,
-        compaction_messages_elided = snapshot.compaction_messages_elided,
-        llm_ttft_ms = snapshot.llm_ttft_ms().unwrap_or_default(),
-        "turn latency breakdown"
-    );
 }
 
 fn last_user_message_text(events: &[EventRecord]) -> Option<&str> {

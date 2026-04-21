@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
 axum = "0.8"
 chrono.workspace = true
 clap.workspace = true
@@ -23,7 +22,6 @@ moa-memory = { path = "../moa-memory" }
 moa-providers = { path = "../moa-providers" }
 moa-security = { path = "../moa-security" }
 moa-session = { path = "../moa-session" }
-moa-skills = { path = "../moa-skills" }
 opentelemetry.workspace = true
 restate-sdk.workspace = true
 reqwest.workspace = true
@@ -32,7 +30,6 @@ serde_json.workspace = true
 shell-words = "1.1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "json", "uuid", "chrono"] }
 tokio.workspace = true
-tokio-cron-scheduler = "0.13"
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
@@ -40,6 +37,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 uuid.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 tempfile = "3"
 tracing-subscriber.workspace = true
 

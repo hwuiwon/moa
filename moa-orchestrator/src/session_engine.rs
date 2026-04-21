@@ -4,7 +4,7 @@ use moa_brain::{find_pending_tool_approval, find_resolved_pending_tool_approval}
 use moa_core::{Event, EventRecord, SessionMeta, SessionStatus};
 
 /// Returns whether the persisted session log indicates more work is required.
-pub(crate) fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) -> bool {
+pub fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) -> bool {
     if matches!(session.status, SessionStatus::Cancelled) {
         return false;
     }

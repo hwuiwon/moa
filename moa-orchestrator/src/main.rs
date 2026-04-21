@@ -17,11 +17,11 @@ use moa_core::{TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_orchestrator::{
+    OrchestratorCtx,
     config::OrchestratorConfig,
     objects::session::{Session, SessionImpl},
     objects::sub_agent::{SubAgent, SubAgentImpl},
     objects::workspace::{Workspace, WorkspaceImpl},
-    runtime::{CONFIG, MEMORY_STORE, POOL, PROVIDERS, SESSION_STORE, TOOL_SCHEMAS},
     services::{
         health::{Health, HealthImpl},
         llm_gateway::{LLMGateway, LLMGatewayImpl, ProviderRegistry},
@@ -90,10 +90,7 @@ async fn main() -> anyhow::Result<()> {
         PostgresSessionStore::from_existing_pool(&config.postgres_url, pool.clone()).await?,
     );
 
-    let _ = POOL.set(pool.clone());
     let providers = Arc::new(ProviderRegistry::from_env());
-    let _ = PROVIDERS.set(providers.clone());
-    let _ = SESSION_STORE.set(session_store.clone());
     let file_memory_store = Arc::new(
         FileMemoryStore::from_config_with_pool(
             moa_config.as_ref(),
@@ -103,15 +100,21 @@ async fn main() -> anyhow::Result<()> {
         .await?,
     );
     let memory_store: Arc<dyn MemoryStore> = file_memory_store.clone();
-    let _ = CONFIG.set(moa_config.clone());
-    let _ = MEMORY_STORE.set(memory_store.clone());
     let tool_router = Arc::new(
-        ToolRouter::from_config(moa_config.as_ref(), memory_store)
+        ToolRouter::from_config(moa_config.as_ref(), memory_store.clone())
             .await?
             .with_rule_store(session_store.clone())
             .with_session_store(session_store.clone()),
     );
-    let _ = TOOL_SCHEMAS.set(Arc::new(tool_router.tool_schemas()));
+    let ctx = Arc::new(OrchestratorCtx {
+        config: moa_config.clone(),
+        session_store: session_store.clone(),
+        memory_store: memory_store.clone(),
+        providers: providers.clone(),
+        tool_router: tool_router.clone(),
+        tool_schemas: Arc::new(tool_router.tool_schemas()),
+    });
+    OrchestratorCtx::install(ctx).expect("install orchestrator ctx");
 
     let endpoint = Endpoint::builder()
         .bind(HealthImpl.serve())

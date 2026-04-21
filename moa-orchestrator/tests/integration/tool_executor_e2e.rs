@@ -10,7 +10,9 @@ use tempfile::TempDir;
 use tokio::time::sleep;
 
 use crate::support::restate_runtime::{OrchestratorPorts, reserve_orchestrator_ports};
-use crate::support::session_store_service::{get_events_request, test_session_meta};
+use crate::support::session_store_service::{
+    append_event_request, get_events_request, test_session_meta,
+};
 
 const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa:moa@127.0.0.1:5432/moa";
 
@@ -75,6 +77,26 @@ fn tool_request(
     ToolCallRequest {
         tool_call_id,
         provider_tool_use_id: None,
+        tool_name: tool_name.to_string(),
+        input,
+        session_id: Some(session_id),
+        workspace_id: meta.workspace_id.clone(),
+        user_id: meta.user_id.clone(),
+        idempotency_key: None,
+    }
+}
+
+fn tool_request_with_provider_id(
+    tool_call_id: ToolCallId,
+    provider_tool_use_id: Option<&str>,
+    tool_name: &str,
+    input: serde_json::Value,
+    session_id: moa_core::SessionId,
+    meta: &moa_core::SessionMeta,
+) -> ToolCallRequest {
+    ToolCallRequest {
+        tool_call_id,
+        provider_tool_use_id: provider_tool_use_id.map(ToOwned::to_owned),
         tool_name: tool_name.to_string(),
         input,
         session_id: Some(session_id),
@@ -210,7 +232,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             );
         }
 
-        let events = wait_for_tool_result_events(&client, ingress, session_id).await?;
+        let events = wait_for_tool_result_events(&client, ingress, session_id, 3).await?;
         assert!(
             events
                 .iter()
@@ -230,10 +252,111 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
     result
 }
 
+#[tokio::test]
+#[ignore = "requires local restate-server and Postgres"]
+async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Result<()> {
+    let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
+    let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
+    let ports = reserve_orchestrator_ports()?;
+    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
+    let endpoint_url = format!("http://127.0.0.1:{}", ports.restate);
+
+    let result = async {
+        register_deployment(endpoint_url.as_str()).await?;
+
+        let client = reqwest::Client::new();
+        let ingress = "http://127.0.0.1:8080";
+        let meta = test_session_meta("tool-executor-preexisting-call");
+
+        let create_response = client
+            .post(format!("{ingress}/SessionStore/create_session"))
+            .json(&meta)
+            .send()
+            .await
+            .context("create session via restate ingress")?;
+        let session_id = create_response
+            .json::<moa_core::SessionId>()
+            .await
+            .context("deserialize create_session response")?;
+
+        let tool_call_id = ToolCallId::new();
+        let provider_tool_use_id = "toolu_preexisting_restate_call";
+        let input = json!({ "cmd": "printf duplicate-check" });
+        let request = tool_request_with_provider_id(
+            tool_call_id,
+            Some(provider_tool_use_id),
+            "bash",
+            input.clone(),
+            session_id,
+            &meta,
+        );
+
+        client
+            .post(format!("{ingress}/SessionStore/append_event"))
+            .json(&append_event_request(
+                session_id,
+                Event::ToolCall {
+                    tool_id: tool_call_id,
+                    provider_tool_use_id: Some(provider_tool_use_id.to_string()),
+                    provider_thought_signature: None,
+                    tool_name: "bash".to_string(),
+                    input,
+                    hand_id: None,
+                },
+            ))
+            .send()
+            .await
+            .context("persist preexisting ToolCall event")?
+            .error_for_status()
+            .context("append_event should succeed")?;
+
+        let output = client
+            .post(format!("{ingress}/ToolExecutor/execute"))
+            .json(&request)
+            .send()
+            .await
+            .context("call ToolExecutor/bash with preexisting ToolCall")?
+            .error_for_status()
+            .context("bash should succeed")?
+            .json::<ToolOutput>()
+            .await
+            .context("deserialize bash output")?;
+        assert!(output.to_text().contains("duplicate-check"));
+
+        let events = wait_for_tool_result_events(&client, ingress, session_id, 1).await?;
+        let matching_tool_calls = events
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::ToolCall {
+                        tool_id,
+                        provider_tool_use_id: Some(existing_provider_id),
+                        ..
+                    } if *tool_id == tool_call_id && existing_provider_id == provider_tool_use_id
+                )
+            })
+            .count();
+        assert_eq!(
+            matching_tool_calls, 1,
+            "expected ToolExecutor to reuse the existing ToolCall event instead of appending a duplicate"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    let _ = orchestrator.kill();
+    let _ = orchestrator.wait();
+
+    result
+}
+
 async fn wait_for_tool_result_events(
     client: &reqwest::Client,
     ingress: &str,
     session_id: moa_core::SessionId,
+    expected_results: usize,
 ) -> Result<Vec<moa_core::EventRecord>> {
     for _attempt in 0..30 {
         let response = client
@@ -250,7 +373,7 @@ async fn wait_for_tool_result_events(
             .iter()
             .filter(|record| matches!(record.event, Event::ToolResult { .. }))
             .count()
-            >= 3
+            >= expected_results
         {
             return Ok(events);
         }
@@ -258,5 +381,5 @@ async fn wait_for_tool_result_events(
         sleep(Duration::from_secs(1)).await;
     }
 
-    bail!("timed out waiting for ToolResult events for session {session_id}")
+    bail!("timed out waiting for {expected_results} ToolResult events for session {session_id}")
 }

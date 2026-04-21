@@ -121,7 +121,9 @@ impl ToolExecutor for ToolExecutorImpl {
             .into());
         }
 
-        append_tool_call_event(&ctx, &request).await?;
+        if !prior_tool_call_event_exists(&ctx, &request).await? {
+            append_tool_call_event(&ctx, &request).await?;
+        }
 
         let run_plan = build_tool_run_plan(&definition, &request).map_err(to_handler_error)?;
         let request_for_run = request.clone();
@@ -215,6 +217,15 @@ pub fn has_prior_non_idempotent_result(events: &[EventRecord], tool_call_id: Too
         matches!(
             &record.event,
             Event::ToolResult { tool_id, .. } if *tool_id == tool_call_id
+        )
+    })
+}
+
+fn has_prior_tool_call_event(events: &[EventRecord], tool_call_id: ToolCallId) -> bool {
+    events.iter().any(|record| {
+        matches!(
+            &record.event,
+            Event::ToolCall { tool_id, .. } if *tool_id == tool_call_id
         )
     })
 }
@@ -336,6 +347,31 @@ async fn prior_non_idempotent_result_exists(
     ))
 }
 
+async fn prior_tool_call_event_exists(
+    ctx: &Context<'_>,
+    request: &ToolCallRequest,
+) -> Result<bool, HandlerError> {
+    let Some(session_id) = request.session_id else {
+        return Ok(false);
+    };
+
+    let events = ctx
+        .service_client::<SessionStoreClient>()
+        .get_events(Json(GetEventsRequest {
+            session_id,
+            range: EventRange {
+                from_seq: None,
+                to_seq: None,
+                event_types: Some(vec![EventType::ToolCall]),
+                limit: None,
+            },
+        }))
+        .call()
+        .await?
+        .into_inner();
+    Ok(has_prior_tool_call_event(&events, request.tool_call_id))
+}
+
 async fn append_tool_call_event(
     ctx: &Context<'_>,
     request: &ToolCallRequest,
@@ -444,4 +480,43 @@ fn to_handler_error(error: MoaError) -> HandlerError {
     }
 
     HandlerError::from(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use moa_core::{Event, EventRecord, EventType, ToolCallId};
+    use uuid::Uuid;
+
+    use super::has_prior_tool_call_event;
+
+    fn tool_call_record(tool_call_id: ToolCallId) -> EventRecord {
+        EventRecord {
+            id: Uuid::now_v7(),
+            session_id: moa_core::SessionId::new(),
+            sequence_num: 0,
+            event_type: EventType::ToolCall,
+            event: Event::ToolCall {
+                tool_id: tool_call_id,
+                provider_tool_use_id: Some("toolu_existing".to_string()),
+                provider_thought_signature: None,
+                tool_name: "bash".to_string(),
+                input: serde_json::json!({ "cmd": "printf existing" }),
+                hand_id: None,
+            },
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        }
+    }
+
+    #[test]
+    fn prior_tool_call_lookup_matches_tool_call_id() {
+        let existing = ToolCallId::new();
+        let events = vec![tool_call_record(existing)];
+
+        assert!(has_prior_tool_call_event(&events, existing));
+        assert!(!has_prior_tool_call_event(&events, ToolCallId::new()));
+    }
 }

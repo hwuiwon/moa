@@ -18,7 +18,7 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep};
 
-use moa_orchestrator::LocalOrchestrator;
+use moa_orchestrator_local::LocalOrchestrator;
 
 #[derive(Clone)]
 struct StreamingMockProvider {

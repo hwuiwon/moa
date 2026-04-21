@@ -5,13 +5,12 @@ use std::time::Instant;
 
 use moa_brain::build_default_pipeline_with_runtime_and_instructions;
 use moa_core::{
-    CompletionRequest, CountedSessionStore, EventRange, MemoryStore, MoaError, Result, SessionId,
-    SessionMeta, SessionStore, WorkingContext, record_pipeline_compile_duration,
-    record_turn_pipeline_compile_duration,
+    CompletionRequest, CountedSessionStore, EventRange, Result, SessionId, SessionStore,
+    WorkingContext, record_pipeline_compile_duration, record_turn_pipeline_compile_duration,
 };
 use tracing::Instrument;
 
-use crate::runtime::{CONFIG, MEMORY_STORE, PROVIDERS, SESSION_STORE, TOOL_SCHEMAS};
+use crate::OrchestratorCtx;
 use crate::session_engine::session_requires_processing;
 
 const TURN_EVENT_TAIL_LIMIT: usize = 16;
@@ -27,7 +26,8 @@ pub(crate) enum PreparedTurnRequest {
 
 /// Compiles the next LLM request for a session from durable state.
 pub(crate) async fn prepare_turn_request(session_id: SessionId) -> Result<PreparedTurnRequest> {
-    let session_store = configured_session_store()?;
+    let ctx = OrchestratorCtx::current();
+    let session_store = ctx.session_store.clone();
     let counted_session_store: Arc<dyn SessionStore> =
         Arc::new(CountedSessionStore::new(session_store.clone()));
     let session = session_store.get_session(session_id).await?;
@@ -38,17 +38,16 @@ pub(crate) async fn prepare_turn_request(session_id: SessionId) -> Result<Prepar
         return Ok(PreparedTurnRequest::Idle);
     }
 
-    let config = configured_config()?;
-    let memory_store = configured_memory_store()?;
-    let tool_schemas = configured_tool_schemas()?;
-    let capabilities = configured_model_capabilities(&session)?;
+    let capabilities = ctx
+        .providers
+        .capabilities_for_model(Some(session.model.as_str()))?;
     let pipeline = build_default_pipeline_with_runtime_and_instructions(
-        config.as_ref(),
+        ctx.config.as_ref(),
         counted_session_store,
-        memory_store,
+        ctx.memory_store.clone(),
         None,
         None,
-        tool_schemas.as_ref().clone(),
+        ctx.tool_schemas.as_ref().clone(),
     );
     let mut context = WorkingContext::new(&session, capabilities);
     let pipeline_span = tracing::info_span!("pipeline_compile");
@@ -69,41 +68,4 @@ pub(crate) async fn prepare_turn_request(session_id: SessionId) -> Result<Prepar
     context.insert_metadata("_moa.model", serde_json::json!(session.model.as_str()));
 
     Ok(PreparedTurnRequest::Request(context.into_request()))
-}
-
-fn configured_config() -> Result<Arc<moa_core::MoaConfig>> {
-    CONFIG.get().cloned().ok_or_else(|| {
-        MoaError::ProviderError("orchestrator runtime config not initialized".to_string())
-    })
-}
-
-fn configured_session_store() -> Result<Arc<dyn SessionStore>> {
-    SESSION_STORE
-        .get()
-        .cloned()
-        .map(|store| store as Arc<dyn SessionStore>)
-        .ok_or_else(|| {
-            MoaError::ProviderError("orchestrator session store not initialized".to_string())
-        })
-}
-
-fn configured_memory_store() -> Result<Arc<dyn MemoryStore>> {
-    MEMORY_STORE.get().cloned().ok_or_else(|| {
-        MoaError::ProviderError("orchestrator memory store not initialized".to_string())
-    })
-}
-
-fn configured_tool_schemas() -> Result<Arc<Vec<serde_json::Value>>> {
-    TOOL_SCHEMAS.get().cloned().ok_or_else(|| {
-        MoaError::ProviderError("orchestrator tool schemas not initialized".to_string())
-    })
-}
-
-fn configured_model_capabilities(session: &SessionMeta) -> Result<moa_core::ModelCapabilities> {
-    PROVIDERS
-        .get()
-        .ok_or_else(|| {
-            MoaError::ProviderError("orchestrator provider registry not initialized".to_string())
-        })?
-        .capabilities_for_model(Some(session.model.as_str()))
 }
