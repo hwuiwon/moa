@@ -1,7 +1,5 @@
-//! Shared integration-test support for orchestrator contract coverage.
+//! Shared integration-test support for Restate orchestrator coverage.
 
-#[allow(dead_code)]
-pub mod orchestrator_contract;
 #[allow(dead_code)]
 pub mod restate_runtime;
 #[allow(dead_code)]

@@ -14,7 +14,7 @@ use moa_core::{
     MoaConfig, RecvResult, RuntimeEvent, SessionFilter, SessionId, SessionStatus, SessionStore,
     WorkspaceBudgetStatus, recv_with_lag_handling,
 };
-use moa_orchestrator::LocalOrchestrator;
+use moa_orchestrator_local::LocalOrchestrator;
 use moa_session::PostgresSessionStore;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;

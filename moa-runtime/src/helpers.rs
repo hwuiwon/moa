@@ -11,7 +11,7 @@ use moa_core::{
     SessionSummary, StartSessionRequest, UserId, WikiPage, WorkspaceBudgetStatus, WorkspaceId,
     recv_with_lag_handling,
 };
-use moa_orchestrator::LocalOrchestrator;
+use moa_orchestrator_local::LocalOrchestrator;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 

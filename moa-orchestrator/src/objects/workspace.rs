@@ -9,8 +9,10 @@ use moa_core::{ApprovalRule, MoaError, PolicyAction, PolicyScope, UserId, Worksp
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
+use crate::OrchestratorCtx;
 use crate::observability::annotate_restate_handler_span;
 use crate::services::memory_store::{ListPagesRequest, MemoryStoreClient};
+use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar};
 use crate::workflows::consolidate::{ConsolidateClient, ConsolidateReport, ConsolidateRequest};
 
 const K_CONFIG: &str = "config";
@@ -91,6 +93,41 @@ impl WorkspaceVoState {
     }
 }
 
+impl VoState for WorkspaceVoState {
+    async fn load_from<R: VoReader>(reader: &R) -> Result<Self, HandlerError> {
+        Ok(Self {
+            config: reader.get_json(K_CONFIG).await?,
+            approval_policy: reader
+                .get_json(K_APPROVAL_POLICY)
+                .await?
+                .unwrap_or_default(),
+            last_consolidation: reader.get_json(K_LAST_CONSOLIDATION).await?,
+            next_consolidation: reader.get_json(K_NEXT_CONSOLIDATION).await?,
+            consolidation_in_progress: reader
+                .get_json(K_CONSOLIDATION_IN_PROGRESS)
+                .await?
+                .unwrap_or_default(),
+        })
+    }
+
+    fn persist_into(&self, ctx: &ObjectContext<'_>) {
+        set_or_clear_opt(ctx, K_CONFIG, self.config.as_ref());
+        set_or_clear_opt(
+            ctx,
+            K_APPROVAL_POLICY,
+            (!self.approval_policy.rules.is_empty()).then_some(&self.approval_policy),
+        );
+        set_or_clear_opt(ctx, K_LAST_CONSOLIDATION, self.last_consolidation.as_ref());
+        set_or_clear_opt(ctx, K_NEXT_CONSOLIDATION, self.next_consolidation.as_ref());
+        set_or_clear_scalar(
+            ctx,
+            K_CONSOLIDATION_IN_PROGRESS,
+            self.consolidation_in_progress,
+            false,
+        );
+    }
+}
+
 /// Returns the next scheduled consolidation time for the given UTC hour.
 #[must_use]
 pub fn compute_next_consolidation_utc(now: DateTime<Utc>, hour: u8) -> DateTime<Utc> {
@@ -159,14 +196,14 @@ impl Workspace for WorkspaceImpl {
         validate_workspace_key(ctx.key(), &config.id)?;
         validate_consolidation_hour(config.consolidation_hour_utc)?;
 
-        let mut state = load_object_state(&ctx).await?;
+        let mut state = WorkspaceVoState::load_from(&ctx).await?;
         state.config = Some(config.clone());
         state.approval_policy = config.approval_policy.clone();
-        persist_state(&ctx, &state);
+        state.persist_into(&ctx);
 
         persist_policy_rules(config.id.clone(), &state.approval_policy.rules).await?;
         schedule_consolidation_inner(&ctx, &mut state)?;
-        persist_state(&ctx, &state);
+        state.persist_into(&ctx);
         Ok(())
     }
 
@@ -176,7 +213,9 @@ impl Workspace for WorkspaceImpl {
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<WorkspaceApprovalPolicy>, HandlerError> {
         annotate_restate_handler_span("Workspace", "get_approval_policy");
-        Ok(Json::from(load_shared_state(&ctx).await?.approval_policy))
+        Ok(Json::from(
+            WorkspaceVoState::load_from(&ctx).await?.approval_policy,
+        ))
     }
 
     #[tracing::instrument(skip(self, ctx, pattern))]
@@ -188,7 +227,7 @@ impl Workspace for WorkspaceImpl {
         annotate_restate_handler_span("Workspace", "add_always_allow");
         let pattern = pattern.into_inner();
         let workspace_id = parse_workspace_key(ctx.key());
-        let mut state = load_object_state(&ctx).await?;
+        let mut state = WorkspaceVoState::load_from(&ctx).await?;
         let _ = state.ensure_initialized()?;
 
         let rule = ApprovalRule {
@@ -212,7 +251,7 @@ impl Workspace for WorkspaceImpl {
         } else {
             state.approval_policy.rules.push(rule.clone());
         }
-        persist_state(&ctx, &state);
+        state.persist_into(&ctx);
         persist_policy_rules(workspace_id, &[rule]).await?;
         Ok(())
     }
@@ -220,9 +259,9 @@ impl Workspace for WorkspaceImpl {
     #[tracing::instrument(skip(self, ctx))]
     async fn schedule_consolidation(&self, ctx: ObjectContext<'_>) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Workspace", "schedule_consolidation");
-        let mut state = load_object_state(&ctx).await?;
+        let mut state = WorkspaceVoState::load_from(&ctx).await?;
         schedule_consolidation_inner(&ctx, &mut state)?;
-        persist_state(&ctx, &state);
+        state.persist_into(&ctx);
         Ok(())
     }
 
@@ -233,10 +272,10 @@ impl Workspace for WorkspaceImpl {
         _target_date: Json<chrono::NaiveDate>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Workspace", "mark_consolidation_started");
-        let mut state = load_object_state(&ctx).await?;
+        let mut state = WorkspaceVoState::load_from(&ctx).await?;
         let _ = state.ensure_initialized()?;
         state.consolidation_in_progress = true;
-        persist_state(&ctx, &state);
+        state.persist_into(&ctx);
         Ok(())
     }
 
@@ -250,7 +289,7 @@ impl Workspace for WorkspaceImpl {
         let report = report.into_inner();
         validate_workspace_key(ctx.key(), &report.workspace_id)?;
 
-        let mut state = load_object_state(&ctx).await?;
+        let mut state = WorkspaceVoState::load_from(&ctx).await?;
         let _ = state.ensure_initialized()?;
         state.last_consolidation = Some(report.ran_at);
         state.consolidation_in_progress = false;
@@ -264,7 +303,7 @@ impl Workspace for WorkspaceImpl {
             "workspace consolidation completed"
         );
         schedule_consolidation_inner(&ctx, &mut state)?;
-        persist_state(&ctx, &state);
+        state.persist_into(&ctx);
         Ok(())
     }
 
@@ -274,7 +313,7 @@ impl Workspace for WorkspaceImpl {
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<WorkspaceStatus>, HandlerError> {
         annotate_restate_handler_span("Workspace", "status");
-        let state = load_shared_state(&ctx).await?;
+        let state = WorkspaceVoState::load_from(&ctx).await?;
         let workspace_id = parse_workspace_key(ctx.key());
         let pages_count = ctx
             .service_client::<MemoryStoreClient>()
@@ -293,87 +332,6 @@ impl Workspace for WorkspaceImpl {
             consolidation_in_progress: state.consolidation_in_progress,
             pages_count,
         }))
-    }
-}
-
-async fn load_object_state(ctx: &ObjectContext<'_>) -> Result<WorkspaceVoState, HandlerError> {
-    Ok(WorkspaceVoState {
-        config: ctx
-            .get::<Json<WorkspaceConfig>>(K_CONFIG)
-            .await?
-            .map(Json::into_inner),
-        approval_policy: ctx
-            .get::<Json<WorkspaceApprovalPolicy>>(K_APPROVAL_POLICY)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or_default(),
-        last_consolidation: ctx
-            .get::<Json<DateTime<Utc>>>(K_LAST_CONSOLIDATION)
-            .await?
-            .map(Json::into_inner),
-        next_consolidation: ctx
-            .get::<Json<DateTime<Utc>>>(K_NEXT_CONSOLIDATION)
-            .await?
-            .map(Json::into_inner),
-        consolidation_in_progress: ctx
-            .get::<Json<bool>>(K_CONSOLIDATION_IN_PROGRESS)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or(false),
-    })
-}
-
-async fn load_shared_state(
-    ctx: &SharedObjectContext<'_>,
-) -> Result<WorkspaceVoState, HandlerError> {
-    Ok(WorkspaceVoState {
-        config: ctx
-            .get::<Json<WorkspaceConfig>>(K_CONFIG)
-            .await?
-            .map(Json::into_inner),
-        approval_policy: ctx
-            .get::<Json<WorkspaceApprovalPolicy>>(K_APPROVAL_POLICY)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or_default(),
-        last_consolidation: ctx
-            .get::<Json<DateTime<Utc>>>(K_LAST_CONSOLIDATION)
-            .await?
-            .map(Json::into_inner),
-        next_consolidation: ctx
-            .get::<Json<DateTime<Utc>>>(K_NEXT_CONSOLIDATION)
-            .await?
-            .map(Json::into_inner),
-        consolidation_in_progress: ctx
-            .get::<Json<bool>>(K_CONSOLIDATION_IN_PROGRESS)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or(false),
-    })
-}
-
-fn persist_state(ctx: &ObjectContext<'_>, state: &WorkspaceVoState) {
-    match &state.config {
-        Some(config) => ctx.set(K_CONFIG, Json::from(config.clone())),
-        None => ctx.clear(K_CONFIG),
-    }
-    if state.approval_policy.rules.is_empty() {
-        ctx.clear(K_APPROVAL_POLICY);
-    } else {
-        ctx.set(K_APPROVAL_POLICY, Json::from(state.approval_policy.clone()));
-    }
-    match state.last_consolidation {
-        Some(timestamp) => ctx.set(K_LAST_CONSOLIDATION, Json::from(timestamp)),
-        None => ctx.clear(K_LAST_CONSOLIDATION),
-    }
-    match state.next_consolidation {
-        Some(timestamp) => ctx.set(K_NEXT_CONSOLIDATION, Json::from(timestamp)),
-        None => ctx.clear(K_NEXT_CONSOLIDATION),
-    }
-    if state.consolidation_in_progress {
-        ctx.set(K_CONSOLIDATION_IN_PROGRESS, Json::from(true));
-    } else {
-        ctx.clear(K_CONSOLIDATION_IN_PROGRESS);
     }
 }
 
@@ -414,10 +372,7 @@ async fn persist_policy_rules(
         return Ok(());
     }
 
-    let store = crate::runtime::SESSION_STORE
-        .get()
-        .cloned()
-        .ok_or_else(|| TerminalError::new("session store runtime is not initialized"))?;
+    let store = OrchestratorCtx::current().session_store.clone();
     let mut normalized_rules = rules.to_vec();
     for rule in &mut normalized_rules {
         rule.workspace_id = workspace_id.clone();

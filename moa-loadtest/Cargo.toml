@@ -11,7 +11,7 @@ clap.workspace = true
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
 moa-memory = { path = "../moa-memory" }
-moa-orchestrator = { path = "../moa-orchestrator" }
+moa-orchestrator-local = { path = "../moa-orchestrator-local" }
 moa-providers = { path = "../moa-providers", features = ["test-util"] }
 moa-session = { path = "../moa-session" }
 serde.workspace = true

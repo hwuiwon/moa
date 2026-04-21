@@ -1,14 +1,15 @@
-//! Local multi-session orchestrator and supporting runtime surfaces.
+//! Restate-backed orchestrator handlers and shared runtime utilities.
 
 mod brain_bridge;
 pub mod config;
-pub mod local;
+pub mod ctx;
 pub mod objects;
-mod observability;
-pub mod runtime;
+pub mod observability;
 pub mod services;
-mod session_engine;
+pub mod session_engine;
 mod sub_agent_dispatch;
+pub mod turn;
+pub mod vo;
 pub mod workflows;
 
-pub use local::LocalOrchestrator;
+pub use ctx::OrchestratorCtx;

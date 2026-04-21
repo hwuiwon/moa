@@ -3,7 +3,10 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use moa_core::{SessionId, SessionMeta, TraceContext, TurnLatencySnapshot, TurnReplaySnapshot};
+use moa_core::{
+    SessionId, SessionMeta, TraceContext, TurnLatencySnapshot, TurnReplaySnapshot,
+    current_turn_root_span,
+};
 use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceId, TraceState};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -31,8 +34,98 @@ pub(crate) fn add_session_trace_link(span: &tracing::Span, session_id: SessionId
     span.add_link(synthetic_session_span_context(session_id));
 }
 
+/// Root span for one brain turn with the standard per-turn trace attributes.
+pub fn session_turn_span(
+    meta: &SessionMeta,
+    prompt: Option<&str>,
+    turn_number: i64,
+    environment: Option<&str>,
+) -> tracing::Span {
+    let trace_name = TraceContext::from_session_meta(meta, prompt)
+        .with_environment(environment.map(str::to_string))
+        .trace_name
+        .unwrap_or_else(|| format!("MOA turn {turn_number}"));
+    let span = tracing::info_span!(
+        "session_turn",
+        otel.name = %trace_name,
+        moa.session.id = %meta.id,
+        moa.workspace.id = %meta.workspace_id,
+        moa.user.id = %meta.user_id,
+        moa.turn.number = turn_number,
+        moa.turn.get_events_calls = tracing::field::Empty,
+        moa.turn.events_replayed = tracing::field::Empty,
+        moa.turn.events_bytes = tracing::field::Empty,
+        moa.turn.get_events_total_ms = tracing::field::Empty,
+        moa.turn.snapshot_load_ms = tracing::field::Empty,
+        moa.turn.snapshot_hit = tracing::field::Empty,
+        moa.turn.snapshot_write_ms = tracing::field::Empty,
+        moa.turn.pipeline_compile_ms = tracing::field::Empty,
+        moa.turn.llm_call_ms = tracing::field::Empty,
+        moa.turn.tool_dispatch_ms = tracing::field::Empty,
+        moa.turn.event_persist_ms = tracing::field::Empty,
+        moa.turn.llm_ttft_ms = tracing::field::Empty,
+        moa.turn.compaction_tier1 = tracing::field::Empty,
+        moa.turn.compaction_tier2 = tracing::field::Empty,
+        moa.turn.compaction_tier3 = tracing::field::Empty,
+        moa.turn.compaction_tokens_reclaimed = tracing::field::Empty,
+        moa.turn.compaction_messages_elided = tracing::field::Empty,
+        langfuse.trace.metadata.turn_number = turn_number,
+    );
+    apply_session_trace(&span, meta, prompt, environment);
+    add_session_trace_link(&span, meta.id);
+    span
+}
+
+/// Child span around one provider completion call.
+pub fn llm_call_span(meta: &SessionMeta) -> tracing::Span {
+    match current_turn_root_span() {
+        Some(parent) => tracing::info_span!(
+            parent: &parent,
+            "llm_call",
+            gen_ai.request.model = %meta.model,
+            moa.session.id = %meta.id,
+            moa.workspace.id = %meta.workspace_id,
+            moa.user.id = %meta.user_id,
+        ),
+        None => tracing::info_span!(
+            "llm_call",
+            gen_ai.request.model = %meta.model,
+            moa.session.id = %meta.id,
+            moa.workspace.id = %meta.workspace_id,
+            moa.user.id = %meta.user_id,
+        ),
+    }
+}
+
+/// Child span around one tool execution or sub-agent dispatch.
+pub fn tool_dispatch_span(tool_name: &str) -> tracing::Span {
+    match current_turn_root_span() {
+        Some(parent) => tracing::info_span!(
+            parent: &parent,
+            "tool_dispatch",
+            moa.tool.name = tool_name,
+        ),
+        None => tracing::info_span!("tool_dispatch", moa.tool.name = tool_name),
+    }
+}
+
+/// Child span around one event persistence batch.
+pub fn event_persist_span(events_written: usize) -> tracing::Span {
+    match current_turn_root_span() {
+        Some(parent) => tracing::info_span!(
+            parent: &parent,
+            "event_persist",
+            moa.persist.events_written = events_written as i64,
+        ),
+        None => tracing::info_span!(
+            "event_persist",
+            moa.persist.events_written = events_written as i64,
+        ),
+    }
+}
+
 /// Emits the shared per-turn replay summary event and mirrors the values onto the turn span.
-pub(crate) fn emit_turn_replay_summary(
+pub fn emit_turn_replay_summary(
     turn_root_span: &tracing::Span,
     turn_number: i64,
     snapshot: &TurnReplaySnapshot,
@@ -65,7 +158,7 @@ pub(crate) fn emit_turn_replay_summary(
 }
 
 /// Emits the shared per-turn latency summary event and mirrors the values onto the turn span.
-pub(crate) fn emit_turn_latency_summary(
+pub fn emit_turn_latency_summary(
     turn_root_span: &tracing::Span,
     turn_number: i64,
     snapshot: &TurnLatencySnapshot,

@@ -12,7 +12,7 @@ use moa_core::{
 };
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
-use moa_orchestrator::LocalOrchestrator;
+use moa_orchestrator_local::LocalOrchestrator;
 use moa_providers::{ModelRouter, resolve_provider_selection};
 use moa_session::{create_session_store, testing};
 use tokio::sync::mpsc;
