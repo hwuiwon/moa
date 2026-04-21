@@ -128,6 +128,13 @@ pub trait HandProvider: Send + Sync {
     fn provider_name(&self) -> &str;
     async fn provision(&self, spec: HandSpec) -> Result<HandHandle>;
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput>;
+    async fn classify_error(
+        &self,
+        handle: &HandHandle,
+        error: &MoaError,
+        consecutive_timeouts: u32,
+    ) -> ToolFailureClass;
+    async fn health_check(&self, handle: &HandHandle) -> Result<bool>;
     async fn status(&self, handle: &HandHandle) -> Result<HandStatus>;
     async fn pause(&self, handle: &HandHandle) -> Result<()>;
     async fn resume(&self, handle: &HandHandle) -> Result<()>;

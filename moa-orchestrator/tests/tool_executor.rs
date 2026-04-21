@@ -139,7 +139,7 @@ fn tool_result_record(tool_call_id: ToolCallId) -> EventRecord {
 }
 
 #[test]
-fn idempotent_tool_retries_freely() {
+fn tool_executor_ctx_run_retries_are_disabled_after_router_recovery() {
     let definition = tool_definition(
         "mock_read",
         IdempotencyClass::Idempotent,
@@ -149,7 +149,7 @@ fn idempotent_tool_retries_freely() {
 
     let run_plan = build_tool_run_plan(&definition, &request).expect("build idempotent run plan");
 
-    assert_eq!(run_plan.max_attempts, 3);
+    assert_eq!(run_plan.max_attempts, 1);
     assert_eq!(
         run_plan.name,
         tool_run_name(&definition, &request).expect("build idempotent run name")

@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use moa_core::{
-    HandHandle, HandProvider, HandSpec, HandStatus, MoaError, Result, SandboxTier, ToolOutput,
+    HandHandle, HandProvider, HandSpec, HandStatus, MoaError, Result, SandboxTier,
+    ToolFailureClass, ToolOutput, classify_tool_error,
 };
 use opentelemetry::trace::Status;
 use tokio::fs;
@@ -406,6 +407,23 @@ impl HandProvider for LocalHandProvider {
         self.execute_with_cancel(handle, tool, input, None).await
     }
 
+    async fn classify_error(
+        &self,
+        handle: &HandHandle,
+        error: &MoaError,
+        consecutive_timeouts: u32,
+    ) -> ToolFailureClass {
+        let status = self.status(handle).await.ok();
+        self::classify_error(error, status, consecutive_timeouts)
+    }
+
+    async fn health_check(&self, handle: &HandHandle) -> Result<bool> {
+        Ok(matches!(
+            self.status(handle).await?,
+            HandStatus::Running | HandStatus::Paused | HandStatus::Provisioning
+        ))
+    }
+
     async fn status(&self, handle: &HandHandle) -> Result<HandStatus> {
         match handle {
             HandHandle::Local { sandbox_dir } => {
@@ -566,5 +584,39 @@ async fn docker_status(container_id: &str) -> Result<HandStatus> {
         other => Err(MoaError::ProviderError(format!(
             "unknown docker sandbox status: {other}"
         ))),
+    }
+}
+
+/// Classifies one local or Docker-backed hand execution error.
+pub fn classify_error(
+    error: &MoaError,
+    status: Option<HandStatus>,
+    consecutive_timeouts: u32,
+) -> ToolFailureClass {
+    if matches!(
+        status,
+        Some(HandStatus::Stopped | HandStatus::Destroyed | HandStatus::Failed)
+    ) {
+        return ToolFailureClass::ReProvision {
+            reason: "local sandbox is no longer healthy".to_string(),
+        };
+    }
+
+    match error {
+        MoaError::ProviderError(message) | MoaError::ToolError(message) => {
+            let message_lower = message.to_ascii_lowercase();
+            if message_lower.contains("unknown docker sandbox handle")
+                || message_lower.contains("no such container")
+                || message_lower.contains("no such object")
+                || message_lower.contains("connection refused")
+                || message_lower.contains("cannot connect to the docker daemon")
+            {
+                return ToolFailureClass::ReProvision {
+                    reason: "Docker sandbox is no longer reachable".to_string(),
+                };
+            }
+            classify_tool_error(error, consecutive_timeouts)
+        }
+        _ => classify_tool_error(error, consecutive_timeouts),
     }
 }

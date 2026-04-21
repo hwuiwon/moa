@@ -32,7 +32,7 @@ pub use config::{
 };
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
 pub use diff::compute_unified_diff;
-pub use error::{MoaError, Result};
+pub use error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 pub use events::Event;
 pub use runtime_metrics::{
     SessionTaskMonitor, init_metrics, metrics_endpoint_url, record_approval_wait,
@@ -41,7 +41,8 @@ pub use runtime_metrics::{
     record_llm_streaming_duration, record_llm_ttft, record_pipeline_compile_duration_metric,
     record_sandbox_provision_duration, record_session_created, record_session_error,
     record_sessions_active, record_tokens_input_cached, record_tokens_input_uncached,
-    record_tokens_output, record_tool_call, record_tool_output_truncated_metric,
+    record_tokens_output, record_tool_call, record_tool_failure,
+    record_tool_output_truncated_metric, record_tool_reprovision, record_tool_retry,
     record_turn_completed, record_turn_latency,
 };
 pub use session_replay::{

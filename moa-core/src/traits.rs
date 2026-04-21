@@ -6,7 +6,7 @@ use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::{MoaError, Result};
+use crate::error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 use crate::events::Event;
 use crate::types::{
     CheckpointHandle, CheckpointInfo, ClaimCheck, CompletionRequest, CompletionStream,
@@ -232,6 +232,24 @@ pub trait HandProvider: Send + Sync {
 
     /// Executes a tool within a provisioned hand.
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput>;
+
+    /// Classifies one provider execution error for retry and recovery decisions.
+    async fn classify_error(
+        &self,
+        _handle: &HandHandle,
+        error: &MoaError,
+        consecutive_timeouts: u32,
+    ) -> ToolFailureClass {
+        classify_tool_error(error, consecutive_timeouts)
+    }
+
+    /// Returns whether the given hand is healthy enough to execute another tool call.
+    async fn health_check(&self, handle: &HandHandle) -> Result<bool> {
+        Ok(matches!(
+            self.status(handle).await?,
+            HandStatus::Running | HandStatus::Paused | HandStatus::Provisioning
+        ))
+    }
 
     /// Returns the current hand status.
     async fn status(&self, handle: &HandHandle) -> Result<HandStatus>;

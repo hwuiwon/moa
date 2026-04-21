@@ -171,6 +171,7 @@ impl NeonBranchManager {
                 .unwrap_or_else(|_| format!("neon api request failed with status {status}"));
             return Err(MoaError::HttpStatus {
                 status: status.as_u16(),
+                retry_after: None,
                 message,
             });
         }
@@ -206,6 +207,7 @@ impl NeonBranchManager {
                 .unwrap_or_else(|_| format!("neon api request failed with status {status}"));
             return Err(MoaError::HttpStatus {
                 status: status.as_u16(),
+                retry_after: None,
                 message,
             });
         }
