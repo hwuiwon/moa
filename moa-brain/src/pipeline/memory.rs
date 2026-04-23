@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_core::{
     ContextMessage, ContextProcessor, MemoryPath, MemoryScope, MemoryStore, ProcessorOutput,
-    Result, WorkingContext,
+    QueryRewriteResult, Result, RewriteSource, WorkingContext,
 };
 
 const MEMORY_BUDGET_DIVISOR: usize = 5;
@@ -25,7 +25,7 @@ struct MemoryStageData {
     relevant_pages: Vec<RelevantMemoryPage>,
 }
 
-/// Single retrieved page snippet prepared for Stage 5 formatting.
+/// Single retrieved page snippet prepared for memory formatting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RelevantMemoryPage {
     /// Scope label used in prompt formatting.
@@ -56,7 +56,7 @@ impl MemoryRetriever {
         let workspace_index = self.memory_store.get_index(&workspace_scope).await?;
         let mut relevant_pages = Vec::new();
 
-        if let Some(query) = extract_search_query_from_messages(&ctx.messages) {
+        if let Some(query) = extract_search_query(ctx) {
             for scope in [user_scope, workspace_scope] {
                 let scope_label = scope_label_for(&scope);
                 let results = match self
@@ -225,6 +225,27 @@ fn trailing_user_insertion_index(messages: &[ContextMessage]) -> usize {
     insertion_index
 }
 
+fn extract_search_query(ctx: &WorkingContext) -> Option<String> {
+    if let Some(query) = ctx
+        .metadata()
+        .get("query_rewrite")
+        .and_then(query_from_rewrite_metadata)
+    {
+        return Some(query);
+    }
+
+    extract_search_query_from_messages(&ctx.messages)
+}
+
+fn query_from_rewrite_metadata(value: &serde_json::Value) -> Option<String> {
+    let result = serde_json::from_value::<QueryRewriteResult>(value.clone()).ok()?;
+    if result.source != RewriteSource::Rewritten {
+        return None;
+    }
+    let query = result.rewritten_query.trim();
+    (!query.is_empty()).then(|| query.to_string())
+}
+
 fn extract_search_query_from_messages(messages: &[ContextMessage]) -> Option<String> {
     let text = messages
         .iter()
@@ -301,7 +322,7 @@ fn query_matches_page(query: &str, title: &str, content: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use chrono::Utc;
@@ -318,16 +339,21 @@ mod tests {
         page_by_scope: HashMap<(String, String), WikiPage>,
         user_results: Vec<MemorySearchResult>,
         workspace_results: Vec<MemorySearchResult>,
+        queries: Arc<Mutex<Vec<String>>>,
     }
 
     #[async_trait]
     impl MemoryStore for StubMemoryStore {
         async fn search(
             &self,
-            _query: &str,
+            query: &str,
             scope: &MemoryScope,
             _limit: usize,
         ) -> Result<Vec<MemorySearchResult>> {
+            self.queries
+                .lock()
+                .expect("query log should not be poisoned")
+                .push(query.to_string());
             Ok(match scope {
                 MemoryScope::User(_) => self.user_results.clone(),
                 MemoryScope::Workspace(_) => self.workspace_results.clone(),
@@ -435,6 +461,7 @@ mod tests {
                 updated: Utc::now(),
                 reference_count: 0,
             }],
+            queries: Arc::new(Mutex::new(Vec::new())),
         };
         let output = MemoryRetriever::new(Arc::new(memory_store))
             .process(&mut ctx)
@@ -466,6 +493,73 @@ mod tests {
         assert_eq!(
             keywords,
             vec!["oauth", "refresh", "token", "race", "condition", "bug"]
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_retriever_uses_rewritten_query_metadata_for_search() {
+        let session = SessionMeta {
+            id: SessionId::new(),
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("user"),
+            platform: Platform::Desktop,
+            model: ModelId::new("claude-sonnet-4-6"),
+            ..SessionMeta::default()
+        };
+        let capabilities = ModelCapabilities {
+            model_id: ModelId::new("claude-sonnet-4-6"),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+            },
+            native_tools: Vec::new(),
+        };
+        let mut ctx = moa_core::WorkingContext::new(&session, capabilities);
+        ctx.append_message(moa_core::ContextMessage::user("fix that"));
+        ctx.insert_metadata(
+            "query_rewrite",
+            serde_json::to_value(moa_core::QueryRewriteResult {
+                rewritten_query: "Fix the OAuth refresh token race condition in auth/refresh.rs"
+                    .to_string(),
+                intent: moa_core::QueryIntent::Coding,
+                sub_queries: Vec::new(),
+                suggested_tools: Vec::new(),
+                needs_clarification: false,
+                clarification_question: None,
+                source: moa_core::RewriteSource::Rewritten,
+            })
+            .expect("rewrite metadata should serialize"),
+        );
+        let queries = Arc::new(Mutex::new(Vec::new()));
+        let memory_store = StubMemoryStore {
+            page_by_scope: HashMap::new(),
+            user_results: Vec::new(),
+            workspace_results: Vec::new(),
+            queries: queries.clone(),
+        };
+
+        MemoryRetriever::new(Arc::new(memory_store))
+            .process(&mut ctx)
+            .await
+            .expect("memory stage should process");
+
+        assert_eq!(
+            queries
+                .lock()
+                .expect("query log should not be poisoned")
+                .as_slice(),
+            [
+                "Fix the OAuth refresh token race condition in auth/refresh.rs",
+                "Fix the OAuth refresh token race condition in auth/refresh.rs"
+            ]
         );
     }
 }

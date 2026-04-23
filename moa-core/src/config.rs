@@ -52,6 +52,8 @@ pub struct MoaConfig {
     pub tool_budgets: ToolBudgetConfig,
     /// Skill-manifest prompt budgeting controls for Stage 4 of the context pipeline.
     pub skill_budget: SkillBudgetConfig,
+    /// Query-rewriting controls for pre-memory retrieval prompt normalization.
+    pub query_rewrite: QueryRewriteConfig,
     /// Incremental context snapshot settings.
     pub context_snapshot: ContextSnapshotConfig,
     /// External MCP server connections.
@@ -265,6 +267,38 @@ impl MoaConfig {
             .set_default(
                 "skill_budget.show_token_estimates",
                 Self::default().skill_budget.show_token_estimates,
+            )?
+            .set_default(
+                "query_rewrite.enabled",
+                Self::default().query_rewrite.enabled,
+            )?
+            .set_default(
+                "query_rewrite.model",
+                Self::default().query_rewrite.model.clone(),
+            )?
+            .set_default(
+                "query_rewrite.timeout_ms",
+                Self::default().query_rewrite.timeout_ms as i64,
+            )?
+            .set_default(
+                "query_rewrite.min_query_tokens",
+                Self::default().query_rewrite.min_query_tokens as i64,
+            )?
+            .set_default(
+                "query_rewrite.skip_single_turn",
+                Self::default().query_rewrite.skip_single_turn,
+            )?
+            .set_default(
+                "query_rewrite.circuit_breaker_threshold",
+                Self::default().query_rewrite.circuit_breaker_threshold,
+            )?
+            .set_default(
+                "query_rewrite.circuit_breaker_window_secs",
+                Self::default().query_rewrite.circuit_breaker_window_secs as i64,
+            )?
+            .set_default(
+                "query_rewrite.circuit_breaker_cooldown_secs",
+                Self::default().query_rewrite.circuit_breaker_cooldown_secs as i64,
             )?
             .set_default(
                 "context_snapshot.enabled",
@@ -1048,6 +1082,43 @@ impl Default for SkillBudgetConfig {
     }
 }
 
+/// Query-rewriting controls for the context pipeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueryRewriteConfig {
+    /// Whether query rewriting is enabled.
+    pub enabled: bool,
+    /// Model to use for rewriting. Defaults to the selected auxiliary provider.
+    pub model: Option<String>,
+    /// Hard timeout for the rewriter LLM call.
+    pub timeout_ms: u64,
+    /// Minimum token count in a single-turn query to trigger rewriting.
+    pub min_query_tokens: usize,
+    /// Whether to skip rewriting on single-turn conversations below the token threshold.
+    pub skip_single_turn: bool,
+    /// Circuit-breaker error-rate threshold that disables rewriting.
+    pub circuit_breaker_threshold: f64,
+    /// Circuit-breaker sliding window length in seconds.
+    pub circuit_breaker_window_secs: u64,
+    /// Circuit-breaker cooldown length in seconds after tripping.
+    pub circuit_breaker_cooldown_secs: u64,
+}
+
+impl Default for QueryRewriteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: None,
+            timeout_ms: 500,
+            min_query_tokens: 15,
+            skip_single_turn: true,
+            circuit_breaker_threshold: 0.05,
+            circuit_breaker_window_secs: 60,
+            circuit_breaker_cooldown_secs: 60,
+        }
+    }
+}
+
 /// Cloud runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1405,6 +1476,19 @@ mod tests {
     }
 
     #[test]
+    fn query_rewrite_config_defaults_are_applied() {
+        let config = MoaConfig::default();
+        assert!(config.query_rewrite.enabled);
+        assert_eq!(config.query_rewrite.model, None);
+        assert_eq!(config.query_rewrite.timeout_ms, 500);
+        assert_eq!(config.query_rewrite.min_query_tokens, 15);
+        assert!(config.query_rewrite.skip_single_turn);
+        assert!((config.query_rewrite.circuit_breaker_threshold - 0.05_f64).abs() < f64::EPSILON);
+        assert_eq!(config.query_rewrite.circuit_breaker_window_secs, 60);
+        assert_eq!(config.query_rewrite.circuit_breaker_cooldown_secs, 60);
+    }
+
+    #[test]
     fn observability_config_defaults_to_grpc() {
         let toml = r#"
             [observability]
@@ -1522,6 +1606,8 @@ mod tests {
         assert_eq!(config.skill_budget.max_manifest_chars, None);
         assert_eq!(config.skill_budget.max_per_skill_chars, 1_536);
         assert!(config.skill_budget.show_token_estimates);
+        assert!(config.query_rewrite.enabled);
+        assert_eq!(config.query_rewrite.timeout_ms, 500);
         assert!(!config.metrics.enabled);
         assert_eq!(config.metrics.listen, "0.0.0.0:9090");
     }

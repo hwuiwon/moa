@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use moa_brain::build_default_pipeline_with_runtime_and_instructions;
+use moa_brain::build_default_pipeline_with_rewriter_runtime_and_instructions;
 use moa_core::{
     CompletionRequest, CountedSessionStore, EventRange, Result, SessionId, SessionStore,
     WorkingContext, record_pipeline_compile_duration, record_turn_pipeline_compile_duration,
@@ -21,7 +21,7 @@ pub(crate) enum PreparedTurnRequest {
     /// No new turn work is currently required.
     Idle,
     /// A compiled request is ready for `LLMGateway/complete`.
-    Request(CompletionRequest),
+    Request(Box<CompletionRequest>),
 }
 
 /// Compiles the next LLM request for a session from durable state.
@@ -41,11 +41,25 @@ pub(crate) async fn prepare_turn_request(session_id: SessionId) -> Result<Prepar
     let capabilities = ctx
         .providers
         .capabilities_for_model(Some(session.model.as_str()))?;
-    let pipeline = build_default_pipeline_with_runtime_and_instructions(
+    let query_rewrite_provider = match ctx
+        .providers
+        .resolve_rewriter_provider(&ctx.config.query_rewrite)
+    {
+        Ok(provider) => provider,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to resolve query rewriter provider; continuing without query rewriting"
+            );
+            None
+        }
+    };
+    let pipeline = build_default_pipeline_with_rewriter_runtime_and_instructions(
         ctx.config.as_ref(),
         counted_session_store,
         ctx.memory_store.clone(),
         None,
+        query_rewrite_provider,
         None,
         ctx.tool_schemas.as_ref().clone(),
     );
@@ -67,5 +81,7 @@ pub(crate) async fn prepare_turn_request(session_id: SessionId) -> Result<Prepar
     );
     context.insert_metadata("_moa.model", serde_json::json!(session.model.as_str()));
 
-    Ok(PreparedTurnRequest::Request(context.into_request()))
+    Ok(PreparedTurnRequest::Request(Box::new(
+        context.into_request(),
+    )))
 }

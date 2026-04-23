@@ -1,4 +1,4 @@
-//! Stage 8: plans explicit prompt-cache breakpoints and reports cache efficiency.
+//! Stage 10: plans explicit prompt-cache breakpoints and reports cache efficiency.
 
 use async_trait::async_trait;
 use moa_core::{
@@ -25,7 +25,7 @@ impl ContextProcessor for CacheOptimizer {
     }
 
     fn stage(&self) -> u8 {
-        9
+        10
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {

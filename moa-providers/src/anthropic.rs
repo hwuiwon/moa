@@ -15,9 +15,10 @@ use eventsource_stream::{Event as SseEvent, Eventsource};
 use futures_util::{Stream, StreamExt, pin_mut};
 use moa_core::{
     CacheBreakpoint, CacheBreakpointTarget, CacheTtl, CompletionContent, CompletionRequest,
-    CompletionResponse, CompletionStream, ContextMessage, LLMProvider, MessageRole, MoaConfig,
-    MoaError, ModelCapabilities, ModelId, ProviderNativeTool, Result, StopReason, TokenPricing,
-    TokenUsage, ToolCallFormat, ToolContent, ToolInvocation, estimate_text_tokens,
+    CompletionResponse, CompletionStream, ContextMessage, JsonResponseFormat, LLMProvider,
+    MessageRole, MoaConfig, MoaError, ModelCapabilities, ModelId, ProviderNativeTool, Result,
+    StopReason, TokenPricing, TokenUsage, ToolCallFormat, ToolContent, ToolInvocation,
+    estimate_text_tokens,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -381,6 +382,12 @@ fn build_request_body(
     if !tools.is_empty() {
         body.insert("tools".to_string(), Value::Array(tools));
     }
+    if let Some(response_format) = request.response_format.as_ref() {
+        body.insert(
+            "output_config".to_string(),
+            anthropic_output_config(response_format),
+        );
+    }
 
     Ok(Value::Object(body))
 }
@@ -405,6 +412,15 @@ fn anthropic_text_block(text: impl Into<String>) -> Value {
     json!({
         "type": "text",
         "text": text.into(),
+    })
+}
+
+fn anthropic_output_config(format: &JsonResponseFormat) -> Value {
+    json!({
+        "format": {
+            "type": "json_schema",
+            "schema": format.schema,
+        }
     })
 }
 
@@ -1265,7 +1281,7 @@ mod tests {
     use futures_util::stream;
     use moa_core::{
         CacheBreakpoint, CacheTtl, CompletionContent, CompletionRequest, ContextMessage,
-        LLMProvider, ModelId, StopReason, ToolContent,
+        JsonResponseFormat, LLMProvider, ModelId, StopReason, ToolContent,
     };
     use serde_json::json;
     use tokio::sync::mpsc;
@@ -1300,6 +1316,7 @@ mod tests {
             })],
             max_output_tokens: Some(512),
             temperature: Some(0.2),
+            response_format: None,
             cache_breakpoints: Vec::new(),
             cache_controls: Vec::new(),
             metadata: Default::default(),
@@ -1325,6 +1342,40 @@ mod tests {
     }
 
     #[test]
+    fn completion_request_sets_structured_output_config() {
+        let mut request = CompletionRequest::new("Return structured data.");
+        request.response_format = Some(JsonResponseFormat::strict_json_schema(
+            "query_rewrite_result",
+            "Query rewrite result.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "intent": {
+                        "type": "string",
+                        "enum": ["coding", "research", "unknown"]
+                    }
+                },
+                "required": ["intent"]
+            }),
+        ));
+
+        let body = build_request_body(
+            &request,
+            &canonical_model_id(MODEL_HAIKU_4_5).expect("valid model"),
+            &capabilities_for_model(MODEL_HAIKU_4_5).expect("valid capabilities"),
+            false,
+        )
+        .expect("request should build");
+
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(
+            body["output_config"]["format"]["schema"]["properties"]["intent"]["enum"],
+            json!(["coding", "research", "unknown"])
+        );
+    }
+
+    #[test]
     fn completion_request_prefers_deepest_breakpoint_when_static_prefix_fits_window() {
         let request = CompletionRequest {
             model: Some(ModelId::new(MODEL_SONNET_4_6)),
@@ -1345,6 +1396,7 @@ mod tests {
             })],
             max_output_tokens: Some(512),
             temperature: None,
+            response_format: None,
             cache_breakpoints: vec![1],
             cache_controls: vec![CacheBreakpoint::message(1, CacheTtl::OneHour)],
             metadata: Default::default(),
@@ -1374,6 +1426,7 @@ mod tests {
             tools: Vec::new(),
             max_output_tokens: Some(512),
             temperature: None,
+            response_format: None,
             cache_breakpoints: vec![1],
             cache_controls: vec![CacheBreakpoint::message(1, CacheTtl::FiveMinutes)],
             metadata: Default::default(),
@@ -1422,6 +1475,7 @@ mod tests {
             })],
             max_output_tokens: Some(512),
             temperature: None,
+            response_format: None,
             cache_breakpoints: vec![1, 2, 3, 4, 5],
             cache_controls: vec![
                 CacheBreakpoint::tools(CacheTtl::OneHour),
@@ -1472,6 +1526,7 @@ mod tests {
             })],
             max_output_tokens: Some(512),
             temperature: None,
+            response_format: None,
             cache_breakpoints: vec![1],
             cache_controls: vec![
                 CacheBreakpoint::tools(CacheTtl::OneHour),
@@ -1511,6 +1566,7 @@ mod tests {
                 .collect(),
             max_output_tokens: Some(512),
             temperature: None,
+            response_format: None,
             cache_breakpoints: vec![1],
             cache_controls: vec![
                 CacheBreakpoint::tools(CacheTtl::OneHour),

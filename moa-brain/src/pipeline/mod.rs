@@ -15,6 +15,7 @@ pub mod history;
 pub mod identity;
 pub mod instructions;
 pub mod memory;
+pub mod query_rewrite;
 pub mod runtime_context;
 pub mod skills;
 pub mod tools;
@@ -25,6 +26,7 @@ use history::HistoryCompiler;
 use identity::IdentityProcessor;
 use instructions::InstructionProcessor;
 use memory::MemoryRetriever;
+use query_rewrite::QueryRewriter;
 use runtime_context::RuntimeContextProcessor;
 use skills::SkillInjector;
 use tools::ToolDefinitionProcessor;
@@ -251,48 +253,88 @@ pub fn build_default_pipeline_with_runtime_and_instructions(
     discovered_workspace_instructions: Option<String>,
     tool_schemas: Vec<serde_json::Value>,
 ) -> ContextPipeline {
-    let history: Box<dyn ContextProcessor> = if let Some(llm_provider) = llm_provider.clone() {
-        Box::new(
-            HistoryCompiler::with_compaction(
-                session_store.clone(),
-                llm_provider,
-                config.compaction.clone(),
-            )
-            .with_tool_output_config(config.tool_output.clone())
-            .with_snapshot_config(config.context_snapshot.clone()),
-        )
-    } else {
-        Box::new(
-            HistoryCompiler::new(session_store.clone())
-                .with_compaction_config(config.compaction.clone())
+    build_default_pipeline_with_rewriter_runtime_and_instructions(
+        config,
+        session_store,
+        memory_store,
+        llm_provider.clone(),
+        llm_provider,
+        discovered_workspace_instructions,
+        tool_schemas,
+    )
+}
+
+/// Builds the default context pipeline with separate compaction and query-rewrite LLMs.
+pub fn build_default_pipeline_with_rewriter_runtime_and_instructions(
+    config: &MoaConfig,
+    session_store: Arc<dyn SessionStore>,
+    memory_store: Arc<dyn MemoryStore>,
+    compaction_llm_provider: Option<Arc<dyn LLMProvider>>,
+    query_rewrite_llm_provider: Option<Arc<dyn LLMProvider>>,
+    discovered_workspace_instructions: Option<String>,
+    tool_schemas: Vec<serde_json::Value>,
+) -> ContextPipeline {
+    let history: Box<dyn ContextProcessor> =
+        if let Some(llm_provider) = compaction_llm_provider.clone() {
+            Box::new(
+                HistoryCompiler::with_compaction(
+                    session_store.clone(),
+                    llm_provider,
+                    config.compaction.clone(),
+                )
                 .with_tool_output_config(config.tool_output.clone())
                 .with_snapshot_config(config.context_snapshot.clone()),
-        )
-    };
-    ContextPipeline::with_runtime_limits(
-        vec![
-            Box::new(IdentityProcessor::default()),
-            Box::new(InstructionProcessor::new(
-                config.general.workspace_instructions.clone(),
-                config.general.user_instructions.clone(),
-                discovered_workspace_instructions,
-            )),
-            Box::new(ToolDefinitionProcessor::new(tool_schemas)),
+            )
+        } else {
             Box::new(
-                SkillInjector::from_memory(memory_store.clone())
-                    .with_session_store(session_store.clone())
-                    .with_budget_config(config.skill_budget.clone()),
-            ),
-            history,
-            Box::new(MemoryRetriever::new(memory_store)),
-            Box::new(RuntimeContextProcessor::default()),
-            Box::new(Compactor::new(
-                config.compaction.clone(),
-                session_store,
-                llm_provider,
-            )),
-            Box::new(CacheOptimizer),
-        ],
+                HistoryCompiler::new(session_store.clone())
+                    .with_compaction_config(config.compaction.clone())
+                    .with_tool_output_config(config.tool_output.clone())
+                    .with_snapshot_config(config.context_snapshot.clone()),
+            )
+        };
+    let query_rewriter: Option<Box<dyn ContextProcessor>> = if config.query_rewrite.enabled {
+        query_rewrite_llm_provider.map(|llm_provider| {
+            Box::new(
+                QueryRewriter::new(config.query_rewrite.clone(), llm_provider)
+                    .with_session_store(session_store.clone()),
+            ) as Box<dyn ContextProcessor>
+        })
+    } else {
+        None
+    };
+
+    let mut stages: Vec<Box<dyn ContextProcessor>> = vec![
+        Box::new(IdentityProcessor::default()),
+        Box::new(InstructionProcessor::new(
+            config.general.workspace_instructions.clone(),
+            config.general.user_instructions.clone(),
+            discovered_workspace_instructions,
+        )),
+        Box::new(ToolDefinitionProcessor::new(tool_schemas)),
+        Box::new(
+            SkillInjector::from_memory(memory_store.clone())
+                .with_session_store(session_store.clone())
+                .with_budget_config(config.skill_budget.clone()),
+        ),
+    ];
+    if let Some(query_rewriter) = query_rewriter {
+        stages.push(query_rewriter);
+    }
+    stages.extend([
+        Box::new(MemoryRetriever::new(memory_store.clone())) as Box<dyn ContextProcessor>,
+        history,
+        Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
+        Box::new(Compactor::new(
+            config.compaction.clone(),
+            session_store,
+            compaction_llm_provider,
+        )) as Box<dyn ContextProcessor>,
+        Box::new(CacheOptimizer) as Box<dyn ContextProcessor>,
+    ]);
+
+    ContextPipeline::with_runtime_limits(
+        stages,
         config.budgets.daily_workspace_cents,
         config.context_snapshot.clone(),
     )

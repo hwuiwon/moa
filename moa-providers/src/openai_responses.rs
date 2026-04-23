@@ -18,15 +18,16 @@ use async_openai::types::responses::{
     CreateResponse, EasyInputContent, EasyInputMessage, FunctionCallOutput,
     FunctionCallOutputItemParam, FunctionTool, FunctionToolCall, InputContent, InputItem,
     InputParam, InputTextContent, Item, OutputItem, OutputMessageContent, PromptCacheRetention,
-    Reasoning, Response, ResponseStream, ResponseStreamEvent, ResponseUsage, Role as OpenAiRole,
-    Status as OpenAiStatus, Tool, ToolChoiceOptions, ToolChoiceParam, WebSearchTool,
+    Reasoning, Response, ResponseFormatJsonSchema, ResponseStream, ResponseStreamEvent,
+    ResponseTextParam, ResponseUsage, Role as OpenAiRole, Status as OpenAiStatus,
+    TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, WebSearchTool,
     WebSearchToolCallStatus,
 };
 use futures_util::StreamExt;
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, MessageRole,
-    MoaError, ModelId, ProviderNativeTool, Result, StopReason, TokenUsage, ToolCallContent,
-    ToolContent, ToolInvocation, stable_prefix_fingerprint,
+    CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, JsonResponseFormat,
+    MessageRole, MoaError, ModelId, ProviderNativeTool, Result, StopReason, TokenUsage,
+    ToolCallContent, ToolContent, ToolInvocation, stable_prefix_fingerprint,
 };
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -109,7 +110,8 @@ pub(crate) fn build_responses_request(
     tools.extend(openai_native_tools(native_tools)?);
     let has_tools = !tools.is_empty();
     let tools = if tools.is_empty() { None } else { Some(tools) };
-    let reasoning = if supports_reasoning(default_model) {
+    let uses_reasoning_controls = supports_reasoning(default_model);
+    let reasoning = if uses_reasoning_controls {
         Some(Reasoning {
             effort: Some(parse_reasoning_effort(default_reasoning_effort)?),
             summary: None,
@@ -136,9 +138,29 @@ pub(crate) fn build_responses_request(
         reasoning,
         stream: Some(true),
         store: Some(false),
-        temperature: request.temperature,
+        text: request
+            .response_format
+            .as_ref()
+            .map(openai_response_text_param),
+        temperature: if uses_reasoning_controls {
+            None
+        } else {
+            request.temperature
+        },
         ..CreateResponse::default()
     })
+}
+
+fn openai_response_text_param(format: &JsonResponseFormat) -> ResponseTextParam {
+    ResponseTextParam {
+        format: TextResponseFormatConfiguration::JsonSchema(ResponseFormatJsonSchema {
+            description: format.description.clone(),
+            name: format.name.clone(),
+            schema: Some(format.schema.clone()),
+            strict: Some(format.strict),
+        }),
+        verbosity: None,
+    }
 }
 
 fn prompt_cache_key(request: &CompletionRequest, model: &str) -> Option<String> {
@@ -862,8 +884,12 @@ mod tests {
     use std::collections::HashMap;
 
     use async_openai::error::OpenAIError;
-    use async_openai::types::responses::{PromptCacheRetention, ResponseUsage};
-    use moa_core::{CacheBreakpoint, CacheTtl, CompletionRequest, ContextMessage};
+    use async_openai::types::responses::{
+        PromptCacheRetention, ResponseUsage, TextResponseFormatConfiguration,
+    };
+    use moa_core::{
+        CacheBreakpoint, CacheTtl, CompletionRequest, ContextMessage, JsonResponseFormat,
+    };
     use serde_json::json;
 
     use super::{
@@ -937,6 +963,7 @@ mod tests {
             })],
             max_output_tokens: Some(128),
             temperature: None,
+            response_format: None,
             cache_breakpoints: vec![1],
             cache_controls: vec![CacheBreakpoint::message(1, CacheTtl::OneHour)],
             metadata: HashMap::new(),
@@ -959,6 +986,59 @@ mod tests {
     }
 
     #[test]
+    fn build_responses_request_omits_temperature_for_reasoning_models() {
+        let request = CompletionRequest {
+            model: None,
+            messages: vec![ContextMessage::user("Rewrite this query")],
+            tools: Vec::new(),
+            max_output_tokens: Some(128),
+            temperature: Some(0.0),
+            response_format: None,
+            cache_breakpoints: Vec::new(),
+            cache_controls: Vec::new(),
+            metadata: HashMap::new(),
+        };
+
+        let built = build_responses_request(&request, "gpt-5.4-mini", "medium", &[])
+            .expect("request should build");
+
+        assert_eq!(built.temperature, None);
+    }
+
+    #[test]
+    fn build_responses_request_sets_structured_output_schema() {
+        let mut request = CompletionRequest::new("Return structured data.");
+        request.response_format = Some(JsonResponseFormat::strict_json_schema(
+            "test_payload",
+            "Test payload.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "answer": { "type": "string" }
+                },
+                "required": ["answer"]
+            }),
+        ));
+
+        let built = build_responses_request(&request, "gpt-5.4-mini", "medium", &[])
+            .expect("request should build");
+        let text = built.text.expect("structured output text config");
+        let TextResponseFormatConfiguration::JsonSchema(schema) = text.format else {
+            panic!("expected json_schema text format");
+        };
+
+        assert_eq!(schema.name, "test_payload");
+        assert_eq!(schema.strict, Some(true));
+        assert_eq!(
+            schema
+                .schema
+                .and_then(|schema| schema.get("required").cloned()),
+            Some(json!(["answer"]))
+        );
+    }
+
+    #[test]
     fn prompt_cache_key_ignores_dynamic_tail_messages() {
         let mut first = CompletionRequest {
             model: None,
@@ -969,6 +1049,7 @@ mod tests {
             tools: Vec::new(),
             max_output_tokens: Some(128),
             temperature: None,
+            response_format: None,
             cache_breakpoints: vec![1],
             cache_controls: vec![CacheBreakpoint::message(1, CacheTtl::OneHour)],
             metadata: HashMap::new(),

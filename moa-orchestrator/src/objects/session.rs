@@ -238,7 +238,7 @@ impl AgentAdapter for SessionTurnAdapter {
             .into_inner();
         Ok(match prepared {
             PreparedTurnRequest::Idle => None,
-            PreparedTurnRequest::Request(request) => Some(request),
+            PreparedTurnRequest::Request(request) => Some(*request),
         })
     }
 

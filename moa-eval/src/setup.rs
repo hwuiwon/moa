@@ -12,6 +12,7 @@ use moa_brain::{
         identity::{DEFAULT_IDENTITY_PROMPT, IdentityProcessor},
         instructions::InstructionProcessor,
         memory::MemoryRetriever,
+        query_rewrite::QueryRewriter,
         runtime_context::RuntimeContextProcessor,
         skills::SkillInjector,
         tools::ToolDefinitionProcessor,
@@ -24,7 +25,9 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_memory::FileMemoryStore;
 use moa_memory::wiki::parse_markdown;
-use moa_providers::{build_provider_from_selection, resolve_provider_selection};
+use moa_providers::{
+    build_provider_from_selection, resolve_provider_selection, resolve_rewriter_provider,
+};
 use moa_security::{ApprovalRuleStore, ToolPolicies};
 use moa_session::PostgresSessionStore;
 use serde_json::Value;
@@ -261,6 +264,7 @@ async fn build_pipeline(
     let user_instructions = base_config.general.user_instructions.clone();
     let tool_schemas = tool_router.tool_schemas();
     let memory_store_dyn: Arc<dyn MemoryStore> = memory_store.clone();
+    let query_rewrite_provider = resolve_eval_rewriter_provider(base_config, llm_provider.clone());
     let mut stages: Vec<Box<dyn ContextProcessor>> = vec![
         Box::new(IdentityProcessor::new(identity_prompt)),
         Box::new(InstructionProcessor::new(
@@ -274,21 +278,52 @@ async fn build_pipeline(
                 .with_session_store(session_store.clone())
                 .with_budget_config(base_config.skill_budget.clone()),
         ),
-        Box::new(MemoryRetriever::new(memory_store_dyn)),
+    ];
+    if let Some(query_rewrite_provider) = query_rewrite_provider {
+        stages.push(Box::new(
+            QueryRewriter::new(base_config.query_rewrite.clone(), query_rewrite_provider)
+                .with_session_store(session_store.clone()),
+        ));
+    }
+    stages.extend([
+        Box::new(MemoryRetriever::new(memory_store_dyn)) as Box<dyn ContextProcessor>,
         Box::new(HistoryCompiler::with_compaction(
-            session_store,
+            session_store.clone(),
             llm_provider,
             base_config.compaction.clone(),
-        )),
-        Box::new(RuntimeContextProcessor::default()),
-        Box::new(CacheOptimizer),
-    ];
+        )) as Box<dyn ContextProcessor>,
+        Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
+        Box::new(CacheOptimizer) as Box<dyn ContextProcessor>,
+    ]);
 
     if !tool_router.has_tool("memory_read") {
         stages.retain(|stage| stage.name() != "skills");
     }
 
     Ok(ContextPipeline::new(stages))
+}
+
+fn resolve_eval_rewriter_provider(
+    base_config: &MoaConfig,
+    fallback_provider: Arc<dyn LLMProvider>,
+) -> Option<Arc<dyn LLMProvider>> {
+    if !base_config.query_rewrite.enabled {
+        return None;
+    }
+
+    if base_config.query_rewrite.model.is_some() || base_config.models.auxiliary.is_some() {
+        match resolve_rewriter_provider(base_config) {
+            Ok(provider) => return Some(provider),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed to build eval query rewriter provider; falling back to main eval provider"
+                );
+            }
+        }
+    }
+
+    Some(fallback_provider)
 }
 
 async fn apply_skill_overrides(
@@ -699,6 +734,7 @@ mod tests {
     #[tokio::test]
     async fn setup_respects_tool_allowlist() {
         let temp = tempdir().unwrap();
+        let moa_config = test_moa_config();
         let config = AgentConfig {
             name: "test".to_string(),
             tools: ToolOverride {
@@ -713,7 +749,7 @@ mod tests {
         };
 
         let environment = build_agent_environment_with_provider(
-            &MoaConfig::default(),
+            &moa_config,
             &config,
             temp.path(),
             Arc::new(MockProvider),
@@ -728,6 +764,7 @@ mod tests {
     #[tokio::test]
     async fn setup_copies_workspace_memory_snapshot() {
         let fixture = tempdir().unwrap();
+        let moa_config = test_moa_config();
         let snapshot_root = fixture.path().join("workspace");
         tokio::fs::create_dir_all(&snapshot_root).await.unwrap();
         tokio::fs::write(
@@ -753,7 +790,7 @@ mod tests {
         };
 
         let environment = build_agent_environment_with_provider(
-            &MoaConfig::default(),
+            &moa_config,
             &config,
             temp.path(),
             Arc::new(MockProvider),
@@ -775,5 +812,15 @@ mod tests {
     #[test]
     fn slugify_preserves_eval_prefix() {
         assert_eq!(slugify_name("Deploy Variant"), "eval-deploy-variant");
+    }
+
+    fn test_moa_config() -> MoaConfig {
+        let mut config = MoaConfig::default();
+        if let Ok(url) =
+            std::env::var("TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"))
+        {
+            config.database.url = url;
+        }
+        config
     }
 }

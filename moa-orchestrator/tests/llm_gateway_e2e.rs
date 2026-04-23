@@ -125,6 +125,7 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
             tools: Vec::new(),
             max_output_tokens: Some(64),
             temperature: None,
+            response_format: None,
             cache_breakpoints: Vec::new(),
             cache_controls: Vec::new(),
             metadata,

@@ -23,7 +23,7 @@ pub use embedding::{
 };
 pub use factory::{
     ProviderSelection, build_provider_from_config, build_provider_from_selection,
-    resolve_provider_selection,
+    resolve_provider_selection, resolve_rewriter_provider,
 };
 pub use gemini::GeminiProvider;
 pub use models::{CATALOG, ProviderModel, by_provider, context_window, find};

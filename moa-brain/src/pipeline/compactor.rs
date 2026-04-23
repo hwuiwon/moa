@@ -1,4 +1,4 @@
-//! Stage 8: applies tiered context compaction to compiled history.
+//! Stage 9: applies tiered context compaction to compiled history.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -64,7 +64,7 @@ impl ContextProcessor for Compactor {
     }
 
     fn stage(&self) -> u8 {
-        8
+        9
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {

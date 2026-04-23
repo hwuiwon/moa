@@ -1,4 +1,4 @@
-//! Stage 7: injects per-turn runtime context outside the cached prompt prefix.
+//! Stage 8: injects per-turn runtime context outside the cached prompt prefix.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -84,7 +84,7 @@ impl ContextProcessor for RuntimeContextProcessor {
     }
 
     fn stage(&self) -> u8 {
-        7
+        8
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
