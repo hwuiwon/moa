@@ -176,6 +176,7 @@ impl ContextPipeline {
                     tokens_removed = output.tokens_removed,
                     items_included = ?output.items_included,
                     items_excluded = ?output.items_excluded,
+                    excluded_items = ?output.excluded_items,
                     duration_ms = output.duration.as_millis(),
                     "pipeline stage completed"
                 );
@@ -277,7 +278,11 @@ pub fn build_default_pipeline_with_runtime_and_instructions(
                 discovered_workspace_instructions,
             )),
             Box::new(ToolDefinitionProcessor::new(tool_schemas)),
-            Box::new(SkillInjector::from_memory(memory_store.clone())),
+            Box::new(
+                SkillInjector::from_memory(memory_store.clone())
+                    .with_session_store(session_store.clone())
+                    .with_budget_config(config.skill_budget.clone()),
+            ),
             history,
             Box::new(MemoryRetriever::new(memory_store)),
             Box::new(RuntimeContextProcessor::default()),

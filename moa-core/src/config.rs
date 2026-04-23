@@ -50,6 +50,8 @@ pub struct MoaConfig {
     pub tool_output: ToolOutputConfig,
     /// Per-tool router-level output budgets enforced before event persistence.
     pub tool_budgets: ToolBudgetConfig,
+    /// Skill-manifest prompt budgeting controls for Stage 4 of the context pipeline.
+    pub skill_budget: SkillBudgetConfig,
     /// Incremental context snapshot settings.
     pub context_snapshot: ContextSnapshotConfig,
     /// External MCP server connections.
@@ -248,6 +250,21 @@ impl MoaConfig {
             .set_default(
                 "tool_budgets.default",
                 Self::default().tool_budgets.default as i64,
+            )?
+            .set_default(
+                "skill_budget.max_manifest_chars",
+                Self::default()
+                    .skill_budget
+                    .max_manifest_chars
+                    .map(|value| value as i64),
+            )?
+            .set_default(
+                "skill_budget.max_per_skill_chars",
+                Self::default().skill_budget.max_per_skill_chars as i64,
+            )?
+            .set_default(
+                "skill_budget.show_token_estimates",
+                Self::default().skill_budget.show_token_estimates,
             )?
             .set_default(
                 "context_snapshot.enabled",
@@ -1007,6 +1024,30 @@ impl Default for ContextSnapshotConfig {
     }
 }
 
+/// Stage-4 skill-manifest budgeting controls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillBudgetConfig {
+    /// Maximum characters for the entire skill manifest.
+    ///
+    /// `None` uses `max(context_window * 0.01, 8000)` at runtime.
+    pub max_manifest_chars: Option<usize>,
+    /// Maximum characters for one individual skill entry before truncation.
+    pub max_per_skill_chars: usize,
+    /// Whether manifest entries should include estimated token counts.
+    pub show_token_estimates: bool,
+}
+
+impl Default for SkillBudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_manifest_chars: None,
+            max_per_skill_chars: 1_536,
+            show_token_estimates: true,
+        }
+    }
+}
+
 /// Cloud runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1356,6 +1397,14 @@ mod tests {
     }
 
     #[test]
+    fn skill_budget_config_defaults_are_applied() {
+        let config = MoaConfig::default();
+        assert_eq!(config.skill_budget.max_manifest_chars, None);
+        assert_eq!(config.skill_budget.max_per_skill_chars, 1_536);
+        assert!(config.skill_budget.show_token_estimates);
+    }
+
+    #[test]
     fn observability_config_defaults_to_grpc() {
         let toml = r#"
             [observability]
@@ -1470,6 +1519,9 @@ mod tests {
         assert_eq!(config.tool_budgets.memory_search, 3_000);
         assert_eq!(config.tool_budgets.file_outline, 2_000);
         assert_eq!(config.tool_budgets.default, 8_000);
+        assert_eq!(config.skill_budget.max_manifest_chars, None);
+        assert_eq!(config.skill_budget.max_per_skill_chars, 1_536);
+        assert!(config.skill_budget.show_token_estimates);
         assert!(!config.metrics.enabled);
         assert_eq!(config.metrics.listen, "0.0.0.0:9090");
     }

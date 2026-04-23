@@ -319,6 +319,15 @@ impl WorkingContext {
     }
 }
 
+/// Structured reason for excluding one item from a processor stage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExcludedItem {
+    /// Stable identifier for the excluded item.
+    pub item: String,
+    /// Human-readable explanation for why the item was excluded.
+    pub reason: String,
+}
+
 /// Output emitted by a context processor stage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ProcessorOutput {
@@ -330,6 +339,8 @@ pub struct ProcessorOutput {
     pub items_included: Vec<String>,
     /// Excluded item identifiers.
     pub items_excluded: Vec<String>,
+    /// Structured explanations for excluded items when the stage can provide them.
+    pub excluded_items: Vec<ExcludedItem>,
     /// Auxiliary structured metadata emitted by the stage.
     pub metadata: HashMap<String, Value>,
     /// Stage execution duration.

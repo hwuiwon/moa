@@ -269,7 +269,11 @@ async fn build_pipeline(
             None,
         )),
         Box::new(ToolDefinitionProcessor::new(tool_schemas)),
-        Box::new(SkillInjector::from_memory(memory_store_dyn.clone())),
+        Box::new(
+            SkillInjector::from_memory(memory_store_dyn.clone())
+                .with_session_store(session_store.clone())
+                .with_budget_config(base_config.skill_budget.clone()),
+        ),
         Box::new(MemoryRetriever::new(memory_store_dyn)),
         Box::new(HistoryCompiler::with_compaction(
             session_store,
