@@ -138,6 +138,8 @@ pub struct SkillMetadata {
     pub estimated_tokens: usize,
     /// Historical usage count.
     pub use_count: u32,
+    /// Last time the skill was used, when tracked in metadata.
+    pub last_used: Option<DateTime<Utc>>,
     /// Historical success rate between `0.0` and `1.0`.
     pub success_rate: f32,
     /// Whether the skill was auto-generated.

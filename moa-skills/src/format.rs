@@ -285,6 +285,7 @@ pub fn skill_metadata_from_document(path: MemoryPath, skill: &SkillDocument) -> 
         allowed_tools: skill.frontmatter.allowed_tools.clone(),
         estimated_tokens: skill.frontmatter.estimated_tokens(&skill.body),
         use_count: skill.frontmatter.use_count(),
+        last_used: skill.frontmatter.last_used(),
         success_rate: skill.frontmatter.success_rate(),
         auto_generated: skill.frontmatter.auto_generated(),
     }
