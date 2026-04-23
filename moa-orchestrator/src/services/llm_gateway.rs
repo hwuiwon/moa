@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use moa_core::{
     CompletionRequest, CompletionResponse, Event, LLMProvider, MoaError, ModelCapabilities,
-    ModelId, ModelTier, SessionId, TokenPricing, TokenUsage, record_llm_cost_cents,
+    ModelId, ModelTier, QueryRewriteConfig, SessionId, TokenPricing, TokenUsage,
+    record_llm_cost_cents,
 };
 use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 use restate_sdk::prelude::*;
@@ -19,6 +20,9 @@ use crate::services::session_store::{AppendEventRequest, SessionStoreClient};
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4";
 const DEFAULT_GOOGLE_MODEL: &str = "gemini-3.1-pro-preview";
+const REWRITER_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
+const REWRITER_OPENAI_MODEL: &str = "gpt-5.4-mini";
+const REWRITER_GOOGLE_MODEL: &str = "gemini-3.1-flash-lite-preview";
 
 /// Restate service surface for journaled LLM completions.
 #[restate_sdk::service]
@@ -189,6 +193,33 @@ impl ProviderRegistry {
             .provider_for(provider_kind, &model)?
             .provider
             .capabilities())
+    }
+
+    /// Resolves the provider instance that should serve query-rewriting calls.
+    pub fn resolve_rewriter_provider(
+        &self,
+        config: &QueryRewriteConfig,
+    ) -> moa_core::Result<Option<Arc<dyn LLMProvider>>> {
+        if !config.enabled {
+            return Ok(None);
+        }
+
+        if let Some(model) = config.model.as_deref() {
+            let (kind, model) = self.resolve_provider_kind(Some(model))?;
+            return Ok(Some(self.provider_for(kind, &model)?.provider));
+        }
+
+        if let Some(provider) = self.anthropic.as_ref() {
+            return Ok(Some(provider.build(REWRITER_ANTHROPIC_MODEL)?));
+        }
+        if let Some(provider) = self.openai.as_ref() {
+            return Ok(Some(provider.build(REWRITER_OPENAI_MODEL)?));
+        }
+        if let Some(provider) = self.google.as_ref() {
+            return Ok(Some(provider.build(REWRITER_GOOGLE_MODEL)?));
+        }
+
+        Ok(None)
     }
 
     fn resolve_requested_model(

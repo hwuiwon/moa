@@ -51,6 +51,7 @@ async fn gemini_live_web_search_returns_current_information() {
                 tools: Vec::new(),
                 max_output_tokens: Some(128),
                 temperature: Some(0.0),
+                response_format: None,
                 cache_breakpoints: Vec::new(),
                 cache_controls: Vec::new(),
                 metadata: Default::default(),

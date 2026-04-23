@@ -9,6 +9,9 @@ use crate::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 const PROVIDER_ANTHROPIC: &str = "anthropic";
 const PROVIDER_OPENAI: &str = "openai";
 const PROVIDER_GOOGLE: &str = "google";
+const REWRITER_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
+const REWRITER_OPENAI_MODEL: &str = "gpt-5.4-mini";
+const REWRITER_GOOGLE_MODEL: &str = "gemini-3.1-flash-lite-preview";
 
 /// Resolved provider/model choice used to construct one provider instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +89,19 @@ pub fn build_provider_from_selection(
     Ok(provider)
 }
 
+/// Builds the configured query-rewriter provider, preferring explicit and auxiliary models.
+pub fn resolve_rewriter_provider(config: &MoaConfig) -> Result<Arc<dyn LLMProvider>> {
+    let model = config
+        .query_rewrite
+        .model
+        .as_deref()
+        .or(config.models.auxiliary.as_deref())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| default_rewriter_model(config));
+    let selection = resolve_provider_selection(config, Some(&model))?;
+    build_provider_from_selection(config, &selection)
+}
+
 fn split_explicit_provider(model: &str) -> Option<(&str, &str)> {
     let (provider_name, model_id) = model.split_once(':')?;
     let provider_name = provider_name.trim();
@@ -112,6 +128,19 @@ fn infer_provider_name(model: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+fn default_rewriter_model(config: &MoaConfig) -> String {
+    match config.general.default_provider.trim() {
+        PROVIDER_ANTHROPIC => REWRITER_ANTHROPIC_MODEL.to_string(),
+        PROVIDER_GOOGLE => REWRITER_GOOGLE_MODEL.to_string(),
+        PROVIDER_OPENAI => REWRITER_OPENAI_MODEL.to_string(),
+        _ => match infer_provider_name(config.models.main.as_str()) {
+            Some(PROVIDER_ANTHROPIC) => REWRITER_ANTHROPIC_MODEL.to_string(),
+            Some(PROVIDER_GOOGLE) => REWRITER_GOOGLE_MODEL.to_string(),
+            _ => REWRITER_OPENAI_MODEL.to_string(),
+        },
+    }
 }
 
 fn normalize_model_for_provider(provider_name: &str, model: &str) -> String {
@@ -148,7 +177,10 @@ fn matches_provider_name(provider_name: &str) -> bool {
 mod tests {
     use moa_core::MoaConfig;
 
-    use super::{PROVIDER_ANTHROPIC, PROVIDER_GOOGLE, PROVIDER_OPENAI, resolve_provider_selection};
+    use super::{
+        PROVIDER_ANTHROPIC, PROVIDER_GOOGLE, PROVIDER_OPENAI, default_rewriter_model,
+        resolve_provider_selection,
+    };
 
     #[test]
     fn infers_openai_for_gpt_models() {
@@ -189,5 +221,21 @@ mod tests {
                 .to_string()
                 .contains("vendor-prefixed model ids are not supported")
         );
+    }
+
+    #[test]
+    fn default_rewriter_model_prefers_provider_family_small_model() {
+        let mut config = MoaConfig::default();
+        config.general.default_provider = "anthropic".to_string();
+        assert_eq!(default_rewriter_model(&config), "claude-haiku-4-5");
+
+        config.general.default_provider = "google".to_string();
+        assert_eq!(
+            default_rewriter_model(&config),
+            "gemini-3.1-flash-lite-preview"
+        );
+
+        config.general.default_provider = "openai".to_string();
+        assert_eq!(default_rewriter_model(&config), "gpt-5.4-mini");
     }
 }

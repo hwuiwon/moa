@@ -87,6 +87,37 @@ pub enum StopReason {
     Other(String),
 }
 
+/// Provider-native JSON response-format request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JsonResponseFormat {
+    /// Stable schema name accepted by providers.
+    pub name: String,
+    /// Optional model-facing schema description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// JSON Schema object that the provider should enforce.
+    pub schema: Value,
+    /// Whether providers that support strict schema mode should enable it.
+    pub strict: bool,
+}
+
+impl JsonResponseFormat {
+    /// Creates a strict JSON-schema response format.
+    #[must_use]
+    pub fn strict_json_schema(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        schema: Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: Some(description.into()),
+            schema,
+            strict: true,
+        }
+    }
+}
+
 /// Provider completion request payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompletionRequest {
@@ -100,6 +131,9 @@ pub struct CompletionRequest {
     pub max_output_tokens: Option<usize>,
     /// Optional temperature override.
     pub temperature: Option<f32>,
+    /// Optional provider-native JSON response-format request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<JsonResponseFormat>,
     /// Message-boundary cache breakpoints used by providers that support explicit prompt caching.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_breakpoints: Vec<usize>,
@@ -119,6 +153,7 @@ impl CompletionRequest {
             tools: Vec::new(),
             max_output_tokens: None,
             temperature: None,
+            response_format: None,
             cache_breakpoints: Vec::new(),
             cache_controls: Vec::new(),
             metadata: HashMap::new(),

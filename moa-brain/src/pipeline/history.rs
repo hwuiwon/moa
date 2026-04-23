@@ -1,4 +1,4 @@
-//! Stage 5: compiles session history into context messages.
+//! Stage 7: compiles session history into context messages.
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -362,7 +362,7 @@ impl ContextProcessor for HistoryCompiler {
     }
 
     fn stage(&self) -> u8 {
-        5
+        7
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {

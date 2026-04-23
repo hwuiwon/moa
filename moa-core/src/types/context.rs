@@ -312,6 +312,7 @@ impl WorkingContext {
             tools: self.tool_schemas,
             max_output_tokens: Some(max_output),
             temperature: None,
+            response_format: None,
             cache_breakpoints: self.cache_breakpoints,
             cache_controls: self.cache_controls,
             metadata: self.metadata,

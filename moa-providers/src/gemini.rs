@@ -16,9 +16,9 @@ use eventsource_stream::{Event as SseEvent, Eventsource};
 use futures_util::{Stream, StreamExt, pin_mut};
 use moa_core::{
     CacheTtl, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
-    ContextMessage, LLMProvider, MessageRole, MoaConfig, MoaError, ModelCapabilities, ModelId,
-    ProviderNativeTool, ProviderToolCallMetadata, Result, StopReason, TokenPricing, TokenUsage,
-    ToolCallContent, ToolCallFormat, ToolContent, ToolInvocation,
+    ContextMessage, JsonResponseFormat, LLMProvider, MessageRole, MoaConfig, MoaError,
+    ModelCapabilities, ModelId, ProviderNativeTool, ProviderToolCallMetadata, Result, StopReason,
+    TokenPricing, TokenUsage, ToolCallContent, ToolCallFormat, ToolContent, ToolInvocation,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -473,6 +473,7 @@ struct GeminiRequestBuildOptions<'a> {
     model: &'a str,
     max_output_tokens: Option<usize>,
     temperature: Option<f32>,
+    response_format: Option<&'a JsonResponseFormat>,
     default_reasoning_effort: &'a str,
     native_tools: &'a [ProviderNativeTool],
     include_tools: bool,
@@ -497,6 +498,7 @@ fn build_request_body(
             model,
             max_output_tokens: request.max_output_tokens,
             temperature: request.temperature,
+            response_format: request.response_format.as_ref(),
             default_reasoning_effort,
             native_tools,
             include_tools: true,
@@ -515,6 +517,7 @@ fn build_request_parts(
         options.model,
         options.max_output_tokens,
         options.temperature,
+        options.response_format,
         options.default_reasoning_effort,
     )?;
     let tools = if options.include_tools {
@@ -641,6 +644,7 @@ fn build_generation_config(
     model: &str,
     max_output_tokens: Option<usize>,
     temperature: Option<f32>,
+    response_format: Option<&JsonResponseFormat>,
     default_reasoning_effort: &str,
 ) -> Result<Option<Value>> {
     let mut generation_config = Map::new();
@@ -649,6 +653,13 @@ fn build_generation_config(
     }
     if let Some(temperature) = temperature {
         generation_config.insert("temperature".to_string(), json!(temperature));
+    }
+    if let Some(response_format) = response_format {
+        generation_config.insert(
+            "responseMimeType".to_string(),
+            Value::String("application/json".to_string()),
+        );
+        generation_config.insert("responseSchema".to_string(), response_format.schema.clone());
     }
     if let Some(thinking_config) = thinking_config_for_model(model, default_reasoning_effort)? {
         generation_config.insert("thinkingConfig".to_string(), thinking_config);
@@ -710,6 +721,7 @@ fn build_explicit_cache_plan(
             model,
             max_output_tokens: request.max_output_tokens,
             temperature: request.temperature,
+            response_format: None,
             default_reasoning_effort,
             native_tools,
             include_tools: true,
@@ -722,6 +734,7 @@ fn build_explicit_cache_plan(
             model,
             max_output_tokens: request.max_output_tokens,
             temperature: request.temperature,
+            response_format: request.response_format.as_ref(),
             default_reasoning_effort,
             native_tools: &[],
             include_tools: false,
@@ -1326,16 +1339,17 @@ fn finish_reason_to_stop_reason(finish_reason: &str) -> StopReason {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        CompletionContent, CompletionRequest, ContextMessage, LLMProvider, ModelId,
-        ProviderToolCallMetadata, ToolCallContent, ToolContent, ToolInvocation,
+        CompletionContent, CompletionRequest, ContextMessage, JsonResponseFormat, LLMProvider,
+        ModelId, ProviderToolCallMetadata, ToolCallContent, ToolContent, ToolInvocation,
     };
     use serde_json::{Value, json};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     use super::{
-        GeminiProvider, GeminiUsageMetadata, build_explicit_cache_plan, canonical_model_id,
-        capabilities_for_model, thinking_config_for_model, token_usage_from_gemini_usage,
+        GeminiProvider, GeminiUsageMetadata, build_explicit_cache_plan, build_request_body,
+        canonical_model_id, capabilities_for_model, thinking_config_for_model,
+        token_usage_from_gemini_usage,
     };
 
     fn sse_stream(frames: &[Value]) -> String {
@@ -1346,6 +1360,35 @@ mod tests {
             stream.push_str("\n\n");
         }
         stream
+    }
+
+    #[test]
+    fn gemini_request_sets_structured_output_schema() {
+        let mut request = CompletionRequest::new("Return structured data.");
+        request.response_format = Some(JsonResponseFormat::strict_json_schema(
+            "test_payload",
+            "Test payload.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "answer": { "type": "string" }
+                },
+                "required": ["answer"]
+            }),
+        ));
+
+        let body = build_request_body(&request, "gemini-2.5-flash", "medium", &[])
+            .expect("request should build");
+
+        assert_eq!(
+            body["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert_eq!(
+            body["generationConfig"]["responseSchema"]["required"],
+            json!(["answer"])
+        );
     }
 
     #[tokio::test]
@@ -1423,6 +1466,7 @@ mod tests {
                 })],
                 max_output_tokens: Some(1024),
                 temperature: Some(0.2),
+                response_format: None,
                 cache_breakpoints: Vec::new(),
                 cache_controls: Vec::new(),
                 metadata: Default::default(),
@@ -1510,6 +1554,7 @@ mod tests {
             })],
             max_output_tokens: Some(256),
             temperature: None,
+            response_format: None,
             cache_breakpoints: vec![2],
             cache_controls: Vec::new(),
             metadata: Default::default(),
@@ -1592,6 +1637,7 @@ mod tests {
                 tools: Vec::new(),
                 max_output_tokens: Some(1024),
                 temperature: None,
+                response_format: None,
                 cache_breakpoints: Vec::new(),
                 cache_controls: Vec::new(),
                 metadata: Default::default(),

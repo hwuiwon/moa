@@ -16,6 +16,7 @@ pub use harness::{
 pub use loop_detector::LoopDetector;
 pub use pipeline::{
     ContextPipeline, PipelineStageReport, build_default_pipeline,
+    build_default_pipeline_with_rewriter_runtime_and_instructions,
     build_default_pipeline_with_runtime, build_default_pipeline_with_runtime_and_instructions,
     build_default_pipeline_with_tools,
 };
