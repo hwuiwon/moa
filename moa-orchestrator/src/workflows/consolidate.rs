@@ -3,9 +3,11 @@
 use std::time::Instant;
 
 use chrono::{DateTime, NaiveDate, Utc};
-use moa_core::WorkspaceId;
+use moa_core::{LearningEntry, WorkspaceId};
 use restate_sdk::prelude::*;
+use uuid::Uuid;
 
+use crate::ctx::OrchestratorCtx;
 use crate::objects::workspace::WorkspaceClient;
 use crate::observability::annotate_restate_handler_span;
 use crate::services::memory_store::{
@@ -163,6 +165,8 @@ impl Consolidate for ConsolidateImpl {
             ),
         };
 
+        record_memory_learning(&ctx, &report).await?;
+
         ctx.object_client::<WorkspaceClient>(request.workspace_id.to_string())
             .consolidation_completed(Json::from(report.clone()))
             .call()
@@ -170,4 +174,45 @@ impl Consolidate for ConsolidateImpl {
 
         Ok(Json::from(report))
     }
+}
+
+async fn record_memory_learning(
+    ctx: &WorkflowContext<'_>,
+    report: &ConsolidateReport,
+) -> Result<(), HandlerError> {
+    if !report.errors.is_empty() {
+        return Ok(());
+    }
+    let store = OrchestratorCtx::current().session_store.clone();
+    let report = report.clone();
+    ctx.run(|| async move {
+        store
+            .append_learning(&LearningEntry {
+                id: Uuid::now_v7(),
+                tenant_id: report.workspace_id.to_string(),
+                learning_type: "memory_updated".to_string(),
+                target_id: report.workspace_id.to_string(),
+                target_label: Some("workspace_memory".to_string()),
+                payload: serde_json::json!({
+                    "target_date": report.target_date,
+                    "pages_updated": report.pages_updated,
+                    "pages_deleted": report.pages_deleted,
+                    "relative_dates_normalized": report.relative_dates_normalized,
+                    "contradictions_resolved": report.contradictions_resolved,
+                    "confidence_decayed": report.confidence_decayed,
+                }),
+                confidence: Some(1.0),
+                source_refs: Vec::new(),
+                actor: "system".to_string(),
+                valid_from: Utc::now(),
+                valid_to: None,
+                batch_id: None,
+                version: 1,
+            })
+            .await
+            .map_err(HandlerError::from)
+    })
+    .name("record_memory_learning")
+    .await?;
+    Ok(())
 }

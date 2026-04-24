@@ -2,9 +2,10 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ApprovalRule, EventType, MoaError, ModelId, PendingSignal, PendingSignalId, PendingSignalType,
-    Platform, PolicyAction, PolicyScope, ResolutionScore, Result, SegmentId, SessionId,
-    SessionMeta, SessionStatus, SessionSummary, TaskSegment, WorkspaceId,
+    ApprovalRule, CatalogIntent, EventType, IntentSource, IntentStatus, LearningEntry, MoaError,
+    ModelId, PendingSignal, PendingSignalId, PendingSignalType, Platform, PolicyAction,
+    PolicyScope, ResolutionScore, Result, SegmentId, SessionId, SessionMeta, SessionStatus,
+    SessionSummary, TaskSegment, TenantIntent, WorkspaceId,
 };
 use sqlx::{Row, postgres::PgRow};
 use uuid::Uuid;
@@ -40,6 +41,25 @@ pub(crate) const TASK_SEGMENT_COLUMNS: &str = concat!(
     "started_at, ended_at, resolution, resolution_signal, ",
     "resolution_confidence::DOUBLE PRECISION AS resolution_confidence, ",
     "tools_used, skills_activated, turn_count, token_cost, previous_segment_id"
+);
+
+/// Canonical column list for selecting tenant-intent rows.
+pub(crate) const TENANT_INTENT_COLUMNS: &str = concat!(
+    "id, tenant_id, label, description, status, source, catalog_ref, example_queries, ",
+    "embedding::TEXT AS embedding, segment_count, resolution_rate::DOUBLE PRECISION AS resolution_rate"
+);
+
+/// Canonical column list for selecting global catalog rows.
+pub(crate) const CATALOG_INTENT_COLUMNS: &str = concat!(
+    "id, label, description, category, example_queries, embedding::TEXT AS embedding, ",
+    "created_at, updated_at"
+);
+
+/// Canonical column list for selecting learning-log rows.
+pub(crate) const LEARNING_ENTRY_COLUMNS: &str = concat!(
+    "id, tenant_id, learning_type, target_id, target_label, payload, ",
+    "confidence::DOUBLE PRECISION AS confidence, source_refs, actor, valid_from, valid_to, ",
+    "batch_id, version"
 );
 
 /// Converts a session status to its stored database representation.
@@ -172,6 +192,48 @@ pub(crate) fn pending_signal_type_from_db(value: &str) -> Result<PendingSignalTy
         "queue_message" => Ok(PendingSignalType::QueueMessage),
         other => Err(MoaError::StorageError(format!(
             "unknown pending signal type `{other}`"
+        ))),
+    }
+}
+
+/// Converts an intent status to its stored representation.
+pub(crate) fn intent_status_to_db(status: IntentStatus) -> &'static str {
+    match status {
+        IntentStatus::Proposed => "proposed",
+        IntentStatus::Active => "active",
+        IntentStatus::Deprecated => "deprecated",
+    }
+}
+
+/// Parses an intent status from its stored representation.
+pub(crate) fn intent_status_from_db(value: &str) -> Result<IntentStatus> {
+    match value {
+        "proposed" => Ok(IntentStatus::Proposed),
+        "active" => Ok(IntentStatus::Active),
+        "deprecated" => Ok(IntentStatus::Deprecated),
+        other => Err(MoaError::StorageError(format!(
+            "unknown intent status `{other}`"
+        ))),
+    }
+}
+
+/// Converts an intent source to its stored representation.
+pub(crate) fn intent_source_to_db(source: IntentSource) -> &'static str {
+    match source {
+        IntentSource::Discovered => "discovered",
+        IntentSource::Manual => "manual",
+        IntentSource::Catalog => "catalog",
+    }
+}
+
+/// Parses an intent source from its stored representation.
+pub(crate) fn intent_source_from_db(value: &str) -> Result<IntentSource> {
+    match value {
+        "discovered" => Ok(IntentSource::Discovered),
+        "manual" => Ok(IntentSource::Manual),
+        "catalog" => Ok(IntentSource::Catalog),
+        other => Err(MoaError::StorageError(format!(
+            "unknown intent source `{other}`"
         ))),
     }
 }
@@ -393,12 +455,136 @@ pub(crate) fn task_segment_from_row(row: &PgRow) -> Result<TaskSegment> {
     })
 }
 
+/// Maps a `tenant_intents` row into a `TenantIntent`.
+pub(crate) fn tenant_intent_from_row(row: &PgRow) -> Result<TenantIntent> {
+    Ok(TenantIntent {
+        id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
+        tenant_id: row
+            .try_get::<String, _>("tenant_id")
+            .map_err(map_sqlx_error)?,
+        label: row.try_get::<String, _>("label").map_err(map_sqlx_error)?,
+        description: row
+            .try_get::<Option<String>, _>("description")
+            .map_err(map_sqlx_error)?,
+        status: intent_status_from_db(
+            &row.try_get::<String, _>("status").map_err(map_sqlx_error)?,
+        )?,
+        source: intent_source_from_db(
+            &row.try_get::<String, _>("source").map_err(map_sqlx_error)?,
+        )?,
+        catalog_ref: row
+            .try_get::<Option<Uuid>, _>("catalog_ref")
+            .map_err(map_sqlx_error)?,
+        example_queries: row
+            .try_get::<Vec<String>, _>("example_queries")
+            .map_err(map_sqlx_error)?,
+        embedding: parse_vector_text(
+            row.try_get::<Option<String>, _>("embedding")
+                .map_err(map_sqlx_error)?,
+        )?,
+        segment_count: row
+            .try_get::<i32, _>("segment_count")
+            .map_err(map_sqlx_error)? as u32,
+        resolution_rate: row
+            .try_get::<Option<f64>, _>("resolution_rate")
+            .map_err(map_sqlx_error)?,
+    })
+}
+
+/// Maps a `global_intent_catalog` row into a `CatalogIntent`.
+pub(crate) fn catalog_intent_from_row(row: &PgRow) -> Result<CatalogIntent> {
+    Ok(CatalogIntent {
+        id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
+        label: row.try_get::<String, _>("label").map_err(map_sqlx_error)?,
+        description: row
+            .try_get::<String, _>("description")
+            .map_err(map_sqlx_error)?,
+        category: row
+            .try_get::<Option<String>, _>("category")
+            .map_err(map_sqlx_error)?,
+        example_queries: row
+            .try_get::<Vec<String>, _>("example_queries")
+            .map_err(map_sqlx_error)?,
+        embedding: parse_vector_text(
+            row.try_get::<Option<String>, _>("embedding")
+                .map_err(map_sqlx_error)?,
+        )?,
+        created_at: row
+            .try_get::<DateTime<Utc>, _>("created_at")
+            .map_err(map_sqlx_error)?,
+        updated_at: row
+            .try_get::<DateTime<Utc>, _>("updated_at")
+            .map_err(map_sqlx_error)?,
+    })
+}
+
+/// Maps a `learning_log` row into a `LearningEntry`.
+pub(crate) fn learning_entry_from_row(row: &PgRow) -> Result<LearningEntry> {
+    Ok(LearningEntry {
+        id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
+        tenant_id: row
+            .try_get::<String, _>("tenant_id")
+            .map_err(map_sqlx_error)?,
+        learning_type: row
+            .try_get::<String, _>("learning_type")
+            .map_err(map_sqlx_error)?,
+        target_id: row
+            .try_get::<String, _>("target_id")
+            .map_err(map_sqlx_error)?,
+        target_label: row
+            .try_get::<Option<String>, _>("target_label")
+            .map_err(map_sqlx_error)?,
+        payload: row
+            .try_get::<serde_json::Value, _>("payload")
+            .map_err(map_sqlx_error)?,
+        confidence: row
+            .try_get::<Option<f64>, _>("confidence")
+            .map_err(map_sqlx_error)?,
+        source_refs: row
+            .try_get::<Vec<Uuid>, _>("source_refs")
+            .map_err(map_sqlx_error)?,
+        actor: row.try_get::<String, _>("actor").map_err(map_sqlx_error)?,
+        valid_from: row
+            .try_get::<DateTime<Utc>, _>("valid_from")
+            .map_err(map_sqlx_error)?,
+        valid_to: row
+            .try_get::<Option<DateTime<Utc>>, _>("valid_to")
+            .map_err(map_sqlx_error)?,
+        batch_id: row
+            .try_get::<Option<Uuid>, _>("batch_id")
+            .map_err(map_sqlx_error)?,
+        version: row.try_get::<i32, _>("version").map_err(map_sqlx_error)?,
+    })
+}
+
 fn parse_resolution_signal(value: Option<String>) -> Result<Option<ResolutionScore>> {
     value
         .map(|value| {
             serde_json::from_str::<ResolutionScore>(&value).map_err(|error| {
                 MoaError::StorageError(format!("invalid resolution signal payload: {error}"))
             })
+        })
+        .transpose()
+}
+
+fn parse_vector_text(value: Option<String>) -> Result<Option<Vec<f32>>> {
+    value
+        .map(|value| {
+            let trimmed = value.trim().trim_start_matches('[').trim_end_matches(']');
+            if trimmed.is_empty() {
+                return Ok(Vec::new());
+            }
+            trimmed
+                .split(',')
+                .map(|part| {
+                    part.trim().parse::<f32>().map_err(|error| {
+                        MoaError::StorageError(format!(
+                            "invalid vector component `{}`: {error}",
+                            part.trim()
+                        ))
+                    })
+                })
+                .collect()
         })
         .transpose()
 }

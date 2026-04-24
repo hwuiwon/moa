@@ -28,6 +28,9 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
     let pending_signals = qualified_name(schema_name, "pending_signals");
     let context_snapshots = qualified_name(schema_name, "context_snapshots");
     let task_segments = qualified_name(schema_name, "task_segments");
+    let tenant_intents = qualified_name(schema_name, "tenant_intents");
+    let global_intent_catalog = qualified_name(schema_name, "global_intent_catalog");
+    let learning_log = qualified_name(schema_name, "learning_log");
     let tool_call_analytics = qualified_name(schema_name, "tool_call_analytics");
     let tool_call_summary = qualified_name(schema_name, "tool_call_summary");
     let session_summary = qualified_name(schema_name, "session_summary");
@@ -51,6 +54,12 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
     let idx_task_segments_tenant_intent = quote_identifier("idx_task_segments_tenant_intent");
     let idx_task_segments_session = quote_identifier("idx_task_segments_session");
     let idx_task_segments_tenant_time = quote_identifier("idx_task_segments_tenant_time");
+    let idx_tenant_intents_tenant = quote_identifier("idx_tenant_intents_tenant");
+    let idx_tenant_intents_embedding_hnsw = quote_identifier("idx_tenant_intents_embedding_hnsw");
+    let idx_global_intent_catalog_category = quote_identifier("idx_global_intent_catalog_category");
+    let idx_learning_log_tenant_type = quote_identifier("idx_learning_log_tenant_type");
+    let idx_learning_log_target = quote_identifier("idx_learning_log_target");
+    let idx_learning_log_batch = quote_identifier("idx_learning_log_batch");
     let idx_session_turn_metrics_session_turn =
         quote_identifier("idx_session_turn_metrics_session_turn");
     let idx_daily_workspace_metrics_workspace_day =
@@ -62,6 +71,8 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
 
     let sql = format!(
         r"
+        CREATE EXTENSION IF NOT EXISTS vector;
+
         CREATE TABLE IF NOT EXISTS {sessions} (
             id UUID PRIMARY KEY,
             workspace_id TEXT NOT NULL,
@@ -221,6 +232,68 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
             ON {task_segments} (session_id, segment_index);
         CREATE INDEX IF NOT EXISTS {idx_task_segments_tenant_time}
             ON {task_segments} (tenant_id, started_at DESC);
+
+        CREATE TABLE IF NOT EXISTS {tenant_intents} (
+            id UUID PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            description TEXT,
+            status TEXT NOT NULL DEFAULT 'proposed',
+            source TEXT NOT NULL DEFAULT 'discovered',
+            catalog_ref UUID,
+            example_queries TEXT[] NOT NULL DEFAULT '{{}}',
+            embedding vector(1536),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            deprecated_at TIMESTAMPTZ,
+            segment_count INT NOT NULL DEFAULT 0,
+            resolution_rate NUMERIC(4,3),
+            UNIQUE(tenant_id, label)
+        );
+
+        CREATE INDEX IF NOT EXISTS {idx_tenant_intents_tenant}
+            ON {tenant_intents} (tenant_id, status);
+        CREATE INDEX IF NOT EXISTS {idx_tenant_intents_embedding_hnsw}
+            ON {tenant_intents} USING hnsw (embedding vector_cosine_ops)
+            WITH (m = 16, ef_construction = 64);
+
+        CREATE TABLE IF NOT EXISTS {global_intent_catalog} (
+            id UUID PRIMARY KEY,
+            label TEXT NOT NULL UNIQUE,
+            description TEXT NOT NULL,
+            category TEXT,
+            example_queries TEXT[] NOT NULL,
+            embedding vector(1536),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS {idx_global_intent_catalog_category}
+            ON {global_intent_catalog} (category, label);
+
+        CREATE TABLE IF NOT EXISTS {learning_log} (
+            id UUID PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            learning_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            target_label TEXT,
+            payload JSONB NOT NULL,
+            confidence NUMERIC(4,3),
+            source_refs UUID[] NOT NULL DEFAULT '{{}}',
+            actor TEXT NOT NULL DEFAULT 'system',
+            valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            valid_to TIMESTAMPTZ,
+            recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            batch_id UUID,
+            version INT NOT NULL DEFAULT 1
+        );
+
+        CREATE INDEX IF NOT EXISTS {idx_learning_log_tenant_type}
+            ON {learning_log} (tenant_id, learning_type, valid_to);
+        CREATE INDEX IF NOT EXISTS {idx_learning_log_target}
+            ON {learning_log} (tenant_id, target_id, valid_from DESC);
+        CREATE INDEX IF NOT EXISTS {idx_learning_log_batch}
+            ON {learning_log} (batch_id) WHERE batch_id IS NOT NULL;
 
         DROP MATERIALIZED VIEW IF EXISTS {skill_resolution_rates};
 

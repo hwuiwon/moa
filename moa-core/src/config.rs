@@ -56,6 +56,8 @@ pub struct MoaConfig {
     pub query_rewrite: QueryRewriteConfig,
     /// Automated task-segment resolution scoring controls.
     pub resolution: ResolutionConfig,
+    /// Tenant intent discovery and classification controls.
+    pub intents: IntentConfig,
     /// Incremental context snapshot settings.
     pub context_snapshot: ContextSnapshotConfig,
     /// External MCP server connections.
@@ -342,6 +344,39 @@ impl MoaConfig {
             .set_default(
                 "resolution.idle_timeout_minutes",
                 Self::default().resolution.idle_timeout_minutes as i64,
+            )?
+            .set_default("intents.enabled", Self::default().intents.enabled)?
+            .set_default(
+                "intents.discovery_interval_hours",
+                Self::default().intents.discovery_interval_hours as i64,
+            )?
+            .set_default(
+                "intents.discovery_window_days",
+                Self::default().intents.discovery_window_days as i64,
+            )?
+            .set_default(
+                "intents.min_segments_for_discovery",
+                Self::default().intents.min_segments_for_discovery as i64,
+            )?
+            .set_default(
+                "intents.min_cluster_size",
+                Self::default().intents.min_cluster_size as i64,
+            )?
+            .set_default(
+                "intents.classification_threshold",
+                Self::default().intents.classification_threshold,
+            )?
+            .set_default(
+                "intents.retroactive_threshold",
+                Self::default().intents.retroactive_threshold,
+            )?
+            .set_default(
+                "intents.medium_confidence_threshold",
+                Self::default().intents.medium_confidence_threshold,
+            )?
+            .set_default(
+                "intents.deprecation_after_days",
+                Self::default().intents.deprecation_after_days as i64,
             )?
             .set_default(
                 "context_snapshot.enabled",
@@ -1196,6 +1231,46 @@ impl Default for ResolutionConfig {
     }
 }
 
+/// Tenant intent discovery and nearest-centroid classification controls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IntentConfig {
+    /// Whether intent classification and discovery are enabled.
+    pub enabled: bool,
+    /// Minimum interval between scheduled discovery runs for a tenant.
+    pub discovery_interval_hours: u64,
+    /// Window of undefined segments considered during discovery.
+    pub discovery_window_days: u64,
+    /// Minimum undefined segment count before discovery runs.
+    pub min_segments_for_discovery: usize,
+    /// Minimum cluster size accepted as a proposed intent.
+    pub min_cluster_size: usize,
+    /// Cosine-distance threshold for active-intent auto-classification.
+    pub classification_threshold: f64,
+    /// Confidence threshold used for retroactive classification after confirmation.
+    pub retroactive_threshold: f64,
+    /// Confidence floor below which a classification is left undefined.
+    pub medium_confidence_threshold: f64,
+    /// Inactivity window after which active intents can be flagged for deprecation.
+    pub deprecation_after_days: u64,
+}
+
+impl Default for IntentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            discovery_interval_hours: 24,
+            discovery_window_days: 30,
+            min_segments_for_discovery: 50,
+            min_cluster_size: 5,
+            classification_threshold: 0.35,
+            retroactive_threshold: 0.60,
+            medium_confidence_threshold: 0.50,
+            deprecation_after_days: 90,
+        }
+    }
+}
+
 /// Composite scorer weights for individual resolution signals.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1607,6 +1682,20 @@ mod tests {
         assert!((config.resolution.rephrase_similarity_threshold - 0.85_f64).abs() < f64::EPSILON);
         assert_eq!(config.resolution.structural_min_samples, 20);
         assert_eq!(config.resolution.idle_timeout_minutes, 30);
+    }
+
+    #[test]
+    fn intent_config_defaults_are_applied() {
+        let config = MoaConfig::default();
+        assert!(config.intents.enabled);
+        assert_eq!(config.intents.discovery_interval_hours, 24);
+        assert_eq!(config.intents.discovery_window_days, 30);
+        assert_eq!(config.intents.min_segments_for_discovery, 50);
+        assert_eq!(config.intents.min_cluster_size, 5);
+        assert!((config.intents.classification_threshold - 0.35_f64).abs() < f64::EPSILON);
+        assert!((config.intents.retroactive_threshold - 0.60_f64).abs() < f64::EPSILON);
+        assert!((config.intents.medium_confidence_threshold - 0.50_f64).abs() < f64::EPSILON);
+        assert_eq!(config.intents.deprecation_after_days, 90);
     }
 
     #[test]

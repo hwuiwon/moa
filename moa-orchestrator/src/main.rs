@@ -24,14 +24,19 @@ use moa_orchestrator::{
     objects::workspace::{Workspace, WorkspaceImpl},
     services::{
         health::{Health, HealthImpl},
+        intent_manager::{IntentManager, IntentManagerImpl},
         llm_gateway::{LLMGateway, LLMGatewayImpl, ProviderRegistry},
         memory_store::{MemoryStore as RestateMemoryStore, MemoryStoreImpl},
         session_store::{SessionStore, SessionStoreImpl},
         tool_executor::{ToolExecutor, ToolExecutorImpl},
         workspace_store::{WorkspaceStore, WorkspaceStoreImpl},
     },
-    workflows::consolidate::{Consolidate, ConsolidateImpl},
+    workflows::{
+        consolidate::{Consolidate, ConsolidateImpl},
+        intent_discovery::{IntentDiscovery, IntentDiscoveryImpl},
+    },
 };
+use moa_providers::build_embedding_provider_from_config;
 use moa_session::PostgresSessionStore;
 use reqwest::Client;
 use restate_sdk::prelude::*;
@@ -48,6 +53,8 @@ const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
 const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Consolidate",
     "Health",
+    "IntentManager",
+    "IntentDiscovery",
     "LLMGateway",
     "MemoryStore",
     "Session",
@@ -91,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let providers = Arc::new(ProviderRegistry::from_env());
+    let embedding_provider = build_embedding_provider_from_config(moa_config.as_ref())?;
     let file_memory_store = Arc::new(
         FileMemoryStore::from_config_with_pool(
             moa_config.as_ref(),
@@ -111,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
         session_store: session_store.clone(),
         memory_store: memory_store.clone(),
         providers: providers.clone(),
+        embedding_provider: embedding_provider.clone(),
         tool_router: tool_router.clone(),
         tool_schemas: Arc::new(tool_router.tool_schemas()),
     });
@@ -118,7 +127,15 @@ async fn main() -> anyhow::Result<()> {
 
     let endpoint = Endpoint::builder()
         .bind(HealthImpl.serve())
-        .bind(SessionStoreImpl::new(session_store).serve())
+        .bind(SessionStoreImpl::new(session_store.clone()).serve())
+        .bind(
+            IntentManagerImpl::new(
+                session_store.clone(),
+                embedding_provider.clone(),
+                moa_config.clone(),
+            )
+            .serve(),
+        )
         .bind(LLMGatewayImpl::new(providers).serve())
         .bind(MemoryStoreImpl::new(file_memory_store).serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
@@ -127,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(SubAgentImpl.serve())
         .bind(WorkspaceImpl.serve())
         .bind(ConsolidateImpl.serve())
+        .bind(IntentDiscoveryImpl.serve())
         .build();
 
     let readiness = Arc::new(AtomicBool::new(false));
