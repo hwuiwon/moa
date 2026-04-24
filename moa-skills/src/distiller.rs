@@ -10,6 +10,7 @@ use moa_core::{
 };
 use moa_memory::FileMemoryStore;
 use moa_providers::ModelRouter;
+use moa_session::PostgresSessionStore;
 
 use crate::format::{
     SkillDocument, build_skill_path, parse_skill_markdown, skill_metadata_from_document,
@@ -30,6 +31,19 @@ pub async fn maybe_distill_skill(
     memory_store: Arc<FileMemoryStore>,
     model_router: Arc<ModelRouter>,
 ) -> Result<Option<SkillMetadata>> {
+    maybe_distill_skill_with_learning(config, session, events, memory_store, model_router, None)
+        .await
+}
+
+/// Distills a successful session and records learning-log entries when a store is provided.
+pub async fn maybe_distill_skill_with_learning(
+    config: &MoaConfig,
+    session: &SessionMeta,
+    events: &[EventRecord],
+    memory_store: Arc<FileMemoryStore>,
+    model_router: Arc<ModelRouter>,
+    learning_store: Option<Arc<PostgresSessionStore>>,
+) -> Result<Option<SkillMetadata>> {
     if count_tool_calls(events) < MIN_TOOL_CALLS_FOR_DISTILLATION {
         return Ok(None);
     }
@@ -40,13 +54,14 @@ pub async fn maybe_distill_skill(
     let existing_skills = registry.list_for_pipeline(&session.workspace_id).await?;
 
     if let Some(existing) = find_similar_skill(&task_summary, &existing_skills) {
-        return crate::improver::maybe_improve_skill(
+        return crate::improver::maybe_improve_skill_with_learning(
             config,
             session,
             existing,
             events,
             memory_store,
             model_router,
+            learning_store,
         )
         .await;
     }
@@ -67,7 +82,49 @@ pub async fn maybe_distill_skill(
     memory_store.write_page(&scope, &path, page).await?;
     generate_skill_test_suite(session, &skill, &path, events, memory_store.clone()).await?;
 
-    Ok(Some(skill_metadata_from_document(path, &skill)))
+    let metadata = skill_metadata_from_document(path, &skill);
+    if let Some(store) = learning_store {
+        append_skill_learning(
+            store.as_ref(),
+            session,
+            "skill_created",
+            &metadata,
+            serde_json::json!({
+                "path": metadata.path.clone(),
+                "name": metadata.name.clone(),
+                "description": metadata.description.clone(),
+            }),
+        )
+        .await?;
+    }
+
+    Ok(Some(metadata))
+}
+
+pub(crate) async fn append_skill_learning(
+    store: &PostgresSessionStore,
+    session: &SessionMeta,
+    learning_type: &str,
+    skill: &SkillMetadata,
+    payload: serde_json::Value,
+) -> Result<()> {
+    store
+        .append_learning(&moa_core::LearningEntry {
+            id: uuid::Uuid::now_v7(),
+            tenant_id: session.workspace_id.to_string(),
+            learning_type: learning_type.to_string(),
+            target_id: skill.path.to_string(),
+            target_label: Some(skill.name.clone()),
+            payload,
+            confidence: Some(1.0),
+            source_refs: vec![session.id.0],
+            actor: format!("brain:{}", session.id),
+            valid_from: Utc::now(),
+            valid_to: None,
+            batch_id: None,
+            version: 1,
+        })
+        .await
 }
 
 fn count_tool_calls(events: &[EventRecord]) -> usize {

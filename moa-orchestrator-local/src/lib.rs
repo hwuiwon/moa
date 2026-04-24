@@ -37,7 +37,7 @@ use moa_providers::{ModelRouter, resolve_provider_selection};
 use moa_session::{
     NeonBranchManager, PostgresSessionStore, SessionEventStream, create_session_store,
 };
-use moa_skills::maybe_distill_skill;
+use moa_skills::maybe_distill_skill_with_learning;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tokio_util::sync::CancellationToken;
@@ -79,6 +79,7 @@ struct LocalBrainHandle {
 struct SessionTaskContext {
     config: Arc<MoaConfig>,
     session_store: Arc<dyn SessionStore>,
+    learning_store: Arc<PostgresSessionStore>,
     memory_store: Arc<FileMemoryStore>,
     model_router: Arc<ModelRouter>,
     tool_router: Arc<ToolRouter>,
@@ -328,6 +329,7 @@ impl LocalOrchestrator {
         let context = SessionTaskContext {
             config: Arc::clone(&self.config),
             session_store: self.instrumented_session_store.clone(),
+            learning_store: self.session_store.clone(),
             memory_store: self.memory_store.clone(),
             model_router: self.model_router.clone(),
             tool_router: self.tool_router.clone(),
@@ -1078,12 +1080,13 @@ async fn run_session_task(
                                 .session_store
                                 .get_events(context.session_id, EventRange::all())
                                 .await?;
-                            if let Some(skill) = maybe_distill_skill(
+                            if let Some(skill) = maybe_distill_skill_with_learning(
                                 &context.config,
                                 &session,
                                 &events,
                                 context.memory_store.clone(),
                                 context.model_router.clone(),
+                                Some(context.learning_store.clone()),
                             )
                             .await?
                             {

@@ -2,6 +2,7 @@
 
 pub mod compaction;
 pub mod harness;
+pub mod intents;
 pub mod loop_detector;
 pub mod pipeline;
 pub mod resolution;

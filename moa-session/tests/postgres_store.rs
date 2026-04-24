@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use moa_core::{
-    Event, ModelId, ResolutionLabel, ResolutionScore, ScoringPhase, SegmentCompletion, SessionMeta,
-    SessionStore, TaskSegment, ToolCallId, ToolOutput, UserId, WorkspaceId,
-    deterministic_segment_id,
+    CatalogIntent, Event, IntentSource, IntentStatus, LearningEntry, ModelId, ResolutionLabel,
+    ResolutionScore, ScoringPhase, SegmentCompletion, SessionMeta, SessionStore, TaskSegment,
+    TenantIntent, ToolCallId, ToolOutput, UserId, WorkspaceId, deterministic_segment_id,
 };
 use moa_session::{PostgresSessionStore, testing};
 use sqlx::PgPool;
@@ -39,6 +39,122 @@ where
 
 fn qualified(schema_name: &str, table_name: &str) -> String {
     format!("\"{}\".\"{}\"", schema_name, table_name)
+}
+
+#[tokio::test]
+#[ignore]
+async fn tenant_intents_start_blank_and_can_be_created() {
+    with_test_store(|store| async move {
+        let tenant_id = "tenant-intents";
+        let initial = store
+            .list_intents(tenant_id, None)
+            .await
+            .expect("list initial intents");
+        assert!(initial.is_empty());
+
+        let intent = TenantIntent {
+            id: Uuid::now_v7(),
+            tenant_id: tenant_id.to_string(),
+            label: "debugging".to_string(),
+            description: Some("Fix broken behavior".to_string()),
+            status: IntentStatus::Active,
+            source: IntentSource::Manual,
+            catalog_ref: None,
+            example_queries: vec!["fix failing tests".to_string()],
+            embedding: Some(vec![0.1; 1_536]),
+            segment_count: 0,
+            resolution_rate: None,
+        };
+        store.create_intent(&intent).await.expect("create intent");
+
+        let active = store
+            .list_intents(tenant_id, Some(IntentStatus::Active))
+            .await
+            .expect("list active intents");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].label, "debugging");
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn learning_log_rollback_invalidates_batch() {
+    with_test_store(|store| async move {
+        let batch_id = Uuid::now_v7();
+        let entry = LearningEntry {
+            id: Uuid::now_v7(),
+            tenant_id: "tenant-learning".to_string(),
+            learning_type: "intent_discovered".to_string(),
+            target_id: "target".to_string(),
+            target_label: Some("target".to_string()),
+            payload: serde_json::json!({ "ok": true }),
+            confidence: Some(0.8),
+            source_refs: vec![Uuid::now_v7()],
+            actor: "system".to_string(),
+            valid_from: Utc::now(),
+            valid_to: None,
+            batch_id: Some(batch_id),
+            version: 1,
+        };
+        store
+            .append_learning(&entry)
+            .await
+            .expect("append learning");
+        assert_eq!(
+            store
+                .list_learnings("tenant-learning", Some("intent_discovered"), 10)
+                .await
+                .expect("list learnings")
+                .len(),
+            1
+        );
+
+        let invalidated = store
+            .rollback_batch(batch_id)
+            .await
+            .expect("rollback batch");
+        assert_eq!(invalidated, 1);
+        assert!(
+            store
+                .list_learnings("tenant-learning", Some("intent_discovered"), 10)
+                .await
+                .expect("list current learnings")
+                .is_empty()
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn catalog_adoption_creates_tenant_intent_with_catalog_ref() {
+    with_test_store(|store| async move {
+        let catalog_id = Uuid::now_v7();
+        let now = Utc::now();
+        store
+            .upsert_catalog_intent(&CatalogIntent {
+                id: catalog_id,
+                label: "deployment".to_string(),
+                description: "Deploy services".to_string(),
+                category: Some("devops".to_string()),
+                example_queries: vec!["deploy staging".to_string()],
+                embedding: Some(vec![0.2; 1_536]),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("upsert catalog intent");
+
+        let adopted = store
+            .adopt_catalog_intent("tenant-catalog", catalog_id)
+            .await
+            .expect("adopt catalog intent");
+        assert_eq!(adopted.catalog_ref, Some(catalog_id));
+        assert_eq!(adopted.source, IntentSource::Catalog);
+        assert_eq!(adopted.status, IntentStatus::Active);
+    })
+    .await;
 }
 
 #[tokio::test]

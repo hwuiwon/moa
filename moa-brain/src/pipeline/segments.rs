@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ActiveSegment, Event, QueryIntent, QueryRewriteResult, Result, SegmentCompletion, SegmentId,
-    SessionId, SessionStore, TaskSegment, WorkingContext, deterministic_segment_id,
+    ActiveSegment, Event, QueryRewriteResult, Result, SegmentCompletion, SegmentId, SessionId,
+    SessionStore, TaskSegment, WorkingContext, deterministic_segment_id,
 };
 use serde_json::Value;
 
@@ -56,7 +56,6 @@ impl SegmentTracker {
             .as_ref()
             .map(|segment| segment.segment_index.saturating_add(1))
             .unwrap_or(0);
-        let intent_label = rewrite.as_ref().and_then(intent_label_for_rewrite);
         let task_summary = rewrite.and_then(|rewrite| rewrite.task_summary);
         let segment_id = deterministic_segment_id(session_id, next_index);
         let task_segment = TaskSegment {
@@ -64,7 +63,7 @@ impl SegmentTracker {
             session_id,
             tenant_id: tenant_id.to_string(),
             segment_index: next_index,
-            intent_label: intent_label.clone(),
+            intent_label: None,
             intent_confidence: None,
             task_summary: task_summary.clone(),
             started_at: now,
@@ -82,7 +81,7 @@ impl SegmentTracker {
             segment_id,
             segment_index: next_index,
             task_summary,
-            intent_label,
+            intent_label: None,
             intent_confidence: None,
             previous_segment_id,
         };
@@ -211,20 +210,6 @@ fn completed_from_active(segment: &ActiveSegment, now: DateTime<Utc>) -> Segment
         duration_ms,
         update,
     }
-}
-
-fn intent_label_for_rewrite(rewrite: &QueryRewriteResult) -> Option<String> {
-    match &rewrite.intent {
-        QueryIntent::Coding => Some("coding"),
-        QueryIntent::Research => Some("research"),
-        QueryIntent::FileOperation => Some("file_operation"),
-        QueryIntent::SystemAdmin => Some("system_admin"),
-        QueryIntent::Creative => Some("creative"),
-        QueryIntent::Question => Some("question"),
-        QueryIntent::Conversation => Some("conversation"),
-        QueryIntent::Unknown => None,
-    }
-    .map(str::to_string)
 }
 
 #[cfg(test)]

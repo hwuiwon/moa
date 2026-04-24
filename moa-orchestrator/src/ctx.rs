@@ -4,6 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use moa_core::{MemoryStore, MoaConfig};
 use moa_hands::ToolRouter;
+use moa_providers::EmbeddingProvider;
 use moa_session::PostgresSessionStore;
 use serde_json::Value;
 
@@ -25,6 +26,8 @@ pub struct OrchestratorCtx {
     pub memory_store: Arc<dyn MemoryStore>,
     /// Registry of configured LLM providers.
     pub providers: Arc<ProviderRegistry>,
+    /// Optional embedding provider shared by intent classification.
+    pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     /// Tool router used by Restate services.
     pub tool_router: Arc<ToolRouter>,
     /// Precompiled tool schemas exposed to the model.

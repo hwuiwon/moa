@@ -10,6 +10,7 @@ use moa_core::{
 };
 use moa_memory::FileMemoryStore;
 use moa_providers::ModelRouter;
+use moa_session::PostgresSessionStore;
 use tokio::fs;
 
 use crate::format::{
@@ -26,6 +27,28 @@ pub async fn maybe_improve_skill(
     events: &[EventRecord],
     memory_store: Arc<FileMemoryStore>,
     model_router: Arc<ModelRouter>,
+) -> Result<Option<SkillMetadata>> {
+    maybe_improve_skill_with_learning(
+        config,
+        session,
+        existing,
+        events,
+        memory_store,
+        model_router,
+        None,
+    )
+    .await
+}
+
+/// Compares a run against an existing skill and records learning-log entries when provided.
+pub async fn maybe_improve_skill_with_learning(
+    config: &MoaConfig,
+    session: &SessionMeta,
+    existing: &SkillMetadata,
+    events: &[EventRecord],
+    memory_store: Arc<FileMemoryStore>,
+    model_router: Arc<ModelRouter>,
+    learning_store: Option<Arc<PostgresSessionStore>>,
 ) -> Result<Option<SkillMetadata>> {
     let scope = MemoryScope::Workspace(session.workspace_id.clone());
     let page = memory_store.read_page(&scope, &existing.path).await?;
@@ -114,10 +137,24 @@ pub async fn maybe_improve_skill(
         return Ok(None);
     }
 
-    Ok(Some(skill_metadata_from_document(
-        existing.path.clone(),
-        &improved,
-    )))
+    let metadata = skill_metadata_from_document(existing.path.clone(), &improved);
+    if let Some(store) = learning_store {
+        crate::distiller::append_skill_learning(
+            store.as_ref(),
+            session,
+            "skill_improved",
+            &metadata,
+            serde_json::json!({
+                "path": metadata.path.clone(),
+                "name": metadata.name.clone(),
+                "previous_version": current.frontmatter.version(),
+                "version": improved.frontmatter.version(),
+            }),
+        )
+        .await?;
+    }
+
+    Ok(Some(metadata))
 }
 
 pub(crate) fn normalize_llm_markdown(text: &str) -> &str {

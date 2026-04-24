@@ -5486,6 +5486,7 @@ dependencies = [
  "moa-eval",
  "moa-memory",
  "moa-providers",
+ "moa-session",
  "serde",
  "serde_json",
  "serde_yaml",
