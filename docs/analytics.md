@@ -23,6 +23,9 @@ its own rollups on the write path.
   - `tool_call_summary`
   - `session_turn_metrics`
   - `daily_workspace_metrics`
+  - `skill_resolution_rates`
+  - `intent_transitions`
+  - `segment_baselines`
 
 Do not write session aggregate counters from application code. The trigger and
 generated columns are the only supported write path for these values.
@@ -105,13 +108,60 @@ Columns include:
 - `total_cost_cents`
 - `avg_cache_hit_rate`
 
+### `skill_resolution_rates`
+
+Cached tenant-level skill outcome aggregate derived from `task_segments`.
+
+Columns include:
+
+- `tenant_id`
+- `intent_label`
+- `skill_name`
+- `uses`
+- `resolution_rate`
+- `avg_token_cost`
+- `avg_turn_count`
+
+`SkillInjector` uses this view to rank skill metadata in the context pipeline.
+
+### `intent_transitions`
+
+Cached transition counts between consecutive task segments.
+
+Columns include:
+
+- `tenant_id`
+- `from_intent`
+- `to_intent`
+- `transition_count`
+- `from_resolution_rate`
+
+This view supports future proactive skill preloading once enough tenant-specific
+transition history exists.
+
+### `segment_baselines`
+
+Cached structural baselines for resolution scoring.
+
+Columns include:
+
+- `tenant_id`
+- `intent_label`
+- `sample_count`
+- average and standard deviation for turn count
+- average and standard deviation for token cost
+- average and standard deviation for duration
+
 ## Refresh behavior
 
-`session_turn_metrics` and `daily_workspace_metrics` are refreshed with:
+Materialized views are refreshed with:
 
 ```sql
 REFRESH MATERIALIZED VIEW CONCURRENTLY session_turn_metrics;
 REFRESH MATERIALIZED VIEW CONCURRENTLY daily_workspace_metrics;
+REFRESH MATERIALIZED VIEW CONCURRENTLY skill_resolution_rates;
+REFRESH MATERIALIZED VIEW CONCURRENTLY intent_transitions;
+REFRESH MATERIALIZED VIEW CONCURRENTLY segment_baselines;
 ```
 
 The local daemon runs this refresh loop hourly. CLI workspace and cache stats

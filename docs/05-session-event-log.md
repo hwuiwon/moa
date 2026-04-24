@@ -1,458 +1,181 @@
 # 05 — Session & Event Log
 
-_Postgres event schema, compaction, and replay._
+_Postgres schema, append-only events, task segments, replay, and compaction._
 
----
+## Storage
 
-## Storage: Postgres
+MOA uses Postgres for session storage in both local and cloud modes. Local development uses the repo Postgres dev stack; cloud deployments use managed Postgres/Neon. The `moa-session` crate owns migrations and the `PostgresSessionStore`.
 
-Same dialect everywhere. Local development uses Docker Compose with Postgres 18 + pgvector on
-`localhost:5432`. Cloud deployments use managed Postgres / Neon.
+Postgres stores:
 
-Crate: `sqlx` with the Postgres driver.
+- session metadata
+- append-only event records
+- approval rules
+- pending signals
+- context snapshots
+- task segments
+- tenant intents and global catalog intents
+- learning log entries
+- analytics views and materialized views
 
----
+## Core Tables
 
-## Schema
+The current migration lives in `moa-session/src/schema.rs`. The important tables are:
 
 ```sql
--- Sessions
 CREATE TABLE sessions (
-    id TEXT PRIMARY KEY,                    -- UUID
+    id UUID PRIMARY KEY,
     workspace_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
-    title TEXT,                             -- auto-generated or user-set
-    status TEXT NOT NULL DEFAULT 'created', -- created|running|paused|waiting_approval|completed|cancelled|failed
-    platform TEXT,                          -- telegram|slack|discord|desktop|cli
-    platform_channel TEXT,                  -- platform-specific channel/thread ID
-    model TEXT,                             -- model used for this session
-    created_at TEXT NOT NULL,               -- ISO 8601
-    updated_at TEXT NOT NULL,
-    completed_at TEXT,
-    parent_session_id TEXT,                 -- for sub-brain sessions
-    total_input_tokens INTEGER DEFAULT 0,
-    total_output_tokens INTEGER DEFAULT 0,
-    total_cost_cents INTEGER DEFAULT 0,     -- in cents to avoid float
-    event_count INTEGER DEFAULT 0,
-    last_checkpoint_seq INTEGER,            -- sequence of last checkpoint
-    FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
+    title TEXT,
+    status TEXT NOT NULL DEFAULT 'created',
+    platform TEXT NOT NULL,
+    platform_channel TEXT,
+    model TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    parent_session_id UUID REFERENCES sessions(id),
+    total_input_tokens_uncached BIGINT DEFAULT 0,
+    total_input_tokens_cache_write BIGINT DEFAULT 0,
+    total_input_tokens_cache_read BIGINT DEFAULT 0,
+    total_input_tokens BIGINT GENERATED ALWAYS AS (
+        COALESCE(total_input_tokens_uncached, 0)
+      + COALESCE(total_input_tokens_cache_write, 0)
+      + COALESCE(total_input_tokens_cache_read, 0)
+    ) STORED,
+    total_output_tokens BIGINT DEFAULT 0,
+    total_cost_cents BIGINT DEFAULT 0,
+    event_count BIGINT DEFAULT 0,
+    turn_count BIGINT DEFAULT 0,
+    cache_hit_rate DOUBLE PRECISION GENERATED ALWAYS AS (...) STORED,
+    last_checkpoint_seq BIGINT
 );
 
-CREATE INDEX idx_sessions_workspace ON sessions(workspace_id, updated_at DESC);
-CREATE INDEX idx_sessions_user ON sessions(user_id, updated_at DESC);
-CREATE INDEX idx_sessions_status ON sessions(status);
-
--- Events (append-only)
 CREATE TABLE events (
-    id TEXT PRIMARY KEY,                    -- UUID
-    session_id TEXT NOT NULL,
-    sequence_num INTEGER NOT NULL,          -- monotonic per session
+    id UUID PRIMARY KEY,
+    session_id UUID NOT NULL REFERENCES sessions(id),
+    sequence_num BIGINT NOT NULL,
     event_type TEXT NOT NULL,
-    payload TEXT NOT NULL,                  -- JSON
-    timestamp TEXT NOT NULL,                -- ISO 8601
-    brain_id TEXT,                          -- which brain emitted
-    hand_id TEXT,                           -- which hand was involved
-    token_count INTEGER,                    -- tokens consumed by this event
-    UNIQUE(session_id, sequence_num),
-    FOREIGN KEY (session_id) REFERENCES sessions(id)
+    payload JSONB NOT NULL,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    brain_id UUID,
+    hand_id TEXT,
+    token_count INTEGER,
+    search_vector TSVECTOR GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', coalesce(event_type, '')), 'A') ||
+        setweight(to_tsvector('english', coalesce(payload::text, '')), 'B')
+    ) STORED,
+    UNIQUE(session_id, sequence_num)
 );
 
-CREATE INDEX idx_events_session_seq ON events(session_id, sequence_num);
-CREATE INDEX idx_events_session_type ON events(session_id, event_type);
-CREATE INDEX idx_events_timestamp ON events(timestamp);
-
--- FTS over events for cross-session search
-CREATE VIRTUAL TABLE events_fts USING fts5(
-    session_id,
-    event_type,
-    payload,
-    content=events,
-    content_rowid=rowid,
-    tokenize='porter unicode61'
-);
-
--- Approval rules (persistent per-workspace)
-CREATE TABLE approval_rules (
-    id TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
-    tool TEXT NOT NULL,
-    pattern TEXT NOT NULL,          -- glob pattern for arguments
-    action TEXT NOT NULL,           -- allow | deny
-    scope TEXT NOT NULL,            -- workspace | global
-    created_by TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE(workspace_id, tool, pattern)
-);
-
--- Workspace metadata
-CREATE TABLE workspaces (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    path TEXT,                      -- filesystem path (local)
-    created_at TEXT NOT NULL,
-    last_active TEXT NOT NULL,
-    session_count INTEGER DEFAULT 0
-);
-
--- User metadata
-CREATE TABLE users (
-    id TEXT PRIMARY KEY,
-    display_name TEXT,
-    platform_links TEXT,            -- JSON: {"telegram": "123", "slack": "U456"}
-    created_at TEXT NOT NULL,
-    last_active TEXT NOT NULL
+CREATE TABLE task_segments (
+    id UUID PRIMARY KEY,
+    session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL,
+    segment_index INT NOT NULL,
+    intent_label TEXT,
+    intent_confidence NUMERIC(4,3),
+    task_summary TEXT,
+    started_at TIMESTAMPTZ NOT NULL,
+    ended_at TIMESTAMPTZ,
+    resolution TEXT,
+    resolution_signal TEXT,
+    resolution_confidence NUMERIC(4,3),
+    tools_used TEXT[] NOT NULL DEFAULT '{}',
+    skills_activated TEXT[] NOT NULL DEFAULT '{}',
+    turn_count INT NOT NULL DEFAULT 0,
+    token_cost BIGINT NOT NULL DEFAULT 0,
+    previous_segment_id UUID,
+    UNIQUE(session_id, segment_index)
 );
 ```
 
----
+The event table uses a generated `tsvector` column and a GIN index for cross-session search. There is no separate application-side rollup writer for session counters; the trigger and generated columns own aggregate updates.
 
-## Event types and payloads
+## Event Types
 
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
-pub enum Event {
-    // Session lifecycle
-    SessionCreated { workspace_id: String, user_id: String, model: String },
-    SessionStatusChanged { from: SessionStatus, to: SessionStatus },
-    SessionCompleted { summary: String, total_turns: u32 },
-    
-    // User messages
-    UserMessage { text: String, attachments: Vec<Attachment> },
-    QueuedMessage { text: String, queued_at: DateTime<Utc> },
-    
-    // Brain output
-    BrainThinking {
-        summary: String,           // SHORT summary only (not full thinking tokens)
-        token_count: usize,
-    },
-    BrainResponse {
-        text: String,              // full response text
-        model: String,
-        input_tokens: usize,
-        output_tokens: usize,
-        cost_cents: u32,
-        duration_ms: u64,
-    },
-    
-    // Tool execution
-    ToolCall {
-        tool_id: Uuid,             // unique per call
-        tool_name: String,
-        input: serde_json::Value,  // full parameters
-        hand_id: Option<String>,
-    },
-    ToolResult {
-        tool_id: Uuid,             // matches ToolCall.tool_id
-        output: String,            // full output
-        success: bool,
-        duration_ms: u64,
-    },
-    ToolError {
-        tool_id: Uuid,
-        error: String,
-        retryable: bool,
-    },
-    
-    // Approvals
-    ApprovalRequested {
-        request_id: Uuid,
-        tool_name: String,
-        input_summary: String,
-        risk_level: RiskLevel,     // low | medium | high
-    },
-    ApprovalDecided {
-        request_id: Uuid,
-        decision: ApprovalDecision,
-        decided_by: String,        // user ID
-        decided_at: DateTime<Utc>,
-    },
-    
-    // Memory operations
-    MemoryRead { path: String, scope: String },
-    MemoryWrite { path: String, scope: String, summary: String },
-    
-    // Hand lifecycle
-    HandProvisioned { hand_id: String, provider: String, tier: String },
-    HandDestroyed { hand_id: String, reason: String },
-    HandError { hand_id: String, error: String },
-    
-    // Checkpoints (for compaction)
-    Checkpoint {
-        summary: String,           // LLM-generated summary of events since last checkpoint
-        events_summarized: u64,    // how many events this checkpoint covers
-        token_count: usize,        // tokens in the summary
-    },
-    
-    // Errors
-    Error { message: String, recoverable: bool },
-    Warning { message: String },
-}
+`moa-core/src/events.rs` defines the serialized event enum. Current major groups:
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ApprovalDecision {
-    AllowOnce,
-    AlwaysAllow { pattern: String }, // stored as approval rule
-    Deny { reason: Option<String> },
-}
+| Group | Events |
+|---|---|
+| Session lifecycle | `SessionCreated`, `SessionStatusChanged`, `SessionCompleted` |
+| Task segmentation | `SegmentStarted`, `SegmentCompleted` |
+| User input | `UserMessage`, `QueuedMessage` |
+| Brain output | `BrainThinking`, `BrainResponse`, `CacheReport` |
+| Tools | `ToolCall`, `ToolResult`, `ToolError` |
+| Approvals | `ApprovalRequested`, `ApprovalDecided` |
+| Memory | `MemoryRead`, `MemoryWrite`, `MemoryIngest` |
+| Hands | `HandProvisioned`, `HandDestroyed`, `HandError` |
+| Compaction | `Checkpoint` |
+| Diagnostics | `Error`, `Warning` |
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RiskLevel { Low, Medium, High }
-```
+`SegmentStarted` records segment ID, index, summary, intent label/confidence, and previous segment ID. `SegmentCompleted` records final counters and duration.
 
----
+## Task Segment Rows
 
-## Core operations
+`task_segments` is the queryable state for segment analytics and learning. It stores the current or final state for each segment:
 
-### Replay and observation
+- tenant and session scope
+- segment index and previous segment edge
+- optional intent classification
+- task summary
+- start/end timestamps
+- resolution label, confidence, and serialized signal breakdown
+- tools and skills used
+- turn and token counters
 
-Observation is history-first. Clients reconstruct a session from durable events in the store, then optionally attach a live in-memory tail from the active orchestrator.
+Materialized views derived from `task_segments` include:
 
-Two implications follow from that contract:
+- `skill_resolution_rates`
+- `intent_transitions`
+- `segment_baselines`
 
-- Losing the live tail must not silently lose information; callers can always reopen from durable history.
-- If a live subscriber lags beyond the in-memory broadcast buffer, the stream should surface an error so the caller can reconnect from the last durable sequence it has seen.
+These feed skill ranking, intent transition analysis, and structural resolution scoring.
 
-### emit_event
+## Learning Tables
 
-```rust
-impl PostgresSessionStore {
-    pub async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<SequenceNum> {
-        let event_id = Uuid::now_v7();
-        let seq = self.next_sequence(session_id).await?;
-        let payload = serde_json::to_string(&event)?;
-        let now = Utc::now().to_rfc3339();
-        
-        sqlx::query(
-            "INSERT INTO events (id, session_id, sequence_num, event_type, payload, timestamp, token_count)
-             VALUES (?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(event_id.to_string())
-        .bind(session_id.to_string())
-        .bind(seq as i64)
-        .bind(event.type_name())
-        .bind(&payload)
-        .bind(&now)
-        .bind(event.token_count() as i64)
-        .execute(&self.pool).await?;
-        
-        // Update session metadata
-        sqlx::query(
-            "UPDATE sessions SET 
-                updated_at = ?,
-                event_count = event_count + 1,
-                total_input_tokens = total_input_tokens + ?,
-                total_output_tokens = total_output_tokens + ?,
-                total_cost_cents = total_cost_cents + ?
-             WHERE id = ?"
-        )
-        .bind(&now)
-        .bind(event.input_tokens() as i64)
-        .bind(event.output_tokens() as i64)
-        .bind(event.cost_cents() as i64)
-        .bind(session_id.to_string())
-        .execute(&self.pool).await?;
-        
-        // Update FTS index
-        sqlx::query(
-            "INSERT INTO events_fts (rowid, session_id, event_type, payload)
-             VALUES (last_insert_rowid(), ?, ?, ?)"
-        )
-        .bind(session_id.to_string())
-        .bind(event.type_name())
-        .bind(&payload)
-        .execute(&self.pool).await?;
-        
-        Ok(seq)
-    }
-}
-```
+The session schema also owns:
 
-### get_events (with range)
+- `tenant_intents`
+- `global_intent_catalog`
+- `learning_log`
 
-```rust
-pub async fn get_events(
-    &self,
-    session_id: SessionId,
-    range: EventRange,
-) -> Result<Vec<EventRecord>> {
-    let mut query = String::from(
-        "SELECT id, session_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count
-         FROM events WHERE session_id = ?"
-    );
-    let mut binds = vec![session_id.to_string()];
-    
-    if let Some(from) = range.from_seq {
-        query.push_str(" AND sequence_num >= ?");
-        binds.push(from.to_string());
-    }
-    if let Some(to) = range.to_seq {
-        query.push_str(" AND sequence_num <= ?");
-        binds.push(to.to_string());
-    }
-    if let Some(types) = &range.event_types {
-        let placeholders: Vec<&str> = types.iter().map(|_| "?").collect();
-        query.push_str(&format!(" AND event_type IN ({})", placeholders.join(",")));
-        for t in types {
-            binds.push(t.to_string());
-        }
-    }
-    
-    query.push_str(" ORDER BY sequence_num ASC");
-    
-    if let Some(limit) = range.limit {
-        query.push_str(&format!(" LIMIT {}", limit));
-    }
-    
-    // Execute with dynamic binds...
-    Ok(results)
-}
-```
+Learning log rows are append-only records with tenant ID, learning type, target, payload, confidence, source refs, actor, validity interval, optional batch ID, and version. Rollback invalidates rows by setting `valid_to`; it does not delete history.
 
-### wake (recover brain from session log)
+## Replay
 
-```rust
-pub async fn wake(&self, session_id: SessionId) -> Result<WakeContext> {
-    let session = self.get_session(session_id).await?;
-    
-    // Find the last checkpoint
-    let last_checkpoint = sqlx::query_as::<_, EventRecord>(
-        "SELECT * FROM events 
-         WHERE session_id = ? AND event_type = 'Checkpoint'
-         ORDER BY sequence_num DESC LIMIT 1"
-    )
-    .bind(session_id.to_string())
-    .fetch_optional(&self.pool).await?;
-    
-    // Load events after the last checkpoint (or all if no checkpoint)
-    let from_seq = last_checkpoint
-        .as_ref()
-        .map(|cp| cp.sequence_num + 1)
-        .unwrap_or(0);
-    
-    let recent_events = self.get_events(session_id, EventRange {
-        from_seq: Some(from_seq),
-        to_seq: None,
-        event_types: None,
-        limit: None,
-    }).await?;
-    
-    Ok(WakeContext {
-        session,
-        checkpoint_summary: last_checkpoint.map(|cp| cp.payload_as::<CheckpointData>()),
-        recent_events,
-    })
-}
-```
+Replay is history-first:
 
----
+1. Load session metadata.
+2. Load event records ordered by `sequence_num`.
+3. Reconstruct visible messages, tool state, approvals, and checkpoints.
+4. Attach to live runtime streams when available.
+
+The local orchestrator can publish live runtime events. Cloud runtime state is queryable through Restate and recoverable from the durable event log.
 
 ## Compaction
 
-### Trigger
+Compaction is segment-aware because segment start/completion events remain durable boundaries. The history compiler uses checkpoints and recent events to stay under model context limits while preserving:
 
-Compaction fires when:
-- Event count since last checkpoint > 100 **OR**
-- Estimated token usage of recent events > 70% of model's context window
+- recent turns
+- errors and warnings
+- active tool context
+- segment boundaries
+- unresolved approvals
+- checkpoint summaries
 
-### Process
+The compactor stage can create checkpoint events, but it does not remove event history from Postgres.
 
-```rust
-async fn maybe_compact(
-    store: &dyn SessionStore,
-    llm: &dyn LLMProvider,
-    session_id: SessionId,
-    pipeline: &ContextPipeline,
-) -> Result<bool> {
-    let session = store.get_session(session_id).await?;
-    let events_since_checkpoint = session.event_count - session.last_checkpoint_seq.unwrap_or(0);
-    
-    if events_since_checkpoint < 100 {
-        return Ok(false); // not enough events
-    }
-    
-    // Step 1: Memory flush — give agent a chance to save important facts
-    let flush_events = store.get_events(session_id, EventRange::since_checkpoint()).await?;
-    let flush_prompt = format!(
-        "Before compacting context, review these recent events and save anything important \
-         to memory. Focus on: errors encountered, decisions made, unresolved items, \
-         and facts that should persist.\n\nEvents:\n{}",
-        format_events_for_prompt(&flush_events)
-    );
-    
-    let flush_response = llm.complete(CompletionRequest {
-        messages: vec![ContextMessage::user(flush_prompt)],
-        tools: vec![MemoryWriteTool::schema()], // only memory tool available
-        ..Default::default()
-    }).await?;
-    
-    // Execute any memory writes from the flush
-    handle_tool_calls(&flush_response, session_id).await?;
-    
-    // Step 2: Generate checkpoint summary
-    let summary_prompt = format!(
-        "Summarize the following events into a concise checkpoint. Preserve:\n\
-         - All errors encountered and their resolutions\n\
-         - Architectural decisions made\n\
-         - Unresolved items / next steps\n\
-         - Active file paths being modified\n\
-         - Key facts discovered\n\
-         \nEvents:\n{}",
-        format_events_for_prompt(&flush_events)
-    );
-    
-    let summary = llm.complete(CompletionRequest::simple(summary_prompt)).await?;
-    
-    // Step 3: Emit checkpoint event
-    store.emit_event(session_id, Event::Checkpoint {
-        summary: summary.text,
-        events_summarized: events_since_checkpoint as u64,
-        token_count: summary.output_tokens,
-    }).await?;
-    
-    Ok(true)
-}
-```
+## Analytics
 
-### What the HistoryCompiler (pipeline stage 6) does with checkpoints
+Session rollups come from generated columns and triggers. Views and materialized views support operational reads and learning:
 
-```
-If checkpoint exists:
-  [Checkpoint summary] + [Last 5 turns verbatim]
-  
-If no checkpoint:
-  [All events, most recent first]
-  
-Errors are ALWAYS preserved regardless of compaction.
-```
-
----
-
-## Cross-session search
-
-```sql
--- Find sessions where we discussed OAuth
-SELECT DISTINCT s.id, s.title, s.updated_at
-FROM events_fts ef
-JOIN events e ON e.rowid = ef.rowid
-JOIN sessions s ON s.id = e.session_id
-WHERE events_fts MATCH 'oauth token refresh'
-  AND s.workspace_id = ?
-ORDER BY s.updated_at DESC
-LIMIT 10;
-```
-
----
-
-## Data retention
-
-```toml
-# ~/.moa/config.toml
-[retention]
-active_sessions_ttl = "90d"     # sessions updated within this window are "hot"
-archive_after = "90d"           # move older sessions to cold storage
-delete_after = "365d"           # permanently delete after this
-checkpoint_retention = "forever" # always keep checkpoint summaries
-```
-
-Cold archival: compress event payloads, drop BrainThinking events (summaries already in checkpoints), retain Checkpoint + UserMessage + BrainResponse + ToolCall/Result + Error events.
+- `session_summary`
+- `tool_call_analytics`
+- `tool_call_summary`
+- `session_turn_metrics`
+- `daily_workspace_metrics`
+- `skill_resolution_rates`
+- `intent_transitions`
+- `segment_baselines`

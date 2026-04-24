@@ -1,309 +1,150 @@
 # 10 — Technology Stack
 
-_Crates, external services, implementation phases, build and deployment._
+_Crates, services, build targets, and deployment dependencies._
 
----
+## Rust Workspace
 
-## Rust crate dependencies
-
-### Core runtime
-
-| Crate | Purpose | Version policy |
-|---|---|---|
-| `tokio` | Async runtime | Latest stable |
-| `serde` + `serde_json` | Serialization | Latest stable |
-| `uuid` | ID generation | Latest stable, with `v7` feature |
-| `chrono` | DateTime handling | Latest stable |
-| `tracing` + `tracing-subscriber` | Structured logging | Latest stable |
-| `opentelemetry` + `tracing-opentelemetry` | OTel integration | Latest stable |
-| `thiserror` | Error types | Latest stable |
-| `anyhow` | Error context (binary crates only) | Latest stable |
-| `config` | Configuration loading (TOML) | Latest stable |
-| `clap` | CLI argument parsing (derive) | v4 |
-
-### Database & storage
+The root workspace currently contains:
 
 | Crate | Purpose |
 |---|---|
-| `sqlx` | SQL toolkit for Postgres access, migrations, and typed queries |
+| `moa-core` | Shared traits, DTOs, config, events, telemetry, analytics helpers |
+| `moa-brain` | Context pipeline, query rewriting, task segmentation helpers, intent classification, resolution scoring |
+| `moa-session` | Postgres session store, event log, task segments, intents, learning log, analytics |
+| `moa-memory` | File-wiki memory, Postgres keyword/trigram search, pgvector embeddings, consolidation |
+| `moa-hands` | Tool router, local/Docker hands, Daytona, E2B, MCP |
+| `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring |
+| `moa-orchestrator` | Restate services, virtual objects, workflows, cloud binary |
+| `moa-orchestrator-local` | Tokio-task local orchestrator |
+| `moa-gateway` | Telegram, Slack, Discord adapters and renderers |
+| `moa-runtime` | Shared runtime assembly |
+| `moa-cli` | CLI and daemon |
+| `moa-security` | Credential vault, policies, MCP proxy, prompt-injection controls |
+| `moa-skills` | Skill parser, registry, distillation, improvement, regression generation |
+| `moa-eval` | Evaluation harness |
+| `moa-loadtest` | Load-test harness |
+| `moa-desktop` | GPUI desktop app, not a default workspace member |
 
-### LLM providers
+## Core Dependencies
 
-| Crate | Purpose |
+| Area | Crates |
 |---|---|
-| `async-openai` | OpenAI Responses API client |
-| `reqwest` | HTTP client for Anthropic + Google Gemini APIs |
-| `eventsource-stream` | SSE parsing for streaming responses |
-| `tiktoken-rs` | Token counting (OpenAI tokenizer) |
+| Async runtime | `tokio`, `tokio-util`, `async-trait` |
+| Serialization | `serde`, `serde_json`, `toml` |
+| IDs and time | `uuid`, `chrono` |
+| Errors | `thiserror` for libraries, `anyhow` for binaries |
+| Logging/observability | `tracing`, `tracing-subscriber`, `opentelemetry`, `tracing-opentelemetry` |
+| CLI | `clap` |
+| HTTP | `reqwest`, `axum` |
+| Database | `sqlx` with Postgres, migrations, JSON, UUID, chrono |
+| Orchestration | `restate-sdk` |
+| Local scheduling | `tokio-cron-scheduler` |
+| Desktop | `gpui`, `gpui-component`, `tray-icon`, `pulldown-cmark`, `syntect`, `similar` |
+| Security | `age`, `secrecy`, `shell-words` |
+| Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 
-### Messaging
+## External Services
 
-| Crate | Purpose |
+### Required For Local Development
+
+| Service | Purpose |
 |---|---|
-| `teloxide` | Telegram Bot API (async, dptree-based) |
-| `serenity` | Discord API (with Gateway + HTTP, auto-sharding) |
-| `slack-morphism-rust` | Slack API (Web, Events, Socket Mode, Block Kit) |
+| Postgres with pgvector | Session store, event search, memory index, embeddings, learning tables |
+| LLM provider | Anthropic, OpenAI, or Google Gemini |
 
-### Desktop app
+Docker is used by the dev stack and optionally by local hand providers.
 
-| Crate | Purpose |
+### Required For Cloud Runtime
+
+| Service | Purpose |
 |---|---|
-| `gpui` | Desktop UI framework |
-| `gpui-component` | Reusable desktop controls and layout |
-| `tray-icon` | System tray integration |
-| `pulldown-cmark` | Markdown parsing |
-| `syntect` | Syntax highlighting |
-| `similar` | Diff algorithm |
-
-### Orchestration
-
-| Crate | Purpose |
-|---|---|
-| `restate-sdk` | Restate Rust SDK |
-| `tokio-cron-scheduler` | Local cron jobs (consolidation, etc.) |
-
-### Security
-
-| Crate | Purpose |
-|---|---|
-| `age` | File encryption (credential vault) |
-| `secrecy` | Zeroize-on-drop secret types |
-| `vaultrs` | HashiCorp Vault client (cloud mode) |
-| `shell-words` | Shell command parsing (for approval matching) |
-
-### Hands & MCP
-
-| Crate | Purpose |
-|---|---|
-| `bollard` | Docker API client (local container hands) |
-| `reqwest` | HTTP client for Daytona/E2B APIs |
-| `mcp-sdk` | MCP client (if available) or custom implementation |
-
----
-
-## External services
-
-### Required for cloud mode
-
-| Service | Purpose | Cost |
-|---|---|---|
-| Kubernetes | Control plane for Restate + MOA workloads | Varies by cluster |
-| Restate | Durable orchestration engine | Cluster-hosted |
-| Neon / managed Postgres | Session database and checkpoint branches | Varies by plan |
-| Daytona | Container hands (default) | ~$0.067/hr per container |
-| LLM API | Anthropic, OpenAI, or Google Gemini | Pay-per-token |
-
-### Required for local mode
-
-| Service | Purpose | Cost |
-|---|---|---|
-| LLM API | Anthropic, OpenAI, or Google Gemini | Pay-per-token |
-| Docker + Postgres 18 | Required local storage backend | Free |
+| Restate | Durable orchestration engine |
+| Postgres/Neon | Product data store |
+| LLM provider | Model calls and optional embeddings |
+| Hand provider | Daytona, E2B, or configured local/container execution |
+| Kubernetes or equivalent | Hosting Restate and MOA services |
 
 ### Optional
 
 | Service | Purpose |
 |---|---|
-| E2B | MicroVM hands (Tier 2 security) |
-| HashiCorp Vault | Cloud credential management |
-| Grafana Cloud | Observability dashboards (OTel export) |
+| Neon branching | Database checkpoint/rollback support |
+| HashiCorp Vault or similar | Cloud credential storage |
+| Grafana/Tempo/Prometheus stack | Metrics and traces |
+| Messaging platforms | Telegram, Slack, Discord adapters |
 
----
-
-## Implementation phases
-
-### Phase 1: Core loop (4-6 weeks)
-
-**Goal**: A working local agent you can chat with in a terminal.
-
-Deliverables:
-- [ ] Rust workspace scaffold (all crate directories)
-- [ ] `moa-core`: types, traits, config, error handling
-- [ ] `moa-providers`: Anthropic provider (streaming completion)
-- [ ] `moa-session`: PostgresSessionStore
-- [ ] `moa-brain`: Brain harness loop (single turn: compile → call LLM → emit events)
-- [ ] `moa-brain/pipeline`: All 7 context compilation stages (basic implementations)
-- [ ] `moa-memory`: FileMemoryStore (MEMORY.md read/write, FTS5 search)
-- [ ] `moa-orchestrator`: LocalOrchestrator (tokio tasks + mpsc channels)
-- [ ] `moa-desktop`: Basic chat view (prompt input, streaming output, no sidebar)
-- [ ] `moa-cli`: one-shot and admin entry points
-
-Test: `moa "What's 2+2?"` works. Agent can read/write memory. Sessions persist across restarts.
-
-### Phase 2: Tools & hands (3-4 weeks)
-
-**Goal**: Agent can execute tools and the user can approve/deny.
-
-Deliverables:
-- [ ] `moa-hands`: LocalHandProvider (direct exec + Docker)
-- [ ] `moa-hands`: ToolRouter with tool registry
-- [ ] Built-in tools: bash, file_read, file_write, file_search, web_search, web_fetch
-- [ ] Memory tools: memory_search, memory_write
-- [ ] Approval flow: inline approval cards in the desktop app
-- [ ] Permission policies: per-workspace rules storage
-- [ ] `moa-security`: Basic tool policy checking
-- [ ] Desktop app: Tool call cards, approval widgets, diff preview
-
-Test: `moa "Create a hello world Express app"` → agent writes files, user approves, files exist on disk.
-
-### Phase 3: Restate + Kubernetes (3-4 weeks)
-
-**Goal**: Agent runs in the cloud with durable execution.
-
-Deliverables:
-- [ ] `moa-orchestrator`: Restate-backed orchestrator binary
-- [ ] Restate services, virtual objects, and workflows for session orchestration
-- [ ] Kubernetes deployment config (`Dockerfile`, `k8s/`)
-- [ ] `moa-session`: Managed Postgres / Neon configuration
-- [ ] `moa-hands`: DaytonaHandProvider
-- [ ] Multi-session support in orchestrator
-- [ ] Session observation (event streaming)
-- [ ] `moa --cloud` startup mode
-
-Test: Start a cloud session through the deployed gateway. Kill one orchestrator pod. Restate replays the invocation and the session resumes from the last durable event.
-
-### Phase 4: Messaging gateway (3-4 weeks)
-
-**Goal**: Users can talk to MOA through Telegram, Slack, Discord.
-
-Deliverables:
-- [ ] `moa-gateway`: PlatformAdapter trait
-- [ ] `moa-gateway`: Telegram adapter (teloxide)
-- [ ] `moa-gateway`: Slack adapter (slack-morphism, Block Kit)
-- [ ] `moa-gateway`: Discord adapter (serenity)
-- [ ] Platform-adaptive message rendering
-- [ ] Approval buttons per platform (three-tier)
-- [ ] Thread observation UX per platform (status messages, throttled updates)
-- [ ] Queue message handling
-- [ ] Stop/cancel via platform buttons
-- [ ] Session ↔ platform thread mapping
-
-Test: Send "deploy to staging" in Telegram. Agent provisions a hand, asks for approval via inline buttons, user taps Allow, agent executes, reports back.
-
-### Phase 5: Learning loop (3-4 weeks)
-
-**Goal**: MOA gets smarter with use.
-
-Deliverables:
-- [ ] `moa-skills`: Skill registry, Agent Skills format parser
-- [ ] Skill distillation from successful runs
-- [ ] Skill self-improvement during use
-- [ ] Wiki compilation (ingest sources → update entity/topic/decision pages)
-- [ ] Memory consolidation workflow (Restate workflow + delayed send)
-- [ ] Git-branch concurrent writes + LLM reconciler
-- [ ] Memory per-user scoping
-- [ ] Desktop app: Memory browser (two-pane wiki view)
-- [ ] Pipeline Stage 4 (SkillInjector) with progressive loading
-
-Test: Complete 3 complex tasks. Check that skills were auto-generated. Start a new session. Verify the agent uses the skills instead of solving from scratch.
-
-### Phase 6: Polish & hardening (2-3 weeks)
-
-**Goal**: Production-ready.
-
-Deliverables:
-- [ ] `moa-providers`: OpenAI + Google Gemini providers
-- [ ] `moa-hands`: E2B provider (Tier 2 microVM)
-- [ ] `moa-hands`: MCP client + credential proxy
-- [ ] `moa-security`: Full credential vault (local + HashiCorp)
-- [ ] `moa-security`: Prompt injection detection
-- [ ] `moa-security`: Canary tokens
-- [ ] Desktop app: Full sidebar, tab bar, and keyboard shortcuts
-- [ ] Desktop app: Settings panel, workspace switcher, session picker
-- [ ] CLI: All subcommands (status, sessions, memory, doctor, daemon, eval)
-- [ ] Observability: OTel traces for pipeline stages, tool calls, LLM requests
-- [ ] `moa daemon` for persistent local background operation
-- [ ] Documentation: README, getting started guide, configuration reference
-- [ ] Integration tests: end-to-end session lifecycle
-- [ ] Security audit
-
-Test: Full end-to-end: install → configure → chat locally → deploy to cloud → interact via Telegram → observe sessions → review memory → verify skills compound.
-
----
-
-## Build & distribution
-
-### Local binary
+## Build Targets
 
 ```bash
-# Development
 cargo build
+cargo test
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
 
-# Release (optimized, stripped)
-cargo build --release
-strip target/release/moa
-
-# With specific features
-cargo build --release --features "telegram,slack,discord"
-
-# Local clients
-cargo build --release -p moa-cli
-cargo build --release -p moa-desktop
+cargo build -p moa-desktop
+cargo run -p moa-cli -- doctor
+cargo run -p moa-orchestrator -- --port 9080 --health-port 9081
 ```
 
-### Docker (cloud deployment)
+`moa-desktop` is excluded from default workspace builds and should be built explicitly.
 
-```dockerfile
-FROM rust:1.94.1-trixie AS builder
-WORKDIR /app
-COPY . .
-RUN cargo build --release --features "cloud"
+## Configuration
 
-FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/moa /usr/local/bin/moa
-ENTRYPOINT ["moa", "--cloud"]
-```
+Config loads from `~/.moa/config.toml` plus `MOA__...` environment overrides. Key sections:
 
-### Kubernetes deployment
+| Section | Controls |
+|---|---|
+| `[models]` and `[providers]` | model routing and provider API key env vars |
+| `[database]` | Postgres URL, admin URL, pool settings, Neon branching |
+| `[memory]` | memory directory and embedding provider/model |
+| `[query_rewrite]` | fail-open query rewriter behavior |
+| `[resolution]` | automated resolution scoring weights and thresholds |
+| `[intents]` | discovery window, min segments, cluster size, classification thresholds |
+| `[skill_budget]` | skill manifest budget controls |
+| `[cloud]` | cloud mode and hand provider settings |
+| `[gateway]` | messaging adapter tokens |
+| `[permissions]` | default approval posture |
+| `[compaction]` | history compaction thresholds |
+
+## Current Implementation State
+
+Implemented architectural pillars:
+
+- Restate cloud orchestration with session, sub-agent, workspace, service, and workflow handlers.
+- Local orchestrator for CLI and desktop.
+- Postgres session store with event log, analytics, task segments, intent tables, and learning log.
+- File-wiki memory with Postgres keyword search, trigram fallback, and pgvector semantic search.
+- Query rewriting, segment creation, automated resolution scoring, and skill resolution-rate ranking.
+- Intent discovery workflow and intent manager service.
+- Skill distillation/improvement with learning-log emission.
+- GPUI desktop crate and CLI/daemon surfaces.
+
+Areas still evolving:
+
+- REST product API shape and admin UI details.
+- Richer gateway callback typing.
+- More complete tenant admin dashboard workflows.
+- Production deployment automation around Restate registration and hand provider configuration.
+
+## Deployment Notes
+
+Cloud deployments need:
 
 ```bash
-kubectl apply -k k8s/
+MOA__DATABASE__URL=postgres://...
+RESTATE_ADMIN_URL=http://...
+OPENAI_API_KEY=... # or another configured provider key
 ```
 
----
-
-## Environment variables
+Optional hand and gateway settings depend on the chosen deployment:
 
 ```bash
-# LLM providers (at least one required)
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-GOOGLE_API_KEY=AIza...
-
-# Cloud mode (optional)
-MOA__DATABASE__URL=postgres://moa:moa@localhost:5432/moa
-RESTATE_ADMIN_URL=http://moa-restate.moa-system.svc.cluster.local:9070
-
-# Hands (optional, cloud mode)
 DAYTONA_API_KEY=...
 E2B_API_KEY=...
-
-# Messaging (optional, cloud mode)
 TELEGRAM_BOT_TOKEN=...
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...
+SLACK_BOT_TOKEN=...
+SLACK_APP_TOKEN=...
 DISCORD_BOT_TOKEN=...
-
-# Optional
-VAULT_ADDR=https://vault.example.com
-VAULT_TOKEN=...
 ```
 
----
-
-## Minimum system requirements
-
-### Local mode
-- OS: macOS, Linux, Windows (WSL2)
-- Rust: 1.80+
-- RAM: 256MB (MOA process) + LLM API calls
-- Disk: ~50MB (binary) + session/memory storage
-- Docker: Optional (for container hands)
-
-### Cloud mode
-- Kubernetes cluster
-- Restate cluster
-- Managed Postgres / Neon database
-- Daytona account (pay-per-use)
-- At least one LLM API key
+The orchestrator exposes the Restate handler endpoint and a health/readiness endpoint. Readiness checks Postgres and can optionally require registered Restate services.
