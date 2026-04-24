@@ -8,9 +8,10 @@ use chrono::{DateTime, Utc};
 use moa_core::{
     ApprovalRule, BlobStore, CacheDailyMetric, ClaimCheck, ContextSnapshot, Event, EventFilter,
     EventRange, EventRecord, MoaConfig, MoaError, PendingSignal, PendingSignalId, Result,
-    SessionAnalyticsSummary, SessionFilter, SessionMeta, SessionStatus, SessionStore,
-    SessionSummary, SessionTurnMetric, ToolCallSummary, WakeContext, WorkspaceAnalyticsSummary,
-    WorkspaceId, record_session_created, record_sessions_active, record_turn_completed,
+    SegmentCompletion, SegmentId, SessionAnalyticsSummary, SessionFilter, SessionMeta,
+    SessionStatus, SessionStore, SessionSummary, SessionTurnMetric, TaskSegment, ToolCallSummary,
+    WakeContext, WorkspaceAnalyticsSummary, WorkspaceId, record_session_created,
+    record_sessions_active, record_turn_completed,
 };
 use moa_security::ApprovalRuleStore;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};
@@ -23,9 +24,10 @@ use crate::blob::{
 use crate::listener::{GLOBAL_EVENTS_CHANNEL, session_channel_name};
 use crate::queries::{
     EVENT_COLUMNS, SESSION_INSERT_COLUMNS, SESSION_SELECT_COLUMNS, SESSION_SUMMARY_COLUMNS,
-    approval_rule_from_row, event_type_from_db, event_type_to_db, map_sqlx_error,
-    pending_signal_from_row, pending_signal_type_to_db, platform_to_db, policy_action_to_db,
-    policy_scope_to_db, session_meta_from_row, session_status_to_db, session_summary_from_row,
+    TASK_SEGMENT_COLUMNS, approval_rule_from_row, event_type_from_db, event_type_to_db,
+    map_sqlx_error, pending_signal_from_row, pending_signal_type_to_db, platform_to_db,
+    policy_action_to_db, policy_scope_to_db, session_meta_from_row, session_status_to_db,
+    session_summary_from_row, task_segment_from_row,
 };
 use crate::schema;
 
@@ -377,6 +379,236 @@ impl PostgresSessionStore {
         .await
         .map_err(map_sqlx_error)?;
 
+        Ok(())
+    }
+
+    /// Creates or refreshes one task segment metadata row.
+    pub async fn create_segment(&self, segment: &TaskSegment) -> Result<()> {
+        let task_segments = self.table_name("task_segments");
+        sqlx::query(&format!(
+            "INSERT INTO {task_segments} \
+             (id, session_id, tenant_id, segment_index, intent_label, intent_confidence, \
+              task_summary, started_at, ended_at, resolution, resolution_confidence, \
+              tools_used, skills_activated, turn_count, token_cost, previous_segment_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
+             ON CONFLICT (id) DO UPDATE SET \
+                 tenant_id = EXCLUDED.tenant_id, \
+                 intent_label = EXCLUDED.intent_label, \
+                 intent_confidence = EXCLUDED.intent_confidence, \
+                 task_summary = EXCLUDED.task_summary, \
+                 ended_at = EXCLUDED.ended_at, \
+                 resolution = EXCLUDED.resolution, \
+                 resolution_confidence = EXCLUDED.resolution_confidence, \
+                 tools_used = EXCLUDED.tools_used, \
+                 skills_activated = EXCLUDED.skills_activated, \
+                 turn_count = EXCLUDED.turn_count, \
+                 token_cost = EXCLUDED.token_cost, \
+                 previous_segment_id = EXCLUDED.previous_segment_id"
+        ))
+        .bind(segment.id.0)
+        .bind(segment.session_id.0)
+        .bind(&segment.tenant_id)
+        .bind(segment.segment_index as i32)
+        .bind(segment.intent_label.as_deref())
+        .bind(segment.intent_confidence)
+        .bind(segment.task_summary.as_deref())
+        .bind(segment.started_at)
+        .bind(segment.ended_at)
+        .bind(segment.resolution.as_deref())
+        .bind(segment.resolution_confidence)
+        .bind(&segment.tools_used)
+        .bind(&segment.skills_activated)
+        .bind(segment.turn_count as i32)
+        .bind(segment.token_cost as i64)
+        .bind(segment.previous_segment_id.map(|id| id.0))
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        Ok(())
+    }
+
+    /// Completes a task segment and stores its final counters.
+    pub async fn complete_segment(
+        &self,
+        segment_id: SegmentId,
+        update: SegmentCompletion,
+    ) -> Result<()> {
+        let task_segments = self.table_name("task_segments");
+        let affected = sqlx::query(&format!(
+            "UPDATE {task_segments} SET \
+                 ended_at = $1, \
+                 turn_count = $2, \
+                 tools_used = $3, \
+                 skills_activated = $4, \
+                 token_cost = $5 \
+             WHERE id = $6"
+        ))
+        .bind(update.ended_at)
+        .bind(update.turn_count as i32)
+        .bind(&update.tools_used)
+        .bind(&update.skills_activated)
+        .bind(update.token_cost as i64)
+        .bind(segment_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(MoaError::StorageError(format!(
+                "task segment `{segment_id}` was not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Loads the active task segment for a session, if present.
+    pub async fn get_active_segment(
+        &self,
+        session_id: moa_core::SessionId,
+    ) -> Result<Option<TaskSegment>> {
+        let task_segments = self.table_name("task_segments");
+        let row = sqlx::query(&format!(
+            "SELECT {TASK_SEGMENT_COLUMNS} FROM {task_segments} \
+             WHERE session_id = $1 AND ended_at IS NULL \
+             ORDER BY segment_index DESC \
+             LIMIT 1"
+        ))
+        .bind(session_id.0)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        row.as_ref().map(task_segment_from_row).transpose()
+    }
+
+    /// Lists all task segments for a session in segment order.
+    pub async fn list_segments(&self, session_id: moa_core::SessionId) -> Result<Vec<TaskSegment>> {
+        let task_segments = self.table_name("task_segments");
+        let rows = sqlx::query(&format!(
+            "SELECT {TASK_SEGMENT_COLUMNS} FROM {task_segments} \
+             WHERE session_id = $1 \
+             ORDER BY segment_index ASC"
+        ))
+        .bind(session_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        rows.iter().map(task_segment_from_row).collect()
+    }
+
+    /// Updates a task segment resolution outcome.
+    pub async fn update_segment_resolution(
+        &self,
+        segment_id: SegmentId,
+        resolution: &str,
+        confidence: f64,
+    ) -> Result<()> {
+        let task_segments = self.table_name("task_segments");
+        let affected = sqlx::query(&format!(
+            "UPDATE {task_segments} SET \
+                 resolution = $1, \
+                 resolution_confidence = $2 \
+             WHERE id = $3"
+        ))
+        .bind(resolution)
+        .bind(confidence)
+        .bind(segment_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(MoaError::StorageError(format!(
+                "task segment `{segment_id}` was not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Records a tool name on the active task segment for a session.
+    pub async fn record_active_segment_tool_use(
+        &self,
+        session_id: moa_core::SessionId,
+        tool_name: &str,
+    ) -> Result<()> {
+        self.append_unique_active_segment_value(session_id, "tools_used", tool_name)
+            .await
+    }
+
+    /// Records a skill activation on the active task segment for a session.
+    pub async fn record_active_segment_skill_activation(
+        &self,
+        session_id: moa_core::SessionId,
+        skill_name: &str,
+    ) -> Result<()> {
+        self.append_unique_active_segment_value(session_id, "skills_activated", skill_name)
+            .await
+    }
+
+    /// Adds one turn and token usage to the active task segment for a session.
+    pub async fn record_active_segment_turn_usage(
+        &self,
+        session_id: moa_core::SessionId,
+        token_cost: u64,
+    ) -> Result<()> {
+        let task_segments = self.table_name("task_segments");
+        sqlx::query(&format!(
+            "UPDATE {task_segments} SET \
+                 turn_count = turn_count + 1, \
+                 token_cost = token_cost + $1 \
+             WHERE id = ( \
+                 SELECT id FROM {task_segments} \
+                 WHERE session_id = $2 AND ended_at IS NULL \
+                 ORDER BY segment_index DESC \
+                 LIMIT 1 \
+             )"
+        ))
+        .bind(token_cost as i64)
+        .bind(session_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    async fn append_unique_active_segment_value(
+        &self,
+        session_id: moa_core::SessionId,
+        column: &str,
+        value: &str,
+    ) -> Result<()> {
+        let task_segments = self.table_name("task_segments");
+        let column = match column {
+            "tools_used" => "tools_used",
+            "skills_activated" => "skills_activated",
+            _ => {
+                return Err(MoaError::StorageError(format!(
+                    "unsupported task segment array column `{column}`"
+                )));
+            }
+        };
+        sqlx::query(&format!(
+            "UPDATE {task_segments} SET \
+                 {column} = CASE \
+                     WHEN $1 = ANY({column}) THEN {column} \
+                     ELSE array_append({column}, $1) \
+                 END \
+             WHERE id = ( \
+                 SELECT id FROM {task_segments} \
+                 WHERE session_id = $2 AND ended_at IS NULL \
+                 ORDER BY segment_index DESC \
+                 LIMIT 1 \
+             )"
+        ))
+        .bind(value)
+        .bind(session_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
         Ok(())
     }
 }
@@ -959,6 +1191,7 @@ impl SessionStore for PostgresSessionStore {
         let events = self.table_name("events");
         let pending_signals = self.table_name("pending_signals");
         let context_snapshots = self.table_name("context_snapshots");
+        let task_segments = self.table_name("task_segments");
         let sessions = self.table_name("sessions");
 
         let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
@@ -966,6 +1199,7 @@ impl SessionStore for PostgresSessionStore {
             format!("DELETE FROM {events} WHERE session_id = $1"),
             format!("DELETE FROM {pending_signals} WHERE session_id = $1"),
             format!("DELETE FROM {context_snapshots} WHERE session_id = $1"),
+            format!("DELETE FROM {task_segments} WHERE session_id = $1"),
             format!("DELETE FROM {sessions} WHERE id = $1"),
         ] {
             sqlx::query(&sql)
@@ -982,6 +1216,64 @@ impl SessionStore for PostgresSessionStore {
         }
 
         Ok(())
+    }
+
+    async fn create_segment(&self, segment: &TaskSegment) -> Result<()> {
+        PostgresSessionStore::create_segment(self, segment).await
+    }
+
+    async fn complete_segment(
+        &self,
+        segment_id: SegmentId,
+        update: SegmentCompletion,
+    ) -> Result<()> {
+        PostgresSessionStore::complete_segment(self, segment_id, update).await
+    }
+
+    async fn get_active_segment(
+        &self,
+        session_id: moa_core::SessionId,
+    ) -> Result<Option<TaskSegment>> {
+        PostgresSessionStore::get_active_segment(self, session_id).await
+    }
+
+    async fn list_segments(&self, session_id: moa_core::SessionId) -> Result<Vec<TaskSegment>> {
+        PostgresSessionStore::list_segments(self, session_id).await
+    }
+
+    async fn update_segment_resolution(
+        &self,
+        segment_id: SegmentId,
+        resolution: &str,
+        confidence: f64,
+    ) -> Result<()> {
+        PostgresSessionStore::update_segment_resolution(self, segment_id, resolution, confidence)
+            .await
+    }
+
+    async fn record_active_segment_tool_use(
+        &self,
+        session_id: moa_core::SessionId,
+        tool_name: &str,
+    ) -> Result<()> {
+        PostgresSessionStore::record_active_segment_tool_use(self, session_id, tool_name).await
+    }
+
+    async fn record_active_segment_skill_activation(
+        &self,
+        session_id: moa_core::SessionId,
+        skill_name: &str,
+    ) -> Result<()> {
+        PostgresSessionStore::record_active_segment_skill_activation(self, session_id, skill_name)
+            .await
+    }
+
+    async fn record_active_segment_turn_usage(
+        &self,
+        session_id: moa_core::SessionId,
+        token_cost: u64,
+    ) -> Result<()> {
+        PostgresSessionStore::record_active_segment_turn_usage(self, session_id, token_cost).await
     }
 }
 

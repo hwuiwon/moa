@@ -359,10 +359,16 @@ fn build_rewriter_prompt(input: &RewriteInput, ctx: &WorkingContext) -> String {
          - Do NOT add entities, file paths, or technical details not mentioned\n\
          - DO resolve \"that\", \"it\", \"the bug\", etc. to their concrete referents\n\
          - DO decompose compound requests into sub_queries\n\
+         - Determine if this message starts a NEW task or continues the current one\n\
+         - A new task means the user is asking about something unrelated to the current work\n\
+         - Set is_new_task=true only when the topic genuinely shifts, not for follow-up questions\n\
+         - If is_new_task=true, provide a short task_summary in one sentence\n\
+         - Treat coreferences like \"that file\", \"the error above\", and \"try again\" as continuations\n\
          - Respond ONLY with valid JSON matching the schema below. No preamble.\n\n\
          Schema: {{\"rewritten_query\": string, \"intent\": string, \"sub_queries\": [string],\n\
          \"suggested_tools\": [string], \"needs_clarification\": bool,\n\
-         \"clarification_question\": string|null}}\n\
+         \"clarification_question\": string|null, \"is_new_task\": bool,\n\
+         \"task_summary\": string|null}}\n\
          intent must be one of: coding, research, file_operation, system_admin,\n\
          creative, question, conversation, unknown.\n\n\
          Available tools: {tools}\n\n\
@@ -444,6 +450,10 @@ struct RawQueryRewriteResult {
     suggested_tools: Vec<String>,
     needs_clarification: bool,
     clarification_question: Option<String>,
+    #[serde(default)]
+    is_new_task: bool,
+    #[serde(default)]
+    task_summary: Option<String>,
 }
 
 impl RawQueryRewriteResult {
@@ -455,6 +465,8 @@ impl RawQueryRewriteResult {
             suggested_tools: self.suggested_tools,
             needs_clarification: self.needs_clarification,
             clarification_question: self.clarification_question,
+            is_new_task: self.is_new_task,
+            task_summary: self.task_summary,
             source: RewriteSource::Rewritten,
         }
     }
@@ -478,6 +490,10 @@ fn validate_rewrite_result(
         .clarification_question
         .map(|question| strip_unsupported_entity_tokens(&question, &allowed_terms))
         .filter(|question| !question.trim().is_empty());
+    result.task_summary = result
+        .task_summary
+        .map(|summary| strip_unsupported_entity_tokens(&summary, &allowed_terms))
+        .filter(|summary| !summary.trim().is_empty());
     result.suggested_tools = filter_suggested_tools(result.suggested_tools, ctx);
     result.source = RewriteSource::Rewritten;
 
@@ -764,6 +780,8 @@ mod tests {
             "suggested_tools": [],
             "needs_clarification": false,
             "clarification_question": null,
+            "is_new_task": false,
+            "task_summary": null,
         })
         .to_string()
     }
@@ -830,6 +848,46 @@ mod tests {
             result.rewritten_query,
             "Fix the OAuth refresh token race condition in auth/refresh.rs"
         );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn default_timeout_allows_segment_transition_rewrite_latency() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = MockProvider {
+            response: Arc::new(std::sync::Mutex::new(
+                json!({
+                    "rewritten_query": "Write a five-word project status headline about database migrations.",
+                    "intent": "creative",
+                    "sub_queries": [],
+                    "suggested_tools": [],
+                    "needs_clarification": false,
+                    "clarification_question": null,
+                    "is_new_task": true,
+                    "task_summary": "Write a short project status headline about database migrations.",
+                })
+                .to_string(),
+            )),
+            delay: Duration::from_millis(600),
+            calls: calls.clone(),
+        };
+        let rewriter = QueryRewriter::new(QueryRewriteConfig::default(), Arc::new(provider));
+        let mut ctx = context_with_messages(vec![
+            ContextMessage::user("What is 2 + 2? Answer with only the number."),
+            ContextMessage::assistant("4"),
+            ContextMessage::user(
+                "Now switch tasks: write a five-word project status headline about database migrations.",
+            ),
+        ]);
+
+        rewriter
+            .process(&mut ctx)
+            .await
+            .expect("default timeout should allow live-like rewrite latency");
+
+        let result = metadata_result(&ctx);
+        assert_eq!(result.source, RewriteSource::Rewritten);
+        assert!(result.is_new_task);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -922,6 +980,8 @@ mod tests {
             "suggested_tools": [],
             "needs_clarification": false,
             "clarification_question": null,
+            "is_new_task": false,
+            "task_summary": null,
         })
         .to_string();
         let (rewriter, calls) = rewriter_with_response(invalid_response);

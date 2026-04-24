@@ -122,6 +122,16 @@ impl<A: AgentAdapter> TurnRunner<A> {
         let Some(mut request) = self.adapter.build_request(ctx).await? else {
             return Ok(TurnOutcome::Idle);
         };
+        if let Some(segment) = self.adapter.current_segment(ctx).await? {
+            request.metadata.insert(
+                "_moa.segment_id".to_string(),
+                serde_json::json!(segment.id.to_string()),
+            );
+            request.metadata.insert(
+                "_moa.segment_index".to_string(),
+                serde_json::json!(segment.segment_index),
+            );
+        }
         ensure_dispatch_tool_schema(&mut request);
 
         let meta = self.adapter.session_meta(ctx).await?;
@@ -284,6 +294,16 @@ impl<A: AgentAdapter> TurnRunner<A> {
         self.adapter
             .record_tool_result(ctx, tool_id, &invocation, &output)
             .await?;
+        if !output.is_error {
+            self.adapter
+                .record_segment_tool_use(ctx, &invocation.name)
+                .await?;
+            if let Some(skill_name) = skill_name_from_memory_read(&invocation) {
+                self.adapter
+                    .record_segment_skill_activation(ctx, &skill_name)
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -347,8 +367,29 @@ impl<A: AgentAdapter> TurnRunner<A> {
         self.adapter
             .record_tool_result(ctx, tool_id, &invocation, &output)
             .await?;
+        if !output.is_error {
+            self.adapter
+                .record_segment_tool_use(ctx, &invocation.name)
+                .await?;
+        }
         Ok(())
     }
+}
+
+fn skill_name_from_memory_read(invocation: &moa_core::ToolInvocation) -> Option<String> {
+    if invocation.name != "memory_read" {
+        return None;
+    }
+
+    let path = invocation.input.get("path")?.as_str()?.trim();
+    let skill_name = path
+        .strip_prefix("skills/")?
+        .strip_suffix("/SKILL.md")?
+        .trim();
+    if skill_name.is_empty() {
+        return None;
+    }
+    Some(skill_name.to_string())
 }
 
 async fn append_session_event(

@@ -1109,7 +1109,7 @@ impl Default for QueryRewriteConfig {
         Self {
             enabled: true,
             model: None,
-            timeout_ms: 500,
+            timeout_ms: 5_000,
             min_query_tokens: 15,
             skip_single_turn: true,
             circuit_breaker_threshold: 0.05,
@@ -1480,7 +1480,7 @@ mod tests {
         let config = MoaConfig::default();
         assert!(config.query_rewrite.enabled);
         assert_eq!(config.query_rewrite.model, None);
-        assert_eq!(config.query_rewrite.timeout_ms, 500);
+        assert_eq!(config.query_rewrite.timeout_ms, 5_000);
         assert_eq!(config.query_rewrite.min_query_tokens, 15);
         assert!(config.query_rewrite.skip_single_turn);
         assert!((config.query_rewrite.circuit_breaker_threshold - 0.05_f64).abs() < f64::EPSILON);
@@ -1607,7 +1607,7 @@ mod tests {
         assert_eq!(config.skill_budget.max_per_skill_chars, 1_536);
         assert!(config.skill_budget.show_token_estimates);
         assert!(config.query_rewrite.enabled);
-        assert_eq!(config.query_rewrite.timeout_ms, 500);
+        assert_eq!(config.query_rewrite.timeout_ms, 5_000);
         assert!(!config.metrics.enabled);
         assert_eq!(config.metrics.listen, "0.0.0.0:9090");
     }

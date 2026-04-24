@@ -17,6 +17,7 @@ pub mod instructions;
 pub mod memory;
 pub mod query_rewrite;
 pub mod runtime_context;
+pub mod segments;
 pub mod skills;
 pub mod tools;
 

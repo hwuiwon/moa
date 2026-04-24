@@ -1,8 +1,8 @@
 //! Agent-specific hooks for the shared durable turn runner.
 
 use moa_core::{
-    CompletionRequest, CompletionResponse, DispatchSubAgentInput, SessionId, SessionMeta,
-    SubAgentId, ToolCallId, ToolInvocation, ToolOutput, TurnOutcome,
+    ActiveSegment, CompletionRequest, CompletionResponse, DispatchSubAgentInput, SessionId,
+    SessionMeta, SubAgentId, ToolCallId, ToolInvocation, ToolOutput, TurnOutcome,
 };
 use restate_sdk::prelude::*;
 
@@ -79,6 +79,32 @@ pub(crate) trait AgentAdapter: Send + Sync {
         invocation: &ToolInvocation,
         output: &ToolOutput,
     ) -> Result<(), HandlerError>;
+
+    /// Returns the current active task segment, if any.
+    async fn current_segment(
+        &self,
+        _ctx: &ObjectContext<'_>,
+    ) -> Result<Option<ActiveSegment>, HandlerError> {
+        Ok(None)
+    }
+
+    /// Records that a tool was used in the current task segment.
+    async fn record_segment_tool_use(
+        &self,
+        _ctx: &ObjectContext<'_>,
+        _tool_name: &str,
+    ) -> Result<(), HandlerError> {
+        Ok(())
+    }
+
+    /// Records that a skill was activated in the current task segment.
+    async fn record_segment_skill_activation(
+        &self,
+        _ctx: &ObjectContext<'_>,
+        _skill_name: &str,
+    ) -> Result<(), HandlerError> {
+        Ok(())
+    }
 
     /// Records a denied tool result in agent-local state.
     async fn record_denied_tool(

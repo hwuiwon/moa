@@ -26,6 +26,10 @@ pub enum EventType {
     SessionStatusChanged,
     /// `SessionCompleted`.
     SessionCompleted,
+    /// `SegmentStarted`.
+    SegmentStarted,
+    /// `SegmentCompleted`.
+    SegmentCompleted,
     /// `UserMessage`.
     UserMessage,
     /// `QueuedMessage`.

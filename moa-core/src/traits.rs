@@ -14,9 +14,9 @@ use crate::types::{
     EventStream, HandHandle, HandSpec, HandStatus, InboundMessage, IngestReport, MemoryPath,
     MemoryScope, MemorySearchResult, MessageId, ModelCapabilities, ObserveLevel, OutboundMessage,
     PageSummary, PageType, PendingSignal, PendingSignalId, Platform, PlatformCapabilities,
-    ProcessorOutput, RuntimeEvent, SequenceNum, SessionFilter, SessionHandle, SessionId,
-    SessionMeta, SessionSignal, SessionStatus, SessionSummary, StartSessionRequest, ToolOutput,
-    WikiPage, WorkingContext, WorkspaceId,
+    ProcessorOutput, RuntimeEvent, SegmentCompletion, SegmentId, SequenceNum, SessionFilter,
+    SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus, SessionSummary,
+    StartSessionRequest, TaskSegment, ToolOutput, WikiPage, WorkingContext, WorkspaceId,
 };
 
 /// Orchestrates session lifecycle and observation.
@@ -178,6 +178,73 @@ pub trait SessionStore: Send + Sync {
     /// orchestrator to sweep empty sessions at startup so clicking
     /// `+ New Session` without sending a prompt doesn't persist a row.
     async fn delete_session(&self, session_id: SessionId) -> Result<()>;
+
+    /// Persists a task segment metadata row.
+    async fn create_segment(&self, _segment: &TaskSegment) -> Result<()> {
+        Err(MoaError::Unsupported(
+            "task segments are not supported by this session store".to_string(),
+        ))
+    }
+
+    /// Marks a task segment as completed and stores final counters.
+    async fn complete_segment(
+        &self,
+        _segment_id: SegmentId,
+        _update: SegmentCompletion,
+    ) -> Result<()> {
+        Err(MoaError::Unsupported(
+            "task segments are not supported by this session store".to_string(),
+        ))
+    }
+
+    /// Loads the open task segment for a session, if one exists.
+    async fn get_active_segment(&self, _session_id: SessionId) -> Result<Option<TaskSegment>> {
+        Ok(None)
+    }
+
+    /// Lists task segments for a session in segment order.
+    async fn list_segments(&self, _session_id: SessionId) -> Result<Vec<TaskSegment>> {
+        Ok(Vec::new())
+    }
+
+    /// Updates the resolution outcome for a task segment.
+    async fn update_segment_resolution(
+        &self,
+        _segment_id: SegmentId,
+        _resolution: &str,
+        _confidence: f64,
+    ) -> Result<()> {
+        Err(MoaError::Unsupported(
+            "task segments are not supported by this session store".to_string(),
+        ))
+    }
+
+    /// Records a tool name on the active segment for a session.
+    async fn record_active_segment_tool_use(
+        &self,
+        _session_id: SessionId,
+        _tool_name: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Records a skill activation on the active segment for a session.
+    async fn record_active_segment_skill_activation(
+        &self,
+        _session_id: SessionId,
+        _skill_name: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Adds one turn and token usage to the active segment for a session.
+    async fn record_active_segment_turn_usage(
+        &self,
+        _session_id: SessionId,
+        _token_cost: u64,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Durable blob store used by the claim-check session event pattern.

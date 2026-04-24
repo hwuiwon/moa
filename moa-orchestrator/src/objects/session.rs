@@ -3,11 +3,12 @@
 use std::time::Instant;
 
 use chrono::Utc;
+use moa_brain::pipeline::segments::SegmentTracker;
 use moa_core::{
-    ApprovalDecision, CancelMode, CompletionRequest, CompletionResponse, DispatchSubAgentInput,
-    Event, MoaError, Result as MoaResult, SessionId, SessionMeta, SessionStatus, SubAgentChildRef,
-    SubAgentId, ToolCallId, ToolInvocation, ToolOutput, TurnOutcome, UserMessage,
-    record_session_error, record_turn_event_persist_duration,
+    ActiveSegment, ApprovalDecision, CancelMode, CompletionRequest, CompletionResponse,
+    DispatchSubAgentInput, Event, MoaError, Result as MoaResult, SessionId, SessionMeta,
+    SessionStatus, SubAgentChildRef, SubAgentId, ToolCallId, ToolInvocation, ToolOutput,
+    TurnOutcome, UserMessage, record_session_error, record_turn_event_persist_duration,
 };
 use restate_sdk::prelude::*;
 use tracing::Instrument;
@@ -16,6 +17,10 @@ use crate::brain_bridge::{PreparedTurnRequest, prepare_turn_request};
 use crate::objects::sub_agent::SubAgentClient;
 use crate::observability::{annotate_restate_handler_span, event_persist_span};
 use crate::services::session_store::{AppendEventRequest, SessionStoreClient, UpdateStatusRequest};
+use crate::services::session_store::{
+    CompleteSegmentRequest, CreateSegmentRequest, RecordSegmentSkillActivationRequest,
+    RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest,
+};
 use crate::sub_agent_dispatch::{DispatchedSubAgent, dispatch_sub_agent};
 use crate::turn::approval::serialize_awakeable_decision;
 use crate::turn::util::summarize_response_text;
@@ -29,6 +34,7 @@ const K_PENDING_APPROVAL: &str = "pending_approval";
 const K_CHILDREN: &str = "children";
 const K_LAST_TURN_SUMMARY: &str = "last_turn_summary";
 const K_CANCEL_FLAG: &str = "cancel_flag";
+const K_CURRENT_SEGMENT: &str = "current_segment";
 const MAX_TURNS_PER_POST: usize = 50;
 
 /// Serializable projection of the Session VO's durable state keys.
@@ -48,6 +54,8 @@ pub struct SessionVoState {
     pub last_turn_summary: Option<String>,
     /// Cooperative cancellation flag checked at turn boundaries.
     pub cancel_flag: Option<CancelMode>,
+    /// Active task segment, when one has been created for the session.
+    pub current_segment: Option<ActiveSegment>,
 }
 
 impl SessionVoState {
@@ -123,6 +131,44 @@ impl SessionVoState {
         *self = Self::default();
     }
 
+    /// Replaces the active task segment.
+    pub fn set_current_segment(&mut self, segment: ActiveSegment) {
+        self.current_segment = Some(segment);
+    }
+
+    /// Records a tool usage on the active task segment.
+    pub fn record_segment_tool_use(&mut self, tool_name: &str) {
+        let Some(segment) = self.current_segment.as_mut() else {
+            return;
+        };
+        if !segment.tools_used.iter().any(|tool| tool == tool_name) {
+            segment.tools_used.push(tool_name.to_string());
+        }
+    }
+
+    /// Records a skill activation on the active task segment.
+    pub fn record_segment_skill_activation(&mut self, skill_name: &str) {
+        let Some(segment) = self.current_segment.as_mut() else {
+            return;
+        };
+        if !segment
+            .skills_activated
+            .iter()
+            .any(|skill| skill == skill_name)
+        {
+            segment.skills_activated.push(skill_name.to_string());
+        }
+    }
+
+    /// Records one completed model turn on the active task segment.
+    pub fn record_segment_turn_usage(&mut self, token_cost: u64) {
+        let Some(segment) = self.current_segment.as_mut() else {
+            return;
+        };
+        segment.turn_count = segment.turn_count.saturating_add(1);
+        segment.token_cost = segment.token_cost.saturating_add(token_cost);
+    }
+
     fn set_status(&mut self, status: SessionStatus) {
         self.status = Some(status.clone());
         if let Some(meta) = self.meta.as_mut() {
@@ -149,6 +195,7 @@ impl VoState for SessionVoState {
             children: reader.get_json(K_CHILDREN).await?.unwrap_or_default(),
             last_turn_summary: reader.get_json(K_LAST_TURN_SUMMARY).await?,
             cancel_flag: reader.get_json(K_CANCEL_FLAG).await?,
+            current_segment: reader.get_json(K_CURRENT_SEGMENT).await?,
         })
     }
 
@@ -160,6 +207,7 @@ impl VoState for SessionVoState {
         set_or_clear_vec(ctx, K_CHILDREN, &self.children);
         set_or_clear_opt(ctx, K_LAST_TURN_SUMMARY, self.last_turn_summary.as_ref());
         set_or_clear_opt(ctx, K_CANCEL_FLAG, self.cancel_flag.as_ref());
+        set_or_clear_opt(ctx, K_CURRENT_SEGMENT, self.current_segment.as_ref());
     }
 }
 
@@ -232,7 +280,11 @@ impl AgentAdapter for SessionTurnAdapter {
             .into_inner();
         Ok(match prepared {
             PreparedTurnRequest::Idle => None,
-            PreparedTurnRequest::Request(request) => Some(*request),
+            PreparedTurnRequest::Request(request) => {
+                let mut request = *request;
+                ensure_current_segment(ctx, session_id, &mut request).await?;
+                Some(request)
+            }
         })
     }
 
@@ -294,7 +346,59 @@ impl AgentAdapter for SessionTurnAdapter {
     ) -> Result<(), HandlerError> {
         let mut state = SessionVoState::load_from(ctx).await?;
         state.last_turn_summary = summarize_response_text(response);
+        let usage = response.token_usage();
+        let token_cost = (usage.total_input_tokens() + usage.output_tokens) as u64;
+        state.record_segment_turn_usage(token_cost);
         state.persist_into(ctx);
+        if token_cost > 0 {
+            ctx.service_client::<SessionStoreClient>()
+                .record_segment_turn_usage(Json(RecordSegmentTurnUsageRequest {
+                    session_id: parse_session_key(ctx.key())?,
+                    token_cost,
+                }))
+                .send();
+        }
+        Ok(())
+    }
+
+    async fn current_segment(
+        &self,
+        ctx: &ObjectContext<'_>,
+    ) -> Result<Option<ActiveSegment>, HandlerError> {
+        Ok(SessionVoState::load_from(ctx).await?.current_segment)
+    }
+
+    async fn record_segment_tool_use(
+        &self,
+        ctx: &ObjectContext<'_>,
+        tool_name: &str,
+    ) -> Result<(), HandlerError> {
+        let mut state = SessionVoState::load_from(ctx).await?;
+        state.record_segment_tool_use(tool_name);
+        state.persist_into(ctx);
+        ctx.service_client::<SessionStoreClient>()
+            .record_segment_tool_use(Json(RecordSegmentToolUseRequest {
+                session_id: parse_session_key(ctx.key())?,
+                tool_name: tool_name.to_string(),
+            }))
+            .send();
+        Ok(())
+    }
+
+    async fn record_segment_skill_activation(
+        &self,
+        ctx: &ObjectContext<'_>,
+        skill_name: &str,
+    ) -> Result<(), HandlerError> {
+        let mut state = SessionVoState::load_from(ctx).await?;
+        state.record_segment_skill_activation(skill_name);
+        state.persist_into(ctx);
+        ctx.service_client::<SessionStoreClient>()
+            .record_segment_skill_activation(Json(RecordSegmentSkillActivationRequest {
+                session_id: parse_session_key(ctx.key())?,
+                skill_name: skill_name.to_string(),
+            }))
+            .send();
         Ok(())
     }
 
@@ -513,6 +617,80 @@ impl Session for SessionImpl {
     }
 }
 
+async fn ensure_current_segment(
+    ctx: &ObjectContext<'_>,
+    session_id: SessionId,
+    request: &mut CompletionRequest,
+) -> Result<(), HandlerError> {
+    let mut state = SessionVoState::load_from(ctx).await?;
+    let meta = state
+        .meta
+        .clone()
+        .ok_or_else(|| TerminalError::new("session meta missing"))?;
+
+    if state.current_segment.is_none()
+        && let Some(segment) = ctx
+            .service_client::<SessionStoreClient>()
+            .get_active_segment(Json(session_id))
+            .call()
+            .await?
+            .into_inner()
+    {
+        state.current_segment = Some(segment.active_view());
+    }
+
+    if let Some(transition) = SegmentTracker::transition_from_metadata(
+        &request.metadata,
+        session_id,
+        meta.workspace_id.as_str(),
+        &state.current_segment,
+        Utc::now(),
+    ) {
+        if let Some(completed) = transition.completed.clone() {
+            ctx.service_client::<SessionStoreClient>()
+                .complete_segment(Json(CompleteSegmentRequest {
+                    segment_id: completed.segment_id,
+                    update: completed.update.clone(),
+                }))
+                .send();
+            ctx.service_client::<SessionStoreClient>()
+                .append_event(Json(AppendEventRequest {
+                    session_id,
+                    event: completed.into_event(),
+                }))
+                .send();
+        }
+
+        ctx.service_client::<SessionStoreClient>()
+            .create_segment(Json(CreateSegmentRequest {
+                segment: transition.task_segment.clone(),
+            }))
+            .send();
+        ctx.service_client::<SessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event: transition.started.clone().into_event(),
+            }))
+            .send();
+
+        state.set_current_segment(transition.active_segment);
+        state.persist_into(ctx);
+    }
+
+    if let Some(segment) = state.current_segment.as_ref() {
+        request.metadata.insert(
+            "_moa.segment_id".to_string(),
+            serde_json::json!(segment.id.to_string()),
+        );
+        request.metadata.insert(
+            "_moa.segment_index".to_string(),
+            serde_json::json!(segment.segment_index),
+        );
+    }
+
+    Ok(())
+}
+
 async fn persist_session_event(
     ctx: &ObjectContext<'_>,
     session_id: SessionId,
@@ -660,5 +838,28 @@ mod tests {
 
         assert!(outcome.contains("waiting_approval"));
         assert!(decision.contains("allow_once"));
+    }
+
+    #[test]
+    fn session_vo_current_segment_serializes() {
+        let mut state = SessionVoState::default();
+        let session_id = moa_core::SessionId::new();
+        state.current_segment = Some(moa_core::ActiveSegment {
+            id: moa_core::deterministic_segment_id(session_id, 0),
+            segment_index: 0,
+            intent_label: Some("coding".to_string()),
+            task_summary: Some("Fix failing tests".to_string()),
+            started_at: chrono::Utc::now(),
+            tools_used: vec!["bash".to_string()],
+            skills_activated: vec!["moa-rust".to_string()],
+            turn_count: 1,
+            token_cost: 123,
+        });
+
+        let json = serde_json::to_string(&state).expect("serialize session state");
+        let decoded: SessionVoState =
+            serde_json::from_str(&json).expect("deserialize session state");
+
+        assert_eq!(decoded.current_segment, state.current_segment);
     }
 }

@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use moa_core::{
-    Event, ModelId, SessionMeta, SessionStore, ToolCallId, ToolOutput, UserId, WorkspaceId,
+    Event, ModelId, SegmentCompletion, SessionMeta, SessionStore, TaskSegment, ToolCallId,
+    ToolOutput, UserId, WorkspaceId, deterministic_segment_id,
 };
 use moa_session::{PostgresSessionStore, testing};
 use sqlx::PgPool;
@@ -142,6 +143,115 @@ async fn postgres_event_payloads_round_trip_as_jsonb() {
     );
 
     pool.close().await;
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_task_segments_track_boundaries_and_usage() {
+    let (store, database_url, schema_name) = create_test_store().await;
+    let session_id = store
+        .create_session(SessionMeta {
+            workspace_id: WorkspaceId::new("pg-segments"),
+            user_id: UserId::new("user"),
+            model: ModelId::new("test-model"),
+            ..SessionMeta::default()
+        })
+        .await
+        .expect("create session");
+    let first_id = deterministic_segment_id(session_id, 0);
+    let second_id = deterministic_segment_id(session_id, 1);
+    let now = Utc::now();
+
+    store
+        .create_segment(&TaskSegment {
+            id: first_id,
+            session_id,
+            tenant_id: "pg-segments".to_string(),
+            segment_index: 0,
+            intent_label: Some("coding".to_string()),
+            intent_confidence: None,
+            task_summary: Some("Fix tests".to_string()),
+            started_at: now,
+            ended_at: None,
+            turn_count: 0,
+            tools_used: Vec::new(),
+            skills_activated: Vec::new(),
+            token_cost: 0,
+            previous_segment_id: None,
+            resolution: None,
+            resolution_confidence: None,
+        })
+        .await
+        .expect("create first segment");
+    store
+        .record_active_segment_tool_use(session_id, "bash")
+        .await
+        .expect("record tool");
+    store
+        .record_active_segment_skill_activation(session_id, "moa-rust")
+        .await
+        .expect("record skill");
+    store
+        .record_active_segment_turn_usage(session_id, 250)
+        .await
+        .expect("record usage");
+
+    let active = store
+        .get_active_segment(session_id)
+        .await
+        .expect("load active")
+        .expect("active segment exists");
+    assert_eq!(active.tools_used, vec!["bash".to_string()]);
+    assert_eq!(active.skills_activated, vec!["moa-rust".to_string()]);
+    assert_eq!(active.turn_count, 1);
+    assert_eq!(active.token_cost, 250);
+
+    store
+        .complete_segment(
+            first_id,
+            SegmentCompletion {
+                ended_at: Utc::now(),
+                turn_count: active.turn_count,
+                tools_used: active.tools_used,
+                skills_activated: active.skills_activated,
+                token_cost: active.token_cost,
+            },
+        )
+        .await
+        .expect("complete first segment");
+    store
+        .create_segment(&TaskSegment {
+            id: second_id,
+            session_id,
+            tenant_id: "pg-segments".to_string(),
+            segment_index: 1,
+            intent_label: Some("file_operation".to_string()),
+            intent_confidence: None,
+            task_summary: Some("Update README".to_string()),
+            started_at: Utc::now(),
+            ended_at: None,
+            turn_count: 0,
+            tools_used: Vec::new(),
+            skills_activated: Vec::new(),
+            token_cost: 0,
+            previous_segment_id: Some(first_id),
+            resolution: None,
+            resolution_confidence: None,
+        })
+        .await
+        .expect("create second segment");
+
+    let segments = store
+        .list_segments(session_id)
+        .await
+        .expect("list segments");
+    assert_eq!(segments.len(), 2);
+    assert!(segments[0].ended_at.is_some());
+    assert_eq!(segments[1].previous_segment_id, Some(first_id));
+    assert_eq!(segments[1].resolution, None);
+
     drop(store);
     cleanup_schema(&database_url, &schema_name).await;
 }
