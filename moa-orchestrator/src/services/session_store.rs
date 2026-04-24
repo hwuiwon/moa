@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use moa_core::{
-    Event, EventFilter, EventRange, EventRecord, SegmentCompletion, SegmentId, SessionId,
-    SessionMeta, SessionStatus, SessionStore as CoreSessionStore, TaskSegment,
-    record_session_error,
+    Event, EventFilter, EventRange, EventRecord, ResolutionScore, SegmentBaseline,
+    SegmentCompletion, SegmentId, SessionId, SessionMeta, SessionStatus,
+    SessionStore as CoreSessionStore, SkillResolutionRate, TaskSegment, record_session_error,
 };
 use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
@@ -85,6 +85,33 @@ pub struct UpdateSegmentResolutionRequest {
     pub confidence: f64,
 }
 
+/// Request payload for `SessionStore/update_segment_resolution_score`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UpdateSegmentResolutionScoreRequest {
+    /// Segment identifier to update.
+    pub segment_id: SegmentId,
+    /// Full resolution score and signal breakdown.
+    pub score: ResolutionScore,
+}
+
+/// Request payload for `SessionStore/get_segment_baseline`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GetSegmentBaselineRequest {
+    /// Tenant/workspace identifier.
+    pub tenant_id: String,
+    /// Optional intent label.
+    pub intent_label: Option<String>,
+}
+
+/// Request payload for `SessionStore/list_skill_resolution_rates`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ListSkillResolutionRatesRequest {
+    /// Tenant/workspace identifier.
+    pub tenant_id: String,
+    /// Optional intent label.
+    pub intent_label: Option<String>,
+}
+
 /// Request payload for recording active-segment tool usage.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RecordSegmentToolUseRequest {
@@ -160,6 +187,24 @@ pub trait SessionStore {
     async fn update_segment_resolution(
         request: Json<UpdateSegmentResolutionRequest>,
     ) -> Result<(), HandlerError>;
+
+    /// Updates a task segment resolution and signal breakdown.
+    async fn update_segment_resolution_score(
+        request: Json<UpdateSegmentResolutionScoreRequest>,
+    ) -> Result<(), HandlerError>;
+
+    /// Loads a task-segment structural baseline.
+    async fn get_segment_baseline(
+        request: Json<GetSegmentBaselineRequest>,
+    ) -> Result<Json<Option<SegmentBaseline>>, HandlerError>;
+
+    /// Lists skill resolution-rate aggregates.
+    async fn list_skill_resolution_rates(
+        request: Json<ListSkillResolutionRatesRequest>,
+    ) -> Result<Json<Vec<SkillResolutionRate>>, HandlerError>;
+
+    /// Refreshes materialized views derived from task segments.
+    async fn refresh_segment_materialized_views() -> Result<(), HandlerError>;
 
     /// Records a tool name on a session's active segment.
     async fn record_segment_tool_use(
@@ -286,6 +331,43 @@ impl SessionStoreImpl {
     ) -> Result<(), HandlerError> {
         self.store
             .update_segment_resolution(request.segment_id, &request.resolution, request.confidence)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    async fn update_segment_resolution_score_inner(
+        &self,
+        request: UpdateSegmentResolutionScoreRequest,
+    ) -> Result<(), HandlerError> {
+        self.store
+            .update_segment_resolution_score(request.segment_id, &request.score)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    async fn get_segment_baseline_inner(
+        &self,
+        request: GetSegmentBaselineRequest,
+    ) -> Result<Option<SegmentBaseline>, HandlerError> {
+        self.store
+            .get_segment_baseline(&request.tenant_id, request.intent_label.as_deref())
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    async fn list_skill_resolution_rates_inner(
+        &self,
+        request: ListSkillResolutionRatesRequest,
+    ) -> Result<Vec<SkillResolutionRate>, HandlerError> {
+        self.store
+            .list_skill_resolution_rates(&request.tenant_id, request.intent_label.as_deref())
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    async fn refresh_segment_materialized_views_inner(&self) -> Result<(), HandlerError> {
+        self.store
+            .refresh_segment_materialized_views()
             .await
             .map_err(HandlerError::from)
     }
@@ -531,6 +613,82 @@ impl SessionStore for SessionStoreImpl {
         Ok(ctx
             .run(|| async move { service.update_segment_resolution_inner(request).await })
             .name("update_segment_resolution")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn update_segment_resolution_score(
+        &self,
+        ctx: Context<'_>,
+        request: Json<UpdateSegmentResolutionScoreRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "update_segment_resolution_score");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move { service.update_segment_resolution_score_inner(request).await })
+            .name("update_segment_resolution_score")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn get_segment_baseline(
+        &self,
+        ctx: Context<'_>,
+        request: Json<GetSegmentBaselineRequest>,
+    ) -> Result<Json<Option<SegmentBaseline>>, HandlerError> {
+        annotate_restate_handler_span("SessionStore", "get_segment_baseline");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move {
+                service
+                    .get_segment_baseline_inner(request)
+                    .await
+                    .map(Json::from)
+            })
+            .name("get_segment_baseline")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn list_skill_resolution_rates(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ListSkillResolutionRatesRequest>,
+    ) -> Result<Json<Vec<SkillResolutionRate>>, HandlerError> {
+        annotate_restate_handler_span("SessionStore", "list_skill_resolution_rates");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move {
+                service
+                    .list_skill_resolution_rates_inner(request)
+                    .await
+                    .map(Json::from)
+            })
+            .name("list_skill_resolution_rates")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx))]
+    async fn refresh_segment_materialized_views(
+        &self,
+        ctx: Context<'_>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "refresh_segment_materialized_views");
+        let store = self.store.clone();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move { service.refresh_segment_materialized_views_inner().await })
+            .name("refresh_segment_materialized_views")
             .await?)
     }
 

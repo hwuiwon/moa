@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use moa_core::{
     CacheTtl, ContextProcessor, Event, EventRange, ExcludedItem, MemoryPath, MemoryScope,
     MemoryStore, PageType, ProcessorOutput, Result, SessionStore, SkillBudgetConfig, SkillMetadata,
-    WikiPage, WorkingContext, WorkspaceId,
+    SkillResolutionRate, WikiPage, WorkingContext, WorkspaceId,
 };
 use serde_json::{Value, json};
 
@@ -88,6 +88,16 @@ impl SkillInjector {
         Ok(extract_query_keywords_from_events(&events))
     }
 
+    async fn skill_resolution_rates(&self, ctx: &WorkingContext) -> Result<HashMap<String, f64>> {
+        let Some(session_store) = &self.session_store else {
+            return Ok(HashMap::new());
+        };
+        let rates = session_store
+            .list_skill_resolution_rates(ctx.workspace_id.as_str(), None)
+            .await?;
+        Ok(skill_resolution_rate_map(&rates))
+    }
+
     fn compute_budget(&self, context_window: usize) -> ResolvedSkillBudget {
         let default_chars =
             ((context_window as f64) * DEFAULT_MANIFEST_WINDOW_RATIO).round() as usize;
@@ -122,8 +132,9 @@ impl ContextProcessor for SkillInjector {
         }
 
         let query_keywords = self.query_keywords(ctx).await?;
+        let resolution_rates = self.skill_resolution_rates(ctx).await?;
         let budget = self.compute_budget(ctx.model_capabilities.context_window);
-        let ranked = rank_skills(&skills, &query_keywords, &budget);
+        let ranked = rank_skills(&skills, &query_keywords, &budget, &resolution_rates);
         let selection = select_skills_within_budget(&ranked, budget.max_manifest_chars);
         let manifest = format_skill_manifest(&selection.selected);
 
@@ -196,6 +207,7 @@ fn rank_skills(
     skills: &[SkillMetadata],
     query_keywords: &[String],
     budget: &ResolvedSkillBudget,
+    resolution_rates: &HashMap<String, f64>,
 ) -> Vec<RankedSkill> {
     let max_use_count = skills
         .iter()
@@ -217,8 +229,17 @@ fn rank_skills(
             };
             let recency_score = normalized_recency_score(metadata.last_used, oldest, newest);
             let manifest_entry = format_manifest_entry(&metadata, budget);
-            let score =
-                (0.3 * keyword_overlap) + (0.5 * normalized_use_count) + (0.2 * recency_score);
+            let score = resolution_rates
+                .get(&metadata.name)
+                .map(|resolution_rate| {
+                    (0.3 * keyword_overlap)
+                        + (0.4 * resolution_rate)
+                        + (0.2 * normalized_use_count)
+                        + (0.1 * recency_score)
+                })
+                .unwrap_or_else(|| {
+                    (0.3 * keyword_overlap) + (0.5 * normalized_use_count) + (0.2 * recency_score)
+                });
 
             RankedSkill {
                 metadata,
@@ -230,6 +251,18 @@ fn rank_skills(
 
     ranked.sort_by(compare_ranked_skills);
     ranked
+}
+
+fn skill_resolution_rate_map(rates: &[SkillResolutionRate]) -> HashMap<String, f64> {
+    rates
+        .iter()
+        .map(|rate| {
+            (
+                rate.skill_name.clone(),
+                rate.resolution_rate.clamp(0.0, 1.0),
+            )
+        })
+        .collect()
 }
 
 fn compare_ranked_skills(left: &RankedSkill, right: &RankedSkill) -> Ordering {
@@ -845,7 +878,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
-        let ranked = rank_skills(&skills, &[], &budget);
+        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new());
         let exact_budget = MANIFEST_PREAMBLE.chars().count()
             + MANIFEST_FOOTER.chars().count()
             + ranked
@@ -961,7 +994,7 @@ mod tests {
         let budget = resolved_budget(
             MANIFEST_PREAMBLE.chars().count() + MANIFEST_FOOTER.chars().count() + 60,
         );
-        let ranked = rank_skills(&skills, &[], &budget);
+        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new());
         let selection = select_skills_within_budget(&ranked, budget.max_manifest_chars);
 
         assert_eq!(selection.selected.len(), 1);
@@ -1028,10 +1061,27 @@ mod tests {
         ];
         let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
 
-        let ranked = rank_skills(&skills, &["auth".to_string()], &budget);
+        let ranked = rank_skills(&skills, &["auth".to_string()], &budget, &HashMap::new());
 
         assert_eq!(ranked[0].metadata.name, "alpha-auth");
         assert_eq!(ranked[1].metadata.name, "beta-db");
+    }
+
+    #[test]
+    fn ranking_uses_resolution_rate_when_available() {
+        let skills = vec![
+            test_skill("high-use", "General workflow", 100, 0),
+            test_skill("high-resolution", "General workflow", 1, 5),
+        ];
+        let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
+        let resolution_rates = HashMap::from([
+            ("high-use".to_string(), 0.0),
+            ("high-resolution".to_string(), 1.0),
+        ]);
+
+        let ranked = rank_skills(&skills, &[], &budget, &resolution_rates);
+
+        assert_eq!(ranked[0].metadata.name, "high-resolution");
     }
 
     #[test]
@@ -1055,7 +1105,7 @@ mod tests {
             test_skill("alpha", "Alpha workflow", 1, 5),
         ];
         let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
-        let ranked = rank_skills(&skills, &[], &budget);
+        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new());
         assert_eq!(ranked[0].metadata.name, "zeta");
         assert_eq!(ranked[1].metadata.name, "alpha");
 

@@ -229,7 +229,7 @@ fn spawn_analytics_refresh_task(
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
+        let mut interval = tokio::time::interval(Duration::from_secs(15 * 60));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
@@ -241,6 +241,9 @@ fn spawn_analytics_refresh_task(
                 _ = interval.tick() => {
                     if let Err(error) = session_store.refresh_analytics_materialized_views().await {
                         tracing::warn!(%error, "failed to refresh analytics materialized views");
+                    }
+                    if let Err(error) = session_store.refresh_segment_materialized_views().await {
+                        tracing::warn!(%error, "failed to refresh segment materialized views");
                     }
                 }
             }

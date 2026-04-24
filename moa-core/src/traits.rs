@@ -14,9 +14,10 @@ use crate::types::{
     EventStream, HandHandle, HandSpec, HandStatus, InboundMessage, IngestReport, MemoryPath,
     MemoryScope, MemorySearchResult, MessageId, ModelCapabilities, ObserveLevel, OutboundMessage,
     PageSummary, PageType, PendingSignal, PendingSignalId, Platform, PlatformCapabilities,
-    ProcessorOutput, RuntimeEvent, SegmentCompletion, SegmentId, SequenceNum, SessionFilter,
-    SessionHandle, SessionId, SessionMeta, SessionSignal, SessionStatus, SessionSummary,
-    StartSessionRequest, TaskSegment, ToolOutput, WikiPage, WorkingContext, WorkspaceId,
+    ProcessorOutput, ResolutionScore, RuntimeEvent, SegmentBaseline, SegmentCompletion, SegmentId,
+    SequenceNum, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
+    SessionStatus, SessionSummary, SkillResolutionRate, StartSessionRequest, TaskSegment,
+    ToolOutput, WikiPage, WorkingContext, WorkspaceId,
 };
 
 /// Orchestrates session lifecycle and observation.
@@ -217,6 +218,39 @@ pub trait SessionStore: Send + Sync {
         Err(MoaError::Unsupported(
             "task segments are not supported by this session store".to_string(),
         ))
+    }
+
+    /// Updates the resolution outcome and serialized signal breakdown for a task segment.
+    async fn update_segment_resolution_score(
+        &self,
+        segment_id: SegmentId,
+        score: &ResolutionScore,
+    ) -> Result<()> {
+        self.update_segment_resolution(segment_id, score.label.as_str(), score.confidence)
+            .await
+    }
+
+    /// Loads the structural baseline for one tenant and optional intent label.
+    async fn get_segment_baseline(
+        &self,
+        _tenant_id: &str,
+        _intent_label: Option<&str>,
+    ) -> Result<Option<SegmentBaseline>> {
+        Ok(None)
+    }
+
+    /// Lists skill resolution-rate aggregates for ranking.
+    async fn list_skill_resolution_rates(
+        &self,
+        _tenant_id: &str,
+        _intent_label: Option<&str>,
+    ) -> Result<Vec<SkillResolutionRate>> {
+        Ok(Vec::new())
+    }
+
+    /// Refreshes materialized analytics views derived from task segments.
+    async fn refresh_segment_materialized_views(&self) -> Result<()> {
+        Ok(())
     }
 
     /// Records a tool name on the active segment for a session.

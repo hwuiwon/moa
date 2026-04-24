@@ -28,8 +28,8 @@ pub use config::{
     DaemonConfig, DatabaseConfig, DatabaseNeonConfig, DesktopConfig, GatewayConfig, GeneralConfig,
     LocalConfig, McpCredentialConfig, McpServerConfig, McpTransportConfig, MemoryConfig,
     MetricsConfig, MoaConfig, ModelsConfig, ObservabilityConfig, OtlpProtocol, PermissionsConfig,
-    ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig, SkillBudgetConfig,
-    ToolBudgetConfig, ToolOutputConfig,
+    ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig, ResolutionConfig,
+    ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig,
 };
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
 pub use diff::compute_unified_diff;
