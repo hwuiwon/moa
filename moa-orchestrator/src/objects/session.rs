@@ -1,26 +1,20 @@
 //! Restate virtual object that owns one durable MOA session key.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
 use moa_core::{
     ApprovalDecision, CancelMode, CompletionRequest, CompletionResponse, DispatchSubAgentInput,
     Event, MoaError, Result as MoaResult, SessionId, SessionMeta, SessionStatus, SubAgentChildRef,
-    SubAgentId, ToolCallId, ToolInvocation, ToolOutput, TurnLatencyCounters, TurnOutcome,
-    TurnReplayCounters, UserMessage, record_session_error, record_turn_event_persist_duration,
-    record_turn_latency, scope_turn_latency_counters, scope_turn_replay_counters,
+    SubAgentId, ToolCallId, ToolInvocation, ToolOutput, TurnOutcome, UserMessage,
+    record_session_error, record_turn_event_persist_duration,
 };
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
-use crate::OrchestratorCtx;
 use crate::brain_bridge::{PreparedTurnRequest, prepare_turn_request};
 use crate::objects::sub_agent::SubAgentClient;
-use crate::observability::{
-    annotate_restate_handler_span, emit_turn_latency_summary, emit_turn_replay_summary,
-    event_persist_span, session_turn_span,
-};
+use crate::observability::{annotate_restate_handler_span, event_persist_span};
 use crate::services::session_store::{AppendEventRequest, SessionStoreClient, UpdateStatusRequest};
 use crate::sub_agent_dispatch::{DispatchedSubAgent, dispatch_sub_agent};
 use crate::turn::approval::serialize_awakeable_decision;
@@ -249,8 +243,48 @@ impl AgentAdapter for SessionTurnAdapter {
             .ok_or_else(|| TerminalError::new("session meta missing").into())
     }
 
+    async fn turn_prompt(&self, ctx: &ObjectContext<'_>) -> Result<Option<String>, HandlerError> {
+        Ok(SessionVoState::load_from(ctx)
+            .await?
+            .pending
+            .last()
+            .map(|message| message.text.clone()))
+    }
+
     async fn owning_session_id(&self, ctx: &ObjectContext<'_>) -> Result<SessionId, HandlerError> {
         parse_session_key(ctx.key())
+    }
+
+    async fn apply_outcome(
+        &self,
+        ctx: &ObjectContext<'_>,
+        outcome: TurnOutcome,
+    ) -> Result<(), HandlerError> {
+        let session_id = parse_session_key(ctx.key())?;
+        let mut state = SessionVoState::load_from(ctx).await?;
+        if matches!(outcome, TurnOutcome::Cancelled) {
+            state.take_cancel_flag();
+        }
+        state.apply_turn_outcome(outcome);
+        state.persist_into(ctx);
+        sync_status(ctx, session_id, &state).await
+    }
+
+    async fn emit_turn_budget_exceeded(
+        &self,
+        ctx: &ObjectContext<'_>,
+        max_turns: usize,
+    ) -> Result<(), HandlerError> {
+        record_session_error("turn_budget");
+        persist_session_event(
+            ctx,
+            parse_session_key(ctx.key())?,
+            Event::Error {
+                message: format!("turn budget exceeded ({max_turns}), stopping"),
+                recoverable: true,
+            },
+        )
+        .await
     }
 
     async fn record_response(
@@ -465,91 +499,9 @@ impl Session for SessionImpl {
         mut ctx: ObjectContext<'_>,
     ) -> Result<Json<TurnOutcome>, HandlerError> {
         annotate_restate_handler_span("Session", "run_turn");
-        let session_id = parse_session_key(ctx.key())?;
         let runner = TurnRunner::new(SessionTurnAdapter);
-        let mut turns_this_invocation = 0usize;
-        loop {
-            let mut current = SessionVoState::load_from(&ctx).await?;
-            if current.take_cancel_flag().is_some() {
-                current.apply_turn_outcome(TurnOutcome::Cancelled);
-                current.persist_into(&ctx);
-                sync_status(&ctx, session_id, &current).await?;
-                return Ok(Json::from(TurnOutcome::Cancelled));
-            }
-            current.persist_into(&ctx);
-
-            turns_this_invocation += 1;
-            if turns_this_invocation > MAX_TURNS_PER_POST {
-                record_session_error("turn_budget");
-                persist_session_event(
-                    &ctx,
-                    session_id,
-                    Event::Error {
-                        message: format!("turn budget exceeded ({MAX_TURNS_PER_POST}), stopping"),
-                        recoverable: true,
-                    },
-                )
-                .await?;
-                let mut current = SessionVoState::load_from(&ctx).await?;
-                current.apply_turn_outcome(TurnOutcome::Idle);
-                current.persist_into(&ctx);
-                sync_status(&ctx, session_id, &current).await?;
-                return Ok(Json::from(TurnOutcome::Idle));
-            }
-
-            let turn_number = turns_this_invocation as i64;
-            let turn_prompt = current.pending.last().map(|message| message.text.as_str());
-            let turn_root_span = match current.meta.as_ref() {
-                Some(meta) => session_turn_span(
-                    meta,
-                    turn_prompt,
-                    turn_number,
-                    OrchestratorCtx::current()
-                        .config
-                        .observability
-                        .environment
-                        .as_deref(),
-                ),
-                None => {
-                    tracing::info_span!("session_turn", otel.name = %format!("MOA turn {turn_number}"))
-                }
-            };
-            let turn_counters = Arc::new(TurnReplayCounters::default());
-            let turn_outcome = scope_turn_replay_counters(turn_counters.clone(), async {
-                let turn_latency_counters =
-                    Arc::new(TurnLatencyCounters::new(turn_root_span.clone()));
-                let turn_started = Instant::now();
-                let turn_result =
-                    scope_turn_latency_counters(turn_latency_counters.clone(), async {
-                        async {
-                            let outcome = runner.run_once(&mut ctx).await?;
-                            let mut current = SessionVoState::load_from(&ctx).await?;
-                            current.apply_turn_outcome(outcome);
-                            current.persist_into(&ctx);
-                            sync_status(&ctx, session_id, &current).await?;
-                            Ok::<TurnOutcome, HandlerError>(outcome)
-                        }
-                        .instrument(turn_root_span.clone())
-                        .await
-                    })
-                    .await;
-
-                let turn_latency_snapshot = turn_latency_counters.snapshot();
-                record_turn_latency(turn_started.elapsed());
-                emit_turn_latency_summary(&turn_root_span, turn_number, &turn_latency_snapshot);
-                turn_result
-            })
-            .await?;
-            let turn_snapshot = turn_counters.snapshot();
-            emit_turn_replay_summary(&turn_root_span, turn_number, &turn_snapshot);
-
-            match turn_outcome {
-                TurnOutcome::Continue => continue,
-                TurnOutcome::Idle | TurnOutcome::WaitingApproval | TurnOutcome::Cancelled => {
-                    return Ok(Json::from(turn_outcome));
-                }
-            }
-        }
+        let outcome = runner.run_until_idle(&mut ctx, MAX_TURNS_PER_POST).await?;
+        Ok(Json::from(outcome))
     }
 
     #[tracing::instrument(skip(self, ctx))]

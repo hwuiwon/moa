@@ -2,7 +2,7 @@
 
 use moa_core::{
     CompletionRequest, CompletionResponse, DispatchSubAgentInput, SessionId, SessionMeta,
-    SubAgentId, ToolCallId, ToolInvocation, ToolOutput,
+    SubAgentId, ToolCallId, ToolInvocation, ToolOutput, TurnOutcome,
 };
 use restate_sdk::prelude::*;
 
@@ -42,8 +42,27 @@ pub(crate) trait AgentAdapter: Send + Sync {
     /// Returns session metadata for policy lookups and event attribution.
     async fn session_meta(&self, ctx: &ObjectContext<'_>) -> Result<SessionMeta, HandlerError>;
 
+    /// Returns the prompt text associated with the turn, when available.
+    async fn turn_prompt(&self, _ctx: &ObjectContext<'_>) -> Result<Option<String>, HandlerError> {
+        Ok(None)
+    }
+
     /// Returns the owning root session for event persistence.
     async fn owning_session_id(&self, ctx: &ObjectContext<'_>) -> Result<SessionId, HandlerError>;
+
+    /// Applies a turn outcome to the agent's durable lifecycle state.
+    async fn apply_outcome(
+        &self,
+        ctx: &ObjectContext<'_>,
+        outcome: TurnOutcome,
+    ) -> Result<(), HandlerError>;
+
+    /// Emits a structured error event when max turns is exceeded.
+    async fn emit_turn_budget_exceeded(
+        &self,
+        ctx: &ObjectContext<'_>,
+        max_turns: usize,
+    ) -> Result<(), HandlerError>;
 
     /// Records the raw LLM response in local state before tool execution begins.
     async fn record_response(
