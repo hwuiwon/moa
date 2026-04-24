@@ -129,7 +129,7 @@ pub fn compile_index(scope: &MemoryScope, pages: &[PageSummary]) -> String {
         })
         .cloned()
         .collect::<Vec<_>>();
-    sorted.sort_by(|left, right| right.updated.cmp(&left.updated));
+    sorted.sort_by_key(|page| std::cmp::Reverse(page.updated));
 
     let heading = match scope {
         MemoryScope::User(user_id) => format!("# User Memory: {}", user_id.as_str()),

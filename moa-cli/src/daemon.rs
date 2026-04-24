@@ -396,7 +396,7 @@ async fn handle_unary_command_inner(
                 .memory_store()
                 .list_pages(&MemoryScope::Workspace(workspace_id), None)
                 .await?;
-            pages.sort_by(|left, right| right.updated.cmp(&left.updated));
+            pages.sort_by_key(|page| std::cmp::Reverse(page.updated));
             pages.truncate(limit);
             Ok(DaemonReply::MemoryEntries(pages))
         }
@@ -722,7 +722,13 @@ mod tests {
         StartSessionRequest, UserId, UserMessage, WorkspaceId,
     };
 
+    static DAEMON_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn test_config() -> Option<MoaConfig> {
+        if !live_provider_tests_enabled() {
+            return None;
+        }
+
         let dir = tempdir().ok()?;
         let base = dir.keep();
         let mut config = MoaConfig::default();
@@ -749,6 +755,12 @@ mod tests {
         None
     }
 
+    fn live_provider_tests_enabled() -> bool {
+        std::env::var("MOA_RUN_LIVE_PROVIDER_TESTS")
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false)
+    }
+
     fn random_port() -> u16 {
         StdTcpListener::bind(("127.0.0.1", 0))
             .expect("bind ephemeral port")
@@ -759,6 +771,7 @@ mod tests {
 
     #[tokio::test]
     async fn daemon_ping_create_and_shutdown_roundtrip() -> Result<()> {
+        let _guard = DAEMON_TEST_LOCK.lock().await;
         let Some(config) = test_config() else {
             return Ok(());
         };
@@ -799,6 +812,7 @@ mod tests {
 
     #[tokio::test]
     async fn daemon_lists_session_previews() -> Result<()> {
+        let _guard = DAEMON_TEST_LOCK.lock().await;
         let Some(config) = test_config() else {
             return Ok(());
         };
@@ -863,6 +877,7 @@ mod tests {
 
     #[tokio::test]
     async fn daemon_create_session_uses_explicit_client_scope() -> Result<()> {
+        let _guard = DAEMON_TEST_LOCK.lock().await;
         let Some(config) = test_config() else {
             return Ok(());
         };
@@ -935,6 +950,7 @@ mod tests {
 
     #[tokio::test]
     async fn daemon_health_endpoint_responds_when_cloud_enabled() -> Result<()> {
+        let _guard = DAEMON_TEST_LOCK.lock().await;
         let Some(mut config) = test_config() else {
             return Ok(());
         };
