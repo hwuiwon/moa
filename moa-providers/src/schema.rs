@@ -142,10 +142,8 @@ fn make_nullable(schema: &mut Value) {
             let kind = kind.clone();
             object.insert("type".to_string(), json!([kind, "null"]));
         }
-        Some(Value::Array(kinds)) => {
-            if !kinds.iter().any(|kind| kind == "null") {
-                kinds.push(Value::String("null".to_string()));
-            }
+        Some(Value::Array(kinds)) if !kinds.iter().any(|kind| kind == "null") => {
+            kinds.push(Value::String("null".to_string()));
         }
         _ => {}
     }

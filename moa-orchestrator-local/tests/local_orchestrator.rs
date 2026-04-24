@@ -31,6 +31,10 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{Instant, sleep, timeout};
 const ASYNC_TEST_DEADLINE: Duration = Duration::from_secs(6);
 
+fn disable_query_rewrite(config: &mut MoaConfig) {
+    config.query_rewrite.enabled = false;
+}
+
 struct LocalContractHarness<'a> {
     orchestrator: &'a LocalOrchestrator,
     requests: Option<Arc<Mutex<Vec<CompletionRequest>>>>,
@@ -261,6 +265,7 @@ async fn test_orchestrator_with_provider(
 ) -> Result<(TempDir, LocalOrchestrator)> {
     let dir = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
+    disable_query_rewrite(&mut config);
     config.memory.auto_bootstrap = false;
     config.local.docker_enabled = false;
     config.local.memory_dir = dir.path().join("memory").display().to_string();
@@ -329,10 +334,11 @@ async fn test_orchestrator_with_config_provider_and_store(
 }
 
 async fn test_orchestrator_with_config_router_and_store(
-    config: MoaConfig,
+    mut config: MoaConfig,
     model_router: Arc<ModelRouter>,
     session_store: Arc<PostgresSessionStore>,
 ) -> Result<LocalOrchestrator> {
+    disable_query_rewrite(&mut config);
     let memory_store = Arc::new(
         timed_test_stage(
             "local:create_memory_store",
@@ -1433,6 +1439,7 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
     drop(orchestrator);
 
     let mut reopened_config = MoaConfig::default();
+    disable_query_rewrite(&mut reopened_config);
     reopened_config.local.memory_dir = dir.path().join("memory").display().to_string();
     reopened_config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     let reopened_memory = Arc::new(
@@ -2208,6 +2215,7 @@ async fn panicking_provider_marks_session_failed() -> Result<()> {
 async fn completed_tool_turn_destroys_cached_hand() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = MoaConfig::default();
+    disable_query_rewrite(&mut config);
     config.memory.auto_bootstrap = false;
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();

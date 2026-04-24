@@ -533,6 +533,12 @@ mod tests {
         }
     }
 
+    fn test_moa_config() -> MoaConfig {
+        let mut config = MoaConfig::default();
+        config.database.url = moa_session::testing::test_database_url();
+        config
+    }
+
     #[derive(Clone)]
     struct MockProvider;
 
@@ -612,8 +618,9 @@ mod tests {
     #[tokio::test]
     async fn run_environment_collects_response_and_metrics() {
         let temp = tempdir().unwrap();
+        let config = test_moa_config();
         let environment = build_agent_environment_with_provider(
-            &MoaConfig::default(),
+            &config,
             &AgentConfig {
                 name: "config".to_string(),
                 ..AgentConfig::default()

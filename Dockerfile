@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.6
 
-FROM rust:1.82 AS builder
+FROM rust:1.95.0-bookworm AS builder
 WORKDIR /build
 
 COPY . .

@@ -213,7 +213,7 @@ impl DaemonChatRuntime {
         if let Some(filter) = filter {
             pages.retain(|page| page.page_type == filter);
         }
-        pages.sort_by(|left, right| right.updated.cmp(&left.updated));
+        pages.sort_by_key(|page| std::cmp::Reverse(page.updated));
         Ok(pages)
     }
 

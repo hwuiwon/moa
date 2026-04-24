@@ -235,6 +235,14 @@ fn model_router(provider: Arc<dyn LLMProvider>) -> Arc<ModelRouter> {
     Arc::new(ModelRouter::new(provider, None))
 }
 
+fn test_config() -> MoaConfig {
+    let mut config = MoaConfig::default();
+    if let Ok(url) = std::env::var("TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
+        config.database.url = url;
+    }
+    config
+}
+
 fn tool_rich_events() -> Vec<EventRecord> {
     let session_id = SessionId::new();
     (0..7)
@@ -343,9 +351,10 @@ async fn distills_skill_after_tool_heavy_session() -> Result<()> {
     });
     let session = session();
     let events = tool_rich_events();
+    let config = test_config();
 
     let distilled = maybe_distill_skill(
-        &MoaConfig::default(),
+        &config,
         &session,
         &events,
         memory.clone(),
@@ -389,8 +398,9 @@ async fn improves_existing_skill_when_better_flow_is_found() -> Result<()> {
         response: Arc::new(Mutex::new(IMPROVED_SKILL.to_string())),
     });
     let existing = moa_skills::skill_metadata_from_document(path.clone(), &original);
+    let config = test_config();
     let improved = maybe_improve_skill(
-        &MoaConfig::default(),
+        &config,
         &session(),
         &existing,
         &tool_rich_events(),
@@ -435,9 +445,10 @@ async fn improvement_accepted_when_scores_better() -> Result<()> {
         output_per_mtok: 0.0,
     });
     let existing = moa_skills::skill_metadata_from_document(path.clone(), &original);
+    let config = test_config();
 
     let improved = maybe_improve_skill(
-        &MoaConfig::default(),
+        &config,
         &session(),
         &existing,
         &tool_rich_events(),
@@ -483,9 +494,10 @@ async fn improvement_rejected_on_regression() -> Result<()> {
         output_per_mtok: 0.0,
     });
     let existing = moa_skills::skill_metadata_from_document(path.clone(), &original);
+    let config = test_config();
 
     let improved = maybe_improve_skill(
-        &MoaConfig::default(),
+        &config,
         &session(),
         &existing,
         &tool_rich_events(),
@@ -521,9 +533,10 @@ async fn no_tests_means_unconditional_accept() -> Result<()> {
         response: Arc::new(Mutex::new(IMPROVED_SKILL.to_string())),
     });
     let existing = moa_skills::skill_metadata_from_document(path.clone(), &original);
+    let config = test_config();
 
     let improved = maybe_improve_skill(
-        &MoaConfig::default(),
+        &config,
         &session(),
         &existing,
         &tool_rich_events(),
@@ -560,9 +573,10 @@ async fn log_entry_written_for_regression_attempt() -> Result<()> {
         output_per_mtok: 0.0,
     });
     let existing = moa_skills::skill_metadata_from_document(path.clone(), &original);
+    let config = test_config();
 
     maybe_improve_skill(
-        &MoaConfig::default(),
+        &config,
         &session(),
         &existing,
         &tool_rich_events(),
@@ -605,9 +619,10 @@ async fn budget_limit_skips_expensive_tests() -> Result<()> {
         output_per_mtok: 50_000.0,
     });
     let existing = moa_skills::skill_metadata_from_document(path.clone(), &original);
+    let config = test_config();
 
     let improved = maybe_improve_skill(
-        &MoaConfig::default(),
+        &config,
         &session(),
         &existing,
         &tool_rich_events(),

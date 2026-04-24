@@ -219,7 +219,7 @@ impl LocalChatRuntime {
             .memory_store()
             .list_pages(&MemoryScope::Workspace(self.workspace_id.clone()), filter)
             .await?;
-        pages.sort_by(|left, right| right.updated.cmp(&left.updated));
+        pages.sort_by_key(|page| std::cmp::Reverse(page.updated));
         Ok(pages)
     }
 
