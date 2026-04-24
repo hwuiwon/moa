@@ -12,8 +12,9 @@ use serde_json::Value;
 
 use crate::{
     ApprovalDecision, ApprovalPrompt, ClaimCheck, ContextSnapshot, Event, EventFilter, EventRange,
-    EventRecord, PendingSignal, PendingSignalId, Result, SessionFilter, SessionId, SessionMeta,
-    SessionStatus, SessionStore, SessionSummary, ToolContent, ToolOutput, WorkspaceId,
+    EventRecord, PendingSignal, PendingSignalId, Result, SegmentCompletion, SegmentId,
+    SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary,
+    TaskSegment, ToolContent, ToolOutput, WorkspaceId,
 };
 
 tokio::task_local! {
@@ -227,6 +228,67 @@ impl SessionStore for CountedSessionStore {
     async fn delete_session(&self, session_id: SessionId) -> Result<()> {
         self.inner.delete_session(session_id).await
     }
+
+    async fn create_segment(&self, segment: &TaskSegment) -> Result<()> {
+        self.inner.create_segment(segment).await
+    }
+
+    async fn complete_segment(
+        &self,
+        segment_id: SegmentId,
+        update: SegmentCompletion,
+    ) -> Result<()> {
+        self.inner.complete_segment(segment_id, update).await
+    }
+
+    async fn get_active_segment(&self, session_id: SessionId) -> Result<Option<TaskSegment>> {
+        self.inner.get_active_segment(session_id).await
+    }
+
+    async fn list_segments(&self, session_id: SessionId) -> Result<Vec<TaskSegment>> {
+        self.inner.list_segments(session_id).await
+    }
+
+    async fn update_segment_resolution(
+        &self,
+        segment_id: SegmentId,
+        resolution: &str,
+        confidence: f64,
+    ) -> Result<()> {
+        self.inner
+            .update_segment_resolution(segment_id, resolution, confidence)
+            .await
+    }
+
+    async fn record_active_segment_tool_use(
+        &self,
+        session_id: SessionId,
+        tool_name: &str,
+    ) -> Result<()> {
+        self.inner
+            .record_active_segment_tool_use(session_id, tool_name)
+            .await
+    }
+
+    async fn record_active_segment_skill_activation(
+        &self,
+        session_id: SessionId,
+        skill_name: &str,
+    ) -> Result<()> {
+        self.inner
+            .record_active_segment_skill_activation(session_id, skill_name)
+            .await
+    }
+
+    async fn record_active_segment_turn_usage(
+        &self,
+        session_id: SessionId,
+        token_cost: u64,
+    ) -> Result<()> {
+        self.inner
+            .record_active_segment_turn_usage(session_id, token_cost)
+            .await
+    }
 }
 
 fn recorded_duration_micros(duration: Duration) -> u64 {
@@ -260,6 +322,26 @@ fn event_payload_size(event: &Event) -> usize {
         } => workspace_id.as_str().len() + user_id.as_str().len() + model.as_str().len(),
         Event::SessionStatusChanged { .. } => 32,
         Event::SessionCompleted { summary, .. } => summary.len(),
+        Event::SegmentStarted {
+            task_summary,
+            intent_label,
+            ..
+        } => {
+            task_summary.as_ref().map_or(0, String::len)
+                + intent_label.as_ref().map_or(0, String::len)
+        }
+        Event::SegmentCompleted {
+            intent_label,
+            task_summary,
+            tools_used,
+            skills_activated,
+            ..
+        } => {
+            intent_label.as_ref().map_or(0, String::len)
+                + task_summary.as_ref().map_or(0, String::len)
+                + tools_used.iter().map(String::len).sum::<usize>()
+                + skills_activated.iter().map(String::len).sum::<usize>()
+        }
         Event::UserMessage { text, attachments } => {
             text.len() + attachments.iter().map(attachment_size).sum::<usize>()
         }

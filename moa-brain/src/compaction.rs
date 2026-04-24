@@ -303,6 +303,24 @@ fn event_summary_line(record: &EventRecord) -> String {
             record.sequence_num,
             truncate(summary)
         ),
+        Event::SegmentStarted {
+            segment_index,
+            task_summary,
+            ..
+        } => format!(
+            "#{} segment_started index={segment_index}: {}",
+            record.sequence_num,
+            truncate(task_summary.as_deref().unwrap_or("undefined"))
+        ),
+        Event::SegmentCompleted {
+            segment_index,
+            task_summary,
+            ..
+        } => format!(
+            "#{} segment_completed index={segment_index}: {}",
+            record.sequence_num,
+            truncate(task_summary.as_deref().unwrap_or("undefined"))
+        ),
         Event::BrainThinking { summary, .. } => format!(
             "#{} brain_thinking: {}",
             record.sequence_num,

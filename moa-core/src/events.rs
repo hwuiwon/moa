@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::types::{
     ApprovalDecision, ApprovalPrompt, Attachment, CacheReport, EventType, ModelId, ModelTier,
-    RiskLevel, SessionStatus, SubAgentId, ToolCallId, ToolOutput, UserId, WorkspaceId,
+    RiskLevel, SegmentId, SessionStatus, SubAgentId, ToolCallId, ToolOutput, UserId, WorkspaceId,
 };
 
 /// Append-only session event payload.
@@ -36,6 +36,42 @@ pub enum Event {
         summary: String,
         /// Number of turns completed.
         total_turns: u32,
+    },
+    /// A new task segment started within the session.
+    SegmentStarted {
+        /// Segment identifier.
+        segment_id: SegmentId,
+        /// Zero-based segment index within the session.
+        segment_index: u32,
+        /// Best-effort task summary for the segment.
+        task_summary: Option<String>,
+        /// Optional intent label.
+        intent_label: Option<String>,
+        /// Optional intent confidence.
+        intent_confidence: Option<f64>,
+        /// Previous segment identifier, when present.
+        previous_segment_id: Option<SegmentId>,
+    },
+    /// The current task segment completed.
+    SegmentCompleted {
+        /// Segment identifier.
+        segment_id: SegmentId,
+        /// Zero-based segment index within the session.
+        segment_index: u32,
+        /// Optional intent label.
+        intent_label: Option<String>,
+        /// Best-effort task summary for the segment.
+        task_summary: Option<String>,
+        /// Number of turns attributed to the segment.
+        turn_count: u32,
+        /// Tool names used during the segment.
+        tools_used: Vec<String>,
+        /// Skill names activated during the segment.
+        skills_activated: Vec<String>,
+        /// Token cost attributed to the segment.
+        token_cost: u64,
+        /// Segment duration in milliseconds.
+        duration_ms: u64,
     },
     /// A user authored message.
     UserMessage {
@@ -260,6 +296,8 @@ impl Event {
             Self::SessionCreated { .. } => EventType::SessionCreated,
             Self::SessionStatusChanged { .. } => EventType::SessionStatusChanged,
             Self::SessionCompleted { .. } => EventType::SessionCompleted,
+            Self::SegmentStarted { .. } => EventType::SegmentStarted,
+            Self::SegmentCompleted { .. } => EventType::SegmentCompleted,
             Self::UserMessage { .. } => EventType::UserMessage,
             Self::QueuedMessage { .. } => EventType::QueuedMessage,
             Self::BrainThinking { .. } => EventType::BrainThinking,
@@ -288,6 +326,8 @@ impl Event {
             Self::SessionCreated { .. } => "SessionCreated",
             Self::SessionStatusChanged { .. } => "SessionStatusChanged",
             Self::SessionCompleted { .. } => "SessionCompleted",
+            Self::SegmentStarted { .. } => "SegmentStarted",
+            Self::SegmentCompleted { .. } => "SegmentCompleted",
             Self::UserMessage { .. } => "UserMessage",
             Self::QueuedMessage { .. } => "QueuedMessage",
             Self::BrainThinking { .. } => "BrainThinking",

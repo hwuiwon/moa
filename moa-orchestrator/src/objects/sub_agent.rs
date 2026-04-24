@@ -6,18 +6,21 @@ use std::hash::{Hash, Hasher};
 
 use chrono::Utc;
 use moa_core::{
-    ApprovalDecision, CompletionRequest, CompletionResponse, ContextMessage, DispatchSubAgentInput,
-    Event, MoaError, ModelCapabilities, ModelId, SessionId, SessionMeta, SessionStatus,
-    SubAgentChildRef, SubAgentId, SubAgentMessage, SubAgentResult, SubAgentState, SubAgentStatus,
-    ToolCallId, ToolInvocation, ToolOutput, TurnOutcome, UserId, UserMessage, WorkspaceId,
-    dispatch_sub_agent_tool_schema,
+    ActiveSegment, ApprovalDecision, CompletionRequest, CompletionResponse, ContextMessage,
+    DispatchSubAgentInput, Event, MoaError, ModelCapabilities, ModelId, SessionId, SessionMeta,
+    SessionStatus, SubAgentChildRef, SubAgentId, SubAgentMessage, SubAgentResult, SubAgentState,
+    SubAgentStatus, ToolCallId, ToolInvocation, ToolOutput, TurnOutcome, UserId, UserMessage,
+    WorkspaceId, dispatch_sub_agent_tool_schema,
 };
 use restate_sdk::prelude::*;
 use serde_json::json;
 
 use crate::OrchestratorCtx;
 use crate::observability::annotate_restate_handler_span;
-use crate::services::session_store::{AppendEventRequest, SessionStoreClient};
+use crate::services::session_store::{
+    AppendEventRequest, RecordSegmentSkillActivationRequest, RecordSegmentToolUseRequest,
+    RecordSegmentTurnUsageRequest, SessionStoreClient,
+};
 use crate::sub_agent_dispatch::{DispatchedSubAgent, MAX_SUB_AGENT_DEPTH, dispatch_sub_agent};
 use crate::turn::approval::serialize_awakeable_decision;
 use crate::turn::util::{
@@ -439,12 +442,64 @@ impl AgentAdapter for SubAgentTurnAdapter {
     ) -> Result<(), HandlerError> {
         let mut state = SubAgentVoState::load_from(ctx).await?;
         let token_usage = response.token_usage();
-        state.record_token_usage(
-            (token_usage.total_input_tokens() + token_usage.output_tokens) as u64,
-        );
+        let token_cost = (token_usage.total_input_tokens() + token_usage.output_tokens) as u64;
+        state.record_token_usage(token_cost);
+        let parent_session = state.parent_session;
         state.last_turn_summary = summarize_response_text(response);
         apply_response_to_history(&mut state.history, response);
         state.persist_into(ctx);
+        if let Some(parent_session) = parent_session
+            && token_cost > 0
+        {
+            ctx.service_client::<SessionStoreClient>()
+                .record_segment_turn_usage(Json(RecordSegmentTurnUsageRequest {
+                    session_id: parent_session,
+                    token_cost,
+                }))
+                .send();
+        }
+        Ok(())
+    }
+
+    async fn current_segment(
+        &self,
+        ctx: &ObjectContext<'_>,
+    ) -> Result<Option<ActiveSegment>, HandlerError> {
+        let parent_session = self.owning_session_id(ctx).await?;
+        let segment = ctx
+            .service_client::<SessionStoreClient>()
+            .get_active_segment(Json(parent_session))
+            .call()
+            .await?
+            .into_inner();
+        Ok(segment.map(|segment| segment.active_view()))
+    }
+
+    async fn record_segment_tool_use(
+        &self,
+        ctx: &ObjectContext<'_>,
+        tool_name: &str,
+    ) -> Result<(), HandlerError> {
+        ctx.service_client::<SessionStoreClient>()
+            .record_segment_tool_use(Json(RecordSegmentToolUseRequest {
+                session_id: self.owning_session_id(ctx).await?,
+                tool_name: tool_name.to_string(),
+            }))
+            .send();
+        Ok(())
+    }
+
+    async fn record_segment_skill_activation(
+        &self,
+        ctx: &ObjectContext<'_>,
+        skill_name: &str,
+    ) -> Result<(), HandlerError> {
+        ctx.service_client::<SessionStoreClient>()
+            .record_segment_skill_activation(Json(RecordSegmentSkillActivationRequest {
+                session_id: self.owning_session_id(ctx).await?,
+                skill_name: skill_name.to_string(),
+            }))
+            .send();
         Ok(())
     }
 

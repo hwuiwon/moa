@@ -1035,6 +1035,12 @@ fn event_labels(events: &[moa_core::EventRecord]) -> Vec<String> {
                 format!("SessionStatusChanged({from:?}->{to:?})")
             }
             Event::SessionCompleted { .. } => "SessionCompleted".to_string(),
+            Event::SegmentStarted { segment_index, .. } => {
+                format!("SegmentStarted({segment_index})")
+            }
+            Event::SegmentCompleted { segment_index, .. } => {
+                format!("SegmentCompleted({segment_index})")
+            }
             Event::UserMessage { text, .. } => format!("UserMessage({text})"),
             Event::QueuedMessage { text, .. } => format!("QueuedMessage({text})"),
             Event::BrainThinking { .. } => "BrainThinking".to_string(),

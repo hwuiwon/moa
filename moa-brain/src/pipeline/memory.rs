@@ -534,6 +534,8 @@ mod tests {
                 suggested_tools: Vec::new(),
                 needs_clarification: false,
                 clarification_question: None,
+                is_new_task: false,
+                task_summary: None,
                 source: moa_core::RewriteSource::Rewritten,
             })
             .expect("rewrite metadata should serialize"),

@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use moa_core::{
-    Event, EventFilter, EventRange, EventRecord, SessionId, SessionMeta, SessionStatus,
-    SessionStore as CoreSessionStore, record_session_error,
+    Event, EventFilter, EventRange, EventRecord, SegmentCompletion, SegmentId, SessionId,
+    SessionMeta, SessionStatus, SessionStore as CoreSessionStore, TaskSegment,
+    record_session_error,
 };
 use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
@@ -57,6 +58,60 @@ pub struct InitSessionVoRequest {
     pub meta: SessionMeta,
 }
 
+/// Request payload for `SessionStore/create_segment`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CreateSegmentRequest {
+    /// Segment metadata to persist.
+    pub segment: TaskSegment,
+}
+
+/// Request payload for `SessionStore/complete_segment`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompleteSegmentRequest {
+    /// Segment identifier to complete.
+    pub segment_id: SegmentId,
+    /// Completion counters and end timestamp.
+    pub update: SegmentCompletion,
+}
+
+/// Request payload for `SessionStore/update_segment_resolution`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UpdateSegmentResolutionRequest {
+    /// Segment identifier to update.
+    pub segment_id: SegmentId,
+    /// Resolution label.
+    pub resolution: String,
+    /// Resolution confidence.
+    pub confidence: f64,
+}
+
+/// Request payload for recording active-segment tool usage.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecordSegmentToolUseRequest {
+    /// Session whose active segment receives the tool usage.
+    pub session_id: SessionId,
+    /// Tool name to record.
+    pub tool_name: String,
+}
+
+/// Request payload for recording active-segment skill usage.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecordSegmentSkillActivationRequest {
+    /// Session whose active segment receives the skill activation.
+    pub session_id: SessionId,
+    /// Skill name to record.
+    pub skill_name: String,
+}
+
+/// Request payload for recording active-segment turn usage.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecordSegmentTurnUsageRequest {
+    /// Session whose active segment receives the turn usage.
+    pub session_id: SessionId,
+    /// Token cost to add for the turn.
+    pub token_cost: u64,
+}
+
 /// Restate service surface for durable session/event storage.
 #[restate_sdk::service]
 pub trait SessionStore {
@@ -84,6 +139,42 @@ pub trait SessionStore {
 
     /// Bootstraps VO state after the session row exists in Postgres.
     async fn init_session_vo(request: Json<InitSessionVoRequest>) -> Result<(), HandlerError>;
+
+    /// Persists a task segment row.
+    async fn create_segment(request: Json<CreateSegmentRequest>) -> Result<(), HandlerError>;
+
+    /// Completes a task segment row.
+    async fn complete_segment(request: Json<CompleteSegmentRequest>) -> Result<(), HandlerError>;
+
+    /// Loads the active task segment for a session.
+    async fn get_active_segment(
+        session_id: Json<SessionId>,
+    ) -> Result<Json<Option<TaskSegment>>, HandlerError>;
+
+    /// Lists task segments for a session.
+    async fn list_segments(
+        session_id: Json<SessionId>,
+    ) -> Result<Json<Vec<TaskSegment>>, HandlerError>;
+
+    /// Updates a task segment resolution.
+    async fn update_segment_resolution(
+        request: Json<UpdateSegmentResolutionRequest>,
+    ) -> Result<(), HandlerError>;
+
+    /// Records a tool name on a session's active segment.
+    async fn record_segment_tool_use(
+        request: Json<RecordSegmentToolUseRequest>,
+    ) -> Result<(), HandlerError>;
+
+    /// Records a skill activation on a session's active segment.
+    async fn record_segment_skill_activation(
+        request: Json<RecordSegmentSkillActivationRequest>,
+    ) -> Result<(), HandlerError>;
+
+    /// Records one turn and token usage on a session's active segment.
+    async fn record_segment_turn_usage(
+        request: Json<RecordSegmentTurnUsageRequest>,
+    ) -> Result<(), HandlerError>;
 }
 
 /// Concrete Restate service implementation backed by `PostgresSessionStore`.
@@ -145,6 +236,86 @@ impl SessionStoreImpl {
     ) -> Result<Vec<EventRecord>, HandlerError> {
         self.store
             .search_events(&request.query, request.filter)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    async fn create_segment_inner(
+        &self,
+        request: CreateSegmentRequest,
+    ) -> Result<(), HandlerError> {
+        self.store
+            .create_segment(&request.segment)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    async fn complete_segment_inner(
+        &self,
+        request: CompleteSegmentRequest,
+    ) -> Result<(), HandlerError> {
+        self.store
+            .complete_segment(request.segment_id, request.update)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    async fn get_active_segment_inner(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<TaskSegment>, HandlerError> {
+        self.store
+            .get_active_segment(session_id)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    async fn list_segments_inner(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<TaskSegment>, HandlerError> {
+        self.store
+            .list_segments(session_id)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    async fn update_segment_resolution_inner(
+        &self,
+        request: UpdateSegmentResolutionRequest,
+    ) -> Result<(), HandlerError> {
+        self.store
+            .update_segment_resolution(request.segment_id, &request.resolution, request.confidence)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    async fn record_segment_tool_use_inner(
+        &self,
+        request: RecordSegmentToolUseRequest,
+    ) -> Result<(), HandlerError> {
+        self.store
+            .record_active_segment_tool_use(request.session_id, &request.tool_name)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    async fn record_segment_skill_activation_inner(
+        &self,
+        request: RecordSegmentSkillActivationRequest,
+    ) -> Result<(), HandlerError> {
+        self.store
+            .record_active_segment_skill_activation(request.session_id, &request.skill_name)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    async fn record_segment_turn_usage_inner(
+        &self,
+        request: RecordSegmentTurnUsageRequest,
+    ) -> Result<(), HandlerError> {
+        self.store
+            .record_active_segment_turn_usage(request.session_id, request.token_cost)
             .await
             .map_err(HandlerError::from)
     }
@@ -266,6 +437,152 @@ impl SessionStore for SessionStoreImpl {
             .call()
             .await?;
         Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn create_segment(
+        &self,
+        ctx: Context<'_>,
+        request: Json<CreateSegmentRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "create_segment");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move { service.create_segment_inner(request).await })
+            .name("create_segment")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn complete_segment(
+        &self,
+        ctx: Context<'_>,
+        request: Json<CompleteSegmentRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "complete_segment");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move { service.complete_segment_inner(request).await })
+            .name("complete_segment")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, session_id))]
+    async fn get_active_segment(
+        &self,
+        ctx: Context<'_>,
+        session_id: Json<SessionId>,
+    ) -> Result<Json<Option<TaskSegment>>, HandlerError> {
+        annotate_restate_handler_span("SessionStore", "get_active_segment");
+        let store = self.store.clone();
+        let session_id = session_id.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move {
+                service
+                    .get_active_segment_inner(session_id)
+                    .await
+                    .map(Json::from)
+            })
+            .name("get_active_segment")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, session_id))]
+    async fn list_segments(
+        &self,
+        ctx: Context<'_>,
+        session_id: Json<SessionId>,
+    ) -> Result<Json<Vec<TaskSegment>>, HandlerError> {
+        annotate_restate_handler_span("SessionStore", "list_segments");
+        let store = self.store.clone();
+        let session_id = session_id.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move {
+                service
+                    .list_segments_inner(session_id)
+                    .await
+                    .map(Json::from)
+            })
+            .name("list_segments")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn update_segment_resolution(
+        &self,
+        ctx: Context<'_>,
+        request: Json<UpdateSegmentResolutionRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "update_segment_resolution");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move { service.update_segment_resolution_inner(request).await })
+            .name("update_segment_resolution")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn record_segment_tool_use(
+        &self,
+        ctx: Context<'_>,
+        request: Json<RecordSegmentToolUseRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "record_segment_tool_use");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move { service.record_segment_tool_use_inner(request).await })
+            .name("record_segment_tool_use")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn record_segment_skill_activation(
+        &self,
+        ctx: Context<'_>,
+        request: Json<RecordSegmentSkillActivationRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "record_segment_skill_activation");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move { service.record_segment_skill_activation_inner(request).await })
+            .name("record_segment_skill_activation")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn record_segment_turn_usage(
+        &self,
+        ctx: Context<'_>,
+        request: Json<RecordSegmentTurnUsageRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "record_segment_turn_usage");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move { service.record_segment_turn_usage_inner(request).await })
+            .name("record_segment_turn_usage")
+            .await?)
     }
 }
 

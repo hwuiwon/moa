@@ -19,6 +19,12 @@ pub struct QueryRewriteResult {
     /// If clarification is needed, the question to ask.
     #[serde(default)]
     pub clarification_question: Option<String>,
+    /// Whether this message starts a new task segment.
+    #[serde(default)]
+    pub is_new_task: bool,
+    /// Short summary of the new task when a segment transition is detected.
+    #[serde(default)]
+    pub task_summary: Option<String>,
     /// Whether the rewriter ran or fell back to the original query.
     pub source: RewriteSource,
 }
@@ -34,6 +40,8 @@ impl QueryRewriteResult {
             suggested_tools: Vec::new(),
             needs_clarification: false,
             clarification_question: None,
+            is_new_task: false,
+            task_summary: None,
             source: RewriteSource::Passthrough,
         }
     }
@@ -70,6 +78,10 @@ impl QueryRewriteResult {
                 "needs_clarification": { "type": "boolean" },
                 "clarification_question": {
                     "type": ["string", "null"]
+                },
+                "is_new_task": { "type": "boolean" },
+                "task_summary": {
+                    "type": ["string", "null"]
                 }
             },
             "required": [
@@ -78,7 +90,9 @@ impl QueryRewriteResult {
                 "sub_queries",
                 "suggested_tools",
                 "needs_clarification",
-                "clarification_question"
+                "clarification_question",
+                "is_new_task",
+                "task_summary"
             ]
         })
     }

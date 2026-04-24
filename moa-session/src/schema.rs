@@ -27,6 +27,7 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
     let users = qualified_name(schema_name, "users");
     let pending_signals = qualified_name(schema_name, "pending_signals");
     let context_snapshots = qualified_name(schema_name, "context_snapshots");
+    let task_segments = qualified_name(schema_name, "task_segments");
     let tool_call_analytics = qualified_name(schema_name, "tool_call_analytics");
     let tool_call_summary = qualified_name(schema_name, "tool_call_summary");
     let session_summary = qualified_name(schema_name, "session_summary");
@@ -44,6 +45,9 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
     let idx_events_fts = quote_identifier("idx_events_fts");
     let idx_pending_signals_session = quote_identifier("idx_pending_signals_session");
     let idx_context_snapshots_last_seq = quote_identifier("idx_context_snapshots_last_seq");
+    let idx_task_segments_tenant_intent = quote_identifier("idx_task_segments_tenant_intent");
+    let idx_task_segments_session = quote_identifier("idx_task_segments_session");
+    let idx_task_segments_tenant_time = quote_identifier("idx_task_segments_tenant_time");
     let idx_session_turn_metrics_session_turn =
         quote_identifier("idx_session_turn_metrics_session_turn");
     let idx_daily_workspace_metrics_workspace_day =
@@ -183,6 +187,34 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS {idx_context_snapshots_last_seq}
             ON {context_snapshots}(session_id, last_sequence_num);
+
+        CREATE TABLE IF NOT EXISTS {task_segments} (
+            id UUID PRIMARY KEY,
+            session_id UUID NOT NULL REFERENCES {sessions}(id) ON DELETE CASCADE,
+            tenant_id TEXT NOT NULL,
+            segment_index INT NOT NULL,
+            intent_label TEXT,
+            intent_confidence NUMERIC(4,3),
+            task_summary TEXT,
+            started_at TIMESTAMPTZ NOT NULL,
+            ended_at TIMESTAMPTZ,
+            resolution TEXT,
+            resolution_signal TEXT,
+            resolution_confidence NUMERIC(4,3),
+            tools_used TEXT[] NOT NULL DEFAULT '{{}}',
+            skills_activated TEXT[] NOT NULL DEFAULT '{{}}',
+            turn_count INT NOT NULL DEFAULT 0,
+            token_cost BIGINT NOT NULL DEFAULT 0,
+            previous_segment_id UUID,
+            UNIQUE(session_id, segment_index)
+        );
+
+        CREATE INDEX IF NOT EXISTS {idx_task_segments_tenant_intent}
+            ON {task_segments} (tenant_id, intent_label, resolution);
+        CREATE INDEX IF NOT EXISTS {idx_task_segments_session}
+            ON {task_segments} (session_id, segment_index);
+        CREATE INDEX IF NOT EXISTS {idx_task_segments_tenant_time}
+            ON {task_segments} (tenant_id, started_at DESC);
 
         CREATE OR REPLACE FUNCTION {update_session_aggregates}() RETURNS TRIGGER AS $$
         DECLARE
