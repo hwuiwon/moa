@@ -7,11 +7,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
     ApprovalRule, BlobStore, CacheDailyMetric, ClaimCheck, ContextSnapshot, Event, EventFilter,
-    EventRange, EventRecord, MoaConfig, MoaError, PendingSignal, PendingSignalId, Result,
-    SegmentCompletion, SegmentId, SessionAnalyticsSummary, SessionFilter, SessionMeta,
-    SessionStatus, SessionStore, SessionSummary, SessionTurnMetric, TaskSegment, ToolCallSummary,
-    WakeContext, WorkspaceAnalyticsSummary, WorkspaceId, record_session_created,
-    record_sessions_active, record_turn_completed,
+    EventRange, EventRecord, MoaConfig, MoaError, PendingSignal, PendingSignalId, ResolutionScore,
+    Result, SegmentBaseline, SegmentCompletion, SegmentId, SessionAnalyticsSummary, SessionFilter,
+    SessionMeta, SessionStatus, SessionStore, SessionSummary, SessionTurnMetric,
+    SkillResolutionRate, TaskSegment, ToolCallSummary, WakeContext, WorkspaceAnalyticsSummary,
+    WorkspaceId, record_session_created, record_sessions_active, record_turn_completed,
 };
 use moa_security::ApprovalRuleStore;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};
@@ -388,9 +388,9 @@ impl PostgresSessionStore {
         sqlx::query(&format!(
             "INSERT INTO {task_segments} \
              (id, session_id, tenant_id, segment_index, intent_label, intent_confidence, \
-              task_summary, started_at, ended_at, resolution, resolution_confidence, \
+              task_summary, started_at, ended_at, resolution, resolution_signal, resolution_confidence, \
               tools_used, skills_activated, turn_count, token_cost, previous_segment_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) \
              ON CONFLICT (id) DO UPDATE SET \
                  tenant_id = EXCLUDED.tenant_id, \
                  intent_label = EXCLUDED.intent_label, \
@@ -398,6 +398,7 @@ impl PostgresSessionStore {
                  task_summary = EXCLUDED.task_summary, \
                  ended_at = EXCLUDED.ended_at, \
                  resolution = EXCLUDED.resolution, \
+                 resolution_signal = EXCLUDED.resolution_signal, \
                  resolution_confidence = EXCLUDED.resolution_confidence, \
                  tools_used = EXCLUDED.tools_used, \
                  skills_activated = EXCLUDED.skills_activated, \
@@ -415,6 +416,9 @@ impl PostgresSessionStore {
         .bind(segment.started_at)
         .bind(segment.ended_at)
         .bind(segment.resolution.as_deref())
+        .bind(serialize_resolution_signal(
+            segment.resolution_signal.as_ref(),
+        )?)
         .bind(segment.resolution_confidence)
         .bind(&segment.tools_used)
         .bind(&segment.skills_activated)
@@ -525,6 +529,142 @@ impl PostgresSessionStore {
             return Err(MoaError::StorageError(format!(
                 "task segment `{segment_id}` was not found"
             )));
+        }
+        Ok(())
+    }
+
+    /// Updates a task segment resolution outcome and signal breakdown.
+    pub async fn update_segment_resolution_score(
+        &self,
+        segment_id: SegmentId,
+        score: &ResolutionScore,
+    ) -> Result<()> {
+        let task_segments = self.table_name("task_segments");
+        let affected = sqlx::query(&format!(
+            "UPDATE {task_segments} SET \
+                 resolution = $1, \
+                 resolution_signal = $2, \
+                 resolution_confidence = $3 \
+             WHERE id = $4"
+        ))
+        .bind(score.label.as_str())
+        .bind(serialize_resolution_signal(Some(score))?)
+        .bind(score.confidence)
+        .bind(segment_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(MoaError::StorageError(format!(
+                "task segment `{segment_id}` was not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Loads the historical structural baseline for one tenant and intent label.
+    pub async fn get_segment_baseline(
+        &self,
+        tenant_id: &str,
+        intent_label: Option<&str>,
+    ) -> Result<Option<SegmentBaseline>> {
+        let Some(intent_label) = intent_label else {
+            return Ok(None);
+        };
+        let segment_baselines = self.table_name("segment_baselines");
+        let row = sqlx::query(&format!(
+            "SELECT sample_count, avg_turns, stddev_turns, avg_cost, stddev_cost, \
+                    avg_duration_secs, stddev_duration_secs \
+             FROM {segment_baselines} \
+             WHERE tenant_id = $1 AND intent_label = $2 \
+             LIMIT 1"
+        ))
+        .bind(tenant_id)
+        .bind(intent_label)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        row.map(|row| {
+            Ok(SegmentBaseline {
+                sample_count: row
+                    .try_get::<i64, _>("sample_count")
+                    .map_err(map_sqlx_error)? as usize,
+                avg_turns: row.try_get::<f64, _>("avg_turns").map_err(map_sqlx_error)?,
+                stddev_turns: row
+                    .try_get::<Option<f64>, _>("stddev_turns")
+                    .map_err(map_sqlx_error)?,
+                avg_cost: row.try_get::<f64, _>("avg_cost").map_err(map_sqlx_error)?,
+                stddev_cost: row
+                    .try_get::<Option<f64>, _>("stddev_cost")
+                    .map_err(map_sqlx_error)?,
+                avg_duration_secs: row
+                    .try_get::<f64, _>("avg_duration_secs")
+                    .map_err(map_sqlx_error)?,
+                stddev_duration_secs: row
+                    .try_get::<Option<f64>, _>("stddev_duration_secs")
+                    .map_err(map_sqlx_error)?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Lists skill resolution-rate aggregates for ranking.
+    pub async fn list_skill_resolution_rates(
+        &self,
+        tenant_id: &str,
+        intent_label: Option<&str>,
+    ) -> Result<Vec<SkillResolutionRate>> {
+        let skill_resolution_rates = self.table_name("skill_resolution_rates");
+        let rows = sqlx::query(&format!(
+            "SELECT skill_name, uses, resolution_rate, avg_token_cost, avg_turn_count \
+             FROM {skill_resolution_rates} \
+             WHERE tenant_id = $1 AND ($2::TEXT IS NULL OR intent_label = $2) \
+             ORDER BY resolution_rate DESC, uses DESC, skill_name ASC"
+        ))
+        .bind(tenant_id)
+        .bind(intent_label)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        rows.iter()
+            .map(|row| {
+                Ok(SkillResolutionRate {
+                    skill_name: row
+                        .try_get::<String, _>("skill_name")
+                        .map_err(map_sqlx_error)?,
+                    uses: row.try_get::<i64, _>("uses").map_err(map_sqlx_error)? as u64,
+                    resolution_rate: row
+                        .try_get::<f64, _>("resolution_rate")
+                        .map_err(map_sqlx_error)?,
+                    avg_token_cost: row
+                        .try_get::<f64, _>("avg_token_cost")
+                        .map_err(map_sqlx_error)?,
+                    avg_turn_count: row
+                        .try_get::<f64, _>("avg_turn_count")
+                        .map_err(map_sqlx_error)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Refreshes task-segment derived materialized views.
+    pub async fn refresh_segment_materialized_views(&self) -> Result<()> {
+        for view_name in [
+            "skill_resolution_rates",
+            "intent_transitions",
+            "segment_baselines",
+        ] {
+            let qualified = self.table_name(view_name);
+            sqlx::query(&format!(
+                "REFRESH MATERIALIZED VIEW CONCURRENTLY {qualified}"
+            ))
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
         }
         Ok(())
     }
@@ -1251,6 +1391,34 @@ impl SessionStore for PostgresSessionStore {
             .await
     }
 
+    async fn update_segment_resolution_score(
+        &self,
+        segment_id: SegmentId,
+        score: &ResolutionScore,
+    ) -> Result<()> {
+        PostgresSessionStore::update_segment_resolution_score(self, segment_id, score).await
+    }
+
+    async fn get_segment_baseline(
+        &self,
+        tenant_id: &str,
+        intent_label: Option<&str>,
+    ) -> Result<Option<SegmentBaseline>> {
+        PostgresSessionStore::get_segment_baseline(self, tenant_id, intent_label).await
+    }
+
+    async fn list_skill_resolution_rates(
+        &self,
+        tenant_id: &str,
+        intent_label: Option<&str>,
+    ) -> Result<Vec<SkillResolutionRate>> {
+        PostgresSessionStore::list_skill_resolution_rates(self, tenant_id, intent_label).await
+    }
+
+    async fn refresh_segment_materialized_views(&self) -> Result<()> {
+        PostgresSessionStore::refresh_segment_materialized_views(self).await
+    }
+
     async fn record_active_segment_tool_use(
         &self,
         session_id: moa_core::SessionId,
@@ -1375,6 +1543,15 @@ fn normalize_event_search_query(query: &str) -> String {
         .filter(|token| !token.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn serialize_resolution_signal(score: Option<&ResolutionScore>) -> Result<Option<String>> {
+    score
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| {
+            MoaError::StorageError(format!("failed to serialize resolution score: {error}"))
+        })
 }
 
 fn quote_identifier(identifier: &str) -> String {

@@ -3,8 +3,8 @@
 use chrono::{DateTime, Utc};
 use moa_core::{
     ApprovalRule, EventType, MoaError, ModelId, PendingSignal, PendingSignalId, PendingSignalType,
-    Platform, PolicyAction, PolicyScope, Result, SegmentId, SessionId, SessionMeta, SessionStatus,
-    SessionSummary, TaskSegment, WorkspaceId,
+    Platform, PolicyAction, PolicyScope, ResolutionScore, Result, SegmentId, SessionId,
+    SessionMeta, SessionStatus, SessionSummary, TaskSegment, WorkspaceId,
 };
 use sqlx::{Row, postgres::PgRow};
 use uuid::Uuid;
@@ -37,7 +37,7 @@ pub(crate) const SESSION_SUMMARY_COLUMNS: &str =
 pub(crate) const TASK_SEGMENT_COLUMNS: &str = concat!(
     "id, session_id, tenant_id, segment_index, intent_label, ",
     "intent_confidence::DOUBLE PRECISION AS intent_confidence, task_summary, ",
-    "started_at, ended_at, resolution, ",
+    "started_at, ended_at, resolution, resolution_signal, ",
     "resolution_confidence::DOUBLE PRECISION AS resolution_confidence, ",
     "tools_used, skills_activated, turn_count, token_cost, previous_segment_id"
 );
@@ -367,6 +367,10 @@ pub(crate) fn task_segment_from_row(row: &PgRow) -> Result<TaskSegment> {
         resolution: row
             .try_get::<Option<String>, _>("resolution")
             .map_err(map_sqlx_error)?,
+        resolution_signal: parse_resolution_signal(
+            row.try_get::<Option<String>, _>("resolution_signal")
+                .map_err(map_sqlx_error)?,
+        )?,
         resolution_confidence: row
             .try_get::<Option<f64>, _>("resolution_confidence")
             .map_err(map_sqlx_error)?,
@@ -387,6 +391,16 @@ pub(crate) fn task_segment_from_row(row: &PgRow) -> Result<TaskSegment> {
             .map_err(map_sqlx_error)?
             .map(SegmentId),
     })
+}
+
+fn parse_resolution_signal(value: Option<String>) -> Result<Option<ResolutionScore>> {
+    value
+        .map(|value| {
+            serde_json::from_str::<ResolutionScore>(&value).map_err(|error| {
+                MoaError::StorageError(format!("invalid resolution signal payload: {error}"))
+            })
+        })
+        .transpose()
 }
 
 /// Maps an `approval_rules` row into an `ApprovalRule`.

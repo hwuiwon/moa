@@ -75,6 +75,7 @@ impl SegmentTracker {
             token_cost: 0,
             previous_segment_id,
             resolution: None,
+            resolution_signal: None,
             resolution_confidence: None,
         };
         let started = SegmentStarted {

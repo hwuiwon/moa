@@ -4,22 +4,29 @@ use std::time::Instant;
 
 use chrono::Utc;
 use moa_brain::pipeline::segments::SegmentTracker;
+use moa_brain::resolution::{
+    ResolutionOverride, ResolutionScorer, continuation_signal, self_assessment_signal,
+    structural_signal, tool_signal, verification_signal,
+};
 use moa_core::{
     ActiveSegment, ApprovalDecision, CancelMode, CompletionRequest, CompletionResponse,
-    DispatchSubAgentInput, Event, MoaError, Result as MoaResult, SessionId, SessionMeta,
-    SessionStatus, SubAgentChildRef, SubAgentId, ToolCallId, ToolInvocation, ToolOutput,
-    TurnOutcome, UserMessage, record_session_error, record_turn_event_persist_duration,
+    DispatchSubAgentInput, Event, EventRange, EventRecord, MoaError, QueryRewriteResult,
+    Result as MoaResult, ScoringPhase, SegmentId, SessionId, SessionMeta, SessionStatus,
+    SubAgentChildRef, SubAgentId, ToolCallId, ToolInvocation, ToolOutput, TurnOutcome, UserMessage,
+    record_session_error, record_turn_event_persist_duration,
 };
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
 use crate::brain_bridge::{PreparedTurnRequest, prepare_turn_request};
+use crate::ctx::OrchestratorCtx;
 use crate::objects::sub_agent::SubAgentClient;
 use crate::observability::{annotate_restate_handler_span, event_persist_span};
 use crate::services::session_store::{AppendEventRequest, SessionStoreClient, UpdateStatusRequest};
 use crate::services::session_store::{
-    CompleteSegmentRequest, CreateSegmentRequest, RecordSegmentSkillActivationRequest,
-    RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest,
+    CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest, GetSegmentBaselineRequest,
+    RecordSegmentSkillActivationRequest, RecordSegmentToolUseRequest,
+    RecordSegmentTurnUsageRequest, UpdateSegmentResolutionScoreRequest,
 };
 use crate::sub_agent_dispatch::{DispatchedSubAgent, dispatch_sub_agent};
 use crate::turn::approval::serialize_awakeable_decision;
@@ -317,7 +324,32 @@ impl AgentAdapter for SessionTurnAdapter {
         if matches!(outcome, TurnOutcome::Cancelled) {
             state.take_cancel_flag();
         }
+        let is_cancelled = matches!(outcome, TurnOutcome::Cancelled);
+        let is_idle = matches!(outcome, TurnOutcome::Idle);
         state.apply_turn_outcome(outcome);
+        if is_cancelled {
+            if let Some(segment) = state.current_segment.as_ref() {
+                score_active_segment(
+                    ctx,
+                    session_id,
+                    &state,
+                    segment,
+                    ScoringPhase::Final,
+                    &[ResolutionOverride::Cancelled],
+                )
+                .await?;
+            }
+        } else if is_idle && let Some(segment) = state.current_segment.as_ref() {
+            score_active_segment(
+                ctx,
+                session_id,
+                &state,
+                segment,
+                ScoringPhase::Immediate,
+                &[],
+            )
+            .await?;
+        }
         state.persist_into(ctx);
         sync_status(ctx, session_id, &state).await
     }
@@ -327,10 +359,23 @@ impl AgentAdapter for SessionTurnAdapter {
         ctx: &ObjectContext<'_>,
         max_turns: usize,
     ) -> Result<(), HandlerError> {
+        let session_id = parse_session_key(ctx.key())?;
+        let state = SessionVoState::load_from(ctx).await?;
+        if let Some(segment) = state.current_segment.as_ref() {
+            score_active_segment(
+                ctx,
+                session_id,
+                &state,
+                segment,
+                ScoringPhase::Final,
+                &[ResolutionOverride::TurnBudgetExceeded],
+            )
+            .await?;
+        }
         record_session_error("turn_budget");
         persist_session_event(
             ctx,
-            parse_session_key(ctx.key())?,
+            session_id,
             Event::Error {
                 message: format!("turn budget exceeded ({max_turns}), stopping"),
                 recoverable: true,
@@ -656,9 +701,17 @@ async fn ensure_current_segment(
             ctx.service_client::<SessionStoreClient>()
                 .append_event(Json(AppendEventRequest {
                     session_id,
-                    event: completed.into_event(),
+                    event: completed.clone().into_event(),
                 }))
                 .send();
+            score_completed_segment_at_transition(
+                ctx,
+                session_id,
+                meta.workspace_id.as_str(),
+                &completed,
+                &request.metadata,
+            )
+            .await?;
         }
 
         ctx.service_client::<SessionStoreClient>()
@@ -730,6 +783,237 @@ fn parse_session_key(key: &str) -> Result<SessionId, HandlerError> {
     uuid::Uuid::parse_str(key)
         .map(SessionId)
         .map_err(|error| TerminalError::new(format!("invalid session key `{key}`: {error}")).into())
+}
+
+async fn score_completed_segment_at_transition(
+    ctx: &ObjectContext<'_>,
+    session_id: SessionId,
+    tenant_id: &str,
+    completed: &moa_brain::pipeline::segments::SegmentCompleted,
+    metadata: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), HandlerError> {
+    if !OrchestratorCtx::current().config.resolution.enabled {
+        return Ok(());
+    }
+
+    let events = load_session_events(ctx, session_id).await?;
+    let (next_user_message, next_user_seq) = latest_user_message(&events)
+        .map(|(text, sequence_num)| (Some(text.to_string()), Some(sequence_num)))
+        .unwrap_or((None, None));
+    let segment_events = segment_events_for_scoring(&events, completed.segment_id, next_user_seq);
+    let rewrite = query_rewrite_from_metadata(metadata);
+    let baseline = load_segment_baseline(ctx, tenant_id, completed.intent_label.as_deref()).await?;
+    let phase = if next_user_message.is_some() {
+        ScoringPhase::Deferred
+    } else {
+        ScoringPhase::Immediate
+    };
+    let score = score_segment_events(
+        &segment_events,
+        completed.turn_count,
+        completed.token_cost,
+        completed.duration_ms,
+        baseline.as_ref(),
+        next_user_message.as_deref(),
+        rewrite.as_ref().is_some_and(|rewrite| rewrite.is_new_task),
+        phase,
+        &[],
+    );
+
+    ctx.service_client::<SessionStoreClient>()
+        .update_segment_resolution_score(Json(UpdateSegmentResolutionScoreRequest {
+            segment_id: completed.segment_id,
+            score,
+        }))
+        .send();
+    Ok(())
+}
+
+async fn score_active_segment(
+    ctx: &ObjectContext<'_>,
+    session_id: SessionId,
+    state: &SessionVoState,
+    segment: &ActiveSegment,
+    phase: ScoringPhase,
+    overrides: &[ResolutionOverride],
+) -> Result<(), HandlerError> {
+    let runtime = OrchestratorCtx::current();
+    if !runtime.config.resolution.enabled {
+        return Ok(());
+    }
+    let tenant_id = state
+        .meta
+        .as_ref()
+        .map(|meta| meta.workspace_id.as_str())
+        .ok_or_else(|| TerminalError::new("session meta missing"))?;
+    let events = load_session_events(ctx, session_id).await?;
+    let segment_events = segment_events_for_scoring(&events, segment.id, None);
+    let baseline = load_segment_baseline(ctx, tenant_id, segment.intent_label.as_deref()).await?;
+    let duration_ms = Utc::now()
+        .signed_duration_since(segment.started_at)
+        .num_milliseconds()
+        .max(0) as u64;
+    let score = score_segment_events(
+        &segment_events,
+        segment.turn_count,
+        segment.token_cost,
+        duration_ms,
+        baseline.as_ref(),
+        None,
+        false,
+        phase,
+        overrides,
+    );
+
+    ctx.service_client::<SessionStoreClient>()
+        .update_segment_resolution_score(Json(UpdateSegmentResolutionScoreRequest {
+            segment_id: segment.id,
+            score,
+        }))
+        .send();
+    Ok(())
+}
+
+async fn load_session_events(
+    ctx: &ObjectContext<'_>,
+    session_id: SessionId,
+) -> Result<Vec<EventRecord>, HandlerError> {
+    Ok(ctx
+        .service_client::<SessionStoreClient>()
+        .get_events(Json(GetEventsRequest {
+            session_id,
+            range: EventRange::all(),
+        }))
+        .call()
+        .await?
+        .into_inner())
+}
+
+async fn load_segment_baseline(
+    ctx: &ObjectContext<'_>,
+    tenant_id: &str,
+    intent_label: Option<&str>,
+) -> Result<Option<moa_core::SegmentBaseline>, HandlerError> {
+    Ok(ctx
+        .service_client::<SessionStoreClient>()
+        .get_segment_baseline(Json(GetSegmentBaselineRequest {
+            tenant_id: tenant_id.to_string(),
+            intent_label: intent_label.map(ToOwned::to_owned),
+        }))
+        .call()
+        .await?
+        .into_inner())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_segment_events(
+    segment_events: &[EventRecord],
+    turn_count: u32,
+    token_cost: u64,
+    duration_ms: u64,
+    baseline: Option<&moa_core::SegmentBaseline>,
+    next_user_message: Option<&str>,
+    is_new_task: bool,
+    phase: ScoringPhase,
+    extra_overrides: &[ResolutionOverride],
+) -> moa_core::ResolutionScore {
+    let config = OrchestratorCtx::current().config.resolution.clone();
+    let tool = tool_signal::score(segment_events);
+    let verification = verification_signal::score(segment_events);
+    let continuation = continuation_signal::score(
+        continuation_signal::ContinuationInput {
+            next_user_message,
+            initial_query: first_user_message(segment_events),
+            is_new_task,
+        },
+        config.rephrase_similarity_threshold,
+    );
+    let self_assessment = self_assessment_signal::score(last_brain_response(segment_events));
+    let structural = structural_signal::score(
+        structural_signal::SegmentMetrics {
+            turn_count,
+            token_cost,
+            duration_secs: duration_ms as f64 / 1_000.0,
+        },
+        baseline,
+        config.structural_min_samples,
+    );
+    let mut overrides = extra_overrides.to_vec();
+    if let Some(override_value) = verification_signal::override_for_events(segment_events) {
+        overrides.push(override_value);
+    }
+    if tool_signal::all_tools_failed(segment_events) {
+        overrides.push(ResolutionOverride::AllToolsFailed);
+    }
+
+    ResolutionScorer::new(config.weights).score(
+        tool,
+        verification,
+        continuation,
+        self_assessment,
+        structural,
+        phase,
+        &overrides,
+    )
+}
+
+fn segment_events_for_scoring(
+    events: &[EventRecord],
+    segment_id: SegmentId,
+    cutoff_before_seq: Option<u64>,
+) -> Vec<EventRecord> {
+    let start_seq = events.iter().find_map(|record| match &record.event {
+        Event::SegmentStarted {
+            segment_id: started_id,
+            ..
+        } if *started_id == segment_id => Some(record.sequence_num),
+        _ => None,
+    });
+    let completed_seq = events.iter().find_map(|record| match &record.event {
+        Event::SegmentCompleted {
+            segment_id: completed_id,
+            ..
+        } if *completed_id == segment_id => Some(record.sequence_num),
+        _ => None,
+    });
+    let end_exclusive = cutoff_before_seq
+        .or_else(|| completed_seq.map(|sequence_num| sequence_num.saturating_add(1)));
+
+    events
+        .iter()
+        .filter(|record| start_seq.is_none_or(|start_seq| record.sequence_num >= start_seq))
+        .filter(|record| end_exclusive.is_none_or(|end_seq| record.sequence_num < end_seq))
+        .cloned()
+        .collect()
+}
+
+fn latest_user_message(events: &[EventRecord]) -> Option<(&str, u64)> {
+    events.iter().rev().find_map(|record| match &record.event {
+        Event::UserMessage { text, .. } => Some((text.as_str(), record.sequence_num)),
+        _ => None,
+    })
+}
+
+fn first_user_message(events: &[EventRecord]) -> Option<&str> {
+    events.iter().find_map(|record| match &record.event {
+        Event::UserMessage { text, .. } => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+fn last_brain_response(events: &[EventRecord]) -> Option<&str> {
+    events.iter().rev().find_map(|record| match &record.event {
+        Event::BrainResponse { text, .. } => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+fn query_rewrite_from_metadata(
+    metadata: &std::collections::HashMap<String, serde_json::Value>,
+) -> Option<QueryRewriteResult> {
+    metadata
+        .get("query_rewrite")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 fn to_handler_error(error: MoaError) -> HandlerError {

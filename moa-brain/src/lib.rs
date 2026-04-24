@@ -4,6 +4,7 @@ pub mod compaction;
 pub mod harness;
 pub mod loop_detector;
 pub mod pipeline;
+pub mod resolution;
 pub mod tool_stats;
 pub mod turn;
 

@@ -33,6 +33,9 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
     let session_summary = qualified_name(schema_name, "session_summary");
     let session_turn_metrics = qualified_name(schema_name, "session_turn_metrics");
     let daily_workspace_metrics = qualified_name(schema_name, "daily_workspace_metrics");
+    let skill_resolution_rates = qualified_name(schema_name, "skill_resolution_rates");
+    let intent_transitions = qualified_name(schema_name, "intent_transitions");
+    let segment_baselines = qualified_name(schema_name, "segment_baselines");
     let update_session_aggregates = qualified_name(schema_name, "update_session_aggregates");
     let idx_sessions_workspace = quote_identifier("idx_sessions_workspace");
     let idx_sessions_user = quote_identifier("idx_sessions_user");
@@ -52,6 +55,9 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
         quote_identifier("idx_session_turn_metrics_session_turn");
     let idx_daily_workspace_metrics_workspace_day =
         quote_identifier("idx_daily_workspace_metrics_workspace_day");
+    let idx_skill_resolution_rates_unique = quote_identifier("idx_skill_resolution_rates_unique");
+    let idx_intent_transitions_unique = quote_identifier("idx_intent_transitions_unique");
+    let idx_segment_baselines_unique = quote_identifier("idx_segment_baselines_unique");
     let trg_update_session_aggregates = quote_identifier("trg_update_session_aggregates");
 
     let sql = format!(
@@ -215,6 +221,65 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
             ON {task_segments} (session_id, segment_index);
         CREATE INDEX IF NOT EXISTS {idx_task_segments_tenant_time}
             ON {task_segments} (tenant_id, started_at DESC);
+
+        DROP MATERIALIZED VIEW IF EXISTS {skill_resolution_rates};
+
+        CREATE MATERIALIZED VIEW {skill_resolution_rates} AS
+        SELECT
+            t.tenant_id,
+            t.intent_label,
+            unnest(t.skills_activated) AS skill_name,
+            COUNT(*)::BIGINT AS uses,
+            AVG(CASE WHEN t.resolution = 'resolved' THEN 1.0
+                     WHEN t.resolution = 'partial' THEN 0.5
+                     ELSE 0.0 END)::DOUBLE PRECISION AS resolution_rate,
+            AVG(t.token_cost)::DOUBLE PRECISION AS avg_token_cost,
+            AVG(t.turn_count)::DOUBLE PRECISION AS avg_turn_count
+        FROM {task_segments} t
+        WHERE t.intent_label IS NOT NULL
+          AND t.resolution IS NOT NULL
+          AND array_length(t.skills_activated, 1) IS NOT NULL
+        GROUP BY t.tenant_id, t.intent_label, skill_name;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS {idx_skill_resolution_rates_unique}
+            ON {skill_resolution_rates}(tenant_id, intent_label, skill_name);
+
+        DROP MATERIALIZED VIEW IF EXISTS {intent_transitions};
+
+        CREATE MATERIALIZED VIEW {intent_transitions} AS
+        SELECT
+            curr.tenant_id,
+            prev.intent_label AS from_intent,
+            curr.intent_label AS to_intent,
+            COUNT(*)::BIGINT AS transition_count,
+            AVG(CASE WHEN prev.resolution = 'resolved' THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS from_resolution_rate
+        FROM {task_segments} curr
+        JOIN {task_segments} prev ON curr.previous_segment_id = prev.id
+        WHERE curr.intent_label IS NOT NULL AND prev.intent_label IS NOT NULL
+        GROUP BY curr.tenant_id, prev.intent_label, curr.intent_label;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS {idx_intent_transitions_unique}
+            ON {intent_transitions}(tenant_id, from_intent, to_intent);
+
+        DROP MATERIALIZED VIEW IF EXISTS {segment_baselines};
+
+        CREATE MATERIALIZED VIEW {segment_baselines} AS
+        SELECT
+            tenant_id,
+            intent_label,
+            COUNT(*)::BIGINT AS sample_count,
+            AVG(turn_count)::DOUBLE PRECISION AS avg_turns,
+            STDDEV(turn_count)::DOUBLE PRECISION AS stddev_turns,
+            AVG(token_cost)::DOUBLE PRECISION AS avg_cost,
+            STDDEV(token_cost)::DOUBLE PRECISION AS stddev_cost,
+            AVG(EXTRACT(EPOCH FROM (ended_at - started_at)))::DOUBLE PRECISION AS avg_duration_secs,
+            STDDEV(EXTRACT(EPOCH FROM (ended_at - started_at)))::DOUBLE PRECISION AS stddev_duration_secs
+        FROM {task_segments}
+        WHERE intent_label IS NOT NULL AND ended_at IS NOT NULL
+        GROUP BY tenant_id, intent_label;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS {idx_segment_baselines_unique}
+            ON {segment_baselines}(tenant_id, intent_label);
 
         CREATE OR REPLACE FUNCTION {update_session_aggregates}() RETURNS TRIGGER AS $$
         DECLARE

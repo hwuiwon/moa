@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use moa_core::{
-    Event, ModelId, SegmentCompletion, SessionMeta, SessionStore, TaskSegment, ToolCallId,
-    ToolOutput, UserId, WorkspaceId, deterministic_segment_id,
+    Event, ModelId, ResolutionLabel, ResolutionScore, ScoringPhase, SegmentCompletion, SessionMeta,
+    SessionStore, TaskSegment, ToolCallId, ToolOutput, UserId, WorkspaceId,
+    deterministic_segment_id,
 };
 use moa_session::{PostgresSessionStore, testing};
 use sqlx::PgPool;
@@ -181,6 +182,7 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
             token_cost: 0,
             previous_segment_id: None,
             resolution: None,
+            resolution_signal: None,
             resolution_confidence: None,
         })
         .await
@@ -238,6 +240,7 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
             token_cost: 0,
             previous_segment_id: Some(first_id),
             resolution: None,
+            resolution_signal: None,
             resolution_confidence: None,
         })
         .await
@@ -251,6 +254,118 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
     assert!(segments[0].ended_at.is_some());
     assert_eq!(segments[1].previous_segment_id, Some(first_id));
     assert_eq!(segments[1].resolution, None);
+
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_task_resolution_scores_and_views_refresh() {
+    let (store, database_url, schema_name) = create_test_store().await;
+    let session_id = store
+        .create_session(SessionMeta {
+            workspace_id: WorkspaceId::new("pg-resolution"),
+            user_id: UserId::new("user"),
+            model: ModelId::new("test-model"),
+            ..SessionMeta::default()
+        })
+        .await
+        .expect("create session");
+    let now = Utc::now();
+
+    for index in 0..20 {
+        let segment_id = deterministic_segment_id(session_id, index);
+        let previous_segment_id =
+            (index > 0).then(|| deterministic_segment_id(session_id, index - 1));
+        store
+            .create_segment(&TaskSegment {
+                id: segment_id,
+                session_id,
+                tenant_id: "pg-resolution".to_string(),
+                segment_index: index,
+                intent_label: Some("coding".to_string()),
+                intent_confidence: None,
+                task_summary: Some(format!("Task {index}")),
+                started_at: now + chrono::Duration::seconds(i64::from(index)),
+                ended_at: None,
+                turn_count: 0,
+                tools_used: vec!["bash".to_string()],
+                skills_activated: vec!["moa-rust".to_string()],
+                token_cost: 0,
+                previous_segment_id,
+                resolution: None,
+                resolution_signal: None,
+                resolution_confidence: None,
+            })
+            .await
+            .expect("create segment");
+        store
+            .complete_segment(
+                segment_id,
+                SegmentCompletion {
+                    ended_at: now + chrono::Duration::seconds(i64::from(index + 10)),
+                    turn_count: 2,
+                    tools_used: vec!["bash".to_string()],
+                    skills_activated: vec!["moa-rust".to_string()],
+                    token_cost: 500,
+                },
+            )
+            .await
+            .expect("complete segment");
+        store
+            .update_segment_resolution_score(
+                segment_id,
+                &ResolutionScore {
+                    label: ResolutionLabel::Resolved,
+                    confidence: 0.92,
+                    tool_signal: Some(0.8),
+                    verification_signal: Some(0.95),
+                    continuation_signal: None,
+                    self_assessment_signal: Some(0.7),
+                    structural_signal: None,
+                    scored_at: Utc::now(),
+                    scoring_phase: ScoringPhase::Immediate,
+                },
+            )
+            .await
+            .expect("update resolution score");
+    }
+
+    let first = store
+        .list_segments(session_id)
+        .await
+        .expect("list segments")
+        .into_iter()
+        .next()
+        .expect("first segment exists");
+    assert_eq!(first.resolution.as_deref(), Some("resolved"));
+    assert_eq!(
+        first.resolution_signal.as_ref().map(|score| score.label),
+        Some(ResolutionLabel::Resolved)
+    );
+    assert_eq!(first.resolution_confidence, Some(0.92));
+
+    store
+        .refresh_segment_materialized_views()
+        .await
+        .expect("refresh resolution views");
+    let rates = store
+        .list_skill_resolution_rates("pg-resolution", Some("coding"))
+        .await
+        .expect("list resolution rates");
+    assert_eq!(rates.len(), 1);
+    assert_eq!(rates[0].skill_name, "moa-rust");
+    assert_eq!(rates[0].uses, 20);
+    assert!((rates[0].resolution_rate - 1.0_f64).abs() < f64::EPSILON);
+
+    let baseline = store
+        .get_segment_baseline("pg-resolution", Some("coding"))
+        .await
+        .expect("load baseline")
+        .expect("baseline exists");
+    assert_eq!(baseline.sample_count, 20);
+    assert!((baseline.avg_turns - 2.0_f64).abs() < f64::EPSILON);
 
     drop(store);
     cleanup_schema(&database_url, &schema_name).await;

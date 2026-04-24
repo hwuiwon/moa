@@ -54,6 +54,8 @@ pub struct MoaConfig {
     pub skill_budget: SkillBudgetConfig,
     /// Query-rewriting controls for pre-memory retrieval prompt normalization.
     pub query_rewrite: QueryRewriteConfig,
+    /// Automated task-segment resolution scoring controls.
+    pub resolution: ResolutionConfig,
     /// Incremental context snapshot settings.
     pub context_snapshot: ContextSnapshotConfig,
     /// External MCP server connections.
@@ -299,6 +301,47 @@ impl MoaConfig {
             .set_default(
                 "query_rewrite.circuit_breaker_cooldown_secs",
                 Self::default().query_rewrite.circuit_breaker_cooldown_secs as i64,
+            )?
+            .set_default("resolution.enabled", Self::default().resolution.enabled)?
+            .set_default(
+                "resolution.weights.tool",
+                Self::default().resolution.weights.tool,
+            )?
+            .set_default(
+                "resolution.weights.verification",
+                Self::default().resolution.weights.verification,
+            )?
+            .set_default(
+                "resolution.weights.continuation",
+                Self::default().resolution.weights.continuation,
+            )?
+            .set_default(
+                "resolution.weights.self_assessment",
+                Self::default().resolution.weights.self_assessment,
+            )?
+            .set_default(
+                "resolution.weights.structural",
+                Self::default().resolution.weights.structural,
+            )?
+            .set_default(
+                "resolution.use_llm_self_assessment",
+                Self::default().resolution.use_llm_self_assessment,
+            )?
+            .set_default(
+                "resolution.self_assessment_timeout_ms",
+                Self::default().resolution.self_assessment_timeout_ms as i64,
+            )?
+            .set_default(
+                "resolution.rephrase_similarity_threshold",
+                Self::default().resolution.rephrase_similarity_threshold,
+            )?
+            .set_default(
+                "resolution.structural_min_samples",
+                Self::default().resolution.structural_min_samples as i64,
+            )?
+            .set_default(
+                "resolution.idle_timeout_minutes",
+                Self::default().resolution.idle_timeout_minutes as i64,
             )?
             .set_default(
                 "context_snapshot.enabled",
@@ -1119,6 +1162,68 @@ impl Default for QueryRewriteConfig {
     }
 }
 
+/// Automated task-segment resolution scoring controls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResolutionConfig {
+    /// Whether automated resolution scoring is enabled.
+    pub enabled: bool,
+    /// Signal weights used by the composite scorer.
+    pub weights: ResolutionWeights,
+    /// Whether ambiguous agent self-assessment should use an LLM fallback.
+    pub use_llm_self_assessment: bool,
+    /// Timeout for optional LLM self-assessment.
+    pub self_assessment_timeout_ms: u64,
+    /// Similarity threshold above which a later user message is treated as a rephrase.
+    pub rephrase_similarity_threshold: f64,
+    /// Minimum historical sample count before structural baselines are used.
+    pub structural_min_samples: usize,
+    /// Idle timeout used for final continuation scoring.
+    pub idle_timeout_minutes: u64,
+}
+
+impl Default for ResolutionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            weights: ResolutionWeights::default(),
+            use_llm_self_assessment: false,
+            self_assessment_timeout_ms: 300,
+            rephrase_similarity_threshold: 0.85,
+            structural_min_samples: 20,
+            idle_timeout_minutes: 30,
+        }
+    }
+}
+
+/// Composite scorer weights for individual resolution signals.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResolutionWeights {
+    /// Weight assigned to tool outcome analysis.
+    pub tool: f64,
+    /// Weight assigned to verification command detection.
+    pub verification: f64,
+    /// Weight assigned to user continuation behavior.
+    pub continuation: f64,
+    /// Weight assigned to agent final-response self-assessment.
+    pub self_assessment: f64,
+    /// Weight assigned to structural anomaly detection.
+    pub structural: f64,
+}
+
+impl Default for ResolutionWeights {
+    fn default() -> Self {
+        Self {
+            tool: 0.20,
+            verification: 0.30,
+            continuation: 0.25,
+            self_assessment: 0.15,
+            structural: 0.10,
+        }
+    }
+}
+
 /// Cloud runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1489,6 +1594,22 @@ mod tests {
     }
 
     #[test]
+    fn resolution_config_defaults_are_applied() {
+        let config = MoaConfig::default();
+        assert!(config.resolution.enabled);
+        assert!((config.resolution.weights.tool - 0.20_f64).abs() < f64::EPSILON);
+        assert!((config.resolution.weights.verification - 0.30_f64).abs() < f64::EPSILON);
+        assert!((config.resolution.weights.continuation - 0.25_f64).abs() < f64::EPSILON);
+        assert!((config.resolution.weights.self_assessment - 0.15_f64).abs() < f64::EPSILON);
+        assert!((config.resolution.weights.structural - 0.10_f64).abs() < f64::EPSILON);
+        assert!(!config.resolution.use_llm_self_assessment);
+        assert_eq!(config.resolution.self_assessment_timeout_ms, 300);
+        assert!((config.resolution.rephrase_similarity_threshold - 0.85_f64).abs() < f64::EPSILON);
+        assert_eq!(config.resolution.structural_min_samples, 20);
+        assert_eq!(config.resolution.idle_timeout_minutes, 30);
+    }
+
+    #[test]
     fn observability_config_defaults_to_grpc() {
         let toml = r#"
             [observability]
@@ -1608,6 +1729,8 @@ mod tests {
         assert!(config.skill_budget.show_token_estimates);
         assert!(config.query_rewrite.enabled);
         assert_eq!(config.query_rewrite.timeout_ms, 5_000);
+        assert!(config.resolution.enabled);
+        assert_eq!(config.resolution.structural_min_samples, 20);
         assert!(!config.metrics.enabled);
         assert_eq!(config.metrics.listen, "0.0.0.0:9090");
     }

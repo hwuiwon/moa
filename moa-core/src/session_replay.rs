@@ -12,9 +12,10 @@ use serde_json::Value;
 
 use crate::{
     ApprovalDecision, ApprovalPrompt, ClaimCheck, ContextSnapshot, Event, EventFilter, EventRange,
-    EventRecord, PendingSignal, PendingSignalId, Result, SegmentCompletion, SegmentId,
-    SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary,
-    TaskSegment, ToolContent, ToolOutput, WorkspaceId,
+    EventRecord, PendingSignal, PendingSignalId, ResolutionScore, Result, SegmentBaseline,
+    SegmentCompletion, SegmentId, SessionFilter, SessionId, SessionMeta, SessionStatus,
+    SessionStore, SessionSummary, SkillResolutionRate, TaskSegment, ToolContent, ToolOutput,
+    WorkspaceId,
 };
 
 tokio::task_local! {
@@ -258,6 +259,40 @@ impl SessionStore for CountedSessionStore {
         self.inner
             .update_segment_resolution(segment_id, resolution, confidence)
             .await
+    }
+
+    async fn update_segment_resolution_score(
+        &self,
+        segment_id: SegmentId,
+        score: &ResolutionScore,
+    ) -> Result<()> {
+        self.inner
+            .update_segment_resolution_score(segment_id, score)
+            .await
+    }
+
+    async fn get_segment_baseline(
+        &self,
+        tenant_id: &str,
+        intent_label: Option<&str>,
+    ) -> Result<Option<SegmentBaseline>> {
+        self.inner
+            .get_segment_baseline(tenant_id, intent_label)
+            .await
+    }
+
+    async fn list_skill_resolution_rates(
+        &self,
+        tenant_id: &str,
+        intent_label: Option<&str>,
+    ) -> Result<Vec<SkillResolutionRate>> {
+        self.inner
+            .list_skill_resolution_rates(tenant_id, intent_label)
+            .await
+    }
+
+    async fn refresh_segment_materialized_views(&self) -> Result<()> {
+        self.inner.refresh_segment_materialized_views().await
     }
 
     async fn record_active_segment_tool_use(
