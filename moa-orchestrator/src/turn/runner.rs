@@ -1,14 +1,21 @@
 //! Shared one-turn runner for durable conversational agents.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    Event, PolicyAction, ToolCallContent, ToolCallRequest, TurnOutcome,
-    record_turn_event_persist_duration, record_turn_llm_call_duration,
-    record_turn_tool_dispatch_duration,
+    Event, PolicyAction, ToolCallContent, ToolCallRequest, TurnLatencyCounters, TurnOutcome,
+    TurnReplayCounters, record_turn_event_persist_duration, record_turn_latency,
+    record_turn_llm_call_duration, record_turn_tool_dispatch_duration, scope_turn_latency_counters,
+    scope_turn_replay_counters,
 };
 use restate_sdk::prelude::*;
 use tracing::Instrument;
+
+use crate::OrchestratorCtx;
+use crate::observability::{
+    emit_turn_latency_summary, emit_turn_replay_summary, session_turn_span,
+};
 
 use super::adapter::AgentAdapter;
 use super::approval::handle_approval_gate;
@@ -34,6 +41,68 @@ impl<A: AgentAdapter> TurnRunner<A> {
     /// Creates a new shared turn runner around one concrete adapter.
     pub(crate) fn new(adapter: A) -> Self {
         Self { adapter }
+    }
+
+    /// Runs consecutive turns until the agent becomes idle, blocked, or cancelled.
+    pub(crate) async fn run_until_idle(
+        &self,
+        ctx: &mut ObjectContext<'_>,
+        max_turns: usize,
+    ) -> Result<TurnOutcome, HandlerError> {
+        for turn_number in 1..=max_turns {
+            if self.adapter.is_cancelled(ctx).await? {
+                self.adapter
+                    .apply_outcome(ctx, TurnOutcome::Cancelled)
+                    .await?;
+                return Ok(TurnOutcome::Cancelled);
+            }
+
+            let meta = self.adapter.session_meta(ctx).await.ok();
+            let prompt = self.adapter.turn_prompt(ctx).await.ok().flatten();
+            let turn_root_span =
+                self.create_turn_span(meta.as_ref(), prompt.as_deref(), turn_number as i64, ctx);
+
+            let turn_counters = Arc::new(TurnReplayCounters::default());
+            let turn_outcome = scope_turn_replay_counters(turn_counters.clone(), async {
+                let turn_latency_counters =
+                    Arc::new(TurnLatencyCounters::new(turn_root_span.clone()));
+                let turn_started = Instant::now();
+                let turn_result =
+                    scope_turn_latency_counters(turn_latency_counters.clone(), async {
+                        async {
+                            let outcome = self.run_once(ctx).await?;
+                            self.adapter.apply_outcome(ctx, outcome).await?;
+                            Ok::<TurnOutcome, HandlerError>(outcome)
+                        }
+                        .instrument(turn_root_span.clone())
+                        .await
+                    })
+                    .await;
+
+                let turn_latency_snapshot = turn_latency_counters.snapshot();
+                record_turn_latency(turn_started.elapsed());
+                emit_turn_latency_summary(
+                    &turn_root_span,
+                    turn_number as i64,
+                    &turn_latency_snapshot,
+                );
+                turn_result
+            })
+            .await?;
+            let turn_snapshot = turn_counters.snapshot();
+            emit_turn_replay_summary(&turn_root_span, turn_number as i64, &turn_snapshot);
+
+            match turn_outcome {
+                TurnOutcome::Continue => continue,
+                terminal => return Ok(terminal),
+            }
+        }
+
+        self.adapter
+            .emit_turn_budget_exceeded(ctx, max_turns)
+            .await?;
+        self.adapter.apply_outcome(ctx, TurnOutcome::Idle).await?;
+        Ok(TurnOutcome::Idle)
     }
 
     /// Executes exactly one durable turn.
@@ -79,6 +148,36 @@ impl<A: AgentAdapter> TurnRunner<A> {
         }
 
         Ok(turn_outcome_for_response(&response))
+    }
+
+    fn create_turn_span(
+        &self,
+        meta: Option<&moa_core::SessionMeta>,
+        prompt: Option<&str>,
+        turn_number: i64,
+        ctx: &ObjectContext<'_>,
+    ) -> tracing::Span {
+        let Some(meta) = meta else {
+            return tracing::info_span!(
+                "session_turn",
+                otel.name = %format!("MOA turn {turn_number}"),
+                moa.turn.number = turn_number,
+            );
+        };
+        let span = session_turn_span(
+            meta,
+            prompt,
+            turn_number,
+            OrchestratorCtx::current()
+                .config
+                .observability
+                .environment
+                .as_deref(),
+        );
+        if let Some(sub_agent_id) = self.adapter.sub_agent_id(ctx) {
+            span.record("moa.sub_agent.id", sub_agent_id);
+        }
+        span
     }
 
     async fn handle_tool_call(

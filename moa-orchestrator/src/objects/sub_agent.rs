@@ -388,6 +388,50 @@ impl AgentAdapter for SubAgentTurnAdapter {
             })
     }
 
+    async fn apply_outcome(
+        &self,
+        ctx: &ObjectContext<'_>,
+        outcome: TurnOutcome,
+    ) -> Result<(), HandlerError> {
+        let mut state = SubAgentVoState::load_from(ctx).await?;
+        if !matches!(
+            (state.current_status(), outcome),
+            (SubAgentState::Failed, TurnOutcome::Idle)
+        ) {
+            state.apply_turn_outcome(outcome);
+        }
+        state.persist_into(ctx);
+        Ok(())
+    }
+
+    async fn emit_turn_budget_exceeded(
+        &self,
+        ctx: &ObjectContext<'_>,
+        max_turns: usize,
+    ) -> Result<(), HandlerError> {
+        let mut state = SubAgentVoState::load_from(ctx).await?;
+        let parent_session = state.parent_session;
+        state.status = Some(SubAgentState::Failed);
+        state.last_turn_summary = Some(format!("turn budget exceeded ({max_turns})"));
+        state.persist_into(ctx);
+
+        if let Some(parent_session) = parent_session {
+            persist_parent_session_event(
+                ctx,
+                parent_session,
+                Event::Error {
+                    message: format!(
+                        "sub-agent {} turn budget exceeded ({max_turns}), stopping",
+                        ctx.key()
+                    ),
+                    recoverable: true,
+                },
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn record_response(
         &self,
         ctx: &ObjectContext<'_>,
@@ -589,31 +633,7 @@ impl SubAgent for SubAgentImpl {
         state.persist_into(&ctx);
 
         let runner = TurnRunner::new(SubAgentTurnAdapter);
-        let mut turns_this_post = 0usize;
-        loop {
-            turns_this_post += 1;
-            if turns_this_post > MAX_TURNS_PER_POST {
-                let mut current = SubAgentVoState::load_from(&ctx).await?;
-                current.status = Some(SubAgentState::Failed);
-                current.last_turn_summary =
-                    Some(format!("turn budget exceeded ({MAX_TURNS_PER_POST})"));
-                current.persist_into(&ctx);
-                break;
-            }
-
-            let outcome = runner.run_once(&mut ctx).await?;
-            let mut current = SubAgentVoState::load_from(&ctx).await?;
-            current.apply_turn_outcome(outcome);
-            current.persist_into(&ctx);
-
-            match outcome {
-                TurnOutcome::Continue => continue,
-                TurnOutcome::Idle | TurnOutcome::WaitingApproval | TurnOutcome::Cancelled => {
-                    break;
-                }
-            }
-        }
-
+        runner.run_until_idle(&mut ctx, MAX_TURNS_PER_POST).await?;
         maybe_resolve_parent_awakeable(&ctx).await
     }
 
