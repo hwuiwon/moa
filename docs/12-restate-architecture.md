@@ -8,7 +8,7 @@ _Durable execution on Restate Virtual Objects and Workflows._
 
 This document specifies how MOA uses Restate as its sole durable execution engine. It defines the mapping of MOA's session/brain/hand model onto Restate's primitives (Services, Virtual Objects, Workflows), handler signatures in Rust, state and journal strategy, and Kubernetes deployment.
 
-Scope: all session orchestration, sub-agent dispatch, tool execution, approval flows, memory consolidation, and scheduled work. Out of scope: data plane primitives (Postgres event log, Daytona sandboxes, LLM gateway) — those remain as specified in `05`, `06`, and the v2 architecture doc.
+Scope: all session orchestration, sub-agent dispatch, tool execution, approval flows, memory consolidation, intent discovery, and scheduled work. Out of scope: data plane primitives such as the Postgres event log, Daytona sandboxes, and provider APIs; those remain specified in the adjacent storage, hands, and provider docs.
 
 ---
 
@@ -491,7 +491,7 @@ RocksDB storage is local NVMe via `fast-ssd` StorageClass — network-attached v
 
 MOA services register themselves with Restate at startup via the admin API. The `moa-orchestrator` binary runs as a standard K8s Deployment (not managed by an operator) and exposes its handlers over HTTP/2; Restate server discovers handlers via introspection.
 
-### Autoscaling (Phases 1–2)
+### Autoscaling
 
 Plain HPA on CPU + in-process concurrency limits, no KEDA. In-process concurrency limit is set via Restate handler config: `max_concurrent_invocations: 200` per pod for `Session`, lower for heavy handlers. Prevents new-pod OOM on startup bursts.
 
@@ -516,7 +516,7 @@ Each `post_message` invocation is one trace root. All traces for a session carry
 
 ### Dashboards (Grafana)
 
-Four core dashboards land in Phase 1:
+Core dashboards:
 1. **Session health**: active sessions, turn p50/p95/p99, approval latency, error rate per tenant tier.
 2. **LLM gateway**: tokens/sec per model, 429 rate, cache hit rate, $/min rolling.
 3. **Restate internals**: invocation rate per handler, journal size distribution, awakeable-waiting count, retry rate.
@@ -549,7 +549,7 @@ Recommended production rollout:
 | `moa-memory`, `moa-security`, `moa-skills` | None — called as libraries |
 | `moa-gateway` | Minor — add awakeable resolution via Restate admin API |
 | `moa-core` | Minor — add `invocation_id`, `attempt` fields |
-| `moa-restate` (new, optional) | Extract boilerplate if it grows |
+| optional helper crate | Extract Restate boilerplate only if it grows enough to justify a new crate |
 
 ---
 
@@ -567,13 +567,13 @@ Integration tests use an in-process test server with tmpdir state. Full session 
 
 ---
 
-## Open decisions
+## Current Decisions
 
-1. **Invocation ID format**: auto-generated UUID with `turn_seq` as span attribute. (leaning)
-2. **Awakeable persistence on gateway side**: read-through from Postgres event log, no gateway-side cache. (leaning)
-3. **Per-tenant service isolation**: revisit at 10k tenants; single handler pool in Phase 1.
-4. **Consolidation scheduling**: `Workspace` VO with delayed self-send. (leaning)
-5. **SubAgent result return**: awakeable-based (parent pre-registers). (leaning)
+1. **Invocation identity**: Restate invocation IDs are surfaced in spans; MOA session/turn identity is carried as span attributes and event metadata.
+2. **Awakeable lookup**: approval surfaces read pending approval state from Postgres events and VO state instead of holding gateway-local execution state.
+3. **Tenant isolation**: tenants currently share the same handler pool while product data is tenant-scoped in Postgres. Revisit runtime pool isolation when scale or compliance requires it.
+4. **Consolidation scheduling**: workspace-scoped scheduling starts `Consolidate` workflows for one logical workspace/date run.
+5. **Sub-agent results**: parent sessions pre-register result awakeables for child completion.
 
 ---
 

@@ -1,56 +1,62 @@
 # 00 — Direction
 
-_Product identity, philosophy, target users._
+_Product identity, principles, and differentiators._
 
----
+## What MOA Is
 
-## What MOA is
+MOA is a cloud-first, Rust-based, multi-tenant AI agent platform for teams. It runs durable agent sessions, executes tools through isolated hands, stores all product-visible state in Postgres/Neon, and improves from completed work.
 
-MOA is a **cloud-first, Rust-based, general-purpose agent platform** built on the **many-brains, many-hands** pattern. Users interact through **messaging apps** (Telegram, Slack, Discord). The system **learns from usage** via a file-backed wiki memory. A **desktop app and CLI** provide the zero-setup local on-ramp.
+The core product model is:
 
-> MOA is a persistent, learning, general-purpose agent that lives in the cloud, reaches you through messaging, and gets better the longer it runs.
+```text
+Platform
+  -> Tenant (team)
+       -> Users
+       -> Workspaces
+       -> Task segments
+       -> Intent taxonomy
+       -> Learning log
+       -> Workspace memory and skills
+```
 
-## What MOA provides
+MOA is not just a chat wrapper. It is an execution platform with durable orchestration, an auditable event log, a file-backed memory system, automated task resolution scoring, and a tenant-scoped learning pipeline.
 
-- A **durable session layer** — append-only event log that outlives any brain or hand
-- **Stateless brains** — harness loops that crash-recover from the session log
-- **Pluggable hands** — execution environments behind `execute(name, input) → output`
-- A **learning loop** — file-wiki memory that compounds with every session
-- **Messaging-first UX** — Telegram, Slack, Discord as primary interfaces
-- A **desktop app and CLI on-ramp** — full local experience with zero cloud dependencies
+## What MOA Provides
 
-## What MOA is not
+- **Durable work:** sessions and sub-agents survive process restarts because Restate owns orchestration and Postgres owns product data.
+- **Task segmentation:** conversations are split into discrete task segments so one long session can contain many independently tracked outcomes.
+- **Resolution detection:** MOA scores whether each task segment resolved, partially resolved, failed, was abandoned, or remains unknown without requiring explicit user feedback.
+- **Per-tenant intent learning:** tenants start with no intents; MOA proposes intents from conversation clusters and only uses active, tenant-approved intents for classification.
+- **Learning log:** every learned pattern, resolution score, intent decision, memory update, and skill change can be audited and invalidated by version or batch.
+- **Workspace memory:** markdown remains the canonical memory format while Postgres provides keyword, trigram, and semantic retrieval.
+- **Skills:** successful workflows can become reusable Agent Skills; ranking improves as segment outcomes accumulate.
+- **Pluggable execution:** local hands, Docker, Daytona, E2B, and MCP servers are routed through one tool abstraction.
+- **Multiple interfaces:** CLI, GPUI desktop, REST/gateway, and messaging adapters all talk to the same session model.
 
-- A chatbot wrapper around one LLM
-- A coding-only agent (though coding is a first-class hand)
-- Local-only — local is the easy on-ramp, cloud is the production target
-- Opinionated about which LLM powers the brain — model/provider flexibility is core
+## Design Values
 
-## Design values
+1. **Durability before cleverness.** A session should recover from crashes, pauses, and human approval waits without losing state.
+2. **Inspectable state.** Product-visible facts live in queryable stores: Postgres tables, event records, wiki files, and learning-log entries.
+3. **Tenant control.** Learned behavior must be scoped and reviewable. Platform-wide defaults are libraries to adopt, not policies to impose.
+4. **Blank-slate learning.** A new tenant should not inherit another team's assumptions. Useful behavior emerges from its own conversations and explicit admin choices.
+5. **Small stable abstractions.** Traits in `moa-core` define the boundaries; implementations can differ between local and cloud runtimes.
+6. **Progressive context.** The pipeline keeps stable prefix content cacheable and loads expensive dynamic context only when it matters.
+7. **Least necessary tool access.** Hands and MCP tools are selected, approved, and isolated based on the task.
 
-- **Inspectability over magic.** Sessions, context compilation, tool calls, memory — all observable.
-- **Reversible collaboration.** Inspect → approve → checkpoint → revert. The human stays in control.
-- **Model/provider flexibility.** OpenAI, Anthropic, and Google Gemini at launch. No vendor lock-in.
-- **Complexity must justify itself.** If it doesn't improve daily use, it doesn't ship in the default path.
-- **Daily-driver UX beats impressive demos.** Predictable, low-friction, no cognitive fatigue.
-- **No "impressive demo" features that degrade the daily path.**
+## Differentiators
 
-## Target users
+MOA's differentiators are architectural, not cosmetic:
 
-General. MOA handles any request a user can describe — coding, research, scheduling, data analysis, creative work, system administration. The architecture does not privilege one task type.
+- **Restate-native agents:** sessions and sub-agents map to virtual objects with single-writer semantics and durable waits.
+- **Segment-level analytics:** learning is based on task outcomes, not whole-session guesses.
+- **Resolution-weighted improvement:** skills and future retrieval decisions can use measured success rates.
+- **Tenant-owned taxonomies:** intent labels reflect a team's work patterns and admin review.
+- **Auditable learning:** the learning log gives provenance, confidence, versions, and rollback hooks.
+- **File wiki plus database retrieval:** memory stays editable while retrieval gets production-grade indexes and embeddings.
 
-Primary persona: a professional who wants an always-available agent that remembers their projects, preferences, and past work — accessed through the messaging app they already use, with the option to drop into a terminal for hands-on work.
+## Non-Goals
 
-## Competitive positioning
-
-- **vs OpenClaw**: MOA competes on architectural soundness (brain/hand isolation, credential separation) and learning (wiki compilation, skill distillation). Not on breadth of integrations.
-- **vs Hermes Agent**: MOA competes on brain/hand decoupling (Hermes runs everything in one process), session durability (Hermes lacks formal crash recovery), and Rust performance. MOA learns from Hermes's closed learning loop design.
-- **vs Anthropic Managed Agents**: MOA is open, self-hosted, model-agnostic, and has a self-improving memory system.
-
-## Source of truth hierarchy
-
-When resolving ambiguity during implementation:
-
-1. This spec (individual section documents)
-2. Current repo code and tests
-3. Older planning docs (background only)
+- MOA does not train a per-tenant model for intent classification. It uses embedding nearest-centroid classification over tenant intent centroids.
+- MOA does not force a global intent catalog onto tenants. Catalog entries are opt-in.
+- MOA does not keep durable product state only in Restate. Restate is orchestration state; Postgres is the product record.
+- MOA does not make the desktop app the only interface. Desktop, CLI, REST/gateway, and messaging adapters are peers over the same runtime model.

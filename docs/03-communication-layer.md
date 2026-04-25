@@ -1,441 +1,112 @@
 # 03 — Communication Layer
 
-_Messaging gateway, desktop app, CLI, approval UX, thread observation._
+_Client surfaces, gateway adapters, approvals, and observation._
 
----
+## Product Surfaces
 
-## Messaging gateway
+MOA has several front doors over the same session model:
 
-### Architecture
-
-Single Rust binary with per-platform tokio task isolation. Feature flags control which adapters compile in.
-
-```toml
-# Cargo.toml features
-[features]
-default = []
-telegram = ["teloxide"]
-slack = ["slack-morphism"]
-discord = ["serenity"]
-cloud = ["telegram", "slack", "discord"]
-```
-
-### Message normalization
-
-All platforms normalize to a common inbound format:
-
-```rust
-pub struct InboundMessage {
-    pub platform: Platform,
-    pub platform_msg_id: String,
-    pub user: PlatformUser,
-    pub channel: ChannelRef,       // DM, group, thread
-    pub text: String,
-    pub attachments: Vec<Attachment>,
-    pub reply_to: Option<String>,  // if replying to a specific message
-    pub timestamp: DateTime<Utc>,
-}
-
-pub struct PlatformUser {
-    pub platform_id: String,
-    pub display_name: String,
-    pub moa_user_id: Option<UserId>, // linked MOA user, if known
-}
-
-pub enum ChannelRef {
-    DirectMessage { user_id: String },
-    Group { channel_id: String },
-    Thread { channel_id: String, thread_id: String },
-}
-```
-
-### Outbound rendering
-
-Outbound messages are rendered per-platform from a common format:
-
-```rust
-pub struct OutboundMessage {
-    pub content: MessageContent,
-    pub buttons: Vec<ActionButton>,
-    pub reply_to: Option<String>,
-    pub ephemeral: bool,           // only visible to one user (Slack/Discord)
-}
-
-pub enum MessageContent {
-    Text(String),
-    Markdown(String),
-    CodeBlock { language: String, code: String },
-    Diff { filename: String, hunks: Vec<DiffHunk> },
-    ToolCard { tool: String, status: ToolStatus, summary: String, detail: Option<String> },
-    ApprovalRequest { request: ApprovalRequest },
-    StatusUpdate { session_id: SessionId, status: SessionStatus, summary: String },
-}
-
-pub struct ActionButton {
-    pub id: String,
-    pub label: String,
-    pub style: ButtonStyle,  // Primary, Danger, Secondary
-    pub callback_data: String,
-}
-```
-
-The `PlatformRenderer` trait converts `OutboundMessage` to platform-native format:
-
-```rust
-pub trait PlatformRenderer {
-    fn render_text(&self, md: &str) -> String;           // markdown → platform format
-    fn render_code(&self, lang: &str, code: &str) -> String;
-    fn render_diff(&self, diff: &[DiffHunk]) -> Vec<String>; // may split across messages
-    fn render_buttons(&self, buttons: &[ActionButton]) -> PlatformButtons;
-    fn truncate(&self, text: &str) -> (String, bool);    // respects platform char limit
-}
-```
-
-### Platform-specific limits and rendering
-
-| Feature | Telegram | Slack | Discord |
-|---|---|---|---|
-| Max message | 4,096 chars | 40,000 chars (50 blocks) | 2,000 chars (+ 4,096 embed) |
-| Code blocks | ` ```lang ` | ` ```lang ` | ` ```diff ` in embeds |
-| Buttons | InlineKeyboardMarkup (callback 64 bytes) | Block Kit actions (primary/danger) | ActionRow (5 button styles) |
-| Edit window | 48 hours | Unlimited | Unlimited |
-| Threads | Reply chains | Native threads | Auto-created threads |
-| Modals | Web App (Mini App) | Native modals | Native modals |
-| Rate limit | 30 msg/sec | 1 msg/sec per channel | 5 req/sec per channel |
-| Status update interval | 2-3s (editMessageText) | 1-2s (chat.update) | 2-5s (message edit) |
-
-### Session ↔ platform mapping
-
-Each MOA session maps to a platform thread/conversation:
-
-- **Telegram**: Each session = a message thread (reply chain). Status message pinned at top, updated in-place.
-- **Slack**: Each session = a thread. Parent message = live status. Replies = event log. App Home = multi-session dashboard.
-- **Discord**: Each session = an auto-created thread. Embed = status display. ActionRow = control buttons.
-
----
-
-## Approval UX
-
-### Three-tier buttons
-
-Every tool call requiring approval renders:
-
-```
-┌─ 🟡 bash ──────────────────────────────────────┐
-│ Command: npm install express                     │
-│ Working dir: ~/projects/webapp                   │
-│                                                  │
-│ [✅ Allow Once]  [🔁 Always Allow]  [❌ Deny]  │
-└──────────────────────────────────────────────────┘
-```
-
-Risk-level coloring:
-- 🟢 Green: read-only operations (file_read, web_search)
-- 🟡 Yellow: file modifications (file_write, file_create)
-- 🔴 Red: shell commands, network access, destructive operations
-
-### "Always Allow" rule storage
-
-Rules stored per-workspace in `~/.moa/workspaces/{id}/permissions.toml`:
-
-```toml
-[[rules]]
-tool = "file_read"
-pattern = "**"           # glob pattern for arguments
-scope = "workspace"      # workspace | session | global
-created_by = "user123"
-created_at = "2026-04-09T14:30:00Z"
-
-[[rules]]
-tool = "bash"
-pattern = "npm test*"    # only allow npm test commands
-scope = "workspace"
-
-[[rules]]
-tool = "bash"
-pattern = "rm *"
-action = "deny"          # always deny rm commands
-```
-
-Rules match at the **inner command level** — a `bash` approval for `npm test` does not approve `npm test && rm -rf /`. The shell command is parsed before matching.
-
-### Post-decision rendering
-
-After the user decides, edit the original message in-place:
-
-```
-┌─ ✅ bash ── Allowed by @user at 14:30 ─────────┐
-│ Command: npm install express                     │
-│ Working dir: ~/projects/webapp                   │
-│ Result: added 52 packages in 3.2s               │
-└──────────────────────────────────────────────────┘
-```
-
----
-
-## Thread observation
-
-### Launch scope: Observe + Stop + Queue
-
-**Observe**: Subscribe to session event stream.
-
-Three detail levels:
-- **Summary**: SessionStatus changes, Checkpoint summaries, Errors
-- **Normal**: + ToolCall names and results, BrainResponse text
-- **Verbose**: + streaming tokens, full tool parameters, thinking summaries
-
-Platform rendering of observations:
-
-```
-Telegram: Single status message, edited every 2-3s
-  "🔄 Working on OAuth fix...
-   ✅ file_search: found 3 files
-   🔧 file_read: src/auth/refresh.rs
-   💭 Analyzing token expiry logic...
-   [⏹ Stop] [📋 Queue Message]"
-
-Slack: Thread with live-updating parent
-  Parent: "🔄 Session: OAuth fix | 4 tools used | 12.3k tokens"
-  Reply 1: "✅ file_search → 3 files found"
-  Reply 2: "🔧 Reading src/auth/refresh.rs"
-  ...
-
-Discord: Thread with embed
-  Embed: status, tool count, token count
-  Messages: one per significant event
-```
-
-**Stop**: Sends `CancelRequested` signal.
-- Soft stop: completes current tool call, then stops
-- Hard stop (long-press or double-tap): aborts immediately
-
-**Queue**: User sends a message while a run is active.
-- Platform detects the session is running
-- Message stored durably in the session log and queued for the next turn
-- Brain picks it up after current turn completes
-- User sees: "📋 Message queued. Will process after current task."
-
----
-
-## Desktop application specification
-
-### Layout (5 zones)
-
-```
-┌─[1 oauth-fix 🔄][2 deploy ✅][3 research ⏸]─────────────────────┐
-│ MOA  workspace: webapp  model: claude-sonnet  12.3k/200k  $0.12   │ ← Header
-├─────────────────────────────────────────────┬──────────────────────┤
-│                                             │ Session Info         │
-│  User: Fix the OAuth refresh token bug      │ ──────────          │
-│                                             │ Duration: 4m 23s    │
-│  Agent: I'll investigate the auth module... │ Turns: 7            │
-│                                             │ Tools: 3 calls      │
-│  ┌─ 🔧 file_search ────── ✅ Done ──┐     │ Cost: $0.12         │
-│  │ Pattern: "oauth.*token"            │     │                     │
-│  │ Found: 3 files                     │     │ Workspace Tools     │ ← Sidebar
-│  └────────────────────────────────────┘     │ ──────────          │ (auto at 120+ cols)
-│                                             │ ✓ bash              │
-│  The issue is in `auth/refresh.rs`...       │ ✓ file_read         │
-│                                             │ ✓ file_write        │
-│  ┌─ 🟡 file_write ─── ⏳ Approval ──┐     │ ✓ web_search        │
-│  │ Path: src/auth/refresh.rs          │     │                     │
-│  │ +12 -3 lines                       │     │ Memory              │
-│  │                                    │     │ ──────────          │
-│  │ [Y]es [N]o [A]lways [D]iff [E]dit │     │ • Auth system       │ ← Chat stream
-│  └────────────────────────────────────┘     │ • Deploy guide      │
-│                                             │ • API conventions    │
-├─────────────────────────────────────────────┴──────────────────────┤
-│ > @auth/refresh.rs Fix the token expiry logic█                      │ ← Prompt
-├─────────────────────────────────────────────────────────────────────┤
-│ approve: y/n/a │ ctrl+x h: help │ /cmd │ @file │ !shell   cost:$0 │ ← Footer
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### Zones
-
-1. **Tab bar**: Session tabs with status icons. `Alt+1-9` direct switch. `Alt+[/]` cycle. `Ctrl+N` new. Max 8 visible, overflow to picker.
-2. **Header**: Workspace name, model, token usage (current/max), cumulative cost, mode indicator.
-3. **Chat stream**: Scrollable message history with inline tool cards, approval widgets, and diff previews. Auto-scrolls during streaming. Pauses on user scroll-up. Resumes with `End`.
-4. **Sidebar** (optional): Session info (duration, turns, tools, cost), workspace tools list, recent memory entries. Auto-shows at 120+ cols. Toggle with `Ctrl+X, B`.
-5. **Prompt**: Rich text composer with `@filename` completion (frecency-ranked), `/command` completion, `!shell` prefix, `Shift+Enter` for newline, and `Enter` to submit.
-6. **Footer**: Context-sensitive shortcuts (changes based on active view), mode indicator, cost ticker.
-
-### Views (modes)
-
-| View | Shortcut | Description |
+| Surface | Primary crate | Use |
 |---|---|---|
-| Chat | (default) | Main conversation view |
-| Sessions | `Ctrl+O, S` | Fuzzy-searchable session picker overlay |
-| Memory | `Ctrl+M` | Two-pane wiki browser (tree + rendered markdown) |
-| Settings | `Ctrl+,` | Config editor (categories + form widgets) |
-| Diff | `D` (on approval) | Full-screen diff viewer with side-by-side / unified toggle |
-| Help | `Ctrl+X, H` | Keybinding reference |
+| GPUI desktop | `moa-desktop` | Local interactive application |
+| CLI and daemon | `moa-cli`, `moa-runtime`, `moa-orchestrator-local` | Local automation, diagnostics, one-shot prompts |
+| REST/gateway | `moa-orchestrator`, `moa-gateway` | Cloud and integration entrypoints |
+| Messaging adapters | `moa-gateway` | Telegram, Slack, Discord conversations and approvals |
 
-### Keyboard shortcuts
+The interfaces differ in rendering and transport. They all eventually create or address a `SessionId`, append user messages, observe session events, and resolve approvals.
 
-**Universal (all views):**
+## Message Normalization
 
-| Shortcut | Action |
+Messaging platforms normalize inbound traffic into the shared platform DTOs in `moa-core`:
+
+- platform identity
+- user identity and optional MOA user link
+- channel or thread reference
+- text
+- attachments
+- reply anchor
+- timestamp
+
+Outbound rendering is platform-specific, but the payload model is shared: text, markdown, code blocks, diffs, tool cards, approval requests, and status updates.
+
+## Session Mapping
+
+| Surface | Session mapping |
 |---|---|
-| `Ctrl+C` | Cancel current operation / interrupt |
-| `Ctrl+D` | Exit (on empty input) |
-| `Ctrl+L` | Clear screen |
-| `Escape` | Cancel streaming / close overlay / back |
-| `Alt+1-9` | Switch to session tab N |
-| `Alt+[` / `Alt+]` | Cycle session tabs |
-| `Ctrl+N` | New session |
-| `Ctrl+P` | Command palette (fuzzy search all actions) |
-| `Ctrl+M` | Memory browser |
-| `Ctrl+,` | Settings |
-| `Ctrl+X, H` | Help |
-| `Ctrl+X, B` | Toggle sidebar |
+| Desktop | User opens, creates, resumes, and observes local sessions directly |
+| CLI | `moa exec` creates or resumes work through the local runtime; daemon commands keep sessions running in the background |
+| REST/gateway | HTTP or gateway request maps to a durable session and calls the cloud orchestrator |
+| Telegram | Reply chains or threads map to sessions |
+| Slack | Slack threads map to sessions |
+| Discord | Direct messages or guild threads map to sessions |
 
-**Chat view:**
+The durable state is not stored in the client. Clients can reconnect by replaying Postgres events and, in cloud mode, querying Restate status.
 
-| Shortcut | Action |
-|---|---|
-| `Enter` | Submit message |
-| `Shift+Enter` | Insert newline |
-| `Up` / `Down` | Input history |
-| `Ctrl+R` | Search input history |
-| `Ctrl+G` | Open in external editor ($EDITOR) |
-| `Tab` | Autocomplete (@file, /command) |
-| `Ctrl+U` / `Ctrl+D` | Scroll chat up/down (half page) |
-| `Home` / `End` | Jump to top/bottom of chat |
-| `v` | Cycle observation verbosity |
+## Approvals
 
-**Approval prompt (when focused):**
+Approval requests are session events with enough information for any surface to render:
 
-| Shortcut | Action |
-|---|---|
-| `y` | Allow once |
-| `n` | Deny |
-| `a` | Always allow |
-| `d` | Show full diff |
-| `e` | Edit parameters |
-| `Shift+A` | Batch approve all pending |
+- request ID
+- optional Restate awakeable ID
+- optional sub-agent ID
+- tool name
+- risk level
+- input summary
+- structured prompt data, including diffs and suggested allow patterns
 
-**Diff view:**
+The default actions are:
 
-| Shortcut | Action |
-|---|---|
-| `t` | Toggle side-by-side / unified |
-| `n` / `N` | Next / previous file |
-| `j` / `k` | Next / previous hunk |
-| `+` / `-` | Expand / collapse context lines |
-| `a` | Accept changes (per-file or per-hunk) |
-| `r` | Reject changes |
-| `f` / `Escape` | Toggle full screen |
+- Allow once
+- Always allow with a scoped rule
+- Deny with an optional reason
 
-**Memory browser:**
+Approval rules are stored in Postgres through the shared approval rule store. Shell approvals are matched at parsed command boundaries so one approval does not accidentally cover chained commands.
 
-| Shortcut | Action |
-|---|---|
-| `/` | Search memories |
-| `Enter` | Open selected page / follow wiki link |
-| `Alt+←` / `Alt+→` | Back / forward (browser-style) |
-| `e` | Edit selected page in $EDITOR |
-| `d` | Delete selected page (with confirmation) |
+## Observation
 
-### Prompt features
+Observation is history-first:
 
-- **`@filename`**: Tab-complete file paths. Frecency-ranked (recently used files rank higher). Files are added to context for the current message.
-- **`/command`**: Slash commands. Tab-complete from registered list.
-- **`!command`**: Shell escape. Run command directly, output shown inline.
-- **Multiline**: `Shift+Enter` inserts newline. Input expands up to 10 lines, then scrolls.
-- **Paste detection**: Multi-line paste auto-wraps in code block.
-- **Image paste**: Detect image in clipboard, attach as base64 for vision models.
+1. Load durable events from `PostgresSessionStore`.
+2. Render them for the client.
+3. Attach to the live stream if the orchestrator has one.
 
-### Slash commands
+This avoids losing information when a client disconnects or a gateway process restarts. Live observation can include:
 
-```
-/new              Start a new session
-/sessions         Open session picker
-/resume [id]      Resume a specific or most recent session
-/model [name]     Switch model (or show picker)
-/memory           Open memory browser
-/workspace [path] Switch workspace
-/tools            Show/configure available tools
-/settings         Open settings
-/compact          Force context compaction
-/export [format]  Export session (markdown, json)
-/undo             Revert last file change
-/redo             Redo last reverted change
-/clear            Clear chat display (doesn't delete history)
-/editor           Open current context in $EDITOR
-/status           Show session stats (tokens, cost, duration)
-/help             Show help
-/quit             Exit
-```
+- session status changes
+- user and assistant messages
+- tool calls, results, and errors
+- approval requests and decisions
+- segment start/completion events
+- memory and checkpoint events
+- runtime events from the local orchestrator
 
----
+Clients choose their own verbosity, but durable events are the source of truth.
 
-## CLI specification
+## Desktop App
 
-### Subcommands
-
-```
-moa exec "prompt text"       Non-interactive one-shot
-moa status                   Show active sessions (table)
-moa sessions                 List all sessions
-moa sessions --workspace .   Sessions for current workspace
-moa memory search "query"    Search memory from CLI
-moa memory show <path>       Display a memory page
-moa memory ingest <files...> Ingest documents into memory
-moa config                   Show current config
-moa config set <key> <val>   Update config
-moa init                     Initialize workspace in current directory
-moa version                  Show version info
-moa doctor                   Check system health (Docker, API keys, etc.)
-moa daemon start|stop|status|logs
-moa sync enable [url]
-moa checkpoint create|list|rollback|cleanup
-moa eval run|plan|skill|list
-moa-desktop                  Launch the desktop app
-```
-
-### Non-interactive mode (`moa exec`)
+`moa-desktop` is a native GPUI app. It is a workspace member but not a default member, so build it explicitly:
 
 ```bash
-# Basic one-shot
-moa exec "What's the weather in NYC?"
-
-# Pipe input
-cat error.log | moa exec "Explain these errors"
-
-# Launch the desktop app
-moa-desktop
+cargo build -p moa-desktop
 ```
 
-Behavior:
-- Progress → stderr (streaming status updates)
-- Final response → stdout
-- Exit code: 0 = success, 1 = error, 2 = user cancelled
-- TTY detection: if stdin is not a terminal, read piped input as context
+The desktop app is the local rich UI for sessions, memory, approvals, diffs, and settings. It talks to the same local runtime and Postgres store as the CLI.
 
-### Daemon mode (`moa daemon`)
+## CLI
 
-For local persistent background operation:
+The CLI binary is `moa` from package `moa-cli`.
 
 ```bash
-moa daemon start             Start background daemon
-moa daemon stop              Stop daemon
-moa daemon status            Show daemon status
-moa daemon logs              Tail daemon logs
+cargo run -p moa-cli -- exec "Summarize this repository"
+cargo run -p moa-cli -- sessions
+cargo run -p moa-cli -- memory search "deployment"
+cargo run -p moa-cli -- doctor
 ```
 
-The daemon runs the `LocalOrchestrator` in the background, allowing sessions to continue after the invoking CLI command exits. Local clients reconnect over a Unix socket.
+The daemon mode keeps the local runtime alive for background work and reconnecting clients.
 
----
+## Messaging Gateway
 
-## Desktop + CLI stack
+`moa-gateway` owns platform adapters and renderers for Telegram, Slack, and Discord. Adapters convert platform callbacks into the shared command/event model and render approvals with platform-native controls when available.
 
-| Purpose | Crate | Notes |
-|---|---|---|
-| Desktop UI framework | `gpui` | Native desktop rendering |
-| Desktop components | `gpui-component` | Shared panels and controls |
-| System tray | `tray-icon` | Background app presence |
-| Async runtime | `tokio` | Async I/O, task spawning |
-| CLI parsing | `clap` | Derive-based argument parsing |
-| Markdown rendering | `pulldown-cmark` + `syntect` | Parse + syntax highlight |
-| Diff rendering | `similar` | Diff algorithm |
+Current implementation caveats are documented in `implementation-caveats.md`, especially around callback normalization and outbound routing anchors.

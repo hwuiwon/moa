@@ -47,9 +47,12 @@ is therefore not the static prefix; it is the rolling conversation prefix.
 
 All per-turn runtime state belongs in the dynamic tail:
 
-- `HistoryCompiler` emits the replayed conversation before the dynamic tail.
-- `MemoryRetriever` injects relevant memory after history and before the active
-  user turn.
+- `QueryRewriter` stores rewritten-query and task-transition metadata without
+  altering the stable prefix.
+- `MemoryRetriever` injects relevant memory after query rewriting and before
+  history compilation.
+- `HistoryCompiler` emits replayed conversation, checkpoints, recent turns,
+  and segment events.
 - `RuntimeContextProcessor` emits the runtime reminder immediately before the
   current user turn.
 
@@ -86,7 +89,10 @@ active turn.
 When adding prompt content:
 
 - Put static instructions in the early pipeline stages.
-- Keep replayed history before memory and runtime context.
+- Keep query rewriting, retrieved memory, replayed history, and runtime context
+  out of the stable prefix.
+- Preserve the current dynamic order: query rewrite, memory, history, runtime
+  context, compactor, cache optimizer.
 - Put dynamic session or turn state in `RuntimeContextProcessor`.
 - Keep tool definitions sorted deterministically by tool name.
 - Keep rendered skill metadata sorted deterministically by skill name.

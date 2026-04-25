@@ -1,222 +1,130 @@
 # MOA
+
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/hwuiwon/moa)
 
-**A cloud-first, learning, general-purpose AI agent platform — written in Rust.**
+**MOA is a cloud-first, Rust-based, multi-tenant AI agent platform that learns from work.**
 
+MOA runs durable agent sessions on Restate, stores product data in Postgres/Neon with pgvector, segments conversations into discrete tasks, scores task resolution automatically, and feeds those outcomes into per-tenant learning. Tenants start with a blank intent taxonomy. MOA discovers candidate intents from their conversations, lets admins curate them, and uses confirmed intents to improve memory retrieval, skill ranking, and tool selection.
 
-MOA is a persistent agent that lives in the cloud, reaches you through the messaging apps you already use, and gets better the longer it runs. Think **many brains, many hands**: stateless reasoning loops recover from a durable event log, and pluggable execution environments (Docker, Daytona, E2B microVMs, MCP servers) carry out the work.
+Local development uses the same core brain and storage model through the CLI and the GPUI desktop app. Cloud deployment uses Restate services, virtual objects, and workflows behind the REST/gateway surfaces.
 
-A zero-setup **desktop app and CLI** give you the same experience locally — the brain harness is identical in both modes; only the orchestrator and hand providers swap out.
+Status: early active development. The architecture is stable enough to document, but APIs and product surfaces still move.
 
-> Status: early / active development. The architecture is stable, the surface area still moves. Pinning a commit is a good idea for now.
+## What Matters
 
----
+- **Durable orchestration:** Restate virtual objects own sessions and sub-agents; workflows own one-shot jobs such as memory consolidation and intent discovery.
+- **Postgres everywhere:** sessions, events, analytics, task segments, memory indexes, embeddings, intents, and the learning log live in Postgres/Neon.
+- **Task-aware sessions:** every session can contain multiple task segments, each with intent metadata, tool and skill usage, cost, and a resolution score.
+- **Per-tenant learning:** tenants own their intent taxonomy and learning log. Global catalog intents are opt-in only.
+- **Resolution-weighted skills:** skill ranking uses tenant-level resolution data, not only recency or usage count.
+- **Inspectable operation:** every event, learning entry, tool call, approval, and materialized analytics view is queryable.
+- **Pluggable hands:** local execution, Docker, Daytona, E2B, and MCP tools all route through the hand/tool abstraction.
+- **Model-agnostic providers:** Anthropic, OpenAI, and Google Gemini are first-class provider targets.
 
-## Why MOA
+## Quickstart
 
-- **Durable sessions.** An append-only Postgres event log survives any brain, hand, or machine crash. Sessions resume from the last event, not from scratch.
-- **Stateless brains, pluggable hands.** Brains don't hold state; hands are cattle, not pets. Provisioned lazily, destroyed at session end.
-- **Inspectable by design.** Every tool call, context compilation stage, memory write, and LLM request is observable. No magic.
-- **Reversible collaboration.** Inspect → approve → checkpoint → revert. Three-tier approval buttons (Allow Once / Always Allow / Deny) on every risky action.
-- **Learning loop.** A file-backed wiki memory (markdown on disk, Postgres FTS index) compounds with every session. Skills are auto-distilled from successful multi-step runs.
-- **Model-agnostic.** Anthropic, OpenAI, and Google Gemini are first-class. No vendor lock-in.
-- **Messaging-first.** Telegram, Slack, and Discord adapters are part of the core communication layer, not an afterthought.
-
----
-
-## Quickstart (local)
-
-**Prerequisites:** Rust 1.80+, Docker, and at least one LLM API key (Anthropic, OpenAI, or Google).
+Prerequisites: Rust, Docker, Postgres from the repo dev stack, and at least one provider key.
 
 ```bash
-# 1. Start Postgres (the only required local service)
-make dev            # equivalent to: docker compose up -d
+make dev
 
-# 2. Provide an API key
-export ANTHROPIC_API_KEY=sk-ant-...
-# or OPENAI_API_KEY=...  / GOOGLE_API_KEY=...
+export OPENAI_API_KEY=sk-...
+# or ANTHROPIC_API_KEY=... / GOOGLE_API_KEY=...
 
-# 3. Build and initialize
 cargo build
-cargo run --bin moa -- init
-cargo run --bin moa -- doctor    # sanity-check your environment
-
-# 4. One-shot prompt
-cargo run --bin moa -- exec "What's 2+2?"
-
-# 5. Or launch the desktop app (built separately — GPUI)
-cargo run -p moa-desktop
+cargo run -p moa-cli -- init
+cargo run -p moa-cli -- doctor
+cargo run -p moa-cli -- exec "What's 2+2?"
 ```
 
-Everything lives under `~/.moa/` (memory, sandbox, logs, vault).
-
----
-
-## CLI surface
-
-```
-moa exec "<prompt>"              # one-shot, streams events to stderr, result to stdout
-moa status                       # active daemon/session status
-moa sessions [--workspace .]     # list persisted sessions
-moa memory search <query>        # FTS search across workspace memory
-moa memory show <path>           # render one memory page
-moa memory ingest <files...>     # ingest documents into workspace memory
-moa config [set <key> <value>]   # read / update config
-moa init                         # initialize MOA directories in the current workspace
-moa doctor                       # local environment diagnostic
-moa daemon {start|stop|status|logs}
-moa checkpoint {create|list|rollback|cleanup}
-moa eval {run|plan|skill|list}
-moa version
-```
-
-The desktop app is a separate binary:
+Launch the desktop app explicitly because it is not a default workspace member:
 
 ```bash
 cargo run -p moa-desktop
 ```
 
-See [`docs/03-communication-layer.md`](docs/03-communication-layer.md) for the full interaction model (keybindings, approval UX, slash commands, observation verbosity).
+## Cloud Runtime
 
----
-
-## Configuration
-
-Config lives at `~/.moa/config.toml`. A commented reference copy is at [`docs/sample-config.toml`](docs/sample-config.toml). Key sections:
-
-| Section | Controls |
-|---|---|
-| `[general]` | default provider, model, reasoning effort |
-| `[providers.*]` | per-provider API key env vars |
-| `[database]` | Postgres connection string (required) |
-| `[local]` | sandbox dir, memory dir, Docker preference |
-| `[cloud]` | cloud-mode enablement and hand-provider settings |
-| `[gateway]` | Telegram / Slack / Discord tokens |
-| `[permissions]` | default posture, auto-approve list, deny list |
-| `[compaction]` | event threshold, preserve-errors, recent-turns-verbatim |
-| `[observability]` | OTLP endpoint, sampling, custom headers |
-
-Environment variables override TOML via the `MOA__` prefix (e.g. `MOA__DATABASE__URL`, `MOA__CLOUD__ENABLED=true`).
-
----
-
-## Deploying to the cloud
-
-Production deployment uses **Restate** for durable orchestration, Kubernetes manifests under [`k8s/`](k8s/) for runtime deployment, and **Daytona** (or E2B) for container/microVM hands.
+Cloud mode runs the `moa-orchestrator` Restate handler service plus Postgres/Neon and the configured hand provider.
 
 ```bash
-# Build the production image
-docker build -t moa:latest .
-
-# Deploy
-kubectl apply -k k8s/
+cargo run -p moa-orchestrator -- --port 9080 --health-port 9081
 ```
 
-Required environment in cloud mode:
+The binary registers these Restate surfaces: `Session`, `SubAgent`, `Workspace`, `SessionStore`, `MemoryStore`, `ToolExecutor`, `LLMGateway`, `WorkspaceStore`, `IntentManager`, `Consolidate`, `IntentDiscovery`, and `Health`.
+
+Required cloud configuration includes:
 
 ```bash
-MOA__CLOUD__ENABLED=true
-MOA__DATABASE__URL=postgres://...            # managed Postgres / Neon
-RESTATE_ADMIN_URL=http://moa-restate.moa-system.svc.cluster.local:9070
-DAYTONA_API_KEY=...                          # or E2B_API_KEY
-ANTHROPIC_API_KEY=...                        # at least one LLM provider
-TELEGRAM_BOT_TOKEN=...                       # optional messaging channels
-SLACK_BOT_TOKEN=...  SLACK_APP_TOKEN=...
-DISCORD_BOT_TOKEN=...
+MOA__DATABASE__URL=postgres://...
+RESTATE_ADMIN_URL=http://localhost:9070
+OPENAI_API_KEY=...
+DAYTONA_API_KEY=... # optional, depending on hand provider
 ```
 
-Full cloud-deployment details: [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md) and [`docs/10-technology-stack.md`](docs/10-technology-stack.md).
+## Architecture
 
----
-
-## Architecture at a glance
-
+```text
+REST / Gateway / CLI / GPUI Desktop
+        |
+        v
+Restate handler service (`moa-orchestrator`)
+        |
+        +-- Session VO -> TurnRunner -> context pipeline -> LLMGateway
+        +-- SubAgent VO -> bounded child agent execution
+        +-- ToolExecutor -> ToolRouter -> hands / MCP / built-ins
+        +-- Consolidate workflow -> memory compaction
+        +-- IntentDiscovery workflow -> tenant intent proposals
+        |
+        v
+Postgres / Neon
+  sessions, events, task_segments, analytics views,
+  wiki search index, pgvector embeddings,
+  tenant_intents, global_intent_catalog, learning_log
 ```
-Messaging  ─┐
-Desktop    ─┼─►  Gateway  ─►  Brain Orchestrator  ─►  Brain (stateless harness)
-CLI        ─┘                  (Restate | Local)            │
-                                                            ├─► LLM Provider
-                                                            │   (Anthropic / OpenAI / Gemini)
-                                                            │
-                                                            ├─► Hands (pluggable)
-                                                            │   Docker │ Daytona │ E2B │ MCP
-                                                            │
-                                                            └─► Session Log (Postgres, append-only)
-                                                                └─► Memory (file-wiki + FTS)
-```
 
-The same trait hierarchy — `BrainOrchestrator`, `SessionStore`, `HandProvider`, `LLMProvider`, `PlatformAdapter`, `MemoryStore`, `ContextProcessor` — powers both modes. Only the concrete implementations swap.
+The context pipeline is byte-stable where possible for prompt caching. With query rewriting enabled, the current processors are: identity, instructions, tools, skills, query rewrite, memory, history, runtime context, compactor, and cache optimizer.
 
-For the full picture, read **[`architecture.md`](architecture.md)**. For runtime flow diagrams (mermaid), see **[`sequence-diagrams.md`](sequence-diagrams.md)**.
-
----
-
-## Workspace layout
+## Workspace Layout
 
 | Crate | Role |
 |---|---|
-| [`moa-core`](moa-core/) | Core types, traits, config, errors — the interface seam |
-| [`moa-brain`](moa-brain/) | Brain harness loop and 7-stage context compilation pipeline |
-| [`moa-session`](moa-session/) | `PostgresSessionStore` — append-only event log, replay, compaction |
-| [`moa-memory`](moa-memory/) | File-wiki memory, FTS index, ingestion, consolidation, git-branch concurrent writes |
-| [`moa-hands`](moa-hands/) | `LocalHandProvider`, Daytona, E2B, MCP client, tool router |
-| [`moa-providers`](moa-providers/) | Anthropic, OpenAI, Gemini LLM providers with streaming + caching |
-| [`moa-orchestrator`](moa-orchestrator/) | `LocalOrchestrator` (tokio) and the Restate-backed orchestrator binary |
-| [`moa-gateway`](moa-gateway/) | Telegram / Slack / Discord adapters, platform-adaptive rendering, approvals |
-| [`moa-security`](moa-security/) | Credential vault, MCP proxy, sandbox policies, injection detection |
-| [`moa-skills`](moa-skills/) | Agent Skills registry, distillation, self-improvement |
-| [`moa-eval`](moa-eval/) | Evaluation harness for agents, skills, and suites |
-| [`moa-runtime`](moa-runtime/) | Shared runtime wiring (local + cloud bootstrap) |
-| [`moa-cli`](moa-cli/) | `moa` binary — CLI + daemon entrypoints |
-| [`moa-desktop`](moa-desktop/) | GPUI desktop application (not a default workspace member) |
+| [`moa-core`](moa-core/) | Shared types, traits, config, events, telemetry, analytics DTOs |
+| [`moa-brain`](moa-brain/) | Context pipeline, query rewriting, segment helpers, intent classifier, resolution scoring, streamed turns |
+| [`moa-session`](moa-session/) | Postgres session store, event log, task segments, intent tables, learning log, analytics views |
+| [`moa-memory`](moa-memory/) | File-backed wiki memory plus Postgres keyword, trigram, and pgvector search |
+| [`moa-hands`](moa-hands/) | Tool router, local/Docker hands, Daytona, E2B, MCP client |
+| [`moa-providers`](moa-providers/) | LLM and embedding providers |
+| [`moa-orchestrator`](moa-orchestrator/) | Restate services, virtual objects, workflows, and handler binary |
+| [`moa-orchestrator-local`](moa-orchestrator-local/) | Tokio-task local orchestrator for CLI and desktop |
+| [`moa-gateway`](moa-gateway/) | Telegram, Slack, Discord adapters and platform rendering |
+| [`moa-runtime`](moa-runtime/) | Shared runtime bootstrap |
+| [`moa-cli`](moa-cli/) | `moa` CLI and daemon commands |
+| [`moa-security`](moa-security/) | Credential vault, MCP proxy, policies, prompt-injection controls |
+| [`moa-skills`](moa-skills/) | Agent Skills parsing, distillation, improvement, regression suites |
+| [`moa-eval`](moa-eval/) | Evaluation harness |
+| [`moa-loadtest`](moa-loadtest/) | Load-test harness |
+| [`moa-desktop`](moa-desktop/) | GPUI desktop application |
 
----
+## Documentation
+
+Start with [`docs/README.md`](docs/README.md), then read:
+
+- [`docs/01-architecture-overview.md`](docs/01-architecture-overview.md) for the system model and trait map.
+- [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md) for Restate session and sub-agent flow.
+- [`docs/13-task-segmentation.md`](docs/13-task-segmentation.md) for segments and resolution scoring.
+- [`docs/14-multi-tenancy-and-learning.md`](docs/14-multi-tenancy-and-learning.md) for tenants, intents, catalog adoption, and the learning log.
 
 ## Development
 
 ```bash
-make dev            # start Postgres
-cargo build         # default workspace build (excludes moa-desktop)
-cargo test          # run tests
-cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all
-
-cargo build -p moa-desktop   # GPUI app — built explicitly
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+cargo build -p moa-desktop
 ```
 
-House rules (see [`AGENTS.md`](AGENTS.md) for the full set):
-
-- `thiserror` for library errors; `anyhow` only in binary entrypoints
-- `tracing` for all logging — never `println!`/`eprintln!` in library code
-- All I/O is async; `tokio` is the runtime
-- No `unwrap()` in library code
-- Every public function and module carries a doc comment
-- `cargo clippy` and `cargo fmt` must pass before any step is "done"
-
----
-
-## Documentation
-
-Short description of each file in [`docs/`](docs/):
-
-| File | Covers |
-|---|---|
-| [`00-direction.md`](docs/00-direction.md) | Product identity, philosophy, target users |
-| [`01-architecture-overview.md`](docs/01-architecture-overview.md) | System diagram, trait definitions, workspace layout |
-| [`02-brain-orchestration.md`](docs/02-brain-orchestration.md) | Restate orchestration, local runtime mode, brain loop |
-| [`03-communication-layer.md`](docs/03-communication-layer.md) | Gateway, desktop/CLI, approvals, thread observation |
-| [`04-memory-architecture.md`](docs/04-memory-architecture.md) | File-wiki, FTS, consolidation, concurrent writes |
-| [`05-session-event-log.md`](docs/05-session-event-log.md) | Postgres schema, event types, compaction, replay |
-| [`06-hands-and-mcp.md`](docs/06-hands-and-mcp.md) | `HandProvider`, Daytona, E2B, MCP, tool routing |
-| [`07-context-pipeline.md`](docs/07-context-pipeline.md) | 7-stage context compilation and cache optimization |
-| [`08-security.md`](docs/08-security.md) | Credential vault, sandbox tiers, prompt-injection mitigation |
-| [`09-skills-and-learning.md`](docs/09-skills-and-learning.md) | Agent Skills format, distillation, self-improvement |
-| [`10-technology-stack.md`](docs/10-technology-stack.md) | Crates, external services, phases, deployment |
-| [`11-event-replay-runbook.md`](docs/11-event-replay-runbook.md) | Operational runbook for event replay |
-| [`12-restate-architecture.md`](docs/12-restate-architecture.md) | Restate services, virtual objects, workflows, and Kubernetes deployment |
-| [`14-post-migration-notes.md`](docs/14-post-migration-notes.md) | Final migration notes, cost comparison, and follow-up debt |
-
----
+`moa-desktop` is not a default workspace member, so build it explicitly.
 
 ## License
 
