@@ -5342,6 +5342,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-memory-graph"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "moa-core",
+ "moa-session",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "moa-orchestrator"
 version = "0.1.0"
 dependencies = [
