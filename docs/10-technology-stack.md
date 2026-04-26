@@ -49,7 +49,7 @@ The root workspace currently contains:
 
 | Service | Purpose |
 |---|---|
-| Postgres with pgvector | Session store, event search, memory index, embeddings, learning tables |
+| Postgres 17.6+ with Apache AGE, pgvector, and pgaudit | Session store, graph memory, event search, memory index, embeddings, learning tables |
 | LLM provider | Anthropic, OpenAI, or Google Gemini |
 
 Docker is used by the dev stack and optionally by local hand providers.

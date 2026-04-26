@@ -43,6 +43,12 @@ impl<'p> ScopedConn<'p> {
             .execute(&mut **tx)
             .await
             .map_err(map_sqlx_error)?;
+        sqlx::query(
+            "SELECT pg_catalog.set_config('search_path', 'ag_catalog, \"$user\", public', true)",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
 
         Ok(())
     }

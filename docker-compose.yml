@@ -3,20 +3,32 @@
 
 services:
   postgres:
-    image: pgvector/pgvector:0.8.2-pg18-trixie
+    build:
+      context: .
+      dockerfile: docker/postgres/Dockerfile
+      args:
+        AGE_REF: release/PG17/1.7.0
+        PGVECTOR_REF: v0.8.2
+    image: moa-postgres-age:pg17-age1.7.0
     container_name: moa-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: moa
-      POSTGRES_USER: moa
-      POSTGRES_PASSWORD: moa
+      POSTGRES_USER: moa_owner
+      POSTGRES_PASSWORD: dev
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=age,pgaudit
+      - -c
+      - session_preload_libraries=age
     ports:
       - "5432:5432"
     volumes:
-      - moa-pg-data:/var/lib/postgresql
+      - moa-pg-data:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U moa -d moa"]
+      test: ["CMD-SHELL", "pg_isready -U moa_owner -d moa"]
       interval: 5s
       timeout: 3s
       retries: 10

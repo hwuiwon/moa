@@ -16,6 +16,7 @@ const SESSION_MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/009_resolution_views.sql"),
     include_str!("../migrations/postgres/010_intents_learning_log.sql"),
     include_str!("../migrations/postgres/011_three_tier_rls.sql"),
+    include_str!("../migrations/postgres/012_age_bootstrap.sql"),
 ];
 
 /// Runs all embedded `PostgreSQL` migrations idempotently on the provided pool.
@@ -43,20 +44,21 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
     .await
     .map_err(map_sqlx_error)?;
 
-    raw_sql("CREATE EXTENSION IF NOT EXISTS vector;")
-        .execute(pool)
-        .await
-        .map_err(map_sqlx_error)?;
+    raw_sql(
+        "CREATE EXTENSION IF NOT EXISTS age; LOAD 'age'; CREATE EXTENSION IF NOT EXISTS vector;",
+    )
+    .execute(pool)
+    .await
+    .map_err(map_sqlx_error)?;
 
     let mut tx = pool.begin().await.map_err(map_sqlx_error)?;
     let search_path = format!("{}, public", quote_identifier(schema_name));
-    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, true)")
-        .bind(search_path)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-
     for migration in SESSION_MIGRATIONS {
+        sqlx::query("SELECT pg_catalog.set_config('search_path', $1, true)")
+            .bind(&search_path)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
         raw_sql(migration)
             .execute(&mut *tx)
             .await

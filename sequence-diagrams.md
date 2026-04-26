@@ -419,7 +419,7 @@ sequenceDiagram
     User->>CLI: moa exec "hello" (or launches desktop)
     CLI->>CLI: load ~/.moa/config.toml
     CLI->>CLI: detect Docker availability
-    CLI->>Log: connect postgres://moa:moa@localhost:5432/moa
+    CLI->>Log: connect postgres://moa_owner:dev@localhost:5432/moa
     CLI->>Orch: new(store, memory, llm, router, vault)
     CLI->>Cron: start (consolidation, skill improvement)
 
