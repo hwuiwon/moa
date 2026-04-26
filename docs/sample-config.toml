@@ -18,7 +18,7 @@ api_key_env = "OPENAI_API_KEY"
 api_key_env = "GOOGLE_API_KEY"
 
 [database]
-url = "postgres://moa:moa@localhost:5432/moa"
+url = "postgres://moa_owner:dev@localhost:5432/moa"
 # admin_url = "postgresql://..." # direct/non-pooled URL for migrations and admin flows
 max_connections = 20
 connect_timeout_seconds = 10

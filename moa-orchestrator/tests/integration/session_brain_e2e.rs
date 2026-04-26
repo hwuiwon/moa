@@ -13,7 +13,7 @@ use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, test_session_meta, user_message,
 };
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa:moa@127.0.0.1:5432/moa";
+const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:5432/moa";
 
 async fn register_deployment(endpoint_url: &str) -> Result<()> {
     for _attempt in 0..15 {

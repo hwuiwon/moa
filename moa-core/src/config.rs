@@ -785,7 +785,7 @@ pub struct DatabaseConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            url: "postgres://moa:moa@localhost:5432/moa".to_string(),
+            url: "postgres://moa_owner:dev@localhost:5432/moa".to_string(),
             admin_url: None,
             max_connections: 20,
             connect_timeout_seconds: 10,
