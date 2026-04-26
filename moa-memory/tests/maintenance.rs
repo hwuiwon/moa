@@ -29,6 +29,12 @@ fn sample_page(title: &str, page_type: PageType, content: &str) -> WikiPage {
     }
 }
 
+fn workspace_scope(workspace_id: impl Into<moa_core::WorkspaceId>) -> MemoryScope {
+    MemoryScope::Workspace {
+        workspace_id: workspace_id.into(),
+    }
+}
+
 async fn searchable_store() -> (tempfile::TempDir, FileMemoryStore) {
     let dir = tempdir().unwrap();
     let (session_store, _database_url, schema_name) =
@@ -71,7 +77,7 @@ impl SeededRng {
 async fn consolidation_normalizes_dates_and_resolves_conflicts() {
     let dir = tempdir().unwrap();
     let store = FileMemoryStore::new(dir.path()).await.unwrap();
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
 
     let mut architecture = sample_page(
         "Architecture",
@@ -132,7 +138,7 @@ async fn consolidation_normalizes_dates_and_resolves_conflicts() {
 async fn ingest_source_creates_summary_and_updates_related_pages() {
     let dir = tempdir().unwrap();
     let store = FileMemoryStore::new(dir.path()).await.unwrap();
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
 
     let report = store
         .ingest_source(
@@ -180,7 +186,7 @@ async fn ingest_source_creates_summary_and_updates_related_pages() {
 async fn ingest_source_truncates_large_content() {
     let dir = tempdir().unwrap();
     let store = FileMemoryStore::new(dir.path()).await.unwrap();
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
     let source = format!("# Large Source\n\n{}", "A".repeat(200_000));
 
     let report = store
@@ -196,7 +202,7 @@ async fn ingest_source_truncates_large_content() {
 async fn branch_reconciliation_merges_conflicting_writes() {
     let dir = tempdir().unwrap();
     let store = FileMemoryStore::new(dir.path()).await.unwrap();
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
 
     let mut main_page = sample_page(
         "Architecture",
@@ -240,7 +246,7 @@ async fn branch_reconciliation_merges_conflicting_writes() {
 async fn consolidation_decays_confidence_once_and_is_stable_on_repeat_runs() {
     let dir = tempdir().unwrap();
     let store = FileMemoryStore::new(dir.path()).await.unwrap();
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
 
     let mut page = sample_page(
         "Lonely Topic",
@@ -277,7 +283,7 @@ async fn consolidation_decays_confidence_once_and_is_stable_on_repeat_runs() {
 async fn repeated_ingest_updates_existing_pages_without_duplicate_links() {
     let dir = tempdir().unwrap();
     let store = FileMemoryStore::new(dir.path()).await.unwrap();
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
 
     let source = r"
 ## Entities
@@ -323,7 +329,7 @@ async fn repeated_ingest_updates_existing_pages_without_duplicate_links() {
 async fn reconciliation_merges_multiple_branches_and_cleans_branch_directory() {
     let dir = tempdir().unwrap();
     let store = FileMemoryStore::new(dir.path()).await.unwrap();
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
 
     store
         .write_page(
@@ -396,7 +402,7 @@ async fn reconciliation_merges_multiple_branches_and_cleans_branch_directory() {
 #[tokio::test]
 async fn maintenance_operations_append_log_and_keep_results_searchable() {
     let (_dir, store) = searchable_store().await;
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
 
     store
         .ingest_source(
@@ -454,7 +460,7 @@ async fn maintenance_operations_append_log_and_keep_results_searchable() {
 async fn manual_stress_ingest_reconcile_and_consolidate_preserves_invariants() {
     let dir = tempdir().unwrap();
     let store = FileMemoryStore::new(dir.path()).await.unwrap();
-    let scope = MemoryScope::Workspace("stress-ws".into());
+    let scope = workspace_scope("stress-ws");
 
     for index in 0..20 {
         store
@@ -540,7 +546,7 @@ async fn manual_seeded_memory_fuzz_preserves_core_invariants() {
     for seed in [7_u64, 19, 41] {
         let dir = tempdir().unwrap();
         let store = FileMemoryStore::new(dir.path()).await.unwrap();
-        let scope = MemoryScope::Workspace(format!("fuzz-ws-{seed}").into());
+        let scope = workspace_scope(format!("fuzz-ws-{seed}"));
         let mut rng = SeededRng::new(seed);
         let mut tracked_terms = Vec::new();
 

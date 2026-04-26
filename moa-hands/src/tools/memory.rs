@@ -134,8 +134,9 @@ impl BuiltInTool for MemorySearchTool {
 
         for scope in scopes {
             let scope_label = match &scope {
-                MemoryScope::User(_) => "user",
-                MemoryScope::Workspace(_) => "workspace",
+                MemoryScope::Global => "global",
+                MemoryScope::Workspace { .. } => "workspace",
+                MemoryScope::User { .. } => "user",
             };
             let mut results = ctx
                 .memory_store
@@ -351,7 +352,9 @@ impl BuiltInTool for MemoryIngestTool {
         let report = ctx
             .memory_store
             .ingest_source(
-                &MemoryScope::Workspace(ctx.session.workspace_id.clone()),
+                &MemoryScope::Workspace {
+                    workspace_id: ctx.session.workspace_id.clone(),
+                },
                 &source_name,
                 &params.content,
             )
@@ -421,11 +424,21 @@ enum MemorySearchScope {
 impl MemorySearchScope {
     fn scopes(&self, session: &moa_core::SessionMeta) -> Vec<MemoryScope> {
         match self {
-            Self::User => vec![MemoryScope::User(session.user_id.clone())],
-            Self::Workspace => vec![MemoryScope::Workspace(session.workspace_id.clone())],
+            Self::User => vec![MemoryScope::User {
+                workspace_id: session.workspace_id.clone(),
+                user_id: session.user_id.clone(),
+            }],
+            Self::Workspace => vec![MemoryScope::Workspace {
+                workspace_id: session.workspace_id.clone(),
+            }],
             Self::Both => vec![
-                MemoryScope::User(session.user_id.clone()),
-                MemoryScope::Workspace(session.workspace_id.clone()),
+                MemoryScope::Workspace {
+                    workspace_id: session.workspace_id.clone(),
+                },
+                MemoryScope::User {
+                    workspace_id: session.workspace_id.clone(),
+                    user_id: session.user_id.clone(),
+                },
             ],
         }
     }
@@ -478,12 +491,23 @@ async fn read_page_with_fallback(
     path: &MemoryPath,
 ) -> Result<WikiPage> {
     match memory_store
-        .read_page(&MemoryScope::Workspace(session.workspace_id.clone()), path)
+        .read_page(
+            &MemoryScope::Workspace {
+                workspace_id: session.workspace_id.clone(),
+            },
+            path,
+        )
         .await
     {
         Ok(page) => Ok(page),
         Err(error) if is_memory_not_found(&error) => memory_store
-            .read_page(&MemoryScope::User(session.user_id.clone()), path)
+            .read_page(
+                &MemoryScope::User {
+                    workspace_id: session.workspace_id.clone(),
+                    user_id: session.user_id.clone(),
+                },
+                path,
+            )
             .await
             .map_err(|fallback_error| {
                 if is_memory_not_found(&fallback_error) {
@@ -504,14 +528,19 @@ async fn resolve_existing_scope(
     session: &moa_core::SessionMeta,
     path: &MemoryPath,
 ) -> Result<(MemoryScope, Option<WikiPage>)> {
-    let workspace_scope = MemoryScope::Workspace(session.workspace_id.clone());
+    let workspace_scope = MemoryScope::Workspace {
+        workspace_id: session.workspace_id.clone(),
+    };
     match memory_store.read_page(&workspace_scope, path).await {
         Ok(page) => return Ok((workspace_scope, Some(page))),
         Err(error) if !is_memory_not_found(&error) => return Err(error),
         Err(_) => {}
     }
 
-    let user_scope = MemoryScope::User(session.user_id.clone());
+    let user_scope = MemoryScope::User {
+        workspace_id: session.workspace_id.clone(),
+        user_id: session.user_id.clone(),
+    };
     match memory_store.read_page(&user_scope, path).await {
         Ok(page) => Ok((user_scope, Some(page))),
         Err(error) if !is_memory_not_found(&error) => Err(error),
@@ -524,8 +553,13 @@ async fn resolve_existing_scope(
 
 fn parse_scope(value: &str, session: &moa_core::SessionMeta) -> Result<MemoryScope> {
     match value {
-        "user" => Ok(MemoryScope::User(session.user_id.clone())),
-        "workspace" => Ok(MemoryScope::Workspace(session.workspace_id.clone())),
+        "user" => Ok(MemoryScope::User {
+            workspace_id: session.workspace_id.clone(),
+            user_id: session.user_id.clone(),
+        }),
+        "workspace" => Ok(MemoryScope::Workspace {
+            workspace_id: session.workspace_id.clone(),
+        }),
         other => Err(MoaError::ValidationError(format!(
             "unsupported memory scope: {other}"
         ))),

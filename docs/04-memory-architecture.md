@@ -6,7 +6,7 @@ _File-backed wiki, Postgres keyword search, pgvector semantic search, and consol
 
 1. Markdown files are canonical.
 2. Postgres indexes are derived and rebuildable.
-3. User and workspace scopes compose at runtime.
+3. Global, workspace, and user scopes compose at runtime.
 4. Memory updates should be inspectable, attributable, and reversible through normal file and event history.
 5. Memory is part of the learning pipeline, not a separate cache.
 
@@ -14,10 +14,11 @@ _File-backed wiki, Postgres keyword search, pgvector semantic search, and consol
 
 | Scope | Local path | Cloud path | Contents |
 |---|---|---|---|
-| User | `~/.moa/memory/` | `users/{user_id}/memory/` | preferences, habits, corrections, cross-workspace facts |
+| Global | Managed by the promotion path | Managed by the promotion path | organization-wide conventions, shared concepts, promoted facts |
 | Workspace | `~/.moa/workspaces/{workspace_id}/memory/` | `workspaces/{workspace_id}/memory/` | project architecture, conventions, decisions, sources, skills |
+| User | `~/.moa/workspaces/{workspace_id}/users/{user_id}/memory/` | `workspaces/{workspace_id}/users/{user_id}/memory/` | workspace-bound preferences, habits, and corrections |
 
-At context compilation time the memory stage loads both scope indexes, then retrieves task-relevant pages from user and workspace search.
+At context compilation time the memory stage loads workspace and user indexes, then searches Global -> Workspace -> User for task-relevant pages.
 
 ## Wiki Layout
 

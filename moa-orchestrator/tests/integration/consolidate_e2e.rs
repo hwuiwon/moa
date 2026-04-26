@@ -148,7 +148,9 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
         client
             .post(format!("{ingress}/MemoryStore/write_page"))
             .json(&WritePageRequest {
-                scope: MemoryScope::Workspace(workspace_id.clone()),
+                scope: MemoryScope::Workspace {
+                    workspace_id: workspace_id.clone(),
+                },
                 path: "topics/architecture.md".into(),
                 page: memory_page(
                     "Architecture",
@@ -188,7 +190,9 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
         let page = client
             .post(format!("{ingress}/MemoryStore/read_page"))
             .json(&ReadPageRequest {
-                scope: MemoryScope::Workspace(workspace_id.clone()),
+                scope: MemoryScope::Workspace {
+                    workspace_id: workspace_id.clone(),
+                },
                 path: "topics/architecture.md".into(),
             })
             .send()

@@ -169,7 +169,9 @@ pub async fn run_due_consolidations<S: SessionStore + ?Sized>(
 
     let mut reports = Vec::new();
     for workspace_id in workspace_ids {
-        let scope = MemoryScope::Workspace(workspace_id.clone());
+        let scope = MemoryScope::Workspace {
+            workspace_id: workspace_id.clone(),
+        };
         if !tokio::fs::try_exists(store.scope_root(&scope)).await? {
             continue;
         }
@@ -202,8 +204,15 @@ async fn consolidation_due_for_scope(
             )
         })
         .filter(|session| match scope {
-            MemoryScope::Workspace(workspace_id) => &session.workspace_id == workspace_id,
-            MemoryScope::User(user_id) => &session.user_id == user_id,
+            MemoryScope::Global => {
+                // TODO(M02): handle Global tier in scheduled consolidation.
+                false
+            }
+            MemoryScope::Workspace { workspace_id } => &session.workspace_id == workspace_id,
+            MemoryScope::User {
+                workspace_id,
+                user_id,
+            } => &session.workspace_id == workspace_id && &session.user_id == user_id,
         })
         .filter(|session| last_run.is_none_or(|timestamp| session.updated_at > timestamp))
         .count();
@@ -440,7 +449,9 @@ mod tests {
     async fn consolidation_resolves_dates_prunes_and_refreshes_index() {
         let dir = tempdir().unwrap();
         let store = FileMemoryStore::new(dir.path()).await.unwrap();
-        let scope = MemoryScope::Workspace("ws1".into());
+        let scope = MemoryScope::Workspace {
+            workspace_id: "ws1".into(),
+        };
 
         store
             .write_page(

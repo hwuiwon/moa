@@ -1152,8 +1152,16 @@ fn quote_identifier(identifier: &str) -> String {
 
 fn scope_key(scope: &MemoryScope) -> String {
     match scope {
-        MemoryScope::User(_) => "user".to_string(),
-        MemoryScope::Workspace(workspace_id) => format!("workspace:{}", workspace_id.as_str()),
+        MemoryScope::Global => "global".to_string(),
+        MemoryScope::Workspace { workspace_id } => {
+            format!("workspace:{}", workspace_id.as_str())
+        }
+        MemoryScope::User {
+            workspace_id,
+            user_id,
+        } => {
+            format!("user:{}:{}", workspace_id.as_str(), user_id.as_str())
+        }
     }
 }
 
@@ -1217,7 +1225,9 @@ mod tests {
 
     fn result(path: &str, updated_hour: u32) -> moa_core::MemorySearchResult {
         moa_core::MemorySearchResult {
-            scope: MemoryScope::Workspace("ws".into()),
+            scope: MemoryScope::Workspace {
+                workspace_id: "ws".into(),
+            },
             path: path.into(),
             title: path.to_string(),
             page_type: PageType::Topic,

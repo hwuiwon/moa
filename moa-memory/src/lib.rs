@@ -48,7 +48,6 @@ impl FileMemoryStore {
     /// tests that only exercise the file-backed wiki semantics.
     pub async fn new(base_dir: impl AsRef<Path>) -> Result<Self> {
         let base_dir = base_dir.as_ref().to_path_buf();
-        fs::create_dir_all(base_dir.join("memory")).await?;
         fs::create_dir_all(base_dir.join("workspaces")).await?;
 
         Ok(Self {
@@ -69,7 +68,6 @@ impl FileMemoryStore {
         schema_name: Option<&str>,
     ) -> Result<Self> {
         let base_dir = base_dir.as_ref().to_path_buf();
-        fs::create_dir_all(base_dir.join("memory")).await?;
         fs::create_dir_all(base_dir.join("workspaces")).await?;
 
         Ok(Self {
@@ -86,7 +84,6 @@ impl FileMemoryStore {
         embedder: Arc<dyn EmbeddingProvider>,
     ) -> Result<Self> {
         let base_dir = base_dir.as_ref().to_path_buf();
-        fs::create_dir_all(base_dir.join("memory")).await?;
         fs::create_dir_all(base_dir.join("workspaces")).await?;
 
         Ok(Self {
@@ -257,11 +254,24 @@ impl FileMemoryStore {
 
     pub(crate) fn scope_root(&self, scope: &MemoryScope) -> PathBuf {
         match scope {
-            MemoryScope::User(_) => self.base_dir.join("memory"),
-            MemoryScope::Workspace(workspace_id) => self
+            MemoryScope::Global => {
+                // TODO(M02): handle Global tier once the store has a global path/RLS contract.
+                unimplemented!("Global scope not yet supported by FileMemoryStore; see M02")
+            }
+            MemoryScope::Workspace { workspace_id } => self
                 .base_dir
                 .join("workspaces")
                 .join(workspace_id.as_str())
+                .join("memory"),
+            MemoryScope::User {
+                workspace_id,
+                user_id,
+            } => self
+                .base_dir
+                .join("workspaces")
+                .join(workspace_id.as_str())
+                .join("users")
+                .join(user_id.as_str())
                 .join("memory"),
         }
     }

@@ -20,6 +20,12 @@ use tokio::fs;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+fn workspace_scope(workspace_id: &str) -> moa_core::MemoryScope {
+    moa_core::MemoryScope::Workspace {
+        workspace_id: WorkspaceId::new(workspace_id),
+    }
+}
+
 const DISTILLED_SKILL: &str = r#"---
 name: debug-oauth-refresh
 description: "Investigate and fix OAuth refresh-token bugs"
@@ -324,7 +330,7 @@ fn parses_skill_markdown() {
 async fn registry_lists_skill_metadata() -> Result<()> {
     let dir = tempdir()?;
     let memory = Arc::new(FileMemoryStore::new(dir.path()).await?);
-    let scope = moa_core::MemoryScope::Workspace(WorkspaceId::new("workspace"));
+    let scope = workspace_scope("workspace");
     let skill = parse_skill_markdown(DISTILLED_SKILL)?;
     let path = build_skill_path(&skill.frontmatter.name);
     let page = wiki_page_from_skill(&skill, Some(path.clone()))?;
@@ -366,7 +372,9 @@ async fn distills_skill_after_tool_heavy_session() -> Result<()> {
     let metadata = distilled.unwrap();
     let stored = memory
         .read_page(
-            &moa_core::MemoryScope::Workspace(session.workspace_id.clone()),
+            &moa_core::MemoryScope::Workspace {
+                workspace_id: session.workspace_id.clone(),
+            },
             &metadata.path,
         )
         .await?;
@@ -388,7 +396,7 @@ async fn distills_skill_after_tool_heavy_session() -> Result<()> {
 async fn improves_existing_skill_when_better_flow_is_found() -> Result<()> {
     let dir = tempdir()?;
     let memory = Arc::new(FileMemoryStore::new(dir.path()).await?);
-    let scope = moa_core::MemoryScope::Workspace(WorkspaceId::new("workspace"));
+    let scope = workspace_scope("workspace");
     let original = parse_skill_markdown(DISTILLED_SKILL)?;
     let path = build_skill_path(&original.frontmatter.name);
     let page = wiki_page_from_skill(&original, Some(path.clone()))?;
@@ -425,7 +433,7 @@ async fn improves_existing_skill_when_better_flow_is_found() -> Result<()> {
 async fn improvement_accepted_when_scores_better() -> Result<()> {
     let dir = tempdir()?;
     let memory = Arc::new(FileMemoryStore::new(dir.path()).await?);
-    let scope = moa_core::MemoryScope::Workspace(WorkspaceId::new("workspace"));
+    let scope = workspace_scope("workspace");
     let original = parse_skill_markdown(DISTILLED_SKILL)?;
     let path = build_skill_path(&original.frontmatter.name);
     let page = wiki_page_from_skill(&original, Some(path.clone()))?;
@@ -474,7 +482,7 @@ async fn improvement_accepted_when_scores_better() -> Result<()> {
 async fn improvement_rejected_on_regression() -> Result<()> {
     let dir = tempdir()?;
     let memory = Arc::new(FileMemoryStore::new(dir.path()).await?);
-    let scope = moa_core::MemoryScope::Workspace(WorkspaceId::new("workspace"));
+    let scope = workspace_scope("workspace");
     let original = parse_skill_markdown(IMPROVED_SKILL)?;
     let path = build_skill_path(&original.frontmatter.name);
     let page = wiki_page_from_skill(&original, Some(path.clone()))?;
@@ -523,7 +531,7 @@ async fn improvement_rejected_on_regression() -> Result<()> {
 async fn no_tests_means_unconditional_accept() -> Result<()> {
     let dir = tempdir()?;
     let memory = Arc::new(FileMemoryStore::new(dir.path()).await?);
-    let scope = moa_core::MemoryScope::Workspace(WorkspaceId::new("workspace"));
+    let scope = workspace_scope("workspace");
     let original = parse_skill_markdown(DISTILLED_SKILL)?;
     let path = build_skill_path(&original.frontmatter.name);
     let page = wiki_page_from_skill(&original, Some(path.clone()))?;
@@ -553,7 +561,7 @@ async fn no_tests_means_unconditional_accept() -> Result<()> {
 async fn log_entry_written_for_regression_attempt() -> Result<()> {
     let dir = tempdir()?;
     let memory = Arc::new(FileMemoryStore::new(dir.path()).await?);
-    let scope = moa_core::MemoryScope::Workspace(WorkspaceId::new("workspace"));
+    let scope = workspace_scope("workspace");
     let original = parse_skill_markdown(DISTILLED_SKILL)?;
     let path = build_skill_path(&original.frontmatter.name);
     let page = wiki_page_from_skill(&original, Some(path.clone()))?;
@@ -585,11 +593,7 @@ async fn log_entry_written_for_regression_attempt() -> Result<()> {
     )
     .await?;
 
-    let log = memory
-        .load_scope_log(&moa_core::MemoryScope::Workspace(WorkspaceId::new(
-            "workspace",
-        )))
-        .await?;
+    let log = memory.load_scope_log(&workspace_scope("workspace")).await?;
     assert!(log.contains("skill_improvement"));
     assert!(log.contains("debug-oauth-refresh"));
     Ok(())
@@ -599,7 +603,7 @@ async fn log_entry_written_for_regression_attempt() -> Result<()> {
 async fn budget_limit_skips_expensive_tests() -> Result<()> {
     let dir = tempdir()?;
     let memory = Arc::new(FileMemoryStore::new(dir.path()).await?);
-    let scope = moa_core::MemoryScope::Workspace(WorkspaceId::new("workspace"));
+    let scope = workspace_scope("workspace");
     let original = parse_skill_markdown(DISTILLED_SKILL)?;
     let path = build_skill_path(&original.frontmatter.name);
     let page = wiki_page_from_skill(&original, Some(path.clone()))?;
@@ -632,11 +636,7 @@ async fn budget_limit_skips_expensive_tests() -> Result<()> {
     .await?;
 
     assert!(improved.is_some());
-    let log = memory
-        .load_scope_log(&moa_core::MemoryScope::Workspace(WorkspaceId::new(
-            "workspace",
-        )))
-        .await?;
+    let log = memory.load_scope_log(&workspace_scope("workspace")).await?;
     assert!(log.contains("exceeds budget"));
     Ok(())
 }

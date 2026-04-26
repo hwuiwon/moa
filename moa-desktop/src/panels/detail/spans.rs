@@ -468,6 +468,57 @@ pub fn build_spans(events: &[EventRecord]) -> Vec<Span> {
                     source: record.clone(),
                 },
             ),
+            Event::SegmentStarted {
+                segment_index,
+                task_summary,
+                intent_label,
+                ..
+            } => push_child(
+                &mut current_turn,
+                &mut roots,
+                Span {
+                    id: record.id,
+                    kind: SpanKind::Session,
+                    name: format!("segment started · {}", segment_index + 1),
+                    detail: task_summary
+                        .as_deref()
+                        .or(intent_label.as_deref())
+                        .map(|value| one_line(value, 100))
+                        .unwrap_or_else(|| "task segment".to_string()),
+                    start: ts,
+                    end: ts,
+                    children: Vec::new(),
+                    source: record.clone(),
+                },
+            ),
+            Event::SegmentCompleted {
+                segment_index,
+                turn_count,
+                tools_used,
+                skills_activated,
+                token_cost,
+                duration_ms,
+                ..
+            } => push_child(
+                &mut current_turn,
+                &mut roots,
+                Span {
+                    id: record.id,
+                    kind: SpanKind::Session,
+                    name: format!("segment completed · {}", segment_index + 1),
+                    detail: format!(
+                        "{} turns · {} tools · {} skills · {} tokens",
+                        turn_count,
+                        tools_used.len(),
+                        skills_activated.len(),
+                        token_cost
+                    ),
+                    start: ts - Duration::milliseconds(*duration_ms as i64),
+                    end: ts,
+                    children: Vec::new(),
+                    source: record.clone(),
+                },
+            ),
         }
 
         // After mutating, bubble the turn's end forward to cover any

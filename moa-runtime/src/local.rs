@@ -217,7 +217,12 @@ impl LocalChatRuntime {
         let mut pages = self
             .orchestrator
             .memory_store()
-            .list_pages(&MemoryScope::Workspace(self.workspace_id.clone()), filter)
+            .list_pages(
+                &MemoryScope::Workspace {
+                    workspace_id: self.workspace_id.clone(),
+                },
+                filter,
+            )
             .await?;
         pages.sort_by_key(|page| std::cmp::Reverse(page.updated));
         Ok(pages)
@@ -240,7 +245,9 @@ impl LocalChatRuntime {
             .memory_store()
             .search(
                 query,
-                &MemoryScope::Workspace(self.workspace_id.clone()),
+                &MemoryScope::Workspace {
+                    workspace_id: self.workspace_id.clone(),
+                },
                 limit,
             )
             .await
@@ -250,7 +257,12 @@ impl LocalChatRuntime {
     pub async fn read_memory_page(&self, path: &MemoryPath) -> Result<WikiPage> {
         self.orchestrator
             .memory_store()
-            .read_page(&MemoryScope::Workspace(self.workspace_id.clone()), path)
+            .read_page(
+                &MemoryScope::Workspace {
+                    workspace_id: self.workspace_id.clone(),
+                },
+                path,
+            )
             .await
     }
 
@@ -263,14 +275,21 @@ impl LocalChatRuntime {
         self.orchestrator
             .memory_store()
             .write_page(
-                &MemoryScope::Workspace(self.workspace_id.clone()),
+                &MemoryScope::Workspace {
+                    workspace_id: self.workspace_id.clone(),
+                },
                 &path,
                 page,
             )
             .await?;
         self.orchestrator
             .memory_store()
-            .read_page(&MemoryScope::Workspace(self.workspace_id.clone()), &path)
+            .read_page(
+                &MemoryScope::Workspace {
+                    workspace_id: self.workspace_id.clone(),
+                },
+                &path,
+            )
             .await
     }
 
@@ -278,7 +297,12 @@ impl LocalChatRuntime {
     pub async fn delete_memory_page(&self, path: &MemoryPath) -> Result<()> {
         self.orchestrator
             .memory_store()
-            .delete_page(&MemoryScope::Workspace(self.workspace_id.clone()), path)
+            .delete_page(
+                &MemoryScope::Workspace {
+                    workspace_id: self.workspace_id.clone(),
+                },
+                path,
+            )
             .await
     }
 
@@ -286,7 +310,9 @@ impl LocalChatRuntime {
     pub async fn memory_index(&self) -> Result<String> {
         self.orchestrator
             .memory_store()
-            .get_index(&MemoryScope::Workspace(self.workspace_id.clone()))
+            .get_index(&MemoryScope::Workspace {
+                workspace_id: self.workspace_id.clone(),
+            })
             .await
     }
 

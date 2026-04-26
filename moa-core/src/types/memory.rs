@@ -8,14 +8,96 @@ use serde_json::Value;
 
 use super::{UserId, WorkspaceId};
 
-/// Scope for memory operations.
+/// Three-tier memory scope walked from global to workspace to user during retrieval.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MemoryScope {
-    /// User-scoped memory.
-    User(UserId),
-    /// Workspace-scoped memory.
-    Workspace(WorkspaceId),
+    /// Cross-workspace knowledge read by every workspace.
+    Global,
+    /// Workspace-tenant knowledge.
+    Workspace {
+        /// Workspace owning this memory scope.
+        workspace_id: WorkspaceId,
+    },
+    /// User-personal knowledge inside a workspace.
+    User {
+        /// Workspace containing this user scope.
+        workspace_id: WorkspaceId,
+        /// User owning this memory scope.
+        user_id: UserId,
+    },
+}
+
+/// Fast discriminator for the three memory scope tiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeTier {
+    /// Cross-workspace global memory tier.
+    Global,
+    /// Workspace memory tier.
+    Workspace,
+    /// User memory tier within a workspace.
+    User,
+}
+
+impl MemoryScope {
+    /// Returns the ancestor chain from `Global` through this scope.
+    pub fn ancestors(&self) -> Vec<MemoryScope> {
+        match self {
+            MemoryScope::Global => vec![MemoryScope::Global],
+            MemoryScope::Workspace { workspace_id } => vec![
+                MemoryScope::Global,
+                MemoryScope::Workspace {
+                    workspace_id: workspace_id.clone(),
+                },
+            ],
+            MemoryScope::User {
+                workspace_id,
+                user_id,
+            } => vec![
+                MemoryScope::Global,
+                MemoryScope::Workspace {
+                    workspace_id: workspace_id.clone(),
+                },
+                MemoryScope::User {
+                    workspace_id: workspace_id.clone(),
+                    user_id: user_id.clone(),
+                },
+            ],
+        }
+    }
+
+    /// Returns the workspace identifier for workspace and user scopes.
+    pub fn workspace_id(&self) -> Option<WorkspaceId> {
+        match self {
+            MemoryScope::Global => None,
+            MemoryScope::Workspace { workspace_id } | MemoryScope::User { workspace_id, .. } => {
+                Some(workspace_id.clone())
+            }
+        }
+    }
+
+    /// Returns the user identifier for user scopes.
+    pub fn user_id(&self) -> Option<UserId> {
+        match self {
+            MemoryScope::User { user_id, .. } => Some(user_id.clone()),
+            MemoryScope::Global | MemoryScope::Workspace { .. } => None,
+        }
+    }
+
+    /// Returns whether this scope is the global tier.
+    pub fn is_global(&self) -> bool {
+        matches!(self, MemoryScope::Global)
+    }
+
+    /// Returns the tier discriminator for this memory scope.
+    pub fn tier(&self) -> ScopeTier {
+        match self {
+            MemoryScope::Global => ScopeTier::Global,
+            MemoryScope::Workspace { .. } => ScopeTier::Workspace,
+            MemoryScope::User { .. } => ScopeTier::User,
+        }
+    }
 }
 
 /// Search strategy used for wiki-backed memory retrieval.

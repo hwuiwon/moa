@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use moa_core::{
     BranchManager, MemoryPath, MemoryScope, MemoryStore, MoaConfig, OtlpProtocol, SessionFilter,
-    SessionStatus, SessionStore, TelemetryConfig, WorkspaceId, default_log_path,
+    SessionStatus, SessionStore, TelemetryConfig, UserId, WorkspaceId, default_log_path,
     init_observability, metrics_endpoint_url,
 };
 use moa_eval::{
@@ -922,7 +922,13 @@ async fn cache_stats_report(
 async fn memory_search_report(config: &MoaConfig, query: &str) -> Result<String> {
     let store = load_memory_store(config).await?;
     let results = store
-        .search(query, &MemoryScope::Workspace(current_workspace_id()), 20)
+        .search(
+            query,
+            &MemoryScope::Workspace {
+                workspace_id: current_workspace_id(),
+            },
+            20,
+        )
         .await?;
     let mut report = String::new();
     for result in results {
@@ -938,7 +944,12 @@ async fn memory_show_report(config: &MoaConfig, path: &str) -> Result<String> {
     let store = load_memory_store(config).await?;
     let path = MemoryPath::new(path);
     let page = store
-        .read_page(&MemoryScope::Workspace(current_workspace_id()), &path)
+        .read_page(
+            &MemoryScope::Workspace {
+                workspace_id: current_workspace_id(),
+            },
+            &path,
+        )
         .await?;
     let rendered = toml::to_string(&page.metadata).unwrap_or_default();
     Ok(format!("---\n{}---\n{}", rendered, page.content))
@@ -958,11 +969,11 @@ async fn memory_ingest_report(
     }
 
     let store = load_memory_store(config).await?;
-    let scope = MemoryScope::Workspace(
-        workspace
+    let scope = MemoryScope::Workspace {
+        workspace_id: workspace
             .map(resolve_workspace_arg)
             .unwrap_or_else(current_workspace_id),
-    );
+    };
 
     let mut sections = Vec::with_capacity(files.len());
     for file in files {
@@ -1262,7 +1273,9 @@ async fn doctor_database(config: &MoaConfig) -> String {
 async fn memory_index_status(config: &MoaConfig) -> String {
     match load_memory_store(config).await {
         Ok(store) => match store
-            .get_index(&MemoryScope::Workspace(current_workspace_id()))
+            .get_index(&MemoryScope::Workspace {
+                workspace_id: current_workspace_id(),
+            })
             .await
         {
             Ok(index) => format!("healthy ({} chars)", index.len()),
@@ -1320,13 +1333,18 @@ async fn memory_rebuild_index_report(
     let scopes = if rebuild_all {
         discover_memory_scopes(&store).await?
     } else if rebuild_user {
-        vec![MemoryScope::User(current_user_id())]
-    } else {
-        vec![MemoryScope::Workspace(
-            workspace
+        vec![MemoryScope::User {
+            workspace_id: workspace
                 .map(resolve_workspace_arg)
                 .unwrap_or_else(current_workspace_id),
-        )]
+            user_id: current_user_id(),
+        }]
+    } else {
+        vec![MemoryScope::Workspace {
+            workspace_id: workspace
+                .map(resolve_workspace_arg)
+                .unwrap_or_else(current_workspace_id),
+        }]
     };
 
     let mut output = String::new();
@@ -1355,13 +1373,18 @@ async fn memory_rebuild_embeddings_report(
     let scopes = if rebuild_all {
         discover_memory_scopes(&store).await?
     } else if rebuild_user {
-        vec![MemoryScope::User(current_user_id())]
-    } else {
-        vec![MemoryScope::Workspace(
-            workspace
+        vec![MemoryScope::User {
+            workspace_id: workspace
                 .map(resolve_workspace_arg)
                 .unwrap_or_else(current_workspace_id),
-        )]
+            user_id: current_user_id(),
+        }]
+    } else {
+        vec![MemoryScope::Workspace {
+            workspace_id: workspace
+                .map(resolve_workspace_arg)
+                .unwrap_or_else(current_workspace_id),
+        }]
     };
 
     let mut output = String::new();
@@ -1381,10 +1404,6 @@ async fn memory_rebuild_embeddings_report(
 async fn discover_memory_scopes(store: &FileMemoryStore) -> Result<Vec<MemoryScope>> {
     let mut scopes = Vec::new();
 
-    if fs::try_exists(&store.base_dir().join("memory")).await? {
-        scopes.push(MemoryScope::User(current_user_id()));
-    }
-
     let workspaces_root = store.base_dir().join("workspaces");
     if fs::try_exists(&workspaces_root).await? {
         let mut entries = fs::read_dir(&workspaces_root).await?;
@@ -1392,12 +1411,31 @@ async fn discover_memory_scopes(store: &FileMemoryStore) -> Result<Vec<MemorySco
             if !entry.file_type().await?.is_dir() {
                 continue;
             }
+            let workspace_id = WorkspaceId::new(entry.file_name().to_string_lossy().to_string());
             let memory_root = entry.path().join("memory");
-            if !fs::try_exists(&memory_root).await? {
+            if fs::try_exists(&memory_root).await? {
+                scopes.push(MemoryScope::Workspace {
+                    workspace_id: workspace_id.clone(),
+                });
+            }
+
+            let users_root = entry.path().join("users");
+            if !fs::try_exists(&users_root).await? {
                 continue;
             }
-            let workspace_id = entry.file_name().to_string_lossy().to_string();
-            scopes.push(MemoryScope::Workspace(WorkspaceId::new(workspace_id)));
+            let mut user_entries = fs::read_dir(&users_root).await?;
+            while let Some(user_entry) = user_entries.next_entry().await? {
+                if !user_entry.file_type().await?.is_dir() {
+                    continue;
+                }
+                if !fs::try_exists(user_entry.path().join("memory")).await? {
+                    continue;
+                }
+                scopes.push(MemoryScope::User {
+                    workspace_id: workspace_id.clone(),
+                    user_id: UserId::new(user_entry.file_name().to_string_lossy().to_string()),
+                });
+            }
         }
     }
 
@@ -1721,7 +1759,9 @@ mod tests {
             .expect("memory store");
         let source_page = store
             .read_page(
-                &MemoryScope::Workspace(WorkspaceId::new("workspace-ingest")),
+                &MemoryScope::Workspace {
+                    workspace_id: WorkspaceId::new("workspace-ingest"),
+                },
                 &MemoryPath::new("sources/rfc-0042-auth-redesign.md"),
             )
             .await
