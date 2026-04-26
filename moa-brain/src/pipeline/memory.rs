@@ -21,7 +21,7 @@ struct MemoryStageData {
     user_index: String,
     /// Truncated workspace-scoped `MEMORY.md`.
     workspace_index: String,
-    /// Relevant retrieved pages for the current turn.
+    /// Relevant retrieved pages for the current turn across all scope tiers.
     relevant_pages: Vec<RelevantMemoryPage>,
 }
 
@@ -50,14 +50,19 @@ impl MemoryRetriever {
     }
 
     async fn load_stage_data(&self, ctx: &WorkingContext) -> Result<MemoryStageData> {
-        let user_scope = MemoryScope::User(ctx.user_id.clone());
-        let workspace_scope = MemoryScope::Workspace(ctx.workspace_id.clone());
+        let user_scope = MemoryScope::User {
+            workspace_id: ctx.workspace_id.clone(),
+            user_id: ctx.user_id.clone(),
+        };
+        let workspace_scope = MemoryScope::Workspace {
+            workspace_id: ctx.workspace_id.clone(),
+        };
         let user_index = self.memory_store.get_index(&user_scope).await?;
         let workspace_index = self.memory_store.get_index(&workspace_scope).await?;
         let mut relevant_pages = Vec::new();
 
         if let Some(query) = extract_search_query(ctx) {
-            for scope in [user_scope, workspace_scope] {
+            for scope in user_scope.ancestors() {
                 let scope_label = scope_label_for(&scope);
                 let results = match self
                     .memory_store
@@ -121,7 +126,7 @@ impl MemoryRetriever {
         scope: &MemoryScope,
         scope_label: &str,
     ) -> Result<Vec<RelevantMemoryPage>> {
-        if !matches!(scope, MemoryScope::Workspace(_)) {
+        if !matches!(scope, MemoryScope::Workspace { .. }) {
             return Ok(Vec::new());
         }
 
@@ -302,8 +307,9 @@ fn truncate_excerpt(excerpt: &str, max_tokens: usize) -> String {
 
 fn scope_label_for(scope: &MemoryScope) -> String {
     match scope {
-        MemoryScope::User(_) => "user".to_string(),
-        MemoryScope::Workspace(_) => "workspace".to_string(),
+        MemoryScope::Global => "global".to_string(),
+        MemoryScope::Workspace { .. } => "workspace".to_string(),
+        MemoryScope::User { .. } => "user".to_string(),
     }
 }
 
@@ -355,8 +361,9 @@ mod tests {
                 .expect("query log should not be poisoned")
                 .push(query.to_string());
             Ok(match scope {
-                MemoryScope::User(_) => self.user_results.clone(),
-                MemoryScope::Workspace(_) => self.workspace_results.clone(),
+                MemoryScope::Global => Vec::new(),
+                MemoryScope::Workspace { .. } => self.workspace_results.clone(),
+                MemoryScope::User { .. } => self.user_results.clone(),
             })
         }
 
@@ -452,7 +459,9 @@ mod tests {
             )]),
             user_results: Vec::new(),
             workspace_results: vec![MemorySearchResult {
-                scope: MemoryScope::Workspace(session.workspace_id.clone()),
+                scope: MemoryScope::Workspace {
+                    workspace_id: session.workspace_id.clone(),
+                },
                 path: shared_path,
                 title: "Storage".to_string(),
                 page_type: PageType::Topic,
@@ -559,6 +568,7 @@ mod tests {
                 .expect("query log should not be poisoned")
                 .as_slice(),
             [
+                "Fix the OAuth refresh token race condition in auth/refresh.rs",
                 "Fix the OAuth refresh token race condition in auth/refresh.rs",
                 "Fix the OAuth refresh token race condition in auth/refresh.rs"
             ]

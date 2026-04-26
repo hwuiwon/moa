@@ -339,7 +339,9 @@ async fn apply_skill_overrides(
         let (page_path, page) = load_skill_page(skill_path).await?;
         memory_store
             .write_page(
-                &MemoryScope::Workspace(workspace_id.clone()),
+                &MemoryScope::Workspace {
+                    workspace_id: workspace_id.clone(),
+                },
                 &page_path,
                 page,
             )
@@ -347,7 +349,9 @@ async fn apply_skill_overrides(
     }
 
     if !agent_config.skills.exclude.is_empty() {
-        let scope = MemoryScope::Workspace(workspace_id.clone());
+        let scope = MemoryScope::Workspace {
+            workspace_id: workspace_id.clone(),
+        };
         let summaries = memory_store
             .list_pages(&scope, Some(moa_core::PageType::Skill))
             .await?;
@@ -372,7 +376,9 @@ async fn clear_workspace_skills(
     memory_store: &FileMemoryStore,
     workspace_id: &WorkspaceId,
 ) -> Result<()> {
-    let scope = MemoryScope::Workspace(workspace_id.clone());
+    let scope = MemoryScope::Workspace {
+        workspace_id: workspace_id.clone(),
+    };
     let summaries = memory_store
         .list_pages(&scope, Some(moa_core::PageType::Skill))
         .await?;
@@ -383,8 +389,13 @@ async fn clear_workspace_skills(
 }
 
 async fn refresh_indices(memory_store: &FileMemoryStore, workspace_id: &WorkspaceId) -> Result<()> {
-    let user_scope = MemoryScope::User(UserId::new(DEFAULT_EVAL_USER));
-    let workspace_scope = MemoryScope::Workspace(workspace_id.clone());
+    let user_scope = MemoryScope::User {
+        workspace_id: workspace_id.clone(),
+        user_id: UserId::new(DEFAULT_EVAL_USER),
+    };
+    let workspace_scope = MemoryScope::Workspace {
+        workspace_id: workspace_id.clone(),
+    };
     memory_store.refresh_scope_index(&user_scope).await?;
     memory_store.refresh_scope_index(&workspace_scope).await?;
     memory_store.rebuild_search_index(&user_scope).await?;
@@ -801,7 +812,9 @@ mod tests {
         let page = environment
             .memory_store
             .read_page(
-                &MemoryScope::Workspace(environment.workspace_id.clone()),
+                &MemoryScope::Workspace {
+                    workspace_id: environment.workspace_id.clone(),
+                },
                 &MemoryPath::new("notes.md"),
             )
             .await

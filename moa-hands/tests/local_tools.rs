@@ -15,6 +15,19 @@ use tempfile::tempdir;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+fn workspace_scope(workspace_id: &str) -> MemoryScope {
+    MemoryScope::Workspace {
+        workspace_id: WorkspaceId::new(workspace_id),
+    }
+}
+
+fn user_scope(workspace_id: &str, user_id: &str) -> MemoryScope {
+    MemoryScope::User {
+        workspace_id: WorkspaceId::new(workspace_id),
+        user_id: UserId::new(user_id),
+    }
+}
+
 #[derive(Default)]
 struct EmptyMemoryStore;
 
@@ -1066,7 +1079,7 @@ async fn memory_search_returns_indexed_results() {
     );
     memory_store
         .write_page(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &workspace_scope("workspace"),
             &MemoryPath::new("topics/oauth.md"),
             WikiPage {
                 path: Some(MemoryPath::new("topics/oauth.md")),
@@ -1150,7 +1163,7 @@ async fn memory_read_returns_page_contents() {
     let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
     memory_store
         .write_page(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &workspace_scope("workspace"),
             &MemoryPath::new("skills/oauth-refresh/SKILL.md"),
             WikiPage {
                 path: Some(MemoryPath::new("skills/oauth-refresh/SKILL.md")),
@@ -1229,7 +1242,7 @@ async fn memory_write_with_scope_creates_new_workspace_page() {
     );
     let page = memory_store
         .read_page(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &workspace_scope("workspace"),
             &MemoryPath::new("topics/new-page.md"),
         )
         .await
@@ -1245,7 +1258,7 @@ async fn memory_write_without_scope_updates_existing_page() {
     let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
     memory_store
         .write_page(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &workspace_scope("workspace"),
             &MemoryPath::new("topics/existing.md"),
             sample_page(
                 "topics/existing.md",
@@ -1279,7 +1292,7 @@ async fn memory_write_without_scope_updates_existing_page() {
 
     let page = memory_store
         .read_page(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &workspace_scope("workspace"),
             &MemoryPath::new("topics/existing.md"),
         )
         .await
@@ -1352,7 +1365,7 @@ async fn memory_ingest_creates_source_page_and_related_pages() {
 
     let source_page = memory_store
         .read_page(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &workspace_scope("workspace"),
             &MemoryPath::new("sources/api-design-doc.md"),
         )
         .await
@@ -1361,7 +1374,7 @@ async fn memory_ingest_creates_source_page_and_related_pages() {
 
     let entity_page = memory_store
         .read_page(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &workspace_scope("workspace"),
             &MemoryPath::new("entities/auth-service.md"),
         )
         .await
@@ -1419,7 +1432,7 @@ async fn memory_read_without_scope_falls_back_to_user_scope() {
     let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
     memory_store
         .write_page(
-            &MemoryScope::User(UserId::new("user")),
+            &user_scope("workspace", "user"),
             &MemoryPath::new("topics/preferences.md"),
             sample_page(
                 "topics/preferences.md",
@@ -1459,7 +1472,7 @@ async fn memory_read_with_explicit_scope_reads_only_that_scope() {
     let path = MemoryPath::new("topics/preferences.md");
     memory_store
         .write_page(
-            &MemoryScope::User(UserId::new("user")),
+            &user_scope("workspace", "user"),
             &path,
             sample_page(
                 "topics/preferences.md",
@@ -1472,7 +1485,7 @@ async fn memory_read_with_explicit_scope_reads_only_that_scope() {
         .unwrap();
     memory_store
         .write_page(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &workspace_scope("workspace"),
             &path,
             sample_page(
                 "topics/preferences.md",

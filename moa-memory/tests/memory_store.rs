@@ -104,6 +104,19 @@ fn workspace_scope_key(workspace_id: &str) -> String {
     format!("workspace:{workspace_id}")
 }
 
+fn workspace_scope(workspace_id: &str) -> MemoryScope {
+    MemoryScope::Workspace {
+        workspace_id: workspace_id.into(),
+    }
+}
+
+fn user_scope(workspace_id: &str, user_id: &str) -> MemoryScope {
+    MemoryScope::User {
+        workspace_id: workspace_id.into(),
+        user_id: user_id.into(),
+    }
+}
+
 #[derive(Clone, Default)]
 struct FailingEmbedding;
 
@@ -128,7 +141,7 @@ impl EmbeddingProvider for FailingEmbedding {
 async fn create_read_update_and_delete_wiki_pages() -> Result<()> {
     let dir = tempdir()?;
     let store = FileMemoryStore::new(dir.path()).await?;
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
     let path = "topics/authentication.md".into();
 
     let page = sample_page(
@@ -162,7 +175,7 @@ async fn create_read_update_and_delete_wiki_pages() -> Result<()> {
 async fn fts_search_finds_ranked_results() -> Result<()> {
     let harness = SearchHarness::new().await?;
     let store = &harness.store;
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
 
     for index in 0..10 {
         let title = format!("Page {index}");
@@ -193,7 +206,7 @@ async fn fts_search_finds_ranked_results() -> Result<()> {
 async fn fts_search_handles_hyphenated_queries() -> Result<()> {
     let harness = SearchHarness::new().await?;
     let store = &harness.store;
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
 
     store
         .write_page(
@@ -220,7 +233,7 @@ async fn fts_search_handles_hyphenated_queries() -> Result<()> {
 async fn rebuild_search_index_from_files_restores_results() -> Result<()> {
     let harness = SearchHarness::new().await?;
     let store = &harness.store;
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
 
     store
         .write_page(
@@ -271,8 +284,8 @@ async fn rebuild_search_index_from_files_restores_results() -> Result<()> {
 async fn user_and_workspace_scopes_are_separate() -> Result<()> {
     let harness = SearchHarness::new().await?;
     let store = &harness.store;
-    let user_scope = MemoryScope::User("u1".into());
-    let workspace_scope = MemoryScope::Workspace("ws1".into());
+    let user_scope = user_scope("ws1", "u1");
+    let workspace_scope = workspace_scope("ws1");
     let path = "topics/preferences.md".into();
 
     store
@@ -316,7 +329,7 @@ async fn user_and_workspace_scopes_are_separate() -> Result<()> {
 async fn trigram_fallback_recovers_short_typos() -> Result<()> {
     let harness = SearchHarness::new().await?;
     let store = &harness.store;
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
 
     store
         .write_page(
@@ -343,7 +356,7 @@ async fn trigram_fallback_recovers_short_typos() -> Result<()> {
 async fn recent_pages_outrank_equally_relevant_old_pages() -> Result<()> {
     let harness = SearchHarness::new().await?;
     let store = &harness.store;
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
 
     let mut recent = sample_page(
         "Recent Rotation",
@@ -381,7 +394,7 @@ async fn recent_pages_outrank_equally_relevant_old_pages() -> Result<()> {
 async fn hybrid_search_finds_semantic_matches_after_queue_drain() -> Result<()> {
     let harness = SearchHarness::new_with_semantic().await?;
     let store = &harness.store;
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
 
     store
         .write_page(
@@ -435,7 +448,7 @@ async fn embedding_failures_keep_keyword_search_and_stop_after_five_attempts() -
         Arc::new(FailingEmbedding),
     )
     .await?;
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
     let path = "topics/oauth.md".into();
 
     store
@@ -488,7 +501,7 @@ async fn embedding_failures_keep_keyword_search_and_stop_after_five_attempts() -
 async fn get_index_truncates_memory_md_to_200_lines() -> Result<()> {
     let dir = tempdir()?;
     let store = FileMemoryStore::new(dir.path()).await?;
-    let scope = MemoryScope::Workspace("ws1".into());
+    let scope = workspace_scope("ws1");
     let content = (0..220)
         .map(|index| format!("line {index}"))
         .collect::<Vec<_>>()
@@ -515,8 +528,8 @@ async fn get_index_truncates_memory_md_to_200_lines() -> Result<()> {
 async fn write_page_creates_and_reads_pages_in_explicit_scopes() -> Result<()> {
     let dir = tempdir()?;
     let store = FileMemoryStore::new(dir.path()).await?;
-    let user_scope = MemoryScope::User("u1".into());
-    let workspace_scope = MemoryScope::Workspace("ws1".into());
+    let user_scope = user_scope("ws1", "u1");
+    let workspace_scope = workspace_scope("ws1");
     let path = "topics/shared.md".into();
 
     store
@@ -546,8 +559,8 @@ async fn write_page_creates_and_reads_pages_in_explicit_scopes() -> Result<()> {
 async fn delete_page_removes_only_the_requested_scope() -> Result<()> {
     let dir = tempdir()?;
     let store = FileMemoryStore::new(dir.path()).await?;
-    let user_scope = MemoryScope::User("u1".into());
-    let workspace_scope = MemoryScope::Workspace("ws1".into());
+    let user_scope = user_scope("ws1", "u1");
+    let workspace_scope = workspace_scope("ws1");
     let path = "topics/shared.md".into();
 
     store

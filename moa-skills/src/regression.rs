@@ -282,7 +282,9 @@ pub async fn append_skill_regression_log(
 
     memory_store
         .append_scope_log(
-            &MemoryScope::Workspace(session.workspace_id.clone()),
+            &MemoryScope::Workspace {
+                workspace_id: session.workspace_id.clone(),
+            },
             LogEntry {
                 timestamp: Utc::now(),
                 operation: "skill_improvement".to_string(),
@@ -369,7 +371,9 @@ async fn resolve_workspace_skill(
     workspace_id: &WorkspaceId,
     selector: &str,
 ) -> Result<ResolvedWorkspaceSkill> {
-    let scope = MemoryScope::Workspace(workspace_id.clone());
+    let scope = MemoryScope::Workspace {
+        workspace_id: workspace_id.clone(),
+    };
     let summaries = memory_store
         .list_pages(&scope, Some(moa_core::PageType::Skill))
         .await?;

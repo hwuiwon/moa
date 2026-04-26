@@ -508,7 +508,9 @@ impl LocalOrchestrator {
             return None;
         }
 
-        let scope = MemoryScope::Workspace(workspace_id.clone());
+        let scope = MemoryScope::Workspace {
+            workspace_id: workspace_id.clone(),
+        };
         let should_bootstrap =
             match bootstrap::should_bootstrap(self.memory_store.as_ref(), &scope).await {
                 Ok(should_bootstrap) => should_bootstrap,

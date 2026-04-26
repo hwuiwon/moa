@@ -50,7 +50,9 @@ pub async fn maybe_improve_skill_with_learning(
     model_router: Arc<ModelRouter>,
     learning_store: Option<Arc<PostgresSessionStore>>,
 ) -> Result<Option<SkillMetadata>> {
-    let scope = MemoryScope::Workspace(session.workspace_id.clone());
+    let scope = MemoryScope::Workspace {
+        workspace_id: session.workspace_id.clone(),
+    };
     let page = memory_store.read_page(&scope, &existing.path).await?;
     let mut current = skill_from_wiki_page(&page)?;
     let current_markdown = render_skill_markdown(&current)?;

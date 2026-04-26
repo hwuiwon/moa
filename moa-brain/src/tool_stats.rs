@@ -104,7 +104,9 @@ pub async fn load_workspace_tool_stats(
     memory_store: &dyn MemoryStore,
     workspace_id: &WorkspaceId,
 ) -> Result<WorkspaceToolStats> {
-    let scope = MemoryScope::Workspace(workspace_id.clone());
+    let scope = MemoryScope::Workspace {
+        workspace_id: workspace_id.clone(),
+    };
     let path = MemoryPath::from(TOOL_STATS_PAGE_PATH);
     let Some(page) = read_optional_page(memory_store, &scope, &path).await? else {
         return Ok(WorkspaceToolStats::default());
@@ -119,7 +121,9 @@ pub async fn write_workspace_tool_stats(
     workspace_id: &WorkspaceId,
     stats: &WorkspaceToolStats,
 ) -> Result<()> {
-    let scope = MemoryScope::Workspace(workspace_id.clone());
+    let scope = MemoryScope::Workspace {
+        workspace_id: workspace_id.clone(),
+    };
     let path = MemoryPath::from(TOOL_STATS_PAGE_PATH);
     let existing_page = read_optional_page(memory_store, &scope, &path).await?;
     let now = Utc::now();

@@ -132,10 +132,18 @@ pub fn compile_index(scope: &MemoryScope, pages: &[PageSummary]) -> String {
     sorted.sort_by_key(|page| std::cmp::Reverse(page.updated));
 
     let heading = match scope {
-        MemoryScope::User(user_id) => format!("# User Memory: {}", user_id.as_str()),
-        MemoryScope::Workspace(workspace_id) => {
+        MemoryScope::Global => "# Global Memory".to_string(),
+        MemoryScope::Workspace { workspace_id } => {
             format!("# Workspace: {}", workspace_id.as_str())
         }
+        MemoryScope::User {
+            workspace_id,
+            user_id,
+        } => format!(
+            "# User Memory: {} in {}",
+            user_id.as_str(),
+            workspace_id.as_str()
+        ),
     };
 
     let mut lines = vec![
@@ -259,7 +267,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let compiled = compile_index(&MemoryScope::Workspace(WorkspaceId::new("ws1")), &pages);
+        let compiled = compile_index(
+            &MemoryScope::Workspace {
+                workspace_id: WorkspaceId::new("ws1"),
+            },
+            &pages,
+        );
 
         assert!(compiled.lines().count() <= MAX_INDEX_LINES);
     }

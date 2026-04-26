@@ -301,7 +301,7 @@ fn initial_ordering(commands: &[CommandEntry], history: &PaletteHistory) -> Vec<
             (i, score)
         })
         .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
     ranked
 }
 

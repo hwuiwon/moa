@@ -318,7 +318,7 @@ impl Workspace for WorkspaceImpl {
         let pages_count = ctx
             .service_client::<MemoryStoreClient>()
             .list_pages(Json(ListPagesRequest {
-                scope: moa_core::MemoryScope::Workspace(workspace_id),
+                scope: moa_core::MemoryScope::Workspace { workspace_id },
                 page_type: None,
             }))
             .call()

@@ -2569,7 +2569,9 @@ async fn run_brain_turn_memory_write_creates_workspace_page_after_approval() {
     assert_eq!(resumed, TurnResult::Complete);
     let page = memory_store
         .read_page(
-            &MemoryScope::Workspace(session.workspace_id.clone()),
+            &MemoryScope::Workspace {
+                workspace_id: session.workspace_id.clone(),
+            },
             &MemoryPath::new("topics/generated.md"),
         )
         .await
@@ -2633,7 +2635,9 @@ async fn run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event
 
     let source_page = memory_store
         .read_page(
-            &MemoryScope::Workspace(session.workspace_id.clone()),
+            &MemoryScope::Workspace {
+                workspace_id: session.workspace_id.clone(),
+            },
             &MemoryPath::new("sources/api-design-doc.md"),
         )
         .await
@@ -2646,7 +2650,9 @@ async fn run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event
 
     let entity_page = memory_store
         .read_page(
-            &MemoryScope::Workspace(session.workspace_id.clone()),
+            &MemoryScope::Workspace {
+                workspace_id: session.workspace_id.clone(),
+            },
             &MemoryPath::new("entities/auth-service.md"),
         )
         .await
@@ -2655,7 +2661,9 @@ async fn run_brain_turn_memory_ingest_creates_workspace_knowledge_and_logs_event
 
     let topic_page = memory_store
         .read_page(
-            &MemoryScope::Workspace(session.workspace_id.clone()),
+            &MemoryScope::Workspace {
+                workspace_id: session.workspace_id.clone(),
+            },
             &MemoryPath::new("topics/api-conventions.md"),
         )
         .await

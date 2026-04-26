@@ -270,7 +270,9 @@ mod tests {
 
         let base = tempdir().unwrap();
         let store = FileMemoryStore::new(base.path()).await.unwrap();
-        let scope = MemoryScope::Workspace("workspace".into());
+        let scope = MemoryScope::Workspace {
+            workspace_id: "workspace".into(),
+        };
 
         let report = run_bootstrap(&store, &scope, workspace.path(), "workspace")
             .await
@@ -305,7 +307,9 @@ mod tests {
         let workspace = tempdir().unwrap();
         let base = tempdir().unwrap();
         let store = FileMemoryStore::new(base.path()).await.unwrap();
-        let scope = MemoryScope::Workspace("workspace".into());
+        let scope = MemoryScope::Workspace {
+            workspace_id: "workspace".into(),
+        };
 
         let report = run_bootstrap(&store, &scope, workspace.path(), "workspace")
             .await

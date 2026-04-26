@@ -397,7 +397,7 @@ async fn handle_unary_command_inner(
             let mut pages: Vec<moa_core::PageSummary> = state
                 .orchestrator
                 .memory_store()
-                .list_pages(&MemoryScope::Workspace(workspace_id), None)
+                .list_pages(&MemoryScope::Workspace { workspace_id }, None)
                 .await?;
             pages.sort_by_key(|page| std::cmp::Reverse(page.updated));
             pages.truncate(limit);
@@ -411,14 +411,14 @@ async fn handle_unary_command_inner(
             state
                 .orchestrator
                 .memory_store()
-                .search(&query, &MemoryScope::Workspace(workspace_id), limit)
+                .search(&query, &MemoryScope::Workspace { workspace_id }, limit)
                 .await?,
         )),
         DaemonCommand::ReadMemoryPage { workspace_id, path } => Ok(DaemonReply::MemoryPage(
             state
                 .orchestrator
                 .memory_store()
-                .read_page(&MemoryScope::Workspace(workspace_id), &path)
+                .read_page(&MemoryScope::Workspace { workspace_id }, &path)
                 .await?,
         )),
         DaemonCommand::WriteMemoryPage {
@@ -429,7 +429,7 @@ async fn handle_unary_command_inner(
             state
                 .orchestrator
                 .memory_store()
-                .write_page(&MemoryScope::Workspace(workspace_id), &path, page)
+                .write_page(&MemoryScope::Workspace { workspace_id }, &path, page)
                 .await?;
             Ok(DaemonReply::Ack)
         }
@@ -437,7 +437,7 @@ async fn handle_unary_command_inner(
             state
                 .orchestrator
                 .memory_store()
-                .delete_page(&MemoryScope::Workspace(workspace_id), &path)
+                .delete_page(&MemoryScope::Workspace { workspace_id }, &path)
                 .await?;
             Ok(DaemonReply::Ack)
         }
@@ -445,7 +445,7 @@ async fn handle_unary_command_inner(
             state
                 .orchestrator
                 .memory_store()
-                .get_index(&MemoryScope::Workspace(workspace_id))
+                .get_index(&MemoryScope::Workspace { workspace_id })
                 .await?,
         )),
         DaemonCommand::ToolNames => Ok(DaemonReply::ToolNames(state.orchestrator.tool_names())),

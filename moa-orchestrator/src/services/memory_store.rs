@@ -197,7 +197,7 @@ impl MemoryStoreImpl {
         &self,
         workspace_id: moa_core::WorkspaceId,
     ) -> Result<WorkspaceConsolidationReport, HandlerError> {
-        let scope = MemoryScope::Workspace(workspace_id);
+        let scope = MemoryScope::Workspace { workspace_id };
         self.store
             .run_consolidation(&scope)
             .await

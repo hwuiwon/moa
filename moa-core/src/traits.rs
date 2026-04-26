@@ -400,10 +400,10 @@ pub trait PlatformAdapter: Send + Sync {
     async fn delete(&self, msg_id: &MessageId) -> Result<()>;
 }
 
-/// Searchable wiki-backed memory store.
+/// Searchable wiki-backed memory store over global, workspace, and user scopes.
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
-    /// Searches memory pages within a scope.
+    /// Searches memory pages within one global, workspace, or user scope.
     async fn search(
         &self,
         query: &str,
@@ -411,7 +411,7 @@ pub trait MemoryStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<MemorySearchResult>>;
 
-    /// Searches memory pages within a scope using an explicit retrieval mode.
+    /// Searches memory pages within one scope using an explicit retrieval mode.
     async fn search_with_mode(
         &self,
         query: &str,
@@ -423,10 +423,10 @@ pub trait MemoryStore: Send + Sync {
         self.search(query, scope, limit).await
     }
 
-    /// Reads a wiki page by logical path within an explicit scope.
+    /// Reads a wiki page by logical path within an explicit memory scope.
     async fn read_page(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<WikiPage>;
 
-    /// Writes a wiki page by logical path within an explicit scope.
+    /// Writes a wiki page by logical path within an explicit memory scope.
     async fn write_page(
         &self,
         scope: &MemoryScope,
@@ -434,10 +434,10 @@ pub trait MemoryStore: Send + Sync {
         page: WikiPage,
     ) -> Result<()>;
 
-    /// Deletes a wiki page by logical path within an explicit scope.
+    /// Deletes a wiki page by logical path within an explicit memory scope.
     async fn delete_page(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<()>;
 
-    /// Lists pages within a scope.
+    /// Lists pages within an explicit memory scope.
     async fn list_pages(
         &self,
         scope: &MemoryScope,

@@ -345,7 +345,9 @@ mod tests {
     async fn ingest_creates_summary_and_related_pages() {
         let dir = tempdir().unwrap();
         let store = FileMemoryStore::new(dir.path()).await.unwrap();
-        let scope = MemoryScope::Workspace("ws1".into());
+        let scope = MemoryScope::Workspace {
+            workspace_id: "ws1".into(),
+        };
 
         let report = ingest_source(
             &store,

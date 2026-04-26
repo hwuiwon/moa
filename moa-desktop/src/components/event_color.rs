@@ -47,7 +47,9 @@ impl EventColor {
             | Event::HandError { .. } => Self::Hand,
             Event::SessionCreated { .. }
             | Event::SessionStatusChanged { .. }
-            | Event::SessionCompleted { .. } => Self::Session,
+            | Event::SessionCompleted { .. }
+            | Event::SegmentStarted { .. }
+            | Event::SegmentCompleted { .. } => Self::Session,
         }
     }
 

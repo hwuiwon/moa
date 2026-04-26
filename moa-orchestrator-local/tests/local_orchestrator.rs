@@ -2464,7 +2464,9 @@ async fn memory_maintenance_runs_due_workspace_consolidation() -> Result<()> {
 
     memory_store
         .write_page(
-            &MemoryScope::Workspace(workspace_id.clone()),
+            &MemoryScope::Workspace {
+                workspace_id: workspace_id.clone(),
+            },
             &"topics/architecture.md".into(),
             WikiPage {
                 path: None,
@@ -2509,7 +2511,7 @@ async fn memory_maintenance_runs_due_workspace_consolidation() -> Result<()> {
     assert!(reports[0].relative_dates_normalized >= 1);
     let architecture = memory_store
         .read_page(
-            &MemoryScope::Workspace(workspace_id),
+            &MemoryScope::Workspace { workspace_id },
             &"topics/architecture.md".into(),
         )
         .await?;
@@ -2526,7 +2528,9 @@ async fn memory_maintenance_skips_when_threshold_or_cooldown_not_met() -> Result
     let workspace_id = WorkspaceId::new("ws1");
     let user_id = UserId::new("u1");
     let now = chrono::Utc::now();
-    let scope = MemoryScope::Workspace(workspace_id.clone());
+    let scope = MemoryScope::Workspace {
+        workspace_id: workspace_id.clone(),
+    };
 
     memory_store
         .write_page(
@@ -2636,13 +2640,17 @@ async fn workspace_memory_bootstrap_copies_contributing_file_without_provider_ca
 
     let index = orchestrator
         .memory_store()
-        .get_index(&MemoryScope::Workspace(WorkspaceId::new("workspace")))
+        .get_index(&MemoryScope::Workspace {
+            workspace_id: WorkspaceId::new("workspace"),
+        })
         .await?;
     assert!(index.contains("Project instructions loaded from `CONTRIBUTING.md`"));
     let project = orchestrator
         .memory_store()
         .read_page(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace {
+                workspace_id: WorkspaceId::new("workspace"),
+            },
             &"topics/project.md".into(),
         )
         .await?;
@@ -2751,7 +2759,9 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
     let project = orchestrator
         .memory_store()
         .read_page(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace {
+                workspace_id: WorkspaceId::new("workspace"),
+            },
             &project_path,
         )
         .await?;
@@ -2784,7 +2794,9 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
     let project = orchestrator
         .memory_store()
         .read_page(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace {
+                workspace_id: WorkspaceId::new("workspace"),
+            },
             &project_path,
         )
         .await?;
@@ -2806,7 +2818,9 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
     let project = orchestrator
         .memory_store()
         .read_page(
-            &MemoryScope::Workspace(WorkspaceId::new("workspace")),
+            &MemoryScope::Workspace {
+                workspace_id: WorkspaceId::new("workspace"),
+            },
             &project_path,
         )
         .await?;
@@ -2855,7 +2869,9 @@ async fn workspace_memory_bootstrap_can_be_disabled() -> Result<()> {
 
     let index = orchestrator
         .memory_store()
-        .get_index(&MemoryScope::Workspace(WorkspaceId::new("workspace")))
+        .get_index(&MemoryScope::Workspace {
+            workspace_id: WorkspaceId::new("workspace"),
+        })
         .await?;
     assert!(index.trim().is_empty());
 

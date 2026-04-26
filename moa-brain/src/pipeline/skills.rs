@@ -423,7 +423,9 @@ async fn load_skills(
     memory_store: &dyn MemoryStore,
     workspace_id: &WorkspaceId,
 ) -> Result<Vec<SkillMetadata>> {
-    let scope = MemoryScope::Workspace(workspace_id.clone());
+    let scope = MemoryScope::Workspace {
+        workspace_id: workspace_id.clone(),
+    };
     let summaries = memory_store
         .list_pages(&scope, Some(PageType::Skill))
         .await?;

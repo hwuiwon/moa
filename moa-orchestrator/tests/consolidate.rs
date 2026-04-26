@@ -44,7 +44,9 @@ fn consolidate_report_maps_memory_report_fields() {
         .expect("valid timestamp");
 
     let memory_report = moa_orchestrator::services::memory_store::WorkspaceConsolidationReport {
-        scope: MemoryScope::Workspace(workspace_id.clone()),
+        scope: MemoryScope::Workspace {
+            workspace_id: workspace_id.clone(),
+        },
         pages_updated: 2,
         pages_deleted: 1,
         relative_dates_normalized: 3,
@@ -115,7 +117,9 @@ async fn memory_store_service_normalizes_relative_dates() -> Result<()> {
     );
     let service = MemoryStoreImpl::new(file_store.clone());
     let workspace_id = WorkspaceId::new("normalize-workspace");
-    let scope = MemoryScope::Workspace(workspace_id.clone());
+    let scope = MemoryScope::Workspace {
+        workspace_id: workspace_id.clone(),
+    };
 
     let mut page = sample_page(
         "Architecture",
