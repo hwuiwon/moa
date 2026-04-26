@@ -4,6 +4,7 @@ pub mod analytics;
 pub mod broadcast_recv;
 pub mod config;
 pub mod daemon;
+pub mod db;
 pub mod diff;
 pub mod error;
 pub mod events;
@@ -32,6 +33,7 @@ pub use config::{
     ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig,
 };
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
+pub use db::ScopedConn;
 pub use diff::compute_unified_diff;
 pub use error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 pub use events::Event;

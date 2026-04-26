@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use futures_util::{StreamExt, stream};
 use moa_brain::{StreamedTurnResult, run_streamed_turn};
 use moa_core::{Event, EventRange, LLMProvider, MoaConfig, RuntimeEvent};
 use opentelemetry::trace::TraceContextExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Semaphore, broadcast};
-use tokio::task::JoinSet;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -220,29 +220,23 @@ impl EvalEngine {
             }
             results
         } else {
-            let semaphore = Arc::new(Semaphore::new(self.options.parallel));
-            let mut join_set = JoinSet::new();
-            for (config_index, case_index, config, case) in indexed_pairs {
-                let engine = self.clone();
-                let default_timeout = suite.default_timeout_seconds;
-                let llm_provider = llm_provider.clone();
-                let permit = semaphore.clone().acquire_owned().await.map_err(|_| {
-                    EvalError::InvalidConfig("parallel semaphore closed unexpectedly".to_string())
-                })?;
-                join_set.spawn(async move {
-                    let _permit = permit;
-                    let result = engine
-                        .run_single_with_timeout(&case, &config, default_timeout, llm_provider)
-                        .await;
-                    (config_index, case_index, result)
-                });
-            }
-
-            let mut unordered = Vec::new();
-            while let Some(joined) = join_set.join_next().await {
-                let (config_index, case_index, result) = joined?;
-                unordered.push((config_index, case_index, result?));
-            }
+            let default_timeout = suite.default_timeout_seconds;
+            let mut unordered = stream::iter(indexed_pairs)
+                .map(|(config_index, case_index, config, case)| {
+                    let engine = self.clone();
+                    let llm_provider = llm_provider.clone();
+                    async move {
+                        let result = engine
+                            .run_single_with_timeout(&case, &config, default_timeout, llm_provider)
+                            .await;
+                        result.map(|result| (config_index, case_index, result))
+                    }
+                })
+                .buffer_unordered(self.options.parallel)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
             unordered.sort_by_key(|(config_index, case_index, _)| (*config_index, *case_index));
             unordered.into_iter().map(|(_, _, result)| result).collect()
         };
@@ -415,8 +409,8 @@ async fn run_environment(
             Some(environment.tool_router.clone()),
             &runtime_tx,
             None,
-            Some(&cancel_token),
-            Some(&hard_cancel_token),
+            Some(cancel_token.clone()),
+            Some(hard_cancel_token.clone()),
         )
         .await?;
 

@@ -28,7 +28,7 @@ use gpui_component::Root;
 
 use crate::app::MoaApp;
 use crate::services::{
-    ServiceBridge, ServiceBridgeHandle, bridge::spawn_into, init::initialize_services,
+    ServiceBridge, ServiceBridgeHandle, bridge::spawn_blocking_into, init::initialize_services,
 };
 use crate::window_state::WindowState;
 
@@ -63,11 +63,11 @@ fn main() {
         cx.set_global(ServiceBridgeHandle(bridge_entity.clone()));
 
         // Kick off async initialization; status flips Ready/Error when it finishes.
-        spawn_into(
+        spawn_blocking_into(
             cx,
             handle,
             bridge_entity,
-            async move { initialize_services().await },
+            || async move { initialize_services().await },
             |bridge, result, cx| match result {
                 Ok(services) => bridge.mark_ready(services, cx),
                 Err(err) => bridge.mark_error(format!("{err:#}"), cx),

@@ -40,8 +40,8 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
     tool_router: Option<Arc<ToolRouter>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
-    cancel_token: Option<&CancellationToken>,
-    hard_cancel_token: Option<&CancellationToken>,
+    cancel_token: Option<CancellationToken>,
+    hard_cancel_token: Option<CancellationToken>,
     mut signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
     turn_requested: Option<&mut bool>,
     queued_messages: Option<&mut Vec<BufferedUserMessage>>,
@@ -68,6 +68,8 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
     let soft_cancel_requested = soft_cancel_requested.unwrap_or(&mut local_soft_cancel_requested);
 
     async move {
+        let cancel_token = cancel_token;
+        let hard_cancel_token = hard_cancel_token;
         let mut total_tool_calls = 0usize;
         let mut total_input_tokens = 0usize;
         let mut total_output_tokens = 0usize;
@@ -94,8 +96,8 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                         event_tx,
                         runtime_tx,
                         &events,
-                        cancel_token,
-                        hard_cancel_token,
+                        cancel_token.as_ref(),
+                        hard_cancel_token.as_ref(),
                         Some(&resolved_dispatch_span),
                     )
                     .await
@@ -151,8 +153,8 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                             pending,
                             event_tx,
                             runtime_tx,
-                            cancel_token,
-                            hard_cancel_token,
+                            cancel_token.as_ref(),
+                            hard_cancel_token.as_ref(),
                             Some(&waiting_dispatch_span),
                             receiver,
                             turn_requested,
@@ -301,7 +303,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                     llm_provider.clone(),
                     request.clone(),
                     Some(&llm_call_span),
-                    cancel_token,
+                    cancel_token.as_ref(),
                     Some(receiver),
                     &mut emit_runtime,
                     |signal| {
@@ -321,7 +323,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                     llm_provider.clone(),
                     request.clone(),
                     Some(&llm_call_span),
-                    cancel_token,
+                    cancel_token.as_ref(),
                     None,
                     &mut emit_runtime,
                     |_| StreamSignalDisposition::Continue,
@@ -426,8 +428,8 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                                 active_canary.as_deref(),
                                 event_tx,
                                 runtime_tx,
-                                cancel_token,
-                                hard_cancel_token,
+                                cancel_token.as_ref(),
+                                hard_cancel_token.as_ref(),
                                 Some(&tool_dispatch_span),
                                 signal_rx.as_deref_mut(),
                                 turn_requested,

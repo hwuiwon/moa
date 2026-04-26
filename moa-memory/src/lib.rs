@@ -254,10 +254,7 @@ impl FileMemoryStore {
 
     pub(crate) fn scope_root(&self, scope: &MemoryScope) -> PathBuf {
         match scope {
-            MemoryScope::Global => {
-                // TODO(M02): handle Global tier once the store has a global path/RLS contract.
-                unimplemented!("Global scope not yet supported by FileMemoryStore; see M02")
-            }
+            MemoryScope::Global => self.base_dir.join("global").join("memory"),
             MemoryScope::Workspace { workspace_id } => self
                 .base_dir
                 .join("workspaces")

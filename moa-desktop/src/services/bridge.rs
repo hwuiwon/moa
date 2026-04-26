@@ -108,6 +108,37 @@ pub fn spawn_into<T, Fut, R, F>(
     .detach();
 }
 
+/// Helper that runs a runtime-bound future on Tokio's blocking pool before
+/// applying its result to a GPUI entity.
+pub fn spawn_blocking_into<T, Fut, R, Make, F>(
+    cx: &mut App,
+    handle: Handle,
+    entity: Entity<T>,
+    make_future: Make,
+    update: F,
+) where
+    T: 'static,
+    R: Send + 'static,
+    Fut: std::future::Future<Output = R> + 'static,
+    Make: FnOnce() -> Fut + Send + 'static,
+    F: FnOnce(&mut T, R, &mut Context<T>) + 'static,
+{
+    cx.spawn(async move |cx| {
+        let blocking_handle = handle.clone();
+        let Ok(result) = handle
+            .spawn_blocking(move || blocking_handle.block_on(make_future()))
+            .await
+        else {
+            return;
+        };
+        let _ = entity.update(cx, |this, cx| {
+            update(this, result, cx);
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
 /// Global wrapper so any view can retrieve the [`ServiceBridge`] entity.
 #[derive(Clone)]
 pub struct ServiceBridgeHandle(pub Entity<ServiceBridge>);

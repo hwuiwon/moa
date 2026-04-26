@@ -36,6 +36,13 @@ struct WikiSearchBackend {
     worker_started: AtomicBool,
 }
 
+#[derive(Debug, Clone)]
+struct ScopeKey {
+    tier: &'static str,
+    workspace_id: Option<String>,
+    user_id: Option<String>,
+}
+
 /// Snapshot of embedding-index health for doctor output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingIndexStatus {
@@ -142,10 +149,12 @@ impl WikiSearchIndex {
             return Ok(());
         };
         let reference_count = reference_count_to_i32(page.reference_count)?;
+        let scope_key = scope_key(scope);
         let mut tx = backend.pool.begin().await.map_err(memory_error)?;
 
         sqlx::query(&upsert_sql(&backend.table_name))
-            .bind(scope_key(scope))
+            .bind(scope_key.workspace_id.as_deref())
+            .bind(scope_key.user_id.as_deref())
             .bind(path.as_str())
             .bind(&page.title)
             .bind(page_type_as_str(&page.page_type))
@@ -162,7 +171,8 @@ impl WikiSearchIndex {
 
         if backend.embedder.is_some() {
             sqlx::query(&enqueue_page_sql(&backend.queue_table_name))
-                .bind(scope_key(scope))
+                .bind(scope_key.workspace_id.as_deref())
+                .bind(scope_key.user_id.as_deref())
                 .bind(path.as_str())
                 .execute(&mut *tx)
                 .await
@@ -183,20 +193,28 @@ impl WikiSearchIndex {
         let mut tx = backend.pool.begin().await.map_err(memory_error)?;
 
         sqlx::query(&format!(
-            "DELETE FROM {} WHERE scope = $1 AND path = $2",
+            "DELETE FROM {} \
+             WHERE workspace_id IS NOT DISTINCT FROM $1 \
+               AND user_id IS NOT DISTINCT FROM $2 \
+               AND path = $3",
             backend.queue_table_name
         ))
-        .bind(&scope_key)
+        .bind(scope_key.workspace_id.as_deref())
+        .bind(scope_key.user_id.as_deref())
         .bind(path.as_str())
         .execute(&mut *tx)
         .await
         .map_err(memory_error)?;
 
         sqlx::query(&format!(
-            "DELETE FROM {} WHERE scope = $1 AND path = $2",
+            "DELETE FROM {} \
+             WHERE workspace_id IS NOT DISTINCT FROM $1 \
+               AND user_id IS NOT DISTINCT FROM $2 \
+               AND path = $3",
             backend.table_name
         ))
-        .bind(&scope_key)
+        .bind(scope_key.workspace_id.as_deref())
+        .bind(scope_key.user_id.as_deref())
         .bind(path.as_str())
         .execute(&mut *tx)
         .await
@@ -220,19 +238,25 @@ impl WikiSearchIndex {
         let mut tx = backend.pool.begin().await.map_err(memory_error)?;
 
         sqlx::query(&format!(
-            "DELETE FROM {} WHERE scope = $1",
+            "DELETE FROM {} \
+             WHERE workspace_id IS NOT DISTINCT FROM $1 \
+               AND user_id IS NOT DISTINCT FROM $2",
             backend.queue_table_name
         ))
-        .bind(&scope_key)
+        .bind(scope_key.workspace_id.as_deref())
+        .bind(scope_key.user_id.as_deref())
         .execute(&mut *tx)
         .await
         .map_err(memory_error)?;
 
         sqlx::query(&format!(
-            "DELETE FROM {} WHERE scope = $1",
+            "DELETE FROM {} \
+             WHERE workspace_id IS NOT DISTINCT FROM $1 \
+               AND user_id IS NOT DISTINCT FROM $2",
             backend.table_name
         ))
-        .bind(&scope_key)
+        .bind(scope_key.workspace_id.as_deref())
+        .bind(scope_key.user_id.as_deref())
         .execute(&mut *tx)
         .await
         .map_err(memory_error)?;
@@ -246,11 +270,12 @@ impl WikiSearchIndex {
                 .collect::<Result<Vec<_>>>()?;
             let mut builder = QueryBuilder::<Postgres>::new(format!(
                 "INSERT INTO {} \
-                 (scope, path, title, page_type, confidence, created, updated, last_referenced, reference_count, tags, content) ",
+                 (workspace_id, user_id, path, title, page_type, confidence, created, updated, last_referenced, reference_count, tags, content) ",
                 backend.table_name
             ));
             builder.push_values(prepared_batch, |mut row, (path, page, reference_count)| {
-                row.push_bind(&scope_key)
+                row.push_bind(scope_key.workspace_id.as_deref())
+                    .push_bind(scope_key.user_id.as_deref())
                     .push_bind(path.as_str())
                     .push_bind(&page.title)
                     .push_bind(page_type_as_str(&page.page_type))
@@ -273,7 +298,8 @@ impl WikiSearchIndex {
             let enqueue_sql = enqueue_page_sql(&backend.queue_table_name);
             for (path, _page) in pages {
                 sqlx::query(&enqueue_sql)
-                    .bind(&scope_key)
+                    .bind(scope_key.workspace_id.as_deref())
+                    .bind(scope_key.user_id.as_deref())
                     .bind(path.as_str())
                     .execute(&mut *tx)
                     .await
@@ -302,24 +328,31 @@ impl WikiSearchIndex {
         if backend.embedder.is_none() {
             return Ok(0);
         }
+        let scope_key = scope_key(scope);
 
         let count = sqlx::query_scalar::<_, i64>(&format!(
-            "SELECT COUNT(*) FROM {} WHERE scope = $1",
+            "SELECT COUNT(*) FROM {} \
+             WHERE workspace_id IS NOT DISTINCT FROM $1 \
+               AND user_id IS NOT DISTINCT FROM $2",
             backend.table_name
         ))
-        .bind(scope_key(scope))
+        .bind(scope_key.workspace_id.as_deref())
+        .bind(scope_key.user_id.as_deref())
         .fetch_one(&*backend.pool)
         .await
         .map_err(memory_error)? as u64;
 
         sqlx::query(&format!(
-            "INSERT INTO {} (scope, path) \
-             SELECT scope, path FROM {} WHERE scope = $1 \
-             ON CONFLICT (scope, path) DO UPDATE \
+            "INSERT INTO {} (workspace_id, user_id, path) \
+             SELECT workspace_id, user_id, path FROM {} \
+             WHERE workspace_id IS NOT DISTINCT FROM $1 \
+               AND user_id IS NOT DISTINCT FROM $2 \
+             ON CONFLICT (workspace_id, user_id, path) DO UPDATE \
              SET enqueued_at = NOW(), attempt_count = 0, last_error = NULL",
             backend.queue_table_name, backend.table_name
         ))
-        .bind(scope_key(scope))
+        .bind(scope_key.workspace_id.as_deref())
+        .bind(scope_key.user_id.as_deref())
         .execute(&*backend.pool)
         .await
         .map_err(memory_error)?;
@@ -470,6 +503,7 @@ impl WikiSearchIndex {
         limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
         let started_at = Instant::now();
+        let scope_key = scope_key(scope);
         let sql = format!(
             r#"
             WITH search_query AS (
@@ -501,16 +535,20 @@ impl WikiSearchIndex {
                     AS score
             FROM {table_name}, search_query
             WHERE scope = $2
+              AND workspace_id IS NOT DISTINCT FROM $3
+              AND user_id IS NOT DISTINCT FROM $4
               AND search_tsv @@ search_query.tsquery
             ORDER BY score DESC, updated DESC, path ASC
-            LIMIT $3
+            LIMIT $5
             "#,
             table_name = backend.table_name
         );
 
         let rows = sqlx::query(&sql)
             .bind(query)
-            .bind(scope_key(scope))
+            .bind(scope_key.tier)
+            .bind(scope_key.workspace_id.as_deref())
+            .bind(scope_key.user_id.as_deref())
             .bind(limit as i64)
             .fetch_all(&*backend.pool)
             .await
@@ -530,6 +568,7 @@ impl WikiSearchIndex {
         limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
         let started_at = Instant::now();
+        let scope_key = scope_key(scope);
         let sql = format!(
             r#"
             SELECT
@@ -550,19 +589,23 @@ impl WikiSearchIndex {
                     AS score
             FROM {table_name}
             WHERE scope = $2
+              AND workspace_id IS NOT DISTINCT FROM $3
+              AND user_id IS NOT DISTINCT FROM $4
               AND (
                     lower(title) % lower($1)
                     OR word_similarity(lower($1), lower(title)) > 0.15
               )
             ORDER BY score DESC, updated DESC, path ASC
-            LIMIT $3
+            LIMIT $5
             "#,
             table_name = backend.table_name
         );
 
         let rows = sqlx::query(&sql)
             .bind(query)
-            .bind(scope_key(scope))
+            .bind(scope_key.tier)
+            .bind(scope_key.workspace_id.as_deref())
+            .bind(scope_key.user_id.as_deref())
             .bind(limit as i64)
             .fetch_all(&*backend.pool)
             .await
@@ -585,6 +628,7 @@ impl WikiSearchIndex {
             return Ok(Vec::new());
         };
         let started_at = Instant::now();
+        let scope_key = scope_key(scope);
         let embeddings = embedder.embed(&[query.to_string()]).await?;
         let query_embedding = embeddings.into_iter().next().ok_or_else(|| {
             MoaError::ProviderError("embedding provider returned zero query embeddings".to_string())
@@ -615,16 +659,20 @@ impl WikiSearchIndex {
                     AS score
             FROM {table_name}
             WHERE scope = $2
+              AND workspace_id IS NOT DISTINCT FROM $3
+              AND user_id IS NOT DISTINCT FROM $4
               AND embedding IS NOT NULL
-              AND embedding_model = $3
+              AND embedding_model = $5
             ORDER BY score DESC, updated DESC, path ASC
-            LIMIT $4
+            LIMIT $6
             "#,
             table_name = backend.table_name
         );
         let rows = sqlx::query(&sql)
             .bind(vector_literal(&query_embedding))
-            .bind(scope_key(scope))
+            .bind(scope_key.tier)
+            .bind(scope_key.workspace_id.as_deref())
+            .bind(scope_key.user_id.as_deref())
             .bind(embedder.model_id())
             .bind(limit as i64)
             .fetch_all(&*backend.pool)
@@ -666,7 +714,12 @@ impl WikiSearchIndex {
         let mut stale_rows = Vec::new();
         let mut ready_rows = Vec::new();
         for row in claimed_rows {
-            let scope = row.try_get::<String, _>("scope").map_err(memory_error)?;
+            let workspace_id = row
+                .try_get::<Option<String>, _>("workspace_id")
+                .map_err(memory_error)?;
+            let user_id = row
+                .try_get::<Option<String>, _>("user_id")
+                .map_err(memory_error)?;
             let path = row.try_get::<String, _>("path").map_err(memory_error)?;
             let title = row
                 .try_get::<Option<String>, _>("title")
@@ -677,12 +730,13 @@ impl WikiSearchIndex {
 
             match (title, content) {
                 (Some(title), Some(content)) => ready_rows.push(QueuedEmbeddingPage {
-                    scope,
+                    workspace_id,
+                    user_id,
                     path,
                     title,
                     content,
                 }),
-                _ => stale_rows.push((scope, path)),
+                _ => stale_rows.push((workspace_id, user_id, path)),
             }
         }
 
@@ -725,7 +779,8 @@ impl WikiSearchIndex {
                         .bind(vector_literal(vector))
                         .bind(embedder.model_id())
                         .bind(timestamp)
-                        .bind(&row.scope)
+                        .bind(row.workspace_id.as_deref())
+                        .bind(row.user_id.as_deref())
                         .bind(&row.path)
                         .execute(&mut *tx)
                         .await
@@ -734,7 +789,13 @@ impl WikiSearchIndex {
 
                 let processed_rows = ready_rows
                     .iter()
-                    .map(|row| (row.scope.clone(), row.path.clone()))
+                    .map(|row| {
+                        (
+                            row.workspace_id.clone(),
+                            row.user_id.clone(),
+                            row.path.clone(),
+                        )
+                    })
                     .collect::<Vec<_>>();
                 delete_queue_rows(&mut tx, &backend.queue_table_name, &processed_rows).await?;
                 tx.commit().await.map_err(memory_error)?;
@@ -754,7 +815,13 @@ impl WikiSearchIndex {
                     &backend.queue_table_name,
                     &ready_rows
                         .iter()
-                        .map(|row| (row.scope.clone(), row.path.clone()))
+                        .map(|row| {
+                            (
+                                row.workspace_id.clone(),
+                                row.user_id.clone(),
+                                row.path.clone(),
+                            )
+                        })
                         .collect::<Vec<_>>(),
                     &error.to_string(),
                 )
@@ -776,7 +843,8 @@ impl WikiSearchIndex {
 
 #[derive(Debug, Clone)]
 struct QueuedEmbeddingPage {
-    scope: String,
+    workspace_id: Option<String>,
+    user_id: Option<String>,
     path: String,
     title: String,
     content: String,
@@ -866,9 +934,9 @@ fn upsert_sql(table_name: &str) -> String {
     format!(
         r#"
         INSERT INTO {table_name}
-            (scope, path, title, page_type, confidence, created, updated, last_referenced, reference_count, tags, content)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        ON CONFLICT (scope, path) DO UPDATE SET
+            (workspace_id, user_id, path, title, page_type, confidence, created, updated, last_referenced, reference_count, tags, content)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT (workspace_id, user_id, path) DO UPDATE SET
             title = EXCLUDED.title,
             page_type = EXCLUDED.page_type,
             confidence = EXCLUDED.confidence,
@@ -886,8 +954,8 @@ fn upsert_sql(table_name: &str) -> String {
 
 fn enqueue_page_sql(queue_table_name: &str) -> String {
     format!(
-        "INSERT INTO {} (scope, path) VALUES ($1, $2) \
-         ON CONFLICT (scope, path) DO UPDATE \
+        "INSERT INTO {} (workspace_id, user_id, path) VALUES ($1, $2, $3) \
+         ON CONFLICT (workspace_id, user_id, path) DO UPDATE \
          SET enqueued_at = NOW(), attempt_count = 0, last_error = NULL",
         queue_table_name
     )
@@ -897,13 +965,16 @@ fn claim_embedding_batch_sql(table_name: &str, queue_table_name: &str) -> String
     format!(
         r#"
         SELECT
-            q.scope,
+            q.workspace_id,
+            q.user_id,
             q.path,
             p.title,
             p.content
         FROM {queue_table_name} q
         LEFT JOIN {table_name} p
-            ON p.scope = q.scope AND p.path = q.path
+            ON p.workspace_id IS NOT DISTINCT FROM q.workspace_id
+           AND p.user_id IS NOT DISTINCT FROM q.user_id
+           AND p.path = q.path
         WHERE q.attempt_count < 5
         ORDER BY q.enqueued_at ASC
         LIMIT $1
@@ -915,7 +986,9 @@ fn claim_embedding_batch_sql(table_name: &str, queue_table_name: &str) -> String
 fn update_embedding_sql(table_name: &str) -> String {
     format!(
         "UPDATE {} SET embedding = $1::vector, embedding_model = $2, embedding_updated = $3 \
-         WHERE scope = $4 AND path = $5",
+         WHERE workspace_id IS NOT DISTINCT FROM $4 \
+           AND user_id IS NOT DISTINCT FROM $5 \
+           AND path = $6",
         table_name
     )
 }
@@ -923,18 +996,22 @@ fn update_embedding_sql(table_name: &str) -> String {
 async fn delete_queue_rows(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     queue_table_name: &str,
-    rows: &[(String, String)],
+    rows: &[(Option<String>, Option<String>, String)],
 ) -> Result<()> {
     if rows.is_empty() {
         return Ok(());
     }
 
-    for (scope, path) in rows {
+    for (workspace_id, user_id, path) in rows {
         sqlx::query(&format!(
-            "DELETE FROM {} WHERE scope = $1 AND path = $2",
+            "DELETE FROM {} \
+             WHERE workspace_id IS NOT DISTINCT FROM $1 \
+               AND user_id IS NOT DISTINCT FROM $2 \
+               AND path = $3",
             queue_table_name
         ))
-        .bind(scope)
+        .bind(workspace_id.as_deref())
+        .bind(user_id.as_deref())
         .bind(path)
         .execute(&mut **tx)
         .await
@@ -947,21 +1024,24 @@ async fn delete_queue_rows(
 async fn mark_queue_failures(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     queue_table_name: &str,
-    rows: &[(String, String)],
+    rows: &[(Option<String>, Option<String>, String)],
     error: &str,
 ) -> Result<()> {
     if rows.is_empty() {
         return Ok(());
     }
 
-    for (scope, path) in rows {
+    for (workspace_id, user_id, path) in rows {
         sqlx::query(&format!(
             "UPDATE {} \
-             SET attempt_count = attempt_count + 1, last_error = $3, enqueued_at = NOW() \
-             WHERE scope = $1 AND path = $2",
+             SET attempt_count = attempt_count + 1, last_error = $4, enqueued_at = NOW() \
+             WHERE workspace_id IS NOT DISTINCT FROM $1 \
+               AND user_id IS NOT DISTINCT FROM $2 \
+               AND path = $3",
             queue_table_name
         ))
-        .bind(scope)
+        .bind(workspace_id.as_deref())
+        .bind(user_id.as_deref())
         .bind(path)
         .bind(error)
         .execute(&mut **tx)
@@ -1150,18 +1230,26 @@ fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-fn scope_key(scope: &MemoryScope) -> String {
+fn scope_key(scope: &MemoryScope) -> ScopeKey {
     match scope {
-        MemoryScope::Global => "global".to_string(),
-        MemoryScope::Workspace { workspace_id } => {
-            format!("workspace:{}", workspace_id.as_str())
-        }
+        MemoryScope::Global => ScopeKey {
+            tier: "global",
+            workspace_id: None,
+            user_id: None,
+        },
+        MemoryScope::Workspace { workspace_id } => ScopeKey {
+            tier: "workspace",
+            workspace_id: Some(workspace_id.to_string()),
+            user_id: None,
+        },
         MemoryScope::User {
             workspace_id,
             user_id,
-        } => {
-            format!("user:{}:{}", workspace_id.as_str(), user_id.as_str())
-        }
+        } => ScopeKey {
+            tier: "user",
+            workspace_id: Some(workspace_id.to_string()),
+            user_id: Some(user_id.to_string()),
+        },
     }
 }
 

@@ -100,6 +100,67 @@ impl MemoryScope {
     }
 }
 
+/// Request-local scope values used to install Postgres RLS GUCs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ScopeContext {
+    scope: MemoryScope,
+}
+
+impl ScopeContext {
+    /// Creates a scope context from a concrete memory scope.
+    pub fn new(scope: MemoryScope) -> Self {
+        Self { scope }
+    }
+
+    /// Creates a workspace-tier scope context.
+    pub fn workspace(workspace_id: WorkspaceId) -> Self {
+        Self::new(MemoryScope::Workspace { workspace_id })
+    }
+
+    /// Creates a user-tier scope context.
+    pub fn user(workspace_id: WorkspaceId, user_id: UserId) -> Self {
+        Self::new(MemoryScope::User {
+            workspace_id,
+            user_id,
+        })
+    }
+
+    /// Returns the concrete memory scope for this context.
+    pub fn scope(&self) -> &MemoryScope {
+        &self.scope
+    }
+
+    /// Returns the workspace identifier for workspace and user scopes.
+    pub fn workspace_id(&self) -> Option<WorkspaceId> {
+        self.scope.workspace_id()
+    }
+
+    /// Returns the user identifier for user scopes.
+    pub fn user_id(&self) -> Option<UserId> {
+        self.scope.user_id()
+    }
+
+    /// Returns the tier discriminator for this context.
+    pub fn tier(&self) -> ScopeTier {
+        self.scope.tier()
+    }
+
+    /// Returns the canonical SQL value for the scope tier.
+    pub fn tier_str(&self) -> &'static str {
+        match self.scope.tier() {
+            ScopeTier::Global => "global",
+            ScopeTier::Workspace => "workspace",
+            ScopeTier::User => "user",
+        }
+    }
+}
+
+impl From<MemoryScope> for ScopeContext {
+    fn from(scope: MemoryScope) -> Self {
+        Self::new(scope)
+    }
+}
+
 /// Search strategy used for wiki-backed memory retrieval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

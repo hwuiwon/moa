@@ -346,8 +346,8 @@ impl LocalOrchestrator {
         let task_runtime_tx = runtime_tx.clone();
         let task_cancel_token = cancel_token.clone();
         let task_hard_cancel_token = hard_cancel_token.clone();
-        let task = tokio::spawn(self.session_task_monitor.instrument_task(async move {
-            run_session_task(
+        let task = tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(run_session_task(
                 context,
                 signal_rx,
                 task_event_tx,
@@ -357,9 +357,8 @@ impl LocalOrchestrator {
                 initial_queued_messages,
                 task_cancel_token,
                 task_hard_cancel_token,
-            )
-            .await
-        }));
+            ))
+        });
         let supervisor_session_store = self.instrumented_session_store.clone();
         let supervisor_tool_router = self.tool_router.clone();
         let supervisor_status = status.clone();
@@ -889,21 +888,21 @@ async fn run_session_task(
                     accept_user_message(
                         &context.session_store,
                         &event_tx,
-                        &context.session_id,
+                        context.session_id,
                         message.clone(),
                         false,
                     )
                     .await?;
                     if let Some(signal_id) = resolve_matching_pending_signal(
                         &context.session_store,
-                        &context.session_id,
-                        &message,
+                        context.session_id,
+                        message.clone(),
                     )
                     .await?
                     {
                         best_effort_resolve_pending_signal(
                             &context.session_store,
-                            &context.session_id,
+                            context.session_id,
                             signal_id,
                         )
                         .await?;
@@ -1000,7 +999,7 @@ async fn run_session_task(
                             &event_tx,
                             &runtime_tx,
                             &status,
-                            &context.session_id,
+                            context.session_id,
                             &mut queued_messages,
                             turn_limit_pause_message(turn_count, &events),
                         )
@@ -1012,7 +1011,7 @@ async fn run_session_task(
                         && flush_next_queued_message(
                             &context.session_store,
                             &event_tx,
-                            &context.session_id,
+                            context.session_id,
                             &mut queued_messages,
                         )
                         .await?
@@ -1037,8 +1036,8 @@ async fn run_session_task(
                         &mut turn_requested,
                         &mut queued_messages,
                         &mut soft_cancel_requested,
-                        Some(&cancel_token),
-                        Some(&hard_cancel_token),
+                        Some(cancel_token.clone()),
+                        Some(hard_cancel_token.clone()),
                     )
                     .await;
 
@@ -1049,7 +1048,7 @@ async fn run_session_task(
                                 &event_tx,
                                 &runtime_tx,
                                 &status,
-                                &context.session_id,
+                                context.session_id,
                                 &mut queued_messages,
                                 turn_start_sequence_num,
                                 &mut turn_count,
@@ -1063,7 +1062,7 @@ async fn run_session_task(
                             if flush_next_queued_message(
                                 &context.session_store,
                                 &event_tx,
-                                &context.session_id,
+                                context.session_id,
                                 &mut queued_messages,
                             )
                             .await?
@@ -1114,7 +1113,7 @@ async fn run_session_task(
                                 refresh_workspace_tool_stats(
                                     &context.session_store,
                                     &context.memory_store,
-                                    &context.session_id,
+                                    context.session_id,
                                 )
                                 .await;
                                 context
@@ -1145,7 +1144,7 @@ async fn run_session_task(
                                 &event_tx,
                                 &runtime_tx,
                                 &status,
-                                &context.session_id,
+                                context.session_id,
                                 &mut queued_messages,
                                 turn_start_sequence_num,
                                 &mut turn_count,
@@ -1164,7 +1163,7 @@ async fn run_session_task(
                             flush_queued_messages(
                                 &context.session_store,
                                 &event_tx,
-                                &context.session_id,
+                                context.session_id,
                                 &mut queued_messages,
                             )
                             .await?;
@@ -1174,7 +1173,7 @@ async fn run_session_task(
                                 refresh_workspace_tool_stats(
                                     &context.session_store,
                                     &context.memory_store,
-                                    &context.session_id,
+                                    context.session_id,
                                 )
                                 .await;
                                 context
@@ -1216,7 +1215,7 @@ async fn run_session_task(
                             flush_queued_messages(
                                 &context.session_store,
                                 &event_tx,
-                                &context.session_id,
+                                context.session_id,
                                 &mut queued_messages,
                             )
                             .await?;
@@ -1226,7 +1225,7 @@ async fn run_session_task(
                                 refresh_workspace_tool_stats(
                                     &context.session_store,
                                     &context.memory_store,
-                                    &context.session_id,
+                                    context.session_id,
                                 )
                                 .await;
                                 context
@@ -1284,7 +1283,7 @@ async fn run_session_task(
 async fn accept_user_message(
     session_store: &Arc<dyn SessionStore>,
     event_tx: &broadcast::Sender<EventRecord>,
-    session_id: &SessionId,
+    session_id: SessionId,
     message: UserMessage,
     queued: bool,
 ) -> Result<()> {
@@ -1299,14 +1298,14 @@ async fn accept_user_message(
             attachments: message.attachments,
         }
     };
-    append_event(session_store, event_tx, *session_id, event).await?;
+    append_event(session_store, event_tx, session_id, event).await?;
     Ok(())
 }
 
 async fn flush_queued_messages(
     session_store: &Arc<dyn SessionStore>,
     event_tx: &broadcast::Sender<EventRecord>,
-    session_id: &SessionId,
+    session_id: SessionId,
     queued_messages: &mut Vec<BufferedUserMessage>,
 ) -> Result<()> {
     for message in queued_messages.drain(..) {
@@ -1319,7 +1318,7 @@ async fn flush_queued_messages(
 async fn flush_next_queued_message(
     session_store: &Arc<dyn SessionStore>,
     event_tx: &broadcast::Sender<EventRecord>,
-    session_id: &SessionId,
+    session_id: SessionId,
     queued_messages: &mut Vec<BufferedUserMessage>,
 ) -> Result<bool> {
     if queued_messages.is_empty() {
@@ -1334,7 +1333,7 @@ async fn flush_next_queued_message(
 async fn flush_pending_signal(
     session_store: &Arc<dyn SessionStore>,
     event_tx: &broadcast::Sender<EventRecord>,
-    session_id: &SessionId,
+    session_id: SessionId,
     buffered: BufferedUserMessage,
 ) -> Result<()> {
     accept_user_message(
@@ -1352,7 +1351,7 @@ async fn flush_pending_signal(
     }
 
     if let Some(signal_id) =
-        resolve_matching_pending_signal(session_store, session_id, &buffered.message).await?
+        resolve_matching_pending_signal(session_store, session_id, buffered.message.clone()).await?
     {
         best_effort_resolve_pending_signal(session_store, session_id, signal_id).await?;
     } else {
@@ -1367,7 +1366,7 @@ async fn flush_pending_signal(
 
 async fn best_effort_resolve_pending_signal(
     session_store: &Arc<dyn SessionStore>,
-    session_id: &SessionId,
+    session_id: SessionId,
     signal_id: moa_core::PendingSignalId,
 ) -> Result<()> {
     match session_store.resolve_pending_signal(signal_id).await {
@@ -1387,12 +1386,12 @@ async fn best_effort_resolve_pending_signal(
 
 async fn resolve_matching_pending_signal(
     session_store: &Arc<dyn SessionStore>,
-    session_id: &SessionId,
-    message: &UserMessage,
+    session_id: SessionId,
+    message: UserMessage,
 ) -> Result<Option<moa_core::PendingSignalId>> {
-    let pending = session_store.get_pending_signals(*session_id).await?;
+    let pending = session_store.get_pending_signals(session_id).await?;
     for signal in pending {
-        if signal.user_message()? == *message {
+        if signal.user_message()? == message {
             return Ok(Some(signal.id));
         }
     }
@@ -1423,10 +1422,11 @@ async fn update_status(
 async fn refresh_workspace_tool_stats(
     session_store: &Arc<dyn SessionStore>,
     memory_store: &Arc<FileMemoryStore>,
-    session_id: &SessionId,
+    session_id: SessionId,
 ) {
     if let Err(error) =
-        update_workspace_tool_stats(session_store.as_ref(), memory_store.as_ref(), session_id).await
+        update_workspace_tool_stats(session_store.as_ref(), memory_store.as_ref(), &session_id)
+            .await
     {
         tracing::warn!(
             session_id = %session_id,
@@ -1566,7 +1566,7 @@ async fn pause_active_session(
     event_tx: &broadcast::Sender<EventRecord>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     status: &Arc<RwLock<SessionStatus>>,
-    session_id: &SessionId,
+    session_id: SessionId,
     queued_messages: &mut Vec<BufferedUserMessage>,
     message: String,
 ) -> Result<()> {
@@ -1582,11 +1582,11 @@ async fn pause_active_session(
         &context.session_store,
         event_tx,
         status,
-        *session_id,
+        session_id,
         message.clone(),
     )
     .await?;
-    context.tool_router.destroy_session_hands(session_id).await;
+    context.tool_router.destroy_session_hands(&session_id).await;
     let _ = runtime_tx.send(RuntimeEvent::Notice(message));
     if let Err(err) = runtime_tx.send(RuntimeEvent::TurnCompleted) {
         tracing::warn!(
@@ -1635,7 +1635,7 @@ async fn record_turn_boundary(
     event_tx: &broadcast::Sender<EventRecord>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     status: &Arc<RwLock<SessionStatus>>,
-    session_id: &SessionId,
+    session_id: SessionId,
     queued_messages: &mut Vec<BufferedUserMessage>,
     turn_start_sequence_num: u64,
     turn_count: &mut u32,
@@ -1646,7 +1646,7 @@ async fn record_turn_boundary(
     let completed_turn_events = context
         .session_store
         .get_events(
-            *session_id,
+            session_id,
             EventRange {
                 from_seq: Some(turn_start_sequence_num.saturating_add(1)),
                 ..EventRange::default()
@@ -1660,7 +1660,7 @@ async fn record_turn_boundary(
 
     let updated_events = context
         .session_store
-        .get_events(*session_id, EventRange::all())
+        .get_events(session_id, EventRange::all())
         .await?;
     pause_active_session(
         context,

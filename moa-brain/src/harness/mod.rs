@@ -114,8 +114,8 @@ pub async fn run_streamed_turn(
     tool_router: Option<Arc<ToolRouter>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
-    cancel_token: Option<&CancellationToken>,
-    hard_cancel_token: Option<&CancellationToken>,
+    cancel_token: Option<CancellationToken>,
+    hard_cancel_token: Option<CancellationToken>,
 ) -> Result<StreamedTurnResult> {
     streaming::run_streamed_turn_with_tools_mode(
         session_id,
@@ -150,8 +150,8 @@ pub async fn run_streamed_turn_with_signals(
     turn_requested: &mut bool,
     queued_messages: &mut Vec<BufferedUserMessage>,
     soft_cancel_requested: &mut bool,
-    cancel_token: Option<&CancellationToken>,
-    hard_cancel_token: Option<&CancellationToken>,
+    cancel_token: Option<CancellationToken>,
+    hard_cancel_token: Option<CancellationToken>,
 ) -> Result<StreamedTurnResult> {
     streaming::run_streamed_turn_with_tools_mode(
         session_id,
@@ -187,8 +187,8 @@ pub async fn run_streamed_turn_with_signals_stepwise(
     turn_requested: &mut bool,
     queued_messages: &mut Vec<BufferedUserMessage>,
     soft_cancel_requested: &mut bool,
-    cancel_token: Option<&CancellationToken>,
-    hard_cancel_token: Option<&CancellationToken>,
+    cancel_token: Option<CancellationToken>,
+    hard_cancel_token: Option<CancellationToken>,
 ) -> Result<StreamedTurnResult> {
     streaming::run_streamed_turn_with_tools_mode(
         session_id,

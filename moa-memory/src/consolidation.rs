@@ -204,10 +204,7 @@ async fn consolidation_due_for_scope(
             )
         })
         .filter(|session| match scope {
-            MemoryScope::Global => {
-                // TODO(M02): handle Global tier in scheduled consolidation.
-                false
-            }
+            MemoryScope::Global => false,
             MemoryScope::Workspace { workspace_id } => &session.workspace_id == workspace_id,
             MemoryScope::User {
                 workspace_id,
