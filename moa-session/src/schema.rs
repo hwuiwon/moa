@@ -17,6 +17,7 @@ const SESSION_MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/010_intents_learning_log.sql"),
     include_str!("../migrations/postgres/011_three_tier_rls.sql"),
     include_str!("../migrations/postgres/012_age_bootstrap.sql"),
+    include_str!("../migrations/postgres/013_node_index.sql"),
 ];
 
 /// Runs all embedded `PostgreSQL` migrations idempotently on the provided pool.

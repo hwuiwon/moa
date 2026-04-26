@@ -1,6 +1,7 @@
 CREATE EXTENSION IF NOT EXISTS age;
 LOAD 'age';
 SET search_path = ag_catalog, "$user", public;
+SELECT pg_advisory_xact_lock(hashtext('moa_age_bootstrap')::BIGINT);
 
 DO $$
 BEGIN

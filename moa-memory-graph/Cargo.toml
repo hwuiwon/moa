@@ -1,0 +1,18 @@
+[package]
+name = "moa-memory-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "json", "macros"] }
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+moa-core = { path = "../moa-core" }
+moa-session = { path = "../moa-session" }
+tokio.workspace = true
