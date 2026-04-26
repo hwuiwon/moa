@@ -727,6 +727,12 @@ mod tests {
 
     static DAEMON_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    fn spawn_daemon_server(config: MoaConfig) -> tokio::task::JoinHandle<Result<()>> {
+        tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(run_daemon_server(config))
+        })
+    }
+
     fn test_config() -> Option<MoaConfig> {
         if !live_provider_tests_enabled() {
             return None;
@@ -778,7 +784,7 @@ mod tests {
         let Some(config) = test_config() else {
             return Ok(());
         };
-        let server = tokio::spawn(run_daemon_server(config.clone()));
+        let server = spawn_daemon_server(config.clone());
         wait_for_daemon(&config, std::time::Duration::from_secs(5)).await?;
 
         let info = daemon_info(&config).await?;
@@ -820,7 +826,7 @@ mod tests {
             return Ok(());
         };
         let workspace_id = WorkspaceId::new(format!("preview-{}", Uuid::now_v7()));
-        let server = tokio::spawn(run_daemon_server(config.clone()));
+        let server = spawn_daemon_server(config.clone());
         wait_for_daemon(&config, std::time::Duration::from_secs(5)).await?;
 
         let empty_previews = match request(
@@ -887,7 +893,7 @@ mod tests {
         let scope_suffix = Uuid::now_v7().simple().to_string();
         let alpha_workspace = WorkspaceId::new(format!("alpha-{scope_suffix}"));
         let beta_workspace = WorkspaceId::new(format!("beta-{scope_suffix}"));
-        let server = tokio::spawn(run_daemon_server(config.clone()));
+        let server = spawn_daemon_server(config.clone());
         wait_for_daemon(&config, std::time::Duration::from_secs(5)).await?;
 
         for workspace_id in [alpha_workspace.clone(), beta_workspace.clone()] {
@@ -971,7 +977,7 @@ mod tests {
             .as_ref()
             .expect("fly config")
             .internal_port;
-        let server = tokio::spawn(run_daemon_server(config.clone()));
+        let server = spawn_daemon_server(config.clone());
         wait_for_daemon(&config, Duration::from_secs(5)).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
 

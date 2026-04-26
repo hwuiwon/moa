@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     id UUID PRIMARY KEY,
     workspace_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
     title TEXT,
     status TEXT NOT NULL DEFAULT 'created',
     platform TEXT NOT NULL,
@@ -20,11 +21,15 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_workspace ON sessions(workspace_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_scope ON sessions(workspace_id, scope, user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 
 CREATE TABLE IF NOT EXISTS events (
     id UUID PRIMARY KEY,
     session_id UUID NOT NULL REFERENCES sessions(id),
+    workspace_id TEXT NOT NULL,
+    user_id TEXT,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
     sequence_num BIGINT NOT NULL,
     event_type TEXT NOT NULL,
     payload JSONB NOT NULL,
@@ -41,20 +46,25 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_session_seq ON events(session_id, sequence_num);
 CREATE INDEX IF NOT EXISTS idx_events_session_type ON events(session_id, event_type);
+CREATE INDEX IF NOT EXISTS idx_events_scope ON events(workspace_id, scope, user_id);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_fts ON events USING GIN(search_vector);
 
 CREATE TABLE IF NOT EXISTS approval_rules (
     id UUID PRIMARY KEY,
     workspace_id TEXT NOT NULL,
+    user_id TEXT,
     tool TEXT NOT NULL,
     pattern TEXT NOT NULL,
     action TEXT NOT NULL,
-    scope TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('global', 'workspace')),
     created_by TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(workspace_id, tool, pattern)
 );
+
+CREATE INDEX IF NOT EXISTS idx_approval_rules_scope
+    ON approval_rules(workspace_id, scope, user_id);
 
 CREATE TABLE IF NOT EXISTS workspaces (
     id TEXT PRIMARY KEY,
@@ -76,6 +86,9 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS pending_signals (
     id UUID PRIMARY KEY,
     session_id UUID NOT NULL REFERENCES sessions(id),
+    workspace_id TEXT NOT NULL,
+    user_id TEXT,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
     signal_type TEXT NOT NULL,
     payload JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -84,3 +97,5 @@ CREATE TABLE IF NOT EXISTS pending_signals (
 
 CREATE INDEX IF NOT EXISTS idx_pending_signals_session
     ON pending_signals(session_id, resolved_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_pending_signals_scope
+    ON pending_signals(workspace_id, scope, user_id);

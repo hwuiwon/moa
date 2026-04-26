@@ -765,12 +765,14 @@ async fn postgres_trigger_failure_rolls_back_insert() {
         .expect("postgres inspection pool");
     let error = sqlx::query(&format!(
         "INSERT INTO {} \
-         (id, session_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
-         VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, NULL)",
+         (id, session_id, workspace_id, user_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, NULL)",
         qualified(&schema_name, "events")
     ))
     .bind(Uuid::now_v7())
     .bind(session_id.0)
+    .bind("w1")
+    .bind("u1")
     .bind(0_i64)
     .bind("BrainResponse")
     .bind(Json(serde_json::json!({

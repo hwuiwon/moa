@@ -1,7 +1,9 @@
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 CREATE TABLE IF NOT EXISTS wiki_pages (
-    scope TEXT NOT NULL,
+    workspace_id TEXT,
+    user_id TEXT,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
     path TEXT NOT NULL,
     title TEXT NOT NULL,
     page_type TEXT NOT NULL,
@@ -17,11 +19,15 @@ CREATE TABLE IF NOT EXISTS wiki_pages (
         setweight(array_to_tsvector(coalesce(tags, ARRAY[]::text[])), 'B') ||
         setweight(to_tsvector('english', coalesce(content, '')), 'C')
     ) STORED,
-    PRIMARY KEY (scope, path)
+    CHECK (scope IS NOT NULL)
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS wiki_pages_scope_path_unique
+    ON wiki_pages (workspace_id, user_id, path) NULLS NOT DISTINCT;
 CREATE INDEX IF NOT EXISTS wiki_pages_tsv_gin ON wiki_pages USING GIN (search_tsv);
 CREATE INDEX IF NOT EXISTS wiki_pages_title_trgm ON wiki_pages USING GIN (title gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS wiki_pages_tags_gin ON wiki_pages USING GIN (tags);
-CREATE INDEX IF NOT EXISTS wiki_pages_updated ON wiki_pages (scope, updated DESC);
-CREATE INDEX IF NOT EXISTS wiki_pages_type ON wiki_pages (scope, page_type);
+CREATE INDEX IF NOT EXISTS wiki_pages_updated
+    ON wiki_pages (workspace_id, scope, user_id, updated DESC);
+CREATE INDEX IF NOT EXISTS wiki_pages_type
+    ON wiki_pages (workspace_id, scope, user_id, page_type);

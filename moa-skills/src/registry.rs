@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use moa_core::{MemoryStore, MoaError, PageType, Result, SkillMetadata, WorkspaceId};
+use moa_core::{MemoryScope, MemoryStore, MoaError, PageType, Result, SkillMetadata, WorkspaceId};
 use tokio::sync::RwLock;
 
 use crate::format::{render_skill_markdown, skill_from_wiki_page, skill_metadata_from_page};
@@ -25,20 +25,21 @@ impl SkillRegistry {
 
     /// Reloads all skills for a workspace into the registry cache.
     pub async fn load(&self, workspace_id: &WorkspaceId) -> Result<()> {
-        let scope = moa_core::MemoryScope::Workspace {
+        let workspace_scope = MemoryScope::Workspace {
             workspace_id: workspace_id.clone(),
         };
-        // TODO(M02): include `MemoryScope::Global` system skills once global storage is wired.
-        let summaries = self
-            .memory
-            .list_pages(&scope, Some(PageType::Skill))
-            .await?;
         let mut skills = HashMap::new();
 
-        for summary in summaries {
-            let page = self.memory.read_page(&scope, &summary.path).await?;
-            let metadata = skill_metadata_from_page(summary.path.clone(), &page)?;
-            skills.insert(metadata.name.clone(), metadata);
+        for scope in [MemoryScope::Global, workspace_scope.clone()] {
+            let summaries = self
+                .memory
+                .list_pages(&scope, Some(PageType::Skill))
+                .await?;
+            for summary in summaries {
+                let page = self.memory.read_page(&scope, &summary.path).await?;
+                let metadata = skill_metadata_from_page(summary.path.clone(), &page)?;
+                skills.insert(metadata.name.clone(), metadata);
+            }
         }
 
         self.skills
@@ -85,10 +86,13 @@ impl SkillRegistry {
                     MoaError::StorageError(format!("skill not found in workspace: {skill_name}"))
                 })?
         };
-        let scope = moa_core::MemoryScope::Workspace {
+        let scope = MemoryScope::Workspace {
             workspace_id: workspace_id.clone(),
         };
-        let page = self.memory.read_page(&scope, &path).await?;
+        let page = match self.memory.read_page(&scope, &path).await {
+            Ok(page) => page,
+            Err(_) => self.memory.read_page(&MemoryScope::Global, &path).await?,
+        };
         let skill = skill_from_wiki_page(&page)?;
         render_skill_markdown(&skill)
     }

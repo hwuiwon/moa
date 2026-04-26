@@ -388,13 +388,17 @@ impl PostgresSessionStore {
     /// Creates or refreshes one task segment metadata row.
     pub async fn create_segment(&self, segment: &TaskSegment) -> Result<()> {
         let task_segments = self.table_name("task_segments");
+        let sessions = self.table_name("sessions");
         sqlx::query(&format!(
             "INSERT INTO {task_segments} \
-             (id, session_id, tenant_id, segment_index, intent_label, intent_confidence, \
+             (id, session_id, workspace_id, user_id, tenant_id, segment_index, intent_label, intent_confidence, \
               task_summary, started_at, ended_at, resolution, resolution_signal, resolution_confidence, \
               tools_used, skills_activated, turn_count, token_cost, previous_segment_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) \
+             SELECT $1, $2, s.workspace_id, s.user_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17 \
+             FROM {sessions} s WHERE s.id = $2 \
              ON CONFLICT (id) DO UPDATE SET \
+                 workspace_id = EXCLUDED.workspace_id, \
+                 user_id = EXCLUDED.user_id, \
                  tenant_id = EXCLUDED.tenant_id, \
                  intent_label = EXCLUDED.intent_label, \
                  intent_confidence = EXCLUDED.intent_confidence, \
@@ -678,10 +682,11 @@ impl PostgresSessionStore {
         let embedding = intent.embedding.as_ref().map(|value| vector_literal(value));
         sqlx::query(&format!(
             "INSERT INTO {tenant_intents} \
-             (id, tenant_id, label, description, status, source, catalog_ref, example_queries, embedding, segment_count, resolution_rate) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector, $10, $11) \
+             (id, tenant_id, workspace_id, label, description, status, source, catalog_ref, example_queries, embedding, segment_count, resolution_rate) \
+             VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9::vector, $10, $11) \
              ON CONFLICT (id) DO UPDATE SET \
                  tenant_id = EXCLUDED.tenant_id, \
+                 workspace_id = EXCLUDED.workspace_id, \
                  label = EXCLUDED.label, \
                  description = EXCLUDED.description, \
                  status = EXCLUDED.status, \
@@ -909,9 +914,9 @@ impl PostgresSessionStore {
         let learning_log = self.table_name("learning_log");
         sqlx::query(&format!(
             "INSERT INTO {learning_log} \
-             (id, tenant_id, learning_type, target_id, target_label, payload, confidence, \
+             (id, tenant_id, workspace_id, learning_type, target_id, target_label, payload, confidence, \
               source_refs, actor, valid_from, valid_to, batch_id, version) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
+             VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
         ))
         .bind(entry.id)
         .bind(&entry.tenant_id)
@@ -1054,9 +1059,10 @@ impl PostgresSessionStore {
 
         let row = sqlx::query(&format!(
             "INSERT INTO {tenant_intents} \
-             (id, tenant_id, label, description, status, source, catalog_ref, example_queries, embedding) \
-             VALUES ($1, $2, $3, $4, 'active', 'catalog', $5, $6, $7::vector) \
+             (id, tenant_id, workspace_id, label, description, status, source, catalog_ref, example_queries, embedding) \
+             VALUES ($1, $2, $2, $3, $4, 'active', 'catalog', $5, $6, $7::vector) \
              ON CONFLICT (tenant_id, label) DO UPDATE SET \
+                 workspace_id = EXCLUDED.workspace_id, \
                  description = EXCLUDED.description, \
                  status = 'active', \
                  source = 'catalog', \
@@ -1155,8 +1161,8 @@ impl PostgresSessionStore {
             let segment_id = row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?;
             sqlx::query(&format!(
                 "INSERT INTO {learning_log} \
-                 (id, tenant_id, learning_type, target_id, target_label, payload, confidence, source_refs, actor, batch_id, version) \
-                 VALUES ($1, $2, 'intent_classified', $3, $4, $5, $6, $7, 'system', $8, 1)"
+                 (id, tenant_id, workspace_id, learning_type, target_id, target_label, payload, confidence, source_refs, actor, batch_id, version) \
+                 VALUES ($1, $2, $2, 'intent_classified', $3, $4, $5, $6, $7, 'system', $8, 1)"
             ))
             .bind(Uuid::now_v7())
             .bind(&intent.tenant_id)
@@ -1367,7 +1373,7 @@ impl SessionStore for PostgresSessionStore {
         let events = self.table_name("events");
 
         let locked_session = sqlx::query(&format!(
-            "SELECT event_count FROM {sessions} WHERE id = $1 FOR UPDATE"
+            "SELECT event_count, workspace_id, user_id FROM {sessions} WHERE id = $1 FOR UPDATE"
         ))
         .bind(session_id.0)
         .fetch_optional(&mut *transaction)
@@ -1377,14 +1383,22 @@ impl SessionStore for PostgresSessionStore {
         let sequence_num = locked_session
             .try_get::<i64, _>("event_count")
             .map_err(map_sqlx_error)? as u64;
+        let workspace_id = locked_session
+            .try_get::<String, _>("workspace_id")
+            .map_err(map_sqlx_error)?;
+        let user_id = locked_session
+            .try_get::<String, _>("user_id")
+            .map_err(map_sqlx_error)?;
 
         sqlx::query(&format!(
             "INSERT INTO {events} \
-             (id, session_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+             (id, session_id, workspace_id, user_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
         ))
         .bind(event_id)
         .bind(session_id.0)
+        .bind(workspace_id)
+        .bind(user_id)
         .bind(sequence_num as i64)
         .bind(event.type_name())
         .bind(Json(payload))
@@ -1572,10 +1586,15 @@ impl SessionStore for PostgresSessionStore {
         snapshot: ContextSnapshot,
     ) -> Result<()> {
         let context_snapshots = self.table_name("context_snapshots");
+        let sessions = self.table_name("sessions");
         sqlx::query(&format!(
-            "INSERT INTO {context_snapshots} (session_id, format_version, last_sequence_num, payload, created_at) \
-             VALUES ($1, $2, $3, $4, $5) \
+            "INSERT INTO {context_snapshots} \
+             (session_id, workspace_id, user_id, format_version, last_sequence_num, payload, created_at) \
+             SELECT $1, s.workspace_id, s.user_id, $2, $3, $4, $5 \
+             FROM {sessions} s WHERE s.id = $1 \
              ON CONFLICT (session_id) DO UPDATE SET \
+                 workspace_id = EXCLUDED.workspace_id, \
+                 user_id = EXCLUDED.user_id, \
                  format_version = EXCLUDED.format_version, \
                  last_sequence_num = EXCLUDED.last_sequence_num, \
                  payload = EXCLUDED.payload, \
@@ -1642,10 +1661,12 @@ impl SessionStore for PostgresSessionStore {
         }
 
         let pending_signals = self.table_name("pending_signals");
+        let sessions = self.table_name("sessions");
         sqlx::query(&format!(
             "INSERT INTO {pending_signals} \
-             (id, session_id, signal_type, payload, created_at, resolved_at) \
-             VALUES ($1, $2, $3, $4, $5, NULL)"
+             (id, session_id, workspace_id, user_id, signal_type, payload, created_at, resolved_at) \
+             SELECT $1, $2, s.workspace_id, s.user_id, $3, $4, $5, NULL \
+             FROM {sessions} s WHERE s.id = $2"
         ))
         .bind(signal.id.0)
         .bind(session_id.0)

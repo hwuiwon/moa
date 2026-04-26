@@ -10,13 +10,20 @@ CREATE INDEX IF NOT EXISTS wiki_pages_embedding_hnsw
     WITH (m = 16, ef_construction = 64);
 
 CREATE TABLE IF NOT EXISTS wiki_embedding_queue (
-    scope TEXT NOT NULL,
+    workspace_id TEXT,
+    user_id TEXT,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
     path TEXT NOT NULL,
     enqueued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
-    PRIMARY KEY (scope, path)
+    CHECK (scope IS NOT NULL)
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS wiki_embedding_queue_scope_path_unique
+    ON wiki_embedding_queue (workspace_id, user_id, path) NULLS NOT DISTINCT;
 CREATE INDEX IF NOT EXISTS wiki_embedding_queue_enqueued
     ON wiki_embedding_queue (enqueued_at);
+
+SELECT moa.apply_three_tier_rls('wiki_pages'::REGCLASS);
+SELECT moa.apply_three_tier_rls('wiki_embedding_queue'::REGCLASS);

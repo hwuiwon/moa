@@ -37,7 +37,10 @@ CREATE INDEX IF NOT EXISTS idx_sessions_cache_hit_rate
 CREATE INDEX IF NOT EXISTS idx_sessions_cost_cents
     ON sessions(total_cost_cents DESC);
 
-CREATE OR REPLACE FUNCTION update_session_aggregates() RETURNS TRIGGER AS $$
+CREATE OR REPLACE FUNCTION update_session_aggregates() RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path FROM CURRENT
+AS $$
 DECLARE
     event_data JSONB := COALESCE(NEW.payload -> 'data', '{}'::JSONB);
 BEGIN
@@ -74,7 +77,7 @@ BEGIN
     WHERE id = NEW.session_id;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 DROP TRIGGER IF EXISTS trg_update_session_aggregates ON events;
 
