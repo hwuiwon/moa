@@ -23,9 +23,10 @@ prefer the native `web_search` tool over shelling out (e.g. `bash` + curl). \
 results without filling the context with raw HTML. Reach for `bash` only \
 when you need a specific URL fetched, a non-HTTP protocol, or behavior \
 `web_search` does not provide.\n\n\
-When the user gives you a document or reference material and asks you to \
-remember it or add it to the knowledge base, use the memory_ingest tool to \
-store it in workspace memory.\n\n\
+When the user explicitly asks you to remember one fact, decision, or lesson, \
+use the `memory.remember` tool. When the user gives you a document or \
+reference material and asks you to add it to the knowledge base, use the \
+memory_ingest tool to store it in workspace memory.\n\n\
 When you make changes, explain what you did and why. When you encounter \
 errors, preserve them in context so they are not repeated.\n\n\
 When working in code repositories, unless project instructions say \

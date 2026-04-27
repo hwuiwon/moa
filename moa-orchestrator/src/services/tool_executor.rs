@@ -70,6 +70,15 @@ impl ToolExecutorImpl {
         session: &SessionMeta,
         request: &ToolCallRequest,
     ) -> moa_core::Result<ToolOutput> {
+        if crate::fast_path::is_fast_memory_tool(&request.tool_name) {
+            return crate::fast_path::execute_memory_tool(
+                session,
+                &request.tool_name,
+                &request.input,
+            )
+            .await;
+        }
+
         let invocation = ToolInvocation {
             id: request.provider_tool_use_id.clone(),
             name: request.tool_name.clone(),

@@ -108,6 +108,9 @@ impl ToolRegistry {
         registry.register_builtin(Arc::new(memory::MemorySearchTool));
         registry.register_builtin(Arc::new(memory::MemoryWriteTool));
         registry.register_builtin(Arc::new(memory::MemoryIngestTool));
+        registry.register_builtin(Arc::new(memory::MemoryRememberTool));
+        registry.register_builtin(Arc::new(memory::MemoryForgetTool));
+        registry.register_builtin(Arc::new(memory::MemorySupersedeTool));
         registry.register_builtin(Arc::new(session_search::SessionSearchTool));
         registry.register_builtin(Arc::new(tool_result::ToolResultReadTool));
         registry.register_builtin(Arc::new(tool_result::ToolResultSearchTool));
@@ -224,6 +227,9 @@ impl ToolRegistry {
             "memory_search".to_string(),
             "memory_write".to_string(),
             "memory_ingest".to_string(),
+            "memory.remember".to_string(),
+            "memory.forget".to_string(),
+            "memory.supersede".to_string(),
             "session_search".to_string(),
             "tool_result_read".to_string(),
             "tool_result_search".to_string(),
