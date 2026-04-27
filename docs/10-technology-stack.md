@@ -65,6 +65,7 @@ Docker is used by the dev stack and optionally by local hand providers.
 | LLM provider | Model calls and optional embeddings |
 | Hand provider | Daytona, E2B, or configured local/container execution |
 | Kubernetes or equivalent | Hosting Restate and MOA services |
+| Debezium + Kafka-compatible broker | Graph changelog CDC for audit shipping, bridge sync, and cache invalidation |
 
 ### Optional
 

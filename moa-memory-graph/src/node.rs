@@ -7,22 +7,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgConnection, Row, postgres::PgRow};
 use uuid::Uuid;
 
-/// Result type returned by graph-memory helpers.
-pub type Result<T> = std::result::Result<T, Error>;
-
-/// Errors returned by graph-memory SQL helpers.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// A node label stored in Postgres is not part of the supported label set.
-    #[error("unknown node label `{0}`")]
-    UnknownNodeLabel(String),
-    /// A PII class stored in Postgres is not part of the supported class set.
-    #[error("unknown PII class `{0}`")]
-    UnknownPiiClass(String),
-    /// The underlying Postgres query failed.
-    #[error("node_index query failed: {0}")]
-    Sqlx(#[from] sqlx::Error),
-}
+use crate::{Error, Result};
 
 /// One projected row from `moa.node_index`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

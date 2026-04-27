@@ -28,7 +28,16 @@ EXCEPTION
     WHEN duplicate_object THEN NULL;
 END $$;
 
+DO $$
+BEGIN
+    CREATE ROLE moa_replicator LOGIN REPLICATION;
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END $$;
+
 GRANT moa_app TO CURRENT_USER;
+GRANT moa_promoter TO CURRENT_USER;
+GRANT moa_auditor TO CURRENT_USER;
 
 CREATE OR REPLACE FUNCTION moa.compute_scope_tier(
     workspace_id TEXT,
@@ -62,13 +71,10 @@ AS $$
     SELECT NULLIF(current_setting('moa.scope_tier', TRUE), '');
 $$;
 
-CREATE OR REPLACE FUNCTION moa.apply_three_tier_rls(target_table REGCLASS) RETURNS VOID
+CREATE OR REPLACE FUNCTION moa.drop_three_tier_policies(target_table REGCLASS) RETURNS VOID
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', target_table);
-    EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', target_table);
-
     EXECUTE format('DROP POLICY IF EXISTS workspace_isolation ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS rd_global ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS rd_workspace ON %s', target_table);
@@ -77,6 +83,15 @@ BEGIN
     EXECUTE format('DROP POLICY IF EXISTS wr_user ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS wr_global_promoter ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS owner_dev_access ON %s', target_table);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.apply_three_tier_read_policies(target_table REGCLASS) RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', target_table);
+    EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', target_table);
 
     EXECUTE format(
         'CREATE POLICY rd_global ON %s FOR SELECT TO moa_app
@@ -95,6 +110,16 @@ BEGIN
                 AND user_id = moa.current_user_id())',
         target_table
     );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.apply_three_tier_rls(target_table REGCLASS) RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM moa.drop_three_tier_policies(target_table);
+    PERFORM moa.apply_three_tier_read_policies(target_table);
+
     EXECUTE format(
         'CREATE POLICY wr_workspace ON %s FOR ALL TO moa_app
          USING (scope = ''workspace'' AND workspace_id = moa.current_workspace())
