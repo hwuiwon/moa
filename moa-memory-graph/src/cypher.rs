@@ -70,7 +70,9 @@ pub mod node {
                 "CREATE (n:",
                 $label,
                 " {uid: $uid, workspace_id: $workspace_id, user_id: $user_id, ",
-                "scope: $scope, name: $name, pii_class: $pii_class}) RETURN n.uid AS result"
+                "scope: $scope, name: $name, pii_class: $pii_class, ",
+                "valid_from: $valid_from, created_at: $created_at, ",
+                "properties: $properties}) RETURN n.uid AS result"
             ));
         };
     }
@@ -95,7 +97,9 @@ pub mod node {
              old.invalidated_by = $actor, old.invalidated_reason = 'superseded' \
          WITH old \
          CREATE (new {uid: $uid, workspace_id: $workspace_id, user_id: $user_id, \
-                      scope: $scope, name: $name, pii_class: $pii_class}) \
+                      scope: $scope, name: $name, pii_class: $pii_class, \
+                      valid_from: $valid_from, created_at: $created_at, \
+                      properties: $properties}) \
          CREATE (new)-[:SUPERSEDES {uid: $edge_uid, workspace_id: $workspace_id, \
                                     user_id: $user_id, scope: $scope}]->(old) \
          RETURN new.uid AS result"
@@ -107,11 +111,6 @@ pub mod node {
          SET n.valid_to = $now, n.invalidated_at = $now, \
              n.invalidated_by = $actor, n.invalidated_reason = $reason \
          RETURN n.uid AS result"
-    ));
-
-    /// Detach-delete a node from AGE.
-    pub const HARD_PURGE: Cypher = Cypher::new(cypher_sql!(
-        "MATCH (n {uid: $uid}) DETACH DELETE n RETURN $uid"
     ));
 }
 
@@ -128,7 +127,7 @@ pub mod edge {
                 "CREATE (a)-[r:",
                 $label,
                 " {uid: $uid, workspace_id: $workspace_id, user_id: $user_id, ",
-                "scope: $scope}]->(b) RETURN r.uid AS result"
+                "scope: $scope, properties: $properties}]->(b) RETURN r.uid AS result"
             ));
         };
     }
@@ -174,6 +173,12 @@ pub mod edge {
         "APPLIES_TO",
         "Create an `APPLIES_TO` edge."
     );
+
+    /// Checks that a `SUPERSEDES` edge links the replacement node to the old node.
+    pub const SUPERSEDES_EXISTS: Cypher = Cypher::new(cypher_sql!(
+        "MATCH (new {uid: $new_uid})-[:SUPERSEDES]->(old {uid: $old_uid}) \
+         RETURN new.uid AS result LIMIT 1"
+    ));
 }
 
 pub mod traverse {

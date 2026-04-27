@@ -1,6 +1,9 @@
 //! Apache AGE-backed `GraphStore` implementation.
 
+use std::sync::Arc;
+
 use moa_core::{ScopeContext, ScopedConn};
+use moa_memory_vector::VectorStore;
 use sqlx::PgPool;
 
 use crate::GraphError;
@@ -11,6 +14,7 @@ pub struct AgeGraphStore {
     pub(crate) pool: PgPool,
     pub(crate) scope: Option<ScopeContext>,
     pub(crate) assume_app_role: bool,
+    pub(crate) vector: Option<Arc<dyn VectorStore>>,
 }
 
 impl AgeGraphStore {
@@ -23,6 +27,7 @@ impl AgeGraphStore {
             pool,
             scope: None,
             assume_app_role: false,
+            vector: None,
         }
     }
 
@@ -32,6 +37,7 @@ impl AgeGraphStore {
             pool,
             scope: Some(scope),
             assume_app_role: false,
+            vector: None,
         }
     }
 
@@ -44,7 +50,14 @@ impl AgeGraphStore {
             pool,
             scope: Some(scope),
             assume_app_role: true,
+            vector: None,
         }
+    }
+
+    /// Attaches a vector backend used by graph write operations.
+    pub fn with_vector_store(mut self, vector: Arc<dyn VectorStore>) -> Self {
+        self.vector = Some(vector);
+        self
     }
 
     /// Returns the underlying Postgres pool.
@@ -55,6 +68,11 @@ impl AgeGraphStore {
     /// Returns the request scope installed before graph operations, when configured.
     pub fn scope(&self) -> Option<&ScopeContext> {
         self.scope.as_ref()
+    }
+
+    /// Returns the vector backend used by graph writes, when configured.
+    pub fn vector(&self) -> Option<&dyn VectorStore> {
+        self.vector.as_deref()
     }
 
     pub(crate) async fn begin(&self) -> Result<Option<ScopedConn<'_>>, GraphError> {
@@ -69,5 +87,9 @@ impl AgeGraphStore {
                 .await?;
         }
         Ok(Some(conn))
+    }
+
+    pub(crate) async fn begin_required(&self) -> Result<ScopedConn<'_>, GraphError> {
+        self.begin().await?.ok_or(GraphError::MissingScope)
     }
 }

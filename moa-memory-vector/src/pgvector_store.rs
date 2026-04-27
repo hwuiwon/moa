@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use moa_core::{ScopeContext, ScopedConn};
 use pgvector::HalfVector;
-use sqlx::{PgPool, Postgres, QueryBuilder};
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::{
@@ -74,40 +74,13 @@ impl VectorStore for PgvectorStore {
 
     async fn upsert(&self, items: &[VectorItem]) -> Result<()> {
         let mut conn = self.begin().await?;
-        for item in items {
-            validate_dimension(&item.embedding)?;
-            pii_rank(&item.pii_class)?;
-            let halfvec = HalfVector::from_f32_slice(&item.embedding);
-            sqlx::query(
-                r#"
-                INSERT INTO moa.embeddings
-                    (uid, workspace_id, user_id, label, pii_class, embedding,
-                     embedding_model, embedding_model_version, valid_to)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                ON CONFLICT (workspace_id, uid) DO UPDATE
-                    SET user_id = EXCLUDED.user_id,
-                        label = EXCLUDED.label,
-                        pii_class = EXCLUDED.pii_class,
-                        embedding = EXCLUDED.embedding,
-                        embedding_model = EXCLUDED.embedding_model,
-                        embedding_model_version = EXCLUDED.embedding_model_version,
-                        valid_to = EXCLUDED.valid_to
-                "#,
-            )
-            .bind(item.uid)
-            .bind(item.workspace_id.as_deref())
-            .bind(item.user_id.as_deref())
-            .bind(&item.label)
-            .bind(&item.pii_class)
-            .bind(halfvec)
-            .bind(&item.embedding_model)
-            .bind(item.embedding_model_version)
-            .bind(item.valid_to)
-            .execute(conn.as_mut())
-            .await?;
-        }
+        upsert_items(conn.as_mut(), items).await?;
         conn.commit().await?;
         Ok(())
+    }
+
+    async fn upsert_in_tx(&self, conn: &mut PgConnection, items: &[VectorItem]) -> Result<()> {
+        upsert_items(conn, items).await
     }
 
     async fn knn(&self, query: &VectorQuery) -> Result<Vec<VectorMatch>> {
@@ -169,11 +142,60 @@ impl VectorStore for PgvectorStore {
         }
 
         let mut conn = self.begin().await?;
-        sqlx::query("DELETE FROM moa.embeddings WHERE uid = ANY($1)")
-            .bind(uids)
-            .execute(conn.as_mut())
-            .await?;
+        delete_items(conn.as_mut(), uids).await?;
         conn.commit().await?;
         Ok(())
     }
+
+    async fn delete_in_tx(&self, conn: &mut PgConnection, uids: &[Uuid]) -> Result<()> {
+        delete_items(conn, uids).await
+    }
+}
+
+async fn upsert_items(conn: &mut PgConnection, items: &[VectorItem]) -> Result<()> {
+    for item in items {
+        validate_dimension(&item.embedding)?;
+        pii_rank(&item.pii_class)?;
+        let halfvec = HalfVector::from_f32_slice(&item.embedding);
+        sqlx::query(
+            r#"
+            INSERT INTO moa.embeddings
+                (uid, workspace_id, user_id, label, pii_class, embedding,
+                 embedding_model, embedding_model_version, valid_to)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (workspace_id, uid) DO UPDATE
+                SET user_id = EXCLUDED.user_id,
+                    label = EXCLUDED.label,
+                    pii_class = EXCLUDED.pii_class,
+                    embedding = EXCLUDED.embedding,
+                    embedding_model = EXCLUDED.embedding_model,
+                    embedding_model_version = EXCLUDED.embedding_model_version,
+                    valid_to = EXCLUDED.valid_to
+            "#,
+        )
+        .bind(item.uid)
+        .bind(item.workspace_id.as_deref())
+        .bind(item.user_id.as_deref())
+        .bind(&item.label)
+        .bind(&item.pii_class)
+        .bind(halfvec)
+        .bind(&item.embedding_model)
+        .bind(item.embedding_model_version)
+        .bind(item.valid_to)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn delete_items(conn: &mut PgConnection, uids: &[Uuid]) -> Result<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query("DELETE FROM moa.embeddings WHERE uid = ANY($1)")
+        .bind(uids)
+        .execute(conn)
+        .await?;
+    Ok(())
 }

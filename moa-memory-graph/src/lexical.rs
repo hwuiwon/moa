@@ -79,7 +79,7 @@ pub(crate) async fn lookup_seed_rows(
     sqlx::query_as::<_, NodeIndexRow>(
         r#"
         SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
-               valid_to, last_accessed_at
+               valid_to, valid_from, properties_summary, last_accessed_at
         FROM moa.node_index
         WHERE valid_to IS NULL
           AND name_tsv @@ plainto_tsquery('simple', $1)
