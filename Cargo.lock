@@ -5361,6 +5361,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-memory-pii"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "moa-core",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "moa-memory-vector"
 version = "0.1.0"
 dependencies = [

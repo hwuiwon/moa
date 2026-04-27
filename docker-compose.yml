@@ -40,5 +40,28 @@ services:
       retries: 10
       start_period: 10s
 
+  moa-pii-service:
+    build:
+      context: .
+      dockerfile: services/pii-service/Dockerfile
+    image: moa/pii-service:0.1
+    container_name: moa-pii-service
+    restart: unless-stopped
+    environment:
+      MODEL: openai/privacy-filter
+      DEVICE: cpu
+      HF_HUB_DISABLE_XET: "1"
+    ports:
+      - "8080:8080"
+    volumes:
+      - moa-pii-hf-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)\""]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 60s
+
 volumes:
   moa-pg-data:
+  moa-pii-hf-cache:

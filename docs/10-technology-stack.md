@@ -13,6 +13,7 @@ The root workspace currently contains:
 | `moa-session` | Postgres session store, event log, task segments, intents, learning log, analytics |
 | `moa-memory` | File-wiki memory, Postgres keyword/trigram search, pgvector embeddings, consolidation |
 | `moa-memory-graph` | Graph-memory sidecar tables and AGE projection helpers |
+| `moa-memory-pii` | PII classification client and privacy-class aggregation helpers |
 | `moa-memory-vector` | VectorStore trait, Cohere Embed v4 client, and pgvector halfvec backend |
 | `moa-hands` | Tool router, local/Docker hands, Daytona, E2B, MCP |
 | `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring |
@@ -52,6 +53,7 @@ The root workspace currently contains:
 | Service | Purpose |
 |---|---|
 | Postgres 17.6+ with Apache AGE, pgvector, and pgaudit | Session store, graph memory, event search, memory index, embeddings, learning tables |
+| `moa-pii-service` | Out-of-process `openai/privacy-filter` inference for memory privacy classification |
 | LLM provider | Anthropic, OpenAI, or Google Gemini |
 
 Docker is used by the dev stack and optionally by local hand providers.
