@@ -5345,6 +5345,7 @@ dependencies = [
 name = "moa-memory-graph"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "moa-core",
  "moa-session",
@@ -5353,6 +5354,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -5463,6 +5465,7 @@ dependencies = [
  "moa-core",
  "moa-hands",
  "moa-memory",
+ "moa-memory-graph",
  "moa-orchestrator-local",
  "moa-providers",
  "moa-session",

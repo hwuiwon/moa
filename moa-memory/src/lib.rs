@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
-    BrainId, MemoryPath, MemoryScope, MemorySearchMode, MemorySearchResult, MemoryStore, MoaConfig,
-    MoaError, PageSummary, PageType, Result, SessionStore, WikiPage,
+    BrainId, MemoryPath, MemoryScope, MemorySearchMode, MemorySearchResult,
+    MemoryStore as CoreMemoryStore, MoaConfig, MoaError, PageSummary, PageType, Result,
+    SessionStore, WikiPage,
 };
 use moa_providers::{EmbeddingProvider, build_embedding_provider_from_config};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -30,6 +31,8 @@ use index::{
     INDEX_FILENAME, LogEntry, append_log_entry, compile_index, load_index_file, load_log_file,
 };
 pub use moa_core::IngestReport;
+#[deprecated(note = "use moa-memory-graph::GraphStore + moa-memory-vector::VectorStore")]
+pub use moa_core::MemoryStore;
 pub use search::EmbeddingIndexStatus;
 use search::WikiSearchIndex;
 use wiki::{parse_markdown, render_markdown};
@@ -352,7 +355,7 @@ async fn connect_search_pool(config: &MoaConfig) -> Result<Arc<PgPool>> {
 }
 
 #[async_trait]
-impl MemoryStore for FileMemoryStore {
+impl CoreMemoryStore for FileMemoryStore {
     /// Searches indexed wiki content within a single scope.
     async fn search(
         &self,

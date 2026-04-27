@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgConnection, Row, postgres::PgRow};
 use uuid::Uuid;
 
-use crate::{Error, Result};
+use crate::{GraphError, Result};
 
 /// One projected row from `moa.node_index`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -87,7 +87,7 @@ impl NodeLabel {
 }
 
 impl FromStr for NodeLabel {
-    type Err = Error;
+    type Err = GraphError;
 
     fn from_str(value: &str) -> Result<Self> {
         match value {
@@ -98,7 +98,7 @@ impl FromStr for NodeLabel {
             "Lesson" => Ok(Self::Lesson),
             "Fact" => Ok(Self::Fact),
             "Source" => Ok(Self::Source),
-            other => Err(Error::UnknownNodeLabel(other.to_string())),
+            other => Err(GraphError::UnknownNodeLabel(other.to_string())),
         }
     }
 }
@@ -131,7 +131,7 @@ impl PiiClass {
 }
 
 impl FromStr for PiiClass {
-    type Err = Error;
+    type Err = GraphError;
 
     fn from_str(value: &str) -> Result<Self> {
         match value {
@@ -139,9 +139,44 @@ impl FromStr for PiiClass {
             "pii" => Ok(Self::Pii),
             "phi" => Ok(Self::Phi),
             "restricted" => Ok(Self::Restricted),
-            other => Err(Error::UnknownPiiClass(other.to_string())),
+            other => Err(GraphError::UnknownPiiClass(other.to_string())),
         }
     }
+}
+
+/// Intent to create or supersede one graph-memory node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeWriteIntent {
+    /// Stable external graph-node identity.
+    pub uid: Uuid,
+    /// AGE vertex label.
+    pub label: NodeLabel,
+    /// Workspace scope for workspace and user rows.
+    pub workspace_id: Option<String>,
+    /// User scope inside a workspace for user-private rows.
+    pub user_id: Option<String>,
+    /// Expected scope tier: `global`, `workspace`, or `user`.
+    pub scope: String,
+    /// Human-readable node name projected into `moa.node_index`.
+    pub name: String,
+    /// Node properties serialized into AGE `agtype`.
+    pub properties: serde_json::Value,
+    /// PII handling class for retrieval filtering.
+    pub pii_class: PiiClass,
+    /// Optional model or extraction confidence.
+    pub confidence: Option<f64>,
+    /// Start of the bitemporal validity interval.
+    pub valid_from: DateTime<Utc>,
+    /// Optional 1024-dimension embedding to write in M08.
+    pub embedding: Option<Vec<f32>>,
+    /// Optional embedding model name.
+    pub embedding_model: Option<String>,
+    /// Optional embedding model version.
+    pub embedding_model_version: Option<i32>,
+    /// Principal identifier that triggered the mutation.
+    pub actor_id: String,
+    /// Principal kind written to the graph changelog.
+    pub actor_kind: String,
 }
 
 /// Looks up graph nodes by name using the `moa.node_index` full-text projection.
@@ -170,7 +205,7 @@ pub async fn lookup_seed_by_name(
     .bind(limit)
     .fetch_all(&mut *conn)
     .await
-    .map_err(Error::from)
+    .map_err(GraphError::from)
 }
 
 /// Updates `last_accessed_at` for projected graph node rows.
@@ -194,6 +229,6 @@ fn decode_pii_class(value: String) -> std::result::Result<PiiClass, sqlx::Error>
     PiiClass::from_str(&value).map_err(decode_error)
 }
 
-fn decode_error(error: Error) -> sqlx::Error {
+fn decode_error(error: GraphError) -> sqlx::Error {
     sqlx::Error::Decode(Box::new(error))
 }
