@@ -1,3 +1,9 @@
+DROP MATERIALIZED VIEW IF EXISTS daily_workspace_metrics;
+DROP MATERIALIZED VIEW IF EXISTS session_turn_metrics;
+DROP VIEW IF EXISTS session_summary;
+DROP VIEW IF EXISTS tool_call_summary;
+DROP VIEW IF EXISTS tool_call_analytics;
+
 ALTER TABLE sessions
     ADD COLUMN IF NOT EXISTS turn_count BIGINT NOT NULL DEFAULT 0;
 

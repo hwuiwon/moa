@@ -1,0 +1,25 @@
+{
+  "name": "moa-changelog",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "moa_replicator",
+    "database.password": "${file:/run/secrets/moa_replicator_pwd:password}",
+    "database.dbname": "moa",
+    "topic.prefix": "moa.cdc",
+    "publication.name": "moa_changelog_pub",
+    "publication.autocreate.mode": "disabled",
+    "slot.name": "moa_changelog_slot",
+    "slot.drop.on.stop": "false",
+    "plugin.name": "pgoutput",
+    "schema.include.list": "moa",
+    "table.include.list": "moa.graph_changelog",
+    "snapshot.mode": "no_data",
+    "tombstones.on.delete": "false",
+    "include.schema.changes": "false",
+    "provide.transaction.metadata": "true",
+    "heartbeat.interval.ms": "10000"
+  }
+}

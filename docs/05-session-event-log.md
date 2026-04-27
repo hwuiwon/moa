@@ -16,6 +16,7 @@ Postgres stores:
 - task segments
 - tenant intents and global catalog intents
 - learning log entries
+- graph changelog outbox rows and per-workspace changelog versions
 - analytics views and materialized views
 
 ## Core Tables
@@ -142,6 +143,12 @@ The session schema also owns:
 - `learning_log`
 
 Learning log rows are append-only records with tenant ID, learning type, target, payload, confidence, source refs, actor, validity interval, optional batch ID, and version. Rollback invalidates rows by setting `valid_to`; it does not delete history.
+
+## Graph Changelog
+
+`moa.graph_changelog` is the immutable outbox for graph-memory mutations. Every node or edge create, update, supersession, invalidation, erase, or crypto-shred writes a changelog row in the same transaction as the graph change. An insert trigger bumps `moa.workspace_state.changelog_version`, which cache invalidation uses as the per-workspace freshness marker.
+
+The changelog is monthly range-partitioned, protected by FORCE RLS, and grants application roles only `SELECT` and `INSERT`. `moa_changelog_pub` publishes the table for Debezium PostgreSQL CDC; `moa_replicator` consumes it through the `moa_changelog_slot` logical replication slot.
 
 ## Replay
 

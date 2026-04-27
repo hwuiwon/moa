@@ -306,11 +306,13 @@ mod tests {
             })?;
             let events_table = format!("\"{schema_name}\".events");
             sqlx::query(&format!(
-                "INSERT INTO {events_table} (id, session_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+                "INSERT INTO {events_table} (id, session_id, workspace_id, user_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
             ))
             .bind(uuid::Uuid::now_v7())
             .bind(session_id.0)
+            .bind("workspace")
+            .bind("user")
             .bind(0_i64)
             .bind("warning")
             .bind(sqlx::types::Json(serde_json::json!({
