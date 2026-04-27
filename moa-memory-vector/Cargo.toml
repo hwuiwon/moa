@@ -1,0 +1,22 @@
+[package]
+name = "moa-memory-vector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+moa-core = { path = "../moa-core" }
+pgvector = { version = "0.4.1", features = ["sqlx", "halfvec"] }
+reqwest.workspace = true
+secrecy = "0.10"
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "json"] }
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+moa-session = { path = "../moa-session" }

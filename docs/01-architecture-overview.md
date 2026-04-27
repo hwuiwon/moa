@@ -137,6 +137,7 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 | `moa-session` | Postgres session store, event log, task segments, intents, learning log |
 | `moa-memory` | File wiki, Postgres search index, embedding queue, consolidation |
 | `moa-memory-graph` | Graph-memory SQL sidecars and AGE projection helpers |
+| `moa-memory-vector` | Graph-memory vector storage abstraction and pgvector backend |
 | `moa-hands` | Tool routing and hand providers |
 | `moa-providers` | LLM and embedding providers |
 | `moa-orchestrator` | Restate handlers and cloud orchestration binary |

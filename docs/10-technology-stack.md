@@ -13,6 +13,7 @@ The root workspace currently contains:
 | `moa-session` | Postgres session store, event log, task segments, intents, learning log, analytics |
 | `moa-memory` | File-wiki memory, Postgres keyword/trigram search, pgvector embeddings, consolidation |
 | `moa-memory-graph` | Graph-memory sidecar tables and AGE projection helpers |
+| `moa-memory-vector` | VectorStore trait, Cohere Embed v4 client, and pgvector halfvec backend |
 | `moa-hands` | Tool router, local/Docker hands, Daytona, E2B, MCP |
 | `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring |
 | `moa-orchestrator` | Restate services, virtual objects, workflows, cloud binary |
