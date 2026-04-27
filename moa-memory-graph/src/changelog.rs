@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use crate::{Error, Result};
+use crate::{GraphError, Result};
 
 /// One append-only mutation record for `moa.graph_changelog`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,13 +78,13 @@ fn validate_scope(rec: &ChangelogRecord) -> Result<()> {
         (None, None) => "global",
         (Some(_), None) => "workspace",
         (Some(_), Some(_)) => "user",
-        (None, Some(_)) => return Err(Error::InvalidChangelogScope),
+        (None, Some(_)) => return Err(GraphError::InvalidChangelogScope),
     };
 
     if rec.scope == expected {
         Ok(())
     } else {
-        Err(Error::ChangelogScopeMismatch {
+        Err(GraphError::ChangelogScopeMismatch {
             actual: rec.scope.clone(),
             expected,
         })
