@@ -3,6 +3,7 @@
 mod brain_bridge;
 pub mod config;
 pub mod ctx;
+pub mod ingestion_vo;
 pub mod objects;
 pub mod observability;
 pub mod services;

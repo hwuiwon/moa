@@ -3,17 +3,20 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
 use moa_core::{
     CompletionRequest, CompletionResponse, Event, LLMProvider, MoaError, ModelCapabilities,
-    ModelId, ModelTier, QueryRewriteConfig, SessionId, TokenPricing, TokenUsage,
-    record_llm_cost_cents,
+    ModelId, ModelTier, QueryRewriteConfig, SessionId, TokenPricing, TokenUsage, UserId,
+    WorkspaceId, record_llm_cost_cents,
 };
+use moa_memory_ingest::SessionTurn;
 use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 use restate_sdk::prelude::*;
 use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
+use crate::ingestion_vo::{IngestionVOClient, ingestion_object_key, turn_transcript};
 use crate::observability::annotate_restate_handler_span;
 use crate::services::session_store::{AppendEventRequest, SessionStoreClient};
 
@@ -399,9 +402,29 @@ impl LLMGateway for LLMGatewayImpl {
                 duration_ms: response.duration_ms,
             };
 
-            ctx.service_client::<SessionStoreClient>()
+            let turn_seq = ctx
+                .service_client::<SessionStoreClient>()
                 .append_event(Json(AppendEventRequest { session_id, event }))
-                .send();
+                .call()
+                .await?;
+
+            if let Some((workspace_id, user_id)) = turn_scope_from_request(&request) {
+                let transcript = turn_transcript(&request.messages, &response.text);
+                if !transcript.trim().is_empty() {
+                    let turn = SessionTurn {
+                        workspace_id,
+                        user_id,
+                        session_id,
+                        turn_seq,
+                        dominant_pii_class: dominant_pii_class_hint(&transcript).to_string(),
+                        transcript,
+                        finalized_at: Utc::now(),
+                    };
+                    ctx.object_client::<IngestionVOClient>(ingestion_object_key(&turn))
+                        .ingest_turn(Json(turn))
+                        .send();
+                }
+            }
         }
 
         Ok(Json::from(response))
@@ -625,6 +648,37 @@ fn session_id_from_request(request: &CompletionRequest) -> Option<SessionId> {
             );
             None
         }
+    }
+}
+
+fn turn_scope_from_request(request: &CompletionRequest) -> Option<(WorkspaceId, UserId)> {
+    let workspace_id = string_metadata(request, "_moa.workspace_id").map(WorkspaceId::new)?;
+    let user_id = string_metadata(request, "_moa.user_id").map(UserId::new)?;
+    Some((workspace_id, user_id))
+}
+
+fn string_metadata<'a>(request: &'a CompletionRequest, key: &str) -> Option<&'a str> {
+    match request.metadata.get(key)? {
+        Value::String(raw) => Some(raw.as_str()),
+        other => {
+            tracing::warn!(metadata = %other, key, "ignoring non-string request metadata");
+            None
+        }
+    }
+}
+
+fn dominant_pii_class_hint(transcript: &str) -> &'static str {
+    let lower = transcript.to_ascii_lowercase();
+    if lower.contains("ssn") || lower.contains("medical record") || lower.contains("government id")
+    {
+        "phi"
+    } else if lower.contains("secret") || lower.contains("sk-") || lower.contains("account number")
+    {
+        "restricted"
+    } else if transcript.contains('@') || lower.contains("phone") || lower.contains("address") {
+        "pii"
+    } else {
+        "none"
     }
 }
 
