@@ -16,7 +16,7 @@ use crate::{
 #[async_trait::async_trait]
 impl GraphStore for AgeGraphStore {
     async fn create_node(&self, intent: NodeWriteIntent) -> Result<Uuid, GraphError> {
-        crate::write::create_node(intent).await
+        crate::write::create_node(self, intent).await
     }
 
     async fn supersede_node(
@@ -24,19 +24,19 @@ impl GraphStore for AgeGraphStore {
         old_uid: Uuid,
         intent: NodeWriteIntent,
     ) -> Result<Uuid, GraphError> {
-        crate::write::supersede_node(old_uid, intent).await
+        crate::write::supersede_node(self, old_uid, intent).await
     }
 
     async fn invalidate_node(&self, uid: Uuid, reason: &str) -> Result<(), GraphError> {
-        crate::write::invalidate_node(uid, reason).await
+        crate::write::invalidate_node(self, uid, reason).await
     }
 
     async fn hard_purge(&self, uid: Uuid, redaction_marker: &str) -> Result<(), GraphError> {
-        crate::write::hard_purge(uid, redaction_marker).await
+        crate::write::hard_purge(self, uid, redaction_marker).await
     }
 
     async fn create_edge(&self, intent: EdgeWriteIntent) -> Result<Uuid, GraphError> {
-        crate::write::create_edge(intent).await
+        crate::write::create_edge(self, intent).await
     }
 
     async fn get_node(&self, uid: Uuid) -> Result<Option<NodeIndexRow>, GraphError> {
@@ -49,7 +49,7 @@ impl GraphStore for AgeGraphStore {
         sqlx::query_as::<_, NodeIndexRow>(
             r#"
             SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
-                   valid_to, last_accessed_at
+                   valid_to, valid_from, properties_summary, last_accessed_at
             FROM moa.node_index
             WHERE uid = $1
             "#,
@@ -67,8 +67,8 @@ impl GraphStore for AgeGraphStore {
         edge_filter: Option<&[EdgeLabel]>,
     ) -> Result<Vec<NodeIndexRow>, GraphError> {
         if edge_filter.is_some_and(|labels| !labels.is_empty()) {
-            return Err(GraphError::NotImplemented(
-                "edge-filtered neighbors land in M08",
+            return Err(GraphError::Conflict(
+                "edge-filtered neighbors require a dedicated traversal template".to_string(),
             ));
         }
 
@@ -132,7 +132,7 @@ async fn fetch_node(
     sqlx::query_as::<_, NodeIndexRow>(
         r#"
         SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
-               valid_to, last_accessed_at
+               valid_to, valid_from, properties_summary, last_accessed_at
         FROM moa.node_index
         WHERE uid = $1
         "#,
@@ -156,7 +156,7 @@ async fn fetch_nodes_by_uid(
     sqlx::query_as::<_, NodeIndexRow>(
         r#"
         SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
-               valid_to, last_accessed_at
+               valid_to, valid_from, properties_summary, last_accessed_at
         FROM moa.node_index
         WHERE uid = ANY($1)
           AND valid_to IS NULL
@@ -175,7 +175,7 @@ async fn fetch_nodes(
     sqlx::query_as::<_, NodeIndexRow>(
         r#"
         SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
-               valid_to, last_accessed_at
+               valid_to, valid_from, properties_summary, last_accessed_at
         FROM moa.node_index
         WHERE uid = ANY($1)
           AND valid_to IS NULL

@@ -15,9 +15,12 @@ pub enum GraphError {
     /// Row-level security denied the operation.
     #[error("rls denied")]
     RlsDenied,
-    /// A graph write path is intentionally deferred to a later migration step.
-    #[error("not implemented: {0}")]
-    NotImplemented(&'static str),
+    /// A graph write was attempted without a request scope.
+    #[error("graph writes require a scoped connection")]
+    MissingScope,
+    /// A node intent supplied an embedding without complete embedding metadata.
+    #[error("embedding requires model name and model version")]
+    MissingEmbeddingMetadata,
     /// The requested mutation conflicts with current graph state.
     #[error("conflict: {0}")]
     Conflict(String),
@@ -47,4 +50,10 @@ pub enum GraphError {
     /// A scoped Postgres transaction could not be started or committed.
     #[error("scope transaction: {0}")]
     Scope(#[from] moa_core::MoaError),
+    /// A vector store operation failed.
+    #[error("vector store: {0}")]
+    Vector(#[from] moa_memory_vector::Error),
+    /// JSON serialization for audit payload hashing failed.
+    #[error("json serialization: {0}")]
+    Json(#[from] serde_json::Error),
 }

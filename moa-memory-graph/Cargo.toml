@@ -7,9 +7,11 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+moa-memory-vector = { path = "../moa-memory-vector" }
 moa-core = { path = "../moa-core" }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "json", "macros"] }
 thiserror.workspace = true
 tracing.workspace = true

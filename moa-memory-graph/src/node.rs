@@ -28,6 +28,10 @@ pub struct NodeIndexRow {
     pub pii_class: PiiClass,
     /// End of validity for soft-deleted or superseded nodes.
     pub valid_to: Option<DateTime<Utc>>,
+    /// Start of the node's application-time validity interval.
+    pub valid_from: DateTime<Utc>,
+    /// Projected non-routing properties used for audit hashing and previews.
+    pub properties_summary: Option<serde_json::Value>,
     /// Last retrieval/access timestamp.
     pub last_accessed_at: DateTime<Utc>,
 }
@@ -45,6 +49,8 @@ impl<'r> FromRow<'r, PgRow> for NodeIndexRow {
             name: row.try_get("name")?,
             pii_class,
             valid_to: row.try_get("valid_to")?,
+            valid_from: row.try_get("valid_from")?,
+            properties_summary: row.try_get("properties_summary")?,
             last_accessed_at: row.try_get("last_accessed_at")?,
         })
     }
@@ -192,7 +198,7 @@ pub async fn lookup_seed_by_name(
     sqlx::query_as::<_, NodeIndexRow>(
         r#"
         SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
-               valid_to, last_accessed_at
+               valid_to, valid_from, properties_summary, last_accessed_at
         FROM moa.node_index
         WHERE valid_to IS NULL
           AND name_tsv @@ plainto_tsquery('simple', $1)

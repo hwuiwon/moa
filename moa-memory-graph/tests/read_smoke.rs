@@ -2,9 +2,7 @@
 
 use chrono::Utc;
 use moa_core::{ScopeContext, ScopedConn, WorkspaceId};
-use moa_memory_graph::{
-    AgeGraphStore, GraphError, GraphStore, NodeLabel, NodeWriteIntent, PiiClass, cypher,
-};
+use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, PiiClass, cypher};
 use moa_session::testing;
 use serde_json::json;
 use sqlx::Row;
@@ -41,7 +39,10 @@ async fn cypher_template_create_uses_bound_params() {
         "user_id": "",
         "scope": "workspace",
         "name": "template smoke",
-        "pii_class": "none"
+        "pii_class": "none",
+        "valid_from": Utc::now().to_rfc3339(),
+        "created_at": Utc::now().to_rfc3339(),
+        "properties": { "smoke": true }
     });
     let row = cypher::node::CREATE_ENTITY
         .execute(&params)
@@ -94,7 +95,7 @@ async fn delete_node(pool: &sqlx::PgPool, uid: Uuid) {
 }
 
 #[tokio::test]
-async fn read_smoke_get_node_lookup_seeds_and_deferred_writes() {
+async fn read_smoke_get_node_and_lookup_seeds() {
     let _guard = TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
@@ -123,29 +124,6 @@ async fn read_smoke_get_node_lookup_seeds_and_deferred_writes() {
         .await
         .expect("lookup lexical seeds through graph store");
     assert!(seeds.iter().any(|seed| seed.uid == uid));
-
-    let intent = NodeWriteIntent {
-        uid: Uuid::now_v7(),
-        label: NodeLabel::Fact,
-        workspace_id: Some(workspace_id.clone()),
-        user_id: None,
-        scope: "workspace".to_string(),
-        name: "deferred write".to_string(),
-        properties: json!({ "name": "deferred write" }),
-        pii_class: PiiClass::None,
-        confidence: Some(0.5),
-        valid_from: Utc::now(),
-        embedding: None,
-        embedding_model: None,
-        embedding_model_version: None,
-        actor_id: "test".to_string(),
-        actor_kind: "system".to_string(),
-    };
-    let error = graph
-        .create_node(intent)
-        .await
-        .expect_err("M07 write path should be deferred");
-    assert!(matches!(error, GraphError::NotImplemented(_)));
 
     delete_node(store.pool(), uid).await;
     drop(store);

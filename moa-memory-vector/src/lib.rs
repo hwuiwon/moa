@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 pub mod embedder;
@@ -55,6 +56,9 @@ pub enum Error {
     /// A Postgres query failed.
     #[error("vector store query failed: {0}")]
     Sqlx(#[from] sqlx::Error),
+    /// The vector backend cannot participate in the caller's Postgres transaction.
+    #[error("vector backend `{0}` does not support Postgres transactional writes")]
+    TransactionalWritesUnsupported(&'static str),
     /// An HTTP request failed.
     #[error("embedding HTTP request failed: {0}")]
     Reqwest(#[from] reqwest::Error),
@@ -119,11 +123,25 @@ pub trait VectorStore: Send + Sync {
     /// Inserts or updates embeddings in the current store scope.
     async fn upsert(&self, items: &[VectorItem]) -> Result<()>;
 
+    /// Inserts or updates embeddings using the caller's scoped Postgres transaction connection.
+    async fn upsert_in_tx(&self, conn: &mut PgConnection, items: &[VectorItem]) -> Result<()> {
+        let _ = conn;
+        let _ = items;
+        Err(Error::TransactionalWritesUnsupported(self.backend()))
+    }
+
     /// Runs a scoped nearest-neighbor query.
     async fn knn(&self, query: &VectorQuery) -> Result<Vec<VectorMatch>>;
 
     /// Deletes embeddings in the current store scope by node id.
     async fn delete(&self, uids: &[Uuid]) -> Result<()>;
+
+    /// Deletes embeddings using the caller's scoped Postgres transaction connection.
+    async fn delete_in_tx(&self, conn: &mut PgConnection, uids: &[Uuid]) -> Result<()> {
+        let _ = conn;
+        let _ = uids;
+        Err(Error::TransactionalWritesUnsupported(self.backend()))
+    }
 }
 
 pub(crate) fn validate_dimension(embedding: &[f32]) -> Result<()> {
