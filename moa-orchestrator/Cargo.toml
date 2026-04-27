@@ -10,11 +10,13 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 axum = "0.8"
 chrono.workspace = true
 clap.workspace = true
 futures = { version = "0.3" }
 futures-util.workspace = true
+metrics.workspace = true
 moa-brain = { path = "../moa-brain" }
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
@@ -34,6 +36,7 @@ serde.workspace = true
 serde_json.workspace = true
 shell-words = "1.1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "json", "uuid", "chrono"] }
+thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
@@ -42,7 +45,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 uuid.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
 tempfile = "3"
 tracing-subscriber.workspace = true
 
