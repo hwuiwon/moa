@@ -60,7 +60,8 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
 }
 
 async fn execute_migration(pool: &PgPool, sql: &str) -> Result<()> {
-    raw_sql(sql)
+    let scoped_sql = format!("SET search_path = public; {sql}");
+    raw_sql(&scoped_sql)
         .execute(pool)
         .await
         .map(|_| ())

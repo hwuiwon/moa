@@ -5361,6 +5361,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-memory-ingest"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "moa-core",
+ "moa-memory-pii",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "moa-memory-pii"
 version = "0.1.0"
 dependencies = [
@@ -5408,12 +5423,17 @@ dependencies = [
  "moa-core",
  "moa-hands",
  "moa-memory",
+ "moa-memory-graph",
+ "moa-memory-ingest",
+ "moa-memory-pii",
+ "moa-memory-vector",
  "moa-providers",
  "moa-security",
  "moa-session",
  "opentelemetry",
  "reqwest 0.13.2",
  "restate-sdk",
+ "secrecy 0.10.3",
  "serde",
  "serde_json",
  "shell-words",

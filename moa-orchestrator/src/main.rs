@@ -19,6 +19,7 @@ use moa_memory::FileMemoryStore;
 use moa_orchestrator::{
     OrchestratorCtx,
     config::OrchestratorConfig,
+    ingestion_vo::{IngestionVO, IngestionVOImpl},
     objects::session::{Session, SessionImpl},
     objects::sub_agent::{SubAgent, SubAgentImpl},
     objects::workspace::{Workspace, WorkspaceImpl},
@@ -55,6 +56,7 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Health",
     "IntentManager",
     "IntentDiscovery",
+    "IngestionVO",
     "LLMGateway",
     "MemoryStore",
     "Session",
@@ -137,6 +139,7 @@ async fn main() -> anyhow::Result<()> {
             .serve(),
         )
         .bind(LLMGatewayImpl::new(providers).serve())
+        .bind(IngestionVOImpl.serve())
         .bind(MemoryStoreImpl::new(file_memory_store).serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
         .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
