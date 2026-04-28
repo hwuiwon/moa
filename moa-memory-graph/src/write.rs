@@ -18,27 +18,37 @@ use crate::{
 
 /// Creates a graph node, sidecar row, optional vector, and changelog row atomically.
 pub async fn create_node(store: &AgeGraphStore, intent: NodeWriteIntent) -> Result<Uuid> {
+    let mut conn = store.begin_required().await?;
+    let uid = create_node_in_conn(store, conn.as_mut(), intent).await?;
+    conn.commit().await?;
+    Ok(uid)
+}
+
+/// Creates a graph node, sidecar row, optional vector, and changelog row in a caller-owned tx.
+pub async fn create_node_in_conn(
+    store: &AgeGraphStore,
+    conn: &mut PgConnection,
+    intent: NodeWriteIntent,
+) -> Result<Uuid> {
     validate_node_scope(&intent)?;
     let vector_item = vector_item_from_intent(&intent)?;
-    let mut conn = store.begin_required().await?;
     let created_at = Utc::now();
     let params = node_params(&intent, created_at);
 
     node_create_template(intent.label)
         .execute(&params)
-        .execute(conn.as_mut())
+        .execute(&mut *conn)
         .await
         .map_err(|error| GraphError::Cypher(error.to_string()))?;
-    insert_node_index(conn.as_mut(), &intent).await?;
+    insert_node_index(&mut *conn, &intent).await?;
     if let Some(item) = vector_item.as_ref() {
         let vector = require_vector_store(store)?;
         vector
-            .upsert_in_tx(conn.as_mut(), std::slice::from_ref(item))
+            .upsert_in_tx(&mut *conn, std::slice::from_ref(item))
             .await?;
     }
-    write_and_bump(conn.as_mut(), create_changelog(&intent, None)).await?;
+    write_and_bump(&mut *conn, create_changelog(&intent, None)).await?;
 
-    conn.commit().await?;
     Ok(intent.uid)
 }
 

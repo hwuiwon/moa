@@ -31,6 +31,20 @@ pub trait GraphStore: Send + Sync {
     /// Creates a new node, sidecar projection, and changelog row in one transaction.
     async fn create_node(&self, intent: NodeWriteIntent) -> Result<Uuid>;
 
+    /// Creates a new node using a caller-owned scoped Postgres connection.
+    ///
+    /// Callers use this when the graph write must be composed with adjacent SQL writes in one
+    /// outer transaction.
+    async fn create_node_in_conn(
+        &self,
+        _conn: &mut sqlx::PgConnection,
+        _intent: NodeWriteIntent,
+    ) -> Result<Uuid> {
+        Err(GraphError::Conflict(
+            "caller-owned graph writes are not supported by this store".to_string(),
+        ))
+    }
+
     /// Updates properties on an existing node by superseding it with a new node.
     async fn supersede_node(&self, old_uid: Uuid, intent: NodeWriteIntent) -> Result<Uuid>;
 

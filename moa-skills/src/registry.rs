@@ -152,7 +152,12 @@ impl SkillRegistry {
             .load_by_name(&scope, skill_name)
             .await?
             .ok_or_else(|| MoaError::StorageError(format!("skill not found: {skill_name}")))?;
-        Ok(skill.body)
+        crate::render::render(
+            &skill,
+            &scope,
+            &crate::render::SkillRenderContext::new(self.pool.clone()),
+        )
+        .await
     }
 
     /// Loads the most specific active skill matching the provided name.

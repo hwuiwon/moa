@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use moa_core::{ScopeContext, ScopedConn};
 use moa_memory_vector::VectorStore;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
-use crate::GraphError;
+use crate::{GraphError, NodeWriteIntent};
 
 /// Graph store backed by Apache AGE plus SQL sidecar tables.
 #[derive(Clone)]
@@ -73,6 +73,18 @@ impl AgeGraphStore {
     /// Returns the vector backend used by graph writes, when configured.
     pub fn vector(&self) -> Option<&dyn VectorStore> {
         self.vector.as_deref()
+    }
+
+    /// Creates a node using a caller-owned scoped Postgres connection.
+    ///
+    /// This is used by adjacent domain crates that need to compose a graph write with their own
+    /// table updates in one transaction.
+    pub async fn create_node_in_conn(
+        &self,
+        conn: &mut PgConnection,
+        intent: NodeWriteIntent,
+    ) -> Result<uuid::Uuid, GraphError> {
+        crate::write::create_node_in_conn(self, conn, intent).await
     }
 
     pub(crate) async fn begin(&self) -> Result<Option<ScopedConn<'_>>, GraphError> {

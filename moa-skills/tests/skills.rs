@@ -6,24 +6,45 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use moa_core::{
     CompletionRequest, CompletionResponse, CompletionStream, Event, EventRecord, LLMProvider,
-    MemoryStore, MoaConfig, Platform, Result, SessionId, SessionMeta, StopReason, TokenPricing,
-    TokenUsage, ToolCallFormat, UserId, WorkspaceId,
+    MemoryStore, MoaConfig, MoaError, Platform, Result, ScopeContext, ScopedConn, SessionId,
+    SessionMeta, StopReason, TokenPricing, TokenUsage, ToolCallFormat, UserId, WorkspaceId,
 };
 use moa_memory::FileMemoryStore;
+use moa_memory_graph::{AgeGraphStore, GraphStore};
 use moa_providers::ModelRouter;
 use moa_skills::{
-    NewSkill, SkillRegistry, build_skill_path, maybe_distill_skill, maybe_improve_skill,
-    parse_skill_markdown, skill_from_wiki_page, wiki_page_from_skill,
+    LessonContext, NewSkill, SkillRegistry, SkillRenderContext, build_skill_path, learn_lesson,
+    maybe_distill_skill, maybe_improve_skill, parse_skill_markdown, render, skill_from_wiki_page,
+    wiki_page_from_skill,
 };
+use sqlx::{PgConnection, Row};
 use tempfile::tempdir;
 use tokio::fs;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+static GRAPH_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
 fn workspace_scope(workspace_id: &str) -> moa_core::MemoryScope {
     moa_core::MemoryScope::Workspace {
         workspace_id: WorkspaceId::new(workspace_id),
     }
+}
+
+fn graph_store(pool: &sqlx::PgPool, scope: &moa_core::MemoryScope) -> AgeGraphStore {
+    AgeGraphStore::scoped_for_app_role(pool.clone(), ScopeContext::from(scope.clone()))
+}
+
+async fn set_app_role(conn: &mut PgConnection) -> Result<()> {
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(conn)
+        .await
+        .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
+fn map_sqlx_error(error: sqlx::Error) -> MoaError {
+    MoaError::StorageError(error.to_string())
 }
 
 const DISTILLED_SKILL: &str = r#"---
@@ -393,6 +414,162 @@ async fn registry_upsert_is_idempotent_and_versions_changed_bodies() -> Result<(
     assert_eq!(skills[0].version, 2);
     assert_eq!(skills[0].previous_skill_uid, Some(first_uid));
 
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+async fn learn_lesson_dual_write() -> Result<()> {
+    let _guard = GRAPH_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let workspace_name = format!("skills-lesson-{}", Uuid::now_v7());
+    let scope = workspace_scope(&workspace_name);
+    let skill_doc = parse_skill_markdown(DISTILLED_SKILL)?;
+    let registry = SkillRegistry::new(store.pool().clone());
+    let skill_uid = registry
+        .upsert_by_name(NewSkill::from_document(
+            scope.clone(),
+            &skill_doc,
+            DISTILLED_SKILL.to_string(),
+        ))
+        .await?;
+    let lesson_ctx = LessonContext::for_app_role(graph_store(store.pool(), &scope));
+
+    let (lesson_uid, addendum_uid) = learn_lesson(
+        skill_uid,
+        "Do not rotate OAuth refresh-token secrets during active deploys.".to_string(),
+        "Avoid refresh-token rotation during active deploys".to_string(),
+        scope.clone(),
+        Uuid::now_v7(),
+        &lesson_ctx,
+    )
+    .await?;
+
+    let mut conn = ScopedConn::begin(store.pool(), &ScopeContext::from(scope.clone())).await?;
+    set_app_role(conn.as_mut()).await?;
+    let row = sqlx::query(
+        r#"
+        SELECT addendum.summary, node.label, node.properties_summary
+        FROM moa.skill_addendum addendum
+        JOIN moa.node_index node
+          ON node.uid = addendum.linked_lesson_uid
+        WHERE addendum.addendum_uid = $1
+          AND addendum.skill_uid = $2
+          AND addendum.linked_lesson_uid = $3
+        "#,
+    )
+    .bind(addendum_uid)
+    .bind(skill_uid)
+    .bind(lesson_uid)
+    .fetch_one(conn.as_mut())
+    .await
+    .map_err(map_sqlx_error)?;
+    assert_eq!(
+        row.try_get::<String, _>("summary")
+            .map_err(map_sqlx_error)?,
+        "Avoid refresh-token rotation during active deploys"
+    );
+    assert_eq!(
+        row.try_get::<String, _>("label").map_err(map_sqlx_error)?,
+        "Lesson"
+    );
+    let properties = row
+        .try_get::<serde_json::Value, _>("properties_summary")
+        .map_err(map_sqlx_error)?;
+    let skill_uid_text = skill_uid.to_string();
+    assert_eq!(
+        properties
+            .get("skill_uid")
+            .and_then(serde_json::Value::as_str),
+        Some(skill_uid_text.as_str())
+    );
+    conn.commit().await?;
+
+    lesson_ctx
+        .graph()
+        .hard_purge(lesson_uid, "redacted:skill-lesson-test")
+        .await
+        .map_err(|error| MoaError::StorageError(error.to_string()))?;
+    let remaining_addenda = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.skill_addendum WHERE addendum_uid = $1",
+    )
+    .bind(addendum_uid)
+    .fetch_one(store.pool())
+    .await
+    .map_err(map_sqlx_error)?;
+    assert_eq!(remaining_addenda, 0);
+
+    sqlx::query("DELETE FROM moa.skill WHERE skill_uid = $1")
+        .bind(skill_uid)
+        .execute(store.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+    drop(store);
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+async fn render_with_addenda() -> Result<()> {
+    let _guard = GRAPH_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let workspace_name = format!("skills-render-{}", Uuid::now_v7());
+    let scope = workspace_scope(&workspace_name);
+    let skill_doc = parse_skill_markdown(DISTILLED_SKILL)?;
+    let registry = SkillRegistry::new(store.pool().clone());
+    let skill_uid = registry
+        .upsert_by_name(NewSkill::from_document(
+            scope.clone(),
+            &skill_doc,
+            DISTILLED_SKILL.to_string(),
+        ))
+        .await?;
+    let lesson_ctx = LessonContext::for_app_role(graph_store(store.pool(), &scope));
+
+    let (lesson_uid, _addendum_uid) = learn_lesson(
+        skill_uid,
+        "When OAuth refresh-token tests fail, inspect deployment-time secret rotation first."
+            .to_string(),
+        "Check secret rotation before debugging OAuth code".to_string(),
+        scope.clone(),
+        Uuid::now_v7(),
+        &lesson_ctx,
+    )
+    .await?;
+    let skill = registry
+        .load_by_name(&scope, "debug-oauth-refresh")
+        .await?
+        .ok_or_else(|| MoaError::StorageError("skill should exist".to_string()))?;
+    let rendered = render(
+        &skill,
+        &scope,
+        &SkillRenderContext::for_app_role(store.pool().clone()),
+    )
+    .await?;
+
+    assert!(rendered.starts_with("<!-- learned lessons -->"));
+    assert!(rendered.contains("Check secret rotation before debugging OAuth code"));
+    assert!(rendered.contains("# Debug OAuth refresh"));
+
+    let loaded = registry
+        .load_full(
+            &WorkspaceId::new(workspace_name.clone()),
+            "debug-oauth-refresh",
+        )
+        .await?;
+    assert!(loaded.contains("Check secret rotation before debugging OAuth code"));
+
+    lesson_ctx
+        .graph()
+        .hard_purge(lesson_uid, "redacted:skill-render-test")
+        .await
+        .map_err(|error| MoaError::StorageError(error.to_string()))?;
+    sqlx::query("DELETE FROM moa.skill WHERE skill_uid = $1")
+        .bind(skill_uid)
+        .execute(store.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+    drop(store);
     moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
 }
 
