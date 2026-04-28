@@ -206,7 +206,7 @@ enum MemoryCommand {
     Ingest(IngestArgs),
     /// Rebuilds the derived Postgres memory index from markdown files on disk.
     RebuildIndex(RebuildIndexArgs),
-    /// Re-enqueues scoped wiki pages for semantic embedding backfill.
+    /// Reports that legacy wiki embedding backfill is disabled.
     RebuildEmbeddings(RebuildEmbeddingsArgs),
 }
 
@@ -1286,34 +1286,8 @@ async fn memory_index_status(config: &MoaConfig) -> String {
 }
 
 async fn memory_embedding_status(config: &MoaConfig) -> String {
-    match load_memory_store(config).await {
-        Ok(store) => match store.embedding_status().await {
-            Ok(status) => {
-                let configured_model = status
-                    .configured_model
-                    .unwrap_or_else(|| "disabled".to_string());
-                let mut parts = vec![
-                    format!("model={configured_model}"),
-                    format!("missing={}", status.missing_embeddings),
-                    format!("queue_depth={}", status.queue_depth),
-                ];
-
-                if status.mismatched_model_pages > 0 {
-                    parts.push(format!(
-                        "model_mismatch={} (run `moa memory rebuild-embeddings`)",
-                        status.mismatched_model_pages
-                    ));
-                }
-                if status.stored_models.len() > 1 {
-                    parts.push(format!("stored_models={}", status.stored_models.join(",")));
-                }
-
-                format!("healthy ({})", parts.join("; "))
-            }
-            Err(error) => format!("unhealthy ({error})"),
-        },
-        Err(error) => format!("unhealthy ({error})"),
-    }
+    let _ = config;
+    "healthy (legacy wiki embeddings disabled; use graph memory vectors)".to_string()
 }
 
 async fn memory_rebuild_index_report(
@@ -1362,43 +1336,8 @@ async fn memory_rebuild_embeddings_report(
     workspace: Option<&str>,
     rebuild_user: bool,
 ) -> Result<String> {
-    if rebuild_all && (workspace.is_some() || rebuild_user) {
-        bail!("--all cannot be combined with --workspace or --user");
-    }
-    if rebuild_user && workspace.is_some() {
-        bail!("--user cannot be combined with --workspace");
-    }
-
-    let store = load_memory_store(config).await?;
-    let scopes = if rebuild_all {
-        discover_memory_scopes(&store).await?
-    } else if rebuild_user {
-        vec![MemoryScope::User {
-            workspace_id: workspace
-                .map(resolve_workspace_arg)
-                .unwrap_or_else(current_workspace_id),
-            user_id: current_user_id(),
-        }]
-    } else {
-        vec![MemoryScope::Workspace {
-            workspace_id: workspace
-                .map(resolve_workspace_arg)
-                .unwrap_or_else(current_workspace_id),
-        }]
-    };
-
-    let mut output = String::new();
-    let mut total = 0_u64;
-    for scope in scopes {
-        let queued = store.enqueue_scope_embeddings(&scope).await?;
-        total += queued;
-        output.push_str(&format!("queued {} pages in {:?}\n", queued, scope));
-    }
-    output.push_str(&format!(
-        "enqueued {} pages for re-embedding; the background worker will process the queue while MOA is running\n",
-        total
-    ));
-    Ok(output)
+    let _ = (config, rebuild_all, workspace, rebuild_user);
+    Ok("legacy wiki embeddings are disabled; graph memory vectors are maintained by moa-memory-vector\n".to_string())
 }
 
 async fn discover_memory_scopes(store: &FileMemoryStore) -> Result<Vec<MemoryScope>> {

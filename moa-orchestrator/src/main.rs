@@ -486,6 +486,9 @@ mod tests {
         let deployments = vec![deployment_with_services(&[
             "Consolidate",
             "Health",
+            "IntentManager",
+            "IntentDiscovery",
+            "IngestionVO",
             "LLMGateway",
             "MemoryStore",
             "Session",

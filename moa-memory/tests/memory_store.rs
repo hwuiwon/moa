@@ -2,13 +2,9 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-use moa_core::{
-    ConfidenceLevel, MemoryScope, MemorySearchMode, MemoryStore, PageType, Result, WikiPage,
-};
+use moa_core::{ConfidenceLevel, MemoryScope, MemoryStore, PageType, Result, WikiPage};
 use moa_memory::FileMemoryStore;
-use moa_providers::{EmbeddingProvider, MockEmbedding};
 use moa_session::{PostgresSessionStore, testing};
 use tempfile::{TempDir, tempdir};
 
@@ -61,27 +57,6 @@ impl SearchHarness {
         })
     }
 
-    async fn new_with_semantic() -> Result<Self> {
-        let dir = tempdir()?;
-        let (session_store, database_url, schema_name) =
-            testing::create_isolated_test_store().await?;
-        let store = FileMemoryStore::new_with_pool_and_schema_and_embedder(
-            dir.path(),
-            Arc::new(session_store.pool().clone()),
-            Some(&schema_name),
-            Arc::new(MockEmbedding::new(1_536)),
-        )
-        .await?;
-
-        Ok(Self {
-            _dir: dir,
-            store,
-            session_store,
-            database_url,
-            schema_name,
-        })
-    }
-
     async fn cleanup(self) -> Result<()> {
         let Self {
             _dir,
@@ -94,14 +69,6 @@ impl SearchHarness {
         drop(session_store);
         testing::cleanup_test_schema(&database_url, &schema_name).await
     }
-}
-
-fn qualified(schema_name: &str, table_name: &str) -> String {
-    format!("\"{}\".\"{}\"", schema_name, table_name)
-}
-
-fn workspace_scope_key(workspace_id: &str) -> String {
-    format!("workspace:{workspace_id}")
 }
 
 fn workspace_scope(workspace_id: &str) -> MemoryScope {
@@ -117,24 +84,16 @@ fn user_scope(workspace_id: &str, user_id: &str) -> MemoryScope {
     }
 }
 
-#[derive(Clone, Default)]
-struct FailingEmbedding;
+fn qualified(schema_name: &str, table_name: &str) -> String {
+    format!(
+        "{}.{}",
+        quote_identifier(schema_name),
+        quote_identifier(table_name)
+    )
+}
 
-#[async_trait]
-impl EmbeddingProvider for FailingEmbedding {
-    fn model_id(&self) -> &str {
-        "failing-mock"
-    }
-
-    fn dimensions(&self) -> usize {
-        1_536
-    }
-
-    async fn embed(&self, _inputs: &[String]) -> Result<Vec<Vec<f32>>> {
-        Err(moa_core::MoaError::ProviderError(
-            "simulated embedding failure".to_string(),
-        ))
-    }
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 #[tokio::test]
@@ -249,11 +208,12 @@ async fn rebuild_search_index_from_files_restores_results() -> Result<()> {
 
     sqlx::query(&format!(
         "INSERT INTO {} \
-         (scope, path, title, page_type, confidence, created, updated, last_referenced, reference_count, tags, content) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+         (workspace_id, user_id, path, title, page_type, confidence, created, updated, last_referenced, reference_count, tags, content) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         qualified(&harness.schema_name, "wiki_pages")
     ))
-    .bind(workspace_scope_key("ws1"))
+    .bind("ws1")
+    .bind(Option::<&str>::None)
     .bind("topics/stale.md")
     .bind("Stale")
     .bind("topic")
@@ -387,113 +347,6 @@ async fn recent_pages_outrank_equally_relevant_old_pages() -> Result<()> {
     assert_eq!(results[0].path.as_str(), "topics/recent.md");
 
     harness.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn hybrid_search_finds_semantic_matches_after_queue_drain() -> Result<()> {
-    let harness = SearchHarness::new_with_semantic().await?;
-    let store = &harness.store;
-    let scope = workspace_scope("ws1");
-
-    store
-        .write_page(
-            &scope,
-            &"topics/oauth.md".into(),
-            sample_page(
-                "OAuth Refresh",
-                PageType::Topic,
-                "# OAuth Refresh\n\nAuthentication tokens rotate during the refresh flow.\n",
-            ),
-        )
-        .await?;
-    store
-        .write_page(
-            &scope,
-            &"topics/cache.md".into(),
-            sample_page(
-                "Cache Reuse",
-                PageType::Topic,
-                "# Cache Reuse\n\nCache entries are compacted after replay.\n",
-            ),
-        )
-        .await?;
-
-    assert_eq!(store.run_embedding_queue_once().await?, 2);
-
-    let keyword = store
-        .search_with_mode("identity rotation", &scope, 5, MemorySearchMode::Keyword)
-        .await?;
-    let semantic = store
-        .search_with_mode("identity rotation", &scope, 5, MemorySearchMode::Semantic)
-        .await?;
-    let hybrid = store.search("identity rotation", &scope, 5).await?;
-
-    assert!(keyword.is_empty());
-    assert_eq!(semantic[0].path.as_str(), "topics/oauth.md");
-    assert_eq!(hybrid[0].path.as_str(), "topics/oauth.md");
-
-    harness.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn embedding_failures_keep_keyword_search_and_stop_after_five_attempts() -> Result<()> {
-    let dir = tempdir()?;
-    let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;
-    let store = FileMemoryStore::new_with_pool_and_schema_and_embedder(
-        dir.path(),
-        Arc::new(session_store.pool().clone()),
-        Some(&schema_name),
-        Arc::new(FailingEmbedding),
-    )
-    .await?;
-    let scope = workspace_scope("ws1");
-    let path = "topics/oauth.md".into();
-
-    store
-        .write_page(
-            &scope,
-            &path,
-            sample_page(
-                "OAuth Refresh",
-                PageType::Topic,
-                "# OAuth Refresh\n\nRefresh tokens rotate every 24 hours.\n",
-            ),
-        )
-        .await?;
-
-    let keyword_results = store.search("OAuth refresh", &scope, 5).await?;
-    assert_eq!(keyword_results[0].path.as_str(), "topics/oauth.md");
-
-    for attempt in 1..=5_i32 {
-        let error = store
-            .run_embedding_queue_once()
-            .await
-            .expect_err("embedding batch should fail");
-        assert!(error.to_string().contains("simulated embedding failure"));
-
-        let recorded_attempt = sqlx::query_scalar::<_, i32>(&format!(
-            "SELECT attempt_count FROM {} WHERE scope = $1 AND path = $2",
-            qualified(&schema_name, "wiki_embedding_queue")
-        ))
-        .bind(workspace_scope_key("ws1"))
-        .bind(path.as_str())
-        .fetch_one(session_store.pool())
-        .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
-        assert_eq!(recorded_attempt, attempt);
-    }
-
-    assert_eq!(store.run_embedding_queue_once().await?, 0);
-    assert_eq!(
-        store.search("OAuth refresh", &scope, 5).await?[0].path,
-        path
-    );
-
-    drop(store);
-    drop(session_store);
-    testing::cleanup_test_schema(&database_url, &schema_name).await?;
     Ok(())
 }
 

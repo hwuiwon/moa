@@ -1,4 +1,4 @@
-//! File-backed wiki memory store with an optional Postgres-backed search index.
+//! Deprecated file-backed wiki memory store and Postgres-backed keyword search.
 
 use std::env;
 use std::path::{Component, Path, PathBuf};
@@ -11,7 +11,6 @@ use moa_core::{
     MemoryStore as CoreMemoryStore, MoaConfig, MoaError, PageSummary, PageType, Result,
     SessionStore, WikiPage,
 };
-use moa_providers::{EmbeddingProvider, build_embedding_provider_from_config};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::fs;
 use tracing::warn;
@@ -33,6 +32,18 @@ use index::{
 pub use moa_core::IngestReport;
 #[deprecated(note = "use moa-memory-graph::GraphStore + moa-memory-vector::VectorStore")]
 pub use moa_core::MemoryStore;
+#[cfg(feature = "legacy-vector-shim")]
+#[deprecated(note = "use moa_memory_vector::CohereV4Embedder")]
+pub use moa_memory_vector::CohereV4Embedder;
+#[cfg(feature = "legacy-vector-shim")]
+#[deprecated(note = "use moa_memory_vector::Embedder")]
+pub use moa_memory_vector::Embedder;
+#[cfg(feature = "legacy-vector-shim")]
+#[deprecated(note = "use moa_memory_vector::PgvectorStore")]
+pub use moa_memory_vector::PgvectorStore;
+#[cfg(feature = "legacy-vector-shim")]
+#[deprecated(note = "use moa_memory_vector::VectorStore")]
+pub use moa_memory_vector::VectorStore;
 pub use search::EmbeddingIndexStatus;
 use search::WikiSearchIndex;
 use wiki::{parse_markdown, render_markdown};
@@ -79,21 +90,15 @@ impl FileMemoryStore {
         })
     }
 
-    /// Creates a file-backed memory store backed by a shared Postgres pool and embedder.
-    pub async fn new_with_pool_and_schema_and_embedder(
+    /// Creates a file-backed memory store and ignores the deprecated legacy embedder.
+    #[deprecated(note = "wiki embeddings moved out of moa-memory; use moa-memory-vector")]
+    pub async fn new_with_pool_and_schema_and_embedder<T: Send + Sync + ?Sized + 'static>(
         base_dir: impl AsRef<Path>,
         pool: Arc<PgPool>,
         schema_name: Option<&str>,
-        embedder: Arc<dyn EmbeddingProvider>,
+        _embedder: Arc<T>,
     ) -> Result<Self> {
-        let base_dir = base_dir.as_ref().to_path_buf();
-        fs::create_dir_all(base_dir.join("workspaces")).await?;
-
-        Ok(Self {
-            base_dir: Arc::new(base_dir),
-            search_index: WikiSearchIndex::new_with_pool_and_embedder(pool, schema_name, embedder)
-                .await?,
-        })
+        Self::new_with_pool_and_schema(base_dir, pool, schema_name).await
     }
 
     /// Creates a Postgres-backed memory store from the local memory config.
@@ -109,20 +114,7 @@ impl FileMemoryStore {
         schema_name: Option<&str>,
     ) -> Result<Self> {
         let base_dir = configured_base_dir(config)?;
-        match build_embedding_provider_from_config(config)? {
-            Some(embedder) => {
-                let store = Self::new_with_pool_and_schema_and_embedder(
-                    base_dir,
-                    pool,
-                    schema_name,
-                    embedder,
-                )
-                .await?;
-                store.search_index.start_embedding_worker();
-                Ok(store)
-            }
-            None => Self::new_with_pool_and_schema(base_dir, pool, schema_name).await,
-        }
+        Self::new_with_pool_and_schema(base_dir, pool, schema_name).await
     }
 
     /// Returns the local filesystem root backing the memory store.
@@ -193,17 +185,23 @@ impl FileMemoryStore {
         consolidation::run_consolidation(self, scope).await
     }
 
-    /// Runs one embedding-worker batch immediately.
+    /// No-op legacy embedding-worker drain retained until `moa-memory` is deleted.
+    #[deprecated(note = "wiki embeddings moved out of moa-memory; use moa-memory-vector")]
+    #[allow(deprecated)]
     pub async fn run_embedding_queue_once(&self) -> Result<usize> {
         self.search_index.run_embedding_queue_once().await
     }
 
-    /// Enqueues every page in one scope for embedding or re-embedding.
+    /// No-op legacy embedding enqueue retained until `moa-memory` is deleted.
+    #[deprecated(note = "wiki embeddings moved out of moa-memory; use moa-memory-vector")]
+    #[allow(deprecated)]
     pub async fn enqueue_scope_embeddings(&self, scope: &MemoryScope) -> Result<u64> {
         self.search_index.enqueue_scope_embeddings(scope).await
     }
 
-    /// Returns embedding-queue and model diagnostics for doctor output.
+    /// Returns disabled legacy embedding diagnostics.
+    #[deprecated(note = "wiki embeddings moved out of moa-memory; use moa-memory-vector")]
+    #[allow(deprecated)]
     pub async fn embedding_status(&self) -> Result<EmbeddingIndexStatus> {
         self.search_index.embedding_status().await
     }
