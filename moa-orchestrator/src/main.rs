@@ -19,10 +19,10 @@ use moa_memory::FileMemoryStore;
 use moa_orchestrator::{
     OrchestratorCtx,
     config::OrchestratorConfig,
-    ingestion_vo::{IngestionVO, IngestionVOImpl},
     objects::session::{Session, SessionImpl},
     objects::sub_agent::{SubAgent, SubAgentImpl},
     objects::workspace::{Workspace, WorkspaceImpl},
+    restate_register::{IngestionVO, IngestionVOImpl},
     services::{
         health::{Health, HealthImpl},
         intent_manager::{IntentManager, IntentManagerImpl},
@@ -126,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
         tool_schemas: Arc::new(tool_router.tool_schemas()),
     });
     OrchestratorCtx::install(ctx).expect("install orchestrator ctx");
+    let _ = moa_memory_ingest::install_runtime_with_pool(pool.clone());
 
     let endpoint = Endpoint::builder()
         .bind(HealthImpl.serve())

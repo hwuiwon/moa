@@ -12,9 +12,6 @@ use moa_core::{
 use moa_memory_graph::{
     AgeGraphStore, GraphError, GraphStore, NodeLabel, NodeWriteIntent, PiiClass as GraphPiiClass,
 };
-use moa_memory_ingest::{
-    Conflict, ContradictionContext, ContradictionDetector, RrfPlusJudgeDetector,
-};
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiClass as ClassifierPiiClass, PiiClassifier, PiiError,
     PiiResult,
@@ -30,7 +27,10 @@ use tokio::time::timeout;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
+use crate::{
+    Conflict, ContradictionContext, ContradictionDetector, IngestError, RrfPlusJudgeDetector,
+    current_runtime,
+};
 
 const JUDGE_TIMEOUT: Duration = Duration::from_millis(250);
 const SUPERSEDE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -159,7 +159,7 @@ pub enum FastError {
     Json(#[from] serde_json::Error),
     /// Slow/fast ingestion helper failed.
     #[error("ingest: {0}")]
-    Ingest(#[from] moa_memory_ingest::IngestError),
+    Ingest(#[from] IngestError),
 }
 
 /// Returns whether a tool name is handled by the graph-backed fast memory path.
@@ -615,8 +615,8 @@ fn workspace_uuid(session: &SessionMeta) -> Result<Uuid, FastError> {
 }
 
 fn runtime_fast_ctx(scope: ScopeContext) -> Result<FastPathCtx, FastError> {
-    let runtime = OrchestratorCtx::current();
-    let pool = runtime.session_store.pool().clone();
+    let runtime = current_runtime()?;
+    let pool = runtime.pool().clone();
     let vector: Arc<dyn VectorStore> = Arc::new(PgvectorStore::new(pool.clone(), scope.clone()));
     let graph = Arc::new(
         AgeGraphStore::scoped(pool.clone(), scope.clone()).with_vector_store(vector.clone()),
