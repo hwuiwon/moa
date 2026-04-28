@@ -175,6 +175,7 @@ async fn hybrid_retrieval_e2e_returns_fused_annotated_results() {
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
             use_reranker: false,
+            strategy: None,
         })
         .await
         .expect("retrieve hybrid hits");

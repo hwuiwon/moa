@@ -10,6 +10,7 @@ use secrecy::SecretString;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::planning::Strategy;
 use crate::retrieval::legs::{
     GRAPH_BUDGET, GRAPH_WEIGHT, LEXICAL_BUDGET, LEXICAL_WEIGHT, VECTOR_BUDGET, VECTOR_WEIGHT,
     bump_last_accessed, graph_leg, hydrate_nodes, lexical_leg, rrf_fuse, timed_leg, vector_leg,
@@ -61,6 +62,8 @@ pub struct RetrievalRequest {
     pub k_final: usize,
     /// Whether to apply Cohere-compatible reranking after RRF.
     pub use_reranker: bool,
+    /// Optional planner-selected strategy for leg weighting.
+    pub strategy: Option<Strategy>,
 }
 
 /// Retrieval legs that contributed to one fused candidate.
@@ -148,6 +151,7 @@ impl HybridRetriever {
             return Ok(Vec::new());
         }
 
+        let strategy = req.strategy.unwrap_or(Strategy::Both);
         let graph = self.graph.as_ref();
         let vector = self.vector.as_ref();
         let graph_future = timed_leg("graph", GRAPH_BUDGET, graph_leg(graph, &req));
@@ -167,7 +171,7 @@ impl HybridRetriever {
             &graph_hits,
             &vector_hits,
             &lexical_hits,
-            (GRAPH_WEIGHT, VECTOR_WEIGHT, LEXICAL_WEIGHT),
+            weights_for(strategy),
         );
         fused.truncate(FUSED_CANDIDATE_LIMIT);
         if fused.is_empty() {
@@ -223,6 +227,13 @@ impl HybridRetriever {
         } else {
             Ok(out)
         }
+    }
+}
+
+fn weights_for(strategy: Strategy) -> (f64, f64, f64) {
+    match strategy {
+        Strategy::GraphFirst => (GRAPH_WEIGHT, VECTOR_WEIGHT, LEXICAL_WEIGHT * 0.5),
+        Strategy::VectorFirst | Strategy::Both => (GRAPH_WEIGHT, VECTOR_WEIGHT, LEXICAL_WEIGHT),
     }
 }
 
@@ -322,6 +333,7 @@ mod tests {
             max_pii_class: PiiClass::Restricted,
             k_final: 1,
             use_reranker: true,
+            strategy: None,
         };
         let first = hit(Uuid::now_v7(), "workspace", 2.0);
         let second = hit(Uuid::now_v7(), "workspace", 1.0);
