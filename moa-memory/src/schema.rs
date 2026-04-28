@@ -6,7 +6,6 @@ use sqlx::{PgPool, raw_sql};
 const WIKI_MIGRATIONS: &[&str] = &[
     include_str!("../../moa-session/migrations/postgres/000_scope_helpers.sql"),
     include_str!("../migrations/001_wiki_pages.sql"),
-    include_str!("../migrations/002_wiki_embeddings.sql"),
 ];
 
 /// Runs the wiki search index migrations on the provided pool.
@@ -31,7 +30,7 @@ async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
     .await
     .map_err(memory_error)?;
 
-    raw_sql("CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE EXTENSION IF NOT EXISTS vector;")
+    raw_sql("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
         .execute(pool)
         .await
         .map_err(memory_error)?;

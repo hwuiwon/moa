@@ -5348,7 +5348,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "moa-core",
- "moa-providers",
+ "moa-memory-vector",
  "moa-session",
  "opentelemetry",
  "regex",

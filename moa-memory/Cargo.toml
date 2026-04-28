@@ -8,7 +8,6 @@ license.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 moa-core = { path = "../moa-core" }
-moa-providers = { path = "../moa-providers" }
 opentelemetry.workspace = true
 regex = "1"
 serde.workspace = true
@@ -21,3 +20,10 @@ tracing.workspace = true
 [dev-dependencies]
 moa-session = { path = "../moa-session" }
 tempfile = "3"
+
+[features]
+legacy-vector-shim = ["dep:moa-memory-vector"]
+
+[dependencies.moa-memory-vector]
+path = "../moa-memory-vector"
+optional = true
