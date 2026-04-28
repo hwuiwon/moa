@@ -299,9 +299,9 @@ async fn detect_contradictions(
     let runtime = current_runtime().map_err(HandlerError::from)?;
     let pool = runtime.pool().clone();
     let scope = ScopeContext::workspace(turn.workspace_id.clone());
-    let vector = Arc::new(PgvectorStore::new(pool.clone(), scope.clone()));
+    let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let detector = RrfPlusJudgeDetector::from_env_or_heuristic();
-    let ctx = ContradictionContext::new(pool, scope, vector);
+    let ctx = ContradictionContext::for_app_role(pool, scope, vector);
     let mut decisions = Vec::with_capacity(embedded.len());
 
     for fact in embedded {
@@ -392,9 +392,9 @@ async fn apply_one_decision(
 }
 
 fn graph_store(pool: PgPool, scope: ScopeContext, fact: &EmbeddedFact) -> AgeGraphStore {
-    let store = AgeGraphStore::scoped(pool.clone(), scope.clone());
+    let store = AgeGraphStore::scoped_for_app_role(pool.clone(), scope.clone());
     if fact.embedding.is_some() {
-        store.with_vector_store(Arc::new(PgvectorStore::new(pool, scope)))
+        store.with_vector_store(Arc::new(PgvectorStore::new_for_app_role(pool, scope)))
     } else {
         store
     }

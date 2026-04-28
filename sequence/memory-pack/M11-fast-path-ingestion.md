@@ -141,9 +141,9 @@ Already covered by `GraphStore::supersede_node`. Wrapper just enforces the laten
 
 In `moa-brain` tool registry, register three new tools:
 
-- `memory.remember(text, label="Fact")` → `fast_remember`
-- `memory.forget(pattern)` → `fast_forget`
-- `memory.supersede(old_uid, new_text)` → `fast_supersede`
+- `memory_remember(text, label="Fact")` → `fast_remember`
+- `memory_forget(pattern)` → `fast_forget`
+- `memory_supersede(old_uid, new_text)` → `fast_supersede`
 
 Tool definitions go through the tool registry; agent invokes them like any other tool call.
 
