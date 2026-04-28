@@ -1,9 +1,13 @@
 //! Graph-memory retrieval for context assembly and planning.
 
+pub mod cache;
 pub mod hybrid;
 pub mod legs;
 pub mod reranker;
 
+pub use cache::{
+    CacheKey, CachedEntry, CachedHybridRetriever, CachedHybridRetrieverConfig, RetrievalBackend,
+};
 pub use hybrid::{
     HybridRetriever, LegSources, Result, RetrievalError, RetrievalHit, RetrievalRequest,
 };

@@ -9,7 +9,7 @@ use moa_memory_vector::{Embedder, Error as VectorError};
 use uuid::Uuid;
 
 use crate::planning::ner::{NerExtractor, NerSpan};
-use crate::retrieval::{HybridRetriever, RetrievalError, RetrievalHit, RetrievalRequest};
+use crate::retrieval::{CachedHybridRetriever, RetrievalError, RetrievalHit, RetrievalRequest};
 
 const DEFAULT_SEED_LIMIT_PER_SPAN: i64 = 5;
 
@@ -168,8 +168,8 @@ pub struct QueryRetrievalCtx<'a> {
     pub planning: &'a PlanningCtx,
     /// Embedder used to produce the query vector.
     pub embedder: &'a dyn Embedder,
-    /// Hybrid retriever used after planning.
-    pub hybrid: &'a HybridRetriever,
+    /// Cached hybrid retriever used after planning.
+    pub hybrid: &'a CachedHybridRetriever,
     /// Maximum PII class visible to the caller.
     pub max_pii_class: PiiClass,
     /// Number of final hits requested.
@@ -185,7 +185,7 @@ impl<'a> QueryRetrievalCtx<'a> {
         planner: &'a QueryPlanner,
         planning: &'a PlanningCtx,
         embedder: &'a dyn Embedder,
-        hybrid: &'a HybridRetriever,
+        hybrid: &'a CachedHybridRetriever,
         max_pii_class: PiiClass,
     ) -> Self {
         Self {
@@ -226,14 +226,17 @@ pub async fn retrieve_for_query(
     let query_input = vec![query_text.to_string()];
     let mut embeddings = ctx.embedder.embed(&query_input).await?;
     let embedding = embeddings.pop().ok_or(PlanError::EmptyQueryEmbedding)?;
-    let request = planned.into_retrieval_request(
+    let request = planned.clone().into_retrieval_request(
         query_text,
         embedding,
         ctx.max_pii_class,
         ctx.k_final,
         ctx.use_reranker,
     );
-    ctx.hybrid.retrieve(request).await.map_err(PlanError::from)
+    ctx.hybrid
+        .retrieve(&planned, request)
+        .await
+        .map_err(PlanError::from)
 }
 
 /// Classifies the retrieval strategy using explicit v1 heuristics.

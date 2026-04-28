@@ -40,6 +40,10 @@ Use this skill when a change touches any of the following:
 - skills distillation, eval wiring, or skill regression suites
 - anything being prepared for merge or release that needs a regression gate
 
+## Boundary
+
+This skill owns validation strategy and failure localization. It does not own implementation planning for memory-pack sequence steps; use `moa-memory-pack` for those changes, then return here for certification.
+
 ## Modes
 
 - `quick`: changed crate plus nearest deterministic suite
@@ -77,12 +81,33 @@ Then load only the relevant reference file:
    - gaps not covered
    - ship / do-not-ship recommendation
 
+## Live And Billed Test Discipline
+
+Live tests that call paid APIs or external infrastructure must require two gates:
+
+- the Rust test is marked `#[ignore = "..."]`
+- an explicit opt-in env flag is set for that provider or service
+
+Known live opt-in flags:
+
+| Surface | Required opt-in | Credential / prerequisite |
+|---|---|---|
+| Cohere Embed/Rerank | `MOA_RUN_LIVE_COHERE_TESTS=1` | `COHERE_API_KEY` or `MOA_COHERE_API_KEY` |
+| Provider matrix | test-specific ignored run | provider env vars such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or Google credentials |
+| PII sidecar | ignored test run | `docker compose up -d moa-pii-service`, optional `MOA_PII_SERVICE_URL` |
+| Local live provider roundtrip | ignored test run | selected provider credential and model env |
+
+When a user provides a temporary key, do not write it to a file or include it in command text. Prefer a TTY `read -rs` prompt or stdin injection, export it only inside that short-lived shell, and avoid echoing it in output.
+
+Compile ignored live tests without opt-in when changing their code, then run the explicit live path only when the user asks for live validation or the release mode requires it.
+
 ## Rules
 
 - Do not treat Local green as Temporal green.
 - Do not duplicate lifecycle coverage across adapters when the shared contract can express it.
 - Prefer exact test targets over broad ignored-test sweeps.
 - If live provider credentials are available, do not ship provider request-shape changes without at least one live check.
+- Do not run billed live tests merely because `--ignored` was requested; require the matching opt-in flag too.
 - If a new orchestrator is added, make it implement the shared contract harness before writing large adapter-specific e2e tests.
 - On this machine, prefer `PROTOC=/opt/homebrew/bin/protoc` if the default `protoc` is invalid.
 
@@ -95,4 +120,3 @@ Use this structure when reporting results:
 - `Live`: what passed and failed
 - `Fault Domain`: shared lifecycle, adapter, provider, persistence, tooling, or observability
 - `Release Risk`: low, medium, or high with one sentence
-
