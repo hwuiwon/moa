@@ -5600,6 +5600,7 @@ dependencies = [
  "moa-core",
  "moa-eval",
  "moa-memory",
+ "moa-memory-graph",
  "moa-providers",
  "moa-session",
  "moka",

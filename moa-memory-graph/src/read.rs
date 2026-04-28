@@ -19,6 +19,14 @@ impl GraphStore for AgeGraphStore {
         crate::write::create_node(self, intent).await
     }
 
+    async fn create_node_in_conn(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        intent: NodeWriteIntent,
+    ) -> Result<Uuid, GraphError> {
+        crate::write::create_node_in_conn(self, conn, intent).await
+    }
+
     async fn supersede_node(
         &self,
         old_uid: Uuid,
