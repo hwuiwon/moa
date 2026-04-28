@@ -33,6 +33,7 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 9. **No `unwrap()` in library code.** Use `?` or explicit error handling.
 10. **Feature flags** control optional dependencies: `telegram`, `slack`, `discord`, `cloud`.
 11. **If `graphify-out/GRAPH_REPORT.md` exists, consult it before broad repo exploration or raw-file search.**
+12. **MOA crates live at the workspace root.** If a prompt references `crates/<name>/...`, translate it to `<name>/...`.
 
 ## Conventions
 
@@ -53,6 +54,24 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 
 - Rust-only changes:
   - `cargo fmt --all`
+  - run focused crate/test targets for the changed surface
   - `cargo clippy ... -D warnings`
+  - `cargo build --workspace` when public types, shared crates, or workspace wiring changed
+  - `git diff --check`
 - Desktop (GPUI) changes:
   - `cargo build -p moa-desktop`
+
+## Live And Billed Tests
+
+- Live provider tests must never run by default.
+- Live/billed tests require both `#[ignore = "..."]` and an explicit opt-in env flag such as `MOA_RUN_LIVE_COHERE_TESTS=1`.
+- If the opt-in flag is set but the required credential is missing, the test should fail with a clear message.
+- Secrets must not be written to files, git-tracked fixtures, or shell command text. Inject temporary keys via stdin, a local shell prompt, or an existing secret store.
+
+## Memory Pack Migration Rules
+
+- For `sequence/memory-pack` steps, prefer a hard break over compatibility shims unless the prompt explicitly requests backwards compatibility.
+- Remove obsolete paths instead of preserving old behavior behind deprecated aliases.
+- Do not duplicate SQL policy templates or migration boilerplate when a compact helper/template is practical.
+- Tool names use underscores, not dotted names.
+- Keep migration steps focused on the requested sequence step; defer unrelated cleanup to the named later step.

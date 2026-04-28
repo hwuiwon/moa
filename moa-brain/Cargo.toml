@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+blake3 = "1"
 chrono.workspace = true
+metrics.workspace = true
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
 moa-memory-graph = { path = "../moa-memory-graph" }
@@ -13,7 +16,7 @@ moa-memory-vector = { path = "../moa-memory-vector" }
 moa-providers = { path = "../moa-providers" }
 moa-session = { path = "../moa-session" }
 moa-security = { path = "../moa-security" }
-async-trait.workspace = true
+moka = { version = "0.12", features = ["future"] }
 reqwest.workspace = true
 secrecy = "0.10"
 serde.workspace = true

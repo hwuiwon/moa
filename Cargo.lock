@@ -5145,7 +5145,9 @@ name = "moa-brain"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "chrono",
+ "metrics",
  "moa-core",
  "moa-hands",
  "moa-memory",
@@ -5154,6 +5156,7 @@ dependencies = [
  "moa-providers",
  "moa-security",
  "moa-session",
+ "moka",
  "proptest",
  "reqwest 0.13.2",
  "secrecy 0.10.3",
