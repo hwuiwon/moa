@@ -10,11 +10,11 @@ use moa_hands::ToolRegistry;
 use moa_memory_graph::{
     AgeGraphStore, NodeLabel, NodeWriteIntent, PiiClass as GraphPiiClass, cypher,
 };
+use moa_memory_ingest::{Conflict, ContradictionContext, ContradictionDetector, IngestError};
 use moa_memory_pii::{PiiClass as ClassifierPiiClass, PiiClassifier, PiiError, PiiResult, PiiSpan};
 use moa_memory_vector::{Embedder, Error as VectorError, PgvectorStore, VECTOR_DIMENSION};
 use moa_orchestrator::fast_path::{
-    Conflict, FastContradictionChecker, FastError, FastPathCtx, FastRememberRequest, ForgetPattern,
-    fast_forget, fast_remember, fast_supersede,
+    FastPathCtx, FastRememberRequest, ForgetPattern, fast_forget, fast_remember, fast_supersede,
 };
 use moa_session::testing;
 use serde_json::json;
@@ -73,15 +73,25 @@ struct FixedConflictChecker {
 }
 
 #[async_trait]
-impl FastContradictionChecker for FixedConflictChecker {
+impl ContradictionDetector for FixedConflictChecker {
     async fn check_one_fast(
         &self,
-        _request: &FastRememberRequest,
+        _fact_text: &str,
         _embedding: &[f32],
-    ) -> Result<Conflict, FastError> {
+        _label: NodeLabel,
+        _ctx: &ContradictionContext,
+    ) -> Result<Conflict, IngestError> {
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
         }
+        Ok(self.conflict)
+    }
+
+    async fn check_one_slow(
+        &self,
+        _fact: &moa_memory_ingest::EmbeddedFact,
+        _ctx: &ContradictionContext,
+    ) -> Result<Conflict, IngestError> {
         Ok(self.conflict)
     }
 }
@@ -130,12 +140,14 @@ fn test_ctx_for_scope(
 ) -> FastPathCtx {
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let graph = Arc::new(
-        AgeGraphStore::scoped_for_app_role(pool.clone(), scope.clone()).with_vector_store(vector),
+        AgeGraphStore::scoped_for_app_role(pool.clone(), scope.clone())
+            .with_vector_store(vector.clone()),
     );
     FastPathCtx::new(
         pool.clone(),
         scope,
         graph,
+        vector,
         Arc::new(MockEmbedder),
         Arc::new(FixedPiiClassifier { class: pii_class }),
         Arc::new(FixedConflictChecker { conflict, delay }),

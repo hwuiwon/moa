@@ -12,6 +12,9 @@ use moa_core::{
 use moa_memory_graph::{
     AgeGraphStore, GraphError, GraphStore, NodeLabel, NodeWriteIntent, PiiClass as GraphPiiClass,
 };
+use moa_memory_ingest::{
+    Conflict, ContradictionContext, ContradictionDetector, RrfPlusJudgeDetector,
+};
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiClass as ClassifierPiiClass, PiiClassifier, PiiError,
     PiiResult,
@@ -64,56 +67,16 @@ pub enum ForgetPattern {
     SoftAll(Uuid),
 }
 
-/// Outcome from the fast contradiction check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Conflict {
-    /// Insert a new fact.
-    Insert,
-    /// Supersede the specified active fact.
-    Supersede(Uuid),
-    /// Return an existing duplicate without writing.
-    Duplicate(Uuid),
-    /// Judge did not decide before the latency budget; commit as a low-confidence insert.
-    Indeterminate,
-}
-
-/// Bounded contradiction check used by the fast path.
-#[async_trait]
-pub trait FastContradictionChecker: Send + Sync {
-    /// Checks one candidate fact and returns the write decision.
-    async fn check_one_fast(
-        &self,
-        request: &FastRememberRequest,
-        embedding: &[f32],
-    ) -> Result<Conflict, FastError>;
-}
-
-/// Default fast checker used until M12 provides vector plus lexical reranking.
-#[derive(Debug, Clone, Default)]
-pub struct RuleBasedContradictionChecker;
-
-#[async_trait]
-impl FastContradictionChecker for RuleBasedContradictionChecker {
-    async fn check_one_fast(
-        &self,
-        request: &FastRememberRequest,
-        _embedding: &[f32],
-    ) -> Result<Conflict, FastError> {
-        Ok(parse_supersedes_marker(&request.text)
-            .map(Conflict::Supersede)
-            .unwrap_or(Conflict::Insert))
-    }
-}
-
 /// Dependencies needed by fast-path memory commands.
 #[derive(Clone)]
 pub struct FastPathCtx {
     pool: PgPool,
     scope: ScopeContext,
     graph: Arc<dyn GraphStore>,
+    vector: Arc<dyn VectorStore>,
     embedder: Arc<dyn Embedder>,
     pii: Arc<dyn PiiClassifier>,
-    contradict: Arc<dyn FastContradictionChecker>,
+    contradict: Arc<dyn ContradictionDetector>,
     assume_app_role: bool,
 }
 
@@ -124,14 +87,16 @@ impl FastPathCtx {
         pool: PgPool,
         scope: ScopeContext,
         graph: Arc<dyn GraphStore>,
+        vector: Arc<dyn VectorStore>,
         embedder: Arc<dyn Embedder>,
         pii: Arc<dyn PiiClassifier>,
-        contradict: Arc<dyn FastContradictionChecker>,
+        contradict: Arc<dyn ContradictionDetector>,
     ) -> Self {
         Self {
             pool,
             scope,
             graph,
+            vector,
             embedder,
             pii,
             contradict,
@@ -150,6 +115,18 @@ impl FastPathCtx {
     #[must_use]
     pub fn scope(&self) -> &ScopeContext {
         &self.scope
+    }
+
+    fn contradiction_context(&self) -> ContradictionContext {
+        if self.assume_app_role {
+            ContradictionContext::for_app_role(
+                self.pool.clone(),
+                self.scope.clone(),
+                self.vector.clone(),
+            )
+        } else {
+            ContradictionContext::new(self.pool.clone(), self.scope.clone(), self.vector.clone())
+        }
     }
 }
 
@@ -180,6 +157,9 @@ pub enum FastError {
     /// JSON input could not be parsed.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    /// Slow/fast ingestion helper failed.
+    #[error("ingest: {0}")]
+    Ingest(#[from] moa_memory_ingest::IngestError),
 }
 
 /// Returns whether a tool name is handled by the graph-backed fast memory path.
@@ -275,9 +255,11 @@ async fn fast_remember_inner(
     let conflict = if let Some(old_uid) = req.supersedes_specific {
         Conflict::Supersede(old_uid)
     } else {
+        let contradiction_ctx = ctx.contradiction_context();
         match timeout(
             JUDGE_TIMEOUT,
-            ctx.contradict.check_one_fast(&req, &embedding),
+            ctx.contradict
+                .check_one_fast(&req.text, &embedding, req.label, &contradiction_ctx),
         )
         .await
         {
@@ -649,9 +631,10 @@ fn runtime_fast_ctx(scope: ScopeContext) -> Result<FastPathCtx, FastError> {
         pool,
         scope,
         graph,
+        vector,
         embedder,
         pii,
-        Arc::new(RuleBasedContradictionChecker),
+        Arc::new(RrfPlusJudgeDetector::from_env_or_heuristic()),
     ))
 }
 
