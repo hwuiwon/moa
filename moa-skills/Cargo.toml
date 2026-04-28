@@ -11,9 +11,12 @@ moa-eval = { path = "../moa-eval" }
 moa-memory = { path = "../moa-memory" }
 moa-providers = { path = "../moa-providers" }
 moa-session = { path = "../moa-session" }
+moka = { version = "0.12", features = ["future"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid"] }
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true

@@ -17,7 +17,7 @@ use crate::format::{
     wiki_page_from_skill,
 };
 use crate::improver::{format_events_for_learning, normalize_llm_markdown, record_successful_use};
-use crate::registry::SkillRegistry;
+use crate::registry::{NewSkill, SkillRegistry};
 use crate::regression::generate_skill_test_suite;
 
 const MIN_TOOL_CALLS_FOR_DISTILLATION: usize = 5;
@@ -49,9 +49,13 @@ pub async fn maybe_distill_skill_with_learning(
     }
 
     let task_summary = extract_task_summary(events);
-    let registry_memory: Arc<dyn MemoryStore> = memory_store.clone();
-    let registry = SkillRegistry::new(registry_memory);
-    let existing_skills = registry.list_for_pipeline(&session.workspace_id).await?;
+    let existing_skills = if let Some(store) = &learning_store {
+        SkillRegistry::new(store.pool().clone())
+            .list_for_pipeline(&session.workspace_id)
+            .await?
+    } else {
+        Vec::new()
+    };
 
     if let Some(existing) = find_similar_skill(&task_summary, &existing_skills) {
         return crate::improver::maybe_improve_skill_with_learning(
@@ -77,6 +81,7 @@ pub async fn maybe_distill_skill_with_learning(
     let mut skill = parse_skill_markdown(skill_markdown)?;
     normalize_new_skill(session, &mut skill);
     let path = build_skill_path(&skill.frontmatter.name);
+    let markdown = render_skill_for_registry(&skill)?;
     let page = wiki_page_from_skill(&skill, Some(path.clone()))?;
     let scope = moa_core::MemoryScope::Workspace {
         workspace_id: session.workspace_id.clone(),
@@ -84,23 +89,35 @@ pub async fn maybe_distill_skill_with_learning(
     memory_store.write_page(&scope, &path, page).await?;
     generate_skill_test_suite(session, &skill, &path, events, memory_store.clone()).await?;
 
-    let metadata = skill_metadata_from_document(path, &skill);
     if let Some(store) = learning_store {
+        let registry = SkillRegistry::new(store.pool().clone());
+        registry
+            .upsert_by_name(NewSkill::from_document(
+                scope.clone(),
+                &skill,
+                markdown.clone(),
+            ))
+            .await?;
         append_skill_learning(
             store.as_ref(),
             session,
             "skill_created",
-            &metadata,
+            &skill_metadata_from_document(path.clone(), &skill),
             serde_json::json!({
-                "path": metadata.path.clone(),
-                "name": metadata.name.clone(),
-                "description": metadata.description.clone(),
+                "path": path.clone(),
+                "name": skill.frontmatter.name.clone(),
+                "description": skill.frontmatter.description.clone(),
             }),
         )
         .await?;
     }
 
+    let metadata = skill_metadata_from_document(path, &skill);
     Ok(Some(metadata))
+}
+
+fn render_skill_for_registry(skill: &SkillDocument) -> Result<String> {
+    crate::format::render_skill_markdown(skill)
 }
 
 pub(crate) async fn append_skill_learning(

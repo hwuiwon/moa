@@ -1,6 +1,7 @@
 //! CLI entry point for MOA subcommands and daemon management.
 
 mod api;
+mod commands;
 mod daemon;
 mod exec;
 
@@ -28,6 +29,8 @@ use tokio::fs;
 use tokio::process::Command;
 use tokio::time::timeout;
 use uuid::Uuid;
+
+use commands::skills::{SkillsCommand, handle_skills_command};
 /// Top-level MOA command line interface.
 #[derive(Debug, Parser)]
 #[command(name = "moa", about = "MOA local terminal agent", version)]
@@ -81,6 +84,11 @@ enum CommandKind {
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
+    },
+    /// Skill import, export, and listing operations.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
     },
     /// Reads or updates config values.
     Config {
@@ -521,6 +529,9 @@ async fn main() -> Result<()> {
                 );
             }
         },
+        Some(CommandKind::Skills { command }) => {
+            print!("{}", handle_skills_command(&config, command).await?);
+        }
         Some(CommandKind::Config { command }) => match command {
             None => {
                 let rendered = toml::to_string_pretty(&config).context("serializing config")?;
