@@ -13,7 +13,7 @@ pub use format::{
     slugify_skill_name, wiki_page_from_skill,
 };
 pub use improver::{maybe_improve_skill, maybe_improve_skill_with_learning};
-pub use registry::SkillRegistry;
+pub use registry::{NewSkill, Skill, SkillRegistry};
 pub use regression::{
     SkillEvalRun, SkillRegressionDecision, SkillRegressionReport, SkillRegressionSummary,
     append_skill_regression_log, compare_scores, generate_skill_test_suite, run_skill_regression,

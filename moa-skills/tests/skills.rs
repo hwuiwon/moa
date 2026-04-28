@@ -12,7 +12,7 @@ use moa_core::{
 use moa_memory::FileMemoryStore;
 use moa_providers::ModelRouter;
 use moa_skills::{
-    SkillRegistry, build_skill_path, maybe_distill_skill, maybe_improve_skill,
+    NewSkill, SkillRegistry, build_skill_path, maybe_distill_skill, maybe_improve_skill,
     parse_skill_markdown, skill_from_wiki_page, wiki_page_from_skill,
 };
 use tempfile::tempdir;
@@ -328,24 +328,72 @@ fn parses_skill_markdown() {
 
 #[tokio::test]
 async fn registry_lists_skill_metadata() -> Result<()> {
-    let dir = tempdir()?;
-    let memory = Arc::new(FileMemoryStore::new(dir.path()).await?);
-    let scope = workspace_scope("workspace");
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let workspace_name = format!("workspace-{}", Uuid::now_v7());
+    let scope = workspace_scope(&workspace_name);
     let skill = parse_skill_markdown(DISTILLED_SKILL)?;
-    let path = build_skill_path(&skill.frontmatter.name);
-    let page = wiki_page_from_skill(&skill, Some(path.clone()))?;
-    memory.write_page(&scope, &path, page).await?;
-
-    let registry_memory: Arc<dyn MemoryStore> = memory.clone();
-    let registry = SkillRegistry::new(registry_memory);
+    let registry = SkillRegistry::new(store.pool().clone());
+    registry
+        .upsert_by_name(NewSkill::from_document(
+            scope,
+            &skill,
+            DISTILLED_SKILL.to_string(),
+        ))
+        .await?;
     let skills = registry
-        .list_for_pipeline(&WorkspaceId::new("workspace"))
+        .list_for_pipeline(&WorkspaceId::new(workspace_name))
         .await?;
 
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].name, "debug-oauth-refresh");
     assert_eq!(skills[0].estimated_tokens, 900);
-    Ok(())
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+async fn registry_upsert_is_idempotent_and_versions_changed_bodies() -> Result<()> {
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let workspace_name = format!("workspace-versioned-{}", Uuid::now_v7());
+    let scope = workspace_scope(&workspace_name);
+    let registry = SkillRegistry::new(store.pool().clone());
+    let original = parse_skill_markdown(DISTILLED_SKILL)?;
+    let first_uid = registry
+        .upsert_by_name(NewSkill::from_document(
+            scope.clone(),
+            &original,
+            DISTILLED_SKILL.to_string(),
+        ))
+        .await?;
+    let second_uid = registry
+        .upsert_by_name(NewSkill::from_document(
+            scope.clone(),
+            &original,
+            DISTILLED_SKILL.to_string(),
+        ))
+        .await?;
+    assert_eq!(first_uid, second_uid);
+
+    let improved = parse_skill_markdown(IMPROVED_SKILL)?;
+    let third_uid = registry
+        .upsert_by_name(NewSkill::from_document(
+            scope,
+            &improved,
+            IMPROVED_SKILL.to_string(),
+        ))
+        .await?;
+    assert_ne!(first_uid, third_uid);
+
+    let skills = registry
+        .load_for_scope(&workspace_scope(&workspace_name))
+        .await?;
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].skill_uid, third_uid);
+    assert_eq!(skills[0].version, 2);
+    assert_eq!(skills[0].previous_skill_uid, Some(first_uid));
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
 }
 
 #[tokio::test]
