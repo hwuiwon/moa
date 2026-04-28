@@ -8,12 +8,18 @@ license.workspace = true
 chrono.workspace = true
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
+moa-memory-graph = { path = "../moa-memory-graph" }
+moa-memory-vector = { path = "../moa-memory-vector" }
 moa-providers = { path = "../moa-providers" }
 moa-session = { path = "../moa-session" }
 moa-security = { path = "../moa-security" }
 async-trait.workspace = true
+reqwest.workspace = true
+secrecy = "0.10"
 serde.workspace = true
 serde_json.workspace = true
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "json"] }
+thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

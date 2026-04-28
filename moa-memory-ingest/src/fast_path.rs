@@ -167,7 +167,7 @@ pub enum FastError {
 pub fn is_fast_memory_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "memory.remember" | "memory.forget" | "memory.supersede"
+        "memory_remember" | "memory_forget" | "memory_supersede"
     )
 }
 
@@ -213,9 +213,9 @@ pub async fn execute_memory_tool(
 ) -> moa_core::Result<ToolOutput> {
     let started = Instant::now();
     let output = match tool_name {
-        "memory.remember" => execute_remember_tool(session, input, started).await,
-        "memory.forget" => execute_forget_tool(session, input, started).await,
-        "memory.supersede" => execute_supersede_tool(session, input, started).await,
+        "memory_remember" => execute_remember_tool(session, input, started).await,
+        "memory_forget" => execute_forget_tool(session, input, started).await,
+        "memory_supersede" => execute_supersede_tool(session, input, started).await,
         _ => Err(FastError::Invalid(format!(
             "unknown fast memory tool {tool_name}"
         ))),

@@ -628,7 +628,7 @@ async fn fast_remember_p95_stays_under_latency_budget_with_local_dependencies() 
 #[test]
 fn fast_memory_tools_appear_in_default_registry() {
     let registry = ToolRegistry::default_local();
-    assert!(registry.get("memory.remember").is_some());
-    assert!(registry.get("memory.forget").is_some());
-    assert!(registry.get("memory.supersede").is_some());
+    assert!(registry.get("memory_remember").is_some());
+    assert!(registry.get("memory_forget").is_some());
+    assert!(registry.get("memory_supersede").is_some());
 }

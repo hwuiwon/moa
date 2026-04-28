@@ -36,7 +36,7 @@ fn available_live_providers() -> Vec<LiveProvider> {
             provider: Arc::new(provider),
         });
     }
-    if let Ok(provider) = GeminiProvider::from_env("gemini-3.1-pro-preview") {
+    if let Ok(provider) = GeminiProvider::from_env(google_live_model()) {
         providers.push(LiveProvider {
             label: "google",
             model: provider.capabilities().model_id.to_string(),
@@ -47,13 +47,17 @@ fn available_live_providers() -> Vec<LiveProvider> {
 }
 
 fn google_live_provider() -> Option<LiveProvider> {
-    GeminiProvider::from_env("gemini-3.1-pro-preview")
+    GeminiProvider::from_env(google_live_model())
         .ok()
         .map(|provider| LiveProvider {
             label: "google",
             model: provider.capabilities().model_id.to_string(),
             provider: Arc::new(provider),
         })
+}
+
+fn google_live_model() -> String {
+    std::env::var("GOOGLE_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_string())
 }
 
 async fn live_orchestrator_with_provider(

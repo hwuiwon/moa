@@ -398,7 +398,7 @@ pub struct MemoryRememberTool;
 #[async_trait]
 impl BuiltInTool for MemoryRememberTool {
     fn name(&self) -> &'static str {
-        "memory.remember"
+        "memory_remember"
     }
 
     fn description(&self) -> &'static str {
@@ -433,7 +433,7 @@ impl BuiltInTool for MemoryRememberTool {
         _ctx: &ToolContext<'_>,
     ) -> Result<ToolOutput> {
         Err(MoaError::ToolError(
-            "memory.remember is executed by the orchestrator fast-path graph writer".to_string(),
+            "memory_remember is executed by the orchestrator fast-path graph writer".to_string(),
         ))
     }
 }
@@ -444,7 +444,7 @@ pub struct MemoryForgetTool;
 #[async_trait]
 impl BuiltInTool for MemoryForgetTool {
     fn name(&self) -> &'static str {
-        "memory.forget"
+        "memory_forget"
     }
 
     fn description(&self) -> &'static str {
@@ -477,7 +477,7 @@ impl BuiltInTool for MemoryForgetTool {
         _ctx: &ToolContext<'_>,
     ) -> Result<ToolOutput> {
         Err(MoaError::ToolError(
-            "memory.forget is executed by the orchestrator fast-path graph writer".to_string(),
+            "memory_forget is executed by the orchestrator fast-path graph writer".to_string(),
         ))
     }
 }
@@ -488,7 +488,7 @@ pub struct MemorySupersedeTool;
 #[async_trait]
 impl BuiltInTool for MemorySupersedeTool {
     fn name(&self) -> &'static str {
-        "memory.supersede"
+        "memory_supersede"
     }
 
     fn description(&self) -> &'static str {
@@ -523,7 +523,7 @@ impl BuiltInTool for MemorySupersedeTool {
         _ctx: &ToolContext<'_>,
     ) -> Result<ToolOutput> {
         Err(MoaError::ToolError(
-            "memory.supersede is executed by the orchestrator fast-path graph writer".to_string(),
+            "memory_supersede is executed by the orchestrator fast-path graph writer".to_string(),
         ))
     }
 }
