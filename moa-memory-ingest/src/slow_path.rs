@@ -4,14 +4,14 @@ use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::{
+    ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
+    ExtractedFact, IngestApplyReport, IngestDecision, RrfPlusJudgeDetector, SessionTurn,
+    chunk_turn, current_runtime, extract_facts, fact_hash, scoped_fact_uid, should_ingest_degraded,
+};
 use moa_core::{ScopeContext, ScopedConn};
 use moa_memory_graph::{
     AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass as GraphPiiClass,
-};
-use moa_memory_ingest::{
-    ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
-    ExtractedFact, IngestApplyReport, IngestDecision, RrfPlusJudgeDetector, SessionTurn,
-    chunk_turn, extract_facts, fact_hash, scoped_fact_uid,
 };
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiCategory, PiiClass as ClassifierPiiClass, PiiClassifier,
@@ -22,9 +22,6 @@ use restate_sdk::prelude::*;
 use secrecy::SecretString;
 use serde_json::json;
 use sqlx::PgPool;
-
-use crate::OrchestratorCtx;
-use crate::observability::annotate_restate_handler_span;
 
 const DONE_KEY_PREFIX: &str = "done";
 const CHUNK_TARGET_TOKENS: usize = 700;
@@ -47,7 +44,6 @@ impl IngestionVO for IngestionVOImpl {
         ctx: ObjectContext<'_>,
         turn: Json<SessionTurn>,
     ) -> Result<Json<IngestApplyReport>, HandlerError> {
-        annotate_restate_handler_span("IngestionVO", "ingest_turn");
         let turn = turn.into_inner();
         let done_key = done_key(turn.turn_seq);
         if ctx
@@ -60,7 +56,7 @@ impl IngestionVO for IngestionVOImpl {
         }
 
         let degraded = workspace_degraded(&turn).await?;
-        if degraded && !moa_memory_ingest::should_ingest_degraded(&turn) {
+        if degraded && !should_ingest_degraded(&turn) {
             ctx.set(&done_key, Json::from(true));
             return Ok(Json::from(IngestApplyReport {
                 skipped: 1,
@@ -300,8 +296,8 @@ async fn detect_contradictions(
     turn: &SessionTurn,
     embedded: &[EmbeddedFact],
 ) -> Result<Vec<IngestDecision>, HandlerError> {
-    let runtime = OrchestratorCtx::current();
-    let pool = runtime.session_store.pool().clone();
+    let runtime = current_runtime().map_err(HandlerError::from)?;
+    let pool = runtime.pool().clone();
     let scope = ScopeContext::workspace(turn.workspace_id.clone());
     let vector = Arc::new(PgvectorStore::new(pool.clone(), scope.clone()));
     let detector = RrfPlusJudgeDetector::from_env_or_heuristic();
@@ -331,8 +327,8 @@ async fn apply_decisions(
     turn: &SessionTurn,
     decisions: &[IngestDecision],
 ) -> Result<IngestApplyReport, HandlerError> {
-    let runtime = OrchestratorCtx::current();
-    let pool = runtime.session_store.pool().clone();
+    let runtime = current_runtime().map_err(HandlerError::from)?;
+    let pool = runtime.pool().clone();
     let scope = ScopeContext::workspace(turn.workspace_id.clone());
     let mut report = IngestApplyReport::default();
 
@@ -446,9 +442,9 @@ fn node_intent(
 }
 
 async fn workspace_degraded(turn: &SessionTurn) -> Result<bool, HandlerError> {
-    let runtime = OrchestratorCtx::current();
+    let runtime = current_runtime().map_err(HandlerError::from)?;
     let scope = ScopeContext::workspace(turn.workspace_id.clone());
-    let mut conn = ScopedConn::begin(runtime.session_store.pool(), &scope)
+    let mut conn = ScopedConn::begin(runtime.pool(), &scope)
         .await
         .map_err(HandlerError::from)?;
     let degraded = sqlx::query_scalar::<_, bool>(

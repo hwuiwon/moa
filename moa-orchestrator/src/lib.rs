@@ -3,10 +3,9 @@
 mod brain_bridge;
 pub mod config;
 pub mod ctx;
-pub mod fast_path;
-pub mod ingestion_vo;
 pub mod objects;
 pub mod observability;
+pub mod restate_register;
 pub mod services;
 pub mod session_engine;
 mod sub_agent_dispatch;

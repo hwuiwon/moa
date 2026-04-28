@@ -10,12 +10,12 @@ use moa_hands::ToolRegistry;
 use moa_memory_graph::{
     AgeGraphStore, NodeLabel, NodeWriteIntent, PiiClass as GraphPiiClass, cypher,
 };
-use moa_memory_ingest::{Conflict, ContradictionContext, ContradictionDetector, IngestError};
+use moa_memory_ingest::{
+    Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, FastPathCtx,
+    FastRememberRequest, ForgetPattern, IngestError, fast_forget, fast_remember, fast_supersede,
+};
 use moa_memory_pii::{PiiClass as ClassifierPiiClass, PiiClassifier, PiiError, PiiResult, PiiSpan};
 use moa_memory_vector::{Embedder, Error as VectorError, PgvectorStore, VECTOR_DIMENSION};
-use moa_orchestrator::fast_path::{
-    FastPathCtx, FastRememberRequest, ForgetPattern, fast_forget, fast_remember, fast_supersede,
-};
 use moa_session::testing;
 use serde_json::json;
 use sqlx::PgPool;
@@ -89,7 +89,7 @@ impl ContradictionDetector for FixedConflictChecker {
 
     async fn check_one_slow(
         &self,
-        _fact: &moa_memory_ingest::EmbeddedFact,
+        _fact: &EmbeddedFact,
         _ctx: &ContradictionContext,
     ) -> Result<Conflict, IngestError> {
         Ok(self.conflict)

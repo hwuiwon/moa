@@ -10,6 +10,7 @@ use moa_core::{
     ToolOutput, classify_tool_error,
 };
 use moa_hands::ToolRouter;
+use moa_memory_ingest::{execute_memory_tool, is_fast_memory_tool};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
@@ -70,13 +71,8 @@ impl ToolExecutorImpl {
         session: &SessionMeta,
         request: &ToolCallRequest,
     ) -> moa_core::Result<ToolOutput> {
-        if crate::fast_path::is_fast_memory_tool(&request.tool_name) {
-            return crate::fast_path::execute_memory_tool(
-                session,
-                &request.tool_name,
-                &request.input,
-            )
-            .await;
+        if is_fast_memory_tool(&request.tool_name) {
+            return execute_memory_tool(session, &request.tool_name, &request.input).await;
         }
 
         let invocation = ToolInvocation {

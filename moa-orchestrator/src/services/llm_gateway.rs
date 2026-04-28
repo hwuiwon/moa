@@ -9,14 +9,13 @@ use moa_core::{
     ModelId, ModelTier, QueryRewriteConfig, SessionId, TokenPricing, TokenUsage, UserId,
     WorkspaceId, record_llm_cost_cents,
 };
-use moa_memory_ingest::SessionTurn;
+use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 use restate_sdk::prelude::*;
 use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
-use crate::ingestion_vo::{IngestionVOClient, ingestion_object_key, turn_transcript};
 use crate::observability::annotate_restate_handler_span;
 use crate::services::session_store::{AppendEventRequest, SessionStoreClient};
 

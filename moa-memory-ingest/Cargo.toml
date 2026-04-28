@@ -13,7 +13,9 @@ moa-memory-graph = { path = "../moa-memory-graph" }
 moa-memory-pii = { path = "../moa-memory-pii" }
 moa-memory-vector = { path = "../moa-memory-vector" }
 moka = { version = "0.12", features = ["future"] }
+metrics.workspace = true
 reqwest.workspace = true
+restate-sdk.workspace = true
 secrecy = "0.10"
 serde.workspace = true
 serde_json.workspace = true
@@ -25,3 +27,5 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+moa-hands = { path = "../moa-hands" }
+moa-session = { path = "../moa-session" }
