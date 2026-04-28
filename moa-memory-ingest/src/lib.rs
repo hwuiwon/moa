@@ -1,11 +1,19 @@
 //! Shared DTOs and deterministic helpers for slow-path graph-memory ingestion.
 
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use moa_core::{SessionId, UserId, WorkspaceId};
 use moa_memory_pii::{PiiClass, PiiSpan};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+pub mod contradiction;
+
+pub use contradiction::{
+    Conflict, ContradictionContext, ContradictionDetector, RrfPlusJudgeDetector,
+};
 
 const APPROX_CHARS_PER_TOKEN: usize = 4;
 
@@ -21,6 +29,30 @@ pub enum IngestError {
     /// A requested chunk size was invalid.
     #[error("chunk token target must be greater than zero")]
     InvalidChunkTarget,
+    /// A scoped Postgres helper failed.
+    #[error("scope transaction: {0}")]
+    Scope(#[from] moa_core::MoaError),
+    /// A Postgres query failed.
+    #[error("postgres: {0}")]
+    Sqlx(#[from] sqlx::Error),
+    /// Vector retrieval failed.
+    #[error("vector: {0}")]
+    Vector(#[from] moa_memory_vector::Error),
+    /// Reranking failed.
+    #[error("rerank: {0}")]
+    Rerank(String),
+    /// Judge execution failed.
+    #[error("judge: {0}")]
+    Judge(String),
+    /// Contradiction detection failed.
+    #[error("contradiction: {0}")]
+    Contradiction(String),
+    /// JSON serialization or parsing failed.
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
+    /// A contradiction detector budget expired.
+    #[error("contradiction detector timed out after {0:?}")]
+    Timeout(Duration),
 }
 
 /// Finalized session turn payload sent to the slow-path ingestion VO.

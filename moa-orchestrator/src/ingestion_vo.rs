@@ -9,7 +9,8 @@ use moa_memory_graph::{
     AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass as GraphPiiClass,
 };
 use moa_memory_ingest::{
-    ClassifiedFact, EmbeddedFact, ExtractedFact, IngestApplyReport, IngestDecision, SessionTurn,
+    ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
+    ExtractedFact, IngestApplyReport, IngestDecision, RrfPlusJudgeDetector, SessionTurn,
     chunk_turn, extract_facts, fact_hash, scoped_fact_uid,
 };
 use moa_memory_pii::{
@@ -107,10 +108,11 @@ impl IngestionVO for IngestionVOImpl {
             .await?
             .into_inner();
 
+        let contradiction_turn = turn.clone();
         let contradiction_input = embedded.clone();
         let decisions = ctx
             .run(|| async move {
-                detect_contradictions(&contradiction_input)
+                detect_contradictions(&contradiction_turn, &contradiction_input)
                     .await
                     .map(Json::from)
             })
@@ -295,13 +297,34 @@ async fn embed_batch(facts: &[ClassifiedFact]) -> Result<Vec<EmbeddedFact>, Hand
 }
 
 async fn detect_contradictions(
+    turn: &SessionTurn,
     embedded: &[EmbeddedFact],
 ) -> Result<Vec<IngestDecision>, HandlerError> {
-    Ok(embedded
-        .iter()
-        .cloned()
-        .map(|fact| IngestDecision::Insert { fact })
-        .collect())
+    let runtime = OrchestratorCtx::current();
+    let pool = runtime.session_store.pool().clone();
+    let scope = ScopeContext::workspace(turn.workspace_id.clone());
+    let vector = Arc::new(PgvectorStore::new(pool.clone(), scope.clone()));
+    let detector = RrfPlusJudgeDetector::from_env_or_heuristic();
+    let ctx = ContradictionContext::new(pool, scope, vector);
+    let mut decisions = Vec::with_capacity(embedded.len());
+
+    for fact in embedded {
+        let conflict = detector
+            .check_one_slow(fact, &ctx)
+            .await
+            .map_err(HandlerError::from)?;
+        decisions.push(decision_from_conflict(conflict, fact.clone()));
+    }
+
+    Ok(decisions)
+}
+
+fn decision_from_conflict(conflict: Conflict, fact: EmbeddedFact) -> IngestDecision {
+    match conflict {
+        Conflict::Insert | Conflict::Indeterminate => IngestDecision::Insert { fact },
+        Conflict::Supersede(old_uid) => IngestDecision::Supersede { old_uid, fact },
+        Conflict::Duplicate(fact_uid) => IngestDecision::SkipDuplicate { fact_uid },
+    }
 }
 
 async fn apply_decisions(
