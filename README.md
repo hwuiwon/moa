@@ -89,22 +89,22 @@ The context pipeline is byte-stable where possible for prompt caching. With quer
 
 | Crate | Role |
 |---|---|
-| [`moa-core`](moa-core/) | Shared types, traits, config, events, telemetry, analytics DTOs |
-| [`moa-brain`](moa-brain/) | Context pipeline, query rewriting, segment helpers, intent classifier, resolution scoring, streamed turns |
-| [`moa-session`](moa-session/) | Postgres session store, event log, task segments, intent tables, learning log, analytics views |
-| [`moa-memory`](moa-memory/) | File-backed wiki memory plus Postgres keyword, trigram, and pgvector search |
-| [`moa-hands`](moa-hands/) | Tool router, local/Docker hands, Daytona, E2B, MCP client |
-| [`moa-providers`](moa-providers/) | LLM and embedding providers |
-| [`moa-orchestrator`](moa-orchestrator/) | Restate services, virtual objects, workflows, and handler binary |
+| [`moa-core`](crates/moa-core/) | Shared types, traits, config, events, telemetry, analytics DTOs |
+| [`moa-brain`](crates/moa-brain/) | Context pipeline, query rewriting, segment helpers, intent classifier, resolution scoring, streamed turns |
+| [`moa-session`](crates/moa-session/) | Postgres session store, event log, task segments, intent tables, learning log, analytics views |
+| [`moa-memory`](crates/moa-memory/) | File-backed wiki memory plus Postgres keyword, trigram, and pgvector search |
+| [`moa-hands`](crates/moa-hands/) | Tool router, local/Docker hands, Daytona, E2B, MCP client |
+| [`moa-providers`](crates/moa-providers/) | LLM and embedding providers |
+| [`moa-orchestrator`](crates/moa-orchestrator/) | Restate services, virtual objects, workflows, and handler binary |
 | [`moa-orchestrator-local`](moa-orchestrator-local/) | Tokio-task local orchestrator for CLI and desktop |
-| [`moa-gateway`](moa-gateway/) | Telegram, Slack, Discord adapters and platform rendering |
-| [`moa-runtime`](moa-runtime/) | Shared runtime bootstrap |
-| [`moa-cli`](moa-cli/) | `moa` CLI and daemon commands |
-| [`moa-security`](moa-security/) | Credential vault, MCP proxy, policies, prompt-injection controls |
-| [`moa-skills`](moa-skills/) | Agent Skills parsing, distillation, improvement, regression suites |
-| [`moa-eval`](moa-eval/) | Evaluation harness |
-| [`moa-loadtest`](moa-loadtest/) | Load-test harness |
-| [`moa-desktop`](moa-desktop/) | GPUI desktop application |
+| [`moa-gateway`](crates/moa-gateway/) | Telegram, Slack, Discord adapters and platform rendering |
+| [`moa-runtime`](crates/moa-runtime/) | Shared runtime bootstrap |
+| [`moa-cli`](crates/moa-cli/) | `moa` CLI and daemon commands |
+| [`moa-security`](crates/moa-security/) | Credential vault, MCP proxy, policies, prompt-injection controls |
+| [`moa-skills`](crates/moa-skills/) | Agent Skills parsing, distillation, improvement, regression suites |
+| [`moa-eval`](crates/moa-eval/) | Evaluation harness |
+| [`moa-loadtest`](crates/moa-loadtest/) | Load-test harness |
+| [`moa-desktop`](crates/moa-desktop/) | GPUI desktop application |
 
 ## Documentation
 

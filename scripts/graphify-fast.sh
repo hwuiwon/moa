@@ -153,7 +153,7 @@ def auto_label(graph, member_ids):
             crates[f.split('/')[0]] += c
         prefix = crates.most_common(1)[0][0]
 
-    # Readability: drop 'src' segments (moa-brain/src/pipeline -> moa-brain/pipeline)
+    # Readability: drop 'src' segments (crates/moa-brain/src/pipeline -> crates/moa-brain/pipeline)
     parts = [p for p in prefix.split('/') if p and p != 'src']
     cleaned = '/'.join(parts) if parts else prefix
 

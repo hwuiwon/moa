@@ -17,7 +17,7 @@ Segments answer:
 
 ## Data Model
 
-`TaskSegment` lives in `moa-core/src/types/segments.rs`; persistent rows live in Postgres `task_segments`.
+`TaskSegment` lives in `crates/moa-core/src/types/segments.rs`; persistent rows live in Postgres `task_segments`.
 
 Important fields:
 

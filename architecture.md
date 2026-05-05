@@ -78,7 +78,7 @@ Source: [`docs/01-architecture-overview.md`](docs/01-architecture-overview.md).
 
 ## 3. Core traits (the interface seam)
 
-All stable interfaces live in [`moa-core`](moa-core/). Implementations swap freely between local and cloud without touching brain logic.
+All stable interfaces live in [`moa-core`](crates/moa-core/). Implementations swap freely between local and cloud without touching brain logic.
 
 | Trait | Responsibility | Local impl | Cloud impl |
 |---|---|---|---|
@@ -99,20 +99,20 @@ Full trait signatures: [`docs/01-architecture-overview.md`](docs/01-architecture
 
 ```
 moa/
-├── moa-core/          # Types, traits, config, errors — the contract
-├── moa-brain/         # Harness loop + 7-stage context pipeline + compaction
-├── moa-session/       # PostgresSessionStore, event schema, FTS, replay
-├── moa-memory/        # File-wiki, ingest, consolidation, git-branch writes
-├── moa-hands/         # Local/Docker/Daytona/E2B/MCP, ToolRouter
-├── moa-providers/     # Anthropic, OpenAI, Gemini — streaming + prompt caching
-├── moa-orchestrator/  # LocalOrchestrator (tokio) + Restate-backed cloud runtime
-├── moa-gateway/       # Telegram / Slack / Discord + platform renderers + approvals
-├── moa-security/      # Credential vault, MCP proxy, sandbox policies, injection
-├── moa-skills/        # Agent Skills registry, distillation, self-improvement
-├── moa-eval/          # Evaluation harness (suites, reporters, CI gating)
-├── moa-runtime/       # Shared bootstrap wiring for local + cloud
-├── moa-cli/           # `moa` binary (clap-based) + daemon
-└── moa-desktop/       # GPUI desktop app — NOT a default-member
+├── crates/moa-core/          # Types, traits, config, errors — the contract
+├── crates/moa-brain/         # Harness loop + 7-stage context pipeline + compaction
+├── crates/moa-session/       # PostgresSessionStore, event schema, FTS, replay
+├── crates/moa-memory/        # File-wiki, ingest, consolidation, git-branch writes
+├── crates/moa-hands/         # Local/Docker/Daytona/E2B/MCP, ToolRouter
+├── crates/moa-providers/     # Anthropic, OpenAI, Gemini — streaming + prompt caching
+├── crates/moa-orchestrator/  # LocalOrchestrator (tokio) + Restate-backed cloud runtime
+├── crates/moa-gateway/       # Telegram / Slack / Discord + platform renderers + approvals
+├── crates/moa-security/      # Credential vault, MCP proxy, sandbox policies, injection
+├── crates/moa-skills/        # Agent Skills registry, distillation, self-improvement
+├── crates/moa-eval/          # Evaluation harness (suites, reporters, CI gating)
+├── crates/moa-runtime/       # Shared bootstrap wiring for local + cloud
+├── crates/moa-cli/           # `moa` binary (clap-based) + daemon
+└── crates/moa-desktop/       # GPUI desktop app — NOT a default-member
 ```
 
 `moa-desktop` is excluded from default builds because GPUI has heavy native deps. Build it explicitly:
@@ -140,6 +140,7 @@ CredentialVault    →  FileVault (age-encrypted ~/.moa/vault.enc)
 - Zero cloud dependencies.
 - Postgres is the only required local service (`make dev`).
 - Sessions survive the process restarting — replay from event log.
+- `moa memory search` reads ranked graph nodes through hybrid retrieval, `moa memory show <uid>` inspects one graph node, and `moa memory ingest` sends documents through graph-memory ingestion. Wiki index and embedding rebuild commands are retired.
 
 ### Cloud mode — `MOA__CLOUD__ENABLED=true`
 
@@ -198,7 +199,7 @@ If anything dies between step 5 and step 20, a new brain can resume from the las
 
 ---
 
-## 7. Session event log ([`moa-session`](moa-session/))
+## 7. Session event log ([`moa-session`](crates/moa-session/))
 
 Postgres is the single source of truth. Every change to a session is an event. The schema lives in [`docs/05-session-event-log.md`](docs/05-session-event-log.md).
 
@@ -229,7 +230,7 @@ Errors are **always** preserved through compaction — they're the strongest sig
 
 ---
 
-## 8. Context compilation ([`moa-brain`](moa-brain/))
+## 8. Context compilation ([`moa-brain`](crates/moa-brain/))
 
 The single biggest cost/latency lever in a production agent is KV-cache hit rate. Cached tokens cost ~10× less. The pipeline is deliberately ordered to maximize stable prefix reuse.
 
@@ -261,7 +262,7 @@ Details: [`docs/07-context-pipeline.md`](docs/07-context-pipeline.md).
 
 ---
 
-## 9. Memory ([`moa-memory`](moa-memory/))
+## 9. Memory ([`moa-memory`](crates/moa-memory/))
 
 The memory layer is a **file-backed wiki** with a Postgres FTS index. Files are the source of truth — the DB is an index you can rebuild any time.
 
@@ -301,7 +302,7 @@ Details: [`docs/04-memory-architecture.md`](docs/04-memory-architecture.md).
 
 ---
 
-## 10. Hands and MCP ([`moa-hands`](moa-hands/))
+## 10. Hands and MCP ([`moa-hands`](crates/moa-hands/))
 
 Hands are **cattle, not pets**:
 
@@ -329,7 +330,7 @@ Details: [`docs/06-hands-and-mcp.md`](docs/06-hands-and-mcp.md).
 
 ---
 
-## 11. Communication layer ([`moa-gateway`](moa-gateway/))
+## 11. Communication layer ([`moa-gateway`](crates/moa-gateway/))
 
 All platforms normalize to a common `InboundMessage` / `OutboundMessage` pair. `PlatformRenderer` converts the common format to platform-native output, respecting each platform's message size, button model, edit window, and rate limit.
 
@@ -347,7 +348,7 @@ Details: [`docs/03-communication-layer.md`](docs/03-communication-layer.md).
 
 ---
 
-## 12. Security ([`moa-security`](moa-security/))
+## 12. Security ([`moa-security`](crates/moa-security/))
 
 **Default posture:**
 
@@ -372,7 +373,7 @@ Details: [`docs/08-security.md`](docs/08-security.md).
 
 ---
 
-## 13. Skills and learning ([`moa-skills`](moa-skills/))
+## 13. Skills and learning ([`moa-skills`](crates/moa-skills/))
 
 MOA adopts the **Agent Skills** format (agentskills.io) with MOA-specific metadata. Each skill is a directory:
 

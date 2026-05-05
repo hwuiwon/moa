@@ -11,7 +11,7 @@ The context pipeline turns durable session state into one provider request. It m
 - keep history within budget
 - produce metadata for task segmentation and learning
 
-The implementation lives in `moa-brain/src/pipeline/`.
+The implementation lives in `crates/moa-brain/src/pipeline/`.
 
 ## Current Stage Order
 
