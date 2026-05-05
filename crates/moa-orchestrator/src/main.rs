@@ -12,12 +12,10 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Router, serve};
 use clap::Parser;
-use moa_core::MemoryStore;
 use moa_core::{TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_hands::ToolRouter;
-use moa_memory::FileMemoryStore;
 use moa_orchestrator::{
-    OrchestratorCtx,
+    DeadMemoryStoreShim, OrchestratorCtx,
     config::OrchestratorConfig,
     objects::session::{Session, SessionImpl},
     objects::sub_agent::{SubAgent, SubAgentImpl},
@@ -27,7 +25,6 @@ use moa_orchestrator::{
         health::{Health, HealthImpl},
         intent_manager::{IntentManager, IntentManagerImpl},
         llm_gateway::{LLMGateway, LLMGatewayImpl, ProviderRegistry},
-        memory_store::{MemoryStore as RestateMemoryStore, MemoryStoreImpl},
         session_store::{SessionStore, SessionStoreImpl},
         tool_executor::{ToolExecutor, ToolExecutorImpl},
         workspace_store::{WorkspaceStore, WorkspaceStoreImpl},
@@ -58,7 +55,6 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "IntentDiscovery",
     "IngestionVO",
     "LLMGateway",
-    "MemoryStore",
     "Session",
     "SessionStore",
     "SubAgent",
@@ -101,15 +97,7 @@ async fn main() -> anyhow::Result<()> {
 
     let providers = Arc::new(ProviderRegistry::from_env());
     let embedding_provider = build_embedding_provider_from_config(moa_config.as_ref())?;
-    let file_memory_store = Arc::new(
-        FileMemoryStore::from_config_with_pool(
-            moa_config.as_ref(),
-            Arc::new(session_store.pool().clone()),
-            session_store.schema_name(),
-        )
-        .await?,
-    );
-    let memory_store: Arc<dyn MemoryStore> = file_memory_store.clone();
+    let memory_store = Arc::new(DeadMemoryStoreShim);
     let tool_router = Arc::new(
         ToolRouter::from_config(moa_config.as_ref(), memory_store.clone())
             .await?
@@ -119,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
     let ctx = Arc::new(OrchestratorCtx {
         config: moa_config.clone(),
         session_store: session_store.clone(),
+        graph_pool: session_store.pool().clone(),
         memory_store: memory_store.clone(),
         providers: providers.clone(),
         embedding_provider: embedding_provider.clone(),
@@ -126,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
         tool_schemas: Arc::new(tool_router.tool_schemas()),
     });
     OrchestratorCtx::install(ctx).expect("install orchestrator ctx");
-    let _ = moa_memory_ingest::install_runtime_with_pool(pool.clone());
+    let _ = memory_ingest::install_runtime_with_pool(pool.clone());
 
     let endpoint = Endpoint::builder()
         .bind(HealthImpl.serve())
@@ -141,7 +130,6 @@ async fn main() -> anyhow::Result<()> {
         )
         .bind(LLMGatewayImpl::new(providers).serve())
         .bind(IngestionVOImpl.serve())
-        .bind(MemoryStoreImpl::new(file_memory_store).serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
         .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
         .bind(SessionImpl.serve())
@@ -491,7 +479,6 @@ mod tests {
             "IntentDiscovery",
             "IngestionVO",
             "LLMGateway",
-            "MemoryStore",
             "Session",
             "SessionStore",
             "SubAgent",

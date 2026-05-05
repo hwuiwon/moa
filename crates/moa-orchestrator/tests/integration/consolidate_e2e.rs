@@ -5,11 +5,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use moa_core::{ConfidenceLevel, MemoryScope, PageType, WikiPage, WorkspaceId};
+use moa_core::WorkspaceId;
 use moa_orchestrator::objects::workspace::{
     WorkspaceApprovalPolicy, WorkspaceConfig, WorkspaceStatus,
 };
-use moa_orchestrator::services::memory_store::{ReadPageRequest, WritePageRequest};
 use moa_orchestrator::workflows::consolidate::{ConsolidateReport, ConsolidateRequest};
 use tempfile::TempDir;
 use tokio::time::sleep;
@@ -77,26 +76,6 @@ fn workflow_url(ingress: &str, workflow_id: &str) -> String {
     format!("{ingress}/Consolidate/{workflow_id}/run")
 }
 
-fn memory_page(title: &str, content: &str) -> WikiPage {
-    let timestamp = Utc::now();
-    WikiPage {
-        path: None,
-        title: title.to_string(),
-        page_type: PageType::Topic,
-        content: content.to_string(),
-        created: timestamp,
-        updated: timestamp,
-        confidence: ConfidenceLevel::High,
-        related: Vec::new(),
-        sources: Vec::new(),
-        tags: vec!["workspace".to_string()],
-        auto_generated: false,
-        last_referenced: timestamp,
-        reference_count: 1,
-        metadata: std::collections::HashMap::new(),
-    }
-}
-
 #[tokio::test]
 #[ignore = "requires a local restate-server and a reachable Postgres instance"]
 async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
@@ -145,24 +124,6 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
             "expected the next consolidation to be scheduled after init"
         );
 
-        client
-            .post(format!("{ingress}/MemoryStore/write_page"))
-            .json(&WritePageRequest {
-                scope: MemoryScope::Workspace {
-                    workspace_id: workspace_id.clone(),
-                },
-                path: "topics/architecture.md".into(),
-                page: memory_page(
-                    "Architecture",
-                    "# Architecture\n\nThe deploy happened today.\n",
-                ),
-            })
-            .send()
-            .await
-            .context("seed workspace memory page")?
-            .error_for_status()
-            .context("write_page should succeed")?;
-
         let target_date = Utc::now().date_naive();
         let workflow_id = format!("{}:{target_date}", workspace_id);
         let report = client
@@ -181,30 +142,9 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
             .context("deserialize consolidate report")?;
 
         assert_eq!(report.workspace_id, workspace_id);
-        assert!(
-            report.relative_dates_normalized >= 1 || report.pages_updated >= 1,
-            "expected the workflow to rewrite the seeded page"
-        );
+        assert_eq!(report.relative_dates_normalized, 0);
+        assert_eq!(report.pages_updated, 0);
         assert!(report.errors.is_empty(), "unexpected consolidation errors");
-
-        let page = client
-            .post(format!("{ingress}/MemoryStore/read_page"))
-            .json(&ReadPageRequest {
-                scope: MemoryScope::Workspace {
-                    workspace_id: workspace_id.clone(),
-                },
-                path: "topics/architecture.md".into(),
-            })
-            .send()
-            .await
-            .context("read consolidated page")?
-            .error_for_status()
-            .context("read_page should succeed")?
-            .json::<Option<WikiPage>>()
-            .await
-            .context("deserialize read_page response")?
-            .context("expected seeded page to exist after consolidation")?;
-        assert!(!page.content.contains("today"));
 
         let final_status = client
             .post(object_url(ingress, &workspace_id, "status"))
@@ -219,7 +159,7 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
         assert!(final_status.last_consolidation_at.is_some());
         assert!(final_status.next_consolidation_at.is_some());
         assert!(!final_status.consolidation_in_progress);
-        assert!(final_status.pages_count >= 1);
+        assert_eq!(final_status.pages_count, 0);
 
         Ok(())
     }

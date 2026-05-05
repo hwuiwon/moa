@@ -55,7 +55,9 @@ impl IngestionVO for IngestionVOImpl {
             return Ok(Json::from(IngestApplyReport::default()));
         }
 
-        let degraded = workspace_degraded(&turn).await?;
+        let runtime = current_runtime().map_err(HandlerError::from)?;
+        let pool = runtime.pool().clone();
+        let degraded = workspace_degraded(&pool, &turn).await?;
         if degraded && !should_ingest_degraded(&turn) {
             ctx.set(&done_key, Json::from(true));
             return Ok(Json::from(IngestApplyReport {
@@ -106,11 +108,16 @@ impl IngestionVO for IngestionVOImpl {
 
         let contradiction_turn = turn.clone();
         let contradiction_input = embedded.clone();
+        let contradiction_pool = pool.clone();
         let decisions = ctx
             .run(|| async move {
-                detect_contradictions(&contradiction_turn, &contradiction_input)
-                    .await
-                    .map(Json::from)
+                detect_contradictions(
+                    &contradiction_pool,
+                    &contradiction_turn,
+                    &contradiction_input,
+                )
+                .await
+                .map(Json::from)
             })
             .name("contradict")
             .retry_policy(ingest_step_retry_policy())
@@ -118,9 +125,10 @@ impl IngestionVO for IngestionVOImpl {
             .into_inner();
 
         let upsert_turn = turn.clone();
+        let upsert_pool = pool.clone();
         let report = ctx
             .run(|| async move {
-                apply_decisions(&upsert_turn, &decisions)
+                apply_decisions(&upsert_pool, &upsert_turn, &decisions)
                     .await
                     .map(Json::from)
             })
@@ -140,7 +148,20 @@ impl IngestionVO for IngestionVOImpl {
 /// [`crate::install_runtime_with_pool`]. Restate handlers should continue to use
 /// [`IngestionVO::ingest_turn`] so the step journal remains durable.
 pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, HandlerError> {
-    let degraded = workspace_degraded(&turn).await?;
+    let runtime = current_runtime().map_err(HandlerError::from)?;
+    ingest_turn_direct_with_pool(runtime.pool().clone(), turn).await
+}
+
+/// Runs the slow-path ingestion steps directly against an explicit Postgres pool.
+///
+/// This is intended for embedded hosts that own more than one pool in the same
+/// process, such as integration tests. Restate handlers should continue to use
+/// [`IngestionVO::ingest_turn`] so the step journal remains durable.
+pub async fn ingest_turn_direct_with_pool(
+    pool: PgPool,
+    turn: SessionTurn,
+) -> Result<IngestApplyReport, HandlerError> {
+    let degraded = workspace_degraded(&pool, &turn).await?;
     if degraded && !should_ingest_degraded(&turn) {
         return Ok(IngestApplyReport {
             skipped: 1,
@@ -153,8 +174,8 @@ pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, 
     let extracted = extract_facts(&chunks);
     let classified = classify_facts(&extracted).await?;
     let embedded = embed_batch(&classified).await?;
-    let decisions = detect_contradictions(&turn, &embedded).await?;
-    apply_decisions(&turn, &decisions).await
+    let decisions = detect_contradictions(&pool, &turn, &embedded).await?;
+    apply_decisions(&pool, &turn, &decisions).await
 }
 
 /// Builds the object key used to serialize ingestion per workspace/session.
@@ -316,11 +337,11 @@ async fn embed_batch(facts: &[ClassifiedFact]) -> Result<Vec<EmbeddedFact>, Hand
 }
 
 async fn detect_contradictions(
+    pool: &PgPool,
     turn: &SessionTurn,
     embedded: &[EmbeddedFact],
 ) -> Result<Vec<IngestDecision>, HandlerError> {
-    let runtime = current_runtime().map_err(HandlerError::from)?;
-    let pool = runtime.pool().clone();
+    let pool = pool.clone();
     let scope = ScopeContext::workspace(turn.workspace_id.clone());
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let detector = RrfPlusJudgeDetector::from_env_or_heuristic();
@@ -347,23 +368,22 @@ fn decision_from_conflict(conflict: Conflict, fact: EmbeddedFact) -> IngestDecis
 }
 
 async fn apply_decisions(
+    pool: &PgPool,
     turn: &SessionTurn,
     decisions: &[IngestDecision],
 ) -> Result<IngestApplyReport, HandlerError> {
-    let runtime = current_runtime().map_err(HandlerError::from)?;
-    let pool = runtime.pool().clone();
     let scope = ScopeContext::workspace(turn.workspace_id.clone());
     let mut report = IngestApplyReport::default();
 
     for decision in decisions {
-        match apply_one_decision(&pool, &scope, turn, decision).await {
+        match apply_one_decision(pool, &scope, turn, decision).await {
             Ok(ApplyOutcome::Inserted) => report.inserted += 1,
             Ok(ApplyOutcome::Superseded) => report.superseded += 1,
             Ok(ApplyOutcome::Skipped) => report.skipped += 1,
             Err(error) => {
                 report.failed += 1;
                 let error_message = format!("{error:?}");
-                write_dlq(&pool, &scope, turn, decision, &error_message).await?;
+                write_dlq(pool, &scope, turn, decision, &error_message).await?;
                 tracing::warn!(
                     error = ?error,
                     session_id = %turn.session_id,
@@ -464,10 +484,9 @@ fn node_intent(
     }
 }
 
-async fn workspace_degraded(turn: &SessionTurn) -> Result<bool, HandlerError> {
-    let runtime = current_runtime().map_err(HandlerError::from)?;
+async fn workspace_degraded(pool: &PgPool, turn: &SessionTurn) -> Result<bool, HandlerError> {
     let scope = ScopeContext::workspace(turn.workspace_id.clone());
-    let mut conn = ScopedConn::begin(runtime.pool(), &scope)
+    let mut conn = ScopedConn::begin(pool, &scope)
         .await
         .map_err(HandlerError::from)?;
     let degraded = sqlx::query_scalar::<_, bool>(

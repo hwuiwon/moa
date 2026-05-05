@@ -5,15 +5,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use moa_core::{Event, EventRange, ModelId, SessionId, SessionStatus};
+use sqlx::PgPool;
 use tempfile::TempDir;
 use tokio::time::sleep;
 
+use crate::support::graph_ingest::{test_database_url, wait_for_ingested_brain_responses};
 use crate::support::restate_runtime::{OrchestratorPorts, reserve_orchestrator_ports};
 use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, test_session_meta, user_message,
 };
-
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:5432/moa";
 
 async fn register_deployment(endpoint_url: &str) -> Result<()> {
     for _attempt in 0..15 {
@@ -46,20 +46,18 @@ fn spawn_orchestrator(
     memory_dir: &TempDir,
     sandbox_dir: &TempDir,
 ) -> Result<Child> {
-    let postgres_url = std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string());
-
     Command::new(env!("CARGO_BIN_EXE_moa-orchestrator"))
         .arg("--port")
         .arg(ports.restate.to_string())
         .arg("--health-port")
         .arg(ports.health.to_string())
-        .env("POSTGRES_URL", postgres_url)
+        .env("POSTGRES_URL", test_database_url())
         .env("MOA_MEMORY_DIR", memory_dir.path())
         .env("MOA_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_DOCKER_ENABLED", "false")
         .env("RUST_LOG", "info")
+        .env_remove("COHERE_API_KEY")
+        .env_remove("MOA_COHERE_API_KEY")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -106,6 +104,9 @@ async fn session_brain_round_trip_through_restate() -> Result<()> {
     let mut meta = test_session_meta("session-brain-e2e");
     meta.model = ModelId::new(model);
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
+    let pool = PgPool::connect(&test_database_url())
+        .await
+        .context("connect to test Postgres")?;
 
     let result = async {
         register_deployment(endpoint_url.as_str()).await?;
@@ -158,6 +159,7 @@ async fn session_brain_round_trip_through_restate() -> Result<()> {
                 .any(|record| matches!(record.event, Event::BrainResponse { .. })),
             "expected a persisted BrainResponse event for session {session_id}"
         );
+        wait_for_ingested_brain_responses(&pool, &meta.workspace_id, session_id, &events).await?;
 
         Ok(())
     }
@@ -165,6 +167,7 @@ async fn session_brain_round_trip_through_restate() -> Result<()> {
 
     let _ = orchestrator.kill();
     let _ = orchestrator.wait();
+    pool.close().await;
 
     result
 }

@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_core::{
     CompletionRequest, CompletionResponse, Event, LLMProvider, MoaError, ModelCapabilities,
     ModelId, ModelTier, QueryRewriteConfig, SessionId, TokenPricing, TokenUsage, UserId,
     WorkspaceId, record_llm_cost_cents,
 };
-use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 use restate_sdk::prelude::*;
 use serde_json::Value;

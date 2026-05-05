@@ -9,14 +9,13 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
     BrainOrchestrator, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
-    ConfidenceLevel, ContextMessage, Event, EventRange, EventType, LLMProvider, LiveEvent,
-    MemoryPath, MemoryScope, MemoryStore, MessageRole, MoaConfig, MoaError, PageType, Platform,
-    Result, RuntimeEvent, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
-    SessionStatus, SessionStore, StartSessionRequest, TokenPricing, TokenUsage, ToolCallFormat,
-    ToolOutput, UserId, UserMessage, WikiPage, WorkspaceId,
+    ContextMessage, Event, EventRange, EventRecord, EventType, LLMProvider, LiveEvent, MessageRole,
+    MoaConfig, MoaError, Platform, Result, RuntimeEvent, SessionFilter, SessionHandle, SessionId,
+    SessionMeta, SessionSignal, SessionStatus, SessionStore, StartSessionRequest, TokenPricing,
+    TokenUsage, ToolCallFormat, ToolOutput, UserId, UserMessage, WorkspaceId,
 };
 use moa_hands::{ToolRegistry, ToolRouter};
-use moa_memory::FileMemoryStore;
+use moa_orchestrator::DeadMemoryStoreShim;
 use moa_orchestrator_local::LocalOrchestrator;
 use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, testing};
@@ -272,17 +271,7 @@ async fn test_orchestrator_with_provider(
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
     let session_store = timed_test_stage("local:create_test_store", create_test_store()).await?;
-    let memory_store = Arc::new(
-        timed_test_stage(
-            "local:create_memory_store",
-            FileMemoryStore::from_config_with_pool(
-                &config,
-                Arc::new(session_store.pool().clone()),
-                session_store.schema_name(),
-            ),
-        )
-        .await?,
-    );
+    let memory_store = Arc::new(DeadMemoryStoreShim);
     let tool_router = Arc::new(
         timed_test_stage(
             "local:create_tool_router",
@@ -297,7 +286,6 @@ async fn test_orchestrator_with_provider(
         LocalOrchestrator::new(
             config,
             session_store,
-            memory_store,
             Arc::new(ModelRouter::new(provider, None)),
             tool_router,
         ),
@@ -339,17 +327,7 @@ async fn test_orchestrator_with_config_router_and_store(
     session_store: Arc<PostgresSessionStore>,
 ) -> Result<LocalOrchestrator> {
     disable_query_rewrite(&mut config);
-    let memory_store = Arc::new(
-        timed_test_stage(
-            "local:create_memory_store",
-            FileMemoryStore::from_config_with_pool(
-                &config,
-                Arc::new(session_store.pool().clone()),
-                session_store.schema_name(),
-            ),
-        )
-        .await?,
-    );
+    let memory_store = Arc::new(DeadMemoryStoreShim);
     let tool_router = Arc::new(
         timed_test_stage(
             "local:create_tool_router",
@@ -361,13 +339,7 @@ async fn test_orchestrator_with_config_router_and_store(
     );
     timed_test_stage(
         "local:create_orchestrator",
-        LocalOrchestrator::new(
-            config,
-            session_store,
-            memory_store,
-            model_router,
-            tool_router,
-        ),
+        LocalOrchestrator::new(config, session_store, model_router, tool_router),
     )
     .await
 }
@@ -380,6 +352,22 @@ fn cwd_lock() -> &'static AsyncMutex<()> {
 async fn create_test_store() -> Result<Arc<PostgresSessionStore>> {
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     Ok(Arc::new(store))
+}
+
+async fn graph_node_count(store: &PostgresSessionStore, workspace_id: &WorkspaceId) -> Result<i64> {
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)::bigint
+        FROM moa.node_index
+        WHERE workspace_id = $1
+          AND valid_to IS NULL
+        "#,
+    )
+    .bind(workspace_id.as_str())
+    .fetch_one(store.pool())
+    .await
+    .map_err(|error| MoaError::StorageError(error.to_string()))?;
+    Ok(count)
 }
 
 async fn timed_test_stage<F, T>(stage: &'static str, future: F) -> T
@@ -814,6 +802,35 @@ async fn wait_for_status_with_timeout(
     }
 }
 
+async fn wait_for_status_event(
+    orchestrator: &LocalOrchestrator,
+    session_id: SessionId,
+    expected: SessionStatus,
+) -> Result<Vec<EventRecord>> {
+    let deadline = Instant::now() + ASYNC_TEST_DEADLINE;
+    loop {
+        let events = orchestrator
+            .session_store()
+            .get_events(session_id, EventRange::all())
+            .await?;
+        if events.iter().any(|record| {
+            matches!(
+                &record.event,
+                Event::SessionStatusChanged { to, .. } if *to == expected
+            )
+        }) {
+            return Ok(events);
+        }
+        if Instant::now() >= deadline {
+            return Err(MoaError::ProviderError(format!(
+                "timed out waiting for status event {:?}",
+                expected
+            )));
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn wait_for_brain_response_count_with_timeout(
     orchestrator: &LocalOrchestrator,
     session_id: SessionId,
@@ -1200,10 +1217,8 @@ async fn soft_cancel_marks_session_cancelled() -> Result<()> {
         .await?;
 
     wait_for_status(&orchestrator, session.session_id, SessionStatus::Cancelled).await?;
-    let events = orchestrator
-        .session_store()
-        .get_events(session.session_id, EventRange::all())
-        .await?;
+    let events =
+        wait_for_status_event(&orchestrator, session.session_id, SessionStatus::Cancelled).await?;
     assert!(events.iter().any(|record| matches!(
         record.event,
         Event::SessionStatusChanged {
@@ -1448,14 +1463,7 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
     disable_query_rewrite(&mut reopened_config);
     reopened_config.local.memory_dir = dir.path().join("memory").display().to_string();
     reopened_config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
-    let reopened_memory = Arc::new(
-        FileMemoryStore::from_config_with_pool(
-            &reopened_config,
-            Arc::new(reopened_store.pool().clone()),
-            reopened_store.schema_name(),
-        )
-        .await?,
-    );
+    let reopened_memory = Arc::new(DeadMemoryStoreShim);
     let reopened_provider: Arc<dyn LLMProvider> = Arc::new(MockProvider {
         model: reopened_config.general.default_model.clone(),
         first_turn_delay: Duration::from_millis(5),
@@ -1469,7 +1477,6 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
     let reopened = LocalOrchestrator::new(
         reopened_config,
         reopened_store,
-        reopened_memory,
         Arc::new(ModelRouter::new(reopened_provider, None)),
         reopened_router,
     )
@@ -2227,14 +2234,7 @@ async fn completed_tool_turn_destroys_cached_hand() -> Result<()> {
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
     let session_store = create_test_store().await?;
-    let memory_store = Arc::new(
-        FileMemoryStore::from_config_with_pool(
-            &config,
-            Arc::new(session_store.pool().clone()),
-            session_store.schema_name(),
-        )
-        .await?,
-    );
+    let memory_store = Arc::new(DeadMemoryStoreShim);
     let provider = Arc::new(DestroyTrackingHandProvider {
         provisioned: Arc::new(AtomicUsize::new(0)),
         destroyed: Arc::new(AtomicUsize::new(0)),
@@ -2259,7 +2259,6 @@ async fn completed_tool_turn_destroys_cached_hand() -> Result<()> {
     let orchestrator = LocalOrchestrator::new(
         config,
         session_store,
-        memory_store,
         Arc::new(ModelRouter::new(llm_provider, None)),
         tool_router,
     )
@@ -2454,225 +2453,34 @@ async fn list_sessions_includes_active_session() -> Result<()> {
 }
 
 #[tokio::test]
-async fn memory_maintenance_runs_due_workspace_consolidation() -> Result<()> {
-    let (dir, orchestrator) = test_orchestrator().await?;
-    let memory_store = FileMemoryStore::new(dir.path()).await?;
-    let session_store = orchestrator.session_store();
-    let workspace_id = WorkspaceId::new("ws1");
-    let user_id = UserId::new("u1");
-    let now = chrono::Utc::now();
-
-    memory_store
-        .write_page(
-            &MemoryScope::Workspace {
-                workspace_id: workspace_id.clone(),
-            },
-            &"topics/architecture.md".into(),
-            WikiPage {
-                path: None,
-                title: "Architecture".to_string(),
-                page_type: PageType::Topic,
-                content: "# Architecture\n\nRefresh tokens rotate today.\n".to_string(),
-                created: now,
-                updated: now - chrono::Duration::days(40),
-                confidence: ConfidenceLevel::High,
-                related: Vec::new(),
-                sources: Vec::new(),
-                tags: Vec::new(),
-                auto_generated: false,
-                last_referenced: now - chrono::Duration::days(40),
-                reference_count: 0,
-                metadata: std::collections::HashMap::new(),
-            },
-        )
-        .await?;
-
-    for index in 0..3 {
-        session_store
-            .create_session(SessionMeta {
-                id: SessionId::new(),
-                workspace_id: workspace_id.clone(),
-                user_id: user_id.clone(),
-                title: Some(format!("finished-{index}")),
-                status: SessionStatus::Completed,
-                platform: Platform::Cli,
-                model: moa_core::ModelId::new("test-model"),
-                created_at: now,
-                updated_at: now,
-                completed_at: Some(now),
-                ..SessionMeta::default()
-            })
-            .await?;
-    }
+async fn graph_memory_maintenance_is_noop() -> Result<()> {
+    let (_dir, orchestrator) = test_orchestrator().await?;
 
     let reports = orchestrator.run_memory_maintenance_once().await?;
 
-    assert_eq!(reports.len(), 1);
-    assert!(reports[0].relative_dates_normalized >= 1);
-    let architecture = memory_store
-        .read_page(
-            &MemoryScope::Workspace { workspace_id },
-            &"topics/architecture.md".into(),
-        )
-        .await?;
-    assert!(architecture.content.contains("20"));
-
+    assert!(reports.is_empty());
     Ok(())
 }
 
 #[tokio::test]
-async fn memory_maintenance_skips_when_threshold_or_cooldown_not_met() -> Result<()> {
-    let (dir, orchestrator) = test_orchestrator().await?;
-    let memory_store = FileMemoryStore::new(dir.path()).await?;
-    let session_store = orchestrator.session_store();
-    let workspace_id = WorkspaceId::new("ws1");
-    let user_id = UserId::new("u1");
-    let now = chrono::Utc::now();
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
-
-    memory_store
-        .write_page(
-            &scope,
-            &"topics/architecture.md".into(),
-            WikiPage {
-                path: None,
-                title: "Architecture".to_string(),
-                page_type: PageType::Topic,
-                content: "# Architecture\n\nRefresh tokens rotate today.\n".to_string(),
-                created: now,
-                updated: now - chrono::Duration::days(40),
-                confidence: ConfidenceLevel::High,
-                related: Vec::new(),
-                sources: Vec::new(),
-                tags: Vec::new(),
-                auto_generated: false,
-                last_referenced: now - chrono::Duration::days(40),
-                reference_count: 0,
-                metadata: std::collections::HashMap::new(),
-            },
-        )
-        .await?;
-
-    for index in 0..2 {
-        session_store
-            .create_session(SessionMeta {
-                id: SessionId::new(),
-                workspace_id: workspace_id.clone(),
-                user_id: user_id.clone(),
-                title: Some(format!("finished-{index}")),
-                status: SessionStatus::Completed,
-                platform: Platform::Cli,
-                model: moa_core::ModelId::new("test-model"),
-                created_at: now,
-                updated_at: now,
-                completed_at: Some(now),
-                ..SessionMeta::default()
-            })
-            .await?;
-    }
+async fn graph_memory_maintenance_stays_noop_across_repeated_checks() -> Result<()> {
+    let (_dir, orchestrator) = test_orchestrator().await?;
 
     let first = orchestrator.run_memory_maintenance_once().await?;
-    assert!(first.is_empty());
-
-    session_store
-        .create_session(SessionMeta {
-            id: SessionId::new(),
-            workspace_id: workspace_id.clone(),
-            user_id,
-            title: Some("finished-2".to_string()),
-            status: SessionStatus::Completed,
-            platform: Platform::Cli,
-            model: moa_core::ModelId::new("test-model"),
-            created_at: now,
-            updated_at: now,
-            completed_at: Some(now),
-            ..SessionMeta::default()
-        })
-        .await?;
-
     let second = orchestrator.run_memory_maintenance_once().await?;
-    assert_eq!(second.len(), 1);
 
-    let third = orchestrator.run_memory_maintenance_once().await?;
-    assert!(third.is_empty());
-
+    assert!(first.is_empty());
+    assert!(second.is_empty());
     Ok(())
 }
 
 #[tokio::test]
-async fn workspace_memory_bootstrap_copies_contributing_file_without_provider_call() -> Result<()> {
+async fn workspace_graph_memory_bootstrap_ingests_agents_file_without_provider_call() -> Result<()>
+{
     let _cwd_guard = cwd_lock().lock().await;
     let workspace = tempfile::tempdir()?;
     tokio::fs::write(
-        workspace.path().join("CONTRIBUTING.md"),
-        "# Project Agent Instructions\n\nUse bootmarkeralpha when describing this project.\n",
-    )
-    .await?;
-    let _dir_guard = CurrentDirGuard::set(workspace.path())?;
-
-    let base = tempfile::tempdir()?;
-    let mut config = MoaConfig::default();
-    config.memory.auto_bootstrap = true;
-    config.database.url = testing::test_database_url();
-    config.local.memory_dir = base.path().join("memory").display().to_string();
-    config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
-        model: config.general.default_model.clone(),
-        first_turn_delay: Duration::from_millis(5),
-        requests: requests.clone(),
-    });
-    let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
-
-    orchestrator
-        .start_session(StartSessionRequest {
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
-            platform: Platform::Cli,
-            model: moa_core::ModelId::new(orchestrator.model()),
-            initial_message: None,
-            title: None,
-            parent_session_id: None,
-        })
-        .await?;
-
-    let index = orchestrator
-        .memory_store()
-        .get_index(&MemoryScope::Workspace {
-            workspace_id: WorkspaceId::new("workspace"),
-        })
-        .await?;
-    assert!(index.contains("Project instructions loaded from `CONTRIBUTING.md`"));
-    let project = orchestrator
-        .memory_store()
-        .read_page(
-            &MemoryScope::Workspace {
-                workspace_id: WorkspaceId::new("workspace"),
-            },
-            &"topics/project.md".into(),
-        )
-        .await?;
-    assert!(project.content.contains("Use bootmarkeralpha"));
-    assert_eq!(requests.lock().expect("request log lock poisoned").len(), 0);
-
-    let sentinel = base
-        .path()
-        .join("workspaces")
-        .join("workspace")
-        .join("memory")
-        .join("_bootstrap.json");
-    assert!(tokio::fs::try_exists(&sentinel).await?);
-    Ok(())
-}
-
-#[tokio::test]
-async fn workspace_memory_bootstrap_informs_first_turn_from_instruction_file() -> Result<()> {
-    let _cwd_guard = cwd_lock().lock().await;
-    let workspace = tempfile::tempdir()?;
-    tokio::fs::write(
-        workspace.path().join("CONTRIBUTING.md"),
+        workspace.path().join("AGENTS.md"),
         "# Project Agent Instructions\n\nbootmarkeralpha is the canonical bootstrap marker.\n",
     )
     .await?;
@@ -2691,10 +2499,55 @@ async fn workspace_memory_bootstrap_informs_first_turn_from_instruction_file() -
         requests: requests.clone(),
     });
     let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
+    let workspace_id = WorkspaceId::new("workspace-bootstrap-ingest");
+
+    orchestrator
+        .start_session(StartSessionRequest {
+            workspace_id: workspace_id.clone(),
+            user_id: UserId::new("user"),
+            platform: Platform::Cli,
+            model: moa_core::ModelId::new(orchestrator.model()),
+            initial_message: None,
+            title: None,
+            parent_session_id: None,
+        })
+        .await?;
+
+    let count = graph_node_count(orchestrator.session_store().as_ref(), &workspace_id).await?;
+    assert!(count > 0, "expected graph bootstrap to write nodes");
+    assert_eq!(requests.lock().expect("request log lock poisoned").len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_memory_bootstrap_informs_first_turn_from_instruction_file() -> Result<()> {
+    let _cwd_guard = cwd_lock().lock().await;
+    let workspace = tempfile::tempdir()?;
+    tokio::fs::write(
+        workspace.path().join("AGENTS.md"),
+        "# Project Agent Instructions\n\nbootmarkeralpha is the canonical bootstrap marker.\n",
+    )
+    .await?;
+    let _dir_guard = CurrentDirGuard::set(workspace.path())?;
+
+    let base = tempfile::tempdir()?;
+    let mut config = MoaConfig::default();
+    config.memory.auto_bootstrap = true;
+    config.database.url = testing::test_database_url();
+    config.local.memory_dir = base.path().join("memory").display().to_string();
+    config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
+        model: config.general.default_model.clone(),
+        first_turn_delay: Duration::from_millis(5),
+        requests: requests.clone(),
+    });
+    let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
+    let workspace_id = WorkspaceId::new("workspace-bootstrap-prompt");
 
     let session = orchestrator
         .start_session(StartSessionRequest {
-            workspace_id: WorkspaceId::new("workspace"),
+            workspace_id,
             user_id: UserId::new("user"),
             platform: Platform::Cli,
             model: moa_core::ModelId::new(orchestrator.model()),
@@ -2720,12 +2573,12 @@ async fn workspace_memory_bootstrap_informs_first_turn_from_instruction_file() -
 }
 
 #[tokio::test]
-async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> Result<()> {
+async fn workspace_graph_memory_bootstrap_skips_when_nodes_already_exist() -> Result<()> {
     let _cwd_guard = cwd_lock().lock().await;
     let workspace = tempfile::tempdir()?;
     tokio::fs::write(
-        workspace.path().join("CONTRIBUTING.md"),
-        "# Project Agent Instructions\n\nversion-one\n",
+        workspace.path().join("AGENTS.md"),
+        "# Project Agent Instructions\n\nFact: version-one is the canonical bootstrap marker.\n",
     )
     .await?;
     let _dir_guard = CurrentDirGuard::set(workspace.path())?;
@@ -2743,10 +2596,11 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
         requests: requests.clone(),
     });
     let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
+    let workspace_id = WorkspaceId::new("workspace-bootstrap-skip");
 
     orchestrator
         .start_session(StartSessionRequest {
-            workspace_id: WorkspaceId::new("workspace"),
+            workspace_id: workspace_id.clone(),
             user_id: UserId::new("user"),
             platform: Platform::Cli,
             model: moa_core::ModelId::new(orchestrator.model()),
@@ -2755,34 +2609,18 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
             parent_session_id: None,
         })
         .await?;
-    let project_path: MemoryPath = "topics/project.md".into();
-    let project = orchestrator
-        .memory_store()
-        .read_page(
-            &MemoryScope::Workspace {
-                workspace_id: WorkspaceId::new("workspace"),
-            },
-            &project_path,
-        )
-        .await?;
-    assert!(project.content.contains("version-one"));
-
-    let sentinel = base
-        .path()
-        .join("workspaces")
-        .join("workspace")
-        .join("memory")
-        .join("_bootstrap.json");
-    assert!(tokio::fs::try_exists(&sentinel).await?);
+    let first_count =
+        graph_node_count(orchestrator.session_store().as_ref(), &workspace_id).await?;
+    assert!(first_count > 0);
 
     tokio::fs::write(
-        workspace.path().join("CONTRIBUTING.md"),
-        "# Project Agent Instructions\n\nversion-two\n",
+        workspace.path().join("AGENTS.md"),
+        "# Project Agent Instructions\n\nFact: version-two is the canonical bootstrap marker.\n",
     )
     .await?;
     orchestrator
         .start_session(StartSessionRequest {
-            workspace_id: WorkspaceId::new("workspace"),
+            workspace_id: workspace_id.clone(),
             user_id: UserId::new("user"),
             platform: Platform::Cli,
             model: moa_core::ModelId::new(orchestrator.model()),
@@ -2791,40 +2629,9 @@ async fn workspace_memory_bootstrap_sentinel_prevents_rerun_until_deleted() -> R
             parent_session_id: None,
         })
         .await?;
-    let project = orchestrator
-        .memory_store()
-        .read_page(
-            &MemoryScope::Workspace {
-                workspace_id: WorkspaceId::new("workspace"),
-            },
-            &project_path,
-        )
-        .await?;
-    assert!(project.content.contains("version-one"));
-    assert!(!project.content.contains("version-two"));
-
-    tokio::fs::remove_file(&sentinel).await?;
-    orchestrator
-        .start_session(StartSessionRequest {
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
-            platform: Platform::Cli,
-            model: moa_core::ModelId::new(orchestrator.model()),
-            initial_message: None,
-            title: None,
-            parent_session_id: None,
-        })
-        .await?;
-    let project = orchestrator
-        .memory_store()
-        .read_page(
-            &MemoryScope::Workspace {
-                workspace_id: WorkspaceId::new("workspace"),
-            },
-            &project_path,
-        )
-        .await?;
-    assert!(project.content.contains("version-two"));
+    let second_count =
+        graph_node_count(orchestrator.session_store().as_ref(), &workspace_id).await?;
+    assert_eq!(second_count, first_count);
     assert_eq!(requests.lock().expect("request log lock poisoned").len(), 0);
 
     Ok(())
@@ -2835,7 +2642,7 @@ async fn workspace_memory_bootstrap_can_be_disabled() -> Result<()> {
     let _cwd_guard = cwd_lock().lock().await;
     let workspace = tempfile::tempdir()?;
     tokio::fs::write(
-        workspace.path().join("CONTRIBUTING.md"),
+        workspace.path().join("AGENTS.md"),
         "# Project Agent Instructions\n\nversion-one\n",
     )
     .await?;
@@ -2854,10 +2661,11 @@ async fn workspace_memory_bootstrap_can_be_disabled() -> Result<()> {
         requests: requests.clone(),
     });
     let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
+    let workspace_id = WorkspaceId::new("workspace-bootstrap-disabled");
 
     orchestrator
         .start_session(StartSessionRequest {
-            workspace_id: WorkspaceId::new("workspace"),
+            workspace_id: workspace_id.clone(),
             user_id: UserId::new("user"),
             platform: Platform::Cli,
             model: moa_core::ModelId::new(orchestrator.model()),
@@ -2867,21 +2675,8 @@ async fn workspace_memory_bootstrap_can_be_disabled() -> Result<()> {
         })
         .await?;
 
-    let index = orchestrator
-        .memory_store()
-        .get_index(&MemoryScope::Workspace {
-            workspace_id: WorkspaceId::new("workspace"),
-        })
-        .await?;
-    assert!(index.trim().is_empty());
-
-    let sentinel = base
-        .path()
-        .join("workspaces")
-        .join("workspace")
-        .join("memory")
-        .join("_bootstrap.json");
-    assert!(!tokio::fs::try_exists(&sentinel).await?);
+    let count = graph_node_count(orchestrator.session_store().as_ref(), &workspace_id).await?;
+    assert_eq!(count, 0);
     assert_eq!(requests.lock().expect("request log lock poisoned").len(), 0);
     Ok(())
 }

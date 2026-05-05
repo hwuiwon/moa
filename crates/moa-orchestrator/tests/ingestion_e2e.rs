@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
+use memory_ingest::{IngestApplyReport, SessionTurn, should_ingest_degraded};
 use moa_core::{SessionId, UserId, WorkspaceId};
-use moa_memory_ingest::{IngestApplyReport, SessionTurn, should_ingest_degraded};
 use sqlx::PgPool;
 use tempfile::TempDir;
 use tokio::sync::Mutex;

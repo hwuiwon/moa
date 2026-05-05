@@ -22,6 +22,8 @@ pub struct OrchestratorCtx {
     pub config: Arc<MoaConfig>,
     /// Session store used by Restate handlers.
     pub session_store: Arc<PostgresSessionStore>,
+    /// Postgres pool used by graph-memory retrieval and ingestion paths.
+    pub graph_pool: sqlx::PgPool,
     /// Memory store used during prompt compilation.
     pub memory_store: Arc<dyn MemoryStore>,
     /// Registry of configured LLM providers.

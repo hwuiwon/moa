@@ -18,26 +18,27 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use memory_ingest::{IngestApplyReport, SessionTurn, ingest_turn_direct_with_pool};
 use moa_brain::{
-    LoopDetector, StreamedTurnResult, build_default_pipeline_with_runtime_and_instructions,
-    run_streamed_turn_with_signals_stepwise, update_workspace_tool_stats,
+    GraphMemoryPipelineOptions, LoopDetector, StreamedTurnResult,
+    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
+    run_streamed_turn_with_signals_stepwise,
 };
 use moa_core::{
     BrainOrchestrator, BranchManager, BufferedUserMessage, CountedSessionStore, CronHandle,
-    CronSpec, Event, EventRange, EventRecord, EventStream, MemoryScope, MoaConfig, MoaError,
+    CronSpec, Event, EventRange, EventRecord, EventStream, MemoryStore, MoaConfig, MoaError,
     ModelTask, ObserveLevel, PendingSignal, Result, RuntimeEvent, SessionFilter, SessionHandle,
     SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, SessionSummary,
-    SessionTaskMonitor, StartSessionRequest, TurnLatencyCounters, TurnReplayCounters, UserMessage,
-    WorkspaceId, record_turn_event_persist_duration, record_turn_latency,
+    SessionTaskMonitor, StartSessionRequest, TurnLatencyCounters, TurnReplayCounters, UserId,
+    UserMessage, WorkspaceId, record_turn_event_persist_duration, record_turn_latency,
     scope_turn_latency_counters, scope_turn_replay_counters,
 };
 use moa_hands::ToolRouter;
-use moa_memory::{ConsolidationReport, FileMemoryStore, bootstrap};
+use moa_orchestrator::DeadMemoryStoreShim;
 use moa_providers::{ModelRouter, resolve_provider_selection};
 use moa_session::{
     NeonBranchManager, PostgresSessionStore, SessionEventStream, create_session_store,
 };
-use moa_skills::maybe_distill_skill_with_learning;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tokio_util::sync::CancellationToken;
@@ -50,13 +51,27 @@ use moa_orchestrator::session_engine::session_requires_processing;
 
 const TURN_EVENT_TAIL_LIMIT: usize = 16;
 
+/// Graph-memory maintenance result for one local check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphMemoryMaintenanceReport {
+    /// Human-readable description of the maintenance action.
+    pub summary: String,
+}
+
+#[derive(Debug, Clone)]
+struct GraphBootstrapReport {
+    source_file: Option<String>,
+    ingest: IngestApplyReport,
+}
+
 /// Local orchestrator backed by Tokio tasks and broadcast channels.
 #[derive(Clone)]
 pub struct LocalOrchestrator {
     config: Arc<MoaConfig>,
     session_store: Arc<PostgresSessionStore>,
     instrumented_session_store: Arc<dyn SessionStore>,
-    memory_store: Arc<FileMemoryStore>,
+    graph_pool: sqlx::PgPool,
+    legacy_memory_bridge: Arc<dyn MemoryStore>,
     model_router: Arc<ModelRouter>,
     tool_router: Arc<ToolRouter>,
     scheduler: Arc<JobScheduler>,
@@ -79,8 +94,8 @@ struct LocalBrainHandle {
 struct SessionTaskContext {
     config: Arc<MoaConfig>,
     session_store: Arc<dyn SessionStore>,
-    learning_store: Arc<PostgresSessionStore>,
-    memory_store: Arc<FileMemoryStore>,
+    graph_pool: sqlx::PgPool,
+    legacy_memory_bridge: Arc<dyn MemoryStore>,
     model_router: Arc<ModelRouter>,
     tool_router: Arc<ToolRouter>,
     session_id: SessionId,
@@ -92,7 +107,6 @@ impl LocalOrchestrator {
     pub async fn new(
         config: MoaConfig,
         session_store: Arc<PostgresSessionStore>,
-        memory_store: Arc<FileMemoryStore>,
         model_router: Arc<ModelRouter>,
         tool_router: Arc<ToolRouter>,
     ) -> Result<Self> {
@@ -107,12 +121,16 @@ impl LocalOrchestrator {
         let branch_manager = NeonBranchManager::maybe_from_config(&config)?.map(Arc::new);
         let instrumented_session_store: Arc<dyn SessionStore> =
             Arc::new(CountedSessionStore::new(session_store.clone()));
+        let graph_pool = session_store.pool().clone();
+        let legacy_memory_bridge: Arc<dyn MemoryStore> = Arc::new(DeadMemoryStoreShim);
+        let _ = memory_ingest::install_runtime_with_pool(graph_pool.clone());
         let session_task_monitor = SessionTaskMonitor::shared();
         let orchestrator = Self {
             config: Arc::new(config),
             session_store,
             instrumented_session_store,
-            memory_store,
+            graph_pool,
+            legacy_memory_bridge,
             model_router,
             tool_router,
             scheduler: Arc::new(scheduler),
@@ -148,29 +166,15 @@ impl LocalOrchestrator {
         config.set_main_model(selection.provider_name, selection.model_id);
 
         let session_store = create_session_store(&config).await?;
-        let memory_store = Arc::new(
-            FileMemoryStore::from_config_with_pool(
-                &config,
-                Arc::new(session_store.pool().clone()),
-                session_store.schema_name(),
-            )
-            .await?,
-        );
+        let legacy_memory_bridge: Arc<dyn MemoryStore> = Arc::new(DeadMemoryStoreShim);
         let tool_router = Arc::new(
-            ToolRouter::from_config(&config, memory_store.clone())
+            ToolRouter::from_config(&config, legacy_memory_bridge)
                 .await?
                 .with_rule_store(session_store.clone())
                 .with_session_store(session_store.clone()),
         );
         let model_router = Arc::new(ModelRouter::from_config(&config)?);
-        Self::new(
-            config,
-            session_store,
-            memory_store,
-            model_router,
-            tool_router,
-        )
-        .await
+        Self::new(config, session_store, model_router, tool_router).await
     }
 
     /// Returns the underlying local session store.
@@ -178,9 +182,9 @@ impl LocalOrchestrator {
         self.session_store.clone()
     }
 
-    /// Returns the underlying file-backed memory store.
-    pub fn memory_store(&self) -> Arc<FileMemoryStore> {
-        self.memory_store.clone()
+    /// Returns the temporary wiki-memory bridge used by unmigrated C04 surfaces.
+    pub fn memory_store(&self) -> Arc<dyn MemoryStore> {
+        self.legacy_memory_bridge.clone()
     }
 
     /// Returns the registered tool names exposed through the active router.
@@ -246,24 +250,13 @@ impl LocalOrchestrator {
         Ok(pruned)
     }
 
-    /// Runs the memory consolidation maintenance check immediately.
-    pub async fn run_memory_maintenance_once(&self) -> Result<Vec<ConsolidationReport>> {
-        let reports = self
-            .memory_store
-            .run_due_consolidations(self.session_store.as_ref())
-            .await?;
-
-        for report in &reports {
-            tracing::info!(
-                scope = ?report.scope,
-                pages_updated = report.pages_updated,
-                pages_deleted = report.pages_deleted,
-                contradictions_resolved = report.contradictions_resolved,
-                "completed scheduled memory consolidation"
-            );
-        }
-
-        Ok(reports)
+    /// Runs the graph-memory maintenance check immediately.
+    pub async fn run_memory_maintenance_once(&self) -> Result<Vec<GraphMemoryMaintenanceReport>> {
+        // MIGRATION: wiki consolidation rewrote markdown pages and regenerated MEMORY.md. Graph
+        // memory maintains sidecar/vector indexes incrementally on writes, so there is no local
+        // consolidation pass to run in C03.
+        tracing::debug!("graph memory maintenance has no scheduled local work");
+        Ok(Vec::new())
     }
 
     /// Returns the current persisted session snapshot.
@@ -329,8 +322,8 @@ impl LocalOrchestrator {
         let context = SessionTaskContext {
             config: Arc::clone(&self.config),
             session_store: self.instrumented_session_store.clone(),
-            learning_store: self.session_store.clone(),
-            memory_store: self.memory_store.clone(),
+            graph_pool: self.graph_pool.clone(),
+            legacy_memory_bridge: self.legacy_memory_bridge.clone(),
             model_router: self.model_router.clone(),
             tool_router: self.tool_router.clone(),
             session_id,
@@ -442,25 +435,11 @@ impl LocalOrchestrator {
     }
 
     async fn register_memory_maintenance_job(&self) -> Result<()> {
-        let memory_store = self.memory_store.clone();
-        let session_store = self.session_store.clone();
         let job = Job::new_async("0 0 * * * *", move |_id, _lock| {
-            let memory_store = memory_store.clone();
-            let session_store = session_store.clone();
             Box::pin(async move {
-                match memory_store
-                    .run_due_consolidations(session_store.as_ref())
-                    .await
-                {
-                    Ok(reports) => tracing::info!(
-                        count = reports.len(),
-                        "completed hourly memory maintenance check"
-                    ),
-                    Err(error) => tracing::error!(
-                        error = %error,
-                        "hourly memory maintenance check failed"
-                    ),
-                }
+                // MIGRATION: graph indexes are updated by writes; the hourly wiki consolidation
+                // job is intentionally a no-op until graph-native maintenance exists.
+                tracing::debug!("hourly graph memory maintenance check has no local work");
             })
         })
         .map_err(|error| MoaError::ProviderError(error.to_string()))?;
@@ -502,29 +481,30 @@ impl LocalOrchestrator {
     async fn maybe_bootstrap_workspace_memory(
         &self,
         workspace_id: &WorkspaceId,
-    ) -> Option<bootstrap::BootstrapReport> {
+    ) -> Option<GraphBootstrapReport> {
         if !self.config.memory.auto_bootstrap {
             return None;
         }
 
-        let scope = MemoryScope::Workspace {
-            workspace_id: workspace_id.clone(),
-        };
-        let should_bootstrap =
-            match bootstrap::should_bootstrap(self.memory_store.as_ref(), &scope).await {
-                Ok(should_bootstrap) => should_bootstrap,
-                Err(error) => {
-                    tracing::warn!(
-                        workspace_id = %workspace_id,
-                        error = %error,
-                        "failed to inspect workspace memory bootstrap state"
-                    );
-                    return None;
-                }
-            };
-        if !should_bootstrap {
-            return None;
+        match workspace_has_graph_nodes(&self.graph_pool, workspace_id).await {
+            Ok(true) => return None,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    error = %error,
+                    "failed to inspect graph memory bootstrap state"
+                );
+                return None;
+            }
         }
+
+        let instructions = self
+            .discovered_workspace_instructions
+            .read()
+            .await
+            .get(workspace_id)
+            .cloned()?;
 
         let workspace_path = match detect_workspace_path(workspace_id).await {
             Ok(path) => path,
@@ -537,48 +517,44 @@ impl LocalOrchestrator {
                 return None;
             }
         };
-        let workspace_name = workspace_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or("workspace");
+        let source_file = workspace_path.join("AGENTS.md");
+        let source_file_display = source_file.display().to_string();
 
         tracing::info!(
             workspace_id = %workspace_id,
-            workspace_path = %workspace_path.display(),
-            "empty workspace memory detected; bootstrapping from instruction file"
+            source_file = %source_file_display,
+            "empty graph memory detected; bootstrapping from workspace instruction file"
         );
 
-        match bootstrap::run_bootstrap(
-            self.memory_store.as_ref(),
-            &scope,
-            &workspace_path,
-            workspace_name,
-        )
-        .await
-        {
+        let turn = SessionTurn {
+            workspace_id: workspace_id.clone(),
+            user_id: UserId::new("system"),
+            session_id: SessionId::new(),
+            turn_seq: 0,
+            transcript: format!("Workspace instructions from AGENTS.md:\n\n{instructions}"),
+            dominant_pii_class: "pii".to_string(),
+            finalized_at: Utc::now(),
+        };
+        match ingest_turn_direct_with_pool(self.graph_pool.clone(), turn).await {
             Ok(report) => {
-                if let Some(source_file) = &report.source_file {
-                    tracing::info!(
-                        workspace_id = %workspace_id,
-                        source_file = %source_file,
-                        pages_created = report.pages_created.len(),
-                        "workspace memory bootstrapped from instruction file"
-                    );
-                } else {
-                    tracing::info!(
-                        workspace_id = %workspace_id,
-                        pages_created = report.pages_created.len(),
-                        "workspace memory bootstrapped with minimal index"
-                    );
-                }
-                Some(report)
+                tracing::info!(
+                    workspace_id = %workspace_id,
+                    inserted = report.inserted,
+                    superseded = report.superseded,
+                    skipped = report.skipped,
+                    failed = report.failed,
+                    "workspace graph memory bootstrapped from instruction file"
+                );
+                Some(GraphBootstrapReport {
+                    source_file: Some(source_file_display),
+                    ingest: report,
+                })
             }
             Err(error) => {
                 tracing::warn!(
                     workspace_id = %workspace_id,
-                    error = %error,
-                    "workspace memory bootstrap failed"
+                    error = ?error,
+                    "workspace graph memory bootstrap failed"
                 );
                 None
             }
@@ -699,12 +675,17 @@ impl BrainOrchestrator for LocalOrchestrator {
         }
         self.spawn_session(session_id, req.initial_message.is_some(), Vec::new())
             .await?;
-        if bootstrap_report.is_some() {
+        if let Some(report) = bootstrap_report {
             let sessions = self.sessions.read().await;
             if let Some(handle) = sessions.get(&session_id) {
-                let _ = handle.runtime_tx.send(RuntimeEvent::Notice(
-                    "Workspace memory initialized from project instructions.".to_string(),
-                ));
+                let source = report
+                    .source_file
+                    .as_deref()
+                    .unwrap_or("workspace instructions");
+                let total = report.ingest.inserted + report.ingest.superseded;
+                let _ = handle.runtime_tx.send(RuntimeEvent::Notice(format!(
+                    "Workspace graph memory initialized from {source} ({total} nodes written)."
+                )));
             }
         }
         Ok(SessionHandle { session_id })
@@ -869,13 +850,21 @@ async fn run_session_task(
     cancel_token: CancellationToken,
     hard_cancel_token: CancellationToken,
 ) -> Result<()> {
-    let pipeline = build_default_pipeline_with_runtime_and_instructions(
+    let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         &context.config,
         context.session_store.clone(),
-        context.memory_store.clone(),
-        Some(context.model_router.provider_for(ModelTask::Summarization)),
-        context.discovered_workspace_instructions.clone(),
-        context.tool_router.tool_schemas(),
+        context.legacy_memory_bridge.clone(),
+        GraphMemoryPipelineOptions {
+            graph_pool: context.graph_pool.clone(),
+            compaction_llm_provider: Some(
+                context.model_router.provider_for(ModelTask::Summarization),
+            ),
+            query_rewrite_llm_provider: Some(
+                context.model_router.provider_for(ModelTask::Summarization),
+            ),
+            discovered_workspace_instructions: context.discovered_workspace_instructions.clone(),
+            tool_schemas: context.tool_router.tool_schemas(),
+        },
     );
     let max_turns = context.config.session_limits.max_turns;
     let loop_detection_threshold = context.config.session_limits.loop_detection_threshold;
@@ -1081,38 +1070,15 @@ async fn run_session_task(
                                 .session_store
                                 .get_events(context.session_id, EventRange::all())
                                 .await?;
-                            if let Some(skill) = maybe_distill_skill_with_learning(
-                                &context.config,
-                                &session,
-                                &events,
-                                context.memory_store.clone(),
-                                context.model_router.clone(),
-                                Some(context.learning_store.clone()),
-                            )
-                            .await?
-                            {
-                                append_event(
-                                    &context.session_store,
-                                    &event_tx,
-                                    context.session_id,
-                                    Event::MemoryWrite {
-                                        path: skill.path.to_string(),
-                                        scope: session.workspace_id.to_string(),
-                                        summary: format!("Distilled skill {}", skill.name),
-                                    },
-                                )
-                                .await?;
-                                let _ = runtime_tx.send(RuntimeEvent::Notice(format!(
-                                    "Distilled skill: {}",
-                                    skill.name
-                                )));
-                            }
+                            // MIGRATION: skill distillation still writes wiki pages in C03.
+                            // C04 moves skill persistence to the graph/registry path, so the
+                            // local runtime skips this post-turn wiki write for now.
+                            let _ = (session, events);
                             let persist_span = event_persist_span(0);
                             let persist_started = std::time::Instant::now();
                             async {
                                 refresh_workspace_tool_stats(
                                     &context.session_store,
-                                    &context.memory_store,
                                     context.session_id,
                                 )
                                 .await;
@@ -1172,7 +1138,6 @@ async fn run_session_task(
                             async {
                                 refresh_workspace_tool_stats(
                                     &context.session_store,
-                                    &context.memory_store,
                                     context.session_id,
                                 )
                                 .await;
@@ -1224,7 +1189,6 @@ async fn run_session_task(
                             async {
                                 refresh_workspace_tool_stats(
                                     &context.session_store,
-                                    &context.memory_store,
                                     context.session_id,
                                 )
                                 .await;
@@ -1421,19 +1385,12 @@ async fn update_status(
 
 async fn refresh_workspace_tool_stats(
     session_store: &Arc<dyn SessionStore>,
-    memory_store: &Arc<FileMemoryStore>,
     session_id: SessionId,
 ) {
-    if let Err(error) =
-        update_workspace_tool_stats(session_store.as_ref(), memory_store.as_ref(), &session_id)
-            .await
-    {
-        tracing::warn!(
-            session_id = %session_id,
-            error = %error,
-            "failed to refresh workspace tool stats"
-        );
-    }
+    let _ = session_store;
+    // MIGRATION: workspace tool stats are still stored as wiki pages. C04 moves this state to the
+    // graph/analytics path; until then the local runtime does not write wiki tool-stat pages.
+    tracing::debug!(session_id = %session_id, "skipped wiki-backed workspace tool stats refresh");
 }
 
 async fn append_event(
@@ -1492,6 +1449,25 @@ async fn detect_workspace_path(workspace_id: &WorkspaceId) -> Result<PathBuf> {
     }
 
     Ok(cwd)
+}
+
+async fn workspace_has_graph_nodes(
+    pool: &sqlx::PgPool,
+    workspace_id: &WorkspaceId,
+) -> Result<bool> {
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)::bigint
+        FROM moa.node_index
+        WHERE workspace_id = $1
+          AND valid_to IS NULL
+        "#,
+    )
+    .bind(workspace_id.as_str())
+    .fetch_one(pool)
+    .await
+    .map_err(|error| MoaError::StorageError(error.to_string()))?;
+    Ok(count > 0)
 }
 
 async fn report_session_task_failure(
@@ -1577,7 +1553,7 @@ async fn pause_active_session(
         queued_messages,
     )
     .await?;
-    refresh_workspace_tool_stats(&context.session_store, &context.memory_store, session_id).await;
+    refresh_workspace_tool_stats(&context.session_store, session_id).await;
     pause_session_task(
         &context.session_store,
         event_tx,

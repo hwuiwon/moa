@@ -8,7 +8,7 @@ use moa_core::{
     WorkspaceId,
 };
 use moa_hands::ToolRouter;
-use moa_memory::FileMemoryStore;
+use moa_orchestrator::DeadMemoryStoreShim;
 use moa_orchestrator_local::LocalOrchestrator;
 use moa_providers::{AnthropicProvider, GeminiProvider, ModelRouter, OpenAIProvider};
 use moa_session::{PostgresSessionStore, testing};
@@ -70,16 +70,10 @@ async fn live_orchestrator_with_provider(
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
-    let (session_store, _database_url, schema_name) = testing::create_isolated_test_store().await?;
+    let (session_store, _database_url, _schema_name) =
+        testing::create_isolated_test_store().await?;
     let session_store = Arc::new(session_store);
-    let memory_store = Arc::new(
-        FileMemoryStore::from_config_with_pool(
-            &config,
-            Arc::new(session_store.pool().clone()),
-            Some(&schema_name),
-        )
-        .await?,
-    );
+    let memory_store = Arc::new(DeadMemoryStoreShim);
     let tool_router = Arc::new(
         ToolRouter::from_config(&config, memory_store.clone())
             .await?
@@ -89,7 +83,6 @@ async fn live_orchestrator_with_provider(
     let orchestrator = LocalOrchestrator::new(
         config,
         session_store.clone(),
-        memory_store,
         Arc::new(ModelRouter::new(provider, None)),
         tool_router,
     )
