@@ -8,10 +8,10 @@ _Restate orchestration, local runtime mode, turn execution, and sub-agents._
 
 - Cloud runtime: `moa-orchestrator`
 - Local runtime: `moa-orchestrator-local`
-- Shared turn helpers: `moa-orchestrator/src/turn/`
-- Session VO: `moa-orchestrator/src/objects/session.rs`
-- Sub-agent VO: `moa-orchestrator/src/objects/sub_agent.rs`
-- Pipeline assembly: `moa-brain/src/pipeline/mod.rs`
+- Shared turn helpers: `crates/moa-orchestrator/src/turn/`
+- Session VO: `crates/moa-orchestrator/src/objects/session.rs`
+- Sub-agent VO: `crates/moa-orchestrator/src/objects/sub_agent.rs`
+- Pipeline assembly: `crates/moa-brain/src/pipeline/mod.rs`
 
 ## Cloud Runtime
 

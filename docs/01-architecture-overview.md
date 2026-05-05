@@ -51,7 +51,7 @@ Intent taxonomies are tenant-scoped because teams tend to repeat work patterns a
 
 ## Core Traits
 
-Current trait definitions live in `moa-core/src/traits.rs`; shared DTOs live under `moa-core/src/types/`.
+Current trait definitions live in `crates/moa-core/src/traits.rs`; shared DTOs live under `crates/moa-core/src/types/`.
 
 | Trait | Purpose | Main implementations |
 |---|---|---|

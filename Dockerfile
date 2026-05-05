@@ -8,7 +8,7 @@ RUN cargo build --locked --release -p moa-orchestrator
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=builder /build/target/release/moa-orchestrator /usr/local/bin/moa-orchestrator
-COPY --from=builder /build/moa-orchestrator/migrations /migrations
+COPY --from=builder /build/crates/moa-session/migrations /migrations
 
 USER nonroot
 ENTRYPOINT ["/usr/local/bin/moa-orchestrator"]

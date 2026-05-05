@@ -33,7 +33,7 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 9. **No `unwrap()` in library code.** Use `?` or explicit error handling.
 10. **Feature flags** control optional dependencies: `telegram`, `slack`, `discord`, `cloud`.
 11. **If `graphify-out/GRAPH_REPORT.md` exists, consult it before broad repo exploration or raw-file search.**
-12. **MOA crates live at the workspace root.** If a prompt references `crates/<name>/...`, translate it to `<name>/...`.
+12. **MOA crates live under `crates/`.** If a prompt references `<name>/...` for a workspace crate, translate it to `crates/<name>/...`.
 
 ## Conventions
 
@@ -46,7 +46,7 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 
 ## Desktop App
 
-- The desktop GUI lives in `moa-desktop/` and uses GPUI (from the Zed editor project).
+- The desktop GUI lives in `crates/moa-desktop/` and uses GPUI (from the Zed editor project).
 - `moa-desktop` is a workspace member but **not** a default member — build it explicitly with `cargo build -p moa-desktop`.
 - `moa-cli` and `moa-desktop` are separate binaries sharing the same backend crates.
 

@@ -21,7 +21,7 @@ Postgres stores:
 
 ## Core Tables
 
-The current migration lives in `moa-session/src/schema.rs`. The important tables are:
+The current migration lives in `crates/moa-session/src/schema.rs`. The important tables are:
 
 ```sql
 CREATE TABLE sessions (
@@ -96,7 +96,7 @@ The event table uses a generated `tsvector` column and a GIN index for cross-ses
 
 ## Event Types
 
-`moa-core/src/events.rs` defines the serialized event enum. Current major groups:
+`crates/moa-core/src/events.rs` defines the serialized event enum. Current major groups:
 
 | Group | Events |
 |---|---|

@@ -1,140 +1,141 @@
-# M00 — MOA Graph-Primary Memory: Prompt Pack Overview
+# M00 — Migration overview (third revision)
 
-_Read this before running any other prompt in the M-series._
+_This doc is the canonical map for the post-M19 work. It supersedes the previous reshape-pack M00. Read this before running anything._
 
-## What this pack does
+## Where we are
 
-This is the implementation prompt pack for replacing MOA's file-wiki memory system with a **graph-primary, bi-temporal memory architecture** built on Apache AGE (Postgres extension), pgvector, Turbopuffer (cloud opt-in), Cohere Embed v4, and Restate orchestration. It also adds the **3-tier scope prerequisite** (`MemoryScope::Global`) that the graph design hard-depends on.
+After M01–M19, the repo has both:
 
-The pack is **31 prompts (M00–M30)**, each self-contained and feedable to an LLM coding agent one at a time. Cleanup is **interleaved** — every prompt that introduces a replacement deletes what it replaces in the same step. There is no consolidated cleanup phase except the final crate-deletion sweep in M28.
+- **Legacy** file-wiki memory (`crates/moa-memory/`, `FileMemoryStore`, `MemoryStore` trait in `moa-core`) — still live, still wired into 32+ consumer sites.
+- **New** graph stack (`moa-memory-graph`, `moa-memory-vector`, `moa-memory-pii`, `moa-memory-ingest`) — built and unit-tested but not yet the only memory subsystem.
 
-**Out of scope for this pack** (sequenced separately):
-- Tool/skill overlay system (parallel track, separate M-pack to be created if needed).
-- Real platform connector implementations (Slack/Notion/Drive). M20 builds the abstract `Connector` trait + `MockConnector` only.
-- Multimodal embeddings (text-only Cohere v4 for v1; multimodal upgrade path preserved in schema via `embedding_model_version`).
+The work below cuts the legacy system out and finishes the graph stack's privacy/audit story.
 
-## How to use these prompts
+## Phase plan
 
-1. **Run them in order.** M01 depends on nothing prior; every later prompt depends on its predecessors. Skipping creates compile failures.
-2. **Feed one prompt at a time** to an LLM coding agent (Claude, GPT, etc.). Each prompt names every file the agent should read first, the exact tasks, acceptance criteria, and tests.
-3. **Verify acceptance criteria before moving on.** Each prompt has an "Acceptance criteria" section with concrete pass/fail signals. If the agent skips one, run the prompt again with explicit instruction to satisfy it.
-4. **Run the cleanup section.** Every prompt has a "Cleanup" section that deletes specific files/code. Cleanup is non-optional — it prevents dead code from accumulating.
+| Phase | Prompt | Purpose | Status |
+|-------|--------|---------|--------|
+| Structure | **S01** | Move every crate into `crates/` | Pending |
+| Cutover | **C00** | Read-only orientation | Pending |
+| Cutover | **C01** | Inventory all `moa_memory::*` consumers | Pending |
+| Cutover | **C02** | Reshape `moa-cli` memory commands | Pending |
+| Cutover | **C03** | Migrate orchestrators | Pending |
+| Cutover | **C04** | Migrate skills + tail consumers | Pending |
+| Cutover | **C05** | Delete `MemoryStore` trait + wiki types from `moa-core` | Pending |
+| Cutover | **C06** | Delete `moa-memory` crate | Pending |
+| Reshape | **R01** | Group `moa-memory-*` under `crates/moa-memory/` | Pending |
+| Reshape | **R02** | Type-location audit + delete connector stubs | Pending |
+| ~~Connectors~~ | ~~**M20**~~ | ~~Connector trait~~ | **DELETED** — connectors deferred indefinitely |
+| Privacy | **M21** | Envelope encryption — **decision-log only** | Replaces full implementation |
+| Audit | **M22** | pgaudit + S3 Object Lock | Unchanged from M-pack |
+| Privacy | **M23** | Privacy export CLI | Simplified — no decryption step |
+| Privacy | **M24** | Privacy erase CLI | Simplified — hard-purge only, no crypto-shred |
+| Privacy | **M25** | Cross-tenant pentest | 11 attacks; redaction-bypass replaces KEK substitution as 5i |
+| Audit | **M26** | Privacy audit GitHub Action | Unchanged |
+| Privacy | **M27** | DSAR runbook | Unchanged |
+| Cleanup | **M28** | Final cleanup + CI guardrails | Slimmed (C06 absorbed crate deletion) |
+| Privacy | **M29** | Privacy SLA dashboards | Unchanged |
+| Cleanup | **M30** | Architecture doc rewrite | Unchanged |
 
-## SOTA-pinned technology stack
+## Architectural decisions (locked)
 
-These versions were verified SOTA-credible as of late April 2026. Pin them in `Cargo.toml` and `docker-compose.yml`.
+These are baked into the prompts above. Future contributors should not relitigate without RFC.
 
-| Component | Version | Notes |
-|---|---|---|
-| PostgreSQL | **17.6+** (mandatory) | 17.5 has a logical-decoding bug that breaks Debezium |
-| Apache AGE | `release/PG17/1.7.0` | First-class RLS via PR #2309 |
-| pgvector | **0.8.2** | halfvec; 0.8.0 lacks iterative-scan and PG18 build fixes |
-| pgaudit | **17.x branch** | PG17 ABI |
-| Restate | **1.6.1+** | Feb 2026 patch fixes RocksDB rebalancing |
-| Debezium PostgreSQL connector | **V2 (3.5.x)** | V1 EOL March 2026 |
-| Turbopuffer | current | SOC2 Type 2, HIPAA BAA on Scale/Enterprise; BYOC GA |
-| Cohere Embed v4 | current | 1024-dim Matryoshka |
-| Cohere Rerank | **v4.0-fast** (interactive), **v4.0** (offline) | NOT v3; v4 released Dec 2025 |
-| openai/privacy-filter | HuggingFace `openai/privacy-filter` | Apache 2.0; ingestion-time PII classifier |
-| Rust UUID | `uuid` crate v1.x with `v7` feature | PG18 has native `uuidv7()` for future migration |
+1. **Full cutover from file-wiki to graph.** Both systems were live as of M19; that ended with C06.
+2. **`crates/` workspace layout.** Production convention; locked in S01.
+3. **`moa-memory/` folder grouping** for the four subcrates. Crate package names unchanged.
+4. **Connectors deferred indefinitely.** The connector track was originally M20; deleted from the plan. M14 stubs removed in R02. Future connector work, if any, lives in a new `moa-connectors/` crate gated behind an explicit RFC.
+5. **Envelope encryption deferred (Path A: redaction at ingestion is the privacy boundary).** M21 documents the decision; M22's pgaudit + Object Lock provide tamper-evidence; M24 is hard-purge only. If a future regulatory ask requires per-fact crypto-shred, design a Path B addendum at that time.
+6. **`moa-orchestrator-local`** stays the embedded runtime. Optional rename to `moa-orchestrator-embedded` in R02 — left to project judgment.
 
-## Old-component → replacement mapping
-
-This is the deletion ledger. Every entry is removed by the listed M-prompt. By the end of M28 nothing in the left column should remain in the codebase.
-
-| Old (deleted) | Replacement | Where deleted |
-|---|---|---|
-| `moa-memory` crate | `moa-memory-graph` + `moa-memory-vector` + `moa-memory-pii` + `moa-memory-ingest` | M28 |
-| `FileMemoryStore` impl | `GraphStore` trait (AGE adapter) | M07 |
-| `MemoryStore` trait | Split into `GraphStore` + `VectorStore` + `LexicalStore` | M07/M13 |
-| `MEMORY.md` handler | Graph nodes (Entity/Concept/Decision/Incident/Lesson/Fact) | M03/M07 |
-| `_log.md` handler | `moa.graph_changelog` table + Debezium feed | M06 |
-| Wiki branching/reconciliation | Bi-temporal SUPERSEDES edges + valid_time_end | M08 |
-| Page-level consolidation cron | Aging policy + LLM contradiction detector | M12 |
-| FileWiki tsvector index | `moa.node_index` sidecar + Postgres tsvector on properties | M04 |
-| On-disk skill loader (`skills/*.md`) | `moa.skill` Postgres rows | M18 |
-| Pre-3-tier `MemoryScope` enum | `MemoryScope::{Global, Workspace(_), User(_)}` | M01 |
-| Pre-3-tier RLS policies | 3-tier-aware RLS FORCE policies | M02 |
-| Cohere Rerank v3 | Cohere Rerank v4.0-fast / v4.0 | M15 |
-| (no PII classification) | `openai/privacy-filter` via `moa-memory-pii` | M09 |
-| (no atomic write protocol) | M08 single-tx write across graph+sidecar+vector+changelog | M08 |
-| (no audit immutability) | M22 pgaudit + S3 Object Lock 6yr | M22 |
-
-## Crate structure after the pack lands
-
-**Existing crates** (touched but not deleted):
-- `moa-core` (M01: scope enum)
-- `moa-brain` (M15/M16: hybrid retriever + planner)
-- `moa-cli` (M23/M24/M27: privacy + admin commands)
-- `moa-eval` (M25/M29: pen-test + golden e2e)
-- `moa-loadtest` (M30: perf gate)
-- `moa-orchestrator` (M10/M11: ingestion VOs)
-- `moa-runtime` (M02/M21: GUC discipline + envelope wiring)
-- `moa-security` (M21: KEK/DEK envelope)
-- `moa-skills` (M18/M19: Postgres-backed + cross-references)
-
-**New crates** (introduced by this pack):
-- `moa-memory-graph` — AGE adapter, Cypher templates, bi-temporal write protocol
-- `moa-memory-vector` — `VectorStore` trait, pgvector + Turbopuffer impls
-- `moa-memory-pii` — openai/privacy-filter helper (reusable across components)
-- `moa-memory-ingest` — slow/fast path ingestion, contradiction detector
-
-**Deleted crate**:
-- `moa-memory` (final removal in M28)
-
-## Phase plan at a glance
-
-| # | Title | Crate(s) touched |
-|---|---|---|
-| M01 | 3-tier `MemoryScope::Global` enum | moa-core |
-| M02 | 3-tier RLS + GUC discipline | moa-runtime, migrations |
-| M03 | Apache AGE bootstrap migration | migrations |
-| M04 | `moa.node_index` sidecar | migrations, moa-memory-graph |
-| M05 | `VectorStore` trait + pgvector impl | moa-memory-vector |
-| M06 | `graph_changelog` outbox + Debezium config | migrations, moa-memory-graph |
-| M07 | `moa-memory-graph` crate scaffold | moa-memory-graph |
-| M08 | Bi-temporal write protocol (atomic tx) | moa-memory-graph |
-| M09 | `moa-memory-pii` crate (privacy-filter) | moa-memory-pii |
-| M10 | Slow-path ingestion VO (Restate) | moa-memory-ingest, moa-orchestrator |
-| M11 | Fast-path ingestion (<500ms) | moa-memory-ingest |
-| M12 | Contradiction detector (RRF + LLM judge) | moa-memory-ingest |
-| M13 | Split vector code out of moa-memory | moa-memory-vector |
-| M14 | `moa-memory-ingest` crate scaffold | moa-memory-ingest |
-| M15 | Hybrid retriever (graph+vector+lexical, RRF k=60) | moa-brain |
-| M16 | Query planner (NER, scope, layer-bias) | moa-brain |
-| M17 | Read-time cache (changelog-version invalidation) | moa-brain, migrations |
-| M18 | Skills → Postgres rows | moa-skills |
-| M19 | Skill ↔ graph cross-references | moa-skills, moa-memory-graph |
-| M20 | `Connector` trait + `MockConnector` | moa-memory-ingest |
-| M21 | KEK/DEK envelope encryption | moa-security |
-| M22 | pgaudit + S3 Object Lock shipping | migrations, ops |
-| M23 | `moa privacy export` CLI | moa-cli |
-| M24 | `moa privacy erase` CLI (crypto-shred default) | moa-cli |
-| M25 | Cross-tenant pen-test suite | moa-eval |
-| M26 | Turbopuffer `VectorStore` impl | moa-memory-vector |
-| M27 | Workspace promotion (pgvector → Turbopuffer, dual-read) | moa-cli, moa-memory-vector |
-| M28 | DELETE `moa-memory` crate; final wiki sweep | (deletion) |
-| M29 | Validation: 100-fact golden e2e | moa-eval |
-| M30 | Performance gate (P95 ≤ 80ms @ 100 QPS) | moa-loadtest |
-
-## Conventions every prompt follows
+## Crate structure — end state (after R01)
 
 ```
-# Step MXX — title
-_one-line italicized goal_
-
-## 1 What this step is about    -- context, why
-## 2 Files to read              -- explicit file paths the agent must read first
-## 3 Goal                       -- what the deliverable looks like
-## 4 Rules                      -- non-negotiable constraints
-## 5 Tasks                      -- step-by-step (5a, 5b, ...)
-## 6 Deliverables               -- file list with line-count guidance
-## 7 Acceptance criteria        -- numbered, testable
-## 8 Tests                      -- how to verify
-## 9 Cleanup                    -- what to delete in this step
-## 10 What's next               -- pointer to next M-prompt
+moa/
+├── Cargo.toml
+├── architecture.md
+├── docs/
+│   ├── architecture/
+│   │   └── type-placement.md       ← R02
+│   └── migrations/
+│       └── moa-memory-inventory.md ← C01
+└── crates/
+    ├── moa-core/
+    ├── moa-brain/
+    ├── moa-cli/
+    ├── moa-desktop/
+    ├── moa-eval/
+    ├── moa-gateway/
+    ├── moa-hands/
+    ├── moa-loadtest/
+    ├── moa-memory/                 ← grouping parent
+    │   ├── README.md
+    │   ├── graph/                  ← moa-memory-graph crate
+    │   ├── vector/                 ← moa-memory-vector crate
+    │   ├── pii/                    ← moa-memory-pii crate
+    │   └── ingest/                 ← moa-memory-ingest crate
+    ├── moa-orchestrator/
+    ├── moa-orchestrator-local/     ← (or moa-orchestrator-embedded if renamed)
+    ├── moa-providers/
+    ├── moa-runtime/
+    ├── moa-security/
+    ├── moa-session/
+    └── moa-skills/
 ```
 
-## What's next
+## Old → replacement deletion ledger
 
-Run **M01** — Add `MemoryScope::Global` to `moa-core`. This is the only prerequisite the graph work depends on, and it's the smallest mechanical change in the pack.
+| Deleted | Replaced by | Where |
+|---------|-------------|-------|
+| `moa-memory` crate | `moa-memory/{graph,vector,pii,ingest}` (grouped under `moa-memory/`) | C06, R01 |
+| `MemoryStore` trait (`moa-core`) | `GraphStore` trait + `RetrievalHandle` / `IngestHandle` traits | C05 |
+| `WikiPage`, `MemoryPath`, `PageType`, `IngestReport`, `MemorySearchMode`, `MemorySearchResult`, `PageSummary`, `ConfidenceLevel` (`moa-core`) | (no replacement; graph types replace these semantically) | C05 |
+| `FileMemoryStore` | `AgeGraphStore` | C03 |
+| `MemoryStore::search` call sites | `HybridRetriever::retrieve` | C02–C04 |
+| `MemoryStore::ingest_source` call sites | `IngestionVO::ingest_turn` (slow) or `fast_remember` (fast) | C02–C04 |
+| `MemoryStore::write_page` call sites | `fast_remember` or `IngestionVO::ingest_turn` | C03 |
+| `MemoryStore::read_page` / `list_pages` / `get_index` call sites | `GraphStore::get_node` / `lookup_seeds` / retriever, or retired with explicit decision | C01 decisions, applied in C02–C04 |
+| `MemoryStore::rebuild_search_index` | (retired; graph indexes are write-incremental) | C02 |
+| `moa memory show <path>` CLI | `moa memory show <uid>` (or retired per C01 decision) | C02 |
+| `moa memory rebuild-index`, `moa memory rebuild-embeddings` CLI | (retired) | C02 |
+| Connector stubs in `moa-memory/ingest/` (M14 era) | (deleted; connectors deferred) | R02 |
+| `M20-connector-trait.md` prompt | (deleted from pack) | M00 (this doc) |
+| Original `M21-envelope-encryption.md` | `M21-envelope-encryption-deferred.md` (decision-log only) | M-pack v2 |
+| Original `M28-delete-moa-memory.md` | `M28-final-cleanup.md` (slim; C06 absorbed crate deletion) | M-pack v2 |
+
+## Recommended running order
+
+```
+S01            ← restructure to crates/ layout
+C00 (read)     ← cutover orientation
+C01            ← inventory; STOP and review docs/migrations/moa-memory-inventory.md
+C02 → C06      ← cutover phases in order; build green between each
+R01 → R02      ← grouping + audit polish
+M21 (read)     ← envelope encryption decision-log
+M22 → M30      ← finish privacy + audit + cleanup
+```
+
+## When to break sequence
+
+- **You can stop after C06** and have a working production-ready cutover. R01–R02 are organizational polish; M21+ is privacy/audit work that adds value but is independent of the graph stack itself.
+- **You can run M21+ in parallel** with R01–R02 (different files, no overlap).
+- **You cannot reorder C-prompts.** C02→C06 is a strict topological sort: each one's preconditions are satisfied by its predecessor.
+
+## Sanity checks at each phase boundary
+
+After every prompt completes, run the same three checks:
+
+```sh
+cargo build --workspace
+cargo test --workspace
+cargo clippy --workspace -- -D warnings
+```
+
+Plus the prompt-specific acceptance criteria. If any fail, stop and resolve before continuing.
+
+## Where to find historical context
+
+- **C01's inventory** documents every consumer migration decision: `docs/migrations/moa-memory-inventory.md`.
+- **C00** explains the semantic gap between the wiki and graph systems.
+- **M21 decision-log** documents the Path A choice on encryption.
+- **R02's type-placement doc** locks in where types live for future contributors.

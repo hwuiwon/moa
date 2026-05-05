@@ -1,0 +1,1 @@
+{"nodes": [{"id": "actions", "label": "actions.rs", "file_type": "code", "source_file": "crates/moa-desktop/src/actions.rs", "source_location": "L1"}], "edges": [{"source": "actions", "target": "actions", "relation": "imports_from", "confidence": "EXTRACTED", "source_file": "crates/moa-desktop/src/actions.rs", "source_location": "L8", "weight": 1.0}]}
