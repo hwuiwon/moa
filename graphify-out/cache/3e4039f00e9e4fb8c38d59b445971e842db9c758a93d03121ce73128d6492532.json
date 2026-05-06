@@ -1,0 +1,1 @@
+{"nodes": [{"id": "mod", "label": "mod.rs", "file_type": "code", "source_file": "crates/moa-desktop/src/layout/mod.rs", "source_location": "L1"}], "edges": [{"source": "mod", "target": "workspace", "relation": "imports_from", "confidence": "EXTRACTED", "source_file": "crates/moa-desktop/src/layout/mod.rs", "source_location": "L5", "weight": 1.0}]}
