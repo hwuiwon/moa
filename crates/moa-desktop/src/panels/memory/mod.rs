@@ -1,4 +1,4 @@
-//! Memory browser: sidebar list + center-panel viewer for wiki pages.
+//! Memory browser: sidebar list + center-panel viewer for graph memory nodes.
 
 mod memory_list;
 mod memory_viewer;

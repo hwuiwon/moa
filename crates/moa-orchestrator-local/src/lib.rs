@@ -241,9 +241,6 @@ impl LocalOrchestrator {
 
     /// Runs the graph-memory maintenance check immediately.
     pub async fn run_memory_maintenance_once(&self) -> Result<Vec<GraphMemoryMaintenanceReport>> {
-        // MIGRATION: wiki consolidation rewrote markdown pages and regenerated MEMORY.md. Graph
-        // memory maintains sidecar/vector indexes incrementally on writes, so there is no local
-        // consolidation pass to run in C03.
         tracing::debug!("graph memory maintenance has no scheduled local work");
         Ok(Vec::new())
     }
@@ -425,8 +422,6 @@ impl LocalOrchestrator {
     async fn register_memory_maintenance_job(&self) -> Result<()> {
         let job = Job::new_async("0 0 * * * *", move |_id, _lock| {
             Box::pin(async move {
-                // MIGRATION: graph indexes are updated by writes; the hourly wiki consolidation
-                // job is intentionally a no-op until graph-native maintenance exists.
                 tracing::debug!("hourly graph memory maintenance check has no local work");
             })
         })
@@ -1049,18 +1044,6 @@ async fn run_session_task(
                                 return Ok(TurnDirective::ContinueLoop);
                             }
 
-                            let session = context
-                                .session_store
-                                .get_session(context.session_id)
-                                .await?;
-                            let events = context
-                                .session_store
-                                .get_events(context.session_id, EventRange::all())
-                                .await?;
-                            // MIGRATION: skill distillation still writes wiki pages in C03.
-                            // C04 moves skill persistence to the graph/registry path, so the
-                            // local runtime skips this post-turn wiki write for now.
-                            let _ = (session, events);
                             let persist_span = event_persist_span(0);
                             let persist_started = std::time::Instant::now();
                             async {
@@ -1375,9 +1358,7 @@ async fn refresh_workspace_tool_stats(
     session_id: SessionId,
 ) {
     let _ = session_store;
-    // MIGRATION: workspace tool stats are still stored as wiki pages. C04 moves this state to the
-    // graph/analytics path; until then the local runtime does not write wiki tool-stat pages.
-    tracing::debug!(session_id = %session_id, "skipped wiki-backed workspace tool stats refresh");
+    tracing::debug!(session_id = %session_id, "skipped workspace tool stats refresh");
 }
 
 async fn append_event(

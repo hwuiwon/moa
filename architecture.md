@@ -101,10 +101,10 @@ moa/
 ├── crates/moa-core/          # Types, traits, config, errors — the contract
 ├── crates/moa-brain/         # Harness loop + 7-stage context pipeline + compaction
 ├── crates/moa-session/       # PostgresSessionStore, event schema, FTS, replay
-├── crates/moa-memory-graph/  # AGE-backed graph store and sidecar indexes
-├── crates/moa-memory-ingest/ # Slow-path ingestion VO and fast memory writes
-├── crates/moa-memory-vector/ # pgvector-backed embeddings
-├── crates/moa-memory-pii/    # PII classification and filtering
+├── crates/moa-memory/graph/  # AGE-backed graph store and sidecar indexes
+├── crates/moa-memory/ingest/ # Slow-path ingestion VO and fast memory writes
+├── crates/moa-memory/vector/ # pgvector-backed embeddings
+├── crates/moa-memory/pii/    # PII classification and filtering
 ├── crates/moa-hands/         # Local/Docker/Daytona/E2B/MCP, ToolRouter
 ├── crates/moa-providers/     # Anthropic, OpenAI, Gemini — streaming + prompt caching
 ├── crates/moa-orchestrator/  # LocalOrchestrator (tokio) + Restate-backed cloud runtime
@@ -268,10 +268,10 @@ Details: [`docs/07-context-pipeline.md`](docs/07-context-pipeline.md).
 
 The graph stack is the only memory subsystem. It is split across:
 
-- [`moa-memory-graph`](crates/moa-memory-graph/) — graph nodes, edges, bitemporal state, RLS, changelog, and SQL sidecar indexes.
-- [`moa-memory-vector`](crates/moa-memory-vector/) — vector storage and embedding lookup for graph nodes.
-- [`moa-memory-pii`](crates/moa-memory-pii/) — privacy classification and filtering before durable writes.
-- [`moa-memory-ingest`](crates/moa-memory-ingest/) — slow-path ingestion and fast remember/forget/supersede APIs.
+- [`moa-memory-graph`](crates/moa-memory/graph/) — graph nodes, edges, bitemporal state, RLS, changelog, and SQL sidecar indexes.
+- [`moa-memory-vector`](crates/moa-memory/vector/) — vector storage and embedding lookup for graph nodes.
+- [`moa-memory-pii`](crates/moa-memory/pii/) — privacy classification and filtering before durable writes.
+- [`moa-memory-ingest`](crates/moa-memory/ingest/) — slow-path ingestion and fast remember/forget/supersede APIs.
 
 The legacy file-wiki crate `moa-memory` was removed in C06. The per-consumer migration record lives in [`docs/migrations/moa-memory-inventory.md`](docs/migrations/moa-memory-inventory.md).
 

@@ -51,7 +51,7 @@ pub struct WorkspaceStatus {
     pub next_consolidation_at: Option<DateTime<Utc>>,
     /// Whether a consolidation workflow is currently in progress.
     pub consolidation_in_progress: bool,
-    /// Number of pages currently present in the workspace wiki.
+    /// Number of graph memory records currently present in the workspace.
     pub pages_count: u64,
 }
 
@@ -326,8 +326,6 @@ impl Workspace for WorkspaceImpl {
 }
 
 async fn count_graph_nodes(workspace_id: &WorkspaceId) -> Result<u64, HandlerError> {
-    // MIGRATION: `pages_count` remains in the status DTO for compatibility with callers, but C03
-    // maps it to active graph-memory nodes rather than wiki pages.
     let ctx = OrchestratorCtx::current();
     let count = sqlx::query_scalar::<_, i64>(
         r#"

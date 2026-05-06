@@ -1,4 +1,4 @@
-//! Embedding providers used by semantic wiki search.
+//! Embedding providers used by graph memory retrieval.
 
 use std::collections::hash_map::DefaultHasher;
 use std::env;

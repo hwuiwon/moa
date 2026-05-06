@@ -14,7 +14,7 @@ use crate::observability::annotate_restate_handler_span;
 /// Workflow input for one workspace/date consolidation run.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConsolidateRequest {
-    /// Workspace whose file-wiki should be consolidated.
+    /// Workspace whose graph memory should be consolidated.
     pub workspace_id: WorkspaceId,
     /// Logical UTC date this workflow instance owns.
     pub target_date: NaiveDate,
@@ -29,9 +29,9 @@ pub struct ConsolidateReport {
     pub target_date: NaiveDate,
     /// Timestamp at which the workflow executed.
     pub ran_at: DateTime<Utc>,
-    /// Number of pages rewritten in place.
+    /// Number of memory records rewritten in place.
     pub pages_updated: u64,
-    /// Number of pages deleted.
+    /// Number of memory records deleted.
     pub pages_deleted: u64,
     /// Number of relative dates normalized.
     pub relative_dates_normalized: u64,
@@ -133,9 +133,8 @@ impl Consolidate for ConsolidateImpl {
             .call()
             .await?;
 
-        // MIGRATION: graph memory maintains indexes incrementally on writes. The scheduled
-        // consolidation workflow remains as a durable scheduling hook but does not call the
-        // deleted wiki `MemoryStore` service in C03.
+        // Graph memory maintains indexes incrementally on writes. The scheduled workflow remains
+        // as a durable checkpoint hook and currently has no graph-local work to run.
         let report = ConsolidateReport::graph_noop(
             request.workspace_id.clone(),
             request.target_date,

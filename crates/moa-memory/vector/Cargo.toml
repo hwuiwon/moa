@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
-moa-core = { path = "../moa-core" }
+moa-core = { path = "../../moa-core" }
 pgvector = { version = "0.4.1", features = ["sqlx", "halfvec"] }
 reqwest.workspace = true
 secrecy = "0.10"
@@ -19,4 +19,4 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-moa-session = { path = "../moa-session" }
+moa-session = { path = "../../moa-session" }

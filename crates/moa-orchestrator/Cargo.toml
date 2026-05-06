@@ -20,8 +20,8 @@ metrics.workspace = true
 moa-brain = { path = "../moa-brain" }
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
-moa-memory-graph = { path = "../moa-memory-graph" }
-memory-ingest = { package = "moa-memory-ingest", path = "../moa-memory-ingest" }
+moa-memory-graph = { path = "../moa-memory/graph" }
+memory-ingest = { package = "moa-memory-ingest", path = "../moa-memory/ingest" }
 moa-providers = { path = "../moa-providers" }
 moa-security = { path = "../moa-security" }
 moa-session = { path = "../moa-session" }
