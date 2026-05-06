@@ -6,13 +6,13 @@ use std::time::Duration;
 
 use crate::{
     ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
-    ExtractedFact, IngestApplyReport, IngestDecision, RrfPlusJudgeDetector, SessionTurn,
+    ExtractedFact, IngestApplyReport, IngestDecision, RrfPlusJudgeDetector, SessionTurn, TurnChunk,
     chunk_turn, current_runtime, extract_facts, fact_hash, scoped_fact_uid, should_ingest_degraded,
 };
 use moa_core::{ScopeContext, ScopedConn};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_pii::{
-    OpenAiPrivacyFilterClassifier, PiiCategory, PiiClassifier, PiiResult, PiiSpan,
+    OpenAiPrivacyFilterClassifier, PiiCategory, PiiClassifier, PiiResult, PiiSpan, redact_text,
 };
 use moa_memory_vector::{CohereV4Embedder, Embedder, PgvectorStore};
 use restate_sdk::prelude::*;
@@ -200,13 +200,32 @@ async fn classify_facts(facts: &[ExtractedFact]) -> Result<Vec<ClassifiedFact>, 
     let mut classified = Vec::with_capacity(facts.len());
     for fact in facts {
         let result = classify_fact(&classifier, &fact.summary).await?;
+        let redacted_fact = redact_fact(fact, &result);
         classified.push(ClassifiedFact {
-            fact: fact.clone(),
+            fact: redacted_fact,
             pii_class: result.class,
             pii_spans: result.spans,
         });
     }
     Ok(classified)
+}
+
+fn redact_fact(fact: &ExtractedFact, result: &PiiResult) -> ExtractedFact {
+    let redacted_summary = redact_text(&fact.summary, &result.spans);
+    if redacted_summary == fact.summary {
+        return fact.clone();
+    }
+
+    let mut redacted = extract_facts(&[TurnChunk {
+        index: fact.source_chunk,
+        text: format!("Fact: {redacted_summary}"),
+        token_estimate: 1,
+    }])
+    .into_iter()
+    .next()
+    .unwrap_or_else(|| fact.clone());
+    redacted.source_chunk = fact.source_chunk;
+    redacted
 }
 
 async fn classify_fact(
@@ -237,13 +256,20 @@ enum ClassifierBackend {
 
 fn heuristic_classify(text: &str) -> PiiResult {
     let mut spans = Vec::new();
-    for token in text.split_whitespace() {
+    let tokens = text.split_whitespace().collect::<Vec<_>>();
+    for (index, token) in tokens.iter().enumerate() {
         if token.contains('@') {
             push_span(text, token, PiiCategory::Email, 0.80, &mut spans);
         } else if token.contains("sk-") || token.to_ascii_lowercase().contains("secret") {
             push_span(text, token, PiiCategory::Secret, 0.80, &mut spans);
         } else if looks_like_ssn(token) {
             push_span(text, token, PiiCategory::Ssn, 0.90, &mut spans);
+        } else if looks_like_card(token) {
+            push_span(text, token, PiiCategory::FinancialAccount, 0.95, &mut spans);
+        } else if token.trim_matches(':').eq_ignore_ascii_case("MRN")
+            && let Some(next) = tokens.get(index + 1)
+        {
+            push_span(text, next, PiiCategory::MedicalRecord, 0.90, &mut spans);
         }
     }
     let class = if spans
@@ -295,6 +321,18 @@ fn looks_like_ssn(token: &str) -> bool {
             .iter()
             .enumerate()
             .all(|(index, byte)| index == 3 || index == 6 || byte.is_ascii_digit())
+}
+
+fn looks_like_card(token: &str) -> bool {
+    let digits = token
+        .bytes()
+        .filter(|byte| byte.is_ascii_digit())
+        .collect::<Vec<_>>();
+    digits.len() >= 13
+        && digits.len() <= 19
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'-' || byte == b' ')
 }
 
 async fn embed_batch(facts: &[ClassifiedFact]) -> Result<Vec<EmbeddedFact>, HandlerError> {

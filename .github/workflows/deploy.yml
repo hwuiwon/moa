@@ -1,11 +1,14 @@
 name: deploy
 
 on:
+  pull_request:
   push:
     branches:
       - main
     tags:
       - "v*"
+  schedule:
+    - cron: "17 8 * * *"
   workflow_dispatch:
 
 permissions:
@@ -19,28 +22,45 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:0.8.2-pg18-trixie
-        env:
-          POSTGRES_DB: moa
-          POSTGRES_USER: moa
-          POSTGRES_PASSWORD: moa
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U moa -d moa"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
     env:
-      TEST_DATABASE_URL: postgres://moa:moa@127.0.0.1:5432/moa
-      DATABASE_URL: postgres://moa:moa@127.0.0.1:5432/moa
-      POSTGRES_URL: postgres://moa:moa@127.0.0.1:5432/moa
+      TEST_DATABASE_URL: postgres://moa_owner:dev@127.0.0.1:5432/moa
+      DATABASE_URL: postgres://moa_owner:dev@127.0.0.1:5432/moa
+      POSTGRES_URL: postgres://moa_owner:dev@127.0.0.1:5432/moa
       MOA_RUN_LIVE_PROVIDER_TESTS: "0"
+      MOA_PENTEST_REPORT: ${{ github.workspace }}/pentest_report.json
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+
+      - name: Start Postgres AGE test stack
+        run: docker compose up -d postgres
+
+      - name: Wait for Postgres
+        run: |
+          for i in {1..60}; do
+            if docker compose exec -T postgres pg_isready -U moa_owner -d moa; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs postgres
+          exit 1
+
+      - name: Start PII service for nightly pentest
+        if: github.event_name == 'schedule'
+        run: docker compose up -d moa-pii-service
+
+      - name: Wait for PII service
+        if: github.event_name == 'schedule'
+        run: |
+          for i in {1..120}; do
+            if curl -fsS http://127.0.0.1:8080/healthz; then
+              exit 0
+            fi
+            sleep 5
+          done
+          docker compose logs moa-pii-service
+          exit 1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -55,14 +75,36 @@ jobs:
         run: cargo run --locked -p xtask --bin audit_legacy_memory
 
       - name: Run clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run cross-tenant pentest
+        if: github.event_name != 'schedule'
+        run: cargo test --locked -p moa-eval --test cross_tenant_pentest -- --nocapture
+
+      - name: Run nightly cross-tenant pentest
+        if: github.event_name == 'schedule'
+        env:
+          MOA_PENTEST_REAL_PII: "1"
+          MOA_PII_SERVICE_URL: http://127.0.0.1:8080
+          MOA_PENTEST_WORKSPACE_COUNT: "100"
+          MOA_PENTEST_FACTS_PER_WORKSPACE: "20"
+        run: cargo test --locked -p moa-eval --test cross_tenant_pentest -- --nocapture
+
+      - name: Upload pentest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pentest-report
+          path: pentest_report.json
+          if-no-files-found: ignore
 
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test --locked --workspace
 
   build-image:
     runs-on: ubuntu-latest
     needs: test
+    if: github.event_name != 'pull_request' && github.event_name != 'schedule'
     outputs:
       image: ${{ steps.image.outputs.image }}
     steps:

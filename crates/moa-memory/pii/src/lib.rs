@@ -107,6 +107,54 @@ impl PiiResult {
     }
 }
 
+/// Redacts detected PII spans from one UTF-8 string.
+#[must_use]
+pub fn redact_text(text: &str, spans: &[PiiSpan]) -> String {
+    if spans.is_empty() {
+        return text.to_string();
+    }
+
+    let mut spans = spans
+        .iter()
+        .filter(|span| {
+            span.start < span.end
+                && span.end <= text.len()
+                && text.is_char_boundary(span.start)
+                && text.is_char_boundary(span.end)
+        })
+        .collect::<Vec<_>>();
+    spans.sort_by_key(|span| span.start);
+
+    let mut redacted = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for span in spans {
+        if span.start < cursor {
+            continue;
+        }
+        redacted.push_str(&text[cursor..span.start]);
+        redacted.push_str(redaction_token(span.category));
+        cursor = span.end;
+    }
+    redacted.push_str(&text[cursor..]);
+    redacted
+}
+
+fn redaction_token(category: PiiCategory) -> &'static str {
+    match category {
+        PiiCategory::Person => "[PERSON_REDACTED]",
+        PiiCategory::Email => "[EMAIL_REDACTED]",
+        PiiCategory::Phone => "[PHONE_REDACTED]",
+        PiiCategory::Address => "[ADDRESS_REDACTED]",
+        PiiCategory::Ssn => "[SSN_REDACTED]",
+        PiiCategory::MedicalRecord => "[MEDICAL_RECORD_REDACTED]",
+        PiiCategory::FinancialAccount => "[FINANCIAL_ACCOUNT_REDACTED]",
+        PiiCategory::GovernmentId => "[GOVERNMENT_ID_REDACTED]",
+        PiiCategory::Url => "[URL_REDACTED]",
+        PiiCategory::Date => "[DATE_REDACTED]",
+        PiiCategory::Secret => "[SECRET_REDACTED]",
+    }
+}
+
 /// Async PII classification abstraction used by ingestion and privacy workflows.
 #[async_trait::async_trait]
 pub trait PiiClassifier: Send + Sync {
@@ -126,4 +174,46 @@ pub enum PiiError {
     /// The inference response could not be parsed.
     #[error("parse: {0}")]
     Parse(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_text_replaces_detected_spans() {
+        let text = "Email alice@example.com and SSN 123-45-6789";
+        let spans = vec![
+            PiiSpan {
+                start: 6,
+                end: 23,
+                category: PiiCategory::Email,
+                confidence: 0.99,
+            },
+            PiiSpan {
+                start: 32,
+                end: 43,
+                category: PiiCategory::Ssn,
+                confidence: 0.99,
+            },
+        ];
+
+        assert_eq!(
+            redact_text(text, &spans),
+            "Email [EMAIL_REDACTED] and SSN [SSN_REDACTED]"
+        );
+    }
+
+    #[test]
+    fn redact_text_ignores_invalid_offsets() {
+        let text = "safe text";
+        let spans = vec![PiiSpan {
+            start: 99,
+            end: 100,
+            category: PiiCategory::Secret,
+            confidence: 0.99,
+        }];
+
+        assert_eq!(redact_text(text, &spans), text);
+    }
 }
