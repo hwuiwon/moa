@@ -302,7 +302,7 @@ impl Default for SessionMeta {
             user_id: UserId::new(""),
             title: None,
             status: SessionStatus::Created,
-            platform: Platform::Desktop,
+            platform: Platform::Cli,
             platform_channel: None,
             model: ModelId::new(""),
             created_at: now,

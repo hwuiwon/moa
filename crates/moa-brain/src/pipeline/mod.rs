@@ -479,7 +479,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Desktop,
+            platform: Platform::Cli,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
@@ -527,7 +527,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Desktop,
+            platform: Platform::Cli,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };

@@ -28,8 +28,6 @@ pub struct MoaConfig {
     pub cloud: CloudConfig,
     /// Messaging gateway settings.
     pub gateway: GatewayConfig,
-    /// Desktop application settings.
-    pub desktop: DesktopConfig,
     /// Permission policy settings.
     pub permissions: PermissionsConfig,
     /// Session storage settings.
@@ -563,14 +561,6 @@ impl MoaConfig {
                 "gateway.discord_token_env",
                 Self::default().gateway.discord_token_env,
             )?
-            .set_default("desktop.theme", Self::default().desktop.theme)?
-            .set_default("desktop.sidebar_auto", Self::default().desktop.sidebar_auto)?
-            .set_default(
-                "desktop.tab_limit",
-                Self::default().desktop.tab_limit as i64,
-            )?
-            .set_default("desktop.diff_style", Self::default().desktop.diff_style)?
-            .set_default("desktop.density", Self::default().desktop.density)?
             .set_default(
                 "permissions.default_posture",
                 Self::default().permissions.default_posture,
@@ -1625,39 +1615,6 @@ impl Default for GatewayConfig {
     }
 }
 
-/// Desktop application configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct DesktopConfig {
-    /// Theme name.
-    pub theme: String,
-    /// Whether to auto-show the sidebar.
-    pub sidebar_auto: bool,
-    /// Maximum number of open tabs.
-    pub tab_limit: usize,
-    /// Diff rendering mode.
-    pub diff_style: String,
-    /// UI density: "comfortable" (default) or "compact".
-    #[serde(default = "default_density")]
-    pub density: String,
-}
-
-fn default_density() -> String {
-    "comfortable".to_string()
-}
-
-impl Default for DesktopConfig {
-    fn default() -> Self {
-        Self {
-            theme: "default".to_string(),
-            sidebar_auto: true,
-            tab_limit: 8,
-            diff_style: "auto".to_string(),
-            density: default_density(),
-        }
-    }
-}
-
 /// Permission posture configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1951,7 +1908,6 @@ mod tests {
 
         let config = MoaConfig::load_from_path(file.path()).unwrap();
         assert_eq!(config.general.default_provider, "openai");
-        assert_eq!(config.desktop.tab_limit, 8);
         assert_eq!(config.session_limits.max_turns, 50);
         assert_eq!(config.session_limits.loop_detection_threshold, 3);
         assert_eq!(config.tool_output.max_replay_chars, 20_000);

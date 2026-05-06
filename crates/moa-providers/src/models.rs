@@ -3,8 +3,8 @@
 //!
 //!   * `moa-providers` factory — for validation when the user picks a
 //!     model that needs a specific provider.
-//!   * `moa-desktop` settings — for the Model dropdown in General.
-//!   * `moa-desktop` detail panel — for the context-usage progress bar.
+//!   * `moa-cli` settings and diagnostics.
+//!   * Gateway/admin surfaces that need model capability metadata.
 //!
 //! Context windows reflect public information as of 2026-04. Update
 //! this file (and nothing else) when providers ship new models or

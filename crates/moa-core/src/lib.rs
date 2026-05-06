@@ -26,10 +26,10 @@ pub use analytics::{
 pub use broadcast_recv::{RecvResult, recv_with_lag_handling};
 pub use config::{
     CloudConfig, CloudFlyioConfig, CloudHandsConfig, CohereEmbedderConfig, CompactionConfig,
-    ContextSnapshotConfig, DaemonConfig, DatabaseConfig, DatabaseNeonConfig, DesktopConfig,
-    GatewayConfig, GeminiEmbedderConfig, GeneralConfig, LineageConfig, LocalConfig,
-    McpCredentialConfig, McpServerConfig, McpTransportConfig, MemoryConfig, MemoryVectorConfig,
-    MetricsConfig, MoaConfig, ModelsConfig, ObservabilityConfig, OtlpProtocol, PermissionsConfig,
+    ContextSnapshotConfig, DaemonConfig, DatabaseConfig, DatabaseNeonConfig, GatewayConfig,
+    GeminiEmbedderConfig, GeneralConfig, LineageConfig, LocalConfig, McpCredentialConfig,
+    McpServerConfig, McpTransportConfig, MemoryConfig, MemoryVectorConfig, MetricsConfig,
+    MoaConfig, ModelsConfig, ObservabilityConfig, OtlpProtocol, PermissionsConfig,
     ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig, ResolutionConfig,
     ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig, VectorEmbedderConfig,
 };

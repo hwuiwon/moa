@@ -24,7 +24,6 @@ members = [
     "crates/moa-skills",
     "crates/moa-eval",
     "crates/moa-loadtest",
-    "crates/moa-desktop",
     "crates/xtask",
 ]
 default-members = [

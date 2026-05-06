@@ -4,7 +4,7 @@ MOA now uses two event fanout paths:
 
 1. In-process broadcast.
    Same-process observers such as the CLI attached to a local daemon or the
-   desktop app connected to the same local orchestrator use Tokio broadcast
+   clients connected to the same local orchestrator use Tokio broadcast
    receivers. This is the lowest-latency path.
 
 2. Postgres `LISTEN/NOTIFY`.

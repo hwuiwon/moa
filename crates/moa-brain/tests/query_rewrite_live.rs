@@ -74,7 +74,7 @@ async fn live_query_rewriter_resolves_coreference_without_new_entities() -> moa_
         &SessionMeta {
             workspace_id: WorkspaceId::new("live-query-rewrite"),
             user_id: UserId::new("live-query-rewrite-user"),
-            platform: Platform::Desktop,
+            platform: Platform::Cli,
             model: provider.capabilities().model_id.clone(),
             ..SessionMeta::default()
         },

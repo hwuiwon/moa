@@ -8,7 +8,6 @@ MOA has several front doors over the same session model:
 
 | Surface | Primary crate | Use |
 |---|---|---|
-| GPUI desktop | `moa-desktop` | Local interactive application |
 | CLI and daemon | `moa-cli`, `moa-runtime`, `moa-orchestrator-local` | Local automation, diagnostics, one-shot prompts |
 | REST/gateway | `moa-orchestrator`, `moa-gateway` | Cloud and integration entrypoints |
 | Messaging adapters | `moa-gateway` | Telegram, Slack, Discord conversations and approvals |
@@ -33,7 +32,6 @@ Outbound rendering is platform-specific, but the payload model is shared: text, 
 
 | Surface | Session mapping |
 |---|---|
-| Desktop | User opens, creates, resumes, and observes local sessions directly |
 | CLI | `moa exec` creates or resumes work through the local runtime; daemon commands keep sessions running in the background |
 | REST/gateway | HTTP or gateway request maps to a durable session and calls the cloud orchestrator |
 | Telegram | Reply chains or threads map to sessions |
@@ -81,16 +79,6 @@ This avoids losing information when a client disconnects or a gateway process re
 - runtime events from the local orchestrator
 
 Clients choose their own verbosity, but durable events are the source of truth.
-
-## Desktop App
-
-`moa-desktop` is a native GPUI app. It is a workspace member but not a default member, so build it explicitly:
-
-```bash
-cargo build -p moa-desktop
-```
-
-The desktop app is the local rich UI for sessions, memory, approvals, diffs, and settings. It talks to the same local runtime and Postgres store as the CLI.
 
 ## CLI
 

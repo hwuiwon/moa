@@ -31,7 +31,7 @@ MOA is not just a chat wrapper. It is an execution platform with durable orchest
 - **Workspace memory:** graph memory stores facts, decisions, lessons, sources, and provenance while Postgres sidecars and pgvector provide retrieval.
 - **Skills:** successful workflows can become reusable Agent Skills; ranking improves as segment outcomes accumulate.
 - **Pluggable execution:** local hands, Docker, Daytona, E2B, and MCP servers are routed through one tool abstraction.
-- **Multiple interfaces:** CLI, GPUI desktop, REST/gateway, and messaging adapters all talk to the same session model.
+- **Multiple interfaces:** CLI, REST/gateway, and messaging adapters all talk to the same session model.
 
 ## Design Values
 
@@ -59,4 +59,4 @@ MOA's differentiators are architectural, not cosmetic:
 - MOA does not train a per-tenant model for intent classification. It uses embedding nearest-centroid classification over tenant intent centroids.
 - MOA does not force a global intent catalog onto tenants. Catalog entries are opt-in.
 - MOA does not keep durable product state only in Restate. Restate is orchestration state; Postgres is the product record.
-- MOA does not make the desktop app the only interface. Desktop, CLI, REST/gateway, and messaging adapters are peers over the same runtime model.
+- MOA does not bind agent work to a single front door. CLI, REST/gateway, and messaging adapters are peers over the same runtime model.

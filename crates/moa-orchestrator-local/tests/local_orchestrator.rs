@@ -61,7 +61,7 @@ impl OrchestratorContractHarness for LocalContractHarness<'_> {
     }
 
     fn platform(&self) -> Platform {
-        Platform::Desktop
+        Platform::Cli
     }
 
     async fn start_session(&self, req: StartSessionRequest) -> Result<SessionHandle> {
@@ -754,7 +754,7 @@ async fn start_session(orchestrator: &LocalOrchestrator) -> Result<SessionHandle
         .start_session(StartSessionRequest {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Desktop,
+            platform: Platform::Cli,
             model: moa_core::ModelId::new(orchestrator.model()),
             initial_message: None,
             title: None,
@@ -2382,7 +2382,7 @@ async fn observe_uses_postgres_listener_for_remote_active_sessions() -> Result<(
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             status: SessionStatus::Running,
-            platform: Platform::Desktop,
+            platform: Platform::Cli,
             model: moa_core::ModelId::new(observer.model()),
             created_at: now,
             updated_at: now,

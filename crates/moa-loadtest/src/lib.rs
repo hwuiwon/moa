@@ -571,7 +571,7 @@ impl SessionTarget for LocalTarget {
             .start_session(StartSessionRequest {
                 workspace_id: self.workspace_id.clone(),
                 user_id: self.user_id.clone(),
-                platform: Platform::Desktop,
+                platform: Platform::Cli,
                 model: self.model.clone(),
                 initial_message: None,
                 title: Some(plan.title.clone()),
@@ -679,7 +679,7 @@ impl SessionTarget for DaemonTarget {
                 request: StartSessionRequest {
                     workspace_id: self.workspace_id.clone(),
                     user_id: self.user_id.clone(),
-                    platform: Platform::Desktop,
+                    platform: Platform::Cli,
                     model: self.model.clone(),
                     initial_message: None,
                     title: Some(plan.title.clone()),

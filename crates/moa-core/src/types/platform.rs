@@ -18,8 +18,6 @@ pub enum Platform {
     Slack,
     /// Discord.
     Discord,
-    /// Desktop application.
-    Desktop,
     /// One-shot CLI.
     Cli,
 }
@@ -31,7 +29,6 @@ impl Platform {
             Self::Telegram => "telegram",
             Self::Slack => "slack",
             Self::Discord => "discord",
-            Self::Desktop => "desktop",
             Self::Cli => "cli",
         }
     }

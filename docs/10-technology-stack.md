@@ -26,7 +26,6 @@ The root workspace currently contains:
 | `moa-skills` | Skill parser, registry, distillation, improvement, regression generation |
 | `moa-eval` | Evaluation harness |
 | `moa-loadtest` | Load-test harness |
-| `moa-desktop` | GPUI desktop app, not a default workspace member |
 
 ## Core Dependencies
 
@@ -42,7 +41,6 @@ The root workspace currently contains:
 | Database | `sqlx` with Postgres, migrations, JSON, UUID, chrono |
 | Orchestration | `restate-sdk` |
 | Local scheduling | `tokio-cron-scheduler` |
-| Desktop | `gpui`, `gpui-component`, `tray-icon`, `pulldown-cmark`, `syntect`, `similar` |
 | Security | `age`, `secrecy`, `shell-words` |
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 
@@ -85,13 +83,9 @@ cargo build
 cargo test
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
-
-cargo build -p moa-desktop
 cargo run -p moa-cli -- doctor
 cargo run -p moa-orchestrator -- --port 9080 --health-port 9081
 ```
-
-`moa-desktop` is excluded from default workspace builds and should be built explicitly.
 
 ## Configuration
 
@@ -116,13 +110,13 @@ Config loads from `~/.moa/config.toml` plus `MOA__...` environment overrides. Ke
 Implemented architectural pillars:
 
 - Restate cloud orchestration with session, sub-agent, workspace, service, and workflow handlers.
-- Local orchestrator for CLI and desktop.
+- Local orchestrator for CLI and daemon execution.
 - Postgres session store with event log, analytics, task segments, intent tables, and learning log.
 - Graph memory with Postgres sidecar search, AGE projection helpers, pgvector semantic search, and privacy filtering.
 - Query rewriting, segment creation, automated resolution scoring, and skill resolution-rate ranking.
 - Intent discovery workflow and intent manager service.
 - Skill distillation/improvement with learning-log emission.
-- GPUI desktop crate and CLI/daemon surfaces.
+- CLI/daemon surfaces.
 
 Areas still evolving:
 
