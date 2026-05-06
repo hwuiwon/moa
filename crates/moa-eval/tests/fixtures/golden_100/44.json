@@ -1,0 +1,12 @@
+{
+  "uid_seed": "44",
+  "label": "Fact",
+  "name": "fact44 alice stack-choice alice rejected file wiki storage for graph primary",
+  "summary": "fact44 alice stack-choice alice rejected file wiki storage for graph primary",
+  "entity_uids": [
+    "alice",
+    "stack-choice"
+  ],
+  "expected_embedding_seed": 44,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

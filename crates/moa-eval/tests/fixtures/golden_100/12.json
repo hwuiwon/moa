@@ -1,0 +1,12 @@
+{
+  "uid_seed": "12",
+  "label": "Fact",
+  "name": "fact12 auth-service deployment smoke test covers passwordless and refresh tokens",
+  "summary": "fact12 auth-service deployment smoke test covers passwordless and refresh tokens",
+  "entity_uids": [
+    "auth-service",
+    "deployment"
+  ],
+  "expected_embedding_seed": 12,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

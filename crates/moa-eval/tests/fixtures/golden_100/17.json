@@ -1,0 +1,12 @@
+{
+  "uid_seed": "17",
+  "label": "Fact",
+  "name": "fact17 auth-service deployment auth config reload avoids process restart",
+  "summary": "fact17 auth-service deployment auth config reload avoids process restart",
+  "entity_uids": [
+    "auth-service",
+    "deployment"
+  ],
+  "expected_embedding_seed": 17,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

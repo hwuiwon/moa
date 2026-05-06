@@ -1,0 +1,12 @@
+{
+  "uid_seed": "42",
+  "label": "Fact",
+  "name": "fact42 alice stack-choice alice kept postgres as source of truth",
+  "summary": "fact42 alice stack-choice alice kept postgres as source of truth",
+  "entity_uids": [
+    "alice",
+    "stack-choice"
+  ],
+  "expected_embedding_seed": 42,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

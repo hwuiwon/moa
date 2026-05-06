@@ -1,0 +1,12 @@
+{
+  "uid_seed": "100",
+  "label": "Fact",
+  "name": "fact100 caching read-through caching readthrough retries only idempotent database reads",
+  "summary": "fact100 caching read-through caching readthrough retries only idempotent database reads",
+  "entity_uids": [
+    "caching",
+    "read-through"
+  ],
+  "expected_embedding_seed": 100,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

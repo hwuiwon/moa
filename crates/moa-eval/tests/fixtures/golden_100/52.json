@@ -1,0 +1,12 @@
+{
+  "uid_seed": "52",
+  "label": "Fact",
+  "name": "fact52 alice stack-choice alice uses changelog for cache invalidation",
+  "summary": "fact52 alice stack-choice alice uses changelog for cache invalidation",
+  "entity_uids": [
+    "alice",
+    "stack-choice"
+  ],
+  "expected_embedding_seed": 52,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

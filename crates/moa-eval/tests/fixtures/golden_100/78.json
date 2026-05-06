@@ -1,0 +1,12 @@
+{
+  "uid_seed": "78",
+  "label": "Fact",
+  "name": "fact78 us-east-1 regional useast1 regional replay restored pending approvals",
+  "summary": "fact78 us-east-1 regional useast1 regional replay restored pending approvals",
+  "entity_uids": [
+    "us-east-1",
+    "regional"
+  ],
+  "expected_embedding_seed": 78,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

@@ -5315,6 +5315,7 @@ dependencies = [
  "moa-hands",
  "moa-memory-graph",
  "moa-memory-ingest",
+ "moa-memory-pii",
  "moa-memory-vector",
  "moa-providers",
  "moa-security",

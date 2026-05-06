@@ -1,0 +1,12 @@
+{
+  "uid_seed": "07",
+  "label": "Fact",
+  "name": "fact07 auth-service deployment build artifact is pinned by commit sha",
+  "summary": "fact07 auth-service deployment build artifact is pinned by commit sha",
+  "entity_uids": [
+    "auth-service",
+    "deployment"
+  ],
+  "expected_embedding_seed": 7,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

@@ -1,0 +1,12 @@
+{
+  "uid_seed": "53",
+  "label": "Fact",
+  "name": "fact53 alice stack-choice alice wants deterministic mocks in eval tests",
+  "summary": "fact53 alice stack-choice alice wants deterministic mocks in eval tests",
+  "entity_uids": [
+    "alice",
+    "stack-choice"
+  ],
+  "expected_embedding_seed": 53,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

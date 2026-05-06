@@ -1,0 +1,12 @@
+{
+  "uid_seed": "69",
+  "label": "Fact",
+  "name": "fact69 us-east-1 regional useast1 regional scheduler delayed nightly compaction",
+  "summary": "fact69 us-east-1 regional useast1 regional scheduler delayed nightly compaction",
+  "entity_uids": [
+    "us-east-1",
+    "regional"
+  ],
+  "expected_embedding_seed": 69,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

@@ -1,0 +1,12 @@
+{
+  "uid_seed": "06",
+  "label": "Fact",
+  "name": "fact06 auth-service deployment secrets rotate before deploy cutover",
+  "summary": "fact06 auth-service deployment secrets rotate before deploy cutover",
+  "entity_uids": [
+    "auth-service",
+    "deployment"
+  ],
+  "expected_embedding_seed": 6,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

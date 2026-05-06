@@ -1,0 +1,12 @@
+{
+  "uid_seed": "74",
+  "label": "Fact",
+  "name": "fact74 us-east-1 regional useast1 regional api error budget burn stayed minor",
+  "summary": "fact74 us-east-1 regional useast1 regional api error budget burn stayed minor",
+  "entity_uids": [
+    "us-east-1",
+    "regional"
+  ],
+  "expected_embedding_seed": 74,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

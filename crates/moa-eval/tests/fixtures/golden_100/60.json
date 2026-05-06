@@ -1,0 +1,12 @@
+{
+  "uid_seed": "60",
+  "label": "Fact",
+  "name": "fact60 alice stack-choice alice keeps workspace promotion explicit",
+  "summary": "fact60 alice stack-choice alice keeps workspace promotion explicit",
+  "entity_uids": [
+    "alice",
+    "stack-choice"
+  ],
+  "expected_embedding_seed": 60,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

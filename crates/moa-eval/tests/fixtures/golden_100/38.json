@@ -1,0 +1,12 @@
+{
+  "uid_seed": "38",
+  "label": "Fact",
+  "name": "fact38 payments scaling worker scale down waits for empty retry queue",
+  "summary": "fact38 payments scaling worker scale down waits for empty retry queue",
+  "entity_uids": [
+    "payments",
+    "scaling"
+  ],
+  "expected_embedding_seed": 38,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

@@ -1,0 +1,12 @@
+{
+  "uid_seed": "67",
+  "label": "Fact",
+  "name": "fact67 us-east-1 regional useast1 regional storage throttle slowed receipts",
+  "summary": "fact67 us-east-1 regional useast1 regional storage throttle slowed receipts",
+  "entity_uids": [
+    "us-east-1",
+    "regional"
+  ],
+  "expected_embedding_seed": 67,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

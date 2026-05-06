@@ -5,6 +5,7 @@ pub mod engine;
 pub mod error;
 pub mod evaluator;
 pub mod evaluators;
+pub mod golden;
 pub mod loader;
 pub mod pentest;
 pub mod plan;

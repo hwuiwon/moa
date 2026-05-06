@@ -1,0 +1,12 @@
+{
+  "uid_seed": "25",
+  "label": "Fact",
+  "name": "fact25 payments scaling stripe webhook consumers scale separately",
+  "summary": "fact25 payments scaling stripe webhook consumers scale separately",
+  "entity_uids": [
+    "payments",
+    "scaling"
+  ],
+  "expected_embedding_seed": 25,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

@@ -1,0 +1,12 @@
+{
+  "uid_seed": "98",
+  "label": "Fact",
+  "name": "fact98 caching read-through caching readthrough protects against thundering herd",
+  "summary": "fact98 caching read-through caching readthrough protects against thundering herd",
+  "entity_uids": [
+    "caching",
+    "read-through"
+  ],
+  "expected_embedding_seed": 98,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

@@ -1,0 +1,12 @@
+{
+  "uid_seed": "66",
+  "label": "Fact",
+  "name": "fact66 us-east-1 regional useast1 regional dns propagation lag lasted four minutes",
+  "summary": "fact66 us-east-1 regional useast1 regional dns propagation lag lasted four minutes",
+  "entity_uids": [
+    "us-east-1",
+    "regional"
+  ],
+  "expected_embedding_seed": 66,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

@@ -1,0 +1,12 @@
+{
+  "uid_seed": "95",
+  "label": "Fact",
+  "name": "fact95 caching read-through caching readthrough expires vector backend state quickly",
+  "summary": "fact95 caching read-through caching readthrough expires vector backend state quickly",
+  "entity_uids": [
+    "caching",
+    "read-through"
+  ],
+  "expected_embedding_seed": 95,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

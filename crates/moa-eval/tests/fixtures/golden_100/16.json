@@ -1,0 +1,12 @@
+{
+  "uid_seed": "16",
+  "label": "Fact",
+  "name": "fact16 auth-service deployment traffic drain lasts five minutes before shutdown",
+  "summary": "fact16 auth-service deployment traffic drain lasts five minutes before shutdown",
+  "entity_uids": [
+    "auth-service",
+    "deployment"
+  ],
+  "expected_embedding_seed": 16,
+  "valid_from": "2026-04-01T00:00:00Z"
+}
