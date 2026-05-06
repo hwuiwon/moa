@@ -373,6 +373,7 @@ dependencies = [
  "compression-core",
  "futures-io",
  "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
@@ -799,6 +800,17 @@ dependencies = [
  "instant",
  "pin-project-lite",
  "rand 0.8.5",
+ "tokio",
+]
+
+[[package]]
+name = "backon"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
+dependencies = [
+ "fastrand 2.4.1",
+ "gloo-timers",
  "tokio",
 ]
 
@@ -5176,6 +5188,7 @@ dependencies = [
  "moa-core",
  "moa-hands",
  "moa-memory-graph",
+ "moa-memory-ingest",
  "moa-memory-vector",
  "moa-providers",
  "moa-security",
@@ -5454,6 +5467,7 @@ name = "moa-memory-vector"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "backon",
  "chrono",
  "moa-core",
  "moa-session",
@@ -9878,13 +9892,18 @@ version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4e6559d53cc268e5031cd8429d05415bc4cb4aefc4aa5d6cc35fbf5b924a1f8"
 dependencies = [
+ "async-compression",
  "bitflags 2.11.0",
  "bytes",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "iri-string",
  "pin-project-lite",
+ "tokio",
+ "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",

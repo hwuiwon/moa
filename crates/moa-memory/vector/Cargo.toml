@@ -6,10 +6,11 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+backon = "1"
 chrono.workspace = true
 moa-core = { path = "../../moa-core" }
 pgvector = { version = "0.4.1", features = ["sqlx", "halfvec"] }
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["gzip"] }
 secrecy = "0.10"
 serde.workspace = true
 serde_json.workspace = true

@@ -1,19 +1,22 @@
 //! Production hybrid graph-memory retriever.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use moa_core::MemoryScope;
+use chrono::{DateTime, Utc};
+use moa_core::{MemoryScope, ScopeContext, ScopedConn};
 use moa_memory_graph::{GraphError, GraphStore, NodeIndexRow, NodeLabel, PiiClass};
-use moa_memory_vector::{Error as VectorError, VectorStore};
+use moa_memory_vector::{Error as VectorError, TurbopufferStore, VectorStore};
 use secrecy::SecretString;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::planning::Strategy;
 use crate::retrieval::legs::{
-    GRAPH_BUDGET, GRAPH_WEIGHT, LEXICAL_BUDGET, LEXICAL_WEIGHT, VECTOR_BUDGET, VECTOR_WEIGHT,
-    bump_last_accessed, graph_leg, hydrate_nodes, lexical_leg, rrf_fuse, timed_leg, vector_leg,
+    GRAPH_BUDGET, GRAPH_WEIGHT, LEXICAL_BUDGET, LEXICAL_WEIGHT, LegCandidate, VECTOR_BUDGET,
+    VECTOR_WEIGHT, bump_last_accessed, graph_leg, hydrate_nodes, lexical_leg, rrf_fuse, timed_leg,
+    vector_leg as run_vector_leg,
 };
 use crate::retrieval::reranker::{CohereReranker, NoopReranker, Reranker};
 
@@ -96,6 +99,7 @@ pub struct HybridRetriever {
     pool: PgPool,
     graph: Arc<dyn GraphStore>,
     vector: Arc<dyn VectorStore>,
+    turbopuffer: Option<Arc<TurbopufferStore>>,
     reranker: Arc<dyn Reranker>,
     assume_app_role: bool,
 }
@@ -108,6 +112,7 @@ impl HybridRetriever {
             pool,
             graph,
             vector,
+            turbopuffer: None,
             reranker: Arc::new(NoopReranker),
             assume_app_role: false,
         }
@@ -126,7 +131,17 @@ impl HybridRetriever {
                 Arc::new(CohereReranker::new(SecretString::from(api_key))) as Arc<dyn Reranker>
             })
             .unwrap_or_else(|_| Arc::new(NoopReranker));
-        Self::new(pool, graph, vector).with_reranker(reranker)
+        let turbopuffer = TurbopufferStore::from_env().ok().map(Arc::new);
+        Self::new(pool, graph, vector)
+            .with_turbopuffer(turbopuffer)
+            .with_reranker(reranker)
+    }
+
+    /// Adds an optional Turbopuffer target backend for promoted workspaces.
+    #[must_use]
+    pub fn with_turbopuffer(mut self, turbopuffer: Option<Arc<TurbopufferStore>>) -> Self {
+        self.turbopuffer = turbopuffer;
+        self
     }
 
     /// Overrides the reranker backend.
@@ -153,9 +168,8 @@ impl HybridRetriever {
 
         let strategy = req.strategy.unwrap_or(Strategy::Both);
         let graph = self.graph.as_ref();
-        let vector = self.vector.as_ref();
         let graph_future = timed_leg("graph", GRAPH_BUDGET, graph_leg(graph, &req));
-        let vector_future = timed_leg("vector", VECTOR_BUDGET, vector_leg(vector, &req));
+        let vector_future = timed_leg("vector", VECTOR_BUDGET, self.vector_leg(&req));
         let lexical_future = timed_leg(
             "lexical",
             LEXICAL_BUDGET,
@@ -203,6 +217,94 @@ impl HybridRetriever {
         Ok(final_hits)
     }
 
+    async fn vector_leg(&self, req: &RetrievalRequest) -> Result<Vec<LegCandidate>> {
+        if req.query_embedding.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let Some(workspace_id) = req.scope.workspace_id() else {
+            return run_vector_leg(self.vector.as_ref(), req).await;
+        };
+        let state = self.vector_backend_state(req).await?;
+        if state.is_dual_read_active() {
+            return self.dual_read_vector_leg(req).await;
+        }
+        if state.vector_backend == "turbopuffer" {
+            if let Some(turbopuffer) = &self.turbopuffer {
+                return run_vector_leg(turbopuffer.as_ref(), req).await;
+            }
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                "workspace is configured for Turbopuffer but no client is configured; falling back to pgvector"
+            );
+        }
+
+        run_vector_leg(self.vector.as_ref(), req).await
+    }
+
+    async fn dual_read_vector_leg(&self, req: &RetrievalRequest) -> Result<Vec<LegCandidate>> {
+        let Some(turbopuffer) = &self.turbopuffer else {
+            tracing::warn!(
+                "workspace is in vector dual-read but no Turbopuffer client is configured"
+            );
+            return run_vector_leg(self.vector.as_ref(), req).await;
+        };
+
+        let pg_future = run_vector_leg(self.vector.as_ref(), req);
+        let tp_future = run_vector_leg(turbopuffer.as_ref(), req);
+        let (pg_result, tp_result) = tokio::join!(pg_future, tp_future);
+
+        if let (Ok(pg_hits), Ok(tp_hits)) = (&pg_result, &tp_result) {
+            metrics::histogram!("moa_vector_dualread_overlap")
+                .record(leg_overlap(pg_hits, tp_hits, 10));
+        }
+
+        match (tp_result, pg_result) {
+            (Ok(tp_hits), _) => Ok(tp_hits),
+            (Err(error), Ok(pg_hits)) => {
+                tracing::warn!(error = %error, "Turbopuffer vector dual-read leg failed; using pgvector result");
+                Ok(pg_hits)
+            }
+            (Err(error), Err(_)) => Err(error),
+        }
+    }
+
+    async fn vector_backend_state(&self, req: &RetrievalRequest) -> Result<VectorBackendState> {
+        let scope = ScopeContext::new(req.scope.clone());
+        let mut conn = ScopedConn::begin(&self.pool, &scope).await?;
+        if self.assume_app_role {
+            sqlx::query("SET LOCAL ROLE moa_app")
+                .execute(conn.as_mut())
+                .await?;
+        }
+        let workspace_id = req.scope.workspace_id().map(|id| id.to_string());
+        let row = match workspace_id {
+            Some(workspace_id) => {
+                sqlx::query_as::<_, (String, String, Option<DateTime<Utc>>)>(
+                    r#"
+                SELECT vector_backend, vector_backend_state, dual_read_until
+                FROM moa.workspace_state
+                WHERE workspace_id = $1
+                "#,
+                )
+                .bind(workspace_id)
+                .fetch_optional(conn.as_mut())
+                .await?
+            }
+            None => None,
+        };
+        conn.commit().await?;
+        Ok(row
+            .map(
+                |(vector_backend, vector_backend_state, dual_read_until)| VectorBackendState {
+                    vector_backend,
+                    vector_backend_state,
+                    dual_read_until,
+                },
+            )
+            .unwrap_or_default())
+    }
+
     async fn rerank_hits(
         &self,
         req: &RetrievalRequest,
@@ -228,6 +330,45 @@ impl HybridRetriever {
             Ok(out)
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct VectorBackendState {
+    vector_backend: String,
+    vector_backend_state: String,
+    dual_read_until: Option<DateTime<Utc>>,
+}
+
+impl Default for VectorBackendState {
+    fn default() -> Self {
+        Self {
+            vector_backend: "pgvector".to_string(),
+            vector_backend_state: "steady".to_string(),
+            dual_read_until: None,
+        }
+    }
+}
+
+impl VectorBackendState {
+    fn is_dual_read_active(&self) -> bool {
+        self.vector_backend_state == "dual_read"
+            && self.dual_read_until.is_none_or(|until| until > Utc::now())
+    }
+}
+
+fn leg_overlap(left: &[LegCandidate], right: &[LegCandidate], k: usize) -> f64 {
+    let left_set = left
+        .iter()
+        .take(k)
+        .map(|hit| hit.uid)
+        .collect::<HashSet<_>>();
+    let right_set = right
+        .iter()
+        .take(k)
+        .map(|hit| hit.uid)
+        .collect::<HashSet<_>>();
+    let denom = left_set.len().max(right_set.len()).max(1).min(k);
+    left_set.intersection(&right_set).count() as f64 / denom as f64
 }
 
 fn weights_for(strategy: Strategy) -> (f64, f64, f64) {

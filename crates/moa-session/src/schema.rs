@@ -26,7 +26,11 @@ const SESSION_MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/019_pgaudit.sql"),
     include_str!("../migrations/postgres/020_privacy_export.sql"),
     include_str!("../migrations/postgres/021_privacy_erase.sql"),
+    include_str!("../migrations/postgres/022_vector_backend_turbopuffer.sql"),
+    include_str!("../migrations/postgres/023_workspace_vector_promotion.sql"),
 ];
+
+const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;
 
 /// Runs all embedded `PostgreSQL` migrations idempotently on the provided pool.
 pub async fn migrate(pool: &PgPool, schema_name: Option<&str>) -> Result<()> {
@@ -45,6 +49,28 @@ pub async fn migrate(pool: &PgPool, schema_name: Option<&str>) -> Result<()> {
 }
 
 async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
+    let mut lock_conn = pool.acquire().await.map_err(map_sqlx_error)?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(SCHEMA_MIGRATION_LOCK_ID)
+        .execute(&mut *lock_conn)
+        .await
+        .map_err(map_sqlx_error)?;
+
+    let result = migrate_in_schema_locked(pool, schema_name).await;
+    let unlock_result = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(SCHEMA_MIGRATION_LOCK_ID)
+        .execute(&mut *lock_conn)
+        .await
+        .map_err(map_sqlx_error);
+
+    match (result, unlock_result) {
+        (Ok(()), Ok(_)) => Ok(()),
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+    }
+}
+
+async fn migrate_in_schema_locked(pool: &PgPool, schema_name: &str) -> Result<()> {
     sqlx::query(&format!(
         "CREATE SCHEMA IF NOT EXISTS {}",
         quote_identifier(schema_name)

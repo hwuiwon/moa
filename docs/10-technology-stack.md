@@ -14,7 +14,7 @@ The root workspace currently contains:
 | `moa-memory-graph` | Graph-memory sidecar tables, RLS, changelog, and AGE projection helpers |
 | `moa-memory-ingest` | Slow-path graph-memory ingestion DTOs and deterministic helpers |
 | `moa-memory-pii` | PII classification client and privacy-class aggregation helpers |
-| `moa-memory-vector` | VectorStore trait, Cohere Embed v4 client, and pgvector halfvec backend |
+| `moa-memory-vector` | VectorStore trait, Cohere Embed v4 client, pgvector halfvec backend, and Turbopuffer opt-in backend |
 | `moa-hands` | Tool router, local/Docker hands, Daytona, E2B, MCP |
 | `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring |
 | `moa-orchestrator` | Restate services, virtual objects, workflows, cloud binary |

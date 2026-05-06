@@ -93,6 +93,7 @@ async fn pgvector_round_trip_returns_identical_seed_first() {
     let seed = &items[42];
     let matches = store
         .knn(&VectorQuery {
+            workspace_id: Some(workspace_id.clone()),
             embedding: seed.embedding.clone(),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
@@ -140,10 +141,11 @@ async fn cross_tenant_knn_cannot_see_other_workspace_vectors() {
 
     let store_b = PgvectorStore::new_for_app_role(
         session_store.pool().clone(),
-        ScopeContext::workspace(WorkspaceId::new(workspace_b)),
+        ScopeContext::workspace(WorkspaceId::new(workspace_b.clone())),
     );
     let matches = store_b
         .knn(&VectorQuery {
+            workspace_id: Some(workspace_b),
             embedding: item_a.embedding.clone(),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
