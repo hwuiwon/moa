@@ -224,7 +224,10 @@ pub async fn retrieve_for_query(
 ) -> Result<Vec<RetrievalHit>> {
     let planned = ctx.planner.plan(query_text, ctx.planning).await?;
     let query_input = vec![query_text.to_string()];
+    let embed_started = std::time::Instant::now();
     let mut embeddings = ctx.embedder.embed(&query_input).await?;
+    metrics::histogram!("moa_retrieval_embedder_seconds")
+        .record(embed_started.elapsed().as_secs_f64());
     let embedding = embeddings.pop().ok_or(PlanError::EmptyQueryEmbedding)?;
     let request = planned.clone().into_retrieval_request(
         query_text,

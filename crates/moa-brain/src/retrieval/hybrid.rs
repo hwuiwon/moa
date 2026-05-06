@@ -181,6 +181,7 @@ impl HybridRetriever {
         let graph_hits = leg_or_empty("graph", graph_result)?;
         let vector_hits = leg_or_empty("vector", vector_result)?;
         let lexical_hits = leg_or_empty("lexical", lexical_result)?;
+        let fusion_started = std::time::Instant::now();
         let mut fused = rrf_fuse(
             &graph_hits,
             &vector_hits,
@@ -202,6 +203,8 @@ impl HybridRetriever {
         } else {
             hits.into_iter().take(req.k_final).collect()
         };
+        metrics::histogram!("moa_retrieval_rrf_rerank_seconds")
+            .record(fusion_started.elapsed().as_secs_f64());
 
         let touched_uids = final_hits.iter().map(|hit| hit.uid).collect::<Vec<_>>();
         let pool = self.pool.clone();

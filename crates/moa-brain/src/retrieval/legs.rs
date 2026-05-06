@@ -264,6 +264,7 @@ where
     let started = Instant::now();
     let result = tokio::time::timeout(budget, future).await;
     let elapsed = started.elapsed();
+    metrics::histogram!("moa_retrieval_leg_seconds", "leg" => name).record(elapsed.as_secs_f64());
     tracing::debug!(
         leg = name,
         elapsed_ms = elapsed.as_millis(),

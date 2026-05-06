@@ -7,14 +7,25 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 clap.workspace = true
+futures-util.workspace = true
+humantime = "2"
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+moa-brain = { path = "../moa-brain" }
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
+moa-memory-graph = { path = "../moa-memory/graph" }
+moa-memory-vector = { path = "../moa-memory/vector" }
 moa-orchestrator-local = { path = "../moa-orchestrator-local" }
 moa-providers = { path = "../moa-providers", features = ["test-util"] }
 moa-session = { path = "../moa-session" }
+rand = "0.8"
+secrecy = "0.10"
 serde.workspace = true
 serde_json.workspace = true
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "json"] }
 tempfile = "3"
 tokio.workspace = true
 uuid.workspace = true

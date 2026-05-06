@@ -3951,6 +3951,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
+name = "humantime"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
+
+[[package]]
 name = "hybrid-array"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5387,14 +5393,25 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "clap",
+ "futures-util",
+ "humantime",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "moa-brain",
  "moa-core",
  "moa-hands",
+ "moa-memory-graph",
+ "moa-memory-vector",
  "moa-orchestrator-local",
  "moa-providers",
  "moa-session",
+ "rand 0.8.5",
+ "secrecy 0.10.3",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "uuid",

@@ -195,6 +195,7 @@ impl CachedHybridRetriever {
         planned: &PlannedQuery,
         req: RetrievalRequest,
     ) -> Result<Vec<RetrievalHit>> {
+        let started = std::time::Instant::now();
         if !self.cacheable_scope(&req.scope) {
             metrics::counter!("moa_retrieval_cache_total", "outcome" => "bypass").increment(1);
             return self.inner.retrieve(req).await;
@@ -213,6 +214,8 @@ impl CachedHybridRetriever {
 
         if let Some(entry) = workspace_cache.get(&key).await {
             if entry.changelog_version == current_version {
+                metrics::histogram!("moa_retrieval_cache_hit_seconds")
+                    .record(started.elapsed().as_secs_f64());
                 metrics::counter!("moa_retrieval_cache_total", "outcome" => "hit").increment(1);
                 metrics::gauge!("moa_retrieval_cache_entries")
                     .set(workspace_cache.entry_count() as f64);
