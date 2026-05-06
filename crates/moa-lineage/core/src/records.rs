@@ -21,8 +21,8 @@ pub enum LineageEvent {
     Generation(GenerationLineage),
     /// Citation and verifier lineage.
     Citation(CitationLineage),
-    /// Reserved for L03 evaluation payloads.
-    Eval(serde_json::Value),
+    /// Evaluation, online judge, or human score lineage.
+    Eval(ScoreRecord),
     /// Reserved for L04 audit payloads.
     Decision(serde_json::Value),
 }
@@ -410,6 +410,84 @@ pub struct VerifierResult {
     pub method: String,
 }
 
+/// A normalized evaluation score for online judges, offline replay, or humans.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScoreRecord {
+    /// Stable score identifier.
+    pub score_id: Uuid,
+    /// Score timestamp.
+    pub ts: DateTime<Utc>,
+    /// Entity this score evaluates.
+    pub target: ScoreTarget,
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Optional user identifier.
+    pub user_id: Option<UserId>,
+    /// Score name, such as `grounding` or `retrieval_zero_recall`.
+    pub name: String,
+    /// Score value.
+    pub value: ScoreValue,
+    /// Score producer.
+    pub source: ScoreSource,
+    /// Evaluator or model name.
+    pub model_or_evaluator: String,
+    /// Optional replay run identifier.
+    pub run_id: Option<Uuid>,
+    /// Optional dataset identifier.
+    pub dataset_id: Option<Uuid>,
+    /// Optional score comment.
+    pub comment: Option<String>,
+}
+
+/// Entity targeted by a score record.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScoreTarget {
+    /// A single agent turn.
+    Turn {
+        /// Target turn ID.
+        turn_id: TurnId,
+    },
+    /// A persisted session.
+    Session {
+        /// Target session ID.
+        session_id: SessionId,
+    },
+    /// One item inside an offline replay run.
+    DatasetRunItem {
+        /// Replay run ID.
+        run_id: Uuid,
+        /// Dataset item ID.
+        item_id: Uuid,
+    },
+}
+
+/// Score value variants.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", content = "v", rename_all = "snake_case")]
+pub enum ScoreValue {
+    /// Numeric score.
+    Numeric(f64),
+    /// Boolean score.
+    Boolean(bool),
+    /// Categorical score.
+    Categorical(String),
+}
+
+/// Score producer category.
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScoreSource {
+    /// Emitted live during a turn.
+    OnlineJudge,
+    /// Emitted by offline replay.
+    OfflineReplay,
+    /// Emitted by human review tooling.
+    Human,
+    /// Emitted by an external integration.
+    External,
+}
+
 impl LineageEvent {
     /// Returns the turn ID when this event carries one.
     #[must_use]
@@ -419,7 +497,11 @@ impl LineageEvent {
             Self::Context(record) => Some(record.turn_id),
             Self::Generation(record) => Some(record.turn_id),
             Self::Citation(record) => Some(record.turn_id),
-            Self::Eval(_) | Self::Decision(_) => None,
+            Self::Eval(record) => match &record.target {
+                ScoreTarget::Turn { turn_id } => Some(*turn_id),
+                ScoreTarget::Session { .. } | ScoreTarget::DatasetRunItem { .. } => None,
+            },
+            Self::Decision(_) => None,
         }
     }
 
@@ -470,5 +552,31 @@ mod tests {
 
         assert_eq!(value["kind"], "retrieval");
         assert_eq!(value["record"]["query_original"], "query");
+    }
+
+    #[test]
+    fn score_event_serializes_with_typed_target_and_value() {
+        let turn_id = TurnId::new_v7();
+        let event = LineageEvent::Eval(ScoreRecord {
+            score_id: Uuid::now_v7(),
+            ts: Utc::now(),
+            target: ScoreTarget::Turn { turn_id },
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: Some(UserId::new("user")),
+            name: "citation_verified".to_string(),
+            value: ScoreValue::Boolean(true),
+            source: ScoreSource::OnlineJudge,
+            model_or_evaluator: "cascade-bm25-hhem".to_string(),
+            run_id: None,
+            dataset_id: None,
+            comment: None,
+        });
+
+        let value = serde_json::to_value(event).expect("serialize score event");
+
+        assert_eq!(value["kind"], "eval");
+        assert_eq!(value["record"]["target"]["kind"], "turn");
+        assert_eq!(value["record"]["value"]["type"], "boolean");
+        assert_eq!(value["record"]["source"], "online_judge");
     }
 }

@@ -36,6 +36,9 @@ pub enum EvalError {
     /// JSON serialization failed.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    /// SQL execution failed.
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
     /// Regex compilation failed while evaluating output expectations.
     #[error(transparent)]
     Regex(#[from] regex::Error),

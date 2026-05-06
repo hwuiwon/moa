@@ -1,0 +1,63 @@
+groups:
+  - name: moa-lineage
+    interval: 60s
+    rules:
+      - alert: MOALineageDropping
+        expr: rate(moa_lineage_dropped_total[5m]) > 0
+        for: 5m
+        annotations:
+          summary: Lineage events being dropped
+          description: "{{ $value }} events/sec dropped on {{ $labels.instance }}. Increase channel_capacity or investigate writer backpressure."
+
+      - alert: MOALineageWriterStuck
+        expr: rate(moa_lineage_recorded_total[5m]) > 0 and rate(moa_lineage_flushed_total[5m]) == 0
+        for: 10m
+        annotations:
+          summary: Lineage writer is not flushing
+          description: "Capture is alive but the writer has not flushed in 10 minutes. Check Postgres connectivity and fjall disk space."
+
+      - alert: MOAColdTierLagging
+        expr: time() - moa_lineage_cold_last_export_timestamp_seconds > 7200
+        for: 1h
+        annotations:
+          summary: Cold-tier export is more than two hours behind
+          description: "Lineage cold-tier export is lagging; retention can drop hot data before archival."
+
+  - name: moa-grounding
+    interval: 5m
+    rules:
+      - alert: MOAGroundingRateDropped
+        expr: |
+          (avg_over_time(moa_grounding_verified_rate[1h])
+          < avg_over_time(moa_grounding_verified_rate[24h] offset 1d) - 2 * stddev_over_time(moa_grounding_verified_rate[24h] offset 1d))
+          and avg_over_time(moa_grounding_verified_rate[1h]) < 0.7
+        for: 30m
+        annotations:
+          summary: "Verified citation rate dropped for workspace {{ $labels.workspace_id }}"
+          description: "Investigate retriever changes, embedder swaps, or model changes."
+
+      - alert: MOAZeroRecallSpike
+        expr: rate(moa_zero_recall_count[1h]) / rate(moa_turn_count[1h]) > 0.05
+        for: 30m
+        annotations:
+          summary: "Zero-recall retrievals above 5 percent in workspace {{ $labels.workspace_id }}"
+          description: "Retriever returned empty top-K too often. Check vector index, embedder API, and sidecar health."
+
+      - alert: MOACitationHallucinationSpike
+        expr: 1 - avg_over_time(moa_grounding_verified_rate[1h]) > 0.3
+        for: 30m
+        annotations:
+          summary: "Citation hallucination rate high in workspace {{ $labels.workspace_id }}"
+          description: "More than 30 percent of citations failed verifier checks over the last hour."
+
+  - name: moa-generation
+    interval: 5m
+    rules:
+      - alert: MOACostPerTurnSpike
+        expr: |
+          avg_over_time(moa_cost_micros_per_turn[1h])
+          > 2 * avg_over_time(moa_cost_micros_per_turn[24h] offset 1d)
+        for: 30m
+        annotations:
+          summary: "Cost per turn doubled vs yesterday for workspace {{ $labels.workspace_id }}"
+          description: "Inspect provider selection, prompt size, tool loops, and cache hit rate."

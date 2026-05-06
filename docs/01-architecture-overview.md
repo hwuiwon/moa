@@ -127,6 +127,23 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
 | Optional checkpoints | Neon | branch manager for database checkpoints |
 
+## Eval And Dashboards
+
+Lineage records are captured through the hot-path `LineageHandle` bridge and
+written asynchronously to `analytics.turn_lineage`. Eval, online-judge, and
+human-review scores use the same sink via `LineageEvent::Eval(ScoreRecord)` and
+land in `analytics.scores`, keyed by turn, session, or dataset replay item.
+
+`moa eval datasets register` stores replay datasets in
+`analytics.eval_datasets` and `analytics.eval_dataset_items`. `moa eval replay`
+emits score records with a shared `run_id`, while `moa eval scores` and
+`moa eval compare` read directly from `analytics.scores`.
+
+Grafana dashboards live in `dashboards/grafana/` and Prometheus alert rules live
+in `ops/prometheus/alerts/`. Import the dashboards with a Postgres datasource
+named `DS_POSTGRES` and a Prometheus datasource named `DS_PROMETHEUS`; the
+workspace selector is populated from `analytics.turn_lineage`.
+
 ## Workspace Layout
 
 | Crate | Role |

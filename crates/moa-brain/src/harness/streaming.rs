@@ -12,8 +12,8 @@ use moa_core::{
 };
 use moa_hands::ToolRouter;
 use moa_lineage_core::{
-    CitationLineage, ContextChunk, ContextLineage, GenerationLineage, LineageEvent, TokenUsage,
-    ToolCallSummary, TurnId,
+    CitationLineage, ContextChunk, ContextLineage, GenerationLineage, LineageEvent, ScoreRecord,
+    ScoreSource, ScoreTarget, ScoreValue, TokenUsage, ToolCallSummary, TurnId,
 };
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -625,6 +625,29 @@ fn emit_context_lineage(
         Ok(json) => lineage.record(json),
         Err(error) => tracing::warn!(%error, "failed to serialize context lineage"),
     }
+    let recall_proxy = if record.chunks_in_window.is_empty() {
+        0.0
+    } else {
+        1.0
+    };
+    let score = ScoreRecord {
+        score_id: uuid::Uuid::now_v7(),
+        ts: chrono::Utc::now(),
+        target: ScoreTarget::Turn { turn_id },
+        workspace_id: session.workspace_id.clone(),
+        user_id: Some(session.user_id.clone()),
+        name: "retrieval_recall_proxy".to_string(),
+        value: ScoreValue::Numeric(recall_proxy),
+        source: ScoreSource::OnlineJudge,
+        model_or_evaluator: "context-compiler".to_string(),
+        run_id: None,
+        dataset_id: None,
+        comment: None,
+    };
+    match serde_json::to_value(LineageEvent::Eval(score)) {
+        Ok(json) => lineage.record(json),
+        Err(error) => tracing::warn!(%error, "failed to serialize context score"),
+    }
     moa_lineage_otel::emit_context_attrs(span, &record);
 }
 
@@ -693,6 +716,30 @@ fn emit_generation_lineage(
         Ok(json) => lineage.record(json),
         Err(error) => tracing::warn!(%error, "failed to serialize generation lineage"),
     }
+    let score = ScoreRecord {
+        score_id: uuid::Uuid::now_v7(),
+        ts: chrono::Utc::now(),
+        target: ScoreTarget::Turn { turn_id },
+        workspace_id: session.workspace_id.clone(),
+        user_id: Some(session.user_id.clone()),
+        name: "cost_micros".to_string(),
+        value: ScoreValue::Numeric(record.cost_micros as f64),
+        source: ScoreSource::OnlineJudge,
+        model_or_evaluator: provider.to_string(),
+        run_id: None,
+        dataset_id: None,
+        comment: None,
+    };
+    match serde_json::to_value(LineageEvent::Eval(score)) {
+        Ok(json) => lineage.record(json),
+        Err(error) => tracing::warn!(%error, "failed to serialize generation score"),
+    }
+    metrics::gauge!(
+        "moa_cost_micros_per_turn",
+        "workspace_id" => session.workspace_id.to_string(),
+        "provider" => provider.to_string()
+    )
+    .set(record.cost_micros as f64);
     moa_lineage_otel::emit_generation_attrs(span, &record);
 
     let citation = CitationLineage {

@@ -533,6 +533,46 @@ fn register_metric_descriptions() {
         "moa_compaction_tier_applied_total",
         "Number of times each compaction tier was applied."
     );
+    describe_counter!(
+        "moa_lineage_dropped_total",
+        "Lineage events dropped because the hot-path channel was saturated."
+    );
+    describe_counter!(
+        "moa_lineage_recorded_total",
+        "Lineage events accepted by the hot-path channel."
+    );
+    describe_counter!(
+        "moa_lineage_flushed_total",
+        "Lineage rows flushed from the durable journal into Postgres."
+    );
+    describe_gauge!(
+        "moa_lineage_journal_depth",
+        "Approximate lineage events pending in the durable journal."
+    );
+    describe_gauge!(
+        "moa_lineage_cold_last_export_timestamp_seconds",
+        "Unix timestamp for the latest successful cold-tier lineage export."
+    );
+    describe_counter!(
+        "moa_lineage_cold_put_errors_total",
+        "Cold-tier object-store write failures."
+    );
+    describe_gauge!(
+        "moa_grounding_verified_rate",
+        "Latest citation verifier outcome per workspace, encoded as 0 or 1."
+    );
+    describe_counter!(
+        "moa_zero_recall_count",
+        "Retrieval operations that returned an empty top-K."
+    );
+    describe_counter!(
+        "moa_turn_count",
+        "Retrieval-scoped turn count used for lineage zero-recall alerting."
+    );
+    describe_gauge!(
+        "moa_cost_micros_per_turn",
+        "Latest generation cost per turn in micros of USD."
+    );
     describe_histogram!(
         "moa_turn_latency_seconds",
         "End-to-end turn latency in seconds."

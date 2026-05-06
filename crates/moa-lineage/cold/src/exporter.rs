@@ -110,6 +110,7 @@ impl ColdTierExporter {
                 _ = cancel.cancelled() => break,
                 _ = interval.tick() => {
                     if let Err(error) = self.flush_one_window().await {
+                        metrics::counter!("moa_lineage_cold_put_errors_total").increment(1);
                         tracing::error!(%error, "cold-tier flush failed");
                     }
                 }
@@ -191,6 +192,8 @@ impl ColdTierExporter {
         .bind(format!("s3://{}/{}", self.config.bucket, key))
         .execute(&self.pool)
         .await?;
+        metrics::gauge!("moa_lineage_cold_last_export_timestamp_seconds")
+            .set(last_ts.timestamp() as f64);
 
         Ok(ExporterStats {
             rows_scanned: rows.len() as u64,

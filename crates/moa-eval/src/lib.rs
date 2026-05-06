@@ -9,6 +9,7 @@ pub mod golden;
 pub mod loader;
 pub mod pentest;
 pub mod plan;
+pub mod replay;
 pub mod reporter;
 pub mod reporters;
 pub mod results;
@@ -25,6 +26,10 @@ pub use evaluators::{
 };
 pub use loader::{discover_configs, discover_suites, load_agent_config, load_suite};
 pub use plan::EvalPlan;
+pub use replay::{
+    DatasetItem, ReplayConfig, ReplayReport, list_datasets, load_dataset_items, register_dataset,
+    replay_dataset, replay_dataset_live, token_f1,
+};
 pub use reporter::Reporter;
 pub use reporters::JsonReporter;
 #[cfg(feature = "langfuse")]
