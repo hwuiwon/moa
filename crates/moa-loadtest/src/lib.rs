@@ -1,5 +1,7 @@
 //! Custom load-test harness for realistic MOA multi-turn agent workloads.
 
+pub mod scenarios;
+
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};

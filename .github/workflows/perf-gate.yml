@@ -1,0 +1,36 @@
+name: perf-gate
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest-8-core
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: ghcr.io/hwuiwon/moa-postgres-age:17.6-age1.7.0
+        ports:
+          - "5432:5432"
+        env:
+          POSTGRES_PASSWORD: ci
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run perf gate
+        run: cargo run -p moa-loadtest --release --bin perf_gate -- --duration 5m
+        env:
+          DATABASE_URL: postgres://postgres:ci@localhost/postgres
+          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY_CI }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-gate-snapshot
+          path: target/perf-gate/snapshot.prom
