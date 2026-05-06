@@ -11,7 +11,7 @@ use std::{panic::AssertUnwindSafe, panic::resume_unwind};
 use futures_util::FutureExt;
 use moa_core::{
     CloudHandsConfig, HandHandle, HandProvider, HandResources, HandSpec, HandStatus, MoaConfig,
-    Result, SessionMeta, ToolInvocation, UserId, WorkspaceId,
+    MoaError, Result, SessionMeta, ToolInvocation, UserId, WorkspaceId,
 };
 use moa_hands::{E2BHandProvider, ToolRouter};
 use serde_json::json;

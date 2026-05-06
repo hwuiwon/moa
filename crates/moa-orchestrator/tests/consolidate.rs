@@ -5,7 +5,7 @@ use moa_core::WorkspaceId;
 use moa_orchestrator::workflows::consolidate::ConsolidateReport;
 
 #[test]
-fn graph_noop_report_has_no_wiki_page_updates() {
+fn graph_noop_report_has_no_memory_record_updates() {
     let workspace_id = WorkspaceId::new("workspace-r09");
     let target_date = chrono::NaiveDate::from_ymd_opt(2026, 4, 20).expect("valid date");
     let ran_at = Utc

@@ -871,9 +871,9 @@ impl Default for LocalConfig {
 pub struct MemoryConfig {
     /// Automatically bootstrap workspace memory when it is empty.
     pub auto_bootstrap: bool,
-    /// Embedding provider used for semantic wiki search. Set to `disabled` to turn it off.
+    /// Embedding provider used for graph memory retrieval. Set to `disabled` to turn it off.
     pub embedding_provider: String,
-    /// Embedding model identifier used for semantic wiki search backfills and queries.
+    /// Embedding model identifier used for graph memory embedding backfills and queries.
     pub embedding_model: String,
 }
 

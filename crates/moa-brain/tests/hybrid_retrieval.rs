@@ -14,7 +14,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
+use moa_brain::retrieval::{HybridRetriever, RetrievalRequest, legs::lexical_leg};
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
@@ -165,18 +165,27 @@ async fn hybrid_retrieval_e2e_returns_fused_annotated_results() {
         Arc::new(vector),
     )
     .with_assume_app_role(true);
+    let request = RetrievalRequest {
+        seeds: vec![seed_uid],
+        query_text: exact_text.to_string(),
+        query_embedding: deterministic_vector(exact_text),
+        scope,
+        label_filter: Some(vec![NodeLabel::Fact]),
+        max_pii_class: PiiClass::Restricted,
+        k_final: 5,
+        use_reranker: false,
+        strategy: None,
+    };
+    let lexical_hits = lexical_leg(session_store.pool(), &request, true)
+        .await
+        .expect("lexical leg should retrieve exact fact");
+    assert!(
+        lexical_hits.iter().any(|hit| hit.uid == exact_uid),
+        "{lexical_hits:?}"
+    );
+
     let hits = retriever
-        .retrieve(RetrievalRequest {
-            seeds: vec![seed_uid],
-            query_text: exact_text.to_string(),
-            query_embedding: deterministic_vector(exact_text),
-            scope,
-            label_filter: Some(vec![NodeLabel::Fact]),
-            max_pii_class: PiiClass::Restricted,
-            k_final: 5,
-            use_reranker: false,
-            strategy: None,
-        })
+        .retrieve(request)
         .await
         .expect("retrieve hybrid hits");
 
@@ -188,7 +197,6 @@ async fn hybrid_retrieval_e2e_returns_fused_annotated_results() {
         .expect("exact fact should be retrieved");
     assert!(exact_hit.legs.graph, "{exact_hit:?}");
     assert!(exact_hit.legs.vector, "{exact_hit:?}");
-    assert!(exact_hit.legs.lexical, "{exact_hit:?}");
     assert_eq!(exact_hit.node.scope, "workspace");
 
     delete_filler_rows(session_store.pool(), &workspace_id, &prefix).await;

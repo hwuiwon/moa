@@ -443,7 +443,7 @@ fn register_metric_descriptions() {
     describe_gauge!("moa_sessions_active", "Currently active MOA sessions.");
     describe_gauge!(
         "moa_embedding_queue_depth",
-        "Approximate number of wiki pages waiting for embeddings."
+        "Approximate number of graph memory records waiting for embeddings."
     );
     describe_gauge!(
         "tokio_workers_count",

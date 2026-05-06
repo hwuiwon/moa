@@ -10,12 +10,9 @@ use crate::{
     chunk_turn, current_runtime, extract_facts, fact_hash, scoped_fact_uid, should_ingest_degraded,
 };
 use moa_core::{ScopeContext, ScopedConn};
-use moa_memory_graph::{
-    AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass as GraphPiiClass,
-};
+use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_pii::{
-    OpenAiPrivacyFilterClassifier, PiiCategory, PiiClass as ClassifierPiiClass, PiiClassifier,
-    PiiResult, PiiSpan,
+    OpenAiPrivacyFilterClassifier, PiiCategory, PiiClassifier, PiiResult, PiiSpan,
 };
 use moa_memory_vector::{CohereV4Embedder, Embedder, PgvectorStore};
 use restate_sdk::prelude::*;
@@ -253,16 +250,16 @@ fn heuristic_classify(text: &str) -> PiiResult {
         .iter()
         .any(|span| matches!(span.category, PiiCategory::Secret))
     {
-        ClassifierPiiClass::Restricted
+        PiiClass::Restricted
     } else if spans
         .iter()
         .any(|span| matches!(span.category, PiiCategory::Ssn))
     {
-        ClassifierPiiClass::Phi
+        PiiClass::Phi
     } else if spans.is_empty() {
-        ClassifierPiiClass::None
+        PiiClass::None
     } else {
-        ClassifierPiiClass::Pii
+        PiiClass::Pii
     };
     PiiResult {
         class,
@@ -473,7 +470,7 @@ fn node_intent(
             "fact_hash": hex_bytes(hash),
             "pii_class": fact.classified.pii_class.as_str(),
         }),
-        pii_class: graph_pii_class(fact.classified.pii_class),
+        pii_class: fact.classified.pii_class,
         confidence: Some(0.70),
         valid_from: turn.finalized_at,
         embedding: fact.embedding.clone(),
@@ -596,15 +593,6 @@ fn decision_fact(decision: &IngestDecision) -> Option<&EmbeddedFact> {
     match decision {
         IngestDecision::Insert { fact } | IngestDecision::Supersede { fact, .. } => Some(fact),
         IngestDecision::SkipDuplicate { .. } => None,
-    }
-}
-
-fn graph_pii_class(class: ClassifierPiiClass) -> GraphPiiClass {
-    match class {
-        ClassifierPiiClass::None => GraphPiiClass::None,
-        ClassifierPiiClass::Pii => GraphPiiClass::Pii,
-        ClassifierPiiClass::Phi => GraphPiiClass::Phi,
-        ClassifierPiiClass::Restricted => GraphPiiClass::Restricted,
     }
 }
 

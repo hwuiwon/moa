@@ -10,12 +10,9 @@ use moa_core::{
     MemoryScope, MoaError, ScopeContext, ScopedConn, SessionMeta, ToolOutput, UserId, WorkspaceId,
 };
 use moa_memory_graph::{
-    AgeGraphStore, GraphError, GraphStore, NodeLabel, NodeWriteIntent, PiiClass as GraphPiiClass,
+    AgeGraphStore, GraphError, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
 };
-use moa_memory_pii::{
-    OpenAiPrivacyFilterClassifier, PiiClass as ClassifierPiiClass, PiiClassifier, PiiError,
-    PiiResult,
-};
+use moa_memory_pii::{OpenAiPrivacyFilterClassifier, PiiClassifier, PiiError, PiiResult};
 use moa_memory_vector::{
     CohereV4Embedder, Embedder, Error as VectorError, PgvectorStore, VECTOR_DIMENSION, VectorStore,
 };
@@ -328,7 +325,7 @@ fn validate_remember_request(req: &FastRememberRequest) -> Result<(), FastError>
 fn build_intent(
     req: &FastRememberRequest,
     embedding: &[f32],
-    pii_class: ClassifierPiiClass,
+    pii_class: PiiClass,
     confidence: f64,
     embedding_model: &str,
     embedding_model_version: i32,
@@ -344,7 +341,7 @@ fn build_intent(
             "summary": req.text,
             "source": "fast_path",
         }),
-        pii_class: graph_pii_class(pii_class),
+        pii_class,
         confidence: Some(confidence),
         valid_from: Utc::now(),
         embedding: Some(embedding.to_vec()),
@@ -396,15 +393,6 @@ async fn begin_scoped(ctx: &FastPathCtx) -> Result<ScopedConn<'_>, FastError> {
             .await?;
     }
     Ok(conn)
-}
-
-fn graph_pii_class(value: ClassifierPiiClass) -> GraphPiiClass {
-    match value {
-        ClassifierPiiClass::None => GraphPiiClass::None,
-        ClassifierPiiClass::Pii => GraphPiiClass::Pii,
-        ClassifierPiiClass::Phi => GraphPiiClass::Phi,
-        ClassifierPiiClass::Restricted => GraphPiiClass::Restricted,
-    }
 }
 
 fn short_name(text: &str) -> String {

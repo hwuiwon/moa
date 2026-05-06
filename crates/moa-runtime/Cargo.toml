@@ -17,5 +17,5 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-memory-graph = { package = "moa-memory-graph", path = "../moa-memory-graph" }
+memory-graph = { package = "moa-memory-graph", path = "../moa-memory/graph" }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }

@@ -7,8 +7,8 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
-moa-memory-vector = { path = "../moa-memory-vector" }
-moa-core = { path = "../moa-core" }
+moa-memory-vector = { path = "../vector" }
+moa-core = { path = "../../moa-core" }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
@@ -18,5 +18,5 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-moa-session = { path = "../moa-session" }
+moa-session = { path = "../../moa-session" }
 tokio.workspace = true

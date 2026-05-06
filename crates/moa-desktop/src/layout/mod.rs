@@ -2,4 +2,4 @@
 
 pub mod workspace;
 
-pub use workspace::Workspace;
+pub(crate) use workspace::Workspace;

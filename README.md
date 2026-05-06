@@ -92,10 +92,10 @@ The context pipeline is byte-stable where possible for prompt caching. With quer
 | [`moa-core`](crates/moa-core/) | Shared types, traits, config, events, telemetry, analytics DTOs |
 | [`moa-brain`](crates/moa-brain/) | Context pipeline, query rewriting, segment helpers, intent classifier, resolution scoring, streamed turns |
 | [`moa-session`](crates/moa-session/) | Postgres session store, event log, task segments, intent tables, learning log, analytics views |
-| [`moa-memory-graph`](crates/moa-memory-graph/) | Graph memory store, SQL sidecars, RLS, bitemporal state, and changelog |
-| [`moa-memory-ingest`](crates/moa-memory-ingest/) | Slow-path graph ingestion and fast memory write APIs |
-| [`moa-memory-vector`](crates/moa-memory-vector/) | pgvector-backed graph embeddings and vector lookup |
-| [`moa-memory-pii`](crates/moa-memory-pii/) | PII classification and privacy filtering for memory writes |
+| [`moa-memory-graph`](crates/moa-memory/graph/) | Graph memory store, SQL sidecars, RLS, bitemporal state, and changelog |
+| [`moa-memory-ingest`](crates/moa-memory/ingest/) | Slow-path graph ingestion and fast memory write APIs |
+| [`moa-memory-vector`](crates/moa-memory/vector/) | pgvector-backed graph embeddings and vector lookup |
+| [`moa-memory-pii`](crates/moa-memory/pii/) | PII classification and privacy filtering for memory writes |
 | [`moa-hands`](crates/moa-hands/) | Tool router, local/Docker hands, Daytona, E2B, MCP client |
 | [`moa-providers`](crates/moa-providers/) | LLM and embedding providers |
 | [`moa-orchestrator`](crates/moa-orchestrator/) | Restate services, virtual objects, workflows, and handler binary |

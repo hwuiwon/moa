@@ -7,7 +7,7 @@ use uuid::Uuid;
 /// Visual model used by the chat view.
 #[allow(dead_code)] // timestamps will be shown in a future polish pass
 #[derive(Clone, Debug)]
-pub enum ChatMessage {
+pub(crate) enum ChatMessage {
     User {
         text: String,
         timestamp: DateTime<Utc>,
@@ -48,21 +48,21 @@ pub enum ChatMessage {
 
 /// Summary of a tool call paired with its result (if present yet).
 #[derive(Clone, Debug)]
-pub struct ToolInvocation {
-    pub tool_id: Uuid,
-    pub tool_name: String,
-    pub input_preview: String,
-    pub output_preview: Option<String>,
-    pub success: Option<bool>,
-    pub duration_ms: Option<u64>,
-    pub risk_level: Option<RiskLevel>,
+pub(crate) struct ToolInvocation {
+    pub(crate) tool_id: Uuid,
+    pub(crate) tool_name: String,
+    pub(crate) input_preview: String,
+    pub(crate) output_preview: Option<String>,
+    pub(crate) success: Option<bool>,
+    pub(crate) duration_ms: Option<u64>,
+    pub(crate) risk_level: Option<RiskLevel>,
 }
 
 /// Converts an ordered sequence of event records into display messages.
 ///
 /// Tool calls are folded into grouped [`ChatMessage::ToolTurn`]s; approvals
 /// are matched to their decisions by `request_id`.
-pub fn events_to_messages(records: &[EventRecord]) -> Vec<ChatMessage> {
+pub(crate) fn events_to_messages(records: &[EventRecord]) -> Vec<ChatMessage> {
     let mut out: Vec<ChatMessage> = Vec::new();
     let mut pending_tools: Vec<ToolInvocation> = Vec::new();
     let mut pending_timestamp: Option<DateTime<Utc>> = None;
@@ -201,7 +201,7 @@ pub fn events_to_messages(records: &[EventRecord]) -> Vec<ChatMessage> {
 }
 
 /// Returns a transient system row explaining that live runtime updates were dropped.
-pub fn gap_message(count: u64) -> ChatMessage {
+pub(crate) fn gap_message(count: u64) -> ChatMessage {
     ChatMessage::System {
         text: format!(
             "… {count} events missed (subscriber was behind; see session log for full history) …"

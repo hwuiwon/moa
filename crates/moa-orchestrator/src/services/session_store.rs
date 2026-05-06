@@ -141,7 +141,8 @@ pub struct RecordSegmentTurnUsageRequest {
 
 /// Restate service surface for durable session/event storage.
 #[restate_sdk::service]
-pub trait SessionStore {
+#[name = "SessionStore"]
+pub trait RestateSessionStore {
     /// Persists a session metadata row.
     async fn create_session(meta: Json<SessionMeta>) -> Result<Json<SessionId>, HandlerError>;
 
@@ -403,7 +404,7 @@ impl SessionStoreImpl {
     }
 }
 
-impl SessionStore for SessionStoreImpl {
+impl RestateSessionStore for SessionStoreImpl {
     #[tracing::instrument(skip(self, ctx, meta))]
     async fn create_session(
         &self,

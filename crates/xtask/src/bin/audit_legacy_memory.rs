@@ -24,19 +24,20 @@ fn main() -> ExitCode {
 fn audit() -> io::Result<Vec<String>> {
     let mut violations = Vec::new();
 
-    if Path::new("crates/moa-memory").exists() {
-        violations.push("crates/moa-memory/ exists; legacy crate has reappeared.".to_string());
+    if Path::new("crates/moa-memory/Cargo.toml").exists() {
+        violations
+            .push("crates/moa-memory/Cargo.toml exists; legacy crate has reappeared.".to_string());
     }
 
     let workspace_toml = fs::read_to_string("Cargo.toml")?;
-    if contains_legacy_crate_name(&workspace_toml) {
+    if contains_legacy_crate_reference(&workspace_toml) {
         violations.push("workspace Cargo.toml references the legacy moa-memory crate.".to_string());
     }
 
     walk_files(Path::new("crates"), &mut |path| {
         if path.file_name().and_then(|name| name.to_str()) == Some("Cargo.toml") {
             let body = fs::read_to_string(path)?;
-            if contains_legacy_crate_name(&body) {
+            if contains_legacy_crate_reference(&body) {
                 violations.push(format!(
                     "{} references the legacy moa-memory crate.",
                     path.display()
@@ -59,17 +60,15 @@ fn audit() -> io::Result<Vec<String>> {
     Ok(violations)
 }
 
-fn contains_legacy_crate_name(body: &str) -> bool {
-    body.lines()
-        .any(|line| legacy_name_positions(line).next().is_some())
-}
-
-fn legacy_name_positions(line: &str) -> impl Iterator<Item = usize> + '_ {
-    line.match_indices("moa-memory").filter_map(|(index, _)| {
-        match line[index + "moa-memory".len()..].chars().next() {
-            Some('-') => None,
-            _ => Some(index),
-        }
+fn contains_legacy_crate_reference(body: &str) -> bool {
+    body.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed == "\"crates/moa-memory\""
+            || trimmed.starts_with("\"crates/moa-memory\",")
+            || trimmed.starts_with("moa-memory ")
+            || trimmed.starts_with("moa-memory=")
+            || trimmed.starts_with("moa-memory\t")
+            || trimmed.contains("package = \"moa-memory\"")
     })
 }
 

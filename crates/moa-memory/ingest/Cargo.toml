@@ -8,10 +8,10 @@ license.workspace = true
 async-trait.workspace = true
 blake3 = "1"
 chrono.workspace = true
-moa-core = { path = "../moa-core" }
-moa-memory-graph = { path = "../moa-memory-graph" }
-moa-memory-pii = { path = "../moa-memory-pii" }
-moa-memory-vector = { path = "../moa-memory-vector" }
+moa-core = { path = "../../moa-core" }
+moa-memory-graph = { path = "../graph" }
+moa-memory-pii = { path = "../pii" }
+moa-memory-vector = { path = "../vector" }
 moka = { version = "0.12", features = ["future"] }
 metrics.workspace = true
 reqwest.workspace = true
@@ -27,5 +27,5 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-moa-hands = { path = "../moa-hands" }
-moa-session = { path = "../moa-session" }
+moa-hands = { path = "../../moa-hands" }
+moa-session = { path = "../../moa-session" }

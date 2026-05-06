@@ -51,7 +51,7 @@ pub struct WorkspaceStatus {
     pub next_consolidation_at: Option<DateTime<Utc>>,
     /// Whether a consolidation workflow is currently in progress.
     pub consolidation_in_progress: bool,
-    /// Number of pages currently present in the workspace wiki.
+    /// Number of graph memory records currently present in the workspace.
     pub pages_count: u64,
 }
 
@@ -153,7 +153,8 @@ pub fn deterministic_consolidation_jitter_secs(workspace_id: &WorkspaceId) -> u6
 
 /// Restate virtual object surface for one workspace orchestration key.
 #[restate_sdk::object]
-pub trait Workspace {
+#[name = "Workspace"]
+pub trait WorkspaceObject {
     /// Initializes the workspace object with its persisted config and schedules the first run.
     async fn init(config: Json<WorkspaceConfig>) -> Result<(), HandlerError>;
 
@@ -183,7 +184,7 @@ pub trait Workspace {
 /// Concrete `Workspace` virtual object implementation.
 pub struct WorkspaceImpl;
 
-impl Workspace for WorkspaceImpl {
+impl WorkspaceObject for WorkspaceImpl {
     #[tracing::instrument(skip(self, ctx, config))]
     async fn init(
         &self,
@@ -326,8 +327,6 @@ impl Workspace for WorkspaceImpl {
 }
 
 async fn count_graph_nodes(workspace_id: &WorkspaceId) -> Result<u64, HandlerError> {
-    // MIGRATION: `pages_count` remains in the status DTO for compatibility with callers, but C03
-    // maps it to active graph-memory nodes rather than wiki pages.
     let ctx = OrchestratorCtx::current();
     let count = sqlx::query_scalar::<_, i64>(
         r#"

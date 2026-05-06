@@ -17,7 +17,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use crate::observability::annotate_restate_handler_span;
-use crate::services::session_store::{AppendEventRequest, SessionStoreClient};
+use crate::services::session_store::{AppendEventRequest, RestateSessionStoreClient};
 
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4";
@@ -402,7 +402,7 @@ impl LLMGateway for LLMGatewayImpl {
             };
 
             let turn_seq = ctx
-                .service_client::<SessionStoreClient>()
+                .service_client::<RestateSessionStoreClient>()
                 .append_event(Json(AppendEventRequest { session_id, event }))
                 .call()
                 .await?;
