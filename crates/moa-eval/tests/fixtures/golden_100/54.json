@@ -1,0 +1,12 @@
+{
+  "uid_seed": "54",
+  "label": "Fact",
+  "name": "fact54 alice stack-choice alice set fast path budget below one second",
+  "summary": "fact54 alice stack-choice alice set fast path budget below one second",
+  "entity_uids": [
+    "alice",
+    "stack-choice"
+  ],
+  "expected_embedding_seed": 54,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

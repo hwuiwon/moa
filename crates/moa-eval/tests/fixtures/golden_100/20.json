@@ -1,0 +1,12 @@
+{
+  "uid_seed": "20",
+  "label": "Fact",
+  "name": "fact20 auth-service deployment deploy dashboard tracks oauth error budget",
+  "summary": "fact20 auth-service deployment deploy dashboard tracks oauth error budget",
+  "entity_uids": [
+    "auth-service",
+    "deployment"
+  ],
+  "expected_embedding_seed": 20,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

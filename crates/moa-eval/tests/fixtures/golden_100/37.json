@@ -1,0 +1,12 @@
+{
+  "uid_seed": "37",
+  "label": "Fact",
+  "name": "fact37 payments scaling capacity review watches authorization p95 latency",
+  "summary": "fact37 payments scaling capacity review watches authorization p95 latency",
+  "entity_uids": [
+    "payments",
+    "scaling"
+  ],
+  "expected_embedding_seed": 37,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

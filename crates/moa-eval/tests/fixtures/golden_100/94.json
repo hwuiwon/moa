@@ -1,0 +1,12 @@
+{
+  "uid_seed": "94",
+  "label": "Fact",
+  "name": "fact94 caching read-through caching readthrough warms dashboard summary at startup",
+  "summary": "fact94 caching read-through caching readthrough warms dashboard summary at startup",
+  "entity_uids": [
+    "caching",
+    "read-through"
+  ],
+  "expected_embedding_seed": 94,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

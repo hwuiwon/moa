@@ -1,0 +1,12 @@
+{
+  "uid_seed": "23",
+  "label": "Fact",
+  "name": "fact23 payments scaling read replica opens for invoice reporting bursts",
+  "summary": "fact23 payments scaling read replica opens for invoice reporting bursts",
+  "entity_uids": [
+    "payments",
+    "scaling"
+  ],
+  "expected_embedding_seed": 23,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

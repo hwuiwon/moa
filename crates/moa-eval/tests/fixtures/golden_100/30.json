@@ -1,0 +1,12 @@
+{
+  "uid_seed": "30",
+  "label": "Fact",
+  "name": "fact30 payments scaling payment retries use exponential backoff ceiling",
+  "summary": "fact30 payments scaling payment retries use exponential backoff ceiling",
+  "entity_uids": [
+    "payments",
+    "scaling"
+  ],
+  "expected_embedding_seed": 30,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

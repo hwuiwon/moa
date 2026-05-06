@@ -1,0 +1,12 @@
+{
+  "uid_seed": "93",
+  "label": "Fact",
+  "name": "fact93 caching read-through caching readthrough stores tenant id in cache key",
+  "summary": "fact93 caching read-through caching readthrough stores tenant id in cache key",
+  "entity_uids": [
+    "caching",
+    "read-through"
+  ],
+  "expected_embedding_seed": 93,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

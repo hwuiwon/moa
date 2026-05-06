@@ -1,0 +1,12 @@
+{
+  "uid_seed": "96",
+  "label": "Fact",
+  "name": "fact96 caching read-through caching readthrough logs cache fill duration histogram",
+  "summary": "fact96 caching read-through caching readthrough logs cache fill duration histogram",
+  "entity_uids": [
+    "caching",
+    "read-through"
+  ],
+  "expected_embedding_seed": 96,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

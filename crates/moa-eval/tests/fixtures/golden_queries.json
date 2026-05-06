@@ -1,0 +1,228 @@
+{
+  "queries": [
+    {
+      "query": "fact01 fact04 fact08 fact12 fact19 auth deploy release cadence",
+      "expected_top_5_uids": [
+        "fact-01",
+        "fact-04",
+        "fact-08",
+        "fact-12",
+        "fact-19"
+      ]
+    },
+    {
+      "query": "fact02 fact05 fact09 fact11 fact15 auth canary migration traffic",
+      "expected_top_5_uids": [
+        "fact-02",
+        "fact-05",
+        "fact-09",
+        "fact-11",
+        "fact-15"
+      ]
+    },
+    {
+      "query": "fact03 fact06 fact10 fact14 fact18 auth rollback secrets release manifest",
+      "expected_top_5_uids": [
+        "fact-03",
+        "fact-06",
+        "fact-10",
+        "fact-14",
+        "fact-18"
+      ]
+    },
+    {
+      "query": "fact07 fact13 fact16 fact17 fact20 auth artifact health drain dashboard",
+      "expected_top_5_uids": [
+        "fact-07",
+        "fact-13",
+        "fact-16",
+        "fact-17",
+        "fact-20"
+      ]
+    },
+    {
+      "query": "fact21 fact22 fact28 fact34 fact40 payments autoscaler queue checkout dashboard",
+      "expected_top_5_uids": [
+        "fact-21",
+        "fact-22",
+        "fact-28",
+        "fact-34",
+        "fact-40"
+      ]
+    },
+    {
+      "query": "fact23 fact24 fact31 fact35 fact36 payments replica idempotency ledger changelog",
+      "expected_top_5_uids": [
+        "fact-23",
+        "fact-24",
+        "fact-31",
+        "fact-35",
+        "fact-36"
+      ]
+    },
+    {
+      "query": "fact25 fact26 fact29 fact37 fact39 payments webhook fraud rate latency polling",
+      "expected_top_5_uids": [
+        "fact-25",
+        "fact-26",
+        "fact-29",
+        "fact-37",
+        "fact-39"
+      ]
+    },
+    {
+      "query": "fact27 fact30 fact32 fact33 fact38 payments settlement retries failover token scale",
+      "expected_top_5_uids": [
+        "fact-27",
+        "fact-30",
+        "fact-32",
+        "fact-33",
+        "fact-38"
+      ]
+    },
+    {
+      "query": "fact41 fact42 fact43 fact45 fact47 alice rust postgres restate age adr",
+      "expected_top_5_uids": [
+        "fact-41",
+        "fact-42",
+        "fact-43",
+        "fact-45",
+        "fact-47"
+      ]
+    },
+    {
+      "query": "fact44 fact46 fact48 fact49 fact50 alice graph pgvector cohere turbopuffer rls",
+      "expected_top_5_uids": [
+        "fact-44",
+        "fact-46",
+        "fact-48",
+        "fact-49",
+        "fact-50"
+      ]
+    },
+    {
+      "query": "fact51 fact52 fact53 fact54 fact55 alice hard changelog mocks fast pii",
+      "expected_top_5_uids": [
+        "fact-51",
+        "fact-52",
+        "fact-53",
+        "fact-54",
+        "fact-55"
+      ]
+    },
+    {
+      "query": "fact56 fact57 fact58 fact59 fact60 alice ownership skill fusion providers promotion",
+      "expected_top_5_uids": [
+        "fact-56",
+        "fact-57",
+        "fact-58",
+        "fact-59",
+        "fact-60"
+      ]
+    },
+    {
+      "query": "fact61 fact62 fact65 fact66 fact73 useast1 regional network failover dns private",
+      "expected_top_5_uids": [
+        "fact-61",
+        "fact-62",
+        "fact-65",
+        "fact-66",
+        "fact-73"
+      ]
+    },
+    {
+      "query": "fact63 fact64 fact67 fact68 fact69 useast1 regional queue cache storage replica scheduler",
+      "expected_top_5_uids": [
+        "fact-63",
+        "fact-64",
+        "fact-67",
+        "fact-68",
+        "fact-69"
+      ]
+    },
+    {
+      "query": "fact70 fact71 fact72 fact74 fact75 useast1 regional restate silence failback api backup",
+      "expected_top_5_uids": [
+        "fact-70",
+        "fact-71",
+        "fact-72",
+        "fact-74",
+        "fact-75"
+      ]
+    },
+    {
+      "query": "fact76 fact77 fact78 fact79 fact80 useast1 regional warm observer replay refill report",
+      "expected_top_5_uids": [
+        "fact-76",
+        "fact-77",
+        "fact-78",
+        "fact-79",
+        "fact-80"
+      ]
+    },
+    {
+      "query": "fact81 fact82 fact83 fact87 fact90 caching readthrough miss fetch ttl coalesces ratio",
+      "expected_top_5_uids": [
+        "fact-81",
+        "fact-82",
+        "fact-83",
+        "fact-87",
+        "fact-90"
+      ]
+    },
+    {
+      "query": "fact84 fact85 fact88 fact89 fact93 caching readthrough restricted negative changelog stale tenant",
+      "expected_top_5_uids": [
+        "fact-84",
+        "fact-85",
+        "fact-88",
+        "fact-89",
+        "fact-93"
+      ]
+    },
+    {
+      "query": "fact86 fact91 fact92 fact94 fact96 caching readthrough hot version oversized warm histogram",
+      "expected_top_5_uids": [
+        "fact-86",
+        "fact-91",
+        "fact-92",
+        "fact-94",
+        "fact-96"
+      ]
+    },
+    {
+      "query": "fact95 fact97 fact98 fact99 fact100 caching readthrough backend promotion herd audit retries",
+      "expected_top_5_uids": [
+        "fact-95",
+        "fact-97",
+        "fact-98",
+        "fact-99",
+        "fact-100"
+      ]
+    }
+  ],
+  "cross_queries": [
+    "fact01 auth deploy release cadence",
+    "fact21 payments autoscaler checkout",
+    "fact44 alice graph primary storage",
+    "fact61 useast1 regional network",
+    "fact81 caching readthrough miss"
+  ],
+  "historical_queries": [
+    {
+      "query": "fact01",
+      "as_of": "2026-04-15T00:00:00Z",
+      "expected_pre_supersession": "fact-01-pre"
+    },
+    {
+      "query": "fact41",
+      "as_of": "2026-04-15T00:00:00Z",
+      "expected_pre_supersession": "fact-41-pre"
+    },
+    {
+      "query": "fact81",
+      "as_of": "2026-04-15T00:00:00Z",
+      "expected_pre_supersession": "fact-81-pre"
+    }
+  ]
+}

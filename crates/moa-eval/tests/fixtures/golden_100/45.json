@@ -1,0 +1,12 @@
+{
+  "uid_seed": "45",
+  "label": "Fact",
+  "name": "fact45 alice stack-choice alice picked apache age for relationship traversal",
+  "summary": "fact45 alice stack-choice alice picked apache age for relationship traversal",
+  "entity_uids": [
+    "alice",
+    "stack-choice"
+  ],
+  "expected_embedding_seed": 45,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

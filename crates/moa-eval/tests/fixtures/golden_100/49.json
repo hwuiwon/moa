@@ -1,0 +1,12 @@
+{
+  "uid_seed": "49",
+  "label": "Fact",
+  "name": "fact49 alice stack-choice alice kept turbopuffer as promoted backend option",
+  "summary": "fact49 alice stack-choice alice kept turbopuffer as promoted backend option",
+  "entity_uids": [
+    "alice",
+    "stack-choice"
+  ],
+  "expected_embedding_seed": 49,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

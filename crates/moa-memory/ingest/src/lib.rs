@@ -26,5 +26,6 @@ pub use fast_path::{
 };
 pub use slow_path::{
     IngestionVO, IngestionVOClient, IngestionVOImpl, ingest_turn_direct,
-    ingest_turn_direct_with_pool, ingestion_object_key, turn_transcript,
+    ingest_turn_direct_with_ctx, ingest_turn_direct_with_pool, ingestion_object_key,
+    turn_transcript,
 };

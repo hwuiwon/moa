@@ -1,0 +1,12 @@
+{
+  "uid_seed": "18",
+  "label": "Fact",
+  "name": "fact18 auth-service deployment incident rollback target is last green release",
+  "summary": "fact18 auth-service deployment incident rollback target is last green release",
+  "entity_uids": [
+    "auth-service",
+    "deployment"
+  ],
+  "expected_embedding_seed": 18,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

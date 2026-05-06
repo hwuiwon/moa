@@ -36,4 +36,5 @@ tracing-opentelemetry.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+moa-memory-pii = { path = "../moa-memory/pii" }
 tempfile = "3"

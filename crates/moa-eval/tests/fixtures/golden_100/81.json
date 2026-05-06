@@ -1,0 +1,12 @@
+{
+  "uid_seed": "81",
+  "label": "Fact",
+  "name": "fact81 caching read-through caching readthrough loads database row on miss",
+  "summary": "fact81 caching read-through caching readthrough loads database row on miss",
+  "entity_uids": [
+    "caching",
+    "read-through"
+  ],
+  "expected_embedding_seed": 81,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

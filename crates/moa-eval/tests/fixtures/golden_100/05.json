@@ -1,0 +1,12 @@
+{
+  "uid_seed": "05",
+  "label": "Fact",
+  "name": "fact05 auth-service deployment migration check requires sessions table compatibility",
+  "summary": "fact05 auth-service deployment migration check requires sessions table compatibility",
+  "entity_uids": [
+    "auth-service",
+    "deployment"
+  ],
+  "expected_embedding_seed": 5,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

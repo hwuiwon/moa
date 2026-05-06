@@ -1,0 +1,12 @@
+{
+  "uid_seed": "85",
+  "label": "Fact",
+  "name": "fact85 caching read-through caching readthrough records negative lookup for short ttl",
+  "summary": "fact85 caching read-through caching readthrough records negative lookup for short ttl",
+  "entity_uids": [
+    "caching",
+    "read-through"
+  ],
+  "expected_embedding_seed": 85,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

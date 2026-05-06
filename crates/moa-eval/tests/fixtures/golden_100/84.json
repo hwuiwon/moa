@@ -1,0 +1,12 @@
+{
+  "uid_seed": "84",
+  "label": "Fact",
+  "name": "fact84 caching read-through caching readthrough bypasses cache for restricted pii",
+  "summary": "fact84 caching read-through caching readthrough bypasses cache for restricted pii",
+  "entity_uids": [
+    "caching",
+    "read-through"
+  ],
+  "expected_embedding_seed": 84,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

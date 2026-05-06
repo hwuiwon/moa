@@ -1,0 +1,12 @@
+{
+  "uid_seed": "40",
+  "label": "Fact",
+  "name": "fact40 payments scaling payment scaling dashboard groups by merchant tier",
+  "summary": "fact40 payments scaling payment scaling dashboard groups by merchant tier",
+  "entity_uids": [
+    "payments",
+    "scaling"
+  ],
+  "expected_embedding_seed": 40,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

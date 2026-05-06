@@ -1,0 +1,12 @@
+{
+  "uid_seed": "01",
+  "label": "Fact",
+  "name": "fact01 auth-service deployment flyio bluegreen Monday release window",
+  "summary": "fact01 auth-service deployment flyio bluegreen Monday release window",
+  "entity_uids": [
+    "auth-service",
+    "deployment"
+  ],
+  "expected_embedding_seed": 1,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

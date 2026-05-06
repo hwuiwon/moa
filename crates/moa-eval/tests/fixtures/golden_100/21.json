@@ -1,0 +1,12 @@
+{
+  "uid_seed": "21",
+  "label": "Fact",
+  "name": "fact21 payments scaling autoscaler target stays at sixty percent cpu",
+  "summary": "fact21 payments scaling autoscaler target stays at sixty percent cpu",
+  "entity_uids": [
+    "payments",
+    "scaling"
+  ],
+  "expected_embedding_seed": 21,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

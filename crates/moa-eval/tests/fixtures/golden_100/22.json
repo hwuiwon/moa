@@ -1,0 +1,12 @@
+{
+  "uid_seed": "22",
+  "label": "Fact",
+  "name": "fact22 payments scaling queue depth adds workers before checkout surge",
+  "summary": "fact22 payments scaling queue depth adds workers before checkout surge",
+  "entity_uids": [
+    "payments",
+    "scaling"
+  ],
+  "expected_embedding_seed": 22,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

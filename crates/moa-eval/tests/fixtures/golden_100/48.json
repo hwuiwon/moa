@@ -1,0 +1,12 @@
+{
+  "uid_seed": "48",
+  "label": "Fact",
+  "name": "fact48 alice stack-choice alice chose cohere embed v4 for production vectors",
+  "summary": "fact48 alice stack-choice alice chose cohere embed v4 for production vectors",
+  "entity_uids": [
+    "alice",
+    "stack-choice"
+  ],
+  "expected_embedding_seed": 48,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

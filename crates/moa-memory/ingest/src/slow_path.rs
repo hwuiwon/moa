@@ -6,15 +6,16 @@ use std::time::Duration;
 
 use crate::{
     ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
-    ExtractedFact, IngestApplyReport, IngestDecision, RrfPlusJudgeDetector, SessionTurn, TurnChunk,
-    chunk_turn, current_runtime, extract_facts, fact_hash, scoped_fact_uid, should_ingest_degraded,
+    ExtractedFact, IngestApplyReport, IngestCtx, IngestDecision, RrfPlusJudgeDetector, SessionTurn,
+    TurnChunk, chunk_turn, current_runtime, extract_facts, fact_hash, scoped_fact_uid,
+    should_ingest_degraded,
 };
 use moa_core::{ScopeContext, ScopedConn};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiCategory, PiiClassifier, PiiResult, PiiSpan, redact_text,
 };
-use moa_memory_vector::{CohereV4Embedder, Embedder, PgvectorStore};
+use moa_memory_vector::{CohereV4Embedder, Embedder, PgvectorStore, VectorStore};
 use restate_sdk::prelude::*;
 use secrecy::SecretString;
 use serde_json::json;
@@ -175,6 +176,38 @@ pub async fn ingest_turn_direct_with_pool(
     apply_decisions(&pool, &turn, &decisions).await
 }
 
+/// Runs the slow-path ingestion steps with explicit deterministic dependencies.
+///
+/// This helper is intended for integration tests that need to exercise the M10 pipeline without
+/// depending on process-global environment variables or billed provider calls.
+pub async fn ingest_turn_direct_with_ctx(
+    ctx: IngestCtx,
+    turn: SessionTurn,
+) -> Result<IngestApplyReport, HandlerError> {
+    let degraded = workspace_degraded(&ctx.pool, &turn).await?;
+    if degraded && !should_ingest_degraded(&turn) {
+        return Ok(IngestApplyReport {
+            skipped: 1,
+            ..IngestApplyReport::default()
+        });
+    }
+
+    let chunks =
+        chunk_turn(&turn, CHUNK_TARGET_TOKENS, CHUNK_OVERLAP_TOKENS).map_err(HandlerError::from)?;
+    let extracted = extract_facts(&chunks);
+    let classified = classify_facts_with(ctx.pii.as_ref(), &extracted).await?;
+    let embedded = embed_batch_with(ctx.embedder.as_ref(), &classified).await?;
+    let decisions = detect_contradictions_with(
+        ctx.contradict.as_ref(),
+        ctx.pool.clone(),
+        ctx.vector.clone(),
+        &turn,
+        &embedded,
+    )
+    .await?;
+    apply_decisions_with_graph(&ctx.pool, ctx.graph.as_ref(), &turn, &decisions).await
+}
+
 /// Builds the object key used to serialize ingestion per workspace/session.
 #[must_use]
 pub fn ingestion_object_key(turn: &SessionTurn) -> String {
@@ -197,9 +230,34 @@ pub fn turn_transcript(messages: &[moa_core::ContextMessage], response_text: &st
 
 async fn classify_facts(facts: &[ExtractedFact]) -> Result<Vec<ClassifiedFact>, HandlerError> {
     let classifier = classifier_from_env()?;
+    match &classifier {
+        ClassifierBackend::Sidecar(classifier) => classify_facts_with(classifier, facts).await,
+        ClassifierBackend::Heuristic => {
+            let mut classified = Vec::with_capacity(facts.len());
+            for fact in facts {
+                let result = heuristic_classify(&fact.summary);
+                let redacted_fact = redact_fact(fact, &result);
+                classified.push(ClassifiedFact {
+                    fact: redacted_fact,
+                    pii_class: result.class,
+                    pii_spans: result.spans,
+                });
+            }
+            Ok(classified)
+        }
+    }
+}
+
+async fn classify_facts_with(
+    classifier: &dyn PiiClassifier,
+    facts: &[ExtractedFact],
+) -> Result<Vec<ClassifiedFact>, HandlerError> {
     let mut classified = Vec::with_capacity(facts.len());
     for fact in facts {
-        let result = classify_fact(&classifier, &fact.summary).await?;
+        let result = classifier
+            .classify(&fact.summary)
+            .await
+            .map_err(HandlerError::from)?;
         let redacted_fact = redact_fact(fact, &result);
         classified.push(ClassifiedFact {
             fact: redacted_fact,
@@ -226,18 +284,6 @@ fn redact_fact(fact: &ExtractedFact, result: &PiiResult) -> ExtractedFact {
     .unwrap_or_else(|| fact.clone());
     redacted.source_chunk = fact.source_chunk;
     redacted
-}
-
-async fn classify_fact(
-    classifier: &ClassifierBackend,
-    text: &str,
-) -> Result<PiiResult, HandlerError> {
-    match classifier {
-        ClassifierBackend::Sidecar(classifier) => {
-            classifier.classify(text).await.map_err(HandlerError::from)
-        }
-        ClassifierBackend::Heuristic => Ok(heuristic_classify(text)),
-    }
 }
 
 fn classifier_from_env() -> Result<ClassifierBackend, HandlerError> {
@@ -353,6 +399,13 @@ async fn embed_batch(facts: &[ClassifiedFact]) -> Result<Vec<EmbeddedFact>, Hand
     };
 
     let embedder = CohereV4Embedder::new(SecretString::from(api_key));
+    embed_batch_with(&embedder, facts).await
+}
+
+async fn embed_batch_with(
+    embedder: &dyn Embedder,
+    facts: &[ClassifiedFact],
+) -> Result<Vec<EmbeddedFact>, HandlerError> {
     let texts = facts
         .iter()
         .map(|fact| fact.fact.summary.clone())
@@ -380,6 +433,17 @@ async fn detect_contradictions(
     let scope = ScopeContext::workspace(turn.workspace_id.clone());
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let detector = RrfPlusJudgeDetector::from_env_or_heuristic();
+    detect_contradictions_with(&detector, pool, vector, turn, embedded).await
+}
+
+async fn detect_contradictions_with(
+    detector: &dyn ContradictionDetector,
+    pool: PgPool,
+    vector: Arc<dyn VectorStore>,
+    turn: &SessionTurn,
+    embedded: &[EmbeddedFact],
+) -> Result<Vec<IngestDecision>, HandlerError> {
+    let scope = ScopeContext::workspace(turn.workspace_id.clone());
     let ctx = ContradictionContext::for_app_role(pool, scope, vector);
     let mut decisions = Vec::with_capacity(embedded.len());
 
@@ -432,6 +496,37 @@ async fn apply_decisions(
     Ok(report)
 }
 
+async fn apply_decisions_with_graph(
+    pool: &PgPool,
+    graph: &dyn GraphStore,
+    turn: &SessionTurn,
+    decisions: &[IngestDecision],
+) -> Result<IngestApplyReport, HandlerError> {
+    let scope = ScopeContext::workspace(turn.workspace_id.clone());
+    let mut report = IngestApplyReport::default();
+
+    for decision in decisions {
+        match apply_one_decision_with_graph(pool, &scope, graph, turn, decision).await {
+            Ok(ApplyOutcome::Inserted) => report.inserted += 1,
+            Ok(ApplyOutcome::Superseded) => report.superseded += 1,
+            Ok(ApplyOutcome::Skipped) => report.skipped += 1,
+            Err(error) => {
+                report.failed += 1;
+                let error_message = format!("{error:?}");
+                write_dlq(pool, &scope, turn, decision, &error_message).await?;
+                tracing::warn!(
+                    error = ?error,
+                    session_id = %turn.session_id,
+                    turn_seq = turn.turn_seq,
+                    "slow-path ingestion fact failed and was written to DLQ"
+                );
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 async fn apply_one_decision(
     pool: &PgPool,
     scope: &ScopeContext,
@@ -447,6 +542,43 @@ async fn apply_one_decision(
     }
 
     let graph = graph_store(pool.clone(), scope.clone(), fact);
+    let fact_uid = scoped_fact_uid(&turn.workspace_id, &turn.session_id, turn.turn_seq, &hash);
+    match decision {
+        IngestDecision::Insert { fact } => {
+            let uid = graph
+                .create_node(node_intent(turn, fact, &hash, fact_uid))
+                .await
+                .map_err(HandlerError::from)?;
+            insert_dedup(pool, scope, turn, &hash, uid).await?;
+            Ok(ApplyOutcome::Inserted)
+        }
+        IngestDecision::Supersede { old_uid, fact } => {
+            let uid = graph
+                .supersede_node(*old_uid, node_intent(turn, fact, &hash, fact_uid))
+                .await
+                .map_err(HandlerError::from)?;
+            insert_dedup(pool, scope, turn, &hash, uid).await?;
+            Ok(ApplyOutcome::Superseded)
+        }
+        IngestDecision::SkipDuplicate { .. } => Ok(ApplyOutcome::Skipped),
+    }
+}
+
+async fn apply_one_decision_with_graph(
+    pool: &PgPool,
+    scope: &ScopeContext,
+    graph: &dyn GraphStore,
+    turn: &SessionTurn,
+    decision: &IngestDecision,
+) -> Result<ApplyOutcome, HandlerError> {
+    let Some(fact) = decision_fact(decision) else {
+        return Ok(ApplyOutcome::Skipped);
+    };
+    let hash = fact_hash(&fact.classified.fact).map_err(HandlerError::from)?;
+    if dedup_fact_uid(pool, scope, turn, &hash).await?.is_some() {
+        return Ok(ApplyOutcome::Skipped);
+    }
+
     let fact_uid = scoped_fact_uid(&turn.workspace_id, &turn.session_id, turn.turn_seq, &hash);
     match decision {
         IngestDecision::Insert { fact } => {

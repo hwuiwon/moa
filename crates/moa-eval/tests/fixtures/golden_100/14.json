@@ -1,0 +1,12 @@
+{
+  "uid_seed": "14",
+  "label": "Fact",
+  "name": "fact14 auth-service deployment staging promotion requires signed release manifest",
+  "summary": "fact14 auth-service deployment staging promotion requires signed release manifest",
+  "entity_uids": [
+    "auth-service",
+    "deployment"
+  ],
+  "expected_embedding_seed": 14,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

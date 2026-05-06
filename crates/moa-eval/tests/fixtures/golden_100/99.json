@@ -1,0 +1,12 @@
+{
+  "uid_seed": "99",
+  "label": "Fact",
+  "name": "fact99 caching read-through caching readthrough keeps audit metadata outside value",
+  "summary": "fact99 caching read-through caching readthrough keeps audit metadata outside value",
+  "entity_uids": [
+    "caching",
+    "read-through"
+  ],
+  "expected_embedding_seed": 99,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

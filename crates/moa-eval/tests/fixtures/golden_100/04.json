@@ -1,0 +1,12 @@
+{
+  "uid_seed": "04",
+  "label": "Fact",
+  "name": "fact04 auth-service deployment deploy freeze starts after Friday noon UTC",
+  "summary": "fact04 auth-service deployment deploy freeze starts after Friday noon UTC",
+  "entity_uids": [
+    "auth-service",
+    "deployment"
+  ],
+  "expected_embedding_seed": 4,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

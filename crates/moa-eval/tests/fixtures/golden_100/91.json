@@ -1,0 +1,12 @@
+{
+  "uid_seed": "91",
+  "label": "Fact",
+  "name": "fact91 caching read-through caching readthrough serializes payload with version field",
+  "summary": "fact91 caching read-through caching readthrough serializes payload with version field",
+  "entity_uids": [
+    "caching",
+    "read-through"
+  ],
+  "expected_embedding_seed": 91,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

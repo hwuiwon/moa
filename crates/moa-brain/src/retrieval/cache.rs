@@ -47,9 +47,9 @@ struct PostgresChangelogVersionReader {
 #[async_trait]
 impl ChangelogVersionReader for PostgresChangelogVersionReader {
     async fn current_version(&self, scope: &MemoryScope, workspace_id: &str) -> Result<i64> {
-        let Ok(workspace_uuid) = uuid::Uuid::parse_str(workspace_id) else {
+        if uuid::Uuid::parse_str(workspace_id).is_err() {
             return Ok(0);
-        };
+        }
 
         let scope_context = ScopeContext::from(scope.clone());
         let mut conn = ScopedConn::begin(&self.pool, &scope_context).await?;
@@ -61,7 +61,7 @@ impl ChangelogVersionReader for PostgresChangelogVersionReader {
         let version = sqlx::query_scalar::<_, i64>(
             "SELECT changelog_version FROM moa.workspace_state WHERE workspace_id = $1",
         )
-        .bind(workspace_uuid)
+        .bind(workspace_id)
         .fetch_optional(conn.as_mut())
         .await?
         .unwrap_or(0);

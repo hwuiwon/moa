@@ -1,0 +1,12 @@
+{
+  "uid_seed": "27",
+  "label": "Fact",
+  "name": "fact27 payments scaling batch settlement pauses during schema change",
+  "summary": "fact27 payments scaling batch settlement pauses during schema change",
+  "entity_uids": [
+    "payments",
+    "scaling"
+  ],
+  "expected_embedding_seed": 27,
+  "valid_from": "2026-04-01T00:00:00Z"
+}

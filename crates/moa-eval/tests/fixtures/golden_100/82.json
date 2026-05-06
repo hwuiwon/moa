@@ -1,0 +1,12 @@
+{
+  "uid_seed": "82",
+  "label": "Fact",
+  "name": "fact82 caching read-through caching readthrough writes value after successful fetch",
+  "summary": "fact82 caching read-through caching readthrough writes value after successful fetch",
+  "entity_uids": [
+    "caching",
+    "read-through"
+  ],
+  "expected_embedding_seed": 82,
+  "valid_from": "2026-04-01T00:00:00Z"
+}
