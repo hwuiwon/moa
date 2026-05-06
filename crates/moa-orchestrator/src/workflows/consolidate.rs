@@ -8,7 +8,7 @@ use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::ctx::OrchestratorCtx;
-use crate::objects::workspace::WorkspaceClient;
+use crate::objects::workspace::WorkspaceObjectClient;
 use crate::observability::annotate_restate_handler_span;
 
 /// Workflow input for one workspace/date consolidation run.
@@ -128,7 +128,7 @@ impl Consolidate for ConsolidateImpl {
         let started_at = Instant::now();
         let ran_at = Utc::now();
 
-        ctx.object_client::<WorkspaceClient>(request.workspace_id.to_string())
+        ctx.object_client::<WorkspaceObjectClient>(request.workspace_id.to_string())
             .mark_consolidation_started(Json::from(request.target_date))
             .call()
             .await?;
@@ -144,7 +144,7 @@ impl Consolidate for ConsolidateImpl {
 
         record_memory_learning(&ctx, &report).await?;
 
-        ctx.object_client::<WorkspaceClient>(request.workspace_id.to_string())
+        ctx.object_client::<WorkspaceObjectClient>(request.workspace_id.to_string())
             .consolidation_completed(Json::from(report.clone()))
             .call()
             .await?;

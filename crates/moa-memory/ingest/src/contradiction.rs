@@ -131,7 +131,7 @@ pub trait ContradictionDetector: Send + Sync {
 
 /// One rerank hit returned by a reranker backend.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RerankHit {
+struct RerankHit {
     /// Candidate index inside the document list supplied to the reranker.
     pub index: usize,
     /// Backend-specific relevance score.
@@ -140,7 +140,7 @@ pub struct RerankHit {
 
 /// Reranker abstraction used between RRF retrieval and the judge.
 #[async_trait]
-pub trait Reranker: Send + Sync {
+trait Reranker: Send + Sync {
     /// Reranks candidate names for one new fact and returns candidate indices.
     async fn rerank(
         &self,
@@ -153,7 +153,7 @@ pub trait Reranker: Send + Sync {
 
 /// Deterministic reranker that preserves retrieval order.
 #[derive(Debug, Clone, Default)]
-pub struct NoopReranker;
+struct NoopReranker;
 
 #[async_trait]
 impl Reranker for NoopReranker {
@@ -175,7 +175,7 @@ impl Reranker for NoopReranker {
 
 /// Cohere Rerank v4 client used for top-N selection.
 #[derive(Clone)]
-pub struct CohereReranker {
+struct CohereReranker {
     client: Client,
     api_key: SecretString,
     endpoint: String,
@@ -184,26 +184,12 @@ pub struct CohereReranker {
 impl CohereReranker {
     /// Creates a Cohere reranker from an API key.
     #[must_use]
-    pub fn new(api_key: SecretString) -> Self {
+    fn new(api_key: SecretString) -> Self {
         Self {
             client: Client::new(),
             api_key,
             endpoint: COHERE_RERANK_URL.to_string(),
         }
-    }
-
-    /// Overrides the HTTP client, primarily for tests.
-    #[must_use]
-    pub fn with_client(mut self, client: Client) -> Self {
-        self.client = client;
-        self
-    }
-
-    /// Overrides the Cohere endpoint, primarily for tests.
-    #[must_use]
-    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
-        self.endpoint = endpoint.into();
-        self
     }
 }
 
@@ -329,7 +315,7 @@ pub struct RrfPlusJudgeDetector {
 impl RrfPlusJudgeDetector {
     /// Creates a detector from explicit reranker and judge backends.
     #[must_use]
-    pub fn new(reranker: Arc<dyn Reranker>, judge: Arc<dyn JudgeModel>) -> Self {
+    fn new(reranker: Arc<dyn Reranker>, judge: Arc<dyn JudgeModel>) -> Self {
         Self {
             reranker,
             judge,

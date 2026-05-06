@@ -1,7 +1,6 @@
 //! Graph-memory ingestion pipelines, fast-path APIs, and contradiction detection.
 
 pub mod chunking;
-pub mod connector;
 pub mod contradiction;
 pub mod ctx;
 pub mod error;

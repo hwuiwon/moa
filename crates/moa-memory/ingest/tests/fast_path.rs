@@ -7,14 +7,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{ScopeContext, ScopedConn, UserId, WorkspaceId};
 use moa_hands::ToolRegistry;
-use moa_memory_graph::{
-    AgeGraphStore, NodeLabel, NodeWriteIntent, PiiClass as GraphPiiClass, cypher,
-};
+use moa_memory_graph::{AgeGraphStore, NodeLabel, NodeWriteIntent, PiiClass, cypher};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, FastPathCtx,
     FastRememberRequest, ForgetPattern, IngestError, fast_forget, fast_remember, fast_supersede,
 };
-use moa_memory_pii::{PiiClass as ClassifierPiiClass, PiiClassifier, PiiError, PiiResult, PiiSpan};
+use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
 use moa_memory_vector::{Embedder, Error as VectorError, PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use serde_json::json;
@@ -51,7 +49,7 @@ impl Embedder for MockEmbedder {
 
 #[derive(Debug, Clone)]
 struct FixedPiiClassifier {
-    class: ClassifierPiiClass,
+    class: PiiClass,
 }
 
 #[async_trait]
@@ -110,7 +108,7 @@ fn test_ctx(
     workspace_id: Uuid,
     conflict: Conflict,
     delay: Duration,
-    pii_class: ClassifierPiiClass,
+    pii_class: PiiClass,
 ) -> FastPathCtx {
     let scope = ScopeContext::workspace(WorkspaceId::new(workspace_id.to_string()));
     test_ctx_for_scope(pool, scope, conflict, delay, pii_class)
@@ -122,7 +120,7 @@ fn user_test_ctx(
     user_id: Uuid,
     conflict: Conflict,
     delay: Duration,
-    pii_class: ClassifierPiiClass,
+    pii_class: PiiClass,
 ) -> FastPathCtx {
     let scope = ScopeContext::user(
         WorkspaceId::new(workspace_id.to_string()),
@@ -136,7 +134,7 @@ fn test_ctx_for_scope(
     scope: ScopeContext,
     conflict: Conflict,
     delay: Duration,
-    pii_class: ClassifierPiiClass,
+    pii_class: PiiClass,
 ) -> FastPathCtx {
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let graph = Arc::new(
@@ -185,7 +183,7 @@ fn supersede_intent(workspace_id: Uuid, text: &str) -> NodeWriteIntent {
         scope: "workspace".to_string(),
         name: text.to_string(),
         properties: json!({ "summary": text, "source": "fast_supersede_test" }),
-        pii_class: GraphPiiClass::None,
+        pii_class: PiiClass::None,
         confidence: Some(0.9),
         valid_from: Utc::now(),
         embedding: Some(deterministic_vector(text)),
@@ -325,7 +323,7 @@ async fn fast_remember_e2e() {
         workspace_id,
         Conflict::Insert,
         Duration::ZERO,
-        ClassifierPiiClass::None,
+        PiiClass::None,
     );
 
     let started = Instant::now();
@@ -360,7 +358,7 @@ async fn fast_remember_explicit_supersede_invalidates_old_node_and_links_edge() 
         workspace_id,
         Conflict::Insert,
         Duration::ZERO,
-        ClassifierPiiClass::Pii,
+        PiiClass::Pii,
     );
     let old_uid = fast_remember(
         remember_request(workspace_id, "deployments use heroku"),
@@ -411,7 +409,7 @@ async fn fast_remember_judge_timeout_commits_indeterminate_with_low_confidence()
         workspace_id,
         Conflict::Supersede(Uuid::now_v7()),
         Duration::from_millis(350),
-        ClassifierPiiClass::None,
+        PiiClass::None,
     );
 
     let uid = fast_remember(
@@ -443,7 +441,7 @@ async fn fast_forget_idempotent_by_name() {
         workspace_id,
         Conflict::Insert,
         Duration::ZERO,
-        ClassifierPiiClass::None,
+        PiiClass::None,
     );
     let uid = fast_remember(remember_request(workspace_id, "auth"), &ctx)
         .await
@@ -484,7 +482,7 @@ async fn fast_forget_soft_all_respects_user_scope() {
         user_a,
         Conflict::Insert,
         Duration::ZERO,
-        ClassifierPiiClass::None,
+        PiiClass::None,
     );
     let ctx_b = user_test_ctx(
         session_store.pool(),
@@ -492,7 +490,7 @@ async fn fast_forget_soft_all_respects_user_scope() {
         user_b,
         Conflict::Insert,
         Duration::ZERO,
-        ClassifierPiiClass::None,
+        PiiClass::None,
     );
 
     let a_one = fast_remember(
@@ -552,7 +550,7 @@ async fn fast_supersede_wrapper_replaces_existing_node() {
         workspace_id,
         Conflict::Insert,
         Duration::ZERO,
-        ClassifierPiiClass::None,
+        PiiClass::None,
     );
     let old_uid = fast_remember(
         remember_request(workspace_id, "the API gateway is nginx"),
@@ -598,7 +596,7 @@ async fn fast_remember_p95_stays_under_latency_budget_with_local_dependencies() 
         workspace_id,
         Conflict::Insert,
         Duration::ZERO,
-        ClassifierPiiClass::None,
+        PiiClass::None,
     );
     let mut durations = Vec::new();
 

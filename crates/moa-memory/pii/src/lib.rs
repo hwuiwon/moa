@@ -5,37 +5,12 @@ use serde::{Deserialize, Serialize};
 pub mod mock;
 pub mod openai_filter;
 
+pub use moa_memory_graph::PiiClass;
 pub use mock::MockClassifier;
 pub use openai_filter::{OpenAiPrivacyFilterClassifier, PrivacyFilterThresholds};
 
 /// Result type returned by PII classifier implementations.
 pub type Result<T> = std::result::Result<T, PiiError>;
-
-/// MOA's four-tier privacy class for memory nodes and audit payloads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PiiClass {
-    /// No PII or PHI was detected.
-    None,
-    /// Personally identifiable information was detected.
-    Pii,
-    /// Protected health information or high-sensitivity identity data was detected.
-    Phi,
-    /// Restricted financial or policy-sensitive data was detected.
-    Restricted,
-}
-
-impl PiiClass {
-    /// Returns the canonical storage string for this class.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Pii => "pii",
-            Self::Phi => "phi",
-            Self::Restricted => "restricted",
-        }
-    }
-}
 
 /// PII categories emitted by `openai/privacy-filter` and normalized into MOA categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

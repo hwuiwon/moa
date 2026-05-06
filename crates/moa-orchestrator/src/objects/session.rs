@@ -23,7 +23,9 @@ use crate::brain_bridge::{PreparedTurnRequest, prepare_turn_request};
 use crate::ctx::OrchestratorCtx;
 use crate::objects::sub_agent::SubAgentClient;
 use crate::observability::{annotate_restate_handler_span, event_persist_span};
-use crate::services::session_store::{AppendEventRequest, SessionStoreClient, UpdateStatusRequest};
+use crate::services::session_store::{
+    AppendEventRequest, RestateSessionStoreClient, UpdateStatusRequest,
+};
 use crate::services::session_store::{
     CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest, GetSegmentBaselineRequest,
     RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest,
@@ -383,7 +385,7 @@ impl AgentAdapter for SessionTurnAdapter {
         state.record_segment_turn_usage(token_cost);
         state.persist_into(ctx);
         if token_cost > 0 {
-            ctx.service_client::<SessionStoreClient>()
+            ctx.service_client::<RestateSessionStoreClient>()
                 .record_segment_turn_usage(Json(RecordSegmentTurnUsageRequest {
                     session_id: parse_session_key(ctx.key())?,
                     token_cost,
@@ -408,7 +410,7 @@ impl AgentAdapter for SessionTurnAdapter {
         let mut state = SessionVoState::load_from(ctx).await?;
         state.record_segment_tool_use(tool_name);
         state.persist_into(ctx);
-        ctx.service_client::<SessionStoreClient>()
+        ctx.service_client::<RestateSessionStoreClient>()
             .record_segment_tool_use(Json(RecordSegmentToolUseRequest {
                 session_id: parse_session_key(ctx.key())?,
                 tool_name: tool_name.to_string(),
@@ -645,7 +647,7 @@ async fn ensure_current_segment(
 
     if state.current_segment.is_none()
         && let Some(segment) = ctx
-            .service_client::<SessionStoreClient>()
+            .service_client::<RestateSessionStoreClient>()
             .get_active_segment(Json(session_id))
             .call()
             .await?
@@ -662,13 +664,13 @@ async fn ensure_current_segment(
         Utc::now(),
     ) {
         if let Some(completed) = transition.completed.clone() {
-            ctx.service_client::<SessionStoreClient>()
+            ctx.service_client::<RestateSessionStoreClient>()
                 .complete_segment(Json(CompleteSegmentRequest {
                     segment_id: completed.segment_id,
                     update: completed.update.clone(),
                 }))
                 .send();
-            ctx.service_client::<SessionStoreClient>()
+            ctx.service_client::<RestateSessionStoreClient>()
                 .append_event(Json(AppendEventRequest {
                     session_id,
                     event: completed.clone().into_event(),
@@ -686,12 +688,12 @@ async fn ensure_current_segment(
 
         classify_started_segment(ctx, meta.workspace_id.as_str(), request, &mut transition).await?;
 
-        ctx.service_client::<SessionStoreClient>()
+        ctx.service_client::<RestateSessionStoreClient>()
             .create_segment(Json(CreateSegmentRequest {
                 segment: transition.task_segment.clone(),
             }))
             .send();
-        ctx.service_client::<SessionStoreClient>()
+        ctx.service_client::<RestateSessionStoreClient>()
             .append_event(Json(AppendEventRequest {
                 session_id,
                 event: transition.started.clone().into_event(),
@@ -821,7 +823,7 @@ async fn persist_session_event(
 ) -> Result<(), HandlerError> {
     let persist_span = event_persist_span(1);
     let persist_started = Instant::now();
-    ctx.service_client::<SessionStoreClient>()
+    ctx.service_client::<RestateSessionStoreClient>()
         .append_event(Json(AppendEventRequest { session_id, event }))
         .call()
         .instrument(persist_span)
@@ -837,7 +839,7 @@ async fn sync_status(
 ) -> Result<(), HandlerError> {
     let persist_span = event_persist_span(0);
     let persist_started = Instant::now();
-    ctx.service_client::<SessionStoreClient>()
+    ctx.service_client::<RestateSessionStoreClient>()
         .update_status(Json(UpdateStatusRequest {
             session_id,
             status: state.current_status(),
@@ -891,7 +893,7 @@ async fn score_completed_segment_at_transition(
     );
 
     record_resolution_learning(ctx, tenant_id, completed.segment_id, &score).await?;
-    ctx.service_client::<SessionStoreClient>()
+    ctx.service_client::<RestateSessionStoreClient>()
         .update_segment_resolution_score(Json(UpdateSegmentResolutionScoreRequest {
             segment_id: completed.segment_id,
             score,
@@ -937,7 +939,7 @@ async fn score_active_segment(
     );
 
     record_resolution_learning(ctx, tenant_id, segment.id, &score).await?;
-    ctx.service_client::<SessionStoreClient>()
+    ctx.service_client::<RestateSessionStoreClient>()
         .update_segment_resolution_score(Json(UpdateSegmentResolutionScoreRequest {
             segment_id: segment.id,
             score,
@@ -989,7 +991,7 @@ async fn load_session_events(
     session_id: SessionId,
 ) -> Result<Vec<EventRecord>, HandlerError> {
     Ok(ctx
-        .service_client::<SessionStoreClient>()
+        .service_client::<RestateSessionStoreClient>()
         .get_events(Json(GetEventsRequest {
             session_id,
             range: EventRange::all(),
@@ -1005,7 +1007,7 @@ async fn load_segment_baseline(
     intent_label: Option<&str>,
 ) -> Result<Option<moa_core::SegmentBaseline>, HandlerError> {
     Ok(ctx
-        .service_client::<SessionStoreClient>()
+        .service_client::<RestateSessionStoreClient>()
         .get_segment_baseline(Json(GetSegmentBaselineRequest {
             tenant_id: tenant_id.to_string(),
             intent_label: intent_label.map(ToOwned::to_owned),

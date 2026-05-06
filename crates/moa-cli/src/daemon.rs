@@ -690,6 +690,9 @@ mod tests {
         config.daemon.pid_file = base.join("daemon.pid").display().to_string();
         config.daemon.log_file = base.join("daemon.log").display().to_string();
         config.daemon.auto_connect = false;
+        if let Some(fly) = config.cloud.flyio.as_mut() {
+            fly.graceful_shutdown_timeout_secs = 1;
+        }
 
         if std::env::var(&config.providers.openai.api_key_env).is_ok() {
             return Some(config);

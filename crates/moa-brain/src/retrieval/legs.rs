@@ -20,11 +20,11 @@ pub const VECTOR_WEIGHT: f64 = 1.0;
 /// Default lexical-leg fusion weight.
 pub const LEXICAL_WEIGHT: f64 = 0.8;
 /// Graph traversal leg budget.
-pub const GRAPH_BUDGET: Duration = Duration::from_millis(30);
+pub const GRAPH_BUDGET: Duration = Duration::from_millis(250);
 /// Vector KNN leg budget.
-pub const VECTOR_BUDGET: Duration = Duration::from_millis(25);
+pub const VECTOR_BUDGET: Duration = Duration::from_millis(250);
 /// Lexical tsvector leg budget.
-pub const LEXICAL_BUDGET: Duration = Duration::from_millis(15);
+pub const LEXICAL_BUDGET: Duration = Duration::from_millis(250);
 
 const GRAPH_HOPS: u8 = 3;
 const VECTOR_LIMIT: usize = 20;

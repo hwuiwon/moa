@@ -26,7 +26,7 @@ use super::util::{
 use super::{event_persist_span, llm_call_span, tool_dispatch_span};
 use crate::services::{
     llm_gateway::LLMGatewayClient,
-    session_store::{AppendEventRequest, SessionStoreClient},
+    session_store::{AppendEventRequest, RestateSessionStoreClient},
     tool_executor::ToolExecutorClient,
     workspace_store::{PrepareToolApprovalRequest, WorkspaceStoreClient},
 };
@@ -378,7 +378,7 @@ async fn append_session_event(
 ) -> Result<(), HandlerError> {
     let persist_span = event_persist_span(1);
     let persist_started = Instant::now();
-    ctx.service_client::<SessionStoreClient>()
+    ctx.service_client::<RestateSessionStoreClient>()
         .append_event(Json(AppendEventRequest { session_id, event }))
         .call()
         .instrument(persist_span)

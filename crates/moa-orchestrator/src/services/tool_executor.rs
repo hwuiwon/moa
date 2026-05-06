@@ -15,7 +15,9 @@ use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::observability::annotate_restate_handler_span;
-use crate::services::session_store::{AppendEventRequest, GetEventsRequest, SessionStoreClient};
+use crate::services::session_store::{
+    AppendEventRequest, GetEventsRequest, RestateSessionStoreClient,
+};
 
 /// Restate service surface for durable tool execution.
 #[restate_sdk::service]
@@ -296,7 +298,7 @@ async fn resolve_session(
 ) -> Result<SessionMeta, HandlerError> {
     if let Some(session_id) = request.session_id {
         return Ok(ctx
-            .service_client::<SessionStoreClient>()
+            .service_client::<RestateSessionStoreClient>()
             .get_session(Json(session_id))
             .call()
             .await
@@ -343,7 +345,7 @@ async fn prior_non_idempotent_result_exists(
         )))
     })?;
     let events = ctx
-        .service_client::<SessionStoreClient>()
+        .service_client::<RestateSessionStoreClient>()
         .get_events(Json(GetEventsRequest {
             session_id,
             range: EventRange {
@@ -371,7 +373,7 @@ async fn prior_tool_call_event_exists(
     };
 
     let events = ctx
-        .service_client::<SessionStoreClient>()
+        .service_client::<RestateSessionStoreClient>()
         .get_events(Json(GetEventsRequest {
             session_id,
             range: EventRange {
@@ -395,7 +397,7 @@ async fn append_tool_call_event(
         return Ok(());
     };
 
-    ctx.service_client::<SessionStoreClient>()
+    ctx.service_client::<RestateSessionStoreClient>()
         .append_event(Json(AppendEventRequest {
             session_id,
             event: Event::ToolCall {
@@ -422,7 +424,7 @@ async fn append_tool_result_event(
         return Ok(());
     };
 
-    ctx.service_client::<SessionStoreClient>()
+    ctx.service_client::<RestateSessionStoreClient>()
         .append_event(Json(AppendEventRequest {
             session_id,
             event: Event::ToolResult {
@@ -450,7 +452,7 @@ async fn append_tool_error_event(
         return Ok(());
     };
 
-    ctx.service_client::<SessionStoreClient>()
+    ctx.service_client::<RestateSessionStoreClient>()
         .append_event(Json(AppendEventRequest {
             session_id,
             event: Event::ToolError {

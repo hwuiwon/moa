@@ -153,7 +153,8 @@ pub fn deterministic_consolidation_jitter_secs(workspace_id: &WorkspaceId) -> u6
 
 /// Restate virtual object surface for one workspace orchestration key.
 #[restate_sdk::object]
-pub trait Workspace {
+#[name = "Workspace"]
+pub trait WorkspaceObject {
     /// Initializes the workspace object with its persisted config and schedules the first run.
     async fn init(config: Json<WorkspaceConfig>) -> Result<(), HandlerError>;
 
@@ -183,7 +184,7 @@ pub trait Workspace {
 /// Concrete `Workspace` virtual object implementation.
 pub struct WorkspaceImpl;
 
-impl Workspace for WorkspaceImpl {
+impl WorkspaceObject for WorkspaceImpl {
     #[tracing::instrument(skip(self, ctx, config))]
     async fn init(
         &self,

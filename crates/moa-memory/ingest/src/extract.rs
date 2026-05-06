@@ -2,7 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{SessionId, UserId, WorkspaceId};
-use moa_memory_pii::{PiiClass, PiiSpan};
+use moa_memory_graph::PiiClass;
+use moa_memory_pii::PiiSpan;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;

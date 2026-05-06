@@ -79,6 +79,7 @@ Source: [`docs/01-architecture-overview.md`](docs/01-architecture-overview.md).
 ## 3. Core traits (the interface seam)
 
 All stable interfaces live in [`moa-core`](crates/moa-core/). Implementations swap freely between local and cloud without touching brain logic.
+Shared type ownership is locked down in [`docs/architecture/type-placement.md`](docs/architecture/type-placement.md).
 
 | Trait | Responsibility | Local impl | Cloud impl |
 |---|---|---|---|

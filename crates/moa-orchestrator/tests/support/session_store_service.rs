@@ -10,7 +10,7 @@ use moa_core::{
 };
 use moa_orchestrator::services::session_store::InitSessionVoRequest;
 use moa_orchestrator::services::session_store::{
-    AppendEventRequest, GetEventsRequest, SearchEventsRequest, SessionStore as RestateSessionStore,
+    AppendEventRequest, GetEventsRequest, RestateSessionStore, SearchEventsRequest,
     SessionStoreImpl, UpdateStatusRequest,
 };
 use moa_session::{PostgresSessionStore, testing};

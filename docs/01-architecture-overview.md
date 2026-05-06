@@ -134,10 +134,10 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 | `moa-core` | Shared types, traits, config, events, analytics helpers |
 | `moa-brain` | Context pipeline, query rewrite, segment helpers, intent classifier, resolution scoring |
 | `moa-session` | Postgres session store, event log, task segments, intents, learning log |
-| `moa-memory-graph` | Graph-memory SQL sidecars, RLS, changelog, and AGE projection helpers |
-| `moa-memory-ingest` | Slow-path graph ingestion and fast memory write APIs |
-| `moa-memory-pii` | PII classification and privacy helpers |
-| `moa-memory-vector` | Graph-memory vector storage abstraction and pgvector backend |
+| `moa-memory/graph` (`moa-memory-graph`) | Graph-memory SQL sidecars, RLS, changelog, and AGE projection helpers |
+| `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph ingestion and fast memory write APIs |
+| `moa-memory/pii` (`moa-memory-pii`) | PII classification and privacy helpers |
+| `moa-memory/vector` (`moa-memory-vector`) | Graph-memory vector storage abstraction and pgvector backend |
 | `moa-hands` | Tool routing and hand providers |
 | `moa-providers` | LLM and embedding providers |
 | `moa-orchestrator` | Restate handlers and cloud orchestration binary |
@@ -155,6 +155,7 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 
 - Orchestration details: `docs/02-brain-orchestration.md` and `docs/12-restate-architecture.md`
 - Memory details: `docs/04-memory-architecture.md`
+- Shared type placement: `docs/architecture/type-placement.md`
 - Event and segment schema: `docs/05-session-event-log.md`
 - Context pipeline: `docs/07-context-pipeline.md`
 - Multi-tenant learning: `docs/14-multi-tenancy-and-learning.md`

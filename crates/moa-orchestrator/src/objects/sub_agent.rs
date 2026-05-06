@@ -19,7 +19,7 @@ use crate::OrchestratorCtx;
 use crate::observability::annotate_restate_handler_span;
 use crate::services::session_store::{
     AppendEventRequest, RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest,
-    SessionStoreClient,
+    RestateSessionStoreClient,
 };
 use crate::sub_agent_dispatch::{DispatchedSubAgent, MAX_SUB_AGENT_DEPTH, dispatch_sub_agent};
 use crate::turn::approval::serialize_awakeable_decision;
@@ -451,7 +451,7 @@ impl AgentAdapter for SubAgentTurnAdapter {
         if let Some(parent_session) = parent_session
             && token_cost > 0
         {
-            ctx.service_client::<SessionStoreClient>()
+            ctx.service_client::<RestateSessionStoreClient>()
                 .record_segment_turn_usage(Json(RecordSegmentTurnUsageRequest {
                     session_id: parent_session,
                     token_cost,
@@ -467,7 +467,7 @@ impl AgentAdapter for SubAgentTurnAdapter {
     ) -> Result<Option<ActiveSegment>, HandlerError> {
         let parent_session = self.owning_session_id(ctx).await?;
         let segment = ctx
-            .service_client::<SessionStoreClient>()
+            .service_client::<RestateSessionStoreClient>()
             .get_active_segment(Json(parent_session))
             .call()
             .await?
@@ -480,7 +480,7 @@ impl AgentAdapter for SubAgentTurnAdapter {
         ctx: &ObjectContext<'_>,
         tool_name: &str,
     ) -> Result<(), HandlerError> {
-        ctx.service_client::<SessionStoreClient>()
+        ctx.service_client::<RestateSessionStoreClient>()
             .record_segment_tool_use(Json(RecordSegmentToolUseRequest {
                 session_id: self.owning_session_id(ctx).await?,
                 tool_name: tool_name.to_string(),
@@ -849,7 +849,7 @@ async fn persist_parent_session_event(
     session_id: SessionId,
     event: Event,
 ) -> Result<(), HandlerError> {
-    ctx.service_client::<SessionStoreClient>()
+    ctx.service_client::<RestateSessionStoreClient>()
         .append_event(Json(AppendEventRequest { session_id, event }))
         .call()
         .await?;

@@ -23,7 +23,7 @@ use crate::{
 };
 
 /// Workspace owns the three panels and tracks their visibility.
-pub struct Workspace {
+pub(crate) struct Workspace {
     sidebar: Entity<SessionSidebar>,
     chat: Entity<ChatPanel>,
     memory_viewer: Entity<MemoryViewer>,
