@@ -27,7 +27,7 @@ pub struct ChangelogRecord {
     pub target_label: String,
     /// Stable external target identity.
     pub target_uid: Uuid,
-    /// Serialized before/after payload. PHI/restricted payloads are envelope-encrypted in M21.
+    /// Serialized before/after payload. Erase rows must use redacted audit payloads only.
     pub payload: serde_json::Value,
     /// Redaction marker written by immutable erase events.
     pub redaction_marker: Option<String>,
