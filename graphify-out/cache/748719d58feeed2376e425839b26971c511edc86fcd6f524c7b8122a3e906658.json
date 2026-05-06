@@ -1,0 +1,1 @@
+{"nodes": [{"id": "chunking", "label": "chunking.rs", "file_type": "code", "source_file": "crates/moa-memory/ingest/src/chunking.rs", "source_location": "L1"}], "edges": [{"source": "chunking", "target": "extract", "relation": "imports_from", "confidence": "EXTRACTED", "source_file": "crates/moa-memory/ingest/src/chunking.rs", "source_location": "L3", "weight": 1.0}]}

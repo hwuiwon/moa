@@ -40,7 +40,7 @@ and returns this canonical enum.
 `moa-memory/vector` owns embedding and vector-index abstractions.
 
 - `Embedder`, `CohereV4Embedder`
-- `VectorStore`, `PgvectorStore`
+- `VectorStore`, `PgvectorStore`, `TurbopufferStore`
 - Vector query/result DTOs such as `VectorQuery` and `VectorMatch`
 
 ## `moa-memory/pii`

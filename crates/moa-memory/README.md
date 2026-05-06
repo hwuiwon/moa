@@ -9,7 +9,7 @@ separate.
 | Path | Crate name | Responsibility |
 | --- | --- | --- |
 | `graph/` | `moa-memory-graph` | `GraphStore`, AGE-backed graph storage, sidecar projection, bi-temporal writes, and node/edge label registries. |
-| `vector/` | `moa-memory-vector` | Embedder abstraction, provider bindings, pgvector storage, and embedding queue support. |
+| `vector/` | `moa-memory-vector` | Embedder abstraction, provider bindings, pgvector storage, Turbopuffer opt-in storage, and embedding queue support. |
 | `pii/` | `moa-memory-pii` | PII classification and redaction before durable memory writes. |
 | `ingest/` | `moa-memory-ingest` | Restate `IngestionVO` slow path and inline fast memory writes. |
 

@@ -78,6 +78,10 @@ pub async fn vector_leg(
     });
     let hits = vector
         .knn(&VectorQuery {
+            workspace_id: req
+                .scope
+                .workspace_id()
+                .map(|workspace_id| workspace_id.to_string()),
             embedding: req.query_embedding.clone(),
             k: VECTOR_LIMIT,
             label_filter,

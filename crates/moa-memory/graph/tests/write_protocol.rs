@@ -203,6 +203,7 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
     );
     let matches = vector
         .knn(&VectorQuery {
+            workspace_id: Some(workspace_id.clone()),
             embedding: basis_vector(0),
             k: 1,
             label_filter: Some(vec!["Fact".to_string()]),

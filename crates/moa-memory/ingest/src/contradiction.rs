@@ -544,6 +544,10 @@ async fn vector_candidate_uids(
     let hits = ctx
         .vector()
         .knn(&VectorQuery {
+            workspace_id: ctx
+                .scope()
+                .workspace_id()
+                .map(|workspace_id| workspace_id.to_string()),
             embedding: embedding.to_vec(),
             k: VECTOR_K,
             label_filter: Some(vec![label.as_str().to_string()]),

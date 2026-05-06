@@ -40,7 +40,7 @@ Edges represent relationships, evidence, provenance, supersession, contradiction
 
 `moa-memory-graph` owns the graph tables and SQL sidecars used by operational reads. The sidecars provide fast filters for labels, names, scopes, timestamps, and active validity windows.
 
-`moa-memory-vector` owns vector storage for semantic retrieval. Embeddings are written for graph nodes that should participate in retrieval, and hybrid retrieval fuses graph/sidecar candidates with vector hits.
+`moa-memory-vector` owns vector storage for semantic retrieval. Embeddings are written for graph nodes that should participate in retrieval, and hybrid retrieval fuses graph/sidecar candidates with vector hits. The default backend is pgvector; large or isolation-sensitive workspaces can opt into Turbopuffer namespaces through `workspace_state.vector_backend`.
 
 Indexes are write-incremental. There is no user-facing rebuild-index command for the removed wiki store.
 

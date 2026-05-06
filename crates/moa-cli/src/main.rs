@@ -36,6 +36,9 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use commands::admin::{
+    AdminCommand, PromoteWorkspaceArgs, WorkspacePromotionArgs, handle_admin_command,
+};
 use commands::privacy::{PrivacyCommand, handle_privacy_command};
 use commands::skills::{SkillsCommand, handle_skills_command};
 /// Top-level MOA command line interface.
@@ -102,6 +105,12 @@ enum CommandKind {
         #[command(subcommand)]
         command: PrivacyCommand,
     },
+    /// Promotes a workspace from pgvector to Turbopuffer.
+    PromoteWorkspace(PromoteWorkspaceArgs),
+    /// Rolls a workspace vector promotion back to pgvector.
+    RollbackPromotion(WorkspacePromotionArgs),
+    /// Finalizes a completed workspace vector promotion.
+    FinalizePromotion(WorkspacePromotionArgs),
     /// Reads or updates config values.
     Config {
         #[command(subcommand)]
@@ -489,6 +498,24 @@ async fn main() -> Result<()> {
         }
         Some(CommandKind::Privacy { command }) => {
             print!("{}", handle_privacy_command(&config, command).await?);
+        }
+        Some(CommandKind::PromoteWorkspace(args)) => {
+            print!(
+                "{}",
+                handle_admin_command(&config, AdminCommand::PromoteWorkspace(args)).await?
+            );
+        }
+        Some(CommandKind::RollbackPromotion(args)) => {
+            print!(
+                "{}",
+                handle_admin_command(&config, AdminCommand::RollbackPromotion(args)).await?
+            );
+        }
+        Some(CommandKind::FinalizePromotion(args)) => {
+            print!(
+                "{}",
+                handle_admin_command(&config, AdminCommand::FinalizePromotion(args)).await?
+            );
         }
         Some(CommandKind::Config { command }) => match command {
             None => {

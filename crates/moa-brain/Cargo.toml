@@ -30,6 +30,7 @@ tracing-opentelemetry.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+moa-memory-ingest = { path = "../moa-memory/ingest" }
 moa-providers = { path = "../moa-providers", features = ["test-util"] }
 moa-session = { path = "../moa-session" }
 proptest = "1"

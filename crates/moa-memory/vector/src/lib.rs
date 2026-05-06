@@ -5,11 +5,20 @@ use chrono::{DateTime, Utc};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
+pub mod backend;
 pub mod embedder;
 pub mod pgvector_store;
+pub mod promotion;
+pub mod turbopuffer;
 
+pub use backend::vector_store_for_workspace;
 pub use embedder::{CohereV4Embedder, Embedder};
 pub use pgvector_store::PgvectorStore;
+pub use promotion::{
+    PROMOTION_BATCH_SIZE, PROMOTION_OVERLAP_THRESHOLD, PromotionOptions, PromotionReport,
+    WorkspacePromotion, finalize_promotion, rollback_promotion,
+};
+pub use turbopuffer::TurbopufferStore;
 
 /// Fixed graph-memory embedding dimensionality.
 pub const VECTOR_DIMENSION: usize = 1024;
@@ -47,9 +56,61 @@ pub enum Error {
         /// Response body text.
         body: String,
     },
+    /// The vector provider returned a non-success status.
+    #[error("vector provider `{provider}` returned HTTP {status}: {body}")]
+    VectorProviderStatus {
+        /// Vector backend identifier.
+        provider: &'static str,
+        /// HTTP status code.
+        status: u16,
+        /// Response body text.
+        body: String,
+    },
     /// The configured query limit is too large for Postgres.
     #[error("vector query limit {0} does not fit into i64")]
     QueryLimitTooLarge(usize),
+    /// The vector backend needs an explicit workspace namespace.
+    #[error("vector backend `{backend}` requires an explicit workspace id for {operation}")]
+    WorkspaceRequired {
+        /// Vector backend identifier.
+        backend: &'static str,
+        /// Operation that requires a workspace id.
+        operation: &'static str,
+    },
+    /// The requested vector backend is not configured.
+    #[error("workspace {workspace_id} is configured for turbopuffer, but no client is configured")]
+    TurbopufferUnavailable {
+        /// Workspace that requested Turbopuffer.
+        workspace_id: String,
+    },
+    /// A HIPAA workspace requested Turbopuffer without a BAA-enabled client.
+    #[error("workspace {workspace_id} is HIPAA-tier and requires a Turbopuffer BAA")]
+    TurbopufferBaaRequired {
+        /// Workspace that requested Turbopuffer.
+        workspace_id: String,
+    },
+    /// Turbopuffer returned a malformed response.
+    #[error("invalid turbopuffer response: {0}")]
+    TurbopufferResponse(String),
+    /// Turbopuffer configuration is invalid.
+    #[error("invalid turbopuffer configuration: {0}")]
+    TurbopufferConfig(String),
+    /// Workspace promotion validation failed.
+    #[error("workspace promotion validation failed: overlap {overlap:.3} below {required:.3}")]
+    PromotionValidationFailed {
+        /// Observed top-K overlap.
+        overlap: f64,
+        /// Required top-K overlap.
+        required: f64,
+    },
+    /// Workspace promotion state does not allow the requested operation.
+    #[error("workspace promotion state `{state}` does not allow {operation}")]
+    InvalidPromotionState {
+        /// Current promotion state.
+        state: String,
+        /// Operation being attempted.
+        operation: &'static str,
+    },
     /// A core storage helper failed.
     #[error("core storage helper failed: {0}")]
     Core(#[from] moa_core::MoaError),
@@ -62,6 +123,9 @@ pub enum Error {
     /// An HTTP request failed.
     #[error("embedding HTTP request failed: {0}")]
     Reqwest(#[from] reqwest::Error),
+    /// JSON serialization or deserialization failed.
+    #[error("vector JSON serialization failed: {0}")]
+    SerdeJson(#[from] serde_json::Error),
 }
 
 /// One vector row to upsert into the vector store.
@@ -90,6 +154,8 @@ pub struct VectorItem {
 /// KNN vector query parameters.
 #[derive(Debug, Clone)]
 pub struct VectorQuery {
+    /// Workspace namespace for backends that require explicit tenant routing.
+    pub workspace_id: Option<String>,
     /// Dense 1024-dimensional query embedding.
     pub embedding: Vec<f32>,
     /// Number of nearest neighbors to return.
