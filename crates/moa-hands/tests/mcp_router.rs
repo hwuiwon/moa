@@ -1,10 +1,6 @@
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use moa_core::{
-    McpCredentialConfig, McpServerConfig, McpTransportConfig, MemoryPath, MemoryScope,
-    MemorySearchResult, MemoryStore, MoaConfig, ModelId, PageSummary, PageType, Result,
-    SessionMeta, ToolInvocation, UserId, WikiPage, WorkspaceId,
+    McpCredentialConfig, McpServerConfig, McpTransportConfig, MoaConfig, ModelId, SessionMeta,
+    ToolInvocation, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use serde_json::json;
@@ -12,54 +8,6 @@ use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use uuid::Uuid;
-
-#[derive(Default)]
-struct EmptyMemoryStore;
-
-#[async_trait]
-impl MemoryStore for EmptyMemoryStore {
-    async fn search(
-        &self,
-        _query: &str,
-        _scope: &MemoryScope,
-        _limit: usize,
-    ) -> Result<Vec<MemorySearchResult>> {
-        Ok(Vec::new())
-    }
-
-    async fn read_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
-        Err(moa_core::MoaError::StorageError("not found".to_string()))
-    }
-
-    async fn write_page(
-        &self,
-        _scope: &MemoryScope,
-        _path: &MemoryPath,
-        _page: WikiPage,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
-        Ok(())
-    }
-
-    async fn list_pages(
-        &self,
-        _scope: &MemoryScope,
-        _filter: Option<PageType>,
-    ) -> Result<Vec<PageSummary>> {
-        Ok(Vec::new())
-    }
-
-    async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
-        Ok(String::new())
-    }
-
-    async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
-        Ok(())
-    }
-}
 
 fn session() -> SessionMeta {
     SessionMeta {
@@ -73,7 +21,6 @@ fn session() -> SessionMeta {
 #[tokio::test]
 async fn router_discovers_stdio_mcp_tools_from_config() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
     let mut config = MoaConfig::default();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     config.mcp_servers = vec![McpServerConfig {
@@ -89,9 +36,7 @@ async fn router_discovers_stdio_mcp_tools_from_config() {
         ..McpServerConfig::default()
     }];
 
-    let router = ToolRouter::from_config(&config, memory_store)
-        .await
-        .unwrap();
+    let router = ToolRouter::from_config(&config).await.unwrap();
     assert!(
         router
             .tool_schemas()
@@ -156,7 +101,6 @@ async fn router_injects_mcp_credentials_via_proxy() {
     });
 
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
     let mut config = MoaConfig::default();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     config.mcp_servers = vec![McpServerConfig {
@@ -169,9 +113,7 @@ async fn router_injects_mcp_credentials_via_proxy() {
         ..McpServerConfig::default()
     }];
 
-    let router = ToolRouter::from_config(&config, memory_store)
-        .await
-        .unwrap();
+    let router = ToolRouter::from_config(&config).await.unwrap();
     let (_, output) = router
         .execute_authorized(
             &session(),
@@ -226,7 +168,6 @@ async fn router_calls_http_mcp_server_and_surfaces_jsonrpc_errors() {
     });
 
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
     let mut config = MoaConfig::default();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     config.mcp_servers = vec![McpServerConfig {
@@ -236,9 +177,7 @@ async fn router_calls_http_mcp_server_and_surfaces_jsonrpc_errors() {
         ..McpServerConfig::default()
     }];
 
-    let router = ToolRouter::from_config(&config, memory_store)
-        .await
-        .unwrap();
+    let router = ToolRouter::from_config(&config).await.unwrap();
     let error = router
         .execute_authorized(
             &session(),
@@ -301,7 +240,6 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
     });
 
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
     let mut config = MoaConfig::default();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     config.mcp_servers = vec![McpServerConfig {
@@ -311,9 +249,7 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
         ..McpServerConfig::default()
     }];
 
-    let router = ToolRouter::from_config(&config, memory_store)
-        .await
-        .unwrap();
+    let router = ToolRouter::from_config(&config).await.unwrap();
     assert!(
         router
             .tool_schemas()

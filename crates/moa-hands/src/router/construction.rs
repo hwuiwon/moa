@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use moa_core::{
-    HandProvider, MemoryStore, MoaConfig, MoaError, Result, SandboxTier, SessionStore,
-    ToolBudgetConfig, ToolOutputConfig,
+    HandProvider, MoaConfig, MoaError, Result, SandboxTier, SessionStore, ToolBudgetConfig,
+    ToolOutputConfig,
 };
 use moa_security::{
     ApprovalRuleStore, EnvironmentCredentialVault, MCPCredentialProxy, ToolPolicies,
@@ -24,14 +24,9 @@ use super::{DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, ToolRegistry, ToolRoute
 
 impl ToolRouter {
     /// Creates a router from explicit providers and a tool registry.
-    pub fn new(
-        registry: ToolRegistry,
-        memory_store: Arc<dyn MemoryStore>,
-        providers: HashMap<String, Arc<dyn HandProvider>>,
-    ) -> Self {
+    pub fn new(registry: ToolRegistry, providers: HashMap<String, Arc<dyn HandProvider>>) -> Self {
         Self {
             registry,
-            memory_store,
             providers,
             local_provider: None,
             mcp_clients: tokio::sync::RwLock::new(HashMap::new()),
@@ -49,10 +44,7 @@ impl ToolRouter {
     }
 
     /// Creates a local-only router rooted at a sandbox work directory.
-    pub async fn new_local(
-        memory_store: Arc<dyn MemoryStore>,
-        sandbox_root: impl AsRef<Path>,
-    ) -> Result<Self> {
+    pub async fn new_local(sandbox_root: impl AsRef<Path>) -> Result<Self> {
         let local_provider = Arc::new(
             LocalHandProvider::new(sandbox_root.as_ref())
                 .await?
@@ -67,15 +59,12 @@ impl ToolRouter {
         Ok(Self {
             sandbox_root: Some(sandbox_root.as_ref().to_path_buf()),
             local_provider: Some(local_provider),
-            ..Self::new(registry, memory_store, providers)
+            ..Self::new(registry, providers)
         })
     }
 
     /// Creates a local router from the loaded MOA config.
-    pub async fn from_config(
-        config: &MoaConfig,
-        memory_store: Arc<dyn MemoryStore>,
-    ) -> Result<Self> {
+    pub async fn from_config(config: &MoaConfig) -> Result<Self> {
         let sandbox_root = expand_local_path(&config.local.sandbox_dir)?;
         let local_provider = Arc::new(
             LocalHandProvider::new_with_docker_detection(
@@ -128,7 +117,7 @@ impl ToolRouter {
         let mut router = Self {
             sandbox_root: Some(sandbox_root),
             local_provider: Some(local_provider),
-            ..Self::new(registry, memory_store, providers)
+            ..Self::new(registry, providers)
         }
         .with_tool_output_config(config.tool_output.clone())
         .with_tool_budgets(config.tool_budgets.clone())

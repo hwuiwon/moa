@@ -11,26 +11,21 @@ use moa_brain::{
         history::HistoryCompiler,
         identity::{DEFAULT_IDENTITY_PROMPT, IdentityProcessor},
         instructions::InstructionProcessor,
-        memory::MemoryRetriever,
+        memory::GraphMemoryRetriever,
         query_rewrite::QueryRewriter,
         runtime_context::RuntimeContextProcessor,
-        skills::SkillInjector,
         tools::ToolDefinitionProcessor,
     },
 };
 use moa_core::{
-    ContextProcessor, LLMProvider, MemoryPath, MemoryScope, MemoryStore, MoaConfig, PageType,
-    SessionMeta, SessionStore, UserId, WorkspaceId,
+    ContextProcessor, LLMProvider, MoaConfig, SessionMeta, SessionStore, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
-use moa_memory::FileMemoryStore;
-use moa_memory::wiki::parse_markdown;
 use moa_providers::{
     build_provider_from_selection, resolve_provider_selection, resolve_rewriter_provider,
 };
 use moa_security::{ApprovalRuleStore, ToolPolicies};
 use moa_session::PostgresSessionStore;
-use serde_json::Value;
 use tokio::fs;
 use uuid::Uuid;
 
@@ -43,8 +38,6 @@ const DEFAULT_EVAL_USER: &str = "eval-runner";
 pub struct AgentEnvironment {
     /// Session store scoped to this run.
     pub session_store: Arc<dyn SessionStore>,
-    /// Memory store scoped to this run.
-    pub memory_store: Arc<dyn MemoryStore>,
     /// LLM provider used for the run.
     pub llm_provider: Arc<dyn LLMProvider>,
     /// Tool router with per-config restrictions and policies applied.
@@ -81,17 +74,10 @@ pub(crate) async fn build_agent_environment_with_provider(
 ) -> Result<AgentEnvironment> {
     let run_root = temp_dir.join(format!("eval-{}", Uuid::now_v7()));
     let workspace_dir = run_root.join("workspace");
-    let memory_root = run_root.join("memory-store");
     fs::create_dir_all(&workspace_dir)
         .await
         .map_err(|source| EvalError::Io {
             path: workspace_dir.clone(),
-            source,
-        })?;
-    fs::create_dir_all(&memory_root)
-        .await
-        .map_err(|source| EvalError::Io {
-            path: memory_root.clone(),
             source,
         })?;
 
@@ -103,26 +89,11 @@ pub(crate) async fn build_agent_environment_with_provider(
     );
     let session_store: Arc<dyn SessionStore> = session_store_concrete.clone();
     let rule_store: Arc<dyn ApprovalRuleStore> = session_store_concrete.clone();
-    let memory_store_concrete = Arc::new(
-        FileMemoryStore::new_with_pool_and_schema(
-            &memory_root,
-            Arc::new(session_store_concrete.pool().clone()),
-            Some(&schema_name),
-        )
-        .await?,
-    );
-    seed_memory(
-        base_config,
-        agent_config,
-        memory_store_concrete.as_ref(),
-        &workspace_id,
-    )
-    .await?;
+    seed_memory(base_config, agent_config).await?;
 
     let tool_router = Arc::new(
         build_tool_router(
             base_config,
-            memory_store_concrete.clone(),
             session_store.clone(),
             rule_store,
             &workspace_dir,
@@ -130,14 +101,6 @@ pub(crate) async fn build_agent_environment_with_provider(
         )
         .await?,
     );
-
-    if tool_router.has_tool("memory_read") {
-        apply_skill_overrides(memory_store_concrete.as_ref(), agent_config, &workspace_id).await?;
-    } else {
-        clear_workspace_skills(memory_store_concrete.as_ref(), &workspace_id).await?;
-    }
-
-    refresh_indices(memory_store_concrete.as_ref(), &workspace_id).await?;
 
     let session_meta = SessionMeta {
         workspace_id: workspace_id.clone(),
@@ -152,7 +115,7 @@ pub(crate) async fn build_agent_environment_with_provider(
         base_config,
         agent_config,
         session_store.clone(),
-        memory_store_concrete.clone(),
+        session_store_concrete.pool().clone(),
         llm_provider.clone(),
         tool_router.as_ref(),
     )
@@ -160,7 +123,6 @@ pub(crate) async fn build_agent_environment_with_provider(
 
     Ok(AgentEnvironment {
         session_store,
-        memory_store: memory_store_concrete,
         llm_provider,
         tool_router,
         pipeline,
@@ -171,67 +133,25 @@ pub(crate) async fn build_agent_environment_with_provider(
     })
 }
 
-async fn seed_memory(
-    base_config: &MoaConfig,
-    agent_config: &AgentConfig,
-    memory_store: &FileMemoryStore,
-    workspace_id: &WorkspaceId,
-) -> Result<()> {
+async fn seed_memory(base_config: &MoaConfig, agent_config: &AgentConfig) -> Result<()> {
     if !agent_config.memory.clear_defaults
         && let Some(default_root) = configured_default_memory_root(base_config)?
     {
-        copy_dir_contents_if_exists(
-            &default_root.join("memory"),
-            &memory_store.base_dir().join("memory"),
-        )
-        .await?;
-        copy_dir_contents_if_exists(
-            &default_root
-                .join("workspaces")
-                .join(workspace_id.as_str())
-                .join("memory"),
-            &memory_store
-                .base_dir()
-                .join("workspaces")
-                .join(workspace_id.as_str())
-                .join("memory"),
-        )
-        .await?;
+        let _ = default_root;
     }
-
-    if let Some(snapshot) = &agent_config.memory.user_memory_path {
-        copy_dir_contents(
-            &resolve_path(snapshot)?,
-            &memory_store.base_dir().join("memory"),
-        )
-        .await?;
-    }
-
-    if let Some(snapshot) = &agent_config.memory.workspace_memory_path {
-        copy_dir_contents(
-            &resolve_path(snapshot)?,
-            &memory_store
-                .base_dir()
-                .join("workspaces")
-                .join(workspace_id.as_str())
-                .join("memory"),
-        )
-        .await?;
-    }
-
+    let _ = &agent_config.memory.user_memory_path;
+    let _ = &agent_config.memory.workspace_memory_path;
     Ok(())
 }
 
 async fn build_tool_router(
     base_config: &MoaConfig,
-    memory_store: Arc<FileMemoryStore>,
     session_store: Arc<dyn SessionStore>,
     rule_store: Arc<dyn ApprovalRuleStore>,
     workspace_dir: &Path,
     agent_config: &AgentConfig,
 ) -> Result<ToolRouter> {
-    let memory_store_dyn: Arc<dyn MemoryStore> = memory_store;
-    let router = ToolRouter::new_local(memory_store_dyn, workspace_dir).await?;
+    let router = ToolRouter::new_local(workspace_dir).await?;
     let available_tools = router.tool_names();
     validate_named_tools(&available_tools, &agent_config.tools.disable)?;
     validate_named_tools(&available_tools, &agent_config.permissions.auto_approve)?;
@@ -254,7 +174,7 @@ async fn build_pipeline(
     base_config: &MoaConfig,
     agent_config: &AgentConfig,
     session_store: Arc<dyn SessionStore>,
-    memory_store: Arc<FileMemoryStore>,
+    graph_pool: sqlx::PgPool,
     llm_provider: Arc<dyn LLMProvider>,
     tool_router: &ToolRouter,
 ) -> Result<ContextPipeline> {
@@ -263,7 +183,6 @@ async fn build_pipeline(
         load_workspace_instructions(base_config, &agent_config.instructions).await?;
     let user_instructions = base_config.general.user_instructions.clone();
     let tool_schemas = tool_router.tool_schemas();
-    let memory_store_dyn: Arc<dyn MemoryStore> = memory_store.clone();
     let query_rewrite_provider = resolve_eval_rewriter_provider(base_config, llm_provider.clone());
     let mut stages: Vec<Box<dyn ContextProcessor>> = vec![
         Box::new(IdentityProcessor::new(identity_prompt)),
@@ -273,11 +192,6 @@ async fn build_pipeline(
             None,
         )),
         Box::new(ToolDefinitionProcessor::new(tool_schemas)),
-        Box::new(
-            SkillInjector::from_memory(memory_store_dyn.clone())
-                .with_session_store(session_store.clone())
-                .with_budget_config(base_config.skill_budget.clone()),
-        ),
     ];
     if let Some(query_rewrite_provider) = query_rewrite_provider {
         stages.push(Box::new(
@@ -286,7 +200,7 @@ async fn build_pipeline(
         ));
     }
     stages.extend([
-        Box::new(MemoryRetriever::new(memory_store_dyn)) as Box<dyn ContextProcessor>,
+        Box::new(GraphMemoryRetriever::new(graph_pool)) as Box<dyn ContextProcessor>,
         Box::new(HistoryCompiler::with_compaction(
             session_store.clone(),
             llm_provider,
@@ -295,10 +209,6 @@ async fn build_pipeline(
         Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
         Box::new(CacheOptimizer) as Box<dyn ContextProcessor>,
     ]);
-
-    if !tool_router.has_tool("memory_read") {
-        stages.retain(|stage| stage.name() != "skills");
-    }
 
     Ok(ContextPipeline::new(stages))
 }
@@ -324,110 +234,6 @@ fn resolve_eval_rewriter_provider(
     }
 
     Some(fallback_provider)
-}
-
-async fn apply_skill_overrides(
-    memory_store: &FileMemoryStore,
-    agent_config: &AgentConfig,
-    workspace_id: &WorkspaceId,
-) -> Result<()> {
-    if agent_config.skills.exclusive {
-        clear_workspace_skills(memory_store, workspace_id).await?;
-    }
-
-    for skill_path in &agent_config.skills.include {
-        let (page_path, page) = load_skill_page(skill_path).await?;
-        memory_store
-            .write_page(
-                &MemoryScope::Workspace {
-                    workspace_id: workspace_id.clone(),
-                },
-                &page_path,
-                page,
-            )
-            .await?;
-    }
-
-    if !agent_config.skills.exclude.is_empty() {
-        let scope = MemoryScope::Workspace {
-            workspace_id: workspace_id.clone(),
-        };
-        let summaries = memory_store
-            .list_pages(&scope, Some(moa_core::PageType::Skill))
-            .await?;
-        for summary in summaries {
-            let page = memory_store.read_page(&scope, &summary.path).await?;
-            let skill_name = skill_name_from_page(&page).unwrap_or_else(|| page.title.clone());
-            if agent_config
-                .skills
-                .exclude
-                .iter()
-                .any(|selector| skill_selector_matches(selector, &summary.path, &skill_name))
-            {
-                memory_store.delete_page(&scope, &summary.path).await?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn clear_workspace_skills(
-    memory_store: &FileMemoryStore,
-    workspace_id: &WorkspaceId,
-) -> Result<()> {
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
-    let summaries = memory_store
-        .list_pages(&scope, Some(moa_core::PageType::Skill))
-        .await?;
-    for summary in summaries {
-        memory_store.delete_page(&scope, &summary.path).await?;
-    }
-    Ok(())
-}
-
-async fn refresh_indices(memory_store: &FileMemoryStore, workspace_id: &WorkspaceId) -> Result<()> {
-    let user_scope = MemoryScope::User {
-        workspace_id: workspace_id.clone(),
-        user_id: UserId::new(DEFAULT_EVAL_USER),
-    };
-    let workspace_scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
-    memory_store.refresh_scope_index(&user_scope).await?;
-    memory_store.refresh_scope_index(&workspace_scope).await?;
-    memory_store.rebuild_search_index(&user_scope).await?;
-    memory_store.rebuild_search_index(&workspace_scope).await?;
-    Ok(())
-}
-
-async fn load_skill_page(selector: &str) -> Result<(MemoryPath, moa_core::WikiPage)> {
-    let resolved = resolve_path(Path::new(selector))?;
-    let file_path = if resolved.is_dir() {
-        resolved.join("SKILL.md")
-    } else {
-        resolved
-    };
-    let hinted_name = file_path
-        .parent()
-        .and_then(Path::file_name)
-        .or_else(|| file_path.file_stem())
-        .and_then(|value| value.to_str())
-        .unwrap_or("skill");
-    let hinted_path = MemoryPath::new(format!("skills/{}/SKILL.md", slugify_name(hinted_name)));
-    let markdown = fs::read_to_string(&file_path)
-        .await
-        .map_err(|source| EvalError::Io {
-            path: file_path.clone(),
-            source,
-        })?;
-    let mut page = parse_markdown(Some(hinted_path), &markdown).map_err(EvalError::Moa)?;
-    page.page_type = PageType::Skill;
-    let path = build_skill_memory_path(&page, &file_path);
-    page.path = Some(path.clone());
-    Ok((path, page))
 }
 
 async fn load_workspace_instructions(
@@ -548,112 +354,6 @@ fn expand_local_path(path: impl AsRef<Path>) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-async fn copy_dir_contents_if_exists(source: &Path, destination: &Path) -> Result<()> {
-    if !fs::try_exists(source)
-        .await
-        .map_err(|source_error| EvalError::Io {
-            path: source.to_path_buf(),
-            source: source_error,
-        })?
-    {
-        return Ok(());
-    }
-
-    copy_dir_contents(source, destination).await
-}
-
-async fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)
-        .await
-        .map_err(|source_error| EvalError::Io {
-            path: destination.to_path_buf(),
-            source: source_error,
-        })?;
-
-    let mut stack = vec![(source.to_path_buf(), destination.to_path_buf())];
-    while let Some((src_dir, dst_dir)) = stack.pop() {
-        let mut entries = fs::read_dir(&src_dir)
-            .await
-            .map_err(|source_error| EvalError::Io {
-                path: src_dir.clone(),
-                source: source_error,
-            })?;
-        while let Some(entry) =
-            entries
-                .next_entry()
-                .await
-                .map_err(|source_error| EvalError::Io {
-                    path: src_dir.clone(),
-                    source: source_error,
-                })?
-        {
-            let entry_type = entry
-                .file_type()
-                .await
-                .map_err(|source_error| EvalError::Io {
-                    path: entry.path(),
-                    source: source_error,
-                })?;
-            let target = dst_dir.join(entry.file_name());
-            if entry_type.is_dir() {
-                fs::create_dir_all(&target)
-                    .await
-                    .map_err(|source_error| EvalError::Io {
-                        path: target.clone(),
-                        source: source_error,
-                    })?;
-                stack.push((entry.path(), target));
-            } else {
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)
-                        .await
-                        .map_err(|source_error| EvalError::Io {
-                            path: parent.to_path_buf(),
-                            source: source_error,
-                        })?;
-                }
-                fs::copy(entry.path(), &target)
-                    .await
-                    .map_err(|source_error| EvalError::Io {
-                        path: target.clone(),
-                        source: source_error,
-                    })?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn skill_selector_matches(selector: &str, path: &MemoryPath, name: &str) -> bool {
-    selector == name
-        || selector == path.as_str()
-        || path.as_str().contains(selector)
-        || name.contains(selector)
-}
-
-fn skill_name_from_page(page: &moa_core::WikiPage) -> Option<String> {
-    page.metadata
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn build_skill_memory_path(page: &moa_core::WikiPage, file_path: &Path) -> MemoryPath {
-    let name = skill_name_from_page(page)
-        .or_else(|| {
-            file_path
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|value| value.to_str())
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_else(|| page.title.clone());
-    MemoryPath::new(format!("skills/{}/SKILL.md", slugify_name(&name)))
-}
-
 fn slugify_name(name: &str) -> String {
     let mut slug = String::from(DEFAULT_EVAL_WORKSPACE);
     let trimmed = name.trim();
@@ -680,14 +380,13 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        CompletionRequest, CompletionResponse, CompletionStream, LLMProvider, MemoryPath,
-        MemoryScope, MoaConfig, ModelCapabilities, StopReason, TokenPricing, TokenUsage,
-        ToolCallFormat,
+        CompletionRequest, CompletionResponse, CompletionStream, LLMProvider, MoaConfig,
+        ModelCapabilities, StopReason, TokenPricing, TokenUsage, ToolCallFormat,
     };
     use tempfile::tempdir;
 
     use super::{build_agent_environment_with_provider, slugify_name};
-    use crate::{AgentConfig, MemoryOverride, PermissionOverride, ToolOverride};
+    use crate::{AgentConfig, PermissionOverride, ToolOverride};
 
     fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
         TokenUsage {
@@ -770,56 +469,6 @@ mod tests {
 
         assert!(environment.tool_router.has_tool("file_read"));
         assert!(!environment.tool_router.has_tool("bash"));
-    }
-
-    #[tokio::test]
-    async fn setup_copies_workspace_memory_snapshot() {
-        let fixture = tempdir().unwrap();
-        let moa_config = test_moa_config();
-        let snapshot_root = fixture.path().join("workspace");
-        tokio::fs::create_dir_all(&snapshot_root).await.unwrap();
-        tokio::fs::write(
-            snapshot_root.join("notes.md"),
-            "# Notes\n\nSnapshot content.",
-        )
-        .await
-        .unwrap();
-
-        let temp = tempdir().unwrap();
-        let config = AgentConfig {
-            name: "snapshot".to_string(),
-            memory: MemoryOverride {
-                workspace_memory_path: Some(snapshot_root),
-                clear_defaults: true,
-                ..MemoryOverride::default()
-            },
-            permissions: PermissionOverride {
-                auto_approve_all: true,
-                ..PermissionOverride::default()
-            },
-            ..AgentConfig::default()
-        };
-
-        let environment = build_agent_environment_with_provider(
-            &moa_config,
-            &config,
-            temp.path(),
-            Arc::new(MockProvider),
-        )
-        .await
-        .unwrap();
-
-        let page = environment
-            .memory_store
-            .read_page(
-                &MemoryScope::Workspace {
-                    workspace_id: environment.workspace_id.clone(),
-                },
-                &MemoryPath::new("notes.md"),
-            )
-            .await
-            .unwrap();
-        assert!(page.content.contains("Snapshot content."));
     }
 
     #[test]

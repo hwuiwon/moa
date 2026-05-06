@@ -662,13 +662,8 @@ mod tests {
                 "line 1\nline 2\nline 3\n".to_string(),
             )]),
         };
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let memory_store = moa_memory::FileMemoryStore::new(tempdir.path().to_path_buf())
-            .await
-            .expect("memory store");
         let ctx = ToolContext {
             session: &session,
-            memory_store: &memory_store,
             session_store: Some(&store),
             cancel_token: None,
         };
@@ -710,13 +705,8 @@ mod tests {
             )],
             artifacts: std::collections::HashMap::new(),
         };
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let memory_store = moa_memory::FileMemoryStore::new(tempdir.path().to_path_buf())
-            .await
-            .expect("memory store");
         let ctx = ToolContext {
             session: &session,
-            memory_store: &memory_store,
             session_store: Some(&store),
             cancel_token: None,
         };

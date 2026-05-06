@@ -37,20 +37,6 @@ trait ChatRuntimeOps {
     async fn session_events(&self, session_id: SessionId) -> Result<Vec<moa_core::EventRecord>>;
     async fn list_sessions(&self) -> Result<Vec<moa_core::SessionSummary>>;
     async fn list_session_previews(&self) -> Result<Vec<SessionPreview>>;
-    async fn list_memory_pages(
-        &self,
-        filter: Option<moa_core::PageType>,
-    ) -> Result<Vec<moa_core::PageSummary>>;
-    async fn recent_memory_entries(&self, limit: usize) -> Result<Vec<moa_core::PageSummary>>;
-    async fn search_memory(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<moa_core::MemorySearchResult>>;
-    async fn read_memory_page(&self, path: &moa_core::MemoryPath) -> Result<moa_core::WikiPage>;
-    async fn write_memory_page(&self, page: moa_core::WikiPage) -> Result<moa_core::WikiPage>;
-    async fn delete_memory_page(&self, path: &moa_core::MemoryPath) -> Result<()>;
-    async fn memory_index(&self) -> Result<String>;
     async fn workspace_budget_status(&self) -> Result<WorkspaceBudgetStatus>;
     async fn observe_session(
         &self,

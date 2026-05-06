@@ -15,7 +15,6 @@ use moa_core::{
     TokenUsage, ToolCallFormat, ToolOutput, UserId, UserMessage, WorkspaceId,
 };
 use moa_hands::{ToolRegistry, ToolRouter};
-use moa_orchestrator::DeadMemoryStoreShim;
 use moa_orchestrator_local::LocalOrchestrator;
 use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, testing};
@@ -271,15 +270,11 @@ async fn test_orchestrator_with_provider(
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
     let session_store = timed_test_stage("local:create_test_store", create_test_store()).await?;
-    let memory_store = Arc::new(DeadMemoryStoreShim);
     let tool_router = Arc::new(
-        timed_test_stage(
-            "local:create_tool_router",
-            ToolRouter::from_config(&config, memory_store.clone()),
-        )
-        .await?
-        .with_rule_store(session_store.clone())
-        .with_session_store(session_store.clone()),
+        timed_test_stage("local:create_tool_router", ToolRouter::from_config(&config))
+            .await?
+            .with_rule_store(session_store.clone())
+            .with_session_store(session_store.clone()),
     );
     let orchestrator = timed_test_stage(
         "local:create_orchestrator",
@@ -327,15 +322,11 @@ async fn test_orchestrator_with_config_router_and_store(
     session_store: Arc<PostgresSessionStore>,
 ) -> Result<LocalOrchestrator> {
     disable_query_rewrite(&mut config);
-    let memory_store = Arc::new(DeadMemoryStoreShim);
     let tool_router = Arc::new(
-        timed_test_stage(
-            "local:create_tool_router",
-            ToolRouter::from_config(&config, memory_store.clone()),
-        )
-        .await?
-        .with_rule_store(session_store.clone())
-        .with_session_store(session_store.clone()),
+        timed_test_stage("local:create_tool_router", ToolRouter::from_config(&config))
+            .await?
+            .with_rule_store(session_store.clone())
+            .with_session_store(session_store.clone()),
     );
     timed_test_stage(
         "local:create_orchestrator",
@@ -1463,13 +1454,12 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
     disable_query_rewrite(&mut reopened_config);
     reopened_config.local.memory_dir = dir.path().join("memory").display().to_string();
     reopened_config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
-    let reopened_memory = Arc::new(DeadMemoryStoreShim);
     let reopened_provider: Arc<dyn LLMProvider> = Arc::new(MockProvider {
         model: reopened_config.general.default_model.clone(),
         first_turn_delay: Duration::from_millis(5),
     });
     let reopened_router = Arc::new(
-        ToolRouter::from_config(&reopened_config, reopened_memory.clone())
+        ToolRouter::from_config(&reopened_config)
             .await?
             .with_rule_store(reopened_store.clone())
             .with_session_store(reopened_store.clone()),
@@ -2234,7 +2224,6 @@ async fn completed_tool_turn_destroys_cached_hand() -> Result<()> {
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
     let session_store = create_test_store().await?;
-    let memory_store = Arc::new(DeadMemoryStoreShim);
     let provider = Arc::new(DestroyTrackingHandProvider {
         provisioned: Arc::new(AtomicUsize::new(0)),
         destroyed: Arc::new(AtomicUsize::new(0)),
@@ -2247,7 +2236,7 @@ async fn completed_tool_turn_destroys_cached_hand() -> Result<()> {
     let mut registry = ToolRegistry::default_local();
     registry.retarget_hand_tools("tracked", moa_core::SandboxTier::Local);
     let tool_router = Arc::new(
-        ToolRouter::new(registry, memory_store.clone(), providers)
+        ToolRouter::new(registry, providers)
             .with_rule_store(session_store.clone())
             .with_session_store(session_store.clone()),
     );

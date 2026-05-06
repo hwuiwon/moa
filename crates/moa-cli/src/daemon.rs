@@ -10,9 +10,9 @@ use chrono::Utc;
 use futures_util::FutureExt;
 use moa_core::{
     BrainOrchestrator, BroadcastChannel, DaemonCommand, DaemonInfo, DaemonReply,
-    DaemonSessionPreview, DaemonStreamEvent, EventRange, LagPolicy, MemoryScope, MemoryStore,
-    MoaConfig, RecvResult, RuntimeEvent, SessionFilter, SessionId, SessionStatus, SessionStore,
-    WorkspaceBudgetStatus, recv_with_lag_handling,
+    DaemonSessionPreview, DaemonStreamEvent, EventRange, LagPolicy, MoaConfig, RecvResult,
+    RuntimeEvent, SessionFilter, SessionId, SessionStatus, SessionStore, WorkspaceBudgetStatus,
+    recv_with_lag_handling,
 };
 use moa_orchestrator_local::LocalOrchestrator;
 use moa_session::PostgresSessionStore;
@@ -388,64 +388,6 @@ async fn handle_unary_command_inner(
             state
                 .session_store
                 .get_events(session_id, EventRange::all())
-                .await?,
-        )),
-        DaemonCommand::RecentMemoryEntries {
-            workspace_id,
-            limit,
-        } => {
-            let mut pages: Vec<moa_core::PageSummary> = state
-                .orchestrator
-                .memory_store()
-                .list_pages(&MemoryScope::Workspace { workspace_id }, None)
-                .await?;
-            pages.sort_by_key(|page| std::cmp::Reverse(page.updated));
-            pages.truncate(limit);
-            Ok(DaemonReply::MemoryEntries(pages))
-        }
-        DaemonCommand::SearchMemory {
-            workspace_id,
-            query,
-            limit,
-        } => Ok(DaemonReply::MemorySearchResults(
-            state
-                .orchestrator
-                .memory_store()
-                .search(&query, &MemoryScope::Workspace { workspace_id }, limit)
-                .await?,
-        )),
-        DaemonCommand::ReadMemoryPage { workspace_id, path } => Ok(DaemonReply::MemoryPage(
-            state
-                .orchestrator
-                .memory_store()
-                .read_page(&MemoryScope::Workspace { workspace_id }, &path)
-                .await?,
-        )),
-        DaemonCommand::WriteMemoryPage {
-            workspace_id,
-            path,
-            page,
-        } => {
-            state
-                .orchestrator
-                .memory_store()
-                .write_page(&MemoryScope::Workspace { workspace_id }, &path, page)
-                .await?;
-            Ok(DaemonReply::Ack)
-        }
-        DaemonCommand::DeleteMemoryPage { workspace_id, path } => {
-            state
-                .orchestrator
-                .memory_store()
-                .delete_page(&MemoryScope::Workspace { workspace_id }, &path)
-                .await?;
-            Ok(DaemonReply::Ack)
-        }
-        DaemonCommand::MemoryIndex { workspace_id } => Ok(DaemonReply::MemoryIndex(
-            state
-                .orchestrator
-                .memory_store()
-                .get_index(&MemoryScope::Workspace { workspace_id })
                 .await?,
         )),
         DaemonCommand::ToolNames => Ok(DaemonReply::ToolNames(state.orchestrator.tool_names())),

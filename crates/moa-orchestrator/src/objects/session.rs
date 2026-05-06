@@ -26,8 +26,8 @@ use crate::observability::{annotate_restate_handler_span, event_persist_span};
 use crate::services::session_store::{AppendEventRequest, SessionStoreClient, UpdateStatusRequest};
 use crate::services::session_store::{
     CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest, GetSegmentBaselineRequest,
-    RecordSegmentSkillActivationRequest, RecordSegmentToolUseRequest,
-    RecordSegmentTurnUsageRequest, UpdateSegmentResolutionScoreRequest,
+    RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest,
+    UpdateSegmentResolutionScoreRequest,
 };
 use crate::sub_agent_dispatch::{DispatchedSubAgent, dispatch_sub_agent};
 use crate::turn::approval::serialize_awakeable_decision;
@@ -151,20 +151,6 @@ impl SessionVoState {
         };
         if !segment.tools_used.iter().any(|tool| tool == tool_name) {
             segment.tools_used.push(tool_name.to_string());
-        }
-    }
-
-    /// Records a skill activation on the active task segment.
-    pub fn record_segment_skill_activation(&mut self, skill_name: &str) {
-        let Some(segment) = self.current_segment.as_mut() else {
-            return;
-        };
-        if !segment
-            .skills_activated
-            .iter()
-            .any(|skill| skill == skill_name)
-        {
-            segment.skills_activated.push(skill_name.to_string());
         }
     }
 
@@ -426,23 +412,6 @@ impl AgentAdapter for SessionTurnAdapter {
             .record_segment_tool_use(Json(RecordSegmentToolUseRequest {
                 session_id: parse_session_key(ctx.key())?,
                 tool_name: tool_name.to_string(),
-            }))
-            .send();
-        Ok(())
-    }
-
-    async fn record_segment_skill_activation(
-        &self,
-        ctx: &ObjectContext<'_>,
-        skill_name: &str,
-    ) -> Result<(), HandlerError> {
-        let mut state = SessionVoState::load_from(ctx).await?;
-        state.record_segment_skill_activation(skill_name);
-        state.persist_into(ctx);
-        ctx.service_client::<SessionStoreClient>()
-            .record_segment_skill_activation(Json(RecordSegmentSkillActivationRequest {
-                session_id: parse_session_key(ctx.key())?,
-                skill_name: skill_name.to_string(),
             }))
             .send();
         Ok(())

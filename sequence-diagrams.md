@@ -16,7 +16,7 @@ Mermaid sequence diagrams showing how MOA actually moves at runtime. Start with 
 | `Router` | `ToolRouter` — built-in / hand / MCP dispatch | `moa-hands` |
 | `Hand` | `HandProvider` implementation | `moa-hands` |
 | `Log` | `SessionStore` (Postgres) | `moa-session` |
-| `Memory` | `MemoryStore` (file-wiki + FTS) | `moa-memory` |
+| `Memory` | graph memory store, ingestion, and hybrid retrieval | `moa-memory-graph`, `moa-memory-ingest`, `moa-brain` |
 | `Vault` | `CredentialVault` (file or HashiCorp) | `moa-security` |
 | `Cron` | Scheduled-task runner (tokio-cron or Restate workflow delay) | `moa-orchestrator` |
 
@@ -51,8 +51,8 @@ sequenceDiagram
     Log-->>Brain: EventRecord[]
 
     Brain->>Pipe: run 7 stages
-    Pipe->>Memory: get_index(user) + get_index(workspace)
-    Memory-->>Pipe: MEMORY.md + relevant pages
+    Pipe->>Memory: hybrid retrieve scoped graph nodes
+    Memory-->>Pipe: ranked node hits + snippets
     Pipe->>Log: (reads history via Brain)
     Pipe-->>Brain: WorkingContext (cache_breakpoint marked)
 
@@ -84,8 +84,8 @@ sequenceDiagram
     Brain->>Log: emit BrainResponse
 
     opt ≥5 tool calls this session
-        Brain->>Memory: write_page(skills/deploy-to-fly)
-        Brain->>Log: emit MemoryWrite
+        Brain->>Memory: fast remember learned deployment lesson
+        Brain->>Log: emit memory learning event
     end
 
     Brain->>Log: emit SessionCompleted
@@ -163,8 +163,8 @@ sequenceDiagram
 
     rect rgb(255, 245, 230)
         Note over Pipe: DYNAMIC (changes per turn)
-        Pipe->>Memory: 5. MemoryRetriever — search(keywords, ≤20% budget)
-        Memory-->>Pipe: top-3 relevant pages (truncated)
+        Pipe->>Memory: 5. HybridRetriever — retrieve(query, ≤20% budget)
+        Memory-->>Pipe: top-ranked graph nodes (truncated)
         Pipe->>Log: 6. HistoryCompiler — get_events(all)
         Log-->>Pipe: events
         Note over Pipe: checkpoint + last-5 verbatim<br/>older turns reverse-chronological<br/>errors ALWAYS preserved
@@ -282,50 +282,49 @@ sequenceDiagram
 
 ## 6. Memory: retrieve, write, and the learning loop
 
-Memory is a file-wiki with a Postgres FTS index. The brain both *reads* (pipeline stage 5, `memory_search`) and *writes* (corrections, discoveries, skill distillation).
+Memory is graph-native. Reads use hybrid retrieval over graph, sidecar, and vector indexes. Writes use the slow-path ingestion VO for documents and the fast-path memory API for short observations and lessons.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Brain
     participant LLM
-    participant Memory
-    participant FTS as FTS Index
+    participant Retriever as HybridRetriever
+    participant Ingest as IngestionVO
+    participant Graph as GraphStore
+    participant Vector as VectorStore
     participant Log as SessionStore
 
-    Note over Brain,Memory: On-demand read (tool call)
-    Brain->>Memory: memory_search(query, scope, limit)
-    Memory->>FTS: MATCH query + scope filter
-    FTS-->>Memory: ranked results<br/>(recency × confidence × reference_count)
-    Memory-->>Brain: MemorySearchResult[] w/ snippets
+    Note over Brain,Retriever: Retrieval during context compilation
+    Brain->>Retriever: retrieve(query, scope, limit)
+    Retriever->>Graph: lookup seeds + expand neighbors
+    Retriever->>Vector: vector search scoped embeddings
+    Retriever-->>Brain: ranked graph nodes + snippets
 
-    Note over Brain,Memory: Write triggers
+    Note over Brain,Graph: Write triggers
     alt User correction
-        Brain->>Memory: read_page(target)
-        Memory-->>Brain: WikiPage
-        Brain->>Memory: write_page(updated)
+        Brain->>Graph: supersede fact or decision node
     else Discovery worth filing
-        Brain->>Memory: write_page(new page)
+        Brain->>Graph: fast_remember(observation)
     else Post-run skill distillation (≥5 tool calls)
-        Brain->>Memory: search("task summary")
-        Memory-->>Brain: similar skills?
+        Brain->>Retriever: retrieve("task summary", scope, limit)
+        Retriever-->>Brain: similar lessons/skills?
         alt Similar skill exists (similarity > 0.8)
             Brain->>LLM: "is the existing skill still best?"
             alt Unchanged
-                Brain->>Memory: update use_count + last_used
+                Brain->>Graph: record usage metadata
             else Improved
-                Brain->>Memory: write_page (version+1, improved_from)
+                Brain->>Graph: create superseding skill/lesson node
             end
         else No similar skill
             Brain->>LLM: distill session → SKILL.md
             LLM-->>Brain: SKILL.md content
-            Brain->>Memory: write_page(skills/<name>/SKILL.md)
+            Brain->>Ingest: ingest_turn(synthetic lesson turn)
         end
     end
 
-    Memory->>Memory: update MEMORY.md index
-    Memory->>Memory: append _log.md entry
-    Memory->>FTS: rebuild index entry
+    Ingest->>Graph: create nodes + edges
+    Ingest->>Vector: write embeddings
     Brain->>Log: emit MemoryWrite
 ```
 
@@ -350,9 +349,9 @@ sequenceDiagram
         Note over Brain: No compaction needed
     else Compaction triggered
         Note over Brain,LLM: Phase 1 — Memory flush<br/>Give agent a chance to save facts
-        Brain->>LLM: complete(flush_prompt, tools=[memory_write])
-        LLM-->>Brain: memory_write tool calls
-        Brain->>Memory: write_page × N
+        Brain->>LLM: complete(flush_prompt, tools=[memory_remember])
+        LLM-->>Brain: memory_remember tool calls
+        Brain->>Memory: fast_remember × N
         Brain->>Log: emit MemoryWrite × N
 
         Note over Brain,LLM: Phase 2 — Summarize
@@ -502,30 +501,29 @@ sequenceDiagram
     participant LLM
     participant Log as SessionStore
 
-    Cron->>Memory: should_consolidate?
-    Memory-->>Cron: (session_count, hours_since_last)
+    Cron->>Memory: should_run_graph_maintenance?
+    Memory-->>Cron: (recent writes, stale projections)
 
     alt >= 3 sessions AND >= 24h
-        Cron->>Memory: list_pages(scope) + get_index + read _log.md
-        Memory-->>Cron: pages, index, recent log
+        Cron->>Memory: query candidate nodes and contradictions
+        Memory-->>Cron: graph maintenance candidates
 
-        Cron->>LLM: run consolidation prompt<br/>(normalize dates, resolve contradictions,<br/>prune stale, dedupe, flag orphans,<br/>decay confidence, trim MEMORY.md)
+        Cron->>LLM: run consolidation prompt<br/>(normalize dates, resolve contradictions,<br/>prune stale, dedupe, flag orphans)
         LLM-->>Cron: ConsolidationAction[]
 
         loop for each action
-            alt UpdatePage
-                Cron->>Memory: write_page
-            else DeletePage
-                Cron->>Memory: delete_page
-            else UpdateIndex
-                Cron->>Memory: write MEMORY.md
+            alt SupersedeNode
+                Cron->>Memory: supersede node
+            else SoftDeleteNode
+                Cron->>Memory: invalidate node
+            else RefreshProjection
+                Cron->>Memory: refresh sidecar projection
             else FlagOrphan
                 Note over Cron: add to report (no side effect)
             end
         end
 
-        Cron->>Memory: append _log.md (dream cycle entry)
-        Cron->>Log: emit Warning if MEMORY.md exceeded 200 lines pre-trim
+        Cron->>Log: emit maintenance report
     else
         Note over Cron: Skip this tick
     end
@@ -533,9 +531,9 @@ sequenceDiagram
 
 ---
 
-## 12. Concurrent memory writes (cloud) — git-branch model
+## 12. Concurrent memory writes (cloud) — graph supersession
 
-In cloud mode, multiple brains may touch the same workspace memory. Each writes to its own branch directory; a reconciler merges with LLM help when needed.
+In cloud mode, multiple brains may write memory concurrently. Graph writes are scoped transactions: conflicting facts are represented with supersession edges and indexed sidecar rows, rather than branch files.
 
 ```mermaid
 sequenceDiagram
@@ -546,34 +544,23 @@ sequenceDiagram
     participant Reconciler
     participant LLM
 
-    par Parallel writes to same page
-        BrainA->>Memory: write_page_branched(brain_A, topics/architecture.md)
-        Memory->>Memory: write to .branches/brain_A/ + manifest
+    par Parallel writes to related facts
+        BrainA->>Memory: fast_remember(fact A)
+        Memory->>Memory: create node + embedding
     and
-        BrainB->>Memory: write_page_branched(brain_B, topics/architecture.md)
-        Memory->>Memory: write to .branches/brain_B/ + manifest
+        BrainB->>Memory: fast_remember(fact B)
+        Memory->>Memory: create node + embedding
     end
 
-    Note over Reconciler: Cron: every 15m or after each session ends
-    Reconciler->>Memory: list_branches(scope)
-    Memory-->>Reconciler: [brain_A, brain_B]
+    Note over Reconciler: Inline contradiction judge or scheduled maintenance
+    Reconciler->>Memory: query candidate conflicting nodes
+    Memory-->>Reconciler: node pairs + evidence
 
-    loop for each branch
-        Reconciler->>Memory: read_change_manifest
-        Memory-->>Reconciler: ChangeRecord[]
-
-        loop for each change
-            Reconciler->>Memory: read main page + branch page
-            alt No conflict (main unchanged since branch wrote)
-                Reconciler->>Memory: write branch page to main
-            else Conflict (main updated after branch)
-                Reconciler->>LLM: merge prompt (Version A + Version B)
-                LLM-->>Reconciler: merged WikiPage
-                Reconciler->>Memory: write merged page to main
-            end
-        end
-
-        Reconciler->>Memory: delete_branch(brain_X)
+    loop for each conflict
+        Reconciler->>LLM: classify duplicate, supersede, or contradiction
+        LLM-->>Reconciler: write decision
+        Reconciler->>Memory: add SUPERSEDES / CONTRADICTS edge
+        Reconciler->>Memory: update sidecar validity
     end
 ```
 
@@ -662,7 +649,7 @@ sequenceDiagram
 - [`docs/01-architecture-overview.md`](docs/01-architecture-overview.md) — full trait signatures
 - [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md) — Restate + local orchestrator internals
 - [`docs/03-communication-layer.md`](docs/03-communication-layer.md) — approval UX, observation verbosity, rate limits
-- [`docs/04-memory-architecture.md`](docs/04-memory-architecture.md) — file-wiki, FTS, consolidation, git-branch writes
+- [`docs/04-memory-architecture.md`](docs/04-memory-architecture.md) — graph memory, ingestion, retrieval, sidecar indexes
 - [`docs/05-session-event-log.md`](docs/05-session-event-log.md) — event schema, compaction, replay
 - [`docs/06-hands-and-mcp.md`](docs/06-hands-and-mcp.md) — HandProvider, ToolRouter, MCP
 - [`docs/07-context-pipeline.md`](docs/07-context-pipeline.md) — 7-stage pipeline details

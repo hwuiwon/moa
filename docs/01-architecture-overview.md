@@ -23,7 +23,7 @@ Brain and execution
 Product data in Postgres / Neon
   sessions, events, pending_signals, context_snapshots
   task_segments, segment analytics materialized views
-  wiki_pages, search vectors, pgvector embeddings
+  graph nodes, graph edges, sidecar indexes, pgvector embeddings
   tenant_intents, global_intent_catalog, learning_log
         |
         v
@@ -32,7 +32,7 @@ Learning loop
   learning log -> intent proposals, skill ranking, memory consolidation
 ```
 
-Restate owns durable cloud execution. Postgres owns product-visible data. The file-backed wiki remains the canonical memory source, with Postgres indexes derived from it.
+Restate owns durable cloud execution. Postgres owns product-visible data. Graph memory is the canonical memory source, with sidecar and vector indexes maintained by graph writes.
 
 ## Tenant Model
 
@@ -47,7 +47,7 @@ Platform
        -> Workspace skills ranked by tenant-level outcomes
 ```
 
-Intent taxonomies are tenant-scoped because teams tend to repeat work patterns across projects. Memory and skill files remain workspace-scoped, but ranking signals aggregate at tenant level.
+Intent taxonomies are tenant-scoped because teams tend to repeat work patterns across projects. Memory and skills remain workspace-scoped, but ranking signals aggregate at tenant level.
 
 ## Core Traits
 
@@ -62,7 +62,6 @@ Current trait definitions live in `crates/moa-core/src/traits.rs`; shared DTOs l
 | `HandProvider` | Provision, execute, pause/resume, destroy hands | local, Docker, Daytona, E2B |
 | `LLMProvider` | Provider completion interface | Anthropic, OpenAI, Gemini through `moa-providers` |
 | `PlatformAdapter` | Gateway inbound/outbound normalization | Telegram, Slack, Discord |
-| `MemoryStore` | File-wiki read/write/search/consolidation | `FileMemoryStore` with Postgres indexes |
 | `BuiltInTool` | Built-in tool execution | memory/search/web and other built-ins |
 | `ContextProcessor` | One stage in context compilation | identity, instructions, tools, skills, query rewrite, memory, history, runtime context, compactor, cache |
 | `CredentialVault` | Secret storage and retrieval | local encrypted vault; cloud vault integration |
@@ -76,14 +75,14 @@ The local and cloud runtimes share these seams. They differ in how turns are sch
 `moa-orchestrator` exposes Restate handlers:
 
 - Virtual objects: `Session`, `SubAgent`, `Workspace`
-- Services: `Health`, `SessionStore`, `IntentManager`, `LLMGateway`, `MemoryStore`, `ToolExecutor`, `WorkspaceStore`
+- Services: `Health`, `SessionStore`, `IntentManager`, `LLMGateway`, `ToolExecutor`, `WorkspaceStore`
 - Workflows: `Consolidate`, `IntentDiscovery`
 
 `Session` is the durable actor for one session key. It queues messages, calls `run_turn`, tracks the active task segment, records tool/skill usage, scores resolution, and writes learning entries. `SubAgent` is the same actor pattern for delegated work with depth and budget limits.
 
 ### Local
 
-`moa-orchestrator-local` runs the same brain loop in Tokio tasks with broadcast channels for observation. It is used by `moa-cli`, `moa-runtime`, and the desktop app. It still uses Postgres for session storage and the same memory/search infrastructure.
+`moa-orchestrator-local` runs the same brain loop in Tokio tasks with broadcast channels for observation. It is used by `moa-cli`, `moa-runtime`, and the desktop app. It still uses Postgres for session storage and the same graph memory and retrieval infrastructure.
 
 ## Turn Data Flow
 
@@ -121,8 +120,8 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 |---|---|---|
 | Session metadata and events | Postgres | `sessions`, `events`, `pending_signals`, `context_snapshots` |
 | Task segmentation | Postgres | `task_segments`, segment baselines, skill resolution rates, intent transitions |
-| Memory files | Filesystem/cloud volume | Markdown wiki is canonical |
-| Memory search | Postgres | `wiki_pages` with `tsvector`, trigram indexes, and pgvector embeddings |
+| Graph memory | Postgres | Nodes, edges, sidecar indexes, changelog, and RLS-protected scope state |
+| Memory vectors | Postgres | pgvector embeddings for graph retrieval |
 | Tenant intents | Postgres | `tenant_intents` and `global_intent_catalog` |
 | Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity |
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
@@ -135,8 +134,9 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 | `moa-core` | Shared types, traits, config, events, analytics helpers |
 | `moa-brain` | Context pipeline, query rewrite, segment helpers, intent classifier, resolution scoring |
 | `moa-session` | Postgres session store, event log, task segments, intents, learning log |
-| `moa-memory` | File wiki, Postgres search index, embedding queue, consolidation |
-| `moa-memory-graph` | Graph-memory SQL sidecars and AGE projection helpers |
+| `moa-memory-graph` | Graph-memory SQL sidecars, RLS, changelog, and AGE projection helpers |
+| `moa-memory-ingest` | Slow-path graph ingestion and fast memory write APIs |
+| `moa-memory-pii` | PII classification and privacy helpers |
 | `moa-memory-vector` | Graph-memory vector storage abstraction and pgvector backend |
 | `moa-hands` | Tool routing and hand providers |
 | `moa-providers` | LLM and embedding providers |

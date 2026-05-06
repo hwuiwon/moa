@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use moa_core::{MemoryStore, MoaConfig};
+use moa_core::MoaConfig;
 use moa_hands::ToolRouter;
 use moa_providers::EmbeddingProvider;
 use moa_session::PostgresSessionStore;
@@ -24,8 +24,6 @@ pub struct OrchestratorCtx {
     pub session_store: Arc<PostgresSessionStore>,
     /// Postgres pool used by graph-memory retrieval and ingestion paths.
     pub graph_pool: sqlx::PgPool,
-    /// Memory store used during prompt compilation.
-    pub memory_store: Arc<dyn MemoryStore>,
     /// Registry of configured LLM providers.
     pub providers: Arc<ProviderRegistry>,
     /// Optional embedding provider shared by intent classification.

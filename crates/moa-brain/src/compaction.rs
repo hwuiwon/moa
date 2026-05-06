@@ -255,7 +255,7 @@ fn event_summary_line(record: &EventRecord) -> String {
             format!("#{} approval_decided: {decision:?}", record.sequence_num)
         }
         Event::MemoryRead { path, scope } => {
-            format!("#{} memory_read {scope}:{path}", record.sequence_num)
+            format!("#{} memory read {scope}:{path}", record.sequence_num)
         }
         Event::MemoryWrite { path, summary, .. } => format!(
             "#{} memory_write {path}: {}",

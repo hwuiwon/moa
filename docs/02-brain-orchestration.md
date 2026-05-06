@@ -19,7 +19,7 @@ _Restate orchestration, local runtime mode, turn execution, and sub-agents._
 
 1. Loads `OrchestratorConfig` from environment.
 2. Connects to Postgres and runs session migrations.
-3. Builds the Postgres session store, memory store, provider registry, embedding provider, and tool router.
+3. Builds the Postgres session store, graph memory stack, provider registry, embedding provider, and tool router.
 4. Installs an `OrchestratorCtx` singleton for handlers.
 5. Binds Restate services, virtual objects, and workflows.
 6. Starts the Restate endpoint and a separate health/readiness endpoint.
@@ -29,7 +29,7 @@ Bound surfaces:
 | Restate primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Workspace` |
-| Service | `Health`, `SessionStore`, `IntentManager`, `LLMGateway`, `MemoryStore`, `ToolExecutor`, `WorkspaceStore` |
+| Service | `Health`, `SessionStore`, `IntentManager`, `LLMGateway`, `ToolExecutor`, `WorkspaceStore` |
 | Workflow | `Consolidate`, `IntentDiscovery` |
 
 Restate state is used for hot orchestration state: queued messages, status, pending approvals, child refs, active segment, cancellation flags, and child budgets. Product-visible history is written to Postgres.
@@ -106,7 +106,7 @@ These are workflow-shaped because rerunning the same logical job should be expli
 Local mode still uses:
 
 - `PostgresSessionStore`
-- `FileMemoryStore`
+- graph memory store, ingestion, and hybrid retrieval stack
 - the same context pipeline
 - the same tool router and permission store
 - the same skill distillation and learning-log paths when a learning store is present

@@ -7,7 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_brain::{build_default_pipeline_with_runtime_and_instructions, run_brain_turn_with_tools};
+use moa_brain::{
+    GraphMemoryPipelineOptions,
+    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
+    run_brain_turn_with_tools,
+};
 use moa_core::workspace::discover_workspace_instructions;
 use moa_core::{
     CacheTtl, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage, Event,
@@ -15,11 +19,9 @@ use moa_core::{
     ToolContent, UserId, WorkspaceId, estimate_text_tokens,
 };
 use moa_hands::ToolRouter;
-use moa_memory::FileMemoryStore;
 use moa_providers::build_provider_from_config;
 use moa_session::testing;
 use serde::Serialize;
-use tempfile::tempdir;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize)]
@@ -214,13 +216,11 @@ struct AuditedProvider {
 #[ignore = "requires provider API key env and performs live cache audits"]
 async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
     let repo_root = repo_root()?;
-    let dir = tempdir()?;
 
     let workspace_id = WorkspaceId::new("cache-audit-matrix");
     let user_id = UserId::new("cache-audit-user");
     let discovered_instructions = discover_workspace_instructions(&repo_root);
 
-    let memory_store = Arc::new(FileMemoryStore::new(dir.path()).await?);
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     let store = Arc::new(store);
 
@@ -243,13 +243,16 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
             ],
             audits.clone(),
         ));
-        let pipeline = build_default_pipeline_with_runtime_and_instructions(
+        let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
             &config,
             store.clone(),
-            memory_store.clone(),
-            Some(provider.clone()),
-            discovered_instructions.clone(),
-            Vec::new(),
+            GraphMemoryPipelineOptions {
+                graph_pool: store.pool().clone(),
+                compaction_llm_provider: Some(provider.clone()),
+                query_rewrite_llm_provider: Some(provider.clone()),
+                discovered_workspace_instructions: discovered_instructions.clone(),
+                tool_schemas: Vec::new(),
+            },
         );
 
         let session_id = create_session(
@@ -394,7 +397,6 @@ fn is_query_rewrite_request(request: &CompletionRequest) -> bool {
 #[ignore = "requires provider API key env and performs live cache audits"]
 async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -> Result<()> {
     let repo_root = repo_root()?;
-    let dir = tempdir()?;
 
     let workspace_id = WorkspaceId::new("cache-audit");
     let user_id = UserId::new("cache-audit-user");
@@ -405,11 +407,10 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     sonnet_config.general.default_model = "claude-sonnet-4-6".to_string();
     sonnet_config.local.sandbox_dir = repo_root.display().to_string();
 
-    let memory_store = Arc::new(FileMemoryStore::new(dir.path()).await?);
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     let store = Arc::new(store);
     let tool_router = Arc::new(
-        ToolRouter::from_config(&sonnet_config, memory_store.clone())
+        ToolRouter::from_config(&sonnet_config)
             .await?
             .with_rule_store(store.clone())
             .with_session_store(store.clone()),
@@ -429,14 +430,18 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         ],
         same_session_audits.clone(),
     ));
-    let sonnet_pipeline = build_default_pipeline_with_runtime_and_instructions(
-        &sonnet_config,
-        store.clone(),
-        memory_store.clone(),
-        Some(sonnet_provider.clone()),
-        discovered_instructions.clone(),
-        tool_router.tool_schemas(),
-    );
+    let sonnet_pipeline =
+        build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
+            &sonnet_config,
+            store.clone(),
+            GraphMemoryPipelineOptions {
+                graph_pool: store.pool().clone(),
+                compaction_llm_provider: Some(sonnet_provider.clone()),
+                query_rewrite_llm_provider: Some(sonnet_provider.clone()),
+                discovered_workspace_instructions: discovered_instructions.clone(),
+                tool_schemas: tool_router.tool_schemas(),
+            },
+        );
 
     let session_a =
         create_session(store.clone(), &workspace_id, &user_id, "claude-sonnet-4-6").await?;
@@ -475,14 +480,18 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         vec!["fresh_session_repeat".to_string()],
         cross_session_audits.clone(),
     ));
-    let cross_session_pipeline = build_default_pipeline_with_runtime_and_instructions(
-        &sonnet_config,
-        store.clone(),
-        memory_store.clone(),
-        Some(cross_session_provider.clone()),
-        discovered_instructions.clone(),
-        tool_router.tool_schemas(),
-    );
+    let cross_session_pipeline =
+        build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
+            &sonnet_config,
+            store.clone(),
+            GraphMemoryPipelineOptions {
+                graph_pool: store.pool().clone(),
+                compaction_llm_provider: Some(cross_session_provider.clone()),
+                query_rewrite_llm_provider: Some(cross_session_provider.clone()),
+                discovered_workspace_instructions: discovered_instructions.clone(),
+                tool_schemas: tool_router.tool_schemas(),
+            },
+        );
     let session_b =
         create_session(store.clone(), &workspace_id, &user_id, "claude-sonnet-4-6").await?;
     run_turn(
@@ -506,14 +515,18 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         discovered_instructions.clone(),
         &format!("cache-audit-salt:{}", Uuid::now_v7()),
     );
-    let cold_session_pipeline = build_default_pipeline_with_runtime_and_instructions(
-        &sonnet_config,
-        store.clone(),
-        memory_store.clone(),
-        Some(cold_session_provider.clone()),
-        cold_instructions,
-        tool_router.tool_schemas(),
-    );
+    let cold_session_pipeline =
+        build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
+            &sonnet_config,
+            store.clone(),
+            GraphMemoryPipelineOptions {
+                graph_pool: store.pool().clone(),
+                compaction_llm_provider: Some(cold_session_provider.clone()),
+                query_rewrite_llm_provider: Some(cold_session_provider.clone()),
+                discovered_workspace_instructions: cold_instructions,
+                tool_schemas: tool_router.tool_schemas(),
+            },
+        );
     let session_c =
         create_session(store.clone(), &workspace_id, &user_id, "claude-sonnet-4-6").await?;
     run_turn(
@@ -544,13 +557,16 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         vec!["switch_cold".to_string(), "switch_warm".to_string()],
         model_switch_audits.clone(),
     ));
-    let opus_pipeline = build_default_pipeline_with_runtime_and_instructions(
+    let opus_pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         &opus_config,
         store.clone(),
-        memory_store.clone(),
-        Some(opus_provider.clone()),
-        discovered_instructions,
-        tool_router.tool_schemas(),
+        GraphMemoryPipelineOptions {
+            graph_pool: store.pool().clone(),
+            compaction_llm_provider: Some(opus_provider.clone()),
+            query_rewrite_llm_provider: Some(opus_provider.clone()),
+            discovered_workspace_instructions: discovered_instructions,
+            tool_schemas: tool_router.tool_schemas(),
+        },
     );
     run_turn(
         store.clone(),

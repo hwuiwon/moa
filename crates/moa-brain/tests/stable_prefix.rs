@@ -2,69 +2,20 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use moa_brain::{TurnResult, build_default_pipeline_with_tools, run_brain_turn_with_tools};
+use moa_brain::{
+    GraphMemoryPipelineOptions, TurnResult,
+    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
+    run_brain_turn_with_tools,
+};
 use moa_core::{
-    CacheTtl, CompletionRequest, Event, MemoryPath, MemoryScope, MemorySearchResult, MemoryStore,
-    ModelCapabilities, PageSummary, PageType, Result, SessionMeta, SessionStore, TokenPricing,
-    ToolCallFormat, UserId, WikiPage, WorkspaceId,
+    CacheTtl, CompletionRequest, Event, ModelCapabilities, Result, SessionMeta, SessionStore,
+    TokenPricing, ToolCallFormat, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_providers::ScriptedProvider;
 use moa_session::testing;
 use serde_json::json;
 use tempfile::TempDir;
-
-#[derive(Default)]
-struct NoopMemoryStore;
-
-#[async_trait]
-impl MemoryStore for NoopMemoryStore {
-    async fn search(
-        &self,
-        _query: &str,
-        _scope: &MemoryScope,
-        _limit: usize,
-    ) -> Result<Vec<MemorySearchResult>> {
-        Ok(Vec::new())
-    }
-
-    async fn read_page(&self, _scope: &MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
-        Err(moa_core::MoaError::StorageError(format!(
-            "memory page not found: {}",
-            path.as_str()
-        )))
-    }
-
-    async fn write_page(
-        &self,
-        _scope: &MemoryScope,
-        _path: &MemoryPath,
-        _page: WikiPage,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
-        Ok(())
-    }
-
-    async fn list_pages(
-        &self,
-        _scope: &MemoryScope,
-        _filter: Option<PageType>,
-    ) -> Result<Vec<PageSummary>> {
-        Ok(Vec::new())
-    }
-
-    async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
-        Ok(String::new())
-    }
-
-    async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
-        Ok(())
-    }
-}
 
 #[tokio::test]
 async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
@@ -80,23 +31,28 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
     let mut config = moa_core::MoaConfig::default();
     config.general.default_model = "claude-sonnet-4-6".to_string();
 
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(NoopMemoryStore);
     let (session_store, _database_url, _schema_name) =
         testing::create_isolated_test_store().await?;
+    let graph_pool = session_store.pool().clone();
     let session_store: Arc<dyn SessionStore> = Arc::new(session_store);
     let workspace_id = WorkspaceId::new("stable-prefix");
     let user_id = UserId::new("stable-prefix-user");
-    let router = Arc::new(ToolRouter::new_local(memory_store.clone(), &workspace).await?);
+    let router = Arc::new(ToolRouter::new_local(&workspace).await?);
     router
         .remember_workspace_root(workspace_id.clone(), workspace.clone())
         .await;
 
     let provider = Arc::new(scripted_provider());
-    let pipeline = build_default_pipeline_with_tools(
+    let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         &config,
         session_store.clone(),
-        memory_store,
-        extend_tool_schemas(router.tool_schemas()),
+        GraphMemoryPipelineOptions {
+            graph_pool,
+            compaction_llm_provider: None,
+            query_rewrite_llm_provider: None,
+            discovered_workspace_instructions: None,
+            tool_schemas: extend_tool_schemas(router.tool_schemas()),
+        },
     );
 
     let first_session_id = session_store

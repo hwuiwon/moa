@@ -5,9 +5,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::types::{
-    ApprovalDecision, BroadcastChannel, EventRecord, MemoryPath, MemorySearchResult, PageSummary,
-    RuntimeEvent, SessionFilter, SessionId, SessionMeta, SessionSummary, StartSessionRequest,
-    WikiPage, WorkspaceBudgetStatus, WorkspaceId,
+    ApprovalDecision, BroadcastChannel, EventRecord, RuntimeEvent, SessionFilter, SessionId,
+    SessionMeta, SessionSummary, StartSessionRequest, WorkspaceBudgetStatus, WorkspaceId,
 };
 
 /// Compact session preview returned by the daemon for session-picker UIs.
@@ -79,50 +78,6 @@ pub enum DaemonCommand {
         /// Session identifier to load.
         session_id: SessionId,
     },
-    /// List recent memory entries for the active workspace.
-    RecentMemoryEntries {
-        /// Workspace to query.
-        workspace_id: WorkspaceId,
-        /// Maximum number of entries to return.
-        limit: usize,
-    },
-    /// Search workspace memory.
-    SearchMemory {
-        /// Workspace to query.
-        workspace_id: WorkspaceId,
-        /// Search query.
-        query: String,
-        /// Maximum number of hits to return.
-        limit: usize,
-    },
-    /// Load one workspace memory page.
-    ReadMemoryPage {
-        /// Workspace to query.
-        workspace_id: WorkspaceId,
-        /// Logical memory path to read.
-        path: MemoryPath,
-    },
-    /// Create or update one workspace memory page.
-    WriteMemoryPage {
-        /// Workspace to modify.
-        workspace_id: WorkspaceId,
-        /// Logical memory path to write.
-        path: MemoryPath,
-        /// Full wiki page payload to persist.
-        page: WikiPage,
-    },
-    /// Delete one workspace memory page.
-    DeleteMemoryPage {
-        /// Workspace to modify.
-        workspace_id: WorkspaceId,
-        /// Logical memory path to delete.
-        path: MemoryPath,
-    },
-    /// Load the current workspace index document.
-    MemoryIndex {
-        /// Workspace to query.
-        workspace_id: WorkspaceId,
-    },
     /// Return the registered tool names.
     ToolNames,
     /// Return current budget status for a workspace.
@@ -181,14 +136,6 @@ pub enum DaemonReply {
     SessionPreviews(Vec<DaemonSessionPreview>),
     /// Full session event history.
     SessionEvents(Vec<EventRecord>),
-    /// Recent memory entries.
-    MemoryEntries(Vec<PageSummary>),
-    /// Workspace memory search hits.
-    MemorySearchResults(Vec<MemorySearchResult>),
-    /// One memory page.
-    MemoryPage(WikiPage),
-    /// Raw index document text.
-    MemoryIndex(String),
     /// Tool-name registry listing.
     ToolNames(Vec<String>),
     /// Current workspace budget snapshot.

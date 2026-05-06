@@ -662,7 +662,7 @@ fn event_to_context_message(
         ))),
         Event::MemoryRead { path, scope } => {
             Some(Ok(CompiledRecordMessage::plain(ContextMessage::system(
-                format!("<memory_read scope=\"{scope}\">{path}</memory_read>"),
+                format!("<memory_event kind=\"read\" scope=\"{scope}\">{path}</memory_event>"),
             ))))
         }
         Event::MemoryWrite { path, summary, .. } => {

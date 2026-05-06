@@ -9,7 +9,9 @@ use sqlx::PgPool;
 use tokio::time::sleep;
 
 use crate::support::graph_ingest::{test_database_url, wait_for_ingested_brain_responses};
-use crate::support::restate_runtime::{OrchestratorPorts, reserve_orchestrator_ports};
+use crate::support::restate_runtime::{
+    OrchestratorPorts, RESTATE_E2E_LOCK, reserve_orchestrator_ports,
+};
 use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, test_session_meta, user_message,
 };
@@ -90,6 +92,7 @@ fn object_url(ingress: &str, session_id: SessionId, handler: &str) -> String {
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, and at least one provider API key"]
 async fn approval_allow_once_round_trip_through_restate() -> Result<()> {
+    let _guard = RESTATE_E2E_LOCK.lock().await;
     let Some(model) = live_model() else {
         return Ok(());
     };

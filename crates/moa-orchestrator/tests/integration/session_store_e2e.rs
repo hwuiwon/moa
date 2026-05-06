@@ -6,7 +6,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::time::sleep;
 
-use crate::support::restate_runtime::{OrchestratorPorts, reserve_orchestrator_ports};
+use crate::support::restate_runtime::{
+    OrchestratorPorts, RESTATE_E2E_LOCK, reserve_orchestrator_ports,
+};
 use crate::support::session_store_service::{
     append_event_request, get_events_request, test_session_meta, user_message_event,
 };
@@ -60,6 +62,7 @@ fn spawn_orchestrator(ports: OrchestratorPorts) -> Result<Child> {
 #[tokio::test]
 #[ignore = "requires a local restate-server and a reachable Postgres instance"]
 async fn session_store_round_trip_through_restate() -> Result<()> {
+    let _guard = RESTATE_E2E_LOCK.lock().await;
     let ports = reserve_orchestrator_ports()?;
     let mut orchestrator = spawn_orchestrator(ports)?;
     let endpoint_url = format!("http://127.0.0.1:{}", ports.restate);

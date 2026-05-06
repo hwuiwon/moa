@@ -11,8 +11,7 @@ The root workspace currently contains:
 | `moa-core` | Shared traits, DTOs, config, events, telemetry, analytics helpers |
 | `moa-brain` | Context pipeline, query rewriting, task segmentation helpers, intent classification, resolution scoring |
 | `moa-session` | Postgres session store, event log, task segments, intents, learning log, analytics |
-| `moa-memory` | File-wiki memory, Postgres keyword/trigram search, pgvector embeddings, consolidation |
-| `moa-memory-graph` | Graph-memory sidecar tables and AGE projection helpers |
+| `moa-memory-graph` | Graph-memory sidecar tables, RLS, changelog, and AGE projection helpers |
 | `moa-memory-ingest` | Slow-path graph-memory ingestion DTOs and deterministic helpers |
 | `moa-memory-pii` | PII classification client and privacy-class aggregation helpers |
 | `moa-memory-vector` | VectorStore trait, Cohere Embed v4 client, and pgvector halfvec backend |
@@ -53,7 +52,7 @@ The root workspace currently contains:
 
 | Service | Purpose |
 |---|---|
-| Postgres 17.6+ with Apache AGE, pgvector, and pgaudit | Session store, graph memory, event search, memory index, embeddings, learning tables |
+| Postgres 17.6+ with Apache AGE, pgvector, and pgaudit | Session store, graph memory, event search, sidecar indexes, embeddings, learning tables |
 | `moa-pii-service` | Out-of-process `openai/privacy-filter` inference for memory privacy classification |
 | LLM provider | Anthropic, OpenAI, or Google Gemini |
 
@@ -119,7 +118,7 @@ Implemented architectural pillars:
 - Restate cloud orchestration with session, sub-agent, workspace, service, and workflow handlers.
 - Local orchestrator for CLI and desktop.
 - Postgres session store with event log, analytics, task segments, intent tables, and learning log.
-- File-wiki memory with Postgres keyword search, trigram fallback, and pgvector semantic search.
+- Graph memory with Postgres sidecar search, AGE projection helpers, pgvector semantic search, and privacy filtering.
 - Query rewriting, segment creation, automated resolution scoring, and skill resolution-rate ranking.
 - Intent discovery workflow and intent manager service.
 - Skill distillation/improvement with learning-log emission.

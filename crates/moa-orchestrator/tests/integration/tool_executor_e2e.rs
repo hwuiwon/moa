@@ -9,7 +9,9 @@ use serde_json::json;
 use tempfile::TempDir;
 use tokio::time::sleep;
 
-use crate::support::restate_runtime::{OrchestratorPorts, reserve_orchestrator_ports};
+use crate::support::restate_runtime::{
+    OrchestratorPorts, RESTATE_E2E_LOCK, reserve_orchestrator_ports,
+};
 use crate::support::session_store_service::{
     append_event_request, get_events_request, test_session_meta,
 };
@@ -109,6 +111,7 @@ fn tool_request_with_provider_id(
 #[tokio::test]
 #[ignore = "requires local restate-server and Postgres"]
 async fn tool_executor_round_trip_through_restate() -> Result<()> {
+    let _guard = RESTATE_E2E_LOCK.lock().await;
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
     let ports = reserve_orchestrator_ports()?;
@@ -255,6 +258,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires local restate-server and Postgres"]
 async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Result<()> {
+    let _guard = RESTATE_E2E_LOCK.lock().await;
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
     let ports = reserve_orchestrator_ports()?;

@@ -129,13 +129,13 @@ Current learning types include:
 
 ## Resolution-Weighted Skills
 
-Skills are files in workspace memory, but ranking uses tenant-level outcomes. `skill_resolution_rates` aggregates resolved, partial, and failed segments by tenant, intent, and skill name.
+Skills are stored through the skill registry, while ranking uses tenant-level outcomes. `skill_resolution_rates` aggregates resolved, partial, and failed segments by tenant, intent, and skill name.
 
 `SkillInjector` combines those rates with query relevance, use count, and recency to decide which skill metadata fits inside the prompt budget.
 
 ## Memory Learning
 
-Memory consolidation records `memory_updated` with counts for rewritten pages, deleted pages, normalized dates, resolved contradictions, and confidence decay. The wiki describes current knowledge; the learning log records provenance and validity.
+Memory consolidation records `memory_updated` with counts for graph updates such as superseded facts, expired nodes, merged duplicates, and resolved contradictions. Graph memory describes current knowledge; the learning log records provenance and validity.
 
 ## Rollback
 

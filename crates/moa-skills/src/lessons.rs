@@ -1,8 +1,8 @@
 //! Skill lesson dual-write helpers.
 
 use chrono::Utc;
+use memory_graph::{AgeGraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_core::{MemoryScope, MoaError, Result, ScopeContext, ScopedConn};
-use moa_memory_graph::{AgeGraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use serde_json::json;
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -154,7 +154,7 @@ fn lesson_name(summary: &str) -> String {
     summary.chars().take(80).collect()
 }
 
-fn map_graph_error(error: moa_memory_graph::GraphError) -> MoaError {
+fn map_graph_error(error: memory_graph::GraphError) -> MoaError {
     MoaError::StorageError(error.to_string())
 }
 

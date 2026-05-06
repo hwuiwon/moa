@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    ContextProcessor, ContextSnapshotConfig, LLMProvider, MemoryStore, MoaConfig, ProcessorOutput,
-    Result, SessionStore, WorkingContext,
+    ContextProcessor, ContextSnapshotConfig, LLMProvider, MoaConfig, ProcessorOutput, Result,
+    SessionStore, WorkingContext,
 };
 use tracing::Instrument;
 
@@ -26,7 +26,7 @@ use compactor::Compactor;
 use history::HistoryCompiler;
 use identity::IdentityProcessor;
 use instructions::InstructionProcessor;
-use memory::{GraphMemoryRetriever, MemoryRetriever};
+use memory::GraphMemoryRetriever;
 use query_rewrite::QueryRewriter;
 use runtime_context::RuntimeContextProcessor;
 use skills::SkillInjector;
@@ -208,128 +208,47 @@ impl ContextPipeline {
     }
 }
 
-/// Builds the default context pipeline.
+/// Builds a context pipeline without a memory backend.
+///
+/// Production runtimes use
+/// [`build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions`].
+/// This helper remains useful for isolated pipeline and brain-loop tests that
+/// do not provision graph-memory storage.
 pub fn build_default_pipeline(
     config: &MoaConfig,
     session_store: Arc<dyn SessionStore>,
-    memory_store: Arc<dyn MemoryStore>,
 ) -> ContextPipeline {
-    build_default_pipeline_with_tools(config, session_store, memory_store, Vec::new())
+    build_default_pipeline_with_tools(config, session_store, Vec::new())
 }
 
-/// Builds the default context pipeline with a fixed tool loadout.
+/// Builds a context pipeline without memory and with a fixed tool loadout.
 pub fn build_default_pipeline_with_tools(
     config: &MoaConfig,
     session_store: Arc<dyn SessionStore>,
-    memory_store: Arc<dyn MemoryStore>,
     tool_schemas: Vec<serde_json::Value>,
 ) -> ContextPipeline {
-    build_default_pipeline_with_runtime(config, session_store, memory_store, None, tool_schemas)
-}
-
-/// Builds the default context pipeline with an optional compaction-capable LLM.
-pub fn build_default_pipeline_with_runtime(
-    config: &MoaConfig,
-    session_store: Arc<dyn SessionStore>,
-    memory_store: Arc<dyn MemoryStore>,
-    llm_provider: Option<Arc<dyn LLMProvider>>,
-    tool_schemas: Vec<serde_json::Value>,
-) -> ContextPipeline {
-    build_default_pipeline_with_runtime_and_instructions(
-        config,
-        session_store,
-        memory_store,
-        llm_provider,
-        None,
-        tool_schemas,
-    )
-}
-
-/// Builds the default context pipeline with optional discovered workspace instructions.
-pub fn build_default_pipeline_with_runtime_and_instructions(
-    config: &MoaConfig,
-    session_store: Arc<dyn SessionStore>,
-    memory_store: Arc<dyn MemoryStore>,
-    llm_provider: Option<Arc<dyn LLMProvider>>,
-    discovered_workspace_instructions: Option<String>,
-    tool_schemas: Vec<serde_json::Value>,
-) -> ContextPipeline {
-    build_default_pipeline_with_rewriter_runtime_and_instructions(
-        config,
-        session_store,
-        memory_store,
-        llm_provider.clone(),
-        llm_provider,
-        discovered_workspace_instructions,
-        tool_schemas,
-    )
-}
-
-/// Builds the default context pipeline with separate compaction and query-rewrite LLMs.
-pub fn build_default_pipeline_with_rewriter_runtime_and_instructions(
-    config: &MoaConfig,
-    session_store: Arc<dyn SessionStore>,
-    memory_store: Arc<dyn MemoryStore>,
-    compaction_llm_provider: Option<Arc<dyn LLMProvider>>,
-    query_rewrite_llm_provider: Option<Arc<dyn LLMProvider>>,
-    discovered_workspace_instructions: Option<String>,
-    tool_schemas: Vec<serde_json::Value>,
-) -> ContextPipeline {
-    let history: Box<dyn ContextProcessor> =
-        if let Some(llm_provider) = compaction_llm_provider.clone() {
-            Box::new(
-                HistoryCompiler::with_compaction(
-                    session_store.clone(),
-                    llm_provider,
-                    config.compaction.clone(),
-                )
-                .with_tool_output_config(config.tool_output.clone())
-                .with_snapshot_config(config.context_snapshot.clone()),
-            )
-        } else {
-            Box::new(
-                HistoryCompiler::new(session_store.clone())
-                    .with_compaction_config(config.compaction.clone())
-                    .with_tool_output_config(config.tool_output.clone())
-                    .with_snapshot_config(config.context_snapshot.clone()),
-            )
-        };
-    let query_rewriter: Option<Box<dyn ContextProcessor>> = if config.query_rewrite.enabled {
-        query_rewrite_llm_provider.map(|llm_provider| {
-            Box::new(
-                QueryRewriter::new(config.query_rewrite.clone(), llm_provider)
-                    .with_session_store(session_store.clone()),
-            ) as Box<dyn ContextProcessor>
-        })
-    } else {
-        None
-    };
-
+    let history: Box<dyn ContextProcessor> = Box::new(
+        HistoryCompiler::new(session_store.clone())
+            .with_compaction_config(config.compaction.clone())
+            .with_tool_output_config(config.tool_output.clone())
+            .with_snapshot_config(config.context_snapshot.clone()),
+    );
     let mut stages: Vec<Box<dyn ContextProcessor>> = vec![
         Box::new(IdentityProcessor::default()),
         Box::new(InstructionProcessor::new(
             config.general.workspace_instructions.clone(),
             config.general.user_instructions.clone(),
-            discovered_workspace_instructions,
+            None,
         )),
         Box::new(ToolDefinitionProcessor::new(tool_schemas)),
-        Box::new(
-            SkillInjector::from_memory(memory_store.clone())
-                .with_session_store(session_store.clone())
-                .with_budget_config(config.skill_budget.clone()),
-        ),
     ];
-    if let Some(query_rewriter) = query_rewriter {
-        stages.push(query_rewriter);
-    }
     stages.extend([
-        Box::new(MemoryRetriever::new(memory_store.clone())) as Box<dyn ContextProcessor>,
         history,
         Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
         Box::new(Compactor::new(
             config.compaction.clone(),
             session_store,
-            compaction_llm_provider,
+            None,
         )) as Box<dyn ContextProcessor>,
         Box::new(CacheOptimizer) as Box<dyn ContextProcessor>,
     ]);
@@ -357,13 +276,9 @@ pub struct GraphMemoryPipelineOptions {
 
 /// Builds the default context pipeline with graph-backed memory retrieval.
 ///
-/// The `memory_store` argument is a temporary C03 bridge for the still wiki-shaped skill
-/// injector. Turn memory retrieval itself uses `moa.node_index` through the hybrid graph
-/// retriever and does not call the legacy memory store.
 pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
     config: &MoaConfig,
     session_store: Arc<dyn SessionStore>,
-    memory_store: Arc<dyn MemoryStore>,
     options: GraphMemoryPipelineOptions,
 ) -> ContextPipeline {
     let GraphMemoryPipelineOptions {
@@ -412,7 +327,7 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
         )),
         Box::new(ToolDefinitionProcessor::new(tool_schemas)),
         Box::new(
-            SkillInjector::from_memory(memory_store)
+            SkillInjector::new(graph_pool.clone())
                 .with_session_store(session_store.clone())
                 .with_budget_config(config.skill_budget.clone()),
         ),

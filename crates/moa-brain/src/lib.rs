@@ -21,14 +21,9 @@ pub use loop_detector::LoopDetector;
 pub use pipeline::{
     ContextPipeline, GraphMemoryPipelineOptions, PipelineStageReport,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
-    build_default_pipeline, build_default_pipeline_with_rewriter_runtime_and_instructions,
-    build_default_pipeline_with_runtime, build_default_pipeline_with_runtime_and_instructions,
-    build_default_pipeline_with_tools,
+    build_default_pipeline, build_default_pipeline_with_tools,
 };
-pub use tool_stats::{
-    ToolStats, WorkspaceToolStats, load_workspace_tool_stats, update_ema,
-    update_workspace_tool_stats, write_workspace_tool_stats,
-};
+pub use tool_stats::{ToolStats, WorkspaceToolStats, update_ema};
 pub use turn::{
     PendingToolApproval, StoredApprovalDecision, StreamSignalDisposition, StreamedCompletion,
     find_pending_approval_request, find_pending_tool_approval, find_resolved_pending_tool_approval,

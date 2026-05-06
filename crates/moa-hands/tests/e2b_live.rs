@@ -5,70 +5,19 @@
 
 #![cfg(feature = "e2b")]
 
-use std::sync::Arc;
 use std::time::Duration;
 use std::{panic::AssertUnwindSafe, panic::resume_unwind};
 
-use async_trait::async_trait;
 use futures_util::FutureExt;
 use moa_core::{
-    CloudHandsConfig, HandHandle, HandProvider, HandResources, HandSpec, HandStatus, MemoryPath,
-    MemoryScope, MemorySearchResult, MemoryStore, MoaConfig, MoaError, PageSummary, PageType,
-    Result, SessionMeta, ToolInvocation, UserId, WikiPage, WorkspaceId,
+    CloudHandsConfig, HandHandle, HandProvider, HandResources, HandSpec, HandStatus, MoaConfig,
+    Result, SessionMeta, ToolInvocation, UserId, WorkspaceId,
 };
 use moa_hands::{E2BHandProvider, ToolRouter};
 use serde_json::json;
 use tempfile::tempdir;
 use tokio::time::{Instant, sleep};
 use uuid::Uuid;
-
-#[derive(Default)]
-struct EmptyMemoryStore;
-
-#[async_trait]
-impl MemoryStore for EmptyMemoryStore {
-    async fn search(
-        &self,
-        _query: &str,
-        _scope: &MemoryScope,
-        _limit: usize,
-    ) -> Result<Vec<MemorySearchResult>> {
-        Ok(Vec::new())
-    }
-
-    async fn read_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
-        Err(MoaError::StorageError("not found".to_string()))
-    }
-
-    async fn write_page(
-        &self,
-        _scope: &MemoryScope,
-        _path: &MemoryPath,
-        _page: WikiPage,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
-        Ok(())
-    }
-
-    async fn list_pages(
-        &self,
-        _scope: &MemoryScope,
-        _filter: Option<PageType>,
-    ) -> Result<Vec<PageSummary>> {
-        Ok(Vec::new())
-    }
-
-    async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
-        Ok(String::new())
-    }
-
-    async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
-        Ok(())
-    }
-}
 
 fn session(label: &str) -> SessionMeta {
     SessionMeta {
@@ -307,9 +256,8 @@ async fn e2b_live_router_lazy_provisions_reuses_and_isolates_sessions() {
     let mut config = live_config();
     let temp = tempdir().expect("tempdir");
     config.local.sandbox_dir = temp.path().join("sandbox").display().to_string();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
 
-    let router = ToolRouter::from_config(&config, memory_store)
+    let router = ToolRouter::from_config(&config)
         .await
         .expect("router should load E2B from config");
     let provider = E2BHandProvider::from_config(&config).expect("provider from config");

@@ -5,22 +5,21 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use moa_core::{
-    ConfidenceLevel, Event, EventRange, EventRecord, MemoryPath, MemoryScope, MemoryStore,
-    MoaError, PageType, Result, SessionId, SessionMeta, SessionStore, ToolCallId, WikiPage,
-    WorkspaceId,
-};
+#[cfg(test)]
+use moa_core::{Event, EventRecord, ToolCallId};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::Value;
 
-const TOOL_STATS_PAGE_PATH: &str = "entities/tool-stats.md";
-const TOOL_STATS_METADATA_KEY: &str = "tool_stats";
+#[cfg(test)]
 const TOOL_STATS_EMA_ALPHA: f64 = 0.1;
 #[cfg(test)]
 const TOOL_RANKING_MIN_CALLS: u64 = 5;
+#[cfg(test)]
 const TOOL_ANNOTATION_MIN_CALLS: u64 = 10;
+#[cfg(test)]
 const TOOL_WARNING_SUCCESS_THRESHOLD: f64 = 0.8;
+#[cfg(test)]
 const MAX_COMMON_ERRORS: usize = 3;
 
 /// Aggregate historical performance for one tool in one workspace.
@@ -83,6 +82,7 @@ impl Default for WorkspaceToolStats {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct SessionToolObservation {
     total_calls: u64,
@@ -99,95 +99,14 @@ pub fn update_ema(current: f64, observation: f64, alpha: f64) -> f64 {
     alpha * observation + (1.0 - alpha) * current
 }
 
-/// Loads workspace tool statistics from `entities/tool-stats.md`.
-pub async fn load_workspace_tool_stats(
-    memory_store: &dyn MemoryStore,
-    workspace_id: &WorkspaceId,
-) -> Result<WorkspaceToolStats> {
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
-    let path = MemoryPath::from(TOOL_STATS_PAGE_PATH);
-    let Some(page) = read_optional_page(memory_store, &scope, &path).await? else {
-        return Ok(WorkspaceToolStats::default());
-    };
-
-    workspace_tool_stats_from_page(&page)
-}
-
-/// Writes workspace tool statistics to `entities/tool-stats.md`.
-pub async fn write_workspace_tool_stats(
-    memory_store: &dyn MemoryStore,
-    workspace_id: &WorkspaceId,
-    stats: &WorkspaceToolStats,
-) -> Result<()> {
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
-    let path = MemoryPath::from(TOOL_STATS_PAGE_PATH);
-    let existing_page = read_optional_page(memory_store, &scope, &path).await?;
-    let now = Utc::now();
-    let created = existing_page
-        .as_ref()
-        .map(|page| page.created)
-        .unwrap_or(now);
-    let mut metadata = existing_page
-        .as_ref()
-        .map(|page| page.metadata.clone())
-        .unwrap_or_default();
-    metadata.insert(
-        TOOL_STATS_METADATA_KEY.to_string(),
-        serde_json::to_value(stats)?,
-    );
-
-    let page = WikiPage {
-        path: Some(path.clone()),
-        title: "Tool Stats".to_string(),
-        page_type: PageType::Entity,
-        content: render_workspace_tool_stats(stats),
-        created,
-        updated: now,
-        confidence: ConfidenceLevel::High,
-        related: Vec::new(),
-        sources: Vec::new(),
-        tags: vec!["tool-stats".to_string(), "auto-generated".to_string()],
-        auto_generated: true,
-        last_referenced: now,
-        reference_count: existing_page
-            .as_ref()
-            .map(|page| page.reference_count)
-            .unwrap_or(0),
-        metadata,
-    };
-
-    memory_store.write_page(&scope, &path, page).await
-}
-
-/// Recomputes workspace tool statistics from one completed session.
-pub async fn update_workspace_tool_stats(
-    session_store: &dyn SessionStore,
-    memory_store: &dyn MemoryStore,
-    session_id: &SessionId,
-) -> Result<Option<WorkspaceToolStats>> {
-    let session = session_store.get_session(*session_id).await?;
-    let events = session_store
-        .get_events(*session_id, EventRange::all())
-        .await?;
-
-    update_workspace_tool_stats_from_events(memory_store, &session, &events).await
-}
-
-pub(crate) async fn update_workspace_tool_stats_from_events(
-    memory_store: &dyn MemoryStore,
-    session: &SessionMeta,
-    events: &[EventRecord],
-) -> Result<Option<WorkspaceToolStats>> {
+#[cfg(test)]
+fn workspace_tool_stats_from_events(events: &[EventRecord]) -> Option<WorkspaceToolStats> {
     let observations = collect_session_tool_observations(events);
     if observations.is_empty() {
-        return Ok(None);
+        return None;
     }
 
-    let mut stats = load_workspace_tool_stats(memory_store, &session.workspace_id).await?;
+    let mut stats = WorkspaceToolStats::default();
     for (tool_name, observation) in observations {
         merge_session_observation(
             stats
@@ -204,8 +123,7 @@ pub(crate) async fn update_workspace_tool_stats_from_events(
     stats.last_updated = Utc::now();
     stats.sessions_tracked = stats.sessions_tracked.saturating_add(1);
 
-    write_workspace_tool_stats(memory_store, &session.workspace_id, &stats).await?;
-    Ok(Some(stats))
+    Some(stats)
 }
 
 #[cfg(test)]
@@ -328,6 +246,7 @@ fn annotate_schema(schema: &mut Value, stats: &WorkspaceToolStats) {
     }
 }
 
+#[cfg(test)]
 fn tool_annotation(stats: &ToolStats) -> Option<String> {
     let mut notes = Vec::new();
     if stats.total_calls >= TOOL_ANNOTATION_MIN_CALLS {
@@ -369,10 +288,12 @@ fn tool_annotation(stats: &ToolStats) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn format_percentage(value: f64) -> String {
     format!("{:.0}%", (value.clamp(0.0, 1.0) * 100.0).round())
 }
 
+#[cfg(test)]
 fn format_duration(duration_ms: f64) -> String {
     if duration_ms >= 1000.0 {
         format!("{:.1}s", duration_ms / 1000.0)
@@ -381,6 +302,7 @@ fn format_duration(duration_ms: f64) -> String {
     }
 }
 
+#[cfg(test)]
 fn failure_rate(stats: &ToolStats) -> f64 {
     if stats.total_calls == 0 {
         0.0
@@ -394,6 +316,7 @@ fn schema_name(schema: &Value) -> Option<&str> {
     schema.get("name").and_then(Value::as_str)
 }
 
+#[cfg(test)]
 fn collect_session_tool_observations(
     events: &[EventRecord],
 ) -> HashMap<String, SessionToolObservation> {
@@ -457,6 +380,7 @@ fn collect_session_tool_observations(
     observations
 }
 
+#[cfg(test)]
 fn merge_session_observation(stats: &mut ToolStats, observation: SessionToolObservation) {
     let previous_calls = stats.total_calls;
     stats.total_calls = stats.total_calls.saturating_add(observation.total_calls);
@@ -500,6 +424,7 @@ fn merge_session_observation(stats: &mut ToolStats, observation: SessionToolObse
     stats.common_errors = top_error_patterns(combined);
 }
 
+#[cfg(test)]
 fn top_error_patterns(patterns: HashMap<String, u32>) -> Vec<(String, u32)> {
     let mut entries = patterns.into_iter().collect::<Vec<_>>();
     entries.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
@@ -507,6 +432,7 @@ fn top_error_patterns(patterns: HashMap<String, u32>) -> Vec<(String, u32)> {
     entries
 }
 
+#[cfg(test)]
 fn record_error_pattern(errors: &mut HashMap<String, u32>, raw: &str) {
     let normalized = normalize_error_pattern(raw);
     if normalized.is_empty() {
@@ -515,6 +441,7 @@ fn record_error_pattern(errors: &mut HashMap<String, u32>, raw: &str) {
     *errors.entry(normalized).or_insert(0) += 1;
 }
 
+#[cfg(test)]
 fn normalize_error_pattern(raw: &str) -> String {
     let first_line = raw
         .lines()
@@ -531,6 +458,7 @@ fn normalize_error_pattern(raw: &str) -> String {
     truncate_with_ellipsis(&normalized, 96)
 }
 
+#[cfg(test)]
 fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
@@ -544,126 +472,17 @@ fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
     truncated
 }
 
-fn render_workspace_tool_stats(stats: &WorkspaceToolStats) -> String {
-    let mut tools = stats.tools.values().cloned().collect::<Vec<_>>();
-    tools.sort_by(|left, right| left.tool_name.cmp(&right.tool_name));
-
-    let mut lines = vec![
-        "# Tool Stats".to_string(),
-        String::new(),
-        "Auto-generated workspace tool performance summary.".to_string(),
-        String::new(),
-        format!(
-            "Tracked sessions: {}  |  Last updated: {}",
-            stats.sessions_tracked,
-            stats.last_updated.to_rfc3339()
-        ),
-        String::new(),
-        "## Performance".to_string(),
-        "| Tool | Calls | Success | Avg duration | Last used |".to_string(),
-        "| --- | ---: | ---: | ---: | --- |".to_string(),
-    ];
-
-    for tool in &tools {
-        lines.push(format!(
-            "| {} | {} | {} | {} | {} |",
-            tool.tool_name,
-            tool.total_calls,
-            format_percentage(tool.ema_success_rate),
-            format_duration(tool.avg_duration_ms),
-            tool.last_used.format("%Y-%m-%d")
-        ));
-    }
-
-    let noted_tools = tools
-        .iter()
-        .filter_map(|tool| tool_annotation(tool).map(|note| (tool.tool_name.clone(), note)))
-        .collect::<Vec<_>>();
-    if !noted_tools.is_empty() {
-        lines.push(String::new());
-        lines.push("## Notes".to_string());
-        for (tool_name, note) in noted_tools {
-            lines.push(format!("- `{tool_name}` {note}"));
-        }
-    }
-
-    lines.join("\n")
-}
-
-fn workspace_tool_stats_from_page(page: &WikiPage) -> Result<WorkspaceToolStats> {
-    let Some(value) = page.metadata.get(TOOL_STATS_METADATA_KEY) else {
-        return Ok(WorkspaceToolStats::default());
-    };
-    Ok(serde_json::from_value(value.clone())?)
-}
-
-async fn read_optional_page(
-    memory_store: &dyn MemoryStore,
-    scope: &MemoryScope,
-    path: &MemoryPath,
-) -> Result<Option<WikiPage>> {
-    match memory_store.read_page(scope, path).await {
-        Ok(page) => Ok(Some(page)),
-        Err(MoaError::StorageError(message))
-            if message == format!("memory page not found: {}", path.as_str())
-                || message.contains("not found") =>
-        {
-            Ok(None)
-        }
-        Err(error) => Err(error),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::collections::HashMap;
 
     use chrono::Duration;
     use moa_core::{
         ModelId, Platform, SessionId, SessionMeta, ToolContent, ToolOutput, UserId, WorkspaceId,
     };
-    use moa_memory::FileMemoryStore;
     use uuid::Uuid;
 
     use super::*;
-
-    #[tokio::test]
-    async fn tool_stats_round_trip() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let store = FileMemoryStore::new(temp.path())
-            .await
-            .expect("memory store");
-        let workspace_id = WorkspaceId::new("ws-tool-stats");
-        let stats = WorkspaceToolStats {
-            tools: HashMap::from([(
-                "bash".to_string(),
-                ToolStats {
-                    tool_name: "bash".to_string(),
-                    total_calls: 12,
-                    successes: 11,
-                    failures: 1,
-                    avg_duration_ms: 2300.0,
-                    common_errors: vec![("timeout".to_string(), 1)],
-                    last_used: Utc::now(),
-                    ema_success_rate: 0.92,
-                    workspace_tips: vec!["Use `npm ci` for clean installs.".to_string()],
-                },
-            )]),
-            sessions_tracked: 4,
-            ..WorkspaceToolStats::default()
-        };
-
-        write_workspace_tool_stats(&store, &workspace_id, &stats)
-            .await
-            .expect("write stats");
-        let loaded = load_workspace_tool_stats(&store, &workspace_id)
-            .await
-            .expect("load stats");
-
-        assert_eq!(loaded.sessions_tracked, 4);
-        assert_eq!(loaded.tools["bash"].workspace_tips.len(), 1);
-        assert_eq!(loaded.tools["bash"].common_errors[0].0, "timeout");
-    }
 
     #[test]
     fn ranking_puts_successful_tools_first() {
@@ -755,10 +574,6 @@ mod tests {
 
     #[tokio::test]
     async fn stats_update_from_events() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let memory = FileMemoryStore::new(temp.path())
-            .await
-            .expect("memory store");
         let session = SessionMeta {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("ws-stats"),
@@ -820,10 +635,7 @@ mod tests {
             ),
         ];
 
-        let stats = update_workspace_tool_stats_from_events(&memory, &session, &events)
-            .await
-            .expect("update stats")
-            .expect("stats");
+        let stats = workspace_tool_stats_from_events(&events).expect("stats");
 
         assert_eq!(stats.sessions_tracked, 1);
         assert_eq!(stats.tools["bash"].successes, 1);
@@ -832,13 +644,6 @@ mod tests {
 
     #[tokio::test]
     async fn cache_stability_preserves_identical_ranked_output() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let memory = Arc::new(
-            FileMemoryStore::new(temp.path())
-                .await
-                .expect("memory store"),
-        );
-        let workspace_id = WorkspaceId::new("ws-cache");
         let stats = WorkspaceToolStats {
             tools: HashMap::from([(
                 "bash".to_string(),
@@ -851,19 +656,13 @@ mod tests {
             )]),
             ..WorkspaceToolStats::default()
         };
-        write_workspace_tool_stats(memory.as_ref(), &workspace_id, &stats)
-            .await
-            .expect("write stats");
 
-        let loaded = load_workspace_tool_stats(memory.as_ref(), &workspace_id)
-            .await
-            .expect("load stats");
         let first = serde_json::to_string(&apply_tool_rankings(
             vec![
                 serde_json::json!({"name": "bash", "description": "shell"}),
                 serde_json::json!({"name": "web_search", "description": "search"}),
             ],
-            &loaded,
+            &stats,
         ))
         .expect("first serialization");
         let second = serde_json::to_string(&apply_tool_rankings(
@@ -871,7 +670,7 @@ mod tests {
                 serde_json::json!({"name": "bash", "description": "shell"}),
                 serde_json::json!({"name": "web_search", "description": "search"}),
             ],
-            &loaded,
+            &stats,
         ))
         .expect("second serialization");
 

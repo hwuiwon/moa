@@ -5,13 +5,11 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_core::{
-    ApprovalDecision, BrainOrchestrator, EventRange, EventRecord, MemoryPath, MemoryScope,
-    MemorySearchResult, MemoryStore, MoaConfig, MoaError, PageSummary, PageType, Platform, Result,
-    RuntimeEvent, SessionFilter, SessionId, SessionMeta, SessionSignal, SessionStore,
-    SessionSummary, UserId, UserMessage, WikiPage, WorkspaceBudgetStatus, WorkspaceId,
+    ApprovalDecision, BrainOrchestrator, EventRange, EventRecord, MoaConfig, MoaError, Platform,
+    Result, RuntimeEvent, SessionFilter, SessionId, SessionMeta, SessionSignal, SessionStore,
+    SessionSummary, UserId, UserMessage, WorkspaceBudgetStatus, WorkspaceId,
 };
 use moa_hands::ToolRouter;
-use moa_memory::FileMemoryStore;
 use moa_orchestrator_local::LocalOrchestrator;
 use moa_providers::{ModelRouter, resolve_provider_selection};
 use moa_session::{create_session_store, testing};
@@ -212,110 +210,6 @@ impl LocalChatRuntime {
         self.orchestrator.tool_names()
     }
 
-    /// Lists memory pages for the current workspace.
-    pub async fn list_memory_pages(&self, filter: Option<PageType>) -> Result<Vec<PageSummary>> {
-        let mut pages = self
-            .orchestrator
-            .memory_store()
-            .list_pages(
-                &MemoryScope::Workspace {
-                    workspace_id: self.workspace_id.clone(),
-                },
-                filter,
-            )
-            .await?;
-        pages.sort_by_key(|page| std::cmp::Reverse(page.updated));
-        Ok(pages)
-    }
-
-    /// Returns recent memory entries for the sidebar.
-    pub async fn recent_memory_entries(&self, limit: usize) -> Result<Vec<PageSummary>> {
-        let mut pages = self.list_memory_pages(None).await?;
-        pages.truncate(limit);
-        Ok(pages)
-    }
-
-    /// Searches memory within the current workspace.
-    pub async fn search_memory(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<MemorySearchResult>> {
-        self.orchestrator
-            .memory_store()
-            .search(
-                query,
-                &MemoryScope::Workspace {
-                    workspace_id: self.workspace_id.clone(),
-                },
-                limit,
-            )
-            .await
-    }
-
-    /// Loads one wiki page from the current workspace.
-    pub async fn read_memory_page(&self, path: &MemoryPath) -> Result<WikiPage> {
-        self.orchestrator
-            .memory_store()
-            .read_page(
-                &MemoryScope::Workspace {
-                    workspace_id: self.workspace_id.clone(),
-                },
-                path,
-            )
-            .await
-    }
-
-    /// Creates or updates one wiki page in the current workspace.
-    pub async fn write_memory_page(&self, page: WikiPage) -> Result<WikiPage> {
-        let path = page
-            .path
-            .clone()
-            .ok_or_else(|| MoaError::ValidationError("memory page path is required".to_string()))?;
-        self.orchestrator
-            .memory_store()
-            .write_page(
-                &MemoryScope::Workspace {
-                    workspace_id: self.workspace_id.clone(),
-                },
-                &path,
-                page,
-            )
-            .await?;
-        self.orchestrator
-            .memory_store()
-            .read_page(
-                &MemoryScope::Workspace {
-                    workspace_id: self.workspace_id.clone(),
-                },
-                &path,
-            )
-            .await
-    }
-
-    /// Deletes one wiki page from the current workspace.
-    pub async fn delete_memory_page(&self, path: &MemoryPath) -> Result<()> {
-        self.orchestrator
-            .memory_store()
-            .delete_page(
-                &MemoryScope::Workspace {
-                    workspace_id: self.workspace_id.clone(),
-                },
-                path,
-            )
-            .await
-    }
-
-    /// Returns the current workspace memory index document.
-    pub async fn memory_index(&self) -> Result<String> {
-        self.orchestrator
-            .memory_store()
-            .get_index(&MemoryScope::Workspace {
-                workspace_id: self.workspace_id.clone(),
-            })
-            .await
-    }
-
     /// Returns the current workspace budget snapshot.
     pub async fn workspace_budget_status(&self) -> Result<WorkspaceBudgetStatus> {
         let Some(day_start) = Utc::now()
@@ -472,30 +366,16 @@ impl ChatRuntime {
         config.local.sandbox_dir = base.join("sandbox").display().to_string();
 
         let session_store = create_session_store(&config).await?;
-        let memory_store = Arc::new(
-            FileMemoryStore::from_config_with_pool(
-                &config,
-                Arc::new(session_store.pool().clone()),
-                session_store.schema_name(),
-            )
-            .await?,
-        );
         let tool_router = Arc::new(
-            ToolRouter::from_config(&config, memory_store.clone())
+            ToolRouter::from_config(&config)
                 .await?
                 .with_rule_store(session_store.clone())
                 .with_session_store(session_store.clone()),
         );
         let model_router = Arc::new(ModelRouter::from_config(&config)?);
         let orchestrator = Arc::new(
-            LocalOrchestrator::new(
-                config.clone(),
-                session_store,
-                memory_store,
-                model_router,
-                tool_router,
-            )
-            .await?,
+            LocalOrchestrator::new(config.clone(), session_store, model_router, tool_router)
+                .await?,
         );
         let workspace_root = detect_local_workspace_root()?;
         let workspace_id = workspace_id_for_root(&workspace_root);

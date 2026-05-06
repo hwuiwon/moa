@@ -15,7 +15,7 @@ use clap::Parser;
 use moa_core::{TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_hands::ToolRouter;
 use moa_orchestrator::{
-    DeadMemoryStoreShim, OrchestratorCtx,
+    OrchestratorCtx,
     config::OrchestratorConfig,
     objects::session::{Session, SessionImpl},
     objects::sub_agent::{SubAgent, SubAgentImpl},
@@ -97,9 +97,8 @@ async fn main() -> anyhow::Result<()> {
 
     let providers = Arc::new(ProviderRegistry::from_env());
     let embedding_provider = build_embedding_provider_from_config(moa_config.as_ref())?;
-    let memory_store = Arc::new(DeadMemoryStoreShim);
     let tool_router = Arc::new(
-        ToolRouter::from_config(moa_config.as_ref(), memory_store.clone())
+        ToolRouter::from_config(moa_config.as_ref())
             .await?
             .with_rule_store(session_store.clone())
             .with_session_store(session_store.clone()),
@@ -108,7 +107,6 @@ async fn main() -> anyhow::Result<()> {
         config: moa_config.clone(),
         session_store: session_store.clone(),
         graph_pool: session_store.pool().clone(),
-        memory_store: memory_store.clone(),
         providers: providers.clone(),
         embedding_provider: embedding_provider.clone(),
         tool_router: tool_router.clone(),

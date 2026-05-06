@@ -161,10 +161,17 @@ For each `NEEDS_DESIGN` row above, record the chosen migration target and reason
 - **Row 81 - skill regression audit log**: [decision + reasoning]
 - **Row 87 - graph-memory consolidation replacement**: [decision + reasoning]
 
-## Open questions
+## C04 migration outcomes
 
-- Should the graph cutover retain any human-facing memory browser, or should CLI/desktop path-based wiki browsing be retired until a graph-node browser exists?
-- Are skills canonical in `moa-skills`/`SkillRegistry`, graph memory, filesystem skill directories, or a combination?
-- Should local workspace auto-bootstrap ingest instructions into graph memory, or should workspace instructions remain separate from memory?
-- What is the replacement for wiki `_log.md`: session `learning_log`, a skill audit table, graph changelog, or no user-facing log?
-- Do eval memory snapshots need a one-shot import path, or can eval fixtures be rewritten directly as graph seed data?
+- **Rows 69-73 - `moa-eval`**: `FileMemoryStore` setup was removed. Eval environments now use `GraphMemoryRetriever` over the isolated Postgres pool; wiki snapshot seeding and index rebuild hooks were retired.
+- **Rows 75 - `moa-loadtest`**: local load-test setup no longer creates a file wiki store; it uses the graph-backed local orchestrator and graph-era `ToolRouter`.
+- **Rows 76-81 - `moa-skills`**: distillation, improvement, and regression paths now persist through `SkillRegistry`/`moa.skill`; generated regression suites live under the configured local memory directory by workspace and skill name. Wiki-only regression fixtures were retired from the test suite.
+- **Rows 44-52 - `moa-hands` memory tools**: path-shaped `memory_read`, `memory_search`, `memory_write`, and `memory_ingest` were removed from the default registry. The remaining `memory_remember`, `memory_forget`, and `memory_supersede` tools execute through the graph fast path.
+- **Rows 34-40 - `moa-runtime` tail**: runtime construction no longer creates `FileMemoryStore`; wiki-shaped runtime facade methods were removed during C05.
+- **Rows 13-14 - brain pipeline memory/skills**: graph pipeline assembly injects skills from `moa.skill` and retrieves memory from graph sidecar/vector state.
+
+## C05/C06 migration outcomes
+
+- **Rows 10-11 - `moa-core` trait and wiki DTOs**: `MemoryStore` and the wiki-only memory types were deleted. `MemoryScope`, `ScopeContext`, and graph-era skill metadata remain.
+- **Rows 84-91 - `moa-memory` crate internals**: the legacy crate was deleted in C06 after every external consumer migrated.
+- **Guardrail**: `cargo run -p xtask --bin audit_legacy_memory` now fails if `crates/moa-memory`, a direct `moa-memory` dependency, or a `moa_memory` Rust import reappears.

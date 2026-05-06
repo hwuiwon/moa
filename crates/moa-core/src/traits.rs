@@ -11,13 +11,12 @@ use crate::events::Event;
 use crate::types::{
     CheckpointHandle, CheckpointInfo, ClaimCheck, CompletionRequest, CompletionStream,
     ContextSnapshot, Credential, CronHandle, CronSpec, EventFilter, EventRange, EventRecord,
-    EventStream, HandHandle, HandSpec, HandStatus, InboundMessage, IngestReport, MemoryPath,
-    MemoryScope, MemorySearchResult, MessageId, ModelCapabilities, ObserveLevel, OutboundMessage,
-    PageSummary, PageType, PendingSignal, PendingSignalId, Platform, PlatformCapabilities,
+    EventStream, HandHandle, HandSpec, HandStatus, InboundMessage, MessageId, ModelCapabilities,
+    ObserveLevel, OutboundMessage, PendingSignal, PendingSignalId, Platform, PlatformCapabilities,
     ProcessorOutput, ResolutionScore, RuntimeEvent, SegmentBaseline, SegmentCompletion, SegmentId,
     SequenceNum, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
     SessionStatus, SessionSummary, SkillResolutionRate, StartSessionRequest, TaskSegment,
-    ToolOutput, WikiPage, WorkingContext, WorkspaceId,
+    ToolOutput, WorkingContext, WorkspaceId,
 };
 
 /// Orchestrates session lifecycle and observation.
@@ -400,75 +399,10 @@ pub trait PlatformAdapter: Send + Sync {
     async fn delete(&self, msg_id: &MessageId) -> Result<()>;
 }
 
-/// Searchable wiki-backed memory store over global, workspace, and user scopes.
-#[async_trait]
-pub trait MemoryStore: Send + Sync {
-    /// Searches memory pages within one global, workspace, or user scope.
-    async fn search(
-        &self,
-        query: &str,
-        scope: &MemoryScope,
-        limit: usize,
-    ) -> Result<Vec<MemorySearchResult>>;
-
-    /// Searches memory pages within one scope using an explicit retrieval mode.
-    async fn search_with_mode(
-        &self,
-        query: &str,
-        scope: &MemoryScope,
-        limit: usize,
-        mode: crate::MemorySearchMode,
-    ) -> Result<Vec<MemorySearchResult>> {
-        let _ = mode;
-        self.search(query, scope, limit).await
-    }
-
-    /// Reads a wiki page by logical path within an explicit memory scope.
-    async fn read_page(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<WikiPage>;
-
-    /// Writes a wiki page by logical path within an explicit memory scope.
-    async fn write_page(
-        &self,
-        scope: &MemoryScope,
-        path: &MemoryPath,
-        page: WikiPage,
-    ) -> Result<()>;
-
-    /// Deletes a wiki page by logical path within an explicit memory scope.
-    async fn delete_page(&self, scope: &MemoryScope, path: &MemoryPath) -> Result<()>;
-
-    /// Lists pages within an explicit memory scope.
-    async fn list_pages(
-        &self,
-        scope: &MemoryScope,
-        filter: Option<PageType>,
-    ) -> Result<Vec<PageSummary>>;
-
-    /// Returns the index document for a memory scope.
-    async fn get_index(&self, scope: &MemoryScope) -> Result<String>;
-
-    /// Ingests a raw source document into the wiki for the given scope.
-    async fn ingest_source(
-        &self,
-        _scope: &MemoryScope,
-        _source_name: &str,
-        _content: &str,
-    ) -> Result<IngestReport> {
-        Err(MoaError::Unsupported(
-            "ingest_source not supported by this memory store".to_string(),
-        ))
-    }
-
-    /// Rebuilds the search index for a memory scope.
-    async fn rebuild_search_index(&self, scope: &MemoryScope) -> Result<()>;
-}
-
 /// Execution context passed to built-in tool implementations.
 pub struct ToolContext<'a> {
     /// Active session metadata.
     pub session: &'a SessionMeta,
-    /// Shared memory store.
-    pub memory_store: &'a dyn MemoryStore,
     /// Shared session store when the tool needs session-log access.
     pub session_store: Option<&'a dyn SessionStore>,
     /// Cooperative cancellation token for the current session, when available.

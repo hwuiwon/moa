@@ -11,7 +11,6 @@ use moa_core::{
     UserId, WorkspaceId, read_tool_policy, write_tool_policy,
 };
 use moa_hands::{ToolRegistry, ToolRouter};
-use moa_orchestrator::DeadMemoryStoreShim;
 use moa_orchestrator::services::tool_executor::{
     ToolDescriptor, ToolExecutorImpl, build_tool_run_plan, has_prior_non_idempotent_result,
     tool_run_name,
@@ -200,7 +199,6 @@ fn run_name_encodes_tool_call_id() {
 
 #[tokio::test]
 async fn list_tools_returns_workspace_tools() {
-    let memory_store = Arc::new(DeadMemoryStoreShim);
     let registry = registry_with_tools(vec![
         Arc::new(CountingTool::new(
             "read_tool",
@@ -213,7 +211,7 @@ async fn list_tools_returns_workspace_tools() {
             write_tool_policy(ToolInputShape::Json, ToolDiffStrategy::None),
         )),
     ]);
-    let router = Arc::new(ToolRouter::new(registry, memory_store, HashMap::new()));
+    let router = Arc::new(ToolRouter::new(registry, HashMap::new()));
     let executor = ToolExecutorImpl::new(router);
 
     let descriptors = executor.list_descriptors();

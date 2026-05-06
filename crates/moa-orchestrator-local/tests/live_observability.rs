@@ -11,7 +11,6 @@ use moa_core::{
     SessionStatus, SessionStore, StartSessionRequest, UserId, UserMessage, WorkspaceId,
 };
 use moa_hands::ToolRouter;
-use moa_orchestrator::DeadMemoryStoreShim;
 use moa_orchestrator_local::LocalOrchestrator;
 use moa_providers::{ModelRouter, build_provider_from_config};
 use moa_session::{PostgresSessionStore, testing};
@@ -206,9 +205,8 @@ async fn live_orchestrator(
     let (session_store, _database_url, _schema_name) =
         testing::create_isolated_test_store().await?;
     let session_store = Arc::new(session_store);
-    let memory_store = Arc::new(DeadMemoryStoreShim);
     let tool_router = Arc::new(
-        ToolRouter::from_config(&config, memory_store.clone())
+        ToolRouter::from_config(&config)
             .await?
             .with_rule_store(session_store.clone())
             .with_session_store(session_store.clone()),

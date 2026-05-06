@@ -26,15 +26,14 @@ use moa_brain::{
 };
 use moa_core::{
     BrainOrchestrator, BranchManager, BufferedUserMessage, CountedSessionStore, CronHandle,
-    CronSpec, Event, EventRange, EventRecord, EventStream, MemoryStore, MoaConfig, MoaError,
-    ModelTask, ObserveLevel, PendingSignal, Result, RuntimeEvent, SessionFilter, SessionHandle,
-    SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, SessionSummary,
-    SessionTaskMonitor, StartSessionRequest, TurnLatencyCounters, TurnReplayCounters, UserId,
-    UserMessage, WorkspaceId, record_turn_event_persist_duration, record_turn_latency,
-    scope_turn_latency_counters, scope_turn_replay_counters,
+    CronSpec, Event, EventRange, EventRecord, EventStream, MoaConfig, MoaError, ModelTask,
+    ObserveLevel, PendingSignal, Result, RuntimeEvent, SessionFilter, SessionHandle, SessionId,
+    SessionMeta, SessionSignal, SessionStatus, SessionStore, SessionSummary, SessionTaskMonitor,
+    StartSessionRequest, TurnLatencyCounters, TurnReplayCounters, UserId, UserMessage, WorkspaceId,
+    record_turn_event_persist_duration, record_turn_latency, scope_turn_latency_counters,
+    scope_turn_replay_counters,
 };
 use moa_hands::ToolRouter;
-use moa_orchestrator::DeadMemoryStoreShim;
 use moa_providers::{ModelRouter, resolve_provider_selection};
 use moa_session::{
     NeonBranchManager, PostgresSessionStore, SessionEventStream, create_session_store,
@@ -71,7 +70,6 @@ pub struct LocalOrchestrator {
     session_store: Arc<PostgresSessionStore>,
     instrumented_session_store: Arc<dyn SessionStore>,
     graph_pool: sqlx::PgPool,
-    legacy_memory_bridge: Arc<dyn MemoryStore>,
     model_router: Arc<ModelRouter>,
     tool_router: Arc<ToolRouter>,
     scheduler: Arc<JobScheduler>,
@@ -95,7 +93,6 @@ struct SessionTaskContext {
     config: Arc<MoaConfig>,
     session_store: Arc<dyn SessionStore>,
     graph_pool: sqlx::PgPool,
-    legacy_memory_bridge: Arc<dyn MemoryStore>,
     model_router: Arc<ModelRouter>,
     tool_router: Arc<ToolRouter>,
     session_id: SessionId,
@@ -122,7 +119,6 @@ impl LocalOrchestrator {
         let instrumented_session_store: Arc<dyn SessionStore> =
             Arc::new(CountedSessionStore::new(session_store.clone()));
         let graph_pool = session_store.pool().clone();
-        let legacy_memory_bridge: Arc<dyn MemoryStore> = Arc::new(DeadMemoryStoreShim);
         let _ = memory_ingest::install_runtime_with_pool(graph_pool.clone());
         let session_task_monitor = SessionTaskMonitor::shared();
         let orchestrator = Self {
@@ -130,7 +126,6 @@ impl LocalOrchestrator {
             session_store,
             instrumented_session_store,
             graph_pool,
-            legacy_memory_bridge,
             model_router,
             tool_router,
             scheduler: Arc::new(scheduler),
@@ -166,9 +161,8 @@ impl LocalOrchestrator {
         config.set_main_model(selection.provider_name, selection.model_id);
 
         let session_store = create_session_store(&config).await?;
-        let legacy_memory_bridge: Arc<dyn MemoryStore> = Arc::new(DeadMemoryStoreShim);
         let tool_router = Arc::new(
-            ToolRouter::from_config(&config, legacy_memory_bridge)
+            ToolRouter::from_config(&config)
                 .await?
                 .with_rule_store(session_store.clone())
                 .with_session_store(session_store.clone()),
@@ -180,11 +174,6 @@ impl LocalOrchestrator {
     /// Returns the underlying local session store.
     pub fn session_store(&self) -> Arc<PostgresSessionStore> {
         self.session_store.clone()
-    }
-
-    /// Returns the temporary wiki-memory bridge used by unmigrated C04 surfaces.
-    pub fn memory_store(&self) -> Arc<dyn MemoryStore> {
-        self.legacy_memory_bridge.clone()
     }
 
     /// Returns the registered tool names exposed through the active router.
@@ -323,7 +312,6 @@ impl LocalOrchestrator {
             config: Arc::clone(&self.config),
             session_store: self.instrumented_session_store.clone(),
             graph_pool: self.graph_pool.clone(),
-            legacy_memory_bridge: self.legacy_memory_bridge.clone(),
             model_router: self.model_router.clone(),
             tool_router: self.tool_router.clone(),
             session_id,
@@ -853,7 +841,6 @@ async fn run_session_task(
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         &context.config,
         context.session_store.clone(),
-        context.legacy_memory_bridge.clone(),
         GraphMemoryPipelineOptions {
             graph_pool: context.graph_pool.clone(),
             compaction_llm_provider: Some(

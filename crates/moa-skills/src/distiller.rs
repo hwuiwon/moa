@@ -5,16 +5,13 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_core::{
-    CompletionRequest, Event, EventRecord, MemoryStore, MoaConfig, ModelTask, Result, SessionMeta,
-    SkillMetadata,
+    CompletionRequest, Event, EventRecord, MoaConfig, ModelTask, Result, SessionMeta, SkillMetadata,
 };
-use moa_memory::FileMemoryStore;
 use moa_providers::ModelRouter;
-use moa_session::PostgresSessionStore;
+use moa_session::{PostgresSessionStore, create_session_store};
 
 use crate::format::{
     SkillDocument, build_skill_path, parse_skill_markdown, skill_metadata_from_document,
-    wiki_page_from_skill,
 };
 use crate::improver::{format_events_for_learning, normalize_llm_markdown, record_successful_use};
 use crate::registry::{NewSkill, SkillRegistry};
@@ -28,10 +25,10 @@ pub async fn maybe_distill_skill(
     config: &MoaConfig,
     session: &SessionMeta,
     events: &[EventRecord],
-    memory_store: Arc<FileMemoryStore>,
     model_router: Arc<ModelRouter>,
 ) -> Result<Option<SkillMetadata>> {
-    maybe_distill_skill_with_learning(config, session, events, memory_store, model_router, None)
+    let learning_store = create_session_store(config).await?;
+    maybe_distill_skill_with_learning(config, session, events, model_router, Some(learning_store))
         .await
 }
 
@@ -40,7 +37,6 @@ pub async fn maybe_distill_skill_with_learning(
     config: &MoaConfig,
     session: &SessionMeta,
     events: &[EventRecord],
-    memory_store: Arc<FileMemoryStore>,
     model_router: Arc<ModelRouter>,
     learning_store: Option<Arc<PostgresSessionStore>>,
 ) -> Result<Option<SkillMetadata>> {
@@ -63,7 +59,6 @@ pub async fn maybe_distill_skill_with_learning(
             session,
             existing,
             events,
-            memory_store,
             model_router,
             learning_store,
         )
@@ -82,12 +77,10 @@ pub async fn maybe_distill_skill_with_learning(
     normalize_new_skill(session, &mut skill);
     let path = build_skill_path(&skill.frontmatter.name);
     let markdown = render_skill_for_registry(&skill)?;
-    let page = wiki_page_from_skill(&skill, Some(path.clone()))?;
     let scope = moa_core::MemoryScope::Workspace {
         workspace_id: session.workspace_id.clone(),
     };
-    memory_store.write_page(&scope, &path, page).await?;
-    generate_skill_test_suite(session, &skill, &path, events, memory_store.clone()).await?;
+    generate_skill_test_suite(config, session, &skill, events).await?;
 
     if let Some(store) = learning_store {
         let registry = SkillRegistry::new(store.pool().clone());

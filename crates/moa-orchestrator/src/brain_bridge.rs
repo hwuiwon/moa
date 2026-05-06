@@ -60,7 +60,6 @@ pub(crate) async fn prepare_turn_request(session_id: SessionId) -> Result<Prepar
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         ctx.config.as_ref(),
         counted_session_store,
-        ctx.memory_store.clone(),
         GraphMemoryPipelineOptions {
             graph_pool: ctx.graph_pool.clone(),
             compaction_llm_provider: None,

@@ -10,7 +10,9 @@ use tempfile::TempDir;
 use tokio::time::sleep;
 
 use crate::support::graph_ingest::{test_database_url, wait_for_ingested_brain_responses};
-use crate::support::restate_runtime::{OrchestratorPorts, reserve_orchestrator_ports};
+use crate::support::restate_runtime::{
+    OrchestratorPorts, RESTATE_E2E_LOCK, reserve_orchestrator_ports,
+};
 use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, test_session_meta, user_message,
 };
@@ -91,6 +93,7 @@ fn live_model() -> Option<&'static str> {
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, and at least one provider API key"]
 async fn session_vo_round_trip_through_restate() -> Result<()> {
+    let _guard = RESTATE_E2E_LOCK.lock().await;
     let Some(model) = live_model() else {
         return Ok(());
     };

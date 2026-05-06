@@ -13,7 +13,9 @@ use moa_orchestrator::workflows::consolidate::{ConsolidateReport, ConsolidateReq
 use tempfile::TempDir;
 use tokio::time::sleep;
 
-use crate::support::restate_runtime::{OrchestratorPorts, reserve_orchestrator_ports};
+use crate::support::restate_runtime::{
+    OrchestratorPorts, RESTATE_E2E_LOCK, reserve_orchestrator_ports,
+};
 
 const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:5432/moa";
 
@@ -79,6 +81,7 @@ fn workflow_url(ingress: &str, workflow_id: &str) -> String {
 #[tokio::test]
 #[ignore = "requires a local restate-server and a reachable Postgres instance"]
 async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
+    let _guard = RESTATE_E2E_LOCK.lock().await;
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
     let ports = reserve_orchestrator_ports()?;
@@ -125,7 +128,11 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
         );
 
         let target_date = Utc::now().date_naive();
-        let workflow_id = format!("{}:{target_date}", workspace_id);
+        let workflow_id = format!(
+            "{}:{target_date}:manual-{}",
+            workspace_id,
+            uuid::Uuid::now_v7()
+        );
         let report = client
             .post(workflow_url(ingress, &workflow_id))
             .json(&ConsolidateRequest {

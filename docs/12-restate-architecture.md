@@ -96,7 +96,7 @@ The mapping is deliberate and reversible only with significant cost. Each choice
 | Tool call | **Service** handler (`ToolExecutor::execute`) | — |
 | LLM call | Service handler (`LLMGateway::complete`) called from Session | — |
 | Hand execution | Service handler (`HandRunner::execute`) | — |
-| Memory read/write | Service handler (`MemoryStore::*`) | — |
+| Memory read/write | Graph memory services and ingestion workflow | — |
 | Session event log append | Service handler (`SessionStore::append_event`) | — |
 | Workspace | Virtual Object (`Workspace`) | `workspace_id` |
 | Consolidation / dream cycle | **Workflow** (`Consolidate`) — scheduled from `Workspace` VO | `workspace_id:YYYY-MM-DD` |
@@ -118,17 +118,17 @@ One-shot tasks that happen to be LLM-driven — research-and-summarize, classify
 
 Tool calls are ephemeral and called from within Session VO turns via typed clients. Service semantics (no keyed state, durable per-invocation) are correct. Wrapping them in Workflows adds no value and pollutes the journal with extra workflow starts.
 
-### Why only Consolidate and IngestSource are Workflows
+### Why Consolidate and graph ingestion are Workflows
 
 These are genuine one-shot operations where re-invocation must be structurally impossible:
-- **Consolidate**: running it twice on the same workspace for the same date would double-process pages and corrupt the wiki. Workflow's runs-once-per-ID guarantee is the correctness property we want.
-- **IngestSource**: ingesting the same source document twice produces duplicate pages with different summaries. Keying the workflow on `source_hash` makes re-ingestion a no-op.
+- **Consolidate**: running it twice on the same workspace for the same date would double-apply graph maintenance. Workflow's runs-once-per-ID guarantee is the correctness property we want.
+- **Graph ingestion**: ingesting the same source document twice should not produce duplicate facts or embeddings. Keying the workflow on source identity makes re-ingestion a no-op.
 
 Everything else is either a conversational actor (VO) or a stateless operation (Service).
 
 ### What stays in Postgres, not in Restate state
 
-Restate state is **fast KV for orchestration**, not a database. Put in VO state only what the orchestration needs on the hot path: current turn status, awakeable IDs awaiting resolution, active tool call handles, the last N turns for context assembly. Everything else — full event log, billing records, memory pages, embeddings, audit trail — goes to Postgres via `SessionStore` service calls. **Product-visible data of record is Postgres. Restate state is the working memory of a live session.**
+Restate state is **fast KV for orchestration**, not a database. Put in VO state only what the orchestration needs on the hot path: current turn status, awakeable IDs awaiting resolution, active tool call handles, the last N turns for context assembly. Everything else — full event log, billing records, graph memory, embeddings, audit trail — goes to Postgres via service calls. **Product-visible data of record is Postgres. Restate state is the working memory of a live session.**
 
 ---
 
@@ -410,7 +410,7 @@ Configured via handler attributes or `restate-server` per-service config:
 | `LLMGateway::complete` | **1h** | Same |
 | `Consolidate::run` | **7d** | Billing/audit |
 | `IngestSource::run` | **30d** | Source hash is durable ID; long retention prevents dup-ingestion |
-| `MemoryStore::*` | **6h** | Compliance log lives in Postgres, not Restate |
+| Graph memory writes | **6h** | Compliance log lives in Postgres, not Restate |
 
 Retention is **completion retention** — the journal is kept for this long *after* the invocation finishes. In-progress invocations retain the journal until completion regardless. A 6-hour session holds its journal for 54 hours total under the 48h setting.
 
@@ -546,7 +546,7 @@ Recommended production rollout:
 | `moa-brain` | Minimal — pipeline and loop body ported into `Session::run_turn` |
 | `moa-hands` | Minimal — exposed via `ToolExecutor` Service |
 | `moa-providers` | None — wrapped by `LLMGateway` Service |
-| `moa-memory`, `moa-security`, `moa-skills` | None — called as libraries |
+| `moa-memory-graph`, `moa-memory-ingest`, `moa-memory-vector`, `moa-memory-pii`, `moa-security`, `moa-skills` | None — called as libraries |
 | `moa-gateway` | Minor — add awakeable resolution via Restate admin API |
 | `moa-core` | Minor — add `invocation_id`, `attempt` fields |
 | optional helper crate | Extract Restate boilerplate only if it grows enough to justify a new crate |

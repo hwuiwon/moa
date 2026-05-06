@@ -2,25 +2,24 @@
 
 use std::sync::Arc;
 
-use moa_brain::{TurnResult, build_default_pipeline, run_brain_turn};
+use moa_brain::{
+    GraphMemoryPipelineOptions, TurnResult,
+    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
+};
 use moa_core::{
     Event, EventRange, LLMProvider, MoaConfig, Result, SessionMeta, SessionStore, UserId,
     WorkspaceId,
 };
-use moa_memory::FileMemoryStore;
 use moa_providers::{build_provider_from_config, resolve_provider_selection};
 use moa_session::testing;
-use tempfile::tempdir;
 
 #[tokio::test]
 #[ignore = "requires provider API key env"]
 async fn live_brain_turn_returns_brain_response() -> Result<()> {
-    let dir = tempdir()?;
     let mut config = MoaConfig::default();
     let selection = resolve_provider_selection(&config, None)?;
     config.general.default_provider = selection.provider_name;
     config.general.default_model = selection.model_id.clone();
-    let memory_store = Arc::new(FileMemoryStore::new(dir.path()).await?);
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     let store = Arc::new(store);
     let provider: Arc<dyn LLMProvider> = build_provider_from_config(&config)?;
@@ -32,7 +31,17 @@ async fn live_brain_turn_returns_brain_response() -> Result<()> {
             ..SessionMeta::default()
         })
         .await?;
-    let pipeline = build_default_pipeline(&config, store.clone(), memory_store);
+    let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
+        &config,
+        store.clone(),
+        GraphMemoryPipelineOptions {
+            graph_pool: store.pool().clone(),
+            compaction_llm_provider: None,
+            query_rewrite_llm_provider: None,
+            discovered_workspace_instructions: None,
+            tool_schemas: Vec::new(),
+        },
+    );
 
     store
         .emit_event(
