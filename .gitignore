@@ -34,3 +34,6 @@ pentest_report.json
 restate-data/
 
 __pycache__/
+
+# Large local inference assets
+*.onnx

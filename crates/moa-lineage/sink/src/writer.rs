@@ -243,9 +243,11 @@ async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
     }
 
     let mut conn = pool.acquire().await?;
+    sqlx::query("DROP TABLE IF EXISTS lineage_copy")
+        .execute(&mut *conn)
+        .await?;
     sqlx::query(
         r#"
-        DROP TABLE IF EXISTS lineage_copy;
         CREATE TEMP TABLE lineage_copy (
             turn_id        UUID        NOT NULL,
             session_id     UUID        NOT NULL,
@@ -257,7 +259,7 @@ async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
             payload        JSONB       NOT NULL,
             integrity_hash BYTEA       NOT NULL,
             prev_hash      BYTEA
-        ) ON COMMIT DROP;
+        );
         "#,
     )
     .execute(&mut *conn)
@@ -425,7 +427,14 @@ impl LineageRow {
                 record.workspace_id.to_string(),
                 record.ts,
             ),
-            LineageEvent::Citation(_) | LineageEvent::Eval(_) | LineageEvent::Decision(_) => (
+            LineageEvent::Citation(record) => (
+                record.turn_id.0,
+                record.session_id.0,
+                record.user_id.to_string(),
+                record.workspace_id.to_string(),
+                record.ts,
+            ),
+            LineageEvent::Eval(_) | LineageEvent::Decision(_) => (
                 Uuid::now_v7(),
                 Uuid::nil(),
                 "unknown".to_string(),

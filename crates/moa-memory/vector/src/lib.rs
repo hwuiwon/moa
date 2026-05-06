@@ -7,12 +7,16 @@ use uuid::Uuid;
 
 pub mod backend;
 pub mod embedder;
+pub mod gemini;
 pub mod pgvector_store;
 pub mod promotion;
 pub mod turbopuffer;
 
 pub use backend::vector_store_for_workspace;
 pub use embedder::{CohereV4Embedder, Embedder};
+pub use gemini::{
+    EmbedRole, EmbedderConstructionRole, GeminiEmbeddingEmbedder, build_embedder_from_config,
+};
 pub use pgvector_store::PgvectorStore;
 pub use promotion::{
     PROMOTION_BATCH_SIZE, PROMOTION_OVERLAP_THRESHOLD, PromotionOptions, PromotionReport,
@@ -56,6 +60,9 @@ pub enum Error {
         /// Response body text.
         body: String,
     },
+    /// Embedder configuration is invalid.
+    #[error("invalid embedder configuration: {0}")]
+    EmbedderConfig(String),
     /// The vector provider returned a non-success status.
     #[error("vector provider `{provider}` returned HTTP {status}: {body}")]
     VectorProviderStatus {

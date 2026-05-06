@@ -28,6 +28,7 @@ const SESSION_MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/021_privacy_erase.sql"),
     include_str!("../migrations/postgres/022_vector_backend_turbopuffer.sql"),
     include_str!("../migrations/postgres/023_workspace_vector_promotion.sql"),
+    include_str!("../migrations/postgres/024_lineage.sql"),
 ];
 
 const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;

@@ -27,33 +27,45 @@
   "crates/moa-memory/graph/src/node.rs": 1778018408.0537927,
   "crates/moa-memory/graph/src/lexical.rs": 1778018408.0534859,
   "crates/moa-memory/graph/src/changelog.rs": 1778039789.8121316,
+  "crates/moa-memory/vector/tests/gemini.rs": 1778095273.166122,
   "crates/moa-memory/vector/tests/pgvector_store.rs": 1778071088.8831868,
   "crates/moa-memory/vector/tests/cohere_live.rs": 1778018408.058654,
   "crates/moa-memory/vector/tests/turbopuffer_live.rs": 1778071088.8833601,
+  "crates/moa-memory/vector/src/gemini.rs": 1778095273.095534,
   "crates/moa-memory/vector/src/backend.rs": 1778071088.8817415,
-  "crates/moa-memory/vector/src/lib.rs": 1778071088.8818924,
+  "crates/moa-memory/vector/src/lib.rs": 1778095273.131441,
   "crates/moa-memory/vector/src/promotion.rs": 1778071088.881996,
   "crates/moa-memory/vector/src/turbopuffer.rs": 1778071088.8821242,
   "crates/moa-memory/vector/src/pgvector_store.rs": 1778018408.058516,
   "crates/moa-memory/vector/src/embedder.rs": 1778018408.0577245,
-  "crates/moa-lineage/core/src/records.rs": 1778089559.440774,
-  "crates/moa-lineage/core/src/lib.rs": 1778088940.9241364,
-  "crates/moa-lineage/core/src/sink.rs": 1778087998.548507,
-  "crates/moa-lineage/core/src/ids.rs": 1778087998.5323803,
-  "crates/moa-lineage/sink/src/error.rs": 1778088137.8184776,
-  "crates/moa-lineage/sink/src/lib.rs": 1778088137.800744,
-  "crates/moa-lineage/sink/src/mpsc_sink.rs": 1778089185.6324947,
-  "crates/moa-lineage/sink/src/fjall_journal.rs": 1778089052.30146,
-  "crates/moa-lineage/sink/src/schema.rs": 1778088137.8487232,
-  "crates/moa-lineage/sink/src/writer.rs": 1778089662.0858254,
-  "crates/moa-lineage/otel/src/lib.rs": 1778088940.9252417,
+  "crates/moa-lineage/citation/tests/adapters.rs": 1778093947.823857,
+  "crates/moa-lineage/citation/src/lib.rs": 1778093947.8214526,
+  "crates/moa-lineage/citation/src/verifiers.rs": 1778093947.8227863,
+  "crates/moa-lineage/citation/src/cascade.rs": 1778093947.8209052,
+  "crates/moa-lineage/citation/src/adapters.rs": 1778093947.819425,
+  "crates/moa-lineage/core/src/records.rs": 1778092815.474698,
+  "crates/moa-lineage/core/src/lib.rs": 1778093947.8272748,
+  "crates/moa-lineage/core/src/sink.rs": 1778092498.0877354,
+  "crates/moa-lineage/core/src/ids.rs": 1778092498.0864527,
+  "crates/moa-lineage/sink/src/error.rs": 1778092498.088271,
+  "crates/moa-lineage/sink/src/lib.rs": 1778092498.0884044,
+  "crates/moa-lineage/sink/src/mpsc_sink.rs": 1778092498.088492,
+  "crates/moa-lineage/sink/src/fjall_journal.rs": 1778092498.0883327,
+  "crates/moa-lineage/sink/src/schema.rs": 1778097938.71338,
+  "crates/moa-lineage/sink/src/writer.rs": 1778097857.0392053,
+  "crates/moa-lineage/otel/src/lib.rs": 1778092498.0879812,
+  "crates/moa-lineage/cold/tests/partition_layout.rs": 1778093829.4410715,
+  "crates/moa-lineage/cold/src/exporter.rs": 1778094195.5479383,
+  "crates/moa-lineage/cold/src/error.rs": 1778094042.532104,
+  "crates/moa-lineage/cold/src/lib.rs": 1778093181.7776244,
+  "crates/moa-lineage/cold/src/schema.rs": 1778094042.5696762,
   "crates/moa-core/tests/scope.rs": 1778018408.034753,
   "crates/moa-core/src/telemetry.rs": 1778018408.0311468,
   "crates/moa-core/src/events.rs": 1778018408.0299397,
   "crates/moa-core/src/shell.rs": 1778018408.0310237,
   "crates/moa-core/src/error.rs": 1778018408.0297582,
-  "crates/moa-core/src/config.rs": 1778088940.74555,
-  "crates/moa-core/src/lib.rs": 1778089024.428012,
+  "crates/moa-core/src/config.rs": 1778096364.8311245,
+  "crates/moa-core/src/lib.rs": 1778093947.6245055,
   "crates/moa-core/src/broadcast_recv.rs": 1778018408.028789,
   "crates/moa-core/src/db.rs": 1778018408.029461,
   "crates/moa-core/src/daemon.rs": 1778032345.268598,
@@ -61,7 +73,7 @@
   "crates/moa-core/src/analytics.rs": 1778018408.0285392,
   "crates/moa-core/src/runtime_metrics.rs": 1778032621.6560764,
   "crates/moa-core/src/session_replay.rs": 1778018408.0309427,
-  "crates/moa-core/src/traits.rs": 1778088454.3306785,
+  "crates/moa-core/src/traits.rs": 1778092498.0846536,
   "crates/moa-core/src/diff.rs": 1778018408.0295794,
   "crates/moa-core/src/turn_latency.rs": 1778018408.0315962,
   "crates/moa-core/src/truncation.rs": 1778018408.0314343,
@@ -90,14 +102,14 @@
   "crates/moa-core/src/types/context.rs": 1778018408.032063,
   "crates/moa-orchestrator-local/tests/prometheus_metrics.rs": 1778032345.2743206,
   "crates/moa-orchestrator-local/tests/local_orchestrator.rs": 1778032345.274137,
-  "crates/moa-orchestrator-local/tests/live_provider_roundtrip.rs": 1778091318.0933282,
+  "crates/moa-orchestrator-local/tests/live_provider_roundtrip.rs": 1778092498.0892868,
   "crates/moa-orchestrator-local/tests/live_observability.rs": 1778032345.273742,
   "crates/moa-orchestrator-local/tests/support/mod.rs": 1778018408.0631962,
   "crates/moa-orchestrator-local/tests/support/orchestrator_contract.rs": 1778032345.2744782,
-  "crates/moa-orchestrator-local/src/lib.rs": 1778089991.072162,
-  "crates/moa-cli/src/exec.rs": 1778018408.0277529,
-  "crates/moa-cli/src/daemon.rs": 1778089996.638443,
-  "crates/moa-cli/src/main.rs": 1778088940.7174134,
+  "crates/moa-orchestrator-local/src/lib.rs": 1778092498.0889962,
+  "crates/moa-cli/src/exec.rs": 1778097433.0564568,
+  "crates/moa-cli/src/daemon.rs": 1778092498.082184,
+  "crates/moa-cli/src/main.rs": 1778097637.165101,
   "crates/moa-cli/src/api.rs": 1778018408.0270598,
   "crates/moa-cli/src/commands/skills.rs": 1778018408.0273602,
   "crates/moa-cli/src/commands/mod.rs": 1778071088.8799288,
@@ -110,7 +122,7 @@
   "crates/moa-gateway/src/slack.rs": 1778018408.0454693,
   "crates/moa-gateway/src/approval.rs": 1778018408.0448248,
   "crates/moa-session/tests/neon_branch_manager.rs": 1778018408.0825467,
-  "crates/moa-session/tests/audit_smoke.rs": 1778037210.220755,
+  "crates/moa-session/tests/audit_smoke.rs": 1778096365.3461483,
   "crates/moa-session/tests/postgres_store.rs": 1778018408.0828238,
   "crates/moa-session/tests/shared/mod.rs": 1778018408.0829723,
   "crates/moa-session/src/neon.rs": 1778018408.0814974,
@@ -118,8 +130,8 @@
   "crates/moa-session/src/store.rs": 1778018408.0822864,
   "crates/moa-session/src/blob.rs": 1778018408.0809567,
   "crates/moa-session/src/listener.rs": 1778018408.081202,
-  "crates/moa-session/src/schema.rs": 1778071088.8842604,
-  "crates/moa-session/src/testing.rs": 1778018408.082387,
+  "crates/moa-session/src/schema.rs": 1778097938.6728978,
+  "crates/moa-session/src/testing.rs": 1778096365.3070605,
   "crates/moa-session/src/queries.rs": 1778018408.0817037,
   "crates/moa-providers/tests/openai_live.rs": 1778018408.0761378,
   "crates/moa-providers/tests/live_provider_matrix.rs": 1778018408.07608,
@@ -152,25 +164,25 @@
   "crates/moa-orchestrator/tests/tool_executor.rs": 1778032345.2795885,
   "crates/moa-orchestrator/tests/llm_gateway_e2e.rs": 1778032345.2787812,
   "crates/moa-orchestrator/tests/workspace.rs": 1778026416.3234096,
-  "crates/moa-orchestrator/tests/ingestion_e2e.rs": 1778032345.2776115,
+  "crates/moa-orchestrator/tests/ingestion_e2e.rs": 1778096364.9187486,
   "crates/moa-orchestrator/tests/session_store.rs": 1778026416.322459,
   "crates/moa-orchestrator/tests/session_vo.rs": 1778026416.3227532,
   "crates/moa-orchestrator/tests/llm_gateway.rs": 1778026416.3218422,
   "crates/moa-orchestrator/tests/integration.rs": 1778026416.3215141,
-  "crates/moa-orchestrator/tests/integration/session_store_e2e.rs": 1778032345.2783058,
-  "crates/moa-orchestrator/tests/integration/tool_executor_e2e.rs": 1778032345.2786279,
-  "crates/moa-orchestrator/tests/integration/consolidate_e2e.rs": 1778077457.396725,
+  "crates/moa-orchestrator/tests/integration/session_store_e2e.rs": 1778096365.2539597,
+  "crates/moa-orchestrator/tests/integration/tool_executor_e2e.rs": 1778096365.1797063,
+  "crates/moa-orchestrator/tests/integration/consolidate_e2e.rs": 1778096365.1013355,
   "crates/moa-orchestrator/tests/integration/session_vo_e2e.rs": 1778032345.2784655,
   "crates/moa-orchestrator/tests/integration/approval_flow_e2e.rs": 1778032345.277806,
   "crates/moa-orchestrator/tests/integration/session_brain_e2e.rs": 1778032345.2781398,
   "crates/moa-orchestrator/tests/support/restate_runtime.rs": 1778032345.27937,
   "crates/moa-orchestrator/tests/support/mod.rs": 1778032345.2791064,
-  "crates/moa-orchestrator/tests/support/graph_ingest.rs": 1778032345.278882,
+  "crates/moa-orchestrator/tests/support/graph_ingest.rs": 1778096365.0199342,
   "crates/moa-orchestrator/tests/support/session_store_service.rs": 1778035609.884199,
   "crates/moa-orchestrator/src/observability.rs": 1778018408.065339,
   "crates/moa-orchestrator/src/config.rs": 1778018408.0639029,
   "crates/moa-orchestrator/src/lib.rs": 1778028510.4656942,
-  "crates/moa-orchestrator/src/brain_bridge.rs": 1778089120.2176023,
+  "crates/moa-orchestrator/src/brain_bridge.rs": 1778092498.0899343,
   "crates/moa-orchestrator/src/sub_agent_dispatch.rs": 1778018408.0670714,
   "crates/moa-orchestrator/src/restate_register.rs": 1778032345.2759366,
   "crates/moa-orchestrator/src/main.rs": 1778035609.8816803,
@@ -212,7 +224,7 @@
   "crates/moa-hands/src/tools/file_search.rs": 1778018408.0490415,
   "crates/moa-hands/src/tools/bash.rs": 1778018408.0483181,
   "crates/moa-hands/src/tools/str_replace.rs": 1778018408.05,
-  "crates/moa-hands/src/tools/tool_result.rs": 1778088473.8298066,
+  "crates/moa-hands/src/tools/tool_result.rs": 1778092498.0858936,
   "crates/moa-hands/src/tools/memory.rs": 1778032345.2714727,
   "crates/moa-hands/src/tools/file_write.rs": 1778018408.0491831,
   "crates/moa-hands/src/tools/mod.rs": 1778018408.049689,
@@ -222,22 +234,22 @@
   "crates/moa-hands/src/tools/file_outline.rs": 1778018408.0487604,
   "crates/moa-hands/src/router/telemetry.rs": 1778018408.0481534,
   "crates/moa-hands/src/router/policy.rs": 1778018408.0478795,
-  "crates/moa-hands/src/router/construction.rs": 1778088473.793449,
+  "crates/moa-hands/src/router/construction.rs": 1778092498.08515,
   "crates/moa-hands/src/router/registration.rs": 1778032345.271207,
-  "crates/moa-hands/src/router/mod.rs": 1778088940.8964763,
+  "crates/moa-hands/src/router/mod.rs": 1778092498.0856793,
   "crates/moa-hands/src/router/normalization.rs": 1778018408.047755,
   "crates/moa-brain/tests/cohere_reranker_live.rs": 1778026436.0072675,
   "crates/moa-brain/tests/hybrid_retrieval.rs": 1778032826.2409778,
-  "crates/moa-brain/tests/live_harness.rs": 1778088587.676394,
+  "crates/moa-brain/tests/live_harness.rs": 1778092498.0818853,
   "crates/moa-brain/tests/brain_turn.rs": 1778032345.2675767,
   "crates/moa-brain/tests/query_rewrite_live.rs": 1778026436.0082715,
-  "crates/moa-brain/tests/integration_steps_72_77.rs": 1778088587.714157,
-  "crates/moa-brain/tests/stable_prefix.rs": 1778088587.6392682,
+  "crates/moa-brain/tests/integration_steps_72_77.rs": 1778092498.0815496,
+  "crates/moa-brain/tests/stable_prefix.rs": 1778092498.0820143,
   "crates/moa-brain/tests/turbopuffer_news_e2e.rs": 1778071088.8795276,
   "crates/moa-brain/tests/query_planner.rs": 1778026436.0081193,
-  "crates/moa-brain/tests/live_cache_audit.rs": 1778088610.3152087,
-  "crates/moa-brain/examples/chat_harness.rs": 1778088587.6030054,
-  "crates/moa-brain/src/lib.rs": 1778088805.704101,
+  "crates/moa-brain/tests/live_cache_audit.rs": 1778092498.0817447,
+  "crates/moa-brain/examples/chat_harness.rs": 1778092498.0802393,
+  "crates/moa-brain/src/lib.rs": 1778092498.0809338,
   "crates/moa-brain/src/turn.rs": 1778018408.024603,
   "crates/moa-brain/src/loop_detector.rs": 1778018408.0183961,
   "crates/moa-brain/src/tool_stats.rs": 1778032345.2673428,
@@ -248,26 +260,26 @@
   "crates/moa-brain/src/pipeline/segments.rs": 1778018408.0211022,
   "crates/moa-brain/src/pipeline/tools.rs": 1778018408.0215254,
   "crates/moa-brain/src/pipeline/runtime_context.rs": 1778018408.0209582,
-  "crates/moa-brain/src/pipeline/memory.rs": 1778089098.4003532,
+  "crates/moa-brain/src/pipeline/memory.rs": 1778097414.6343973,
   "crates/moa-brain/src/pipeline/skills.rs": 1778032345.2671745,
   "crates/moa-brain/src/pipeline/compactor.rs": 1778018408.0190747,
   "crates/moa-brain/src/pipeline/identity.rs": 1778018408.0198684,
-  "crates/moa-brain/src/pipeline/mod.rs": 1778088532.0657997,
+  "crates/moa-brain/src/pipeline/mod.rs": 1778092498.0813508,
   "crates/moa-brain/src/pipeline/history.rs": 1778032345.2665842,
   "crates/moa-brain/src/planning/planner.rs": 1778080514.2853591,
   "crates/moa-brain/src/planning/mod.rs": 1778018408.0216777,
   "crates/moa-brain/src/planning/ner.rs": 1778018408.0219548,
   "crates/moa-brain/src/harness/budget.rs": 1778018408.0170827,
   "crates/moa-brain/src/harness/tool_dispatch.rs": 1778018408.01784,
-  "crates/moa-brain/src/harness/mod.rs": 1778088789.2268646,
+  "crates/moa-brain/src/harness/mod.rs": 1778092498.0805914,
   "crates/moa-brain/src/harness/approval_flow.rs": 1778018408.0169988,
-  "crates/moa-brain/src/harness/streaming.rs": 1778088940.633216,
-  "crates/moa-brain/src/harness/context_build.rs": 1778088695.8693821,
+  "crates/moa-brain/src/harness/streaming.rs": 1778093658.4870923,
+  "crates/moa-brain/src/harness/context_build.rs": 1778092498.080433,
   "crates/moa-brain/src/retrieval/cache.rs": 1778080514.285581,
   "crates/moa-brain/src/retrieval/hybrid.rs": 1778080514.2860749,
   "crates/moa-brain/src/retrieval/reranker.rs": 1778018408.0240998,
   "crates/moa-brain/src/retrieval/mod.rs": 1778018408.0239608,
-  "crates/moa-brain/src/retrieval/legs.rs": 1778080514.2865114,
+  "crates/moa-brain/src/retrieval/legs.rs": 1778098314.8282201,
   "crates/moa-brain/src/resolution/continuation_signal.rs": 1778018408.0225363,
   "crates/moa-brain/src/resolution/self_assessment_signal.rs": 1778018408.0229182,
   "crates/moa-brain/src/resolution/mod.rs": 1778018408.0226548,
@@ -309,8 +321,8 @@
   "crates/moa-eval/src/reporters/json.rs": 1778018408.0434763,
   "crates/moa-eval/src/reporters/mod.rs": 1778018408.0435996,
   "crates/moa-runtime/tests/age_smoke.rs": 1778032345.280939,
-  "crates/moa-runtime/src/local.rs": 1778032345.2807722,
-  "crates/moa-runtime/src/lib.rs": 1778032345.2805705,
+  "crates/moa-runtime/src/local.rs": 1778097432.9694958,
+  "crates/moa-runtime/src/lib.rs": 1778097433.0173676,
   "crates/moa-runtime/src/daemon_ipc.rs": 1778018408.0768993,
   "crates/moa-runtime/src/helpers.rs": 1778032345.2801785,
   "crates/moa-runtime/src/daemon.rs": 1778032345.279983,
@@ -392,13 +404,13 @@
   "scripts/bootstrap_global_skills.rs": 1777372703.4873824,
   "services/audit-shipper/main.py": 1778037210.223388,
   "services/pii-service/main.py": 1777328848.879444,
-  "architecture.md": 1778088922.5684485,
+  "architecture.md": 1778092498.079917,
   "e2e_test_plan.md": 1776368962.1764686,
   "README.md": 1778077457.394439,
   "sequence-diagrams.md": 1778032345.303668,
   "crates/moa-memory/README.md": 1778077457.3957095,
   "crates/moa-memory/ingest/prompts/judge.txt": 1778018408.0548751,
-  "crates/moa-lineage/README.md": 1778087998.4806423,
+  "crates/moa-lineage/README.md": 1778097961.7332094,
   "crates/moa-brain/proptest-regressions/pipeline/history.txt": 1778018408.0164726,
   "crates/moa-brain/assets/ner-gazetteer.txt": 1778018408.016179,
   "crates/moa-brain/src/prompts/summarizer.txt": 1778018408.0222294,
@@ -422,33 +434,33 @@
     "7": "Local Orchestrator Tests",
     "8": "Core Config",
     "9": "Exec Command Flow",
-    "10": "Postgres Session Store",
-    "11": "Brain Turn Tests",
-    "12": "History Compiler",
-    "13": "Skill Injection Stage",
-    "14": "Daemon Service",
-    "15": "Privacy Export & Erase",
-    "16": "Anthropic Provider",
-    "17": "Eval Engine & Plan",
-    "18": "Local Chat Runtime",
-    "19": "Gemini Provider",
-    "20": "Fast Ingestion Path",
-    "21": "File Read & Write Tools",
-    "22": "Hybrid Retriever",
+    "10": "Gemini Provider",
+    "11": "Postgres Session Store",
+    "12": "Brain Turn Tests",
+    "13": "History Compiler",
+    "14": "Skill Injection Stage",
+    "15": "Daemon Service",
+    "16": "Privacy Export & Erase",
+    "17": "Anthropic Provider",
+    "18": "Eval Engine & Plan",
+    "19": "Local Chat Runtime",
+    "20": "Hybrid Retriever",
+    "21": "Fast Ingestion Path",
+    "22": "File Read & Write Tools",
     "23": "Session Replay Snapshots",
-    "24": "Workspace Instructions",
-    "25": "Orchestrator Test Harness",
+    "24": "Orchestrator Test Harness",
+    "25": "Workspace Instructions",
     "26": "Sub-Agent Dispatch",
-    "27": "Checkpoint Compaction",
-    "28": "Query Rewrite Pipeline",
+    "27": "Query Rewrite Pipeline",
+    "28": "Checkpoint Compaction",
     "29": "Tool Types & Policy",
     "30": "Cohere Reranker Live Test",
     "31": "Session Store Service",
     "32": "Memory Scope Tool",
     "33": "OpenAI Responses Provider",
     "34": "LLM Gateway Service",
-    "35": "Contradiction Detection",
-    "36": "Turn Streaming & Approvals",
+    "35": "Turn Streaming & Approvals",
+    "36": "Contradiction Detection",
     "37": "Cross-Tenant Pentest Suite",
     "38": "Cache Optimizer",
     "39": "Golden E2E Fixtures",
@@ -469,8 +481,8 @@
     "54": "Broadcast Lag Handling",
     "55": "MCP Client Discovery",
     "56": "Completion Types",
-    "57": "Approval Request Types",
-    "58": "Working Context",
+    "57": "Working Context",
+    "58": "Approval Request Types",
     "59": "Discord Adapter",
     "60": "Provider Selection & Routing",
     "61": "Tool Usage Stats",
@@ -478,126 +490,132 @@
     "63": "Slack Adapter",
     "64": "Turn Latency Counters",
     "65": "Workspace Promotion",
-    "66": "Live Ingestion E2E",
-    "67": "Tool Router Policy",
-    "68": "LLM Span Instrumentation",
-    "69": "Intent Manager Service",
-    "70": "Live Cache Audit Tests",
-    "71": "MCP Credential Proxy",
-    "72": "Command Palette & Keybindings",
-    "73": "Graph Write Protocol",
-    "74": "Live Observability Tests",
-    "75": "Session DB Codecs",
-    "76": "Local Tools Integration Tests",
-    "77": "Telegram Adapter",
-    "78": "Embedding Provider",
-    "79": "Cohere Embedder",
-    "80": "Lineage Records & Stages",
-    "81": "Session Blob Store",
-    "82": "File Search Tool",
-    "83": "Memory Viewer Panel",
-    "84": "Pgvector Store Tests",
-    "85": "Scripted Test Provider",
-    "86": "Runtime Context Stage",
-    "87": "Session Analytics",
-    "88": "Chat Message Bubbles",
-    "89": "OpenAI Privacy Filter",
-    "90": "Model Capabilities",
-    "91": "Orchestrator Contract Harness",
-    "92": "Session Postgres Store Tests",
-    "93": "Provider Schema",
-    "94": "Live Provider Matrix",
-    "95": "Tool Router Construction",
-    "96": "Integration Steps 72-77",
-    "97": "OpenAI Provider Tests",
-    "98": "Security Policies",
-    "99": "Desktop Service Bridge",
-    "100": "Settings Panel",
-    "101": "Graph Node Index",
-    "102": "Encrypted Secret Vault",
-    "103": "Intent Discovery Workflow",
-    "104": "Session Search Tool",
-    "105": "Chat Panel",
-    "106": "Neon Branch Manager Tests",
-    "107": "Prompt Injection Defense",
-    "108": "Query Planner Tests",
-    "109": "Window State Persistence",
-    "110": "AGE Graph Store",
-    "111": "Continuation Signal",
-    "112": "Eval Terminal Reporter",
-    "113": "Session Row Badges",
-    "114": "E2E Retest Plan",
-    "115": "Turn Loop Detector",
-    "116": "Intent Classifier",
-    "117": "Session List",
-    "118": "Tool Approval Store",
-    "119": "Instruction Stage",
-    "120": "Session Sidebar",
-    "121": "Identity Stage",
-    "122": "Vector Store Backend",
-    "123": "Session VO Tests",
-    "124": "Health Service",
-    "125": "Self Assessment Signal",
-    "126": "Structural Signal",
-    "127": "WCAG Contrast Helpers",
-    "128": "Lexical Seed Store",
-    "129": "Lineage Fjall Journal",
-    "130": "Query Rewrite Live Tests",
-    "131": "Trajectory Match Evaluator",
-    "132": "Output Match Evaluator",
-    "133": "Live E2E Fixtures",
-    "134": "PII Classifier Smoke",
-    "135": "Scope Hierarchy Tests",
-    "136": "Threshold Evaluator",
-    "137": "Desktop Notifications",
-    "138": "Providers Settings Tab",
-    "139": "Shell Chain Splitter",
-    "140": "Scoped Transaction Lifecycle",
-    "141": "Unified Diff",
-    "142": "Pgaudit Smoke Tests",
-    "143": "Gemini Live Tests",
-    "144": "Anthropic Provider Tests",
-    "145": "Desktop Status Bar",
-    "146": "Event Color Mapping",
-    "147": "Cohere Live Test",
-    "148": "Turbopuffer Live Tests",
-    "149": "DB Error Mapping",
-    "150": "Cost Budget Enforcement",
-    "151": "Tool Success Evaluator",
-    "152": "Settings Integration Tests",
-    "153": "Desktop Title Bar",
-    "154": "General Settings Tab",
-    "155": "Error Banner Component",
-    "156": "PII Live Sidecar Test",
-    "157": "Mock PII Classifier",
-    "158": "OpenAI Live Test",
-    "159": "Anthropic Live Test",
-    "160": "Chat Harness Example",
-    "161": "Sidebar Tab Enum",
-    "162": "Permissions Settings Tab",
-    "163": "Desktop Service Init",
-    "164": "Perf Gate Binary",
-    "165": "Model Identifier",
-    "166": "Tool Call Identifier",
-    "167": "Provider HTTP Client",
-    "168": "Session Engine Gating",
-    "169": "Object Context",
-    "170": "Shared Object Context",
-    "171": "Agent Adapter",
-    "172": "Docker Hardening Test",
-    "173": "Eval Live Tests",
-    "174": "Chat Runtime Trait",
-    "175": "Keyboard Shortcuts Tab",
-    "176": "Icon Button",
-    "177": "Section Card",
-    "178": "Segmented Control",
-    "179": "Markdown Style",
-    "180": "Nav Item",
-    "181": "Perf Gate Config",
-    "182": "Skills Bootstrap Script",
-    "183": "Core Type Macros",
-    "184": "Integration Test Entry",
-    "185": "Restate Registration"
+    "66": "Citation Vendor Adapters",
+    "67": "Live Ingestion E2E",
+    "68": "Tool Router Policy",
+    "69": "LLM Span Instrumentation",
+    "70": "Intent Manager Service",
+    "71": "Live Cache Audit Tests",
+    "72": "MCP Credential Proxy",
+    "73": "Command Palette & Keybindings",
+    "74": "Graph Write Protocol",
+    "75": "Live Observability Tests",
+    "76": "Session DB Codecs",
+    "77": "Local Tools Integration Tests",
+    "78": "Lineage Records & Stages",
+    "79": "Telegram Adapter",
+    "80": "Citation Verifiers",
+    "81": "Embedding Provider",
+    "82": "Session Blob Store",
+    "83": "File Search Tool",
+    "84": "Memory Viewer Panel",
+    "85": "Pgvector Store Tests",
+    "86": "Scripted Test Provider",
+    "87": "Runtime Context Stage",
+    "88": "Session Analytics",
+    "89": "Chat Message Bubbles",
+    "90": "OpenAI Privacy Filter",
+    "91": "Model Capabilities",
+    "92": "Orchestrator Contract Harness",
+    "93": "Session Postgres Store Tests",
+    "94": "Provider Schema",
+    "95": "Task Segment Tracker",
+    "96": "Live Provider Matrix",
+    "97": "Tool Router Construction",
+    "98": "Integration Steps 72-77",
+    "99": "OpenAI Provider Tests",
+    "100": "Security Policies",
+    "101": "Settings Panel",
+    "102": "Graph Node Index",
+    "103": "Encrypted Secret Vault",
+    "104": "Intent Discovery Workflow",
+    "105": "Session Search Tool",
+    "106": "Cohere Embedder",
+    "107": "Chat Panel",
+    "108": "Neon Branch Manager Tests",
+    "109": "Prompt Injection Defense",
+    "110": "Query Planner Tests",
+    "111": "Window State Persistence",
+    "112": "Ingest Runtime Context",
+    "113": "AGE Graph Store",
+    "114": "Continuation Signal",
+    "115": "Eval Terminal Reporter",
+    "116": "Session Row Badges",
+    "117": "E2E Retest Plan",
+    "118": "Cold Tier Exporter",
+    "119": "Turn Loop Detector",
+    "120": "Intent Classifier",
+    "121": "Skill Render Context",
+    "122": "Session List",
+    "123": "Tool Approval Store",
+    "124": "Instruction Stage",
+    "125": "Session Sidebar",
+    "126": "Identity Stage",
+    "127": "Vector Store Backend",
+    "128": "Session VO Tests",
+    "129": "Health Service",
+    "130": "Self Assessment Signal",
+    "131": "Structural Signal",
+    "132": "WCAG Contrast Helpers",
+    "133": "Lexical Seed Store",
+    "134": "Lineage Fjall Journal",
+    "135": "Query Rewrite Live Tests",
+    "136": "Trajectory Match Evaluator",
+    "137": "Output Match Evaluator",
+    "138": "Live E2E Fixtures",
+    "139": "PII Classifier Smoke",
+    "140": "Scope Hierarchy Tests",
+    "141": "Threshold Evaluator",
+    "142": "Desktop Notifications",
+    "143": "Providers Settings Tab",
+    "144": "Shell Chain Splitter",
+    "145": "Scoped Transaction Lifecycle",
+    "146": "Unified Diff",
+    "147": "Pgaudit Smoke Tests",
+    "148": "Gemini Live Tests",
+    "149": "Anthropic Provider Tests",
+    "150": "Desktop Status Bar",
+    "151": "Event Color Mapping",
+    "152": "Cohere Live Test",
+    "153": "Turbopuffer Live Tests",
+    "154": "DB Error Mapping",
+    "155": "Cost Budget Enforcement",
+    "156": "Tool Success Evaluator",
+    "157": "Settings Integration Tests",
+    "158": "Desktop Title Bar",
+    "159": "General Settings Tab",
+    "160": "Error Banner Component",
+    "161": "PII Live Sidecar Test",
+    "162": "Mock PII Classifier",
+    "163": "OpenAI Live Test",
+    "164": "Anthropic Live Test",
+    "165": "Chat Harness Example",
+    "166": "Sidebar Tab Enum",
+    "167": "Permissions Settings Tab",
+    "168": "Desktop Service Init",
+    "169": "Perf Gate Binary",
+    "170": "Cold Tier Partition Tests",
+    "171": "Model Identifier",
+    "172": "Tool Call Identifier",
+    "173": "Provider HTTP Client",
+    "174": "Session Engine Gating",
+    "175": "Object Context",
+    "176": "Shared Object Context",
+    "177": "Agent Adapter",
+    "178": "Docker Hardening Test",
+    "179": "Eval Live Tests",
+    "180": "Chat Runtime Trait",
+    "181": "Keyboard Shortcuts Tab",
+    "182": "Icon Button",
+    "183": "Section Card",
+    "184": "Segmented Control",
+    "185": "Markdown Style",
+    "186": "Nav Item",
+    "187": "Perf Gate Config",
+    "188": "Skills Bootstrap Script",
+    "189": "Core Type Macros",
+    "190": "Integration Test Entry",
+    "191": "Restate Registration"
   },
   "community_signatures": {
     "0": [
@@ -605,18 +623,6 @@
       "changelog_changelogrecord",
       "changelog_validate_scope",
       "changelog_write_and_bump",
-      "ctx",
-      "ctx_current_runtime",
-      "ctx_ingestctx",
-      "ctx_ingestctx_new",
-      "ctx_ingestruntime",
-      "ctx_ingestruntime_new",
-      "ctx_ingestruntime_pool",
-      "ctx_install_runtime",
-      "ctx_install_runtime_with_pool",
-      "ctx_orchestratorctx",
-      "ctx_orchestratorctx_current",
-      "ctx_orchestratorctx_install",
       "edge",
       "edge_edgelabel",
       "edge_edgelabel_as_str",
@@ -654,6 +660,7 @@
       "lib_chatruntime_from_config",
       "lib_chatruntime_from_daemon_config",
       "lib_chatruntime_from_local_config",
+      "lib_chatruntime_shutdown_background_workers",
       "lib_chatruntime_tool_names",
       "lib_chatruntime_tool_names_async",
       "lib_chatruntimeops",
@@ -812,17 +819,16 @@
       "lib_wait_for_turn_completion",
       "lib_workspace_has_graph_nodes",
       "lib_workspace_id_for_root",
-      "render",
-      "render_load_addenda",
-      "render_map_sqlx_error",
-      "render_render",
-      "render_set_app_role",
-      "render_skilladdendum",
-      "render_skillrendercontext",
-      "render_skillrendercontext_for_app_role",
-      "render_skillrendercontext_new",
-      "render_skillrendercontext_pool",
-      "render_skillrendercontext_with_addendum_limit",
+      "models",
+      "models_by_provider",
+      "models_by_provider_partitions_correctly",
+      "models_catalog_has_unique_ids",
+      "models_claude_opus_has_million_token_context",
+      "models_context_window",
+      "models_find",
+      "models_google_catalog_includes_latest_gemini_3_series",
+      "models_gpt_5_4_has_extended_context",
+      "models_providermodel",
       "reporters",
       "reporters_json_reporter_writes_valid_json",
       "results",
@@ -846,6 +852,21 @@
       "truncation_truncate_head_tail_lines"
     ],
     "1": [
+      "bridge",
+      "bridge_servicebridge",
+      "bridge_servicebridge_chat_runtime",
+      "bridge_servicebridge_config",
+      "bridge_servicebridge_mark_error",
+      "bridge_servicebridge_mark_ready",
+      "bridge_servicebridge_new",
+      "bridge_servicebridge_status",
+      "bridge_servicebridge_tokio_handle",
+      "bridge_servicebridgehandle",
+      "bridge_servicebridgehandle_entity",
+      "bridge_servicebridgehandle_global",
+      "bridge_servicestatus",
+      "bridge_spawn_blocking_into",
+      "bridge_spawn_into",
       "identifiers",
       "identifiers_session_id_roundtrip",
       "intents",
@@ -1007,6 +1028,8 @@
       "provider_modeltask_tier",
       "provider_modeltier",
       "provider_modeltier_as_str",
+      "runtime",
+      "runtime_build_tokio_runtime",
       "runtime_events",
       "runtime_events_runtime_event_type_uses_stable_sse_names",
       "runtime_events_runtimeevent",
@@ -1116,7 +1139,10 @@
       "main_ingestargs",
       "main_init_workspace",
       "main_leg_trace",
+      "main_lineage_query_report",
       "main_lineage_status",
+      "main_lineagecommand",
+      "main_lineagequeryargs",
       "main_live_handler",
       "main_load_branch_manager",
       "main_load_eval_configs",
@@ -1143,6 +1169,9 @@
       "main_parse_bool_accepts_common_values",
       "main_parse_otlp_protocol",
       "main_piispan",
+      "main_prepare_lineage_sql",
+      "main_prepare_lineage_sql_rejects_mutating_statement",
+      "main_prepare_lineage_sql_replaces_logical_lineage_source",
       "main_probestate",
       "main_probestate_admin_base_url",
       "main_probestate_check_ready",
@@ -1170,10 +1199,12 @@
       "main_rationale_98",
       "main_rationale_99",
       "main_ready_handler",
+      "main_record_debug_retrieval_lineage",
       "main_registereddeployment",
       "main_registeredservice",
       "main_registration_check_rejects_partial_deployments",
       "main_registration_check_requires_all_expected_services",
+      "main_render_citation_record",
       "main_render_context_record",
       "main_render_generation_record",
       "main_render_lineage_record",
@@ -1462,26 +1493,6 @@
       "read_smoke_set_app_role",
       "row",
       "row_settings_row",
-      "segments",
-      "segments_activesegment",
-      "segments_completed_from_active",
-      "segments_deterministic_segment_id",
-      "segments_first_message_creates_segment_zero",
-      "segments_follow_up_does_not_create_transition",
-      "segments_malformed_rewrite_metadata_only_creates_first_segment",
-      "segments_new_task_creates_next_segment_with_previous_id",
-      "segments_rewrite",
-      "segments_segmentcompleted",
-      "segments_segmentcompleted_into_event",
-      "segments_segmentcompletion",
-      "segments_segmentstarted",
-      "segments_segmentstarted_into_event",
-      "segments_segmenttracker",
-      "segments_segmenttracker_check_transition",
-      "segments_segmenttracker_transition_from_metadata",
-      "segments_segmenttransition",
-      "segments_tasksegment",
-      "segments_tasksegment_active_view",
       "stable_prefix",
       "stable_prefix_capabilities",
       "stable_prefix_extend_tool_schemas",
@@ -1931,6 +1942,8 @@
       "config_cloudflyioconfig_default",
       "config_cloudhandsconfig",
       "config_cloudhandsconfig_default",
+      "config_cohereembedderconfig",
+      "config_cohereembedderconfig_default",
       "config_compaction_config_defaults_are_applied",
       "config_compactionconfig",
       "config_compactionconfig_default",
@@ -1957,6 +1970,8 @@
       "config_from_reader_uses_defaults_and_optional_values",
       "config_gatewayconfig",
       "config_gatewayconfig_default",
+      "config_geminiembedderconfig",
+      "config_geminiembedderconfig_default",
       "config_generalconfig",
       "config_generalconfig_default",
       "config_intent_config_defaults_are_applied",
@@ -1972,6 +1987,7 @@
       "config_memory_config_defaults_are_applied",
       "config_memoryconfig",
       "config_memoryconfig_default",
+      "config_memoryvectorconfig",
       "config_metrics_config_defaults_are_applied",
       "config_metrics_config_deserializes",
       "config_metricsconfig",
@@ -2032,7 +2048,9 @@
       "config_toolbudgetconfig_default",
       "config_toolbudgetconfig_for_tool",
       "config_tooloutputconfig",
-      "config_tooloutputconfig_default"
+      "config_tooloutputconfig_default",
+      "config_vectorembedderconfig",
+      "config_vectorembedderconfig_default"
     ],
     "9": [
       "bash",
@@ -2146,6 +2164,113 @@
       "time_relative"
     ],
     "10": [
+      "gemini",
+      "gemini_build_cache_create_body",
+      "gemini_build_contents_from_messages",
+      "gemini_build_embedder_from_config",
+      "gemini_build_explicit_cache_plan",
+      "gemini_build_generation_config",
+      "gemini_build_request_body",
+      "gemini_build_request_body_from_parts",
+      "gemini_build_request_parts",
+      "gemini_build_tools",
+      "gemini_canonical_model_id",
+      "gemini_capabilities_for_model",
+      "gemini_consume_sse_events",
+      "gemini_content_message",
+      "gemini_deepest_cache_boundary",
+      "gemini_embedderconstructionrole",
+      "gemini_embedding_response",
+      "gemini_embedrole",
+      "gemini_embedrole_format",
+      "gemini_estimate_prefix_tokens",
+      "gemini_fingerprint_cache_body",
+      "gemini_finish_reason_to_stop_reason",
+      "gemini_flush_pending_parts",
+      "gemini_flush_tool_responses",
+      "gemini_function_call_part",
+      "gemini_function_response_part",
+      "gemini_function_response_payload",
+      "gemini_gemini_3_pro_maps_medium_reasoning_to_medium_thinking_level",
+      "gemini_gemini_explicit_cache_plan_skips_tail_system_instruction",
+      "gemini_gemini_flash_lite_preview_uses_documented_price_envelope",
+      "gemini_gemini_function_declaration",
+      "gemini_gemini_preview_model_ids_pass_through_unchanged",
+      "gemini_gemini_provider_groups_tool_history_and_preserves_thought_signatures",
+      "gemini_gemini_provider_serializes_google_search_without_functions",
+      "gemini_gemini_provider_serializes_system_messages_and_tools",
+      "gemini_gemini_provider_streams_tool_calls_and_google_search_updates",
+      "gemini_gemini_request_sets_structured_output_schema",
+      "gemini_gemini_v2_does_not_renormalize_server_output",
+      "gemini_gemini_v2_uses_prompt_prefix_and_snake_case_output_dimensionality",
+      "gemini_geminicachedcontent",
+      "gemini_geminicandidate",
+      "gemini_geminicontent",
+      "gemini_geminiembedding",
+      "gemini_geminiembeddingembedder",
+      "gemini_geminiembeddingembedder_dimension",
+      "gemini_geminiembeddingembedder_embed",
+      "gemini_geminiembeddingembedder_embed_as",
+      "gemini_geminiembeddingembedder_model_name",
+      "gemini_geminiembeddingembedder_model_version",
+      "gemini_geminiembeddingembedder_new",
+      "gemini_geminiembeddingembedder_post_embed",
+      "gemini_geminiembeddingembedder_with_client",
+      "gemini_geminiembeddingembedder_with_endpoint",
+      "gemini_geminiexplicitcacheplan",
+      "gemini_geminifunctioncall",
+      "gemini_geminigeneratecontentresponse",
+      "gemini_geminipart",
+      "gemini_geminiprovider",
+      "gemini_geminiprovider_build_request_body_with_cache",
+      "gemini_geminiprovider_cached_content_name",
+      "gemini_geminiprovider_capabilities",
+      "gemini_geminiprovider_clone_with_model",
+      "gemini_geminiprovider_complete",
+      "gemini_geminiprovider_from_config",
+      "gemini_geminiprovider_from_config_with_model",
+      "gemini_geminiprovider_from_env",
+      "gemini_geminiprovider_name",
+      "gemini_geminiprovider_new",
+      "gemini_geminiprovider_new_with_reasoning_effort",
+      "gemini_geminiprovider_with_api_base",
+      "gemini_geminiprovider_with_max_retries",
+      "gemini_geminiprovider_with_web_search_enabled",
+      "gemini_geminirequestbuildoptions",
+      "gemini_geminirequestparts",
+      "gemini_geminiresponse",
+      "gemini_geministreamdebugsnapshot",
+      "gemini_geministreamstate",
+      "gemini_geministreamstate_apply_event",
+      "gemini_geministreamstate_debug_snapshot",
+      "gemini_geministreamstate_finish",
+      "gemini_geministreamstate_new",
+      "gemini_geminitextpart",
+      "gemini_geminiusagemetadata",
+      "gemini_is_standard_user_message",
+      "gemini_minimum_cacheable_tokens",
+      "gemini_native_google_search_tools",
+      "gemini_normalize_config_key",
+      "gemini_normalize_reasoning_effort",
+      "gemini_normalize_tool_args",
+      "gemini_only_request",
+      "gemini_parse_embed_role",
+      "gemini_read_secret_env",
+      "gemini_reasoningeffort",
+      "gemini_role_prefixes_match_documented_shapes",
+      "gemini_sse_stream",
+      "gemini_text_part",
+      "gemini_thinking_config_for_model",
+      "gemini_token_usage_from_gemini_usage",
+      "gemini_token_usage_from_gemini_usage_splits_cached_prompt_tokens",
+      "gemini_tool_content_value",
+      "gemini_v2_keeps_already_normalized_values_unchanged",
+      "gemini_v2request",
+      "gemini_validate_gemini_dimension",
+      "gemini_validate_gemini_output_dim",
+      "gemini_vector_dimension_constant_still_matches_cohere_default"
+    ],
+    "11": [
       "listener",
       "listener_backfill_from",
       "listener_listen_stream_backfills_from_last_seen_sequence",
@@ -2242,7 +2367,7 @@
       "store_serialize_resolution_signal",
       "store_vector_literal"
     ],
-    "11": [
+    "12": [
       "brain_turn",
       "brain_turn_always_allow_rule_persists_and_skips_next_approval",
       "brain_turn_approximate_tokens",
@@ -2337,7 +2462,7 @@
       "brain_turn_toolloopllmprovider_complete",
       "brain_turn_toolloopllmprovider_name"
     ],
-    "12": [
+    "13": [
       "history",
       "history_build_events_from_turn_specs",
       "history_build_file_read_dedup_state",
@@ -2428,7 +2553,7 @@
       "history_truncate_tool_result_text",
       "history_turn_spec_strategy"
     ],
-    "13": [
+    "14": [
       "skills",
       "skills_alphabetical_name_cmp",
       "skills_bootstrap_global_skills",
@@ -2511,7 +2636,7 @@
       "skills_truncate_with_ellipsis",
       "skills_workspace_scope"
     ],
-    "14": [
+    "15": [
       "daemon",
       "daemon_daemon_create_session_uses_explicit_client_scope",
       "daemon_daemon_health_endpoint_responds_when_cloud_enabled",
@@ -2592,7 +2717,7 @@
       "daemon_write_reply",
       "daemon_write_stream_event"
     ],
-    "15": [
+    "16": [
       "privacy",
       "privacy_approval_token",
       "privacy_approval_token_verifies_subject_op_workspace_and_signature",
@@ -2672,7 +2797,7 @@
       "privacy_write_jsonl",
       "privacy_write_manifest"
     ],
-    "16": [
+    "17": [
       "anthropic",
       "anthropic_annotate_cache_control",
       "anthropic_annotate_message_cache_control",
@@ -2752,7 +2877,7 @@
       "anthropic_usage",
       "anthropic_websearchresultcontent"
     ],
-    "17": [
+    "18": [
       "collector",
       "collector_collectedexecution",
       "collector_collector_tracks_tool_steps_and_metrics",
@@ -2832,7 +2957,7 @@
       "setup_token_usage",
       "setup_validate_named_tools"
     ],
-    "18": [
+    "19": [
       "helpers",
       "helpers_detect_local_workspace_root",
       "helpers_expand_local_path",
@@ -2881,6 +3006,7 @@
       "local_localchatruntime_session_meta_by_id",
       "local_localchatruntime_set_model",
       "local_localchatruntime_set_workspace",
+      "local_localchatruntime_shutdown_lineage_writer",
       "local_localchatruntime_soft_cancel_session",
       "local_localchatruntime_tool_names",
       "local_localchatruntime_tool_names_async",
@@ -2911,84 +3037,85 @@
       "local_localhandprovider_with_command_timeout",
       "local_localsandbox"
     ],
-    "19": [
-      "gemini",
-      "gemini_build_cache_create_body",
-      "gemini_build_contents_from_messages",
-      "gemini_build_explicit_cache_plan",
-      "gemini_build_generation_config",
-      "gemini_build_request_body",
-      "gemini_build_request_body_from_parts",
-      "gemini_build_request_parts",
-      "gemini_build_tools",
-      "gemini_canonical_model_id",
-      "gemini_capabilities_for_model",
-      "gemini_consume_sse_events",
-      "gemini_content_message",
-      "gemini_deepest_cache_boundary",
-      "gemini_estimate_prefix_tokens",
-      "gemini_fingerprint_cache_body",
-      "gemini_finish_reason_to_stop_reason",
-      "gemini_flush_pending_parts",
-      "gemini_flush_tool_responses",
-      "gemini_function_call_part",
-      "gemini_function_response_part",
-      "gemini_function_response_payload",
-      "gemini_gemini_3_pro_maps_medium_reasoning_to_medium_thinking_level",
-      "gemini_gemini_explicit_cache_plan_skips_tail_system_instruction",
-      "gemini_gemini_flash_lite_preview_uses_documented_price_envelope",
-      "gemini_gemini_function_declaration",
-      "gemini_gemini_preview_model_ids_pass_through_unchanged",
-      "gemini_gemini_provider_groups_tool_history_and_preserves_thought_signatures",
-      "gemini_gemini_provider_serializes_google_search_without_functions",
-      "gemini_gemini_provider_serializes_system_messages_and_tools",
-      "gemini_gemini_provider_streams_tool_calls_and_google_search_updates",
-      "gemini_gemini_request_sets_structured_output_schema",
-      "gemini_geminicachedcontent",
-      "gemini_geminicandidate",
-      "gemini_geminicontent",
-      "gemini_geminiexplicitcacheplan",
-      "gemini_geminifunctioncall",
-      "gemini_geminigeneratecontentresponse",
-      "gemini_geminipart",
-      "gemini_geminiprovider",
-      "gemini_geminiprovider_build_request_body_with_cache",
-      "gemini_geminiprovider_cached_content_name",
-      "gemini_geminiprovider_capabilities",
-      "gemini_geminiprovider_clone_with_model",
-      "gemini_geminiprovider_complete",
-      "gemini_geminiprovider_from_config",
-      "gemini_geminiprovider_from_config_with_model",
-      "gemini_geminiprovider_from_env",
-      "gemini_geminiprovider_name",
-      "gemini_geminiprovider_new",
-      "gemini_geminiprovider_new_with_reasoning_effort",
-      "gemini_geminiprovider_with_api_base",
-      "gemini_geminiprovider_with_max_retries",
-      "gemini_geminiprovider_with_web_search_enabled",
-      "gemini_geminirequestbuildoptions",
-      "gemini_geminirequestparts",
-      "gemini_geministreamdebugsnapshot",
-      "gemini_geministreamstate",
-      "gemini_geministreamstate_apply_event",
-      "gemini_geministreamstate_debug_snapshot",
-      "gemini_geministreamstate_finish",
-      "gemini_geministreamstate_new",
-      "gemini_geminiusagemetadata",
-      "gemini_is_standard_user_message",
-      "gemini_minimum_cacheable_tokens",
-      "gemini_native_google_search_tools",
-      "gemini_normalize_reasoning_effort",
-      "gemini_normalize_tool_args",
-      "gemini_reasoningeffort",
-      "gemini_sse_stream",
-      "gemini_text_part",
-      "gemini_thinking_config_for_model",
-      "gemini_token_usage_from_gemini_usage",
-      "gemini_token_usage_from_gemini_usage_splits_cached_prompt_tokens",
-      "gemini_tool_content_value"
-    ],
     "20": [
+      "hybrid",
+      "hybrid_apply_layer_bias",
+      "hybrid_build_hits",
+      "hybrid_emptygraph",
+      "hybrid_emptygraph_create_edge",
+      "hybrid_emptygraph_create_node",
+      "hybrid_emptygraph_get_node",
+      "hybrid_emptygraph_hard_purge",
+      "hybrid_emptygraph_invalidate_node",
+      "hybrid_emptygraph_lookup_seeds",
+      "hybrid_emptygraph_neighbors",
+      "hybrid_emptygraph_supersede_node",
+      "hybrid_emptyvector",
+      "hybrid_emptyvector_backend",
+      "hybrid_emptyvector_delete",
+      "hybrid_emptyvector_dimension",
+      "hybrid_emptyvector_knn",
+      "hybrid_emptyvector_upsert",
+      "hybrid_hit",
+      "hybrid_hybridretriever",
+      "hybrid_hybridretriever_dual_read_vector_leg",
+      "hybrid_hybridretriever_from_env",
+      "hybrid_hybridretriever_new",
+      "hybrid_hybridretriever_rerank_hits",
+      "hybrid_hybridretriever_retrieve",
+      "hybrid_hybridretriever_vector_backend_state",
+      "hybrid_hybridretriever_vector_leg",
+      "hybrid_hybridretriever_with_assume_app_role",
+      "hybrid_hybridretriever_with_reranker",
+      "hybrid_hybridretriever_with_turbopuffer",
+      "hybrid_layer_bias_prefers_user_over_workspace_for_matching_scores",
+      "hybrid_leg_or_empty",
+      "hybrid_leg_overlap",
+      "hybrid_legsources",
+      "hybrid_reranker_reorders_candidates_when_enabled",
+      "hybrid_retrievalerror",
+      "hybrid_retrievalhit",
+      "hybrid_retrievalrequest",
+      "hybrid_reversereranker",
+      "hybrid_reversereranker_rerank",
+      "hybrid_vectorbackendstate",
+      "hybrid_vectorbackendstate_default",
+      "hybrid_vectorbackendstate_is_dual_read_active",
+      "hybrid_weights_for",
+      "legs",
+      "legs_add_leg_scores",
+      "legs_begin_scoped",
+      "legs_bump_last_accessed",
+      "legs_graph_leg",
+      "legs_hydrate_nodes",
+      "legs_legcandidate",
+      "legs_lexical_fallback_leg",
+      "legs_lexical_fallback_terms",
+      "legs_lexical_fallback_terms_keep_article_ids_and_drop_question_words",
+      "legs_lexical_leg",
+      "legs_pii_rank",
+      "legs_rank_uids",
+      "legs_rrf_fuse",
+      "legs_rrf_fuse_tracks_all_contributing_legs",
+      "legs_sort_fused",
+      "legs_timed_leg",
+      "legs_vector_leg",
+      "reranker",
+      "reranker_coherereranker",
+      "reranker_coherereranker_new",
+      "reranker_coherereranker_rerank",
+      "reranker_coherereranker_with_client",
+      "reranker_coherereranker_with_endpoint",
+      "reranker_coherererankrequest",
+      "reranker_coherererankresponse",
+      "reranker_coherererankresponsehit",
+      "reranker_noop_reranker_preserves_order_and_limit",
+      "reranker_noopreranker",
+      "reranker_noopreranker_rerank",
+      "reranker_reranker",
+      "reranker_rerankhit"
+    ],
+    "21": [
       "fast_path",
       "fast_path_active_uids_for_pattern",
       "fast_path_begin_scoped",
@@ -3063,7 +3190,7 @@
       "fast_path_workspace_uuid",
       "fast_path_workspace_version"
     ],
-    "21": [
+    "22": [
       "docker_file",
       "docker_file_container_path_validation_accepts_workspace_absolute_paths",
       "docker_file_container_path_validation_rejects_absolute_paths_outside_workspace",
@@ -3138,81 +3265,6 @@
       "str_replace_str_replace_single_match",
       "str_replace_strreplaceinput"
     ],
-    "22": [
-      "hybrid",
-      "hybrid_apply_layer_bias",
-      "hybrid_build_hits",
-      "hybrid_emptygraph",
-      "hybrid_emptygraph_create_edge",
-      "hybrid_emptygraph_create_node",
-      "hybrid_emptygraph_get_node",
-      "hybrid_emptygraph_hard_purge",
-      "hybrid_emptygraph_invalidate_node",
-      "hybrid_emptygraph_lookup_seeds",
-      "hybrid_emptygraph_neighbors",
-      "hybrid_emptygraph_supersede_node",
-      "hybrid_emptyvector",
-      "hybrid_emptyvector_backend",
-      "hybrid_emptyvector_delete",
-      "hybrid_emptyvector_dimension",
-      "hybrid_emptyvector_knn",
-      "hybrid_emptyvector_upsert",
-      "hybrid_hit",
-      "hybrid_hybridretriever",
-      "hybrid_hybridretriever_dual_read_vector_leg",
-      "hybrid_hybridretriever_from_env",
-      "hybrid_hybridretriever_new",
-      "hybrid_hybridretriever_rerank_hits",
-      "hybrid_hybridretriever_retrieve",
-      "hybrid_hybridretriever_vector_backend_state",
-      "hybrid_hybridretriever_vector_leg",
-      "hybrid_hybridretriever_with_assume_app_role",
-      "hybrid_hybridretriever_with_reranker",
-      "hybrid_hybridretriever_with_turbopuffer",
-      "hybrid_layer_bias_prefers_user_over_workspace_for_matching_scores",
-      "hybrid_leg_or_empty",
-      "hybrid_leg_overlap",
-      "hybrid_legsources",
-      "hybrid_reranker_reorders_candidates_when_enabled",
-      "hybrid_retrievalerror",
-      "hybrid_retrievalhit",
-      "hybrid_retrievalrequest",
-      "hybrid_reversereranker",
-      "hybrid_reversereranker_rerank",
-      "hybrid_vectorbackendstate",
-      "hybrid_vectorbackendstate_default",
-      "hybrid_vectorbackendstate_is_dual_read_active",
-      "hybrid_weights_for",
-      "legs",
-      "legs_add_leg_scores",
-      "legs_begin_scoped",
-      "legs_bump_last_accessed",
-      "legs_graph_leg",
-      "legs_hydrate_nodes",
-      "legs_legcandidate",
-      "legs_lexical_leg",
-      "legs_pii_rank",
-      "legs_rank_uids",
-      "legs_rrf_fuse",
-      "legs_rrf_fuse_tracks_all_contributing_legs",
-      "legs_sort_fused",
-      "legs_timed_leg",
-      "legs_vector_leg",
-      "reranker",
-      "reranker_coherereranker",
-      "reranker_coherereranker_new",
-      "reranker_coherereranker_rerank",
-      "reranker_coherereranker_with_client",
-      "reranker_coherereranker_with_endpoint",
-      "reranker_coherererankrequest",
-      "reranker_coherererankresponse",
-      "reranker_coherererankresponsehit",
-      "reranker_noop_reranker_preserves_order_and_limit",
-      "reranker_noopreranker",
-      "reranker_noopreranker_rerank",
-      "reranker_reranker",
-      "reranker_rerankhit"
-    ],
     "23": [
       "session_replay",
       "session_replay_approval_decision_size",
@@ -3285,76 +3337,6 @@
       "session_replay_turnreplaysnapshot_pipeline_compile_ms"
     ],
     "24": [
-      "consolidate",
-      "consolidate_consolidate",
-      "consolidate_consolidateimpl",
-      "consolidate_consolidateimpl_run",
-      "consolidate_consolidatereport",
-      "consolidate_consolidatereport_failed",
-      "consolidate_consolidatereport_graph_noop",
-      "consolidate_consolidaterequest",
-      "consolidate_e2e",
-      "consolidate_e2e_object_url",
-      "consolidate_e2e_register_deployment",
-      "consolidate_e2e_spawn_orchestrator",
-      "consolidate_e2e_workflow_url",
-      "consolidate_e2e_workspace_consolidation_round_trip_through_restate",
-      "consolidate_graph_noop_report_has_no_memory_record_updates",
-      "consolidate_record_memory_learning",
-      "workspace",
-      "workspace_alwaysallowpattern",
-      "workspace_async_discovery_truncates_oversized_files",
-      "workspace_compute_next_consolidation_rolls_over_after_target_hour",
-      "workspace_compute_next_consolidation_same_day_when_hour_is_still_ahead",
-      "workspace_compute_next_consolidation_utc",
-      "workspace_consolidation_jitter_is_deterministic_per_workspace",
-      "workspace_count_graph_nodes",
-      "workspace_deterministic_consolidation_jitter_secs",
-      "workspace_discover_workspace_instructions",
-      "workspace_discover_workspace_instructions_async",
-      "workspace_discovers_agents_md",
-      "workspace_duration_from_chrono",
-      "workspace_ignores_non_agents_instruction_files",
-      "workspace_parse_workspace_key",
-      "workspace_persist_policy_rules",
-      "workspace_process_instruction_bytes",
-      "workspace_returns_none_when_no_file_exists",
-      "workspace_schedule_consolidation_inner",
-      "workspace_to_handler_error",
-      "workspace_truncates_oversized_files",
-      "workspace_validate_consolidation_hour",
-      "workspace_validate_workspace_key",
-      "workspace_workspace",
-      "workspace_workspace_apply_state",
-      "workspace_workspace_create_session",
-      "workspace_workspace_detail_visible",
-      "workspace_workspace_new",
-      "workspace_workspace_on_new_session",
-      "workspace_workspace_on_toggle_detail",
-      "workspace_workspace_on_toggle_sidebar",
-      "workspace_workspace_render",
-      "workspace_workspace_selected_session",
-      "workspace_workspace_sidebar_visible",
-      "workspace_workspace_toggle_detail",
-      "workspace_workspace_toggle_sidebar",
-      "workspace_workspaceapprovalpolicy",
-      "workspace_workspaceconfig",
-      "workspace_workspaceimpl",
-      "workspace_workspaceimpl_add_always_allow",
-      "workspace_workspaceimpl_consolidation_completed",
-      "workspace_workspaceimpl_get_approval_policy",
-      "workspace_workspaceimpl_init",
-      "workspace_workspaceimpl_mark_consolidation_started",
-      "workspace_workspaceimpl_schedule_consolidation",
-      "workspace_workspaceimpl_status",
-      "workspace_workspaceobject",
-      "workspace_workspacestatus",
-      "workspace_workspacevostate",
-      "workspace_workspacevostate_ensure_initialized",
-      "workspace_workspacevostate_load_from",
-      "workspace_workspacevostate_persist_into"
-    ],
-    "25": [
       "approval_flow_e2e",
       "approval_flow_e2e_approval_allow_once_round_trip_through_restate",
       "approval_flow_e2e_configured_env",
@@ -3423,6 +3405,76 @@
       "tool_executor_e2e_tool_request",
       "tool_executor_e2e_tool_request_with_provider_id",
       "tool_executor_e2e_wait_for_tool_result_events"
+    ],
+    "25": [
+      "consolidate",
+      "consolidate_consolidate",
+      "consolidate_consolidateimpl",
+      "consolidate_consolidateimpl_run",
+      "consolidate_consolidatereport",
+      "consolidate_consolidatereport_failed",
+      "consolidate_consolidatereport_graph_noop",
+      "consolidate_consolidaterequest",
+      "consolidate_e2e",
+      "consolidate_e2e_object_url",
+      "consolidate_e2e_register_deployment",
+      "consolidate_e2e_spawn_orchestrator",
+      "consolidate_e2e_workflow_url",
+      "consolidate_e2e_workspace_consolidation_round_trip_through_restate",
+      "consolidate_graph_noop_report_has_no_memory_record_updates",
+      "consolidate_record_memory_learning",
+      "workspace",
+      "workspace_alwaysallowpattern",
+      "workspace_async_discovery_truncates_oversized_files",
+      "workspace_compute_next_consolidation_rolls_over_after_target_hour",
+      "workspace_compute_next_consolidation_same_day_when_hour_is_still_ahead",
+      "workspace_compute_next_consolidation_utc",
+      "workspace_consolidation_jitter_is_deterministic_per_workspace",
+      "workspace_count_graph_nodes",
+      "workspace_deterministic_consolidation_jitter_secs",
+      "workspace_discover_workspace_instructions",
+      "workspace_discover_workspace_instructions_async",
+      "workspace_discovers_agents_md",
+      "workspace_duration_from_chrono",
+      "workspace_ignores_non_agents_instruction_files",
+      "workspace_parse_workspace_key",
+      "workspace_persist_policy_rules",
+      "workspace_process_instruction_bytes",
+      "workspace_returns_none_when_no_file_exists",
+      "workspace_schedule_consolidation_inner",
+      "workspace_to_handler_error",
+      "workspace_truncates_oversized_files",
+      "workspace_validate_consolidation_hour",
+      "workspace_validate_workspace_key",
+      "workspace_workspace",
+      "workspace_workspace_apply_state",
+      "workspace_workspace_create_session",
+      "workspace_workspace_detail_visible",
+      "workspace_workspace_new",
+      "workspace_workspace_on_new_session",
+      "workspace_workspace_on_toggle_detail",
+      "workspace_workspace_on_toggle_sidebar",
+      "workspace_workspace_render",
+      "workspace_workspace_selected_session",
+      "workspace_workspace_sidebar_visible",
+      "workspace_workspace_toggle_detail",
+      "workspace_workspace_toggle_sidebar",
+      "workspace_workspaceapprovalpolicy",
+      "workspace_workspaceconfig",
+      "workspace_workspaceimpl",
+      "workspace_workspaceimpl_add_always_allow",
+      "workspace_workspaceimpl_consolidation_completed",
+      "workspace_workspaceimpl_get_approval_policy",
+      "workspace_workspaceimpl_init",
+      "workspace_workspaceimpl_mark_consolidation_started",
+      "workspace_workspaceimpl_schedule_consolidation",
+      "workspace_workspaceimpl_status",
+      "workspace_workspaceobject",
+      "workspace_workspacestatus",
+      "workspace_workspacevostate",
+      "workspace_workspacevostate_ensure_initialized",
+      "workspace_workspacevostate_load_from",
+      "workspace_workspacevostate_persist_into"
     ],
     "26": [
       "sub_agent",
@@ -3495,76 +3547,6 @@
       "sub_agent_turn_outcome_for_sub_agent_state"
     ],
     "27": [
-      "compaction",
-      "compaction_calculate_cost_cents",
-      "compaction_checkpointstate",
-      "compaction_compaction_request",
-      "compaction_event_summary_line",
-      "compaction_latest_checkpoint_state",
-      "compaction_maybe_compact",
-      "compaction_maybe_compact_events",
-      "compaction_non_checkpoint_events",
-      "compaction_normalize_summary",
-      "compaction_recent_turn_boundary",
-      "compaction_should_compact",
-      "compaction_truncate",
-      "compaction_unsummarized_events",
-      "compactor",
-      "compactor_apply_tier1",
-      "compactor_apply_tier2",
-      "compactor_apply_tier3",
-      "compactor_capabilities",
-      "compactor_collapse_snapshot_for_tier2",
-      "compactor_compacted_tool_result",
-      "compactor_compactionreport",
-      "compactor_compactionreport_tokens_reclaimed",
-      "compactor_compactiontier",
-      "compactor_compactor",
-      "compactor_compactor_name",
-      "compactor_compactor_new",
-      "compactor_compactor_process",
-      "compactor_compactor_should_apply_tier3",
-      "compactor_compactor_stage",
-      "compactor_event_record",
-      "compactor_history_bounds",
-      "compactor_is_compacted_tool_result",
-      "compactor_is_file_read_result_message",
-      "compactor_load_snapshot",
-      "compactor_mockllmprovider",
-      "compactor_mockllmprovider_capabilities",
-      "compactor_mockllmprovider_complete",
-      "compactor_mockllmprovider_name",
-      "compactor_mocksessionstore",
-      "compactor_mocksessionstore_create_session",
-      "compactor_mocksessionstore_delete_session",
-      "compactor_mocksessionstore_delete_snapshot",
-      "compactor_mocksessionstore_emit_event",
-      "compactor_mocksessionstore_get_events",
-      "compactor_mocksessionstore_get_pending_signals",
-      "compactor_mocksessionstore_get_session",
-      "compactor_mocksessionstore_get_snapshot",
-      "compactor_mocksessionstore_list_sessions",
-      "compactor_mocksessionstore_new",
-      "compactor_mocksessionstore_put_snapshot",
-      "compactor_mocksessionstore_resolve_pending_signal",
-      "compactor_mocksessionstore_search_events",
-      "compactor_mocksessionstore_store_pending_signal",
-      "compactor_mocksessionstore_update_status",
-      "compactor_mocksessionstore_workspace_cost_since",
-      "compactor_protected_snapshot_tool_use_ids",
-      "compactor_recent_turn_boundary_messages",
-      "compactor_referenced_tool_use_ids",
-      "compactor_session",
-      "compactor_should_apply_tier2",
-      "compactor_store_snapshot",
-      "compactor_tier1_is_idempotent_for_compacted_messages",
-      "compactor_tier2_replaces_old_history_with_placeholder",
-      "compactor_tier3_emits_checkpoint_and_replaces_history_with_summary",
-      "compactor_tier3summary",
-      "compactor_token_count",
-      "compactor_tool_names_by_use_id"
-    ],
-    "28": [
       "query_rewrite",
       "query_rewrite_allowed_terms",
       "query_rewrite_approximate_query_tokens",
@@ -3633,6 +3615,76 @@
       "query_rewrite_truncate_for_prompt",
       "query_rewrite_validate_rewrite_result",
       "query_rewrite_validation_strips_entities_not_present_in_history"
+    ],
+    "28": [
+      "compaction",
+      "compaction_calculate_cost_cents",
+      "compaction_checkpointstate",
+      "compaction_compaction_request",
+      "compaction_event_summary_line",
+      "compaction_latest_checkpoint_state",
+      "compaction_maybe_compact",
+      "compaction_maybe_compact_events",
+      "compaction_non_checkpoint_events",
+      "compaction_normalize_summary",
+      "compaction_recent_turn_boundary",
+      "compaction_should_compact",
+      "compaction_truncate",
+      "compaction_unsummarized_events",
+      "compactor",
+      "compactor_apply_tier1",
+      "compactor_apply_tier2",
+      "compactor_apply_tier3",
+      "compactor_capabilities",
+      "compactor_collapse_snapshot_for_tier2",
+      "compactor_compacted_tool_result",
+      "compactor_compactionreport",
+      "compactor_compactionreport_tokens_reclaimed",
+      "compactor_compactiontier",
+      "compactor_compactor",
+      "compactor_compactor_name",
+      "compactor_compactor_new",
+      "compactor_compactor_process",
+      "compactor_compactor_should_apply_tier3",
+      "compactor_compactor_stage",
+      "compactor_event_record",
+      "compactor_history_bounds",
+      "compactor_is_compacted_tool_result",
+      "compactor_is_file_read_result_message",
+      "compactor_load_snapshot",
+      "compactor_mockllmprovider",
+      "compactor_mockllmprovider_capabilities",
+      "compactor_mockllmprovider_complete",
+      "compactor_mockllmprovider_name",
+      "compactor_mocksessionstore",
+      "compactor_mocksessionstore_create_session",
+      "compactor_mocksessionstore_delete_session",
+      "compactor_mocksessionstore_delete_snapshot",
+      "compactor_mocksessionstore_emit_event",
+      "compactor_mocksessionstore_get_events",
+      "compactor_mocksessionstore_get_pending_signals",
+      "compactor_mocksessionstore_get_session",
+      "compactor_mocksessionstore_get_snapshot",
+      "compactor_mocksessionstore_list_sessions",
+      "compactor_mocksessionstore_new",
+      "compactor_mocksessionstore_put_snapshot",
+      "compactor_mocksessionstore_resolve_pending_signal",
+      "compactor_mocksessionstore_search_events",
+      "compactor_mocksessionstore_store_pending_signal",
+      "compactor_mocksessionstore_update_status",
+      "compactor_mocksessionstore_workspace_cost_since",
+      "compactor_protected_snapshot_tool_use_ids",
+      "compactor_recent_turn_boundary_messages",
+      "compactor_referenced_tool_use_ids",
+      "compactor_session",
+      "compactor_should_apply_tier2",
+      "compactor_store_snapshot",
+      "compactor_tier1_is_idempotent_for_compacted_messages",
+      "compactor_tier2_replaces_old_history_with_placeholder",
+      "compactor_tier3_emits_checkpoint_and_replaces_history_with_summary",
+      "compactor_tier3summary",
+      "compactor_token_count",
+      "compactor_tool_names_by_use_id"
     ],
     "29": [
       "registration",
@@ -3857,6 +3909,7 @@
       "memory_graphmemoryretriever_with_assume_app_role",
       "memory_graphmemoryretriever_with_lineage",
       "memory_keyword_extraction_filters_stopwords_and_duplicates",
+      "memory_keyword_extraction_preserves_memory_article_ids",
       "memory_memoryforgettool",
       "memory_memoryforgettool_description",
       "memory_memoryforgettool_execute",
@@ -4029,6 +4082,68 @@
       "llm_gateway_turn_scope_from_request"
     ],
     "35": [
+      "approval_flow",
+      "approval_flow_process_resolved_approval",
+      "approval_flow_wait_for_approval",
+      "approval_flow_wait_for_signal_approval",
+      "context_build",
+      "context_build_append_event",
+      "context_build_approval_decision_label",
+      "context_build_buffer_queued_message",
+      "context_build_build_cache_report",
+      "context_build_build_turn_context",
+      "context_build_buildturncontextoptions",
+      "context_build_calculate_response_cost_cents",
+      "context_build_last_user_message_text",
+      "context_build_persist_context_snapshot",
+      "context_build_record_turn_span_metrics",
+      "context_build_response_cost_cents_uses_provider_pricing",
+      "context_build_turn_number_for_events",
+      "streaming",
+      "streaming_context_chunk",
+      "streaming_drain_signal_queue",
+      "streaming_emit_context_lineage",
+      "streaming_emit_generation_lineage",
+      "streaming_estimate_tokens",
+      "streaming_handle_stream_signal",
+      "streaming_push_offset",
+      "streaming_run_streamed_turn_with_tools_mode",
+      "streaming_sentence_offsets",
+      "streaming_tool_call_summaries",
+      "tool_dispatch",
+      "tool_dispatch_append_tool_call_event",
+      "tool_dispatch_emit_tool_output_warning",
+      "tool_dispatch_execute_pending_tool",
+      "tool_dispatch_execute_tool",
+      "tool_dispatch_format_tool_output",
+      "tool_dispatch_handle_tool_call",
+      "tool_dispatch_parse_tool_id",
+      "tool_dispatch_provider_thought_signature",
+      "tool_dispatch_record_denied_tool_span",
+      "tool_dispatch_resumed_tool_invocation_id",
+      "tool_dispatch_secure_tool_output",
+      "tool_dispatch_securedtooloutput",
+      "tool_dispatch_summarize_tool_completion",
+      "tool_dispatch_toolcalloutcome",
+      "turn",
+      "turn_event_record",
+      "turn_find_pending_approval_request",
+      "turn_find_pending_tool_approval",
+      "turn_find_resolved_pending_tool_approval",
+      "turn_pendingtoolapproval",
+      "turn_providertoolresultllm",
+      "turn_providertoolresultllm_capabilities",
+      "turn_providertoolresultllm_complete",
+      "turn_providertoolresultllm_name",
+      "turn_resolved_pending_tool_approval_preserves_provider_tool_use_id",
+      "turn_storedapprovaldecision",
+      "turn_stream_completion_reports_provider_tool_results_as_notices",
+      "turn_stream_completion_response",
+      "turn_streamedcompletion",
+      "turn_streamsignaldisposition",
+      "turn_token_usage"
+    ],
+    "36": [
       "contradiction",
       "contradiction_build_judge_prompt",
       "contradiction_candidate",
@@ -4087,66 +4202,6 @@
       "contradiction_sleepingjudge",
       "contradiction_sleepingjudge_judge",
       "contradiction_vector_candidate_uids"
-    ],
-    "36": [
-      "approval_flow",
-      "approval_flow_process_resolved_approval",
-      "approval_flow_wait_for_approval",
-      "approval_flow_wait_for_signal_approval",
-      "context_build",
-      "context_build_append_event",
-      "context_build_approval_decision_label",
-      "context_build_buffer_queued_message",
-      "context_build_build_cache_report",
-      "context_build_build_turn_context",
-      "context_build_buildturncontextoptions",
-      "context_build_calculate_response_cost_cents",
-      "context_build_last_user_message_text",
-      "context_build_persist_context_snapshot",
-      "context_build_record_turn_span_metrics",
-      "context_build_response_cost_cents_uses_provider_pricing",
-      "context_build_turn_number_for_events",
-      "streaming",
-      "streaming_context_chunk",
-      "streaming_drain_signal_queue",
-      "streaming_emit_context_lineage",
-      "streaming_emit_generation_lineage",
-      "streaming_estimate_tokens",
-      "streaming_handle_stream_signal",
-      "streaming_run_streamed_turn_with_tools_mode",
-      "streaming_tool_call_summaries",
-      "tool_dispatch",
-      "tool_dispatch_append_tool_call_event",
-      "tool_dispatch_emit_tool_output_warning",
-      "tool_dispatch_execute_pending_tool",
-      "tool_dispatch_execute_tool",
-      "tool_dispatch_format_tool_output",
-      "tool_dispatch_handle_tool_call",
-      "tool_dispatch_parse_tool_id",
-      "tool_dispatch_provider_thought_signature",
-      "tool_dispatch_record_denied_tool_span",
-      "tool_dispatch_resumed_tool_invocation_id",
-      "tool_dispatch_secure_tool_output",
-      "tool_dispatch_securedtooloutput",
-      "tool_dispatch_summarize_tool_completion",
-      "tool_dispatch_toolcalloutcome",
-      "turn",
-      "turn_event_record",
-      "turn_find_pending_approval_request",
-      "turn_find_pending_tool_approval",
-      "turn_find_resolved_pending_tool_approval",
-      "turn_pendingtoolapproval",
-      "turn_providertoolresultllm",
-      "turn_providertoolresultllm_capabilities",
-      "turn_providertoolresultllm_complete",
-      "turn_providertoolresultllm_name",
-      "turn_resolved_pending_tool_approval_preserves_provider_tool_use_id",
-      "turn_storedapprovaldecision",
-      "turn_stream_completion_reports_provider_tool_results_as_notices",
-      "turn_stream_completion_response",
-      "turn_streamedcompletion",
-      "turn_streamsignaldisposition",
-      "turn_token_usage"
     ],
     "37": [
       "cross_tenant_pentest",
@@ -5133,44 +5188,6 @@
       "completion_toolinvocation"
     ],
     "57": [
-      "approval",
-      "approval_append_session_event",
-      "approval_approval_buttons",
-      "approval_approval_outcome_label",
-      "approval_approval_request",
-      "approval_approval_timeout_defaults_when_override_is_missing_or_invalid",
-      "approval_approval_timeout_uses_positive_override",
-      "approval_approval_wait_timeout",
-      "approval_approval_wait_timeout_from_env",
-      "approval_approvalcallbackaction",
-      "approval_approvalcallbackaction_decode",
-      "approval_approvalcallbackaction_encode",
-      "approval_approvalcallbackaction_inbound_command",
-      "approval_approvaldecision",
-      "approval_approvalfield",
-      "approval_approvalfilediff",
-      "approval_approvaloutcome",
-      "approval_approvaloutcome_allow_execution",
-      "approval_approvaloutcome_deny",
-      "approval_approvalprompt",
-      "approval_approvalrequest",
-      "approval_approvalrule",
-      "approval_awakeable_decision_round_trips_through_json_payload",
-      "approval_callback_data_roundtrips",
-      "approval_handle_approval_gate",
-      "approval_parse_awakeable_decision",
-      "approval_policyaction",
-      "approval_policyscope",
-      "approval_prepare_outbound_message",
-      "approval_prepare_outbound_message_adds_inline_buttons_when_supported",
-      "approval_prepare_outbound_message_degrades_to_text_prompt_without_buttons",
-      "approval_renderer_builds_platform_approval_buttons",
-      "approval_risk_icon",
-      "approval_risklevel",
-      "approval_serialize_awakeable_decision",
-      "approval_text_fallback"
-    ],
-    "58": [
       "context",
       "context_context_message_assistant_tool_call_preserves_invocation",
       "context_context_message_tool_result_preserves_text_and_blocks",
@@ -5207,6 +5224,44 @@
       "context_workingcontext_set_tools",
       "context_workingcontext_tools",
       "context_workingcontext_tools_mut"
+    ],
+    "58": [
+      "approval",
+      "approval_append_session_event",
+      "approval_approval_buttons",
+      "approval_approval_outcome_label",
+      "approval_approval_request",
+      "approval_approval_timeout_defaults_when_override_is_missing_or_invalid",
+      "approval_approval_timeout_uses_positive_override",
+      "approval_approval_wait_timeout",
+      "approval_approval_wait_timeout_from_env",
+      "approval_approvalcallbackaction",
+      "approval_approvalcallbackaction_decode",
+      "approval_approvalcallbackaction_encode",
+      "approval_approvalcallbackaction_inbound_command",
+      "approval_approvaldecision",
+      "approval_approvalfield",
+      "approval_approvalfilediff",
+      "approval_approvaloutcome",
+      "approval_approvaloutcome_allow_execution",
+      "approval_approvaloutcome_deny",
+      "approval_approvalprompt",
+      "approval_approvalrequest",
+      "approval_approvalrule",
+      "approval_awakeable_decision_round_trips_through_json_payload",
+      "approval_callback_data_roundtrips",
+      "approval_handle_approval_gate",
+      "approval_parse_awakeable_decision",
+      "approval_policyaction",
+      "approval_policyscope",
+      "approval_prepare_outbound_message",
+      "approval_prepare_outbound_message_adds_inline_buttons_when_supported",
+      "approval_prepare_outbound_message_degrades_to_text_prompt_without_buttons",
+      "approval_renderer_builds_platform_approval_buttons",
+      "approval_risk_icon",
+      "approval_risklevel",
+      "approval_serialize_awakeable_decision",
+      "approval_text_fallback"
     ],
     "59": [
       "discord",
@@ -5461,6 +5516,39 @@
       "promotion_workspacepromotion_validate_workspace"
     ],
     "66": [
+      "adapters",
+      "adapters_adaptererror",
+      "adapters_answer_span_bytes",
+      "adapters_anthropic_adapter_maps_document_index",
+      "adapters_anthropic_chunk",
+      "adapters_anthropiccitations",
+      "adapters_anthropiccitations_extract_citations",
+      "adapters_anthropiccitations_provider",
+      "adapters_cascade_flags_vendor_hallucinated_citation",
+      "adapters_chunkref",
+      "adapters_chunks",
+      "adapters_chunks_by_provider_id",
+      "adapters_citation_from_chunk",
+      "adapters_citationadapter",
+      "adapters_cited_text",
+      "adapters_cohere_adapter_maps_document_sources",
+      "adapters_coheredocuments",
+      "adapters_coheredocuments_extract_citations",
+      "adapters_coheredocuments_provider",
+      "adapters_collect_named_arrays",
+      "adapters_collect_object_named",
+      "adapters_grounding_metadata_values",
+      "adapters_number_f32",
+      "adapters_openai_adapter_maps_file_annotations",
+      "adapters_openaiannotations",
+      "adapters_openaiannotations_extract_citations",
+      "adapters_openaiannotations_provider",
+      "adapters_vertex_adapter_maps_grounding_supports",
+      "adapters_vertexgrounding",
+      "adapters_vertexgrounding_extract_citations",
+      "adapters_vertexgrounding_provider"
+    ],
+    "67": [
       "ingestion_e2e",
       "ingestion_e2e_changelog_count",
       "ingestion_e2e_complex_ingestion_turn_writes_facts_pii_changelog_and_dedup",
@@ -5493,7 +5581,7 @@
       "ingestion_e2e_wait_for_fact_count",
       "ingestion_e2e_wait_for_live"
     ],
-    "67": [
+    "68": [
       "normalization",
       "normalization_approval_diffs_for",
       "normalization_approval_fields_for",
@@ -5526,7 +5614,7 @@
       "policy_toolrouter_prepare_invocation",
       "policy_toolrouter_store_approval_rule"
     ],
-    "68": [
+    "69": [
       "instrumentation",
       "instrumentation_calculate_cost",
       "instrumentation_calculate_cost_with_cached",
@@ -5558,7 +5646,7 @@
       "instrumentation_serialize_provider_debug_payload",
       "instrumentation_truncate_attribute_value"
     ],
-    "69": [
+    "70": [
       "intent_manager",
       "intent_manager_adoptcatalogintentrequest",
       "intent_manager_average_embeddings",
@@ -5590,7 +5678,7 @@
       "intent_manager_renameintentrequest",
       "intent_manager_rollbacklearningbatchrequest"
     ],
-    "70": [
+    "71": [
       "live_cache_audit",
       "live_cache_audit_auditedprovider",
       "live_cache_audit_auditedprovider_capabilities",
@@ -5622,7 +5710,7 @@
       "live_cache_audit_static_prefix_message_count",
       "live_cache_audit_toolsummary"
     ],
-    "71": [
+    "72": [
       "mcp_proxy",
       "mcp_proxy_credential_from_env",
       "mcp_proxy_default_scope_for",
@@ -5653,7 +5741,7 @@
       "mcp_proxy_proxy_creates_tokens_and_injects_headers",
       "mcp_proxy_proxygrant"
     ],
-    "72": [
+    "73": [
       "actions",
       "command_palette",
       "command_palette_commandentry",
@@ -5684,7 +5772,7 @@
       "keybindings",
       "keybindings_register_keybindings"
     ],
-    "73": [
+    "74": [
       "write",
       "write_actor_uuid",
       "write_age_table",
@@ -5714,7 +5802,7 @@
       "write_validate_scope_shape",
       "write_vector_item_from_intent"
     ],
-    "74": [
+    "75": [
       "live_observability",
       "live_observability_fieldrecorder",
       "live_observability_fieldrecorder_finish",
@@ -5744,7 +5832,7 @@
       "live_observability_tracerecorder_spans_named",
       "live_observability_wait_for_status"
     ],
-    "75": [
+    "76": [
       "queries",
       "queries_approval_rule_from_row",
       "queries_catalog_intent_from_row",
@@ -5774,7 +5862,7 @@
       "queries_task_segment_from_row",
       "queries_tenant_intent_from_row"
     ],
-    "76": [
+    "77": [
       "local_tools",
       "local_tools_approval_prompt_str_replace_diff_is_surgical",
       "local_tools_approval_prompt_uses_remembered_workspace_root_for_commands",
@@ -5804,7 +5892,36 @@
       "local_tools_str_replace_updates_only_the_target_region",
       "local_tools_test_session_store"
     ],
-    "77": [
+    "78": [
+      "records",
+      "records_ageintrospection",
+      "records_backendintrospection",
+      "records_citation",
+      "records_citationlineage",
+      "records_contextchunk",
+      "records_contextlineage",
+      "records_fusedhit",
+      "records_generationlineage",
+      "records_graphpath",
+      "records_lineage_event_serializes_with_kind_and_record",
+      "records_lineageevent",
+      "records_lineageevent_record_kind",
+      "records_lineageevent_turn_id",
+      "records_pgvectorintrospection",
+      "records_recordkind",
+      "records_recordkind_as_i16",
+      "records_rerankhit",
+      "records_retrievallineage",
+      "records_retrievalstage",
+      "records_stagetimings",
+      "records_tokenusage",
+      "records_toolcallsummary",
+      "records_truncationevent",
+      "records_turbopufferintrospection",
+      "records_vechit",
+      "records_verifierresult"
+    ],
+    "79": [
       "telegram",
       "telegram_channel_from_chat_and_reply",
       "telegram_handle_callback_query",
@@ -5833,7 +5950,34 @@
       "telegram_telegrammessageref_from_message",
       "telegram_telegramtarget"
     ],
-    "78": [
+    "80": [
+      "cascade",
+      "cascade_cascadeconfig",
+      "cascade_cascadeconfig_default",
+      "cascade_cascadeverifier",
+      "cascade_cascadeverifier_bm25_only",
+      "cascade_cascadeverifier_new",
+      "cascade_cascadeverifier_verify",
+      "cascade_cascadeverifier_verify_all",
+      "cascade_cascadeverifier_verify_uncited_answer",
+      "cascade_sentence_for",
+      "verifiers",
+      "verifiers_bm25verifier",
+      "verifiers_bm25verifier_new",
+      "verifiers_bm25verifier_score",
+      "verifiers_bm25verifier_verify",
+      "verifiers_citationverifier",
+      "verifiers_contradiction_score",
+      "verifiers_nliverifier",
+      "verifiers_nliverifier_model_name",
+      "verifiers_nliverifier_new",
+      "verifiers_nliverifier_verify",
+      "verifiers_score_bm25",
+      "verifiers_tokenize",
+      "verifiers_tokenize_list",
+      "verifiers_verificationinput"
+    ],
+    "81": [
       "embedding",
       "embedding_add_feature",
       "embedding_build_embedding_provider_from_config",
@@ -5860,59 +6004,7 @@
       "embedding_token_aliases",
       "embedding_tokenize"
     ],
-    "79": [
-      "embedder",
-      "embedder_cohereembeddings",
-      "embedder_cohereembedrequest",
-      "embedder_cohereembedresponse",
-      "embedder_coherev4embedder",
-      "embedder_coherev4embedder_dimension",
-      "embedder_coherev4embedder_embed",
-      "embedder_coherev4embedder_embed_chunk",
-      "embedder_coherev4embedder_model_name",
-      "embedder_coherev4embedder_model_version",
-      "embedder_coherev4embedder_new",
-      "embedder_coherev4embedder_with_client",
-      "embedder_coherev4embedder_with_endpoint",
-      "embedder_embedder",
-      "models",
-      "models_by_provider",
-      "models_by_provider_partitions_correctly",
-      "models_catalog_has_unique_ids",
-      "models_claude_opus_has_million_token_context",
-      "models_context_window",
-      "models_find",
-      "models_google_catalog_includes_latest_gemini_3_series",
-      "models_gpt_5_4_has_extended_context",
-      "models_providermodel"
-    ],
-    "80": [
-      "records",
-      "records_ageintrospection",
-      "records_backendintrospection",
-      "records_contextchunk",
-      "records_contextlineage",
-      "records_fusedhit",
-      "records_generationlineage",
-      "records_graphpath",
-      "records_lineage_event_serializes_with_kind_and_record",
-      "records_lineageevent",
-      "records_lineageevent_record_kind",
-      "records_lineageevent_turn_id",
-      "records_pgvectorintrospection",
-      "records_recordkind",
-      "records_recordkind_as_i16",
-      "records_rerankhit",
-      "records_retrievallineage",
-      "records_retrievalstage",
-      "records_stagetimings",
-      "records_tokenusage",
-      "records_toolcallsummary",
-      "records_truncationevent",
-      "records_turbopufferintrospection",
-      "records_vechit"
-    ],
-    "81": [
+    "82": [
       "blob",
       "blob_claim_check_from_value",
       "blob_collect_blob_refs",
@@ -5938,7 +6030,7 @@
       "blob_preview_text",
       "blob_replace_value_at_path"
     ],
-    "82": [
+    "83": [
       "file_search",
       "file_search_build_file_search_output",
       "file_search_collect_matches",
@@ -5964,7 +6056,7 @@
       "file_search_skips_python_venv_directory",
       "file_search_skips_vendor_directory"
     ],
-    "83": [
+    "84": [
       "empty_state",
       "empty_state_empty_state",
       "empty_state_empty_state_any",
@@ -5990,7 +6082,7 @@
       "skill_list_skilllist_new",
       "skill_list_skilllist_render"
     ],
-    "84": [
+    "85": [
       "pgvector_store",
       "pgvector_store_basis_vector",
       "pgvector_store_cross_tenant_knn_cannot_see_other_workspace_vectors",
@@ -6015,7 +6107,7 @@
       "pgvector_store_upsert_items",
       "pgvector_store_vector_item"
     ],
-    "85": [
+    "86": [
       "scripted",
       "scripted_scriptedblock",
       "scripted_scriptedblock_into_completion_content",
@@ -6039,7 +6131,7 @@
       "scripted_scriptedresponse_tool_call",
       "scripted_scriptedresponse_with_usage"
     ],
-    "86": [
+    "87": [
       "runtime_context",
       "runtime_context_build_runtime_reminder",
       "runtime_context_capabilities",
@@ -6063,7 +6155,7 @@
       "runtime_context_systemclock_now",
       "runtime_context_workspace_root_from_context"
     ],
-    "87": [
+    "88": [
       "analytics",
       "analytics_analytics_window_start",
       "analytics_cache_daily_metric_from_row",
@@ -6086,7 +6178,7 @@
       "analytics_toolcallsummary",
       "analytics_workspaceanalyticssummary"
     ],
-    "88": [
+    "89": [
       "message_bubble",
       "message_bubble_agent_bubble",
       "message_bubble_approval_card",
@@ -6109,7 +6201,7 @@
       "messages_toolinvocation",
       "messages_truncate"
     ],
-    "89": [
+    "90": [
       "openai_filter",
       "openai_filter_normalize_base_url",
       "openai_filter_openaiprivacyfilterclassifier",
@@ -6131,7 +6223,7 @@
       "openai_filter_servicespan",
       "openai_filter_servicespan_try_into_span"
     ],
-    "90": [
+    "91": [
       "model",
       "model_credential",
       "model_modelcapabilities",
@@ -6153,7 +6245,7 @@
       "model_tokenpricing",
       "model_toolcallformat"
     ],
-    "91": [
+    "92": [
       "orchestrator_contract",
       "orchestrator_contract_assert_blank_session_waits_for_first_message",
       "orchestrator_contract_assert_processes_multiple_queued_messages_fifo",
@@ -6175,7 +6267,7 @@
       "orchestrator_contract_wait_for_status",
       "orchestrator_contract_wait_for_status_transition"
     ],
-    "92": [
+    "93": [
       "postgres_store",
       "postgres_store_approx_eq",
       "postgres_store_catalog_adoption_creates_tenant_intent_with_catalog_ref",
@@ -6197,7 +6289,7 @@
       "postgres_store_tenant_intents_start_blank_and_can_be_created",
       "postgres_store_with_test_store"
     ],
-    "93": [
+    "94": [
       "schema",
       "schema_compile_for_gemini",
       "schema_compile_for_gemini_removes_additional_properties_recursively",
@@ -6208,6 +6300,7 @@
       "schema_compile_for_openai_strict_preserves_existing_required_properties",
       "schema_compile_for_openai_strict_strips_validation_only_keywords",
       "schema_ensure_schema",
+      "schema_lineage_arrow_schema",
       "schema_make_gemini_compatible",
       "schema_make_nullable",
       "schema_make_strict_compatible",
@@ -6218,7 +6311,29 @@
       "schema_quote_identifier",
       "schema_strip_validation_keywords"
     ],
-    "94": [
+    "95": [
+      "segments",
+      "segments_activesegment",
+      "segments_completed_from_active",
+      "segments_deterministic_segment_id",
+      "segments_first_message_creates_segment_zero",
+      "segments_follow_up_does_not_create_transition",
+      "segments_malformed_rewrite_metadata_only_creates_first_segment",
+      "segments_new_task_creates_next_segment_with_previous_id",
+      "segments_rewrite",
+      "segments_segmentcompleted",
+      "segments_segmentcompleted_into_event",
+      "segments_segmentcompletion",
+      "segments_segmentstarted",
+      "segments_segmentstarted_into_event",
+      "segments_segmenttracker",
+      "segments_segmenttracker_check_transition",
+      "segments_segmenttracker_transition_from_metadata",
+      "segments_segmenttransition",
+      "segments_tasksegment",
+      "segments_tasksegment_active_view"
+    ],
+    "96": [
       "live_provider_matrix",
       "live_provider_matrix_available_live_providers",
       "live_provider_matrix_complete_until",
@@ -6238,7 +6353,7 @@
       "live_provider_matrix_looks_like_four_answer",
       "live_provider_matrix_normalized_response_text"
     ],
-    "95": [
+    "97": [
       "construction",
       "construction_default_cloud_provider",
       "construction_toolrouter",
@@ -6258,7 +6373,7 @@
       "construction_toolrouter_with_rule_store",
       "construction_toolrouter_with_session_store"
     ],
-    "96": [
+    "98": [
       "integration_steps_72_77",
       "integration_steps_72_77_assert_replay_flattening",
       "integration_steps_72_77_assert_turn_latency_spans",
@@ -6278,7 +6393,7 @@
       "integration_steps_72_77_steps_72_77_e2e",
       "integration_steps_72_77_toolrun"
     ],
-    "97": [
+    "99": [
       "openai_provider",
       "openai_provider_openai_provider_does_not_retry_after_partial_stream_output",
       "openai_provider_openai_provider_drops_oversized_metadata_values",
@@ -6297,7 +6412,7 @@
       "openai_provider_sse_response",
       "openai_provider_tool_call_stream"
     ],
-    "98": [
+    "100": [
       "policies",
       "policies_approvalrulestore",
       "policies_glob_match",
@@ -6316,26 +6431,7 @@
       "policies_toolpolicycontext",
       "policies_toolpolicycontext_from_session"
     ],
-    "99": [
-      "bridge",
-      "bridge_servicebridge",
-      "bridge_servicebridge_chat_runtime",
-      "bridge_servicebridge_config",
-      "bridge_servicebridge_mark_error",
-      "bridge_servicebridge_mark_ready",
-      "bridge_servicebridge_new",
-      "bridge_servicebridge_status",
-      "bridge_servicebridge_tokio_handle",
-      "bridge_servicebridgehandle",
-      "bridge_servicebridgehandle_entity",
-      "bridge_servicebridgehandle_global",
-      "bridge_servicestatus",
-      "bridge_spawn_blocking_into",
-      "bridge_spawn_into",
-      "runtime",
-      "runtime_build_tokio_runtime"
-    ],
-    "100": [
+    "101": [
       "settings_panel",
       "settings_panel_settingsdismissed",
       "settings_panel_settingspage",
@@ -6353,7 +6449,7 @@
       "settings_panel_settingssection_id",
       "settings_panel_settingssection_label"
     ],
-    "101": [
+    "102": [
       "node",
       "node_bump_last_accessed",
       "node_decode_error",
@@ -6370,7 +6466,7 @@
       "node_piiclass_as_str",
       "node_piiclass_from_str"
     ],
-    "102": [
+    "103": [
       "vault",
       "vault_decrypt_bytes",
       "vault_encrypt_bytes",
@@ -6387,7 +6483,7 @@
       "vault_filevault_persist_store",
       "vault_filevault_set"
     ],
-    "103": [
+    "104": [
       "intent_discovery",
       "intent_discovery_average_embeddings",
       "intent_discovery_average_embeddings_skips_mismatched_vectors",
@@ -6404,7 +6500,7 @@
       "intent_discovery_parse_clusters_accepts_fenced_json",
       "intent_discovery_prompt_requires_minimum_cluster_size_and_member_indices"
     ],
-    "104": [
+    "105": [
       "session_search",
       "session_search_event_snippet",
       "session_search_event_tool_id",
@@ -6421,7 +6517,23 @@
       "session_search_sessionsearchtool_policy_spec",
       "session_search_truncate"
     ],
-    "105": [
+    "106": [
+      "embedder",
+      "embedder_cohereembeddings",
+      "embedder_cohereembedrequest",
+      "embedder_cohereembedresponse",
+      "embedder_coherev4embedder",
+      "embedder_coherev4embedder_dimension",
+      "embedder_coherev4embedder_embed",
+      "embedder_coherev4embedder_embed_chunk",
+      "embedder_coherev4embedder_model_name",
+      "embedder_coherev4embedder_model_version",
+      "embedder_coherev4embedder_new",
+      "embedder_coherev4embedder_with_client",
+      "embedder_coherev4embedder_with_endpoint",
+      "embedder_embedder"
+    ],
+    "107": [
       "chat_panel",
       "chat_panel_chatpanel",
       "chat_panel_chatpanel_apply_runtime_event",
@@ -6437,7 +6549,7 @@
       "chat_panel_chatpanel_toggle_tool",
       "chat_panel_pendingtoast"
     ],
-    "106": [
+    "108": [
       "neon_branch_manager",
       "neon_branch_manager_live_neon_config",
       "neon_branch_manager_live_neon_config_with_limit",
@@ -6452,7 +6564,7 @@
       "neon_branch_manager_resolve_parent_branch_id",
       "neon_branch_manager_wait_for_workspace_session_count"
     ],
-    "107": [
+    "109": [
       "injection",
       "injection_canary_detection_works",
       "injection_check_canary",
@@ -6467,7 +6579,7 @@
       "injection_working_context",
       "injection_wrap_untrusted_tool_output"
     ],
-    "108": [
+    "110": [
       "query_planner",
       "query_planner_planner_classify_and_seed_dependency_query",
       "query_planner_planner_classify_vector_query_and_builds_retrieval_request",
@@ -6482,7 +6594,7 @@
       "query_planner_seedgraph_neighbors",
       "query_planner_seedgraph_supersede_node"
     ],
-    "109": [
+    "111": [
       "window_state",
       "window_state_missing_file_falls_back_to_default",
       "window_state_round_trips_through_disk",
@@ -6497,7 +6609,21 @@
       "window_state_windowstate_save_to_default_path",
       "window_state_windowstate_validate_bounds"
     ],
-    "110": [
+    "112": [
+      "ctx",
+      "ctx_current_runtime",
+      "ctx_ingestctx",
+      "ctx_ingestctx_new",
+      "ctx_ingestruntime",
+      "ctx_ingestruntime_new",
+      "ctx_ingestruntime_pool",
+      "ctx_install_runtime",
+      "ctx_install_runtime_with_pool",
+      "ctx_orchestratorctx",
+      "ctx_orchestratorctx_current",
+      "ctx_orchestratorctx_install"
+    ],
+    "113": [
       "age",
       "age_agegraphstore",
       "age_agegraphstore_begin",
@@ -6511,7 +6637,7 @@
       "age_agegraphstore_vector",
       "age_agegraphstore_with_vector_store"
     ],
-    "111": [
+    "114": [
       "continuation_signal",
       "continuation_signal_continuationinput",
       "continuation_signal_correction_scores_low",
@@ -6525,7 +6651,7 @@
       "continuation_signal_thanks_scores_acknowledgment_high",
       "continuation_signal_token_counts"
     ],
-    "112": [
+    "115": [
       "terminal",
       "terminal_format_scores",
       "terminal_render_includes_case_names_and_summary",
@@ -6539,7 +6665,7 @@
       "terminal_terminalreporter_status_label",
       "terminal_truncate"
     ],
-    "113": [
+    "116": [
       "badges",
       "badges_risk_badge",
       "badges_risk_color",
@@ -6553,7 +6679,7 @@
       "session_row_sessionrow_render",
       "session_row_truncate_single_line"
     ],
-    "114": [
+    "117": [
       "concept_applied_workspace",
       "concept_approval_rules",
       "concept_moa_cli_exec",
@@ -6567,7 +6693,20 @@
       "doc_e2e_test_plan",
       "doc_e2e_watch_for"
     ],
-    "115": [
+    "118": [
+      "exporter",
+      "exporter_coldtierconfig",
+      "exporter_coldtierconfig_default",
+      "exporter_coldtierexporter",
+      "exporter_coldtierexporter_ensure_progress_table",
+      "exporter_coldtierexporter_flush_one_window",
+      "exporter_coldtierexporter_new",
+      "exporter_coldtierexporter_run",
+      "exporter_exporterstats",
+      "exporter_partition_key",
+      "exporter_render_parquet_rows"
+    ],
+    "119": [
       "loop_detector",
       "loop_detector_loop_detector_disabled_at_zero_threshold",
       "loop_detector_loop_detector_does_not_trigger_on_varied_calls",
@@ -6580,7 +6719,7 @@
       "loop_detector_loopdetector_record_turn",
       "loop_detector_loopdetector_reset"
     ],
-    "116": [
+    "120": [
       "classifier",
       "classifier_best_within_threshold",
       "classifier_classification_text",
@@ -6593,7 +6732,20 @@
       "classifier_intentclassifier_new",
       "classifier_intentclassifier_with_threshold"
     ],
-    "117": [
+    "121": [
+      "render",
+      "render_load_addenda",
+      "render_map_sqlx_error",
+      "render_render",
+      "render_set_app_role",
+      "render_skilladdendum",
+      "render_skillrendercontext",
+      "render_skillrendercontext_for_app_role",
+      "render_skillrendercontext_new",
+      "render_skillrendercontext_pool",
+      "render_skillrendercontext_with_addendum_limit"
+    ],
+    "122": [
       "session_list",
       "session_list_sessionlist",
       "session_list_sessionlist_create_session",
@@ -6606,7 +6758,7 @@
       "session_list_sessionlist_select_session",
       "session_list_sessionselected"
     ],
-    "118": [
+    "123": [
       "workspace_store",
       "workspace_store_preparedtoolapproval",
       "workspace_store_preparetoolapprovalrequest",
@@ -6618,7 +6770,7 @@
       "workspace_store_workspacestoreimpl_prepare_tool_approval",
       "workspace_store_workspacestoreimpl_store_approval_rule"
     ],
-    "119": [
+    "124": [
       "instructions",
       "instructions_combine_workspace_instructions",
       "instructions_instruction_processor_appends_config_backed_sections",
@@ -6630,7 +6782,7 @@
       "instructions_instructionprocessor_process",
       "instructions_instructionprocessor_stage"
     ],
-    "120": [
+    "125": [
       "session_sidebar",
       "session_sidebar_sessionsidebar",
       "session_sidebar_sessionsidebar_memory_list",
@@ -6642,7 +6794,7 @@
       "session_sidebar_sessionsidebar_set_active",
       "session_sidebar_sessionsidebar_skill_list"
     ],
-    "121": [
+    "126": [
       "identity",
       "identity_identity_processor_appends_system_prompt",
       "identity_identity_prompt_includes_coding_guardrails",
@@ -6653,7 +6805,7 @@
       "identity_identityprocessor_process",
       "identity_identityprocessor_stage"
     ],
-    "122": [
+    "127": [
       "backend",
       "backend_hipaa_tier_requires_baa_enabled_turbopuffer_client",
       "backend_pg_store",
@@ -6663,7 +6815,7 @@
       "backend_turbopuffer_selected_when_configured",
       "backend_vector_store_for_workspace"
     ],
-    "123": [
+    "128": [
       "session_vo",
       "session_vo_session_vo_cancel_sets_flag",
       "session_vo_session_vo_destroy_clears_state",
@@ -6673,7 +6825,7 @@
       "session_vo_test_message",
       "session_vo_test_meta"
     ],
-    "124": [
+    "129": [
       "health",
       "health_health",
       "health_healthimpl",
@@ -6683,7 +6835,7 @@
       "health_versioninfo",
       "health_versioninfo_current"
     ],
-    "125": [
+    "130": [
       "self_assessment_signal",
       "self_assessment_signal_clarification_scores_low",
       "self_assessment_signal_completion_language_scores_high",
@@ -6693,7 +6845,7 @@
       "self_assessment_signal_score",
       "self_assessment_signal_unclear_response_is_neutral"
     ],
-    "126": [
+    "131": [
       "structural_signal",
       "structural_signal_above_two_sigma_scores_anomalous",
       "structural_signal_baseline",
@@ -6703,7 +6855,7 @@
       "structural_signal_segmentmetrics",
       "structural_signal_within_one_sigma_scores_normal"
     ],
-    "127": [
+    "132": [
       "wcag",
       "wcag_black_on_white_is_max_ratio",
       "wcag_classify",
@@ -6713,7 +6865,7 @@
       "wcag_relative_luminance",
       "wcag_wcagpass"
     ],
-    "128": [
+    "133": [
       "lexical",
       "lexical_lexicalstore",
       "lexical_lexicalstore_lookup_seeds",
@@ -6722,7 +6874,7 @@
       "lexical_lexicalstore_scoped_for_app_role",
       "lexical_lookup_seed_rows"
     ],
-    "129": [
+    "134": [
       "fjall_journal",
       "fjall_journal_journal",
       "fjall_journal_journal_ack_range",
@@ -6731,7 +6883,7 @@
       "fjall_journal_journal_open",
       "fjall_journal_journal_replay"
     ],
-    "130": [
+    "135": [
       "query_rewrite_live",
       "query_rewrite_live_capturingprovider",
       "query_rewrite_live_capturingprovider_capabilities",
@@ -6740,7 +6892,7 @@
       "query_rewrite_live_capturingprovider_new",
       "query_rewrite_live_live_query_rewriter_resolves_coreference_without_new_entities"
     ],
-    "131": [
+    "136": [
       "trajectory_match",
       "trajectory_match_exact_match_scores_one",
       "trajectory_match_lcs_len",
@@ -6749,7 +6901,7 @@
       "trajectory_match_trajectorymatchevaluator_evaluate",
       "trajectory_match_trajectorymatchevaluator_name"
     ],
-    "132": [
+    "137": [
       "output_match",
       "output_match_contains_rules_pass_when_all_terms_match",
       "output_match_evaluate_output",
@@ -6758,7 +6910,7 @@
       "output_match_outputmatchevaluator_evaluate",
       "output_match_outputmatchevaluator_name"
     ],
-    "133": [
+    "138": [
       "live_e2e_anthropic_doc",
       "live_e2e_google_doc",
       "live_e2e_marker_concept",
@@ -6767,7 +6919,7 @@
       "provider_google",
       "provider_openai"
     ],
-    "134": [
+    "139": [
       "classify_smoke",
       "classify_smoke_classifier_fails_closed_on_network_error",
       "classify_smoke_classify_smoke_maps_ssn_to_phi_and_clean_text_to_none",
@@ -6775,7 +6927,7 @@
       "classify_smoke_real_model_aliases_map_to_moa_categories",
       "classify_smoke_spawn_test_service"
     ],
-    "135": [
+    "140": [
       "scope",
       "scope_ancestors_global_is_just_global",
       "scope_ancestors_user_is_three_tier",
@@ -6783,7 +6935,7 @@
       "scope_serde_global_uses_tagged_shape",
       "scope_serde_round_trip_all_three"
     ],
-    "136": [
+    "141": [
       "threshold",
       "threshold_cost_over_budget_fails_boolean_score",
       "threshold_limit_score",
@@ -6791,7 +6943,7 @@
       "threshold_thresholdevaluator_evaluate",
       "threshold_thresholdevaluator_name"
     ],
-    "137": [
+    "142": [
       "notifications",
       "notifications_error",
       "notifications_info",
@@ -6799,7 +6951,7 @@
       "notifications_success",
       "notifications_warning"
     ],
-    "138": [
+    "143": [
       "providers_tab",
       "providers_tab_collect_providers",
       "providers_tab_describe_provider",
@@ -6807,240 +6959,244 @@
       "providers_tab_providerinfo",
       "providers_tab_render_providers_tab"
     ],
-    "139": [
+    "144": [
       "shell",
       "shell_push_sub_command",
       "shell_split_shell_chain",
       "shell_split_shell_chain_breaks_on_supported_operators",
       "shell_split_shell_chain_falls_back_to_trimmed_input_on_parse_failure"
     ],
-    "140": [
+    "145": [
       "db_scopedconn_p",
       "db_scopedconn_p_apply_gucs",
       "db_scopedconn_p_begin",
       "db_scopedconn_p_commit",
       "db_scopedconn_p_rollback"
     ],
-    "141": [
+    "146": [
       "diff",
       "diff_approximate_tokens",
       "diff_compute_unified_diff",
       "diff_small_edit_diff_is_substantially_smaller_than_full_file",
       "diff_unified_diff_contains_standard_headers_and_hunks"
     ],
-    "142": [
+    "147": [
       "audit_smoke",
       "audit_smoke_audit_writes_log_line",
       "audit_smoke_pgaudit_migration_marks_phi_tables_and_auditor_view",
       "audit_smoke_pgaudit_smoke_requested",
       "audit_smoke_test_database_url"
     ],
-    "143": [
+    "148": [
       "gemini_live",
       "gemini_live_gemini_live_completion_returns_expected_answer",
       "gemini_live_gemini_live_model",
       "gemini_live_gemini_live_web_search_returns_current_information",
       "gemini_live_looks_like_four_answer"
     ],
-    "144": [
+    "149": [
       "anthropic_provider",
       "anthropic_provider_provider_retries_after_rate_limit",
       "anthropic_provider_provider_returns_error_after_partial_output_without_retrying",
       "anthropic_provider_provider_streams_tokens_incrementally",
       "anthropic_provider_provider_streams_tool_use_blocks"
     ],
-    "145": [
+    "150": [
       "statusbar",
       "statusbar_moastatusbar",
       "statusbar_moastatusbar_new",
       "statusbar_moastatusbar_render",
       "statusbar_moastatusbar_render_metric"
     ],
-    "146": [
+    "151": [
       "event_color",
       "event_color_event_color",
       "event_color_eventcolor",
       "event_color_eventcolor_color",
       "event_color_eventcolor_from_event"
     ],
-    "147": [
+    "152": [
       "cohere_live",
       "cohere_live_cohere_embed_v4_returns_1024_dimensional_float_embeddings",
       "cohere_live_live_cohere_key",
       "cohere_live_live_cohere_requested"
     ],
-    "148": [
+    "153": [
       "turbopuffer_live",
       "turbopuffer_live_basis_vector",
       "turbopuffer_live_live_store",
       "turbopuffer_live_turbopuffer_live_round_trip"
     ],
-    "149": [
+    "154": [
       "db",
       "db_map_sqlx_error",
       "db_scopedconn",
       "db_scopedconn_as_mut"
     ],
-    "150": [
+    "155": [
       "budget",
       "budget_budget_message_includes_limit_and_reset_window",
       "budget_enforce_workspace_budget",
       "budget_format_budget_exhausted_message"
     ],
-    "151": [
+    "156": [
       "tool_success",
       "tool_success_toolsuccessevaluator",
       "tool_success_toolsuccessevaluator_evaluate",
       "tool_success_toolsuccessevaluator_name"
     ],
-    "152": [
+    "157": [
       "settings_integration",
       "settings_integration_removing_from_auto_approve_persists",
       "settings_integration_scratch_dir",
       "settings_integration_settings_mutations_round_trip_through_config_file"
     ],
-    "153": [
+    "158": [
       "titlebar",
       "titlebar_moatitlebar",
       "titlebar_moatitlebar_new",
       "titlebar_moatitlebar_render"
     ],
-    "154": [
+    "159": [
       "general_tab",
       "general_tab_fmt_tokens",
       "general_tab_render_general_tab",
       "general_tab_render_model_card"
     ],
-    "155": [
+    "160": [
       "error_banner",
       "error_banner_error_banner",
       "error_banner_error_banner_any",
       "error_banner_with_retry"
     ],
-    "156": [
+    "161": [
       "live_sidecar",
       "live_sidecar_live_service_url",
       "live_sidecar_live_sidecar_classifies_private_and_clean_text"
     ],
-    "157": [
+    "162": [
       "mock",
       "mock_mockclassifier",
       "mock_mockclassifier_classify"
     ],
-    "158": [
+    "163": [
       "openai_live",
       "openai_live_openai_live_completion_returns_expected_answer",
       "openai_live_openai_live_web_search_emits_provider_tool_result"
     ],
-    "159": [
+    "164": [
       "anthropic_live",
       "anthropic_live_anthropic_live_completion_returns_expected_answer",
       "anthropic_live_anthropic_live_web_search_emits_provider_tool_result"
     ],
-    "160": [
+    "165": [
       "chat_harness",
       "chat_harness_main",
       "chat_harness_run_prompt"
     ],
-    "161": [
+    "166": [
       "sidebar_tabs",
       "sidebar_tabs_sidebartab",
       "sidebar_tabs_sidebartab_label"
     ],
-    "162": [
+    "167": [
       "permissions_tab",
       "permissions_tab_render_permissions_tab",
       "permissions_tab_tool_list_card"
     ],
-    "163": [
+    "168": [
       "init",
       "init_initialize_services",
       "init_initializedservices"
     ],
-    "164": [
+    "169": [
       "perf_gate",
       "perf_gate_args",
       "perf_gate_main"
     ],
-    "165": [
+    "170": [
+      "partition_layout",
+      "partition_layout_partition_key_uses_workspace_and_day_layout"
+    ],
+    "171": [
       "identifiers_modelid",
       "identifiers_modelid_default"
     ],
-    "166": [
+    "172": [
       "identifiers_toolcallid",
       "identifiers_toolcallid_from"
     ],
-    "167": [
+    "173": [
       "http",
       "http_build_http_client"
     ],
-    "168": [
+    "174": [
       "session_engine",
       "session_engine_session_requires_processing"
     ],
-    "169": [
+    "175": [
       "mod_objectcontext_a",
       "mod_objectcontext_a_get_json"
     ],
-    "170": [
+    "176": [
       "mod_sharedobjectcontext_a",
       "mod_sharedobjectcontext_a_get_json"
     ],
-    "171": [
+    "177": [
       "adapter",
       "adapter_agentadapter"
     ],
-    "172": [
+    "178": [
       "docker_hardening",
       "docker_hardening_docker_container_runs_with_hardening"
     ],
-    "173": [
+    "179": [
       "engine_live",
       "engine_live_live_run_single_produces_eval_result"
     ],
-    "174": [
+    "180": [
       "helpers_chatruntime",
       "helpers_chatruntime_set_model"
     ],
-    "175": [
+    "181": [
       "keyboard_shortcuts_tab",
       "keyboard_shortcuts_tab_render_keyboard_shortcuts_tab"
     ],
-    "176": [
+    "182": [
       "icon_button",
       "icon_button_icon_button"
     ],
-    "177": [
+    "183": [
       "section",
       "section_section_card"
     ],
-    "178": [
+    "184": [
       "segmented",
       "segmented_segmented"
     ],
-    "179": [
+    "185": [
       "markdown",
       "markdown_markdown_style"
     ],
-    "180": [
+    "186": [
       "nav",
       "nav_nav_item"
     ],
-    "181": [
+    "187": [
       "perf_gate_perfgateconfig",
       "perf_gate_perfgateconfig_from"
     ],
-    "182": [
+    "188": [
       "bootstrap_global_skills",
       "bootstrap_global_skills_main"
     ],
-    "183": [
+    "189": [
       "macros"
     ],
-    "184": [
+    "190": [
       "integration"
     ],
-    "185": [
+    "191": [
       "restate_register"
     ]
   }

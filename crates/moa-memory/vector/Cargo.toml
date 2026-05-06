@@ -21,3 +21,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 moa-session = { path = "../../moa-session" }
+wiremock = "0.6"

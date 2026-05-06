@@ -17,7 +17,7 @@ use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, reserve_orchestrator_ports,
 };
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:5432/moa";
+const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:25432/moa";
 
 async fn register_deployment(endpoint_url: &str) -> Result<()> {
     for _attempt in 0..15 {

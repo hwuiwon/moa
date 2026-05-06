@@ -77,6 +77,9 @@ pub async fn run_exec(config: MoaConfig, prompt: String) -> Result<()> {
         Err(error) if terminated_after_interrupt && error.is_cancelled() => {}
         Err(error) => return Err(error).context("exec task join failure"),
     }
+    if let Err(error) = runtime.shutdown_background_workers().await {
+        eprintln!("warning: failed to drain background workers: {error}");
+    }
 
     if io::stdout().is_terminal() {
         println!("{final_output}");

@@ -162,6 +162,26 @@ impl MoaConfig {
                 "memory.embedding_model",
                 Self::default().memory.embedding_model,
             )?
+            .set_default(
+                "memory.vector.embedder.name",
+                Self::default().memory.vector.embedder.name,
+            )?
+            .set_default(
+                "memory.vector.embedder.output_dim",
+                Self::default().memory.vector.embedder.output_dim as i64,
+            )?
+            .set_default(
+                "memory.vector.embedder.cohere.api_key_env",
+                Self::default().memory.vector.embedder.cohere.api_key_env,
+            )?
+            .set_default(
+                "memory.vector.embedder.gemini.api_key_env",
+                Self::default().memory.vector.embedder.gemini.api_key_env,
+            )?
+            .set_default(
+                "memory.vector.embedder.gemini.default_role",
+                Self::default().memory.vector.embedder.gemini.default_role,
+            )?
             .set_default("daemon.socket_path", Self::default().daemon.socket_path)?
             .set_default("daemon.pid_file", Self::default().daemon.pid_file)?
             .set_default("daemon.log_file", Self::default().daemon.log_file)?
@@ -812,7 +832,7 @@ pub struct DatabaseConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            url: "postgres://moa_owner:dev@localhost:5432/moa".to_string(),
+            url: "postgres://moa_owner:dev@localhost:25432/moa".to_string(),
             admin_url: None,
             max_connections: 20,
             connect_timeout_seconds: 10,
@@ -902,6 +922,8 @@ pub struct MemoryConfig {
     pub embedding_provider: String,
     /// Embedding model identifier used for graph memory embedding backfills and queries.
     pub embedding_model: String,
+    /// Graph-memory vector embedding configuration.
+    pub vector: MemoryVectorConfig,
 }
 
 impl Default for MemoryConfig {
@@ -910,6 +932,75 @@ impl Default for MemoryConfig {
             auto_bootstrap: true,
             embedding_provider: "openai".to_string(),
             embedding_model: "text-embedding-3-small".to_string(),
+            vector: MemoryVectorConfig::default(),
+        }
+    }
+}
+
+/// Graph-memory vector configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryVectorConfig {
+    /// Embedder selection and credentials.
+    pub embedder: VectorEmbedderConfig,
+}
+
+/// Per-workspace embedder selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VectorEmbedderConfig {
+    /// Embedder model name.
+    pub name: String,
+    /// Requested output dimensionality.
+    pub output_dim: usize,
+    /// Cohere-specific settings.
+    pub cohere: CohereEmbedderConfig,
+    /// Gemini-specific settings.
+    pub gemini: GeminiEmbedderConfig,
+}
+
+impl Default for VectorEmbedderConfig {
+    fn default() -> Self {
+        Self {
+            name: "gemini-embedding-2".to_string(),
+            output_dim: 1024,
+            cohere: CohereEmbedderConfig::default(),
+            gemini: GeminiEmbedderConfig::default(),
+        }
+    }
+}
+
+/// Cohere embedder credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CohereEmbedderConfig {
+    /// Environment variable containing the Cohere API key.
+    pub api_key_env: String,
+}
+
+impl Default for CohereEmbedderConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: "COHERE_API_KEY".to_string(),
+        }
+    }
+}
+
+/// Gemini embedder credentials and task encoding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GeminiEmbedderConfig {
+    /// Environment variable containing the Gemini API key.
+    pub api_key_env: String,
+    /// Default Gemini v2 role for retrieval-side embedders.
+    pub default_role: String,
+}
+
+impl Default for GeminiEmbedderConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: "GEMINI_API_KEY".to_string(),
+            default_role: "search_query".to_string(),
         }
     }
 }

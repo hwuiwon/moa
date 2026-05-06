@@ -42,6 +42,10 @@ Edges represent relationships, evidence, provenance, supersession, contradiction
 
 `moa-memory-vector` owns vector storage for semantic retrieval. Embeddings are written for graph nodes that should participate in retrieval, and hybrid retrieval fuses graph/sidecar candidates with vector hits. The default backend is pgvector; large or isolation-sensitive workspaces can opt into Turbopuffer namespaces through `workspace_state.vector_backend`.
 
+Embedder selection is per workspace. `cohere-embed-v4` and `gemini-embedding-2` use incompatible vector spaces, so switching a workspace requires re-embedding its graph nodes before retrieval can safely use the new model. Gemini Embedding 2 is exposed as a text-only `Embedder` today; its API supports multimodal inputs, but MOA needs a separate multimodal chunker and embedder trait before image, audio, video, or PDF chunks are indexed.
+
+Gemini Embedding 2 does not use a `task_type` request field. MOA encodes asymmetric retrieval through role-specific prompt prefixes inside the embedder: ingestion-side embedders use the document prefix and retrieval-side embedders use a search-query prefix.
+
 Indexes are write-incremental. There is no user-facing rebuild-index command for graph memory.
 
 ## Ingestion

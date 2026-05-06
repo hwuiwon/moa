@@ -2,8 +2,8 @@
 
 Two-tier observability and explainability for MOA. The subcrates here form one
 logical unit; they are separated to keep the hot path (`sink`), the wire format
-(`otel`), and the record shapes (`core`) independently versionable. `citation/`,
-`cold/`, and `audit/` will be added by L02-L04.
+(`otel`), the record shapes (`core`), citation verification (`citation`), and
+cold retention (`cold`) independently versionable. `audit/` will be added by L04.
 
 ## Subcrates
 
@@ -12,8 +12,8 @@ logical unit; they are separated to keep the hot path (`sink`), the wire format
 | `core/` | `moa-lineage-core` | `LineageSink` trait; record shapes; scope and ID types; serde wire format |
 | `sink/` | `moa-lineage-sink` | mpsc + fjall durable journal + TimescaleDB writer + worker lifecycle |
 | `otel/` | `moa-lineage-otel` | OTel GenAI v1.38 + OpenInference attribute emitters; tracing bridge |
-| `citation/` | `moa-lineage-citation` | (L02) vendor passthrough adapters + cascade NLI verifier |
-| `cold/` | `moa-lineage-cold` | (L02) Parquet + S3 exporter; retention policy |
+| `citation/` | `moa-lineage-citation` | Vendor passthrough adapters + cascade verifier |
+| `cold/` | `moa-lineage-cold` | Parquet/object-store exporter + retention progress tracking |
 | `audit/` | `moa-lineage-audit` | (L04) BLAKE3 hash chain + ct-merkle + Object Lock + PII HMAC vault |
 
 ## Public surface
@@ -25,8 +25,12 @@ logical unit; they are separated to keep the hot path (`sink`), the wire format
 The CLI subcommands (`moa explain`, `moa retrieve --debug`, `moa lineage query`,
 `moa lineage export`) live in `crates/moa-cli/`.
 
+Database schema for lineage lives in the central Postgres migration tree at
+`crates/moa-session/migrations/postgres/024_lineage.sql`; lineage crates do not
+own separate migration directories.
+
 ## Phase status
 
-L01 ships core + sink + otel; L02 adds citation + cold; L03 wires eval and
+L01 shipped core + sink + otel; L02 ships citation + cold; L03 wires eval and
 dashboards; L04 adds compliance audit. See `sequence/lineage/L*-*.md` for
 prompts.

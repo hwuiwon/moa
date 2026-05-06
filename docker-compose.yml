@@ -51,7 +51,7 @@ services:
       - -c
       - pgaudit.log_statement_once=on
     ports:
-      - "5432:5432"
+      - "25432:5432"
     volumes:
       - moa-pg-data:/var/lib/postgresql/data
       - moa-pg-audit:/var/log/postgresql

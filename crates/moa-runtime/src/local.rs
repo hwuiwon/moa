@@ -122,6 +122,12 @@ impl LocalChatRuntime {
         &self.config
     }
 
+    /// Drains the local lineage writer when durable lineage capture is enabled.
+    pub async fn shutdown_lineage_writer(&self) -> Result<()> {
+        self.orchestrator.shutdown_lineage_writer().await?;
+        Ok(())
+    }
+
     /// Switches the runtime to a different workspace and starts a fresh session there.
     pub async fn set_workspace(&mut self, workspace_id: WorkspaceId) -> Result<SessionId> {
         self.workspace_id = workspace_id;
