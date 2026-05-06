@@ -3310,6 +3310,7 @@ dependencies = [
  "moa-brain",
  "moa-core",
  "moa-hands",
+ "moa-lineage-core",
  "moa-memory-graph",
  "moa-memory-ingest",
  "moa-memory-pii",
@@ -3384,6 +3385,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "metrics",
  "moa-core",
  "moa-lineage-core",
  "serde",
@@ -3401,6 +3403,7 @@ dependencies = [
  "arrow",
  "bytes",
  "chrono",
+ "metrics",
  "moa-lineage-core",
  "object_store",
  "parquet",

@@ -3,7 +3,12 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use moa_lineage_core::{Citation, VerifierResult};
+use chrono::Utc;
+use moa_core::WorkspaceId;
+use moa_lineage_core::{
+    Citation, LineageEvent, LineageSink, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, TurnId,
+    VerifierResult,
+};
 use uuid::Uuid;
 
 use crate::adapters::ChunkRef;
@@ -242,5 +247,50 @@ fn sentence_for<'a>(answer_text: &'a str, offsets: &[(u32, u32)], idx: u32) -> &
         &answer_text[start..end]
     } else {
         answer_text
+    }
+}
+
+/// Emits normalized verifier scores for one citation through the lineage sink.
+pub fn emit_verifier_scores(
+    sink: &dyn LineageSink,
+    citation: &Citation,
+    turn_id: TurnId,
+    workspace_id: &WorkspaceId,
+) {
+    sink.record(LineageEvent::Eval(ScoreRecord {
+        score_id: Uuid::now_v7(),
+        ts: Utc::now(),
+        target: ScoreTarget::Turn { turn_id },
+        workspace_id: workspace_id.clone(),
+        user_id: None,
+        name: "citation_verified".to_string(),
+        value: ScoreValue::Boolean(citation.verifier.verified),
+        source: ScoreSource::OnlineJudge,
+        model_or_evaluator: citation.verifier.method.clone(),
+        run_id: None,
+        dataset_id: None,
+        comment: None,
+    }));
+    metrics::gauge!(
+        "moa_grounding_verified_rate",
+        "workspace_id" => workspace_id.to_string()
+    )
+    .set(if citation.verifier.verified { 1.0 } else { 0.0 });
+
+    if let Some(entailment) = citation.verifier.nli_entailment {
+        sink.record(LineageEvent::Eval(ScoreRecord {
+            score_id: Uuid::now_v7(),
+            ts: Utc::now(),
+            target: ScoreTarget::Turn { turn_id },
+            workspace_id: workspace_id.clone(),
+            user_id: None,
+            name: "nli_entailment".to_string(),
+            value: ScoreValue::Numeric(f64::from(entailment)),
+            source: ScoreSource::OnlineJudge,
+            model_or_evaluator: "hhem-2.1-open".to_string(),
+            run_id: None,
+            dataset_id: None,
+            comment: None,
+        }));
     }
 }

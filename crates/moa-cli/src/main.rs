@@ -27,8 +27,8 @@ use moa_core::{
 };
 use moa_eval::{
     AgentConfig, EngineOptions, EvalEngine, EvalRun, EvalStatus, EvaluatorOptions, ReporterOptions,
-    build_evaluators, build_reporters, discover_suites, evaluate_run, load_agent_config,
-    load_suite,
+    build_evaluators, build_reporters, discover_suites, evaluate_run, list_datasets,
+    load_agent_config, load_suite, register_dataset, replay_dataset_live,
 };
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
@@ -362,6 +362,17 @@ enum EvalCommand {
     Run(EvalRunArgs),
     /// Shows the eval plan without executing.
     Plan(EvalPlanArgs),
+    /// Registers or lists replay datasets.
+    Datasets {
+        #[command(subcommand)]
+        command: EvalDatasetsCommand,
+    },
+    /// Replays a stored dataset and records score rows.
+    Replay(EvalReplayArgs),
+    /// Shows score summaries for one replay run.
+    Scores(EvalScoresArgs),
+    /// Compares score means between two replay runs.
+    Compare(EvalCompareArgs),
     /// Runs the regression suite for one workspace skill.
     Skill(EvalSkillArgs),
     /// Lists discoverable eval suites in a directory.
@@ -370,6 +381,64 @@ enum EvalCommand {
         #[arg(default_value = "tests/suites")]
         dir: PathBuf,
     },
+}
+
+/// Eval dataset commands.
+#[derive(Debug, Subcommand)]
+enum EvalDatasetsCommand {
+    /// Registers a JSONL dataset.
+    Register(EvalDatasetRegisterArgs),
+    /// Lists registered datasets.
+    List,
+}
+
+/// Arguments for `moa eval datasets register`.
+#[derive(Debug, Args)]
+struct EvalDatasetRegisterArgs {
+    /// JSONL dataset path.
+    path: PathBuf,
+    /// Dataset name.
+    #[arg(long)]
+    name: String,
+}
+
+/// Arguments for `moa eval replay`.
+#[derive(Debug, Args)]
+struct EvalReplayArgs {
+    /// Dataset identifier.
+    #[arg(long)]
+    dataset: Uuid,
+    /// Optional replay run identifier.
+    #[arg(long)]
+    run_id: Option<Uuid>,
+    /// Maximum dataset items to replay.
+    #[arg(long)]
+    limit: Option<usize>,
+    /// Optional embedder label for the run.
+    #[arg(long)]
+    embedder: Option<String>,
+    /// Optional model label for the run.
+    #[arg(long)]
+    model: Option<String>,
+}
+
+/// Arguments for `moa eval scores`.
+#[derive(Debug, Args)]
+struct EvalScoresArgs {
+    /// Replay run identifier.
+    #[arg(long)]
+    run_id: Uuid,
+}
+
+/// Arguments for `moa eval compare`.
+#[derive(Debug, Args)]
+struct EvalCompareArgs {
+    /// Baseline replay run identifier.
+    #[arg(long)]
+    base_run: Uuid,
+    /// New replay run identifier.
+    #[arg(long)]
+    new_run: Uuid,
 }
 
 /// Arguments for `moa eval run`.
@@ -636,6 +705,18 @@ async fn main() -> Result<()> {
             EvalCommand::Plan(args) => {
                 handle_eval_plan(args, config)?;
             }
+            EvalCommand::Datasets { command } => {
+                print!("{}", handle_eval_datasets(&config, command).await?);
+            }
+            EvalCommand::Replay(args) => {
+                print!("{}", handle_eval_replay(&config, args).await?);
+            }
+            EvalCommand::Scores(args) => {
+                print!("{}", handle_eval_scores(&config, args).await?);
+            }
+            EvalCommand::Compare(args) => {
+                print!("{}", handle_eval_compare(&config, args).await?);
+            }
             EvalCommand::Skill(args) => {
                 let exit_code = handle_eval_skill(args, config).await?;
                 if exit_code != 0 {
@@ -744,6 +825,152 @@ fn handle_eval_list(dir: PathBuf) -> Result<()> {
         );
     }
     Ok(())
+}
+
+async fn handle_eval_datasets(config: &MoaConfig, command: EvalDatasetsCommand) -> Result<String> {
+    let store = load_session_store(config).await?;
+    match command {
+        EvalDatasetsCommand::Register(args) => {
+            let dataset_id = register_dataset(store.pool(), &args.path, &args.name)
+                .await
+                .context("registering eval dataset")?;
+            Ok(format!(
+                "dataset: {dataset_id}\nname: {}\npath: {}\n",
+                args.name,
+                args.path.display()
+            ))
+        }
+        EvalDatasetsCommand::List => {
+            let rows = list_datasets(store.pool())
+                .await
+                .context("listing eval datasets")?;
+            let mut report = String::from("dataset_id\tname\titems\n");
+            for (dataset_id, name, items) in rows {
+                report.push_str(&format!("{dataset_id}\t{name}\t{items}\n"));
+            }
+            Ok(report)
+        }
+    }
+}
+
+async fn handle_eval_replay(config: &MoaConfig, args: EvalReplayArgs) -> Result<String> {
+    let store = load_session_store(config).await?;
+    let (sink, writer) = MpscSink::spawn(
+        MpscSinkConfig::from(&config.observability.lineage),
+        store.pool().clone(),
+    )
+    .await
+    .context("starting lineage writer for eval replay")?;
+    let run_id = args.run_id.unwrap_or_else(Uuid::now_v7);
+    let report = replay_dataset_live(
+        config.clone(),
+        store.pool(),
+        Arc::new(sink) as Arc<dyn moa_lineage_core::LineageSink>,
+        moa_eval::ReplayConfig {
+            dataset_id: args.dataset,
+            run_id,
+            model_override: args.model,
+            embedder_override: args.embedder,
+            limit: args.limit,
+        },
+    )
+    .await
+    .context("running eval replay")?;
+    writer
+        .shutdown()
+        .await
+        .context("flushing eval replay scores")?;
+
+    Ok(format!(
+        "run_id: {}\ndataset_id: {}\nitems: {}\nscores: {}\n",
+        report.run_id, report.dataset_id, report.items, report.scores
+    ))
+}
+
+async fn handle_eval_scores(config: &MoaConfig, args: EvalScoresArgs) -> Result<String> {
+    let store = load_session_store(config).await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT name,
+               value_type,
+               COUNT(*)::BIGINT AS n,
+               AVG(value_numeric) AS numeric_mean,
+               AVG(CASE WHEN value_boolean THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS boolean_rate
+        FROM analytics.scores
+        WHERE run_id = $1
+        GROUP BY name, value_type
+        ORDER BY name, value_type
+        "#,
+    )
+    .bind(args.run_id)
+    .fetch_all(store.pool())
+    .await?;
+
+    let mut report = format!("run_id: {}\nname\ttype\tn\tmean_or_rate\n", args.run_id);
+    for row in rows {
+        let name: String = row.try_get("name")?;
+        let value_type: String = row.try_get("value_type")?;
+        let n: i64 = row.try_get("n")?;
+        let numeric_mean: Option<f64> = row.try_get("numeric_mean")?;
+        let boolean_rate: Option<f64> = row.try_get("boolean_rate")?;
+        let value = numeric_mean.or(boolean_rate).unwrap_or(0.0);
+        report.push_str(&format!("{name}\t{value_type}\t{n}\t{value:.4}\n"));
+    }
+    Ok(report)
+}
+
+async fn handle_eval_compare(config: &MoaConfig, args: EvalCompareArgs) -> Result<String> {
+    let store = load_session_store(config).await?;
+    let rows = sqlx::query(
+        r#"
+        WITH base AS (
+            SELECT name, AVG(value_numeric) AS mean
+            FROM analytics.scores
+            WHERE run_id = $1 AND value_type = 'numeric'
+            GROUP BY name
+        ),
+        new AS (
+            SELECT name, AVG(value_numeric) AS mean
+            FROM analytics.scores
+            WHERE run_id = $2 AND value_type = 'numeric'
+            GROUP BY name
+        )
+        SELECT COALESCE(base.name, new.name) AS name,
+               base.mean AS base_mean,
+               new.mean AS new_mean,
+               COALESCE(new.mean, 0.0) - COALESCE(base.mean, 0.0) AS delta
+        FROM base
+        FULL OUTER JOIN new USING (name)
+        ORDER BY name
+        "#,
+    )
+    .bind(args.base_run)
+    .bind(args.new_run)
+    .fetch_all(store.pool())
+    .await?;
+
+    let mut report = format!(
+        "base_run: {}\nnew_run: {}\nname\tbase\tnew\tdelta\n",
+        args.base_run, args.new_run
+    );
+    for row in rows {
+        let name: String = row.try_get("name")?;
+        let base_mean: Option<f64> = row.try_get("base_mean")?;
+        let new_mean: Option<f64> = row.try_get("new_mean")?;
+        let delta: f64 = row.try_get("delta")?;
+        report.push_str(&format!(
+            "{name}\t{}\t{}\t{delta:.4}\n",
+            format_optional_f64(base_mean),
+            format_optional_f64(new_mean)
+        ));
+    }
+    Ok(report)
+}
+
+fn format_optional_f64(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.4}"))
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn load_eval_configs(paths: &[PathBuf]) -> Result<Vec<AgentConfig>> {

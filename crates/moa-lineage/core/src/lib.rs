@@ -12,7 +12,8 @@ pub use ids::{LineageRecordId, TurnId};
 pub use records::{
     AgeIntrospection, BackendIntrospection, Citation, CitationLineage, ContextChunk,
     ContextLineage, FusedHit, GenerationLineage, GraphPath, LineageEvent, PgvectorIntrospection,
-    RecordKind, RerankHit, RetrievalLineage, RetrievalStage, StageTimings, TokenUsage,
-    ToolCallSummary, TruncationEvent, TurbopufferIntrospection, VecHit, VerifierResult,
+    RecordKind, RerankHit, RetrievalLineage, RetrievalStage, ScoreRecord, ScoreSource, ScoreTarget,
+    ScoreValue, StageTimings, TokenUsage, ToolCallSummary, TruncationEvent,
+    TurbopufferIntrospection, VecHit, VerifierResult,
 };
 pub use sink::{LineageSink, NullSink};

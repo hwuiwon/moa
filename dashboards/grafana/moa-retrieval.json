@@ -1,0 +1,101 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT bucket AS time, workspace_id::text AS metric, zero_recall::double precision / NULLIF(turns, 0) AS value FROM analytics.turn_recall_hourly WHERE $__timeFilter(bucket) AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Zero-recall rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', ts) AS time, workspace_id::text AS metric, count(DISTINCT payload #>> '{record,top_k,0}') AS value FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 1 AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') GROUP BY 1, 2 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Top-K first-hit churn",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "id": 3,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT jsonb_array_length(payload #> '{record,vector_hits}') AS vector_hits, count(*) FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 1 AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') GROUP BY 1 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Vector hit count distribution",
+      "type": "barchart"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "id": 4,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', ts) AS time, workspace_id::text AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY ((payload #>> '{record,timings,total_ms}')::double precision)) AS value FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 1 AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') GROUP BY 1, 2 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Retrieval latency p95",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["moa", "lineage", "retrieval"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "all", "value": "all" },
+        "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+        "definition": "SELECT 'all' AS workspace_id UNION SELECT DISTINCT workspace_id::text FROM analytics.turn_lineage ORDER BY 1",
+        "hide": 0,
+        "includeAll": false,
+        "label": "workspace_id",
+        "multi": false,
+        "name": "workspace_id",
+        "options": [],
+        "query": "SELECT 'all' AS workspace_id UNION SELECT DISTINCT workspace_id::text FROM analytics.turn_lineage ORDER BY 1",
+        "refresh": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-24h", "to": "now" },
+  "timezone": "browser",
+  "title": "MOA Retrieval",
+  "uid": "moa-retrieval",
+  "version": 1,
+  "weekStart": ""
+}

@@ -13,5 +13,5 @@ pub use adapters::{
     AdapterError, AnthropicCitations, ChunkRef, CitationAdapter, CohereDocuments,
     OpenAiAnnotations, VertexGrounding,
 };
-pub use cascade::{CascadeConfig, CascadeVerifier};
+pub use cascade::{CascadeConfig, CascadeVerifier, emit_verifier_scores};
 pub use verifiers::{Bm25Verifier, CitationVerifier, NliVerifier, VerificationInput};

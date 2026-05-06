@@ -1,0 +1,95 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "id": null,
+  "panels": [
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', ts) AS time, workspace_id::text AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY ((payload #>> '{record,usage,input_tokens}')::double precision + (payload #>> '{record,usage,output_tokens}')::double precision)) AS value FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 3 AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') GROUP BY 1, 2 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Tokens per turn p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', ts) AS time, payload #>> '{record,provider}' AS metric, avg((payload #>> '{record,cost_micros}')::double precision) AS value FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 3 AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') GROUP BY 1, 2 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost per turn",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "id": 3,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', ts) AS time, COALESCE(payload #>> '{record,finish_reasons,0}', 'unknown') AS metric, count(*) AS value FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 3 AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') GROUP BY 1, 2 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Finish reason breakdown",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "id": 4,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', ts) AS time, workspace_id::text AS metric, avg((payload #>> '{record,usage,cache_read_tokens}')::double precision / NULLIF((payload #>> '{record,usage,input_tokens}')::double precision, 0)) AS value FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 3 AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') GROUP BY 1, 2 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Prefix-cache hit rate",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["moa", "lineage", "generation"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "all", "value": "all" },
+        "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+        "definition": "SELECT 'all' AS workspace_id UNION SELECT DISTINCT workspace_id::text FROM analytics.turn_lineage ORDER BY 1",
+        "includeAll": false,
+        "label": "workspace_id",
+        "multi": false,
+        "name": "workspace_id",
+        "query": "SELECT 'all' AS workspace_id UNION SELECT DISTINCT workspace_id::text FROM analytics.turn_lineage ORDER BY 1",
+        "refresh": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-24h", "to": "now" },
+  "timezone": "browser",
+  "title": "MOA Generation",
+  "uid": "moa-generation",
+  "version": 1
+}

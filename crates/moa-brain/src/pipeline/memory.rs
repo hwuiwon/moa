@@ -11,7 +11,7 @@ use moa_core::{
 };
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
-    StageTimings, TurnId, VecHit,
+    ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, StageTimings, TurnId, VecHit,
 };
 use moa_memory_graph::{AgeGraphStore, PiiClass};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
@@ -209,6 +209,38 @@ impl GraphMemoryRetriever {
         match serde_json::to_value(LineageEvent::Retrieval(retrieval.clone())) {
             Ok(json) => self.lineage.record(json),
             Err(error) => tracing::warn!(%error, "failed to serialize retrieval lineage"),
+        }
+        let zero_recall_score = ScoreRecord {
+            score_id: Uuid::now_v7(),
+            ts: Utc::now(),
+            target: ScoreTarget::Turn {
+                turn_id: retrieval.turn_id,
+            },
+            workspace_id: retrieval.workspace_id.clone(),
+            user_id: Some(retrieval.user_id.clone()),
+            name: "retrieval_zero_recall".to_string(),
+            value: ScoreValue::Boolean(retrieval.top_k.is_empty()),
+            source: ScoreSource::OnlineJudge,
+            model_or_evaluator: "hybrid-retriever".to_string(),
+            run_id: None,
+            dataset_id: None,
+            comment: None,
+        };
+        match serde_json::to_value(LineageEvent::Eval(zero_recall_score)) {
+            Ok(json) => self.lineage.record(json),
+            Err(error) => tracing::warn!(%error, "failed to serialize retrieval score"),
+        }
+        metrics::counter!(
+            "moa_turn_count",
+            "workspace_id" => retrieval.workspace_id.to_string()
+        )
+        .increment(1);
+        if retrieval.top_k.is_empty() {
+            metrics::counter!(
+                "moa_zero_recall_count",
+                "workspace_id" => retrieval.workspace_id.to_string()
+            )
+            .increment(1);
         }
         moa_lineage_otel::emit_retrieval_attrs(&Span::current(), &retrieval);
     }

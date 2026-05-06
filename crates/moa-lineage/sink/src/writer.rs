@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use moa_lineage_core::LineageEvent;
+use moa_lineage_core::{LineageEvent, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -142,9 +142,7 @@ async fn run_writer(
         }
     }
 
-    stats
-        .journal_depth
-        .store(journal.approximate_len() as u64, Ordering::Relaxed);
+    record_journal_depth(&stats, journal.approximate_len() as u64);
     Ok(stats.snapshot())
 }
 
@@ -165,25 +163,21 @@ async fn replay_pending(
     stats: &Arc<SharedWriterStats>,
 ) -> Result<()> {
     let pending = journal.replay()?;
-    stats
-        .journal_depth
-        .store(pending.len() as u64, Ordering::Relaxed);
+    record_journal_depth(stats, pending.len() as u64);
     if pending.is_empty() {
         return Ok(());
     }
 
     let rows = pending
         .iter()
-        .map(|(_, payload)| serde_json::from_slice::<LineageRow>(payload))
+        .map(|(_, payload)| decode_pending_row(payload))
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    write_rows_with_retry(pool, &rows).await?;
+    write_pending_rows_with_retry(pool, &rows).await?;
     if let (Some((lo, _)), Some((hi, _))) = (pending.first(), pending.last()) {
         journal.ack_range(*lo, *hi)?;
     }
     record_flush(stats, rows.len());
-    stats
-        .journal_depth
-        .store(journal.approximate_len() as u64, Ordering::Relaxed);
+    record_journal_depth(stats, journal.approximate_len() as u64);
     Ok(())
 }
 
@@ -203,30 +197,26 @@ async fn flush_events(
     let start_seq = *seq;
     let mut end_seq = start_seq;
     for evt in events {
-        let row = LineageRow::from_event(evt)?;
+        let row = PendingRow::from_event(evt)?;
         let payload = serde_json::to_vec(&row)?;
         journal.append(*seq, &payload)?;
         end_seq = *seq;
         *seq = (*seq).saturating_add(1);
         rows.push(row);
     }
-    stats
-        .journal_depth
-        .store(journal.approximate_len() as u64, Ordering::Relaxed);
+    record_journal_depth(stats, journal.approximate_len() as u64);
 
-    write_rows_with_retry(pool, &rows).await?;
+    write_pending_rows_with_retry(pool, &rows).await?;
     journal.ack_range(start_seq, end_seq)?;
     record_flush(stats, rows.len());
-    stats
-        .journal_depth
-        .store(journal.approximate_len() as u64, Ordering::Relaxed);
+    record_journal_depth(stats, journal.approximate_len() as u64);
     Ok(())
 }
 
-async fn write_rows_with_retry(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
+async fn write_pending_rows_with_retry(pool: &sqlx::PgPool, rows: &[PendingRow]) -> Result<()> {
     let mut delay = Duration::from_millis(100);
     loop {
-        match write_rows(pool, rows).await {
+        match write_pending_rows(pool, rows).await {
             Ok(()) => return Ok(()),
             Err(error) => {
                 tracing::warn!(%error, retry_after_ms = delay.as_millis(), "lineage write failed");
@@ -235,6 +225,25 @@ async fn write_rows_with_retry(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Resu
             }
         }
     }
+}
+
+async fn write_pending_rows(pool: &sqlx::PgPool, rows: &[PendingRow]) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let mut lineage_rows = Vec::new();
+    let mut score_rows = Vec::new();
+    for row in rows {
+        match row {
+            PendingRow::Lineage(row) => lineage_rows.push(row.clone()),
+            PendingRow::Score(row) => score_rows.push(row.clone()),
+        }
+    }
+
+    write_rows(pool, &lineage_rows).await?;
+    write_score_rows(pool, &score_rows).await?;
+    Ok(())
 }
 
 async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
@@ -356,6 +365,185 @@ fn render_copy_csv(rows: &[LineageRow]) -> String {
     out
 }
 
+async fn write_score_rows(pool: &sqlx::PgPool, rows: &[ScoreRow]) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let mut conn = pool.acquire().await?;
+    sqlx::query("DROP TABLE IF EXISTS lineage_scores_copy")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query(
+        r#"
+        CREATE TEMP TABLE lineage_scores_copy (
+            score_id           UUID             NOT NULL,
+            ts                 TIMESTAMPTZ      NOT NULL,
+            workspace_id       TEXT             NOT NULL,
+            user_id            TEXT,
+            target_kind        TEXT             NOT NULL,
+            turn_id            UUID,
+            session_id         UUID,
+            run_id             UUID,
+            item_id            UUID,
+            dataset_id         UUID,
+            name               TEXT             NOT NULL,
+            value_type         TEXT             NOT NULL,
+            value_numeric      DOUBLE PRECISION,
+            value_boolean      BOOLEAN,
+            value_categorical  TEXT,
+            source             TEXT             NOT NULL,
+            model_or_evaluator TEXT             NOT NULL,
+            comment            TEXT
+        );
+        "#,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    let copy_payload = render_score_copy_csv(rows);
+    let mut copy = conn
+        .copy_in_raw(
+            r#"
+            COPY lineage_scores_copy (
+                score_id,
+                ts,
+                workspace_id,
+                user_id,
+                target_kind,
+                turn_id,
+                session_id,
+                run_id,
+                item_id,
+                dataset_id,
+                name,
+                value_type,
+                value_numeric,
+                value_boolean,
+                value_categorical,
+                source,
+                model_or_evaluator,
+                comment
+            )
+            FROM STDIN WITH (FORMAT csv, NULL '\N')
+            "#,
+        )
+        .await?;
+    if let Err(error) = copy.send(copy_payload.as_bytes()).await {
+        let _ = copy.abort("lineage score copy failed").await;
+        return Err(error.into());
+    }
+    copy.finish().await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO analytics.scores (
+            score_id,
+            ts,
+            workspace_id,
+            user_id,
+            target_kind,
+            turn_id,
+            session_id,
+            run_id,
+            item_id,
+            dataset_id,
+            name,
+            value_type,
+            value_numeric,
+            value_boolean,
+            value_categorical,
+            source,
+            model_or_evaluator,
+            comment
+        )
+        SELECT
+            score_id,
+            ts,
+            workspace_id,
+            user_id,
+            target_kind,
+            turn_id,
+            session_id,
+            run_id,
+            item_id,
+            dataset_id,
+            name,
+            value_type,
+            value_numeric,
+            value_boolean,
+            value_categorical,
+            source,
+            model_or_evaluator,
+            comment
+        FROM lineage_scores_copy
+        ON CONFLICT (score_id, ts) DO UPDATE
+        SET workspace_id = EXCLUDED.workspace_id,
+            user_id = EXCLUDED.user_id,
+            target_kind = EXCLUDED.target_kind,
+            turn_id = EXCLUDED.turn_id,
+            session_id = EXCLUDED.session_id,
+            run_id = EXCLUDED.run_id,
+            item_id = EXCLUDED.item_id,
+            dataset_id = EXCLUDED.dataset_id,
+            name = EXCLUDED.name,
+            value_type = EXCLUDED.value_type,
+            value_numeric = EXCLUDED.value_numeric,
+            value_boolean = EXCLUDED.value_boolean,
+            value_categorical = EXCLUDED.value_categorical,
+            source = EXCLUDED.source,
+            model_or_evaluator = EXCLUDED.model_or_evaluator,
+            comment = EXCLUDED.comment
+        "#,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    sqlx::query("DROP TABLE IF EXISTS lineage_scores_copy")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+fn render_score_copy_csv(rows: &[ScoreRow]) -> String {
+    let mut out = String::new();
+    for row in rows {
+        let fields = [
+            csv_field(&row.score_id.to_string()),
+            csv_field(&row.ts.to_rfc3339()),
+            csv_field(&row.workspace_id),
+            nullable_csv(row.user_id.as_deref()),
+            csv_field(&row.target_kind),
+            nullable_uuid_csv(row.turn_id),
+            nullable_uuid_csv(row.session_id),
+            nullable_uuid_csv(row.run_id),
+            nullable_uuid_csv(row.item_id),
+            nullable_uuid_csv(row.dataset_id),
+            csv_field(&row.name),
+            csv_field(&row.value_type),
+            nullable_csv(row.value_numeric.map(|value| value.to_string()).as_deref()),
+            nullable_csv(row.value_boolean.map(|value| value.to_string()).as_deref()),
+            nullable_csv(row.value_categorical.as_deref()),
+            csv_field(&row.source),
+            csv_field(&row.model_or_evaluator),
+            nullable_csv(row.comment.as_deref()),
+        ];
+        out.push_str(&fields.join(","));
+        out.push('\n');
+    }
+    out
+}
+
+fn nullable_csv(value: Option<&str>) -> String {
+    value.map(csv_field).unwrap_or_else(|| "\\N".to_string())
+}
+
+fn nullable_uuid_csv(value: Option<Uuid>) -> String {
+    value
+        .map(|value| csv_field(&value.to_string()))
+        .unwrap_or_else(|| "\\N".to_string())
+}
+
 fn csv_field(value: &str) -> String {
     let escaped = value.replace('"', "\"\"");
     format!("\"{escaped}\"")
@@ -379,6 +567,33 @@ fn record_flush(stats: &SharedWriterStats, rows: usize) {
         Ordering::Relaxed,
     );
     metrics::counter!("moa_lineage_written_total").increment(rows as u64);
+    metrics::counter!("moa_lineage_flushed_total").increment(rows as u64);
+}
+
+fn record_journal_depth(stats: &SharedWriterStats, depth: u64) {
+    stats.journal_depth.store(depth, Ordering::Relaxed);
+    metrics::gauge!("moa_lineage_journal_depth").set(depth as f64);
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "table", content = "row", rename_all = "snake_case")]
+enum PendingRow {
+    Lineage(LineageRow),
+    Score(ScoreRow),
+}
+
+impl PendingRow {
+    fn from_event(evt: LineageEvent) -> Result<Self> {
+        match evt {
+            LineageEvent::Eval(record) => Ok(Self::Score(ScoreRow::from_record(record))),
+            other => Ok(Self::Lineage(LineageRow::from_event(other)?)),
+        }
+    }
+}
+
+fn decode_pending_row(payload: &[u8]) -> std::result::Result<PendingRow, serde_json::Error> {
+    serde_json::from_slice::<PendingRow>(payload)
+        .or_else(|_| serde_json::from_slice::<LineageRow>(payload).map(PendingRow::Lineage))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -458,6 +673,83 @@ impl LineageRow {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ScoreRow {
+    score_id: Uuid,
+    ts: DateTime<Utc>,
+    workspace_id: String,
+    user_id: Option<String>,
+    target_kind: String,
+    turn_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    run_id: Option<Uuid>,
+    item_id: Option<Uuid>,
+    dataset_id: Option<Uuid>,
+    name: String,
+    value_type: String,
+    value_numeric: Option<f64>,
+    value_boolean: Option<bool>,
+    value_categorical: Option<String>,
+    source: String,
+    model_or_evaluator: String,
+    comment: Option<String>,
+}
+
+impl ScoreRow {
+    fn from_record(record: ScoreRecord) -> Self {
+        let (target_kind, turn_id, session_id, target_run_id, item_id) = match record.target {
+            ScoreTarget::Turn { turn_id } => {
+                ("turn".to_string(), Some(turn_id.0), None, None, None)
+            }
+            ScoreTarget::Session { session_id } => {
+                ("session".to_string(), None, Some(session_id.0), None, None)
+            }
+            ScoreTarget::DatasetRunItem { run_id, item_id } => (
+                "dataset_run_item".to_string(),
+                None,
+                None,
+                Some(run_id),
+                Some(item_id),
+            ),
+        };
+        let (value_type, value_numeric, value_boolean, value_categorical) = match record.value {
+            ScoreValue::Numeric(value) => ("numeric".to_string(), Some(value), None, None),
+            ScoreValue::Boolean(value) => ("boolean".to_string(), None, Some(value), None),
+            ScoreValue::Categorical(value) => ("categorical".to_string(), None, None, Some(value)),
+        };
+
+        Self {
+            score_id: record.score_id,
+            ts: record.ts,
+            workspace_id: record.workspace_id.to_string(),
+            user_id: record.user_id.map(|user_id| user_id.to_string()),
+            target_kind,
+            turn_id,
+            session_id,
+            run_id: record.run_id.or(target_run_id),
+            item_id,
+            dataset_id: record.dataset_id,
+            name: record.name,
+            value_type,
+            value_numeric,
+            value_boolean,
+            value_categorical,
+            source: score_source_to_db(record.source).to_string(),
+            model_or_evaluator: record.model_or_evaluator,
+            comment: record.comment,
+        }
+    }
+}
+
+fn score_source_to_db(source: ScoreSource) -> &'static str {
+    match source {
+        ScoreSource::OnlineJudge => "online_judge",
+        ScoreSource::OfflineReplay => "offline_replay",
+        ScoreSource::Human => "human",
+        ScoreSource::External => "external",
+    }
+}
+
 fn sort_json_value(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Array(items) => {
@@ -489,7 +781,12 @@ fn sort_json_value(value: &mut serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::sort_json_value;
+    use chrono::Utc;
+    use moa_core::WorkspaceId;
+    use moa_lineage_core::{
+        LineageEvent, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, TurnId,
+    };
+    use uuid::Uuid;
 
     #[test]
     fn canonical_sort_orders_nested_object_keys() {
@@ -500,12 +797,44 @@ mod tests {
                 "c": 3
             }
         });
-        sort_json_value(&mut value);
+        super::sort_json_value(&mut value);
         assert_eq!(value.to_string(), r#"{"a":{"c":3,"d":2},"b":1}"#);
     }
 
     #[test]
     fn writer_stats_default_has_no_flush_timestamp() {
         assert_eq!(super::WriterStats::default().last_flush_unix_ms, None);
+    }
+
+    #[test]
+    fn pending_row_routes_eval_events_to_scores() {
+        let score_id = Uuid::now_v7();
+        let row = super::PendingRow::from_event(LineageEvent::Eval(ScoreRecord {
+            score_id,
+            ts: Utc::now(),
+            target: ScoreTarget::Turn {
+                turn_id: TurnId::new_v7(),
+            },
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: None,
+            name: "retrieval_zero_recall".to_string(),
+            value: ScoreValue::Boolean(false),
+            source: ScoreSource::OnlineJudge,
+            model_or_evaluator: "retriever".to_string(),
+            run_id: None,
+            dataset_id: None,
+            comment: None,
+        }))
+        .expect("score row should build");
+
+        match row {
+            super::PendingRow::Score(row) => {
+                assert_eq!(row.score_id, score_id);
+                assert_eq!(row.name, "retrieval_zero_recall");
+                assert_eq!(row.value_type, "boolean");
+                assert_eq!(row.value_boolean, Some(false));
+            }
+            super::PendingRow::Lineage(_) => panic!("eval events must not enter turn_lineage"),
+        }
     }
 }
