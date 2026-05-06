@@ -3,7 +3,8 @@
 Two-tier observability and explainability for MOA. The subcrates here form one
 logical unit; they are separated to keep the hot path (`sink`), the wire format
 (`otel`), the record shapes (`core`), citation verification (`citation`), and
-cold retention (`cold`) independently versionable. `audit/` will be added by L04.
+cold retention (`cold`) independently versionable. `audit/` owns the opt-in
+compliance tier.
 
 ## Subcrates
 
@@ -14,7 +15,7 @@ cold retention (`cold`) independently versionable. `audit/` will be added by L04
 | `otel/` | `moa-lineage-otel` | OTel GenAI v1.38 + OpenInference attribute emitters; tracing bridge |
 | `citation/` | `moa-lineage-citation` | Vendor passthrough adapters + cascade verifier |
 | `cold/` | `moa-lineage-cold` | Parquet/object-store exporter + retention progress tracking |
-| `audit/` | `moa-lineage-audit` | (L04) BLAKE3 hash chain + ct-merkle + Object Lock + PII HMAC vault |
+| `audit/` | `moa-lineage-audit` | BLAKE3 hash chain + ct-merkle + Object Lock + PII HMAC vault |
 
 ## Public surface
 
@@ -31,6 +32,6 @@ own separate migration directories.
 
 ## Phase status
 
-L01 shipped core + sink + otel; L02 ships citation + cold; L03 wires eval and
-dashboards; L04 adds compliance audit. See `sequence/lineage/L*-*.md` for
-prompts.
+L01 shipped core + sink + otel; L02 shipped citation + cold; L03 wired eval and
+dashboards; L04 ships the compliance audit tier behind a per-workspace opt-in.
+See `sequence/lineage/L*-*.md` for prompts.

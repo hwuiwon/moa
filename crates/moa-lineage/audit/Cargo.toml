@@ -1,0 +1,34 @@
+[package]
+name = "moa-lineage-audit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+moa-core = { path = "../../moa-core" }
+moa-lineage-core = { path = "../core" }
+base64 = "0.22"
+blake3 = "1"
+ct-merkle = "0.2"
+ed25519-dalek = { version = "2", features = ["pem", "pkcs8"] }
+async-trait = { workspace = true }
+aes-gcm = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+zstd = "0.13"
+zip = "2"
+tokio = { workspace = true, features = ["fs", "rt", "macros", "sync", "time"] }
+tokio-util = { workspace = true }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "json"] }
+object_store = { version = "0.11", features = ["aws"] }
+arrow = "53"
+parquet = { version = "53", features = ["async", "arrow"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_canonical_json = "1"
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

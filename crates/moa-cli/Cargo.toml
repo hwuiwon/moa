@@ -24,6 +24,7 @@ libc = "0.2"
 moa-core = { path = "../moa-core" }
 moa-eval = { path = "../moa-eval" }
 moa-brain = { path = "../moa-brain" }
+moa-lineage-audit = { path = "../moa-lineage/audit" }
 moa-lineage-core = { path = "../moa-lineage/core" }
 moa-lineage-sink = { path = "../moa-lineage/sink" }
 moa-memory-graph = { path = "../moa-memory/graph" }

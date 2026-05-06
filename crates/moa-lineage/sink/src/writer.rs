@@ -4,16 +4,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use blake3::{Hash, Hasher};
 use chrono::{DateTime, Utc};
 use moa_lineage_core::{LineageEvent, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue};
 use serde::{Deserialize, Serialize};
+use serde_canonical_json::CanonicalFormatter;
+use sqlx::Row;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::fjall_journal::Journal;
 use crate::mpsc_sink::MpscSinkConfig;
-use crate::{Result, ensure_schema};
+use crate::{Error, Result, ensure_schema};
 
 /// Writer runtime statistics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -251,9 +254,12 @@ async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
         return Ok(());
     }
 
-    let mut conn = pool.acquire().await?;
+    let mut rows = rows.to_vec();
+    let mut tx = pool.begin().await?;
+    apply_compliance_hashes(&mut tx, &mut rows).await?;
+
     sqlx::query("DROP TABLE IF EXISTS lineage_copy")
-        .execute(&mut *conn)
+        .execute(&mut *tx)
         .await?;
     sqlx::query(
         r#"
@@ -271,11 +277,11 @@ async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
         );
         "#,
     )
-    .execute(&mut *conn)
+    .execute(&mut *tx)
     .await?;
 
-    let copy_payload = render_copy_csv(rows);
-    let mut copy = conn
+    let copy_payload = render_copy_csv(&rows);
+    let mut copy = (*tx)
         .copy_in_raw(
             r#"
             COPY lineage_copy (
@@ -332,12 +338,102 @@ async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
             prev_hash = COALESCE(EXCLUDED.prev_hash, analytics.turn_lineage.prev_hash)
         "#,
     )
-    .execute(&mut *conn)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query("DROP TABLE IF EXISTS lineage_copy")
-        .execute(&mut *conn)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn apply_compliance_hashes(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rows: &mut [LineageRow],
+) -> Result<()> {
+    for row in rows {
+        let enabled = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT COALESCE((
+                SELECT enabled
+                FROM analytics.compliance_workspaces
+                WHERE workspace_id = $1
+            ), FALSE)
+            "#,
+        )
+        .bind(&row.workspace_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        if !enabled {
+            continue;
+        }
+
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(format!("compliance:{}", row.workspace_id))
+            .execute(&mut **tx)
+            .await?;
+
+        if let Some(existing) = sqlx::query(
+            r#"
+            SELECT integrity_hash, prev_hash
+            FROM analytics.turn_lineage
+            WHERE turn_id = $1 AND record_kind = $2 AND ts = $3
+            "#,
+        )
+        .bind(row.turn_id)
+        .bind(row.record_kind)
+        .bind(row.ts)
+        .fetch_optional(&mut **tx)
+        .await?
+        {
+            row.integrity_hash = existing.try_get("integrity_hash")?;
+            row.prev_hash = existing.try_get("prev_hash")?;
+            continue;
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO analytics.compliance_workspace_state (workspace_id)
+            VALUES ($1)
+            ON CONFLICT (workspace_id) DO NOTHING
+            "#,
+        )
+        .bind(&row.workspace_id)
+        .execute(&mut **tx)
+        .await?;
+
+        let prev_hash: Option<Vec<u8>> = sqlx::query_scalar(
+            r#"
+            SELECT last_integrity_hash
+            FROM analytics.compliance_workspace_state
+            WHERE workspace_id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(&row.workspace_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        let prev = prev_hash.as_deref().map(hash_from_slice).transpose()?;
+        let (integrity_hash, prev) = compliance_link(prev, &row.payload)?;
+        row.integrity_hash = integrity_hash.as_bytes().to_vec();
+        row.prev_hash = prev.map(|hash| hash.as_bytes().to_vec());
+
+        sqlx::query(
+            r#"
+            UPDATE analytics.compliance_workspace_state
+            SET last_integrity_hash = $2,
+                last_ts = $3,
+                record_count = record_count + 1
+            WHERE workspace_id = $1
+            "#,
+        )
+        .bind(&row.workspace_id)
+        .bind(&row.integrity_hash)
+        .bind(row.ts)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(())
 }
 
@@ -614,9 +710,7 @@ impl LineageRow {
     fn from_event(evt: LineageEvent) -> Result<Self> {
         let mut payload = serde_json::to_value(&evt)?;
         sort_json_value(&mut payload);
-        let integrity_hash = blake3::hash(payload.to_string().as_bytes())
-            .as_bytes()
-            .to_vec();
+        let integrity_hash = canonical_payload_hash(&payload)?.as_bytes().to_vec();
         let record_kind = evt.record_kind().as_i16();
         let fallback_ts = Utc::now();
 
@@ -649,7 +743,14 @@ impl LineageRow {
                 record.workspace_id.to_string(),
                 record.ts,
             ),
-            LineageEvent::Eval(_) | LineageEvent::Decision(_) => (
+            LineageEvent::Decision(record) => (
+                record.turn_id.0,
+                record.session_id.0,
+                record.user_id.to_string(),
+                record.workspace_id.to_string(),
+                record.ts,
+            ),
+            LineageEvent::Eval(_) => (
                 Uuid::now_v7(),
                 Uuid::nil(),
                 "unknown".to_string(),
@@ -777,6 +878,40 @@ fn sort_json_value(value: &mut serde_json::Value) {
         | serde_json::Value::Number(_)
         | serde_json::Value::String(_) => {}
     }
+}
+
+fn canonical_json_bytes(payload: &serde_json::Value) -> Result<Vec<u8>> {
+    let mut serializer =
+        serde_json::Serializer::with_formatter(Vec::new(), CanonicalFormatter::new());
+    payload.serialize(&mut serializer)?;
+    Ok(serializer.into_inner())
+}
+
+fn canonical_payload_hash(payload: &serde_json::Value) -> Result<Hash> {
+    Ok(blake3::hash(&canonical_json_bytes(payload)?))
+}
+
+fn compliance_link(
+    prev: Option<Hash>,
+    payload: &serde_json::Value,
+) -> Result<(Hash, Option<Hash>)> {
+    let payload_hash = canonical_payload_hash(payload)?;
+    let prev = prev.unwrap_or_else(compliance_genesis_hash);
+    let mut hasher = Hasher::new();
+    hasher.update(prev.as_bytes());
+    hasher.update(payload_hash.as_bytes());
+    Ok((hasher.finalize(), Some(prev)))
+}
+
+fn hash_from_slice(bytes: &[u8]) -> Result<Hash> {
+    let array: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| Error::Invalid("expected 32-byte compliance hash".to_string()))?;
+    Ok(Hash::from(array))
+}
+
+fn compliance_genesis_hash() -> Hash {
+    blake3::hash(b"\0\0\0\0moa-audit-genesis-v1\0\0\0\0")
 }
 
 #[cfg(test)]

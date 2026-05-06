@@ -23,8 +23,8 @@ pub enum LineageEvent {
     Citation(CitationLineage),
     /// Evaluation, online judge, or human score lineage.
     Eval(ScoreRecord),
-    /// Reserved for L04 audit payloads.
-    Decision(serde_json::Value),
+    /// Compliance audit decision lineage.
+    Decision(DecisionRecord),
 }
 
 /// Numeric lineage record kind stored in TimescaleDB.
@@ -488,6 +488,104 @@ pub enum ScoreSource {
     External,
 }
 
+/// Compliance audit decision lineage for one policy boundary.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DecisionRecord {
+    /// Shared agent turn identifier.
+    pub turn_id: TurnId,
+    /// Session identifier.
+    pub session_id: SessionId,
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// User identifier.
+    pub user_id: UserId,
+    /// Event timestamp.
+    pub ts: DateTime<Utc>,
+    /// Decision kind and redacted payload.
+    pub kind: DecisionKind,
+    /// Policy or rule-set version that produced the decision.
+    pub policy_version: String,
+    /// BLAKE3 hash of the canonical decision payload for cross-checking.
+    pub integrity_hash: Vec<u8>,
+}
+
+/// Compliance-relevant decision categories.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum DecisionKind {
+    /// PII redaction was applied before lineage capture.
+    PiiRedaction(PiiRedactionDecision),
+    /// ACL filtering removed or admitted a candidate.
+    AclFilter(AclFilterDecision),
+    /// Scope enforcement allowed or rejected a request.
+    ScopeEnforcement(ScopeEnforcementDecision),
+    /// Privacy export was requested or completed.
+    PrivacyExport(PrivacyExportDecision),
+    /// Privacy erasure or crypto-shred was requested or completed.
+    PrivacyErase(PrivacyEraseDecision),
+}
+
+/// Redacted PII redaction decision details.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PiiRedactionDecision {
+    /// Pseudonymized subject identifier when known.
+    pub subject_pseudonym: Option<String>,
+    /// Fields redacted from the source text.
+    pub fields: Vec<String>,
+    /// Detector or service version.
+    pub detector: String,
+    /// Whether the source payload was modified.
+    pub redacted: bool,
+}
+
+/// ACL filtering decision details.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AclFilterDecision {
+    /// Resource or candidate identifier.
+    pub resource_id: String,
+    /// Action evaluated.
+    pub action: String,
+    /// Whether access was allowed.
+    pub allowed: bool,
+    /// Rule or policy label that decided the request.
+    pub rule: String,
+}
+
+/// Scope enforcement decision details.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScopeEnforcementDecision {
+    /// Requested scope.
+    pub requested_scope: String,
+    /// Effective scope after enforcement.
+    pub effective_scope: String,
+    /// Whether enforcement admitted the request.
+    pub allowed: bool,
+    /// Reason label.
+    pub reason: String,
+}
+
+/// Privacy export decision details.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PrivacyExportDecision {
+    /// Pseudonymized subject identifier.
+    pub subject_pseudonym: String,
+    /// Export request identifier.
+    pub request_id: Uuid,
+    /// Export status.
+    pub status: String,
+}
+
+/// Privacy erase decision details.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PrivacyEraseDecision {
+    /// Pseudonymized subject identifier.
+    pub subject_pseudonym: String,
+    /// Erase request identifier.
+    pub request_id: Uuid,
+    /// Whether subject key destruction has been scheduled or completed.
+    pub key_erased: bool,
+}
+
 impl LineageEvent {
     /// Returns the turn ID when this event carries one.
     #[must_use]
@@ -501,7 +599,7 @@ impl LineageEvent {
                 ScoreTarget::Turn { turn_id } => Some(*turn_id),
                 ScoreTarget::Session { .. } | ScoreTarget::DatasetRunItem { .. } => None,
             },
-            Self::Decision(_) => None,
+            Self::Decision(record) => Some(record.turn_id),
         }
     }
 

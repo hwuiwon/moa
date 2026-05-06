@@ -144,6 +144,34 @@ in `ops/prometheus/alerts/`. Import the dashboards with a Postgres datasource
 named `DS_POSTGRES` and a Prometheus datasource named `DS_PROMETHEUS`; the
 workspace selector is populated from `analytics.turn_lineage`.
 
+## Compliance Audit Tier
+
+Compliance audit is an opt-in superset of the engineering lineage tier. A row
+in `analytics.compliance_workspaces` enables workspace-local BLAKE3 chain links
+on `analytics.turn_lineage`, periodic Merkle roots in `analytics.audit_roots`,
+PII pseudonymization side data in `pii_vault`, and DSAR tooling through
+`moa lineage export`, `moa lineage verify`, and `moa lineage erase`. Workspaces
+that are not enabled keep the L01-L03 behavior and store `prev_hash = NULL`.
+
+Audit bucket bootstrap lives in `scripts/bootstrap-audit-bucket.sh`. Buckets
+must be created with Object Lock enabled at creation time; production uses
+Compliance mode and development uses a separate bucket, usually Governance mode
+with short retention. Signing keys are local PKCS#8/seed files for development
+and should be HSM-backed KMS Ed25519 keys in production. Switching signing keys
+starts new windows with the new label; old verifying keys remain required for
+old audit roots.
+
+**ATTESTATION GATE - DO NOT REPRESENT THIS AS COMPLIANCE EVIDENCE TO REGULATORS
+OR CUSTOMERS UNTIL EXTERNAL CRYPTOGRAPHIC REVIEW IS COMPLETE.** The
+`ct-merkle` crate is explicitly not audited by its authors. `moa-lineage-audit`
+must receive external cryptographer or appsec review before DSAR exports,
+regulator responses, audit attestations, or certifications rely on this layer as
+compliance-grade evidence. Internal debugging and forensics may use it before
+that review. The review must cover BLAKE3 canonicalization and chain extension,
+Ed25519 key handling, Merkle inclusion and consistency proof construction, PII
+crypto-shredding semantics, S3 Object Lock configuration, timestamp discipline,
+and replay resistance on the verify path.
+
 ## Workspace Layout
 
 | Crate | Role |
