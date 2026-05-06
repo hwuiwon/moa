@@ -895,7 +895,7 @@ async fn handle_eval_scores(config: &MoaConfig, args: EvalScoresArgs) -> Result<
                value_type,
                COUNT(*)::BIGINT AS n,
                AVG(value_numeric) AS numeric_mean,
-               AVG(CASE WHEN value_boolean THEN 1.0 ELSE 0.0 END) AS boolean_rate
+               AVG(CASE WHEN value_boolean THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS boolean_rate
         FROM analytics.scores
         WHERE run_id = $1
         GROUP BY name, value_type
