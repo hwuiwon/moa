@@ -399,10 +399,37 @@ pub trait PlatformAdapter: Send + Sync {
     async fn delete(&self, msg_id: &MessageId) -> Result<()>;
 }
 
+/// Hot-path observability tap used by lineage capture.
+///
+/// `moa-core` owns this thin bridge so shared call sites can carry a lineage
+/// handle without depending on the lineage crates directly.
+pub trait LineageHandle: Send + Sync {
+    /// Records one lineage event encoded as JSON.
+    fn record(&self, evt_json: Value);
+
+    /// Returns the number of dropped events observed by the handle.
+    fn dropped_count(&self) -> u64 {
+        0
+    }
+}
+
+/// No-op lineage handle for tests and disabled capture paths.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NullLineageHandle;
+
+impl LineageHandle for NullLineageHandle {
+    fn record(&self, _evt_json: Value) {}
+}
+
+/// Shared no-op lineage handle for simple borrowed contexts.
+pub static NULL_LINEAGE_HANDLE: NullLineageHandle = NullLineageHandle;
+
 /// Execution context passed to built-in tool implementations.
 pub struct ToolContext<'a> {
     /// Active session metadata.
     pub session: &'a SessionMeta,
+    /// Hot-path lineage capture bridge.
+    pub lineage: &'a dyn LineageHandle,
     /// Shared session store when the tool needs session-log access.
     pub session_store: Option<&'a dyn SessionStore>,
     /// Cooperative cancellation token for the current session, when available.

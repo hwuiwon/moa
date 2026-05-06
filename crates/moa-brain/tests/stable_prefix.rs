@@ -52,6 +52,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
             query_rewrite_llm_provider: None,
             discovered_workspace_instructions: None,
             tool_schemas: extend_tool_schemas(router.tool_schemas()),
+            lineage: Arc::new(moa_core::NullLineageHandle),
         },
     );
 

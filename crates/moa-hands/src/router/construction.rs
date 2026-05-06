@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use moa_core::{
-    HandProvider, MoaConfig, MoaError, Result, SandboxTier, SessionStore, ToolBudgetConfig,
-    ToolOutputConfig,
+    HandProvider, LineageHandle, MoaConfig, MoaError, NullLineageHandle, Result, SandboxTier,
+    SessionStore, ToolBudgetConfig, ToolOutputConfig,
 };
 use moa_security::{
     ApprovalRuleStore, EnvironmentCredentialVault, MCPCredentialProxy, ToolPolicies,
@@ -37,6 +37,7 @@ impl ToolRouter {
             policies: ToolPolicies::default(),
             rule_store: None,
             session_store: None,
+            lineage: Arc::new(NullLineageHandle),
             sandbox_root: None,
             tool_output: ToolOutputConfig::default(),
             tool_budgets: ToolBudgetConfig::default(),
@@ -141,6 +142,13 @@ impl ToolRouter {
     #[must_use]
     pub fn with_session_store(mut self, session_store: Arc<dyn SessionStore>) -> Self {
         self.session_store = Some(session_store);
+        self
+    }
+
+    /// Attaches the hot-path lineage handle for built-in tools.
+    #[must_use]
+    pub fn with_lineage(mut self, lineage: Arc<dyn LineageHandle>) -> Self {
+        self.lineage = lineage;
         self
     }
 

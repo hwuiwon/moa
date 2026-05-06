@@ -9,8 +9,8 @@ mod tool_dispatch;
 use std::sync::Arc;
 
 use moa_core::{
-    ApprovalRequest, BufferedUserMessage, EventRecord, LLMProvider, MoaError, Result, RuntimeEvent,
-    SessionId, SessionSignal, SessionStore,
+    ApprovalRequest, BufferedUserMessage, EventRecord, LLMProvider, LineageHandle, MoaError,
+    NullLineageHandle, Result, RuntimeEvent, SessionId, SessionSignal, SessionStore,
 };
 use moa_hands::ToolRouter;
 use tokio::sync::{broadcast, mpsc};
@@ -131,6 +131,7 @@ pub async fn run_streamed_turn(
         None,
         None,
         None,
+        Arc::new(NullLineageHandle),
         ToolLoopMode::LoopUntilTurnBoundary,
     )
     .await
@@ -167,6 +168,7 @@ pub async fn run_streamed_turn_with_signals(
         Some(turn_requested),
         Some(queued_messages),
         Some(soft_cancel_requested),
+        Arc::new(NullLineageHandle),
         ToolLoopMode::LoopUntilTurnBoundary,
     )
     .await
@@ -204,6 +206,45 @@ pub async fn run_streamed_turn_with_signals_stepwise(
         Some(turn_requested),
         Some(queued_messages),
         Some(soft_cancel_requested),
+        Arc::new(NullLineageHandle),
+        ToolLoopMode::StepAfterToolBoundary,
+    )
+    .await
+}
+
+/// Runs the shared streamed turn engine with live signals and lineage capture.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_streamed_turn_with_signals_stepwise_and_lineage(
+    session_id: SessionId,
+    session_store: Arc<dyn SessionStore>,
+    llm_provider: Arc<dyn LLMProvider>,
+    pipeline: &ContextPipeline,
+    tool_router: Option<Arc<ToolRouter>>,
+    runtime_tx: &broadcast::Sender<RuntimeEvent>,
+    event_tx: Option<&broadcast::Sender<EventRecord>>,
+    signal_rx: &mut mpsc::Receiver<SessionSignal>,
+    turn_requested: &mut bool,
+    queued_messages: &mut Vec<BufferedUserMessage>,
+    soft_cancel_requested: &mut bool,
+    cancel_token: Option<CancellationToken>,
+    hard_cancel_token: Option<CancellationToken>,
+    lineage: Arc<dyn LineageHandle>,
+) -> Result<StreamedTurnResult> {
+    streaming::run_streamed_turn_with_tools_mode(
+        session_id,
+        session_store,
+        llm_provider,
+        pipeline,
+        tool_router,
+        runtime_tx,
+        event_tx,
+        cancel_token,
+        hard_cancel_token,
+        Some(signal_rx),
+        Some(turn_requested),
+        Some(queued_messages),
+        Some(soft_cancel_requested),
+        lineage,
         ToolLoopMode::StepAfterToolBoundary,
     )
     .await
@@ -232,6 +273,7 @@ async fn run_brain_turn_with_tools_mode(
         None,
         None,
         None,
+        Arc::new(NullLineageHandle),
         tool_loop_mode,
     )
     .await?;

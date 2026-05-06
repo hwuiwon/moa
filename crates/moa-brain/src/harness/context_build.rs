@@ -12,6 +12,7 @@ use moa_core::{
     record_turn_event_persist_duration, record_turn_pipeline_compile_duration,
     record_turn_snapshot_write_duration, stable_prefix_fingerprint,
 };
+use moa_lineage_core::TurnId;
 use moa_security::inject_canary;
 use tokio::sync::broadcast;
 use tracing::Instrument;
@@ -31,6 +32,7 @@ pub(super) struct BuildTurnContextOptions<'a> {
     pub enable_canary: bool,
     pub trace_context: &'a TraceContext,
     pub snapshot_max_size_bytes: usize,
+    pub turn_id: TurnId,
 }
 
 /// Runs the context pipeline and persists the latest reusable history snapshot.
@@ -38,6 +40,26 @@ pub(super) async fn build_turn_context(
     options: BuildTurnContextOptions<'_>,
 ) -> Result<(WorkingContext, Option<String>)> {
     let mut ctx = WorkingContext::new(options.session, options.llm_provider.capabilities());
+    ctx.insert_metadata(
+        "_moa.turn_id",
+        serde_json::json!(options.turn_id.0.to_string()),
+    );
+    ctx.insert_metadata(
+        "_moa.session_id",
+        serde_json::json!(options.trace_context.session_id.to_string()),
+    );
+    ctx.insert_metadata(
+        "_moa.user_id",
+        serde_json::json!(options.trace_context.user_id.to_string()),
+    );
+    ctx.insert_metadata(
+        "_moa.workspace_id",
+        serde_json::json!(options.trace_context.workspace_id.to_string()),
+    );
+    ctx.insert_metadata(
+        "_moa.model",
+        serde_json::json!(options.trace_context.model.clone()),
+    );
     if let Some(workspace_root) = options.workspace_root {
         ctx.insert_metadata(
             WORKSPACE_ROOT_METADATA_KEY,

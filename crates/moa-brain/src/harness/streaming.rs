@@ -4,11 +4,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    BufferedUserMessage, CompletionContent, Event, EventRange, EventRecord, LLMProvider, MoaError,
-    ModelTask, Result, RuntimeEvent, SessionId, SessionSignal, SessionStatus, SessionStore,
-    StopReason, TraceContext, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
+    BufferedUserMessage, CompletionContent, CompletionRequest, CompletionResponse, ContextMessage,
+    Event, EventRange, EventRecord, LLMProvider, LineageHandle, MoaError, ModelTask, Result,
+    RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, StopReason,
+    TraceContext, WorkingContext, record_turn_llm_call_duration,
+    record_turn_tool_dispatch_duration,
 };
 use moa_hands::ToolRouter;
+use moa_lineage_core::{
+    ContextChunk, ContextLineage, GenerationLineage, LineageEvent, TokenUsage, ToolCallSummary,
+    TurnId,
+};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -46,6 +52,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
     turn_requested: Option<&mut bool>,
     queued_messages: Option<&mut Vec<BufferedUserMessage>>,
     soft_cancel_requested: Option<&mut bool>,
+    lineage: Arc<dyn LineageHandle>,
     tool_loop_mode: ToolLoopMode,
 ) -> Result<StreamedTurnResult> {
     let initial_session = session_store.get_session(session_id).await?;
@@ -56,7 +63,9 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
     let trace_context =
         TraceContext::from_session_meta(&initial_session, last_user_message_text(&initial_events));
     let turn_span = tracing::Span::current();
+    let turn_id = TurnId::new_v7();
     turn_span.record("moa.turn.number", turn_number);
+    turn_span.record("moa.turn.id", tracing::field::display(turn_id.0));
     turn_span.record("moa.model", tracing::field::display(&initial_session.model));
     trace_context.apply_to_span(&turn_span);
 
@@ -265,10 +274,12 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 enable_canary: tool_router.is_some(),
                 trace_context: &trace_context,
                 snapshot_max_size_bytes: pipeline.snapshot_config().max_size_bytes,
+                turn_id,
             })
             .instrument(pipeline_compile_span.clone())
             .await?;
             pipeline_compile_span.record("moa.pipeline.total_tokens", ctx.token_count as i64);
+            emit_context_lineage(lineage.as_ref(), turn_id, &session, &ctx, &pipeline_compile_span);
 
             let mut emit_runtime = |event| {
                 let _ = runtime_tx.send(event);
@@ -352,6 +363,17 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             let response_usage = response.token_usage();
             let response_cost_cents =
                 calculate_response_cost_cents(&response, &llm_provider.capabilities().pricing);
+            emit_generation_lineage(
+                lineage.as_ref(),
+                turn_id,
+                &session,
+                llm_provider.name(),
+                &request,
+                &response,
+                response_cost_cents,
+                llm_call_duration,
+                &llm_call_span,
+            );
             llm_call_span.record(
                 "gen_ai.usage.input_tokens",
                 response_usage.total_input_tokens() as i64,
@@ -571,6 +593,134 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
         }
     }
     .await
+}
+
+fn emit_context_lineage(
+    lineage: &dyn LineageHandle,
+    turn_id: TurnId,
+    session: &SessionMeta,
+    ctx: &WorkingContext,
+    span: &tracing::Span,
+) {
+    let chunks = ctx
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(idx, message)| context_chunk(session, idx, message))
+        .collect::<Vec<_>>();
+    let record = ContextLineage {
+        turn_id,
+        session_id: session.id,
+        workspace_id: session.workspace_id.clone(),
+        user_id: session.user_id.clone(),
+        ts: chrono::Utc::now(),
+        chunks_in_window: chunks,
+        truncations: Vec::new(),
+        prefix_cache_hit_tokens: None,
+        prefix_cache_miss_tokens: None,
+        total_input_tokens_estimated: ctx.token_count.min(u32::MAX as usize) as u32,
+    };
+
+    match serde_json::to_value(LineageEvent::Context(record.clone())) {
+        Ok(json) => lineage.record(json),
+        Err(error) => tracing::warn!(%error, "failed to serialize context lineage"),
+    }
+    moa_lineage_otel::emit_context_attrs(span, &record);
+}
+
+fn context_chunk(session: &SessionMeta, idx: usize, message: &ContextMessage) -> ContextChunk {
+    ContextChunk {
+        chunk_id: uuid::Uuid::now_v7(),
+        source_uid: session.id.0,
+        position: idx.min(u16::MAX as usize) as u16,
+        estimated_tokens: estimate_tokens(&message.content),
+        role: format!("{:?}", message.role).to_ascii_lowercase(),
+    }
+}
+
+fn estimate_tokens(text: &str) -> u32 {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        0
+    } else {
+        trimmed.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_generation_lineage(
+    lineage: &dyn LineageHandle,
+    turn_id: TurnId,
+    session: &SessionMeta,
+    provider: &str,
+    request: &CompletionRequest,
+    response: &CompletionResponse,
+    cost_cents: u32,
+    duration: std::time::Duration,
+    span: &tracing::Span,
+) {
+    let usage = response.token_usage();
+    let record = GenerationLineage {
+        turn_id,
+        session_id: session.id,
+        workspace_id: session.workspace_id.clone(),
+        user_id: session.user_id.clone(),
+        ts: chrono::Utc::now(),
+        provider: provider.to_string(),
+        request_model: request
+            .model
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| session.model.to_string()),
+        response_model: response.model.to_string(),
+        usage: TokenUsage {
+            input_tokens: usage.total_input_tokens().min(u32::MAX as usize) as u32,
+            output_tokens: usage.output_tokens.min(u32::MAX as usize) as u32,
+            cache_read_tokens: Some(usage.input_tokens_cache_read.min(u32::MAX as usize) as u32),
+            cache_creation_tokens: Some(
+                usage.input_tokens_cache_write.min(u32::MAX as usize) as u32
+            ),
+        },
+        finish_reasons: vec![format!("{:?}", response.stop_reason)],
+        tool_calls: tool_call_summaries(response),
+        cost_micros: u64::from(cost_cents).saturating_mul(10_000),
+        duration,
+        trace_id: None,
+        span_id: None,
+    };
+
+    match serde_json::to_value(LineageEvent::Generation(record.clone())) {
+        Ok(json) => lineage.record(json),
+        Err(error) => tracing::warn!(%error, "failed to serialize generation lineage"),
+    }
+    moa_lineage_otel::emit_generation_attrs(span, &record);
+}
+
+fn tool_call_summaries(response: &CompletionResponse) -> Vec<ToolCallSummary> {
+    response
+        .content
+        .iter()
+        .filter_map(|content| {
+            let CompletionContent::ToolCall(call) = content else {
+                return None;
+            };
+            let argument_size_bytes = serde_json::to_vec(&call.invocation.input)
+                .map(|bytes| bytes.len().min(u32::MAX as usize) as u32)
+                .unwrap_or(0);
+            Some(ToolCallSummary {
+                tool_name: call.invocation.name.clone(),
+                call_id: call
+                    .invocation
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| call.invocation.name.clone()),
+                argument_size_bytes,
+                result_size_bytes: 0,
+                duration: std::time::Duration::ZERO,
+                error: None,
+            })
+        })
+        .collect()
 }
 
 fn handle_stream_signal(

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    ContextProcessor, ContextSnapshotConfig, LLMProvider, MoaConfig, ProcessorOutput, Result,
-    SessionStore, WorkingContext,
+    ContextProcessor, ContextSnapshotConfig, LLMProvider, LineageHandle, MoaConfig,
+    ProcessorOutput, Result, SessionStore, WorkingContext,
 };
 use tracing::Instrument;
 
@@ -272,6 +272,8 @@ pub struct GraphMemoryPipelineOptions {
     pub discovered_workspace_instructions: Option<String>,
     /// Tool schemas to expose to the model.
     pub tool_schemas: Vec<serde_json::Value>,
+    /// Durable lineage handle used by retrieval stages.
+    pub lineage: Arc<dyn LineageHandle>,
 }
 
 /// Builds the default context pipeline with graph-backed memory retrieval.
@@ -287,6 +289,7 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
         query_rewrite_llm_provider,
         discovered_workspace_instructions,
         tool_schemas,
+        lineage,
     } = options;
     let history: Box<dyn ContextProcessor> =
         if let Some(llm_provider) = compaction_llm_provider.clone() {
@@ -336,7 +339,8 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
         stages.push(query_rewriter);
     }
     stages.extend([
-        Box::new(GraphMemoryRetriever::new(graph_pool)) as Box<dyn ContextProcessor>,
+        Box::new(GraphMemoryRetriever::new(graph_pool).with_lineage(lineage))
+            as Box<dyn ContextProcessor>,
         history,
         Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
         Box::new(Compactor::new(

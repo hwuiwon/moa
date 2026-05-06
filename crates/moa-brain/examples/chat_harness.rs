@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
             query_rewrite_llm_provider: Some(provider.clone()),
             discovered_workspace_instructions: None,
             tool_schemas: tool_router.tool_schemas(),
+            lineage: Arc::new(moa_core::NullLineageHandle),
         },
     );
     let cli_prompt = std::env::args().skip(1).collect::<Vec<_>>().join(" ");

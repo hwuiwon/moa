@@ -61,6 +61,7 @@ pub struct ToolRouter {
     policies: ToolPolicies,
     rule_store: Option<Arc<dyn ApprovalRuleStore>>,
     session_store: Option<Arc<dyn SessionStore>>,
+    lineage: Arc<dyn moa_core::LineageHandle>,
     sandbox_root: Option<PathBuf>,
     tool_output: ToolOutputConfig,
     tool_budgets: ToolBudgetConfig,
@@ -443,6 +444,7 @@ impl ToolRouter {
 
         let ctx = moa_core::ToolContext {
             session,
+            lineage: self.lineage.as_ref(),
             session_store: self.session_store.as_deref(),
             cancel_token,
         };

@@ -27,10 +27,10 @@ pub use broadcast_recv::{RecvResult, recv_with_lag_handling};
 pub use config::{
     CloudConfig, CloudFlyioConfig, CloudHandsConfig, CompactionConfig, ContextSnapshotConfig,
     DaemonConfig, DatabaseConfig, DatabaseNeonConfig, DesktopConfig, GatewayConfig, GeneralConfig,
-    LocalConfig, McpCredentialConfig, McpServerConfig, McpTransportConfig, MemoryConfig,
-    MetricsConfig, MoaConfig, ModelsConfig, ObservabilityConfig, OtlpProtocol, PermissionsConfig,
-    ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig, ResolutionConfig,
-    ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig,
+    LineageConfig, LocalConfig, McpCredentialConfig, McpServerConfig, McpTransportConfig,
+    MemoryConfig, MetricsConfig, MoaConfig, ModelsConfig, ObservabilityConfig, OtlpProtocol,
+    PermissionsConfig, ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig,
+    ResolutionConfig, ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig,
 };
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
 pub use db::ScopedConn;
@@ -55,7 +55,8 @@ pub use session_replay::{
 pub use telemetry::{TelemetryConfig, TelemetryGuard, default_log_path, init_observability};
 pub use traits::{
     BlobStore, BrainOrchestrator, BranchManager, BuiltInTool, ContextProcessor, CredentialVault,
-    HandProvider, LLMProvider, PlatformAdapter, SessionStore, ToolContext,
+    HandProvider, LLMProvider, LineageHandle, NULL_LINEAGE_HANDLE, NullLineageHandle,
+    PlatformAdapter, SessionStore, ToolContext,
 };
 pub use truncation::{truncate_head_tail, truncate_head_tail_lines};
 pub use turn_latency::{

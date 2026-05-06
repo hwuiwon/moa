@@ -22,7 +22,7 @@ use memory_ingest::{IngestApplyReport, SessionTurn, ingest_turn_direct_with_pool
 use moa_brain::{
     GraphMemoryPipelineOptions, LoopDetector, StreamedTurnResult,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
-    run_streamed_turn_with_signals_stepwise,
+    run_streamed_turn_with_signals_stepwise_and_lineage,
 };
 use moa_core::{
     BrainOrchestrator, BranchManager, BufferedUserMessage, CountedSessionStore, CronHandle,
@@ -34,6 +34,7 @@ use moa_core::{
     scope_turn_replay_counters,
 };
 use moa_hands::ToolRouter;
+use moa_lineage_sink::{MpscSink, MpscSinkConfig, ensure_schema};
 use moa_providers::{ModelRouter, resolve_provider_selection};
 use moa_session::{
     NeonBranchManager, PostgresSessionStore, SessionEventStream, create_session_store,
@@ -49,6 +50,29 @@ use moa_orchestrator::observability::{
 use moa_orchestrator::session_engine::session_requires_processing;
 
 const TURN_EVENT_TAIL_LIMIT: usize = 16;
+
+async fn build_lineage_sink(
+    config: &MoaConfig,
+    graph_pool: sqlx::PgPool,
+) -> Result<(
+    Arc<dyn moa_core::LineageHandle>,
+    Option<Arc<moa_lineage_sink::WriterHandle>>,
+)> {
+    if !config.observability.lineage.enabled {
+        return Ok((Arc::new(moa_core::NullLineageHandle), None));
+    }
+
+    ensure_schema(&graph_pool)
+        .await
+        .map_err(|error| MoaError::StorageError(format!("lineage schema setup failed: {error}")))?;
+    let sink_config = MpscSinkConfig::from(&config.observability.lineage);
+    let (sink, writer) = MpscSink::spawn(sink_config, graph_pool)
+        .await
+        .map_err(|error| {
+            MoaError::StorageError(format!("lineage writer startup failed: {error}"))
+        })?;
+    Ok((Arc::new(sink), Some(Arc::new(writer))))
+}
 
 /// Graph-memory maintenance result for one local check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +96,8 @@ pub struct LocalOrchestrator {
     graph_pool: sqlx::PgPool,
     model_router: Arc<ModelRouter>,
     tool_router: Arc<ToolRouter>,
+    lineage: Arc<dyn moa_core::LineageHandle>,
+    lineage_writer: Option<Arc<moa_lineage_sink::WriterHandle>>,
     scheduler: Arc<JobScheduler>,
     branch_manager: Option<Arc<NeonBranchManager>>,
     sessions: Arc<RwLock<HashMap<SessionId, LocalBrainHandle>>>,
@@ -95,6 +121,7 @@ struct SessionTaskContext {
     graph_pool: sqlx::PgPool,
     model_router: Arc<ModelRouter>,
     tool_router: Arc<ToolRouter>,
+    lineage: Arc<dyn moa_core::LineageHandle>,
     session_id: SessionId,
     discovered_workspace_instructions: Option<String>,
 }
@@ -120,6 +147,7 @@ impl LocalOrchestrator {
             Arc::new(CountedSessionStore::new(session_store.clone()));
         let graph_pool = session_store.pool().clone();
         let _ = memory_ingest::install_runtime_with_pool(graph_pool.clone());
+        let (lineage, lineage_writer) = build_lineage_sink(&config, graph_pool.clone()).await?;
         let session_task_monitor = SessionTaskMonitor::shared();
         let orchestrator = Self {
             config: Arc::new(config),
@@ -128,6 +156,8 @@ impl LocalOrchestrator {
             graph_pool,
             model_router,
             tool_router,
+            lineage,
+            lineage_writer,
             scheduler: Arc::new(scheduler),
             branch_manager,
             sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -145,6 +175,22 @@ impl LocalOrchestrator {
             tracing::warn!(%err, "prune_empty_sessions skipped on startup");
         }
         Ok(orchestrator)
+    }
+
+    /// Returns lineage writer statistics when durable lineage capture is enabled.
+    pub fn lineage_writer_stats(&self) -> Option<moa_lineage_sink::WriterStats> {
+        self.lineage_writer.as_ref().map(|writer| writer.stats())
+    }
+
+    /// Gracefully drains and shuts down the lineage writer when capture is enabled.
+    pub async fn shutdown_lineage_writer(&self) -> Result<Option<moa_lineage_sink::WriterStats>> {
+        let Some(writer) = &self.lineage_writer else {
+            return Ok(None);
+        };
+        let stats = writer.shutdown().await.map_err(|error| {
+            MoaError::StorageError(format!("lineage writer shutdown failed: {error}"))
+        })?;
+        Ok(Some(stats))
     }
 
     /// Creates a fully local orchestrator from the loaded MOA config.
@@ -311,6 +357,7 @@ impl LocalOrchestrator {
             graph_pool: self.graph_pool.clone(),
             model_router: self.model_router.clone(),
             tool_router: self.tool_router.clone(),
+            lineage: self.lineage.clone(),
             session_id,
             discovered_workspace_instructions: self
                 .discovered_workspace_instructions
@@ -846,6 +893,7 @@ async fn run_session_task(
             ),
             discovered_workspace_instructions: context.discovered_workspace_instructions.clone(),
             tool_schemas: context.tool_router.tool_schemas(),
+            lineage: context.lineage.clone(),
         },
     );
     let max_turns = context.config.session_limits.max_turns;
@@ -995,7 +1043,7 @@ async fn run_session_task(
                     let mut soft_cancel_requested = false;
                     let turn_start_sequence_num =
                         events.last().map(|record| record.sequence_num).unwrap_or(0);
-                    let turn_result = run_streamed_turn_with_signals_stepwise(
+                    let turn_result = run_streamed_turn_with_signals_stepwise_and_lineage(
                         context.session_id,
                         context.session_store.clone(),
                         context.model_router.provider_for(ModelTask::MainLoop),
@@ -1009,6 +1057,7 @@ async fn run_session_task(
                         &mut soft_cancel_requested,
                         Some(cancel_token.clone()),
                         Some(hard_cancel_token.clone()),
+                        context.lineage.clone(),
                     )
                     .await;
 

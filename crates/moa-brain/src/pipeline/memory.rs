@@ -1,15 +1,23 @@
 //! Stage 6: graph memory retrieval and prompt injection.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use moa_core::{
-    ContextMessage, ContextProcessor, MemoryScope, ProcessorOutput, QueryRewriteResult, Result,
-    RewriteSource, ScopeContext, WorkingContext,
+    ContextMessage, ContextProcessor, LineageHandle, MemoryScope, NullLineageHandle,
+    ProcessorOutput, QueryRewriteResult, Result, RewriteSource, ScopeContext, WorkingContext,
+};
+use moa_lineage_core::{
+    BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
+    StageTimings, TurnId, VecHit,
 };
 use moa_memory_graph::{AgeGraphStore, PiiClass};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use sqlx::PgPool;
+use tracing::Span;
+use uuid::Uuid;
 
 const MEMORY_BUDGET_DIVISOR: usize = 5;
 const GRAPH_MEMORY_RESULTS: usize = 4;
@@ -20,6 +28,7 @@ pub(crate) const MEMORY_REMINDER_PREFIX: &str = "<memory-reminder>";
 pub struct GraphMemoryRetriever {
     pool: PgPool,
     assume_app_role: bool,
+    lineage: Arc<dyn LineageHandle>,
 }
 
 impl GraphMemoryRetriever {
@@ -29,6 +38,7 @@ impl GraphMemoryRetriever {
         Self {
             pool,
             assume_app_role: false,
+            lineage: Arc::new(NullLineageHandle),
         }
     }
 
@@ -36,6 +46,13 @@ impl GraphMemoryRetriever {
     #[must_use]
     pub fn with_assume_app_role(mut self, assume_app_role: bool) -> Self {
         self.assume_app_role = assume_app_role;
+        self
+    }
+
+    /// Attaches the lineage sink used to capture retrieval traces.
+    #[must_use]
+    pub fn with_lineage(mut self, lineage: Arc<dyn LineageHandle>) -> Self {
+        self.lineage = lineage;
         self
     }
 
@@ -90,7 +107,9 @@ impl ContextProcessor for GraphMemoryRetriever {
         let Some(query) = extract_search_query(ctx) else {
             return Ok(ProcessorOutput::default());
         };
-        let hits = self.retrieve_hits(ctx, query).await?;
+        let retrieval_started = Instant::now();
+        let hits = self.retrieve_hits(ctx, query.clone()).await?;
+        self.emit_lineage(ctx, &query, &hits, retrieval_started.elapsed());
         if hits.is_empty() {
             return Ok(ProcessorOutput::default());
         }
@@ -125,6 +144,95 @@ impl ContextProcessor for GraphMemoryRetriever {
             ..ProcessorOutput::default()
         })
     }
+}
+
+impl GraphMemoryRetriever {
+    fn emit_lineage(
+        &self,
+        ctx: &WorkingContext,
+        query: &str,
+        hits: &[crate::retrieval::RetrievalHit],
+        elapsed: std::time::Duration,
+    ) {
+        let retrieval = RetrievalLineage {
+            turn_id: turn_id_from_context(ctx).unwrap_or_else(TurnId::new_v7),
+            session_id: ctx.session_id,
+            workspace_id: ctx.workspace_id.clone(),
+            user_id: ctx.user_id.clone(),
+            scope: MemoryScope::Workspace {
+                workspace_id: ctx.workspace_id.clone(),
+            },
+            ts: Utc::now(),
+            query_original: query.to_string(),
+            query_expansions: query_expansions_from_context(ctx),
+            vector_hits: hits
+                .iter()
+                .map(|hit| VecHit {
+                    chunk_id: hit.uid,
+                    score: hit.score as f32,
+                    source: "hybrid".to_string(),
+                    embedder: "configured".to_string(),
+                    embed_dim: VECTOR_DIMENSION as u16,
+                })
+                .collect(),
+            graph_paths: Vec::new(),
+            fusion_scores: hits
+                .iter()
+                .map(|hit| FusedHit {
+                    chunk_id: hit.uid,
+                    fused_score: hit.score as f32,
+                    vector_contribution: contribution(hit.legs.vector),
+                    graph_contribution: contribution(hit.legs.graph),
+                    lexical_contribution: contribution(hit.legs.lexical),
+                    fusion_method: "rrf".to_string(),
+                })
+                .collect(),
+            rerank_scores: hits
+                .iter()
+                .enumerate()
+                .map(|(idx, hit)| RerankHit {
+                    chunk_id: hit.uid,
+                    original_index: idx.min(u16::MAX as usize) as u16,
+                    relevance_score: hit.score as f32,
+                    rerank_model: "noop".to_string(),
+                })
+                .collect(),
+            top_k: hits.iter().map(|hit| hit.uid).collect(),
+            timings: StageTimings {
+                total_ms: duration_ms_u32(elapsed),
+                ..StageTimings::default()
+            },
+            introspection: BackendIntrospection::default(),
+            stage: RetrievalStage::Single,
+        };
+
+        match serde_json::to_value(LineageEvent::Retrieval(retrieval.clone())) {
+            Ok(json) => self.lineage.record(json),
+            Err(error) => tracing::warn!(%error, "failed to serialize retrieval lineage"),
+        }
+        moa_lineage_otel::emit_retrieval_attrs(&Span::current(), &retrieval);
+    }
+}
+
+fn contribution(enabled: bool) -> f32 {
+    if enabled { 1.0 } else { 0.0 }
+}
+
+fn duration_ms_u32(duration: std::time::Duration) -> u32 {
+    duration.as_millis().min(u128::from(u32::MAX)) as u32
+}
+
+fn turn_id_from_context(ctx: &WorkingContext) -> Option<TurnId> {
+    let value = ctx.metadata().get("_moa.turn_id")?.as_str()?;
+    Uuid::parse_str(value).ok().map(TurnId)
+}
+
+fn query_expansions_from_context(ctx: &WorkingContext) -> Vec<String> {
+    ctx.metadata()
+        .get("query_rewrite")
+        .and_then(query_from_rewrite_metadata)
+        .into_iter()
+        .collect()
 }
 
 fn graph_hit_excerpt(row: &moa_memory_graph::NodeIndexRow) -> String {

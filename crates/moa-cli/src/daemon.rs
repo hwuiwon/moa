@@ -212,6 +212,16 @@ pub async fn run_daemon_server(config: MoaConfig) -> Result<()> {
 
     let shutdown_grace = graceful_shutdown_timeout(&config);
     wait_for_active_turns(state.session_store.as_ref(), shutdown_grace).await?;
+    match state.orchestrator.shutdown_lineage_writer().await {
+        Ok(Some(stats)) => tracing::info!(
+            written = stats.written,
+            journal_depth = stats.journal_depth,
+            last_flush_unix_ms = stats.last_flush_unix_ms,
+            "lineage writer drained"
+        ),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, "lineage writer shutdown failed"),
+    }
     signal_task.abort();
     analytics_refresh_task.abort();
     let _ = analytics_refresh_task.await;
