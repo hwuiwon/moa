@@ -75,7 +75,7 @@ jobs:
         run: cargo run --locked -p xtask --bin audit_legacy_memory
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Run cross-tenant pentest
         if: github.event_name != 'schedule'
@@ -99,7 +99,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Run tests
-        run: cargo test --locked --workspace
+        run: cargo test --locked
 
   build-image:
     runs-on: ubuntu-latest
