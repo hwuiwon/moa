@@ -96,12 +96,6 @@ slack_token_env = "SLACK_BOT_TOKEN"
 slack_app_token_env = "SLACK_APP_TOKEN"
 discord_token_env = "DISCORD_BOT_TOKEN"
 
-[desktop]
-theme = "default"
-sidebar_auto = true
-tab_limit = 8
-diff_style = "auto"
-
 [permissions]
 default_posture = "approve"
 auto_approve = ["file_read", "file_search"]

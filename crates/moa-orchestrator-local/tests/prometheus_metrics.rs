@@ -126,7 +126,7 @@ async fn start_session(orchestrator: &LocalOrchestrator) -> Result<SessionHandle
         .start_session(StartSessionRequest {
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Desktop,
+            platform: Platform::Cli,
             model: ModelId::new(orchestrator.model()),
             initial_message: None,
             title: None,

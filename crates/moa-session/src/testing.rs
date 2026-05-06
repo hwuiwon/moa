@@ -5,6 +5,7 @@ use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 use crate::PostgresSessionStore;
+use crate::schema::SCHEMA_MIGRATION_LOCK_ID;
 
 const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:25432/moa";
 
@@ -35,15 +36,40 @@ pub async fn cleanup_test_schema(database_url: &str, schema_name: &str) -> Resul
                 "failed to connect to Postgres for cleanup: {error}"
             ))
         })?;
+    let mut conn = pool.acquire().await.map_err(|error| {
+        MoaError::StorageError(format!(
+            "failed to acquire Postgres cleanup connection: {error}"
+        ))
+    })?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(SCHEMA_MIGRATION_LOCK_ID)
+        .execute(&mut *conn)
+        .await
+        .map_err(|error| {
+            MoaError::StorageError(format!(
+                "failed to lock test schema cleanup for {schema_name}: {error}"
+            ))
+        })?;
     let query = format!(
         "DROP SCHEMA IF EXISTS {} CASCADE",
         quote_identifier(schema_name)
     );
-    sqlx::query(&query).execute(&pool).await.map_err(|error| {
-        MoaError::StorageError(format!("failed to drop test schema {schema_name}: {error}"))
-    })?;
+    let drop_result = sqlx::query(&query).execute(&mut *conn).await;
+    let unlock_result = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(SCHEMA_MIGRATION_LOCK_ID)
+        .execute(&mut *conn)
+        .await;
+    drop(conn);
     pool.close().await;
-    Ok(())
+    match (drop_result, unlock_result) {
+        (Ok(_), Ok(_)) => Ok(()),
+        (Err(error), _) => Err(MoaError::StorageError(format!(
+            "failed to drop test schema {schema_name}: {error}"
+        ))),
+        (Ok(_), Err(error)) => Err(MoaError::StorageError(format!(
+            "failed to unlock test schema cleanup for {schema_name}: {error}"
+        ))),
+    }
 }
 
 fn quote_identifier(identifier: &str) -> String {

@@ -11,7 +11,7 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 | `docs/00-direction.md` | Product identity and philosophy |
 | `docs/01-architecture-overview.md` | System diagram, all trait definitions, workspace layout |
 | `docs/02-brain-orchestration.md` | Restate orchestration, local runtime mode, brain loop |
-| `docs/03-communication-layer.md` | Gateway, desktop/CLI communication, approvals, observation |
+| `docs/03-communication-layer.md` | Gateway, CLI communication, approvals, observation |
 | `docs/04-memory-architecture.md` | Graph memory, privacy filtering, sidecar indexes, retrieval, consolidation |
 | `docs/05-session-event-log.md` | Postgres event schema, event types, compaction |
 | `docs/06-hands-and-mcp.md` | HandProvider, Daytona, E2B, MCP, tool routing |
@@ -25,7 +25,7 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 1. **Use the trait definitions from `docs/01-architecture-overview.md` as the source of truth.** All component interfaces are defined there.
 2. **Every public function must have a doc comment.**
 3. **Every module must have a module-level doc comment.**
-4. **Use `thiserror` for library error types.** Use `anyhow` only in binary entrypoints (`moa-cli`, `moa-desktop`).
+4. **Use `thiserror` for library error types.** Use `anyhow` only in binary entrypoints (`moa-cli`).
 5. **Use `tracing` for all logging.** Never `println!` or `eprintln!` in library code.
 6. **Use `tokio` as the async runtime.** All I/O must be async.
 7. **All tests go in a `tests/` directory within each crate** (integration tests) or inline `#[cfg(test)] mod tests` (unit tests).
@@ -44,12 +44,6 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 - Paths: `std::path::PathBuf` for filesystem, `String` for logical identifiers, and typed IDs for graph memory nodes where available
 - Errors: One `Error` enum per crate with `#[derive(thiserror::Error)]`
 
-## Desktop App
-
-- The desktop GUI lives in `crates/moa-desktop/` and uses GPUI (from the Zed editor project).
-- `moa-desktop` is a workspace member but **not** a default member — build it explicitly with `cargo build -p moa-desktop`.
-- `moa-cli` and `moa-desktop` are separate binaries sharing the same backend crates.
-
 ## Verification Checklist
 
 - Rust-only changes:
@@ -58,8 +52,6 @@ The full architecture specification is in `docs/`. Read the relevant section bef
   - `cargo clippy ... -D warnings`
   - `cargo build --workspace` when public types, shared crates, or workspace wiring changed
   - `git diff --check`
-- Desktop (GPUI) changes:
-  - `cargo build -p moa-desktop`
 
 ## Live And Billed Tests
 

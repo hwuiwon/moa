@@ -83,7 +83,6 @@ impl PostgresSessionStore {
     /// This is primarily intended for ignored integration tests so multiple runs can isolate
     /// their tables without separate databases.
     pub async fn new_in_schema(database_url: &str, schema_name: &str) -> Result<Self> {
-        Self::ensure_schema_exists(database_url, schema_name).await?;
         let blob_dir = FileBlobStore::default_dir_for_database_path(Path::new(":memory:"))?;
         let blob_store: Arc<dyn BlobStore> = Arc::new(FileBlobStore::new(blob_dir));
         Self::new_with_options_and_schema(
@@ -289,26 +288,6 @@ impl PostgresSessionStore {
         Err(MoaError::StorageError(
             "postgres connection retry loop terminated unexpectedly".to_string(),
         ))
-    }
-
-    async fn ensure_schema_exists(database_url: &str, schema_name: &str) -> Result<()> {
-        let pool = PgPoolOptions::new()
-            .min_connections(1)
-            .max_connections(1)
-            .acquire_timeout(Duration::from_secs(10))
-            .connect(database_url)
-            .await
-            .map_err(map_sqlx_error)?;
-        let query = format!(
-            "CREATE SCHEMA IF NOT EXISTS {}",
-            quote_identifier(schema_name)
-        );
-        sqlx::query(&query)
-            .execute(&pool)
-            .await
-            .map_err(map_sqlx_error)?;
-        pool.close().await;
-        Ok(())
     }
 
     fn table_name(&self, table_name: &str) -> String {

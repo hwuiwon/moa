@@ -6,7 +6,7 @@ _System model, trait map, data flow, and workspace layout._
 
 ```text
 Clients
-  GPUI desktop | CLI | REST/gateway | Telegram/Slack/Discord
+  CLI | REST/gateway | Telegram/Slack/Discord
         |
         v
 Runtime boundary
@@ -82,7 +82,7 @@ The local and cloud runtimes share these seams. They differ in how turns are sch
 
 ### Local
 
-`moa-orchestrator-local` runs the same brain loop in Tokio tasks with broadcast channels for observation. It is used by `moa-cli`, `moa-runtime`, and the desktop app. It still uses Postgres for session storage and the same graph memory and retrieval infrastructure.
+`moa-orchestrator-local` runs the same brain loop in Tokio tasks with broadcast channels for observation. It is used by `moa-cli` and `moa-runtime`. It still uses Postgres for session storage and the same graph memory and retrieval infrastructure.
 
 ## Turn Data Flow
 
@@ -149,7 +149,6 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 | `moa-skills` | Skill parsing, distillation, improvement, regression generation |
 | `moa-eval` | Evaluation harness |
 | `moa-loadtest` | Load-test tooling |
-| `moa-desktop` | GPUI desktop app |
 
 ## Where To Look Next
 

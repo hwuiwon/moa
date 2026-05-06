@@ -1,1 +1,0 @@
-{"nodes": [{"id": "mod", "label": "mod.rs", "file_type": "code", "source_file": "crates/moa-desktop/src/panels/settings/mod.rs", "source_location": "L1"}], "edges": [{"source": "mod", "target": "settings_panel", "relation": "imports_from", "confidence": "EXTRACTED", "source_file": "crates/moa-desktop/src/panels/settings/mod.rs", "source_location": "L11", "weight": 1.0}]}

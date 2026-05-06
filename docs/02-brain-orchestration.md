@@ -101,7 +101,7 @@ These are workflow-shaped because rerunning the same logical job should be expli
 
 ## Local Runtime
 
-`moa-orchestrator-local` implements `BrainOrchestrator` with Tokio tasks and broadcast channels. It is used by `moa-cli`, `moa-runtime`, and `moa-desktop`.
+`moa-orchestrator-local` implements `BrainOrchestrator` with Tokio tasks and broadcast channels. It is used by `moa-cli` and `moa-runtime`.
 
 Local mode still uses:
 

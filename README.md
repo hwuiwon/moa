@@ -6,7 +6,7 @@
 
 MOA runs durable agent sessions on Restate, stores product data in Postgres/Neon with pgvector, segments conversations into discrete tasks, scores task resolution automatically, and feeds those outcomes into per-tenant learning. Tenants start with a blank intent taxonomy. MOA discovers candidate intents from their conversations, lets admins curate them, and uses confirmed intents to improve memory retrieval, skill ranking, and tool selection.
 
-Local development uses the same core brain and storage model through the CLI and the GPUI desktop app. Cloud deployment uses Restate services, virtual objects, and workflows behind the REST/gateway surfaces.
+Local development uses the same core brain and storage model through the CLI. Cloud deployment uses Restate services, virtual objects, and workflows behind the REST/gateway surfaces.
 
 Status: early active development. The architecture is stable enough to document, but APIs and product surfaces still move.
 
@@ -37,12 +37,6 @@ cargo run -p moa-cli -- doctor
 cargo run -p moa-cli -- exec "What's 2+2?"
 ```
 
-Launch the desktop app explicitly because it is not a default workspace member:
-
-```bash
-cargo run -p moa-desktop
-```
-
 ## Cloud Runtime
 
 Cloud mode runs the `moa-orchestrator` Restate handler service plus Postgres/Neon and the configured hand provider.
@@ -65,7 +59,7 @@ DAYTONA_API_KEY=... # optional, depending on hand provider
 ## Architecture
 
 ```text
-REST / Gateway / CLI / GPUI Desktop
+REST / Gateway / CLI
         |
         v
 Restate handler service (`moa-orchestrator`)
@@ -111,7 +105,7 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-hands`](crates/moa-hands/) | Tool router, local/Docker hands, Daytona, E2B, MCP client |
 | [`moa-providers`](crates/moa-providers/) | LLM and embedding providers |
 | [`moa-orchestrator`](crates/moa-orchestrator/) | Restate services, virtual objects, workflows, and handler binary |
-| [`moa-orchestrator-local`](crates/moa-orchestrator-local/) | Tokio-task local orchestrator for CLI and desktop |
+| [`moa-orchestrator-local`](crates/moa-orchestrator-local/) | Tokio-task local orchestrator for CLI and daemon flows |
 | [`moa-gateway`](crates/moa-gateway/) | Telegram, Slack, Discord adapters and platform rendering |
 | [`moa-runtime`](crates/moa-runtime/) | Shared runtime bootstrap |
 | [`moa-cli`](crates/moa-cli/) | `moa` CLI and daemon commands |
@@ -119,7 +113,6 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-skills`](crates/moa-skills/) | Agent Skills parsing, distillation, improvement, regression suites |
 | [`moa-eval`](crates/moa-eval/) | Evaluation harness |
 | [`moa-loadtest`](crates/moa-loadtest/) | Load-test harness |
-| [`moa-desktop`](crates/moa-desktop/) | GPUI desktop application |
 
 ## Documentation
 
@@ -136,10 +129,7 @@ Start with [`docs/README.md`](docs/README.md), then read:
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
-cargo build -p moa-desktop
 ```
-
-`moa-desktop` is not a default workspace member, so build it explicitly.
 
 ## License
 

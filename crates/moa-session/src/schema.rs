@@ -31,7 +31,7 @@ const SESSION_MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/024_lineage.sql"),
 ];
 
-const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;
+pub(crate) const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;
 
 /// Runs all embedded `PostgreSQL` migrations idempotently on the provided pool.
 pub async fn migrate(pool: &PgPool, schema_name: Option<&str>) -> Result<()> {

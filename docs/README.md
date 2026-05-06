@@ -9,7 +9,7 @@ These docs describe the current MOA architecture as implemented in the Rust work
 | 00 | [Direction](00-direction.md) | Product identity, principles, and differentiators |
 | 01 | [Architecture Overview](01-architecture-overview.md) | System diagram, trait map, data flow, workspace layout |
 | 02 | [Brain Orchestration](02-brain-orchestration.md) | Restate session objects, sub-agents, turn loop, local runtime |
-| 03 | [Communication Layer](03-communication-layer.md) | REST/gateway surfaces, desktop/CLI, approvals, observation |
+| 03 | [Communication Layer](03-communication-layer.md) | REST/gateway surfaces, CLI, approvals, observation |
 | 04 | [Memory Architecture](04-memory-architecture.md) | Graph memory, privacy filtering, sidecar indexes, pgvector semantic retrieval, consolidation |
 | 05 | [Session & Event Log](05-session-event-log.md) | Postgres event schema, task segments, replay, compaction |
 | 06 | [Hands & MCP](06-hands-and-mcp.md) | Hand providers, tool routing, MCP, lazy provisioning |
@@ -37,7 +37,7 @@ Supporting notes:
 
 | # | Decision | Status |
 |---|---|---|
-| 1 | Rust workspace with explicit crate boundaries around core traits, brain, session storage, memory, hands, providers, orchestration, gateway, security, skills, eval, CLI, and desktop. | Implemented |
+| 1 | Rust workspace with explicit crate boundaries around core traits, brain, session storage, memory, hands, providers, orchestration, gateway, security, skills, eval, and CLI. | Implemented |
 | 2 | Restate is the durable cloud orchestration engine. Sessions and sub-agents are virtual objects; consolidation and intent discovery are workflows. | Implemented |
 | 3 | Local mode uses `moa-orchestrator-local`, a Tokio-task orchestrator sharing the same core brain/session/graph-memory abstractions. | Implemented |
 | 4 | Postgres is the single application database. Neon is the managed/cloud Postgres target and optional checkpoint branch provider. | Implemented |
@@ -50,7 +50,7 @@ Supporting notes:
 | 11 | Global catalog intents are opt-in. No tenant receives platform-curated intents unless adopted or manually created. | Implemented |
 | 12 | Learning is recorded in a bitemporal append-only `learning_log` with provenance, confidence, batch IDs, and invalidation via `valid_to`. | Implemented |
 | 13 | Skills are ranked with a mix of keyword relevance, resolution rate, use count, and recency, with prompt-budget controls. | Implemented |
-| 14 | Desktop local UI is the GPUI `moa-desktop` crate; CLI and REST/gateway surfaces are separate product interfaces. | Implemented |
+| 14 | CLI and REST/gateway surfaces are separate product interfaces over the same runtime model. | Implemented |
 
 ## Consistency Rules
 

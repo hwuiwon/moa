@@ -37,7 +37,7 @@ async fn cohere_rerank_v4_fast_prioritizes_relevant_retrieval_candidate() {
     let documents = vec![
         "MOA deploys its local validation service to fly.io.".to_string(),
         "MOA stores memory facts in PostgreSQL tables with RLS.".to_string(),
-        "The desktop shell renders status panels and approval prompts.".to_string(),
+        "The CLI shell renders status output and approval prompts.".to_string(),
     ];
 
     let hits = reranker
