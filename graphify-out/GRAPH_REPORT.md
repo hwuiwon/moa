@@ -71,7 +71,7 @@ Nodes (58): budget_config_defaults_are_applied(), BudgetConfig, CloudConfig, Clo
 Cohesion: 0.03
 Nodes (55): PreparedTurnRequest, ResolutionLabel, ResolutionScore, ScoringPhase, SegmentBaseline, SkillResolutionRate, BufferedUserMessage, CancelMode (+47 more)
 
-### Community 8 - "crates · error.rs"
+### Community 8 - "Audit Errors & DSAR Export"
 Cohesion: 0.03
 Nodes (65): canonical_json_bytes(), canonical_payload_hash(), chain_detects_tampered_payload(), HashChain, next_chain_hash(), AuditError, classifies_rate_limit_as_retryable(), classifies_repeated_timeout_as_reprovision() (+57 more)
 
@@ -227,7 +227,7 @@ Nodes (25): checkpoint_branch_names_follow_moa_prefix(), checkpoint_info_from_br
 Cohesion: 0.06
 Nodes (16): collect_context(), load_tool_result_text(), MockSessionStore, parse_tool_id(), render_search_summary(), search_tool_result(), SearchContextLine, SearchMatch (+8 more)
 
-### Community 47 - "crates/moa-orchestrator · tool_executor.rs"
+### Community 47 - "Tool Executor Service"
 Cohesion: 0.08
 Nodes (31): append_tool_call_event(), append_tool_error_event(), append_tool_result_event(), build_tool_run_plan(), CountingTool, has_prior_non_idempotent_result(), has_prior_tool_call_event(), keyed_tool_requires_idempotency_key() (+23 more)
 
@@ -295,7 +295,7 @@ Nodes (14): current_turn_root_span(), display_duration_ms(), record_turn_compact
 Cohesion: 0.1
 Nodes (13): basis_vector(), EmbeddingRow, fetch_embedding_batch(), fetch_validation_sample(), PromotionOptions, PromotionReport, rollback_promotion(), set_dual_read() (+5 more)
 
-### Community 64 - "crates/moa-lineage/citation · adapters.rs"
+### Community 64 - "Citation Provider Adapters"
 Cohesion: 0.12
 Nodes (22): AdapterError, answer_span_bytes(), anthropic_adapter_maps_document_index(), anthropic_chunk(), AnthropicCitations, cascade_flags_vendor_hallucinated_citation(), ChunkRef, chunks() (+14 more)
 
@@ -395,7 +395,7 @@ Nodes (14): assert_blank_session_waits_for_first_message(), assert_processes_mul
 Cohesion: 0.23
 Nodes (16): catalog_adoption_creates_tenant_intent_with_catalog_ref(), cleanup_schema(), create_test_store(), learning_log_rollback_invalidates_batch(), postgres_event_payloads_round_trip_as_jsonb(), postgres_materialized_analytics_views_refresh(), postgres_session_ids_are_native_uuid_and_concurrent_emits_are_serialized(), postgres_session_summary_tracks_model_tier_costs() (+8 more)
 
-### Community 89 - "crates · schema.rs"
+### Community 89 - "Schema Migrations"
 Cohesion: 0.16
 Nodes (15): compile_for_gemini(), compile_for_gemini_removes_additional_properties_recursively(), compile_for_openai_strict(), compile_for_openai_strict_adds_additional_properties_false_recursively(), compile_for_openai_strict_does_not_duplicate_null_in_type_arrays(), compile_for_openai_strict_makes_optional_properties_required_and_nullable(), compile_for_openai_strict_preserves_existing_required_properties(), compile_for_openai_strict_strips_validation_only_keywords() (+7 more)
 
@@ -407,7 +407,7 @@ Nodes (18): build_grep_output(), collect_context(), ContextLine, execute(), grep
 Cohesion: 0.14
 Nodes (12): ActiveSegment, completed_from_active(), first_message_creates_segment_zero(), follow_up_does_not_create_transition(), new_task_creates_next_segment_with_previous_id(), rewrite(), SegmentCompleted, SegmentCompletion (+4 more)
 
-### Community 92 - "crates/moa-providers/tests · live_provider_matrix.rs"
+### Community 92 - "Live Provider Matrix"
 Cohesion: 0.25
 Nodes (13): available_live_providers(), complete_until(), google_live_model(), live_providers_answer_simple_prompt_across_available_keys(), live_providers_can_use_native_web_search_across_available_keys(), live_providers_emit_tool_calls_across_available_keys(), live_providers_obey_system_prompt_across_available_keys(), live_providers_preserve_unicode_across_available_keys() (+5 more)
 
@@ -415,7 +415,7 @@ Nodes (13): available_live_providers(), complete_until(), google_live_model(), l
 Cohesion: 0.14
 Nodes (2): default_cloud_provider(), ToolRouter
 
-### Community 94 - "crates/moa-brain/tests · integration_steps_72_77.rs"
+### Community 94 - "Brain Integration Steps Test"
 Cohesion: 0.19
 Nodes (15): assert_replay_flattening(), assert_turn_latency_spans(), build_auth_source(), build_scripted_provider(), cached_usage(), collect_cache_control_ttls(), collect_tool_runs(), extend_tool_schemas() (+7 more)
 
@@ -447,7 +447,7 @@ Nodes (13): average_embeddings(), average_embeddings_skips_mismatched_vectors(),
 Cohesion: 0.16
 Nodes (6): event_snippet(), render_results(), SessionSearchEventType, SessionSearchInput, SessionSearchTool, truncate()
 
-### Community 102 - "crates/moa-eval · replay.rs"
+### Community 102 - "Eval Replay Runner"
 Cohesion: 0.21
 Nodes (12): DatasetItem, JsonlDatasetItem, load_dataset_items(), normalized_tokens(), parse_jsonl_items(), register_dataset(), replay_dataset(), replay_dataset_live() (+4 more)
 
