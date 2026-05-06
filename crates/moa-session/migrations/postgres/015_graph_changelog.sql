@@ -12,8 +12,7 @@ CREATE TABLE IF NOT EXISTS moa.graph_changelog (
             'update',
             'supersede',
             'invalidate',
-            'erase',
-            'crypto_shred'
+            'erase'
         )),
     target_kind TEXT NOT NULL CHECK (target_kind IN ('node', 'edge')),
     target_label TEXT NOT NULL

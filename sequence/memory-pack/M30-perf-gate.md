@@ -25,8 +25,8 @@ This is the **last** prompt in the migration pack. After M30 lands, the graph-pr
 ## 2 Files to read
 
 - `crates/moa-loadtest/Cargo.toml` and existing scenarios (see what's already there from earlier load testing)
-- `crates/moa-memory-ingest/src/retriever.rs` — the entry point we're stressing
-- `crates/moa-memory-ingest/src/cache.rs` from M17
+- `crates/moa-memory/ingest/src/retriever.rs` — the entry point we're stressing
+- `crates/moa-memory/ingest/src/cache.rs` from M17
 - `crates/moa-eval/tests/golden_e2e.rs` from M29 — borrow the fixture-loader pattern
 - `crates/moa-security/tests/cross_tenant.rs` from M25 — borrow the attack suite, run it as a background task
 - `docs/runbook/observability.md` — confirm the metric names we'll be reading
@@ -365,7 +365,7 @@ The 30s smoke run is what local development uses; the 5m run is what CI uses.
 
 ## 9 Cleanup
 
-None new. M28 already deleted the old `moa-memory` crate; M29 replaced legacy smoke tests with the golden suite. This step adds files only.
+None new. M29 provides the golden suite. This step adds files only.
 
 ## 10 What's next
 

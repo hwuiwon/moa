@@ -274,7 +274,9 @@ The graph stack is the only memory subsystem. It is split across:
 - [`moa-memory-pii`](crates/moa-memory/pii/) — privacy classification and filtering before durable writes.
 - [`moa-memory-ingest`](crates/moa-memory/ingest/) — slow-path ingestion and fast remember/forget/supersede APIs.
 
-The legacy file-wiki crate `moa-memory` was removed in C06. The per-consumer migration record lives in [`docs/migrations/moa-memory-inventory.md`](docs/migrations/moa-memory-inventory.md).
+The current crate layout is documented in
+[`crates/moa-memory/README.md`](crates/moa-memory/README.md), and type ownership is documented in
+[`docs/architecture/type-placement.md`](docs/architecture/type-placement.md).
 
 ### Scopes
 

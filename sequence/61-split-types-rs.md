@@ -111,7 +111,7 @@ moa-core/src/types/
 ├── tools.rs            # ToolDefinition, ToolOutput, ToolContent, ToolInputShape, ToolDiffStrategy, ToolPolicySpec, ToolPolicyInput, read_tool_policy, write_tool_policy
 ├── approval.rs         # ApprovalRequest, ApprovalPrompt, ApprovalDecision, ApprovalRule, ApprovalField, ApprovalFileDiff, PolicyAction, PolicyScope, RiskLevel
 ├── platform.rs         # Platform, InboundMessage, OutboundMessage, PlatformUser, PlatformCapabilities, ChannelRef, Attachment, ActionButton, ButtonStyle, MessageContent, MessageId, DiffHunk, ToolStatus
-├── memory.rs           # MemoryScope, MemoryPath, WikiPage, PageSummary, PageType, ConfidenceLevel, MemorySearchResult, IngestReport, SkillMetadata
+├── memory.rs           # MemoryScope, ScopeContext, ScopeTier
 ├── hands.rs            # HandSpec, HandHandle, HandResources, HandStatus, SandboxTier
 ├── runtime_events.rs   # RuntimeEvent, ToolUpdate, ToolCardStatus
 ├── events_stream.rs    # EventRecord, EventStream, EventRange, EventFilter, EventType, ClaimCheck, MaybeBlob, SequenceNum
@@ -179,8 +179,6 @@ string_id!(/// Identifier for a MOA user.
 UserId);
 string_id!(/// Identifier for a workspace.
 WorkspaceId);
-string_id!(/// Logical memory wiki path.
-MemoryPath);
 
 // UUID-backed identifiers
 uuid_id!(/// Identifier for a MOA session.

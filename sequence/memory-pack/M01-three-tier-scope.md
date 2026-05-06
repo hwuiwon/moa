@@ -145,7 +145,7 @@ For every hit:
 - If the call site uses a wildcard `_ =>` → leave it but add a comment confirming the wildcard is intentional.
 
 Common files expected to match:
-- `crates/moa-memory/src/store/file.rs` — old FileMemoryStore (will be deleted in M28; for now emit unimplemented! for Global)
+- `crates/moa-memory/graph` and retrieval callers — add Global handling where graph queries fan out by scope
 - `crates/moa-brain/src/pipeline/memory_retriever.rs` — must add Global to retrieval fanout
 - `crates/moa-runtime/src/context.rs` — wire Global through scope resolution
 - `crates/moa-skills/src/registry.rs` — skills can be global (system-provided)

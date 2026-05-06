@@ -23,7 +23,7 @@ Every pipeline stage has a uniform `async fn process()` signature. Stages that n
 ## Rules
 - Change `ContextProcessor::process` to an async method: `async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput>`
 - Use `#[async_trait]` on `ContextProcessor` (consistent with every other trait in `moa-core`).
-- Each stage that currently depends on a preloaded metadata key must be refactored to receive its dependencies through constructor injection (e.g., `Arc<dyn SessionStore>`, `Arc<dyn MemoryStore>`) and do its own I/O in `process()`.
+- Each stage that currently depends on a preloaded metadata key must be refactored to receive its dependencies through constructor injection (e.g., `Arc<dyn SessionStore>`, graph retriever handles) and do its own I/O in `process()`.
 - Pure-sync stages (identity, instructions, tools, cache) keep their current logic unchanged — just add `async` to the signature.
 - Remove `HISTORY_EVENTS_METADATA_KEY`, `MEMORY_STAGE_DATA_METADATA_KEY`, `SKILLS_STAGE_DATA_METADATA_KEY` and all preload logic from `pipeline/mod.rs`.
 - Remove `PreloadedMemoryStageData` struct from `memory.rs` (or make it stage-internal if the stage still uses it as an internal detail).
@@ -50,10 +50,10 @@ pub struct HistoryCompiler {
 }
 ```
 
-**`MemoryRetriever`** — currently reads preloaded `PreloadedMemoryStageData` from metadata. After: holds `Arc<dyn MemoryStore>`, does search + read in `process()`.
+**`MemoryRetriever`** — currently reads preloaded `PreloadedMemoryStageData` from metadata. After: holds graph retriever handles, does search + read in `process()`.
 ```rust
 pub struct MemoryRetriever {
-    memory_store: Arc<dyn MemoryStore>,
+    retriever: Arc<HybridRetriever>,
 }
 ```
 
@@ -132,7 +132,7 @@ moa-brain/src/pipeline/cache.rs       # Async signature, no logic change
 1. `ContextProcessor::process` is async across the entire codebase.
 2. No `METADATA_KEY` constants remain for runner-to-stage data passing.
 3. No preload blocks in the pipeline runner — each stage fetches what it needs.
-4. `MemoryRetriever` holds and uses `Arc<dyn MemoryStore>` directly.
+4. `MemoryRetriever` holds and uses graph retriever handles directly.
 5. `HistoryCompiler` holds and uses `Arc<dyn SessionStore>` directly.
 6. `SkillInjector` holds and uses `Arc<SkillRegistry>` directly.
 7. Pure-sync stages compile and pass tests with the async signature.
@@ -146,7 +146,7 @@ moa-brain/src/pipeline/cache.rs       # Async signature, no logic change
 - `InstructionProcessor` appends workspace/user instructions (same)
 - `ToolDefinitionProcessor` sets tool schemas (same)
 - `SkillInjector` injects skill metadata — now with mock `SkillRegistry` passed at construction
-- `MemoryRetriever` searches and includes relevant pages — now with mock `MemoryStore` at construction, no metadata pre-seeding
+- `MemoryRetriever` searches and includes ranked graph hits — now with mock retriever handles at construction, no metadata pre-seeding
 - `HistoryCompiler` compiles events — now with mock `SessionStore` at construction, no metadata pre-seeding
 - `CacheOptimizer` verifies prefix ordering (same)
 

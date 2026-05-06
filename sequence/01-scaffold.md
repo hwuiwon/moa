@@ -31,7 +31,7 @@ A compilable Rust workspace with 12 crates. `moa-core` contains all shared types
 1. **Create `Cargo.toml` workspace root** with all 12 member crates listed
 2. **Create each crate directory** with its own `Cargo.toml` and a minimal `src/lib.rs` (or `src/main.rs` for `moa-cli` and `moa-tui`)
 3. **Implement `moa-core/src/types.rs`**: All newtype IDs, `Platform` enum, `SessionStatus` enum, `SandboxTier` enum, `RiskLevel` enum, `ApprovalDecision` enum, `ObserveLevel` enum, `SessionSignal` enum, `ToolCallFormat` enum
-4. **Implement `moa-core/src/traits.rs`**: All trait definitions from the architecture doc — `BrainOrchestrator`, `SessionStore`, `HandProvider`, `LLMProvider`, `PlatformAdapter`, `MemoryStore`, `ContextProcessor`, `CredentialVault`
+4. **Implement `moa-core/src/traits.rs`**: All trait definitions from the architecture doc — `BrainOrchestrator`, `SessionStore`, `HandProvider`, `LLMProvider`, `PlatformAdapter`, `ContextProcessor`, `CredentialVault`
 5. **Implement `moa-core/src/events.rs`**: The full `Event` enum with all variants and their payload structs (from `docs/05-session-event-log.md`)
 6. **Implement `moa-core/src/config.rs`**: Configuration structures matching the TOML format in `docs/02-brain-orchestration.md`. Use the `config` crate to load from `~/.moa/config.toml` with env var overrides.
 7. **Implement `moa-core/src/error.rs`**: A base `MoaError` enum with variants for common failures (SessionNotFound, ProviderError, ConfigError, StorageError, ToolError, etc.)

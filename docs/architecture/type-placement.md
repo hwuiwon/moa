@@ -95,10 +95,10 @@ should not be reintroduced as placeholders.
 - Defining the same public type in two crates.
 - Putting graph-specific types in `moa-core` because another crate might need
   them later.
-- Adding compatibility aliases for the deleted file-wiki memory system.
+- Adding compatibility aliases for superseded memory APIs.
 - Adding empty connector traits or clients before connector work is actively
   scheduled.
 
 History: this policy was finalized after the C-pack memory cutover and R01
-folder grouping. See `docs/migrations/moa-memory-inventory.md` for the migration
-record.
+folder grouping. See `crates/moa-memory/README.md` for the grouped memory crate
+layout.

@@ -13,7 +13,7 @@ The hand-written `src/lib/types.ts` has been a source of bugs — field name mis
 ## 2. Files/directories to read
 
 Rust side (types to annotate):
-- **`src-tauri/src/dto.rs`** — All DTO structs: `RuntimeInfoDto`, `SessionSummaryDto`, `SessionPreviewDto`, `SessionMetaDto`, `EventRecordDto`, `MemorySearchResultDto`, `PageSummaryDto`, `WikiPageDto`, `MoaConfigDto`, `ModelOptionDto`. Each needs `#[derive(TS)]`.
+- **`src-tauri/src/dto.rs`** — All DTO structs: `RuntimeInfoDto`, `SessionSummaryDto`, `SessionPreviewDto`, `SessionMetaDto`, `EventRecordDto`, `MemorySearchResultDto`, `MemoryRecordSummaryDto`, `MemoryRecordDto`, `MoaConfigDto`, `ModelOptionDto`. Each needs `#[derive(TS)]`.
 - **`src-tauri/src/stream.rs`** — `StreamEvent` tagged enum. Needs `#[derive(TS)]`.
 - **`src-tauri/src/error.rs`** — `MoaAppError` if it crosses IPC.
 - **`src-tauri/Cargo.toml`** — Add `ts-rs` dependency.
@@ -54,7 +54,7 @@ After this step:
 - **Export to `src/lib/bindings/`** via `#[ts(export, export_to = "../../src/lib/bindings/")]` on each struct/enum. This puts generated `.ts` files directly in the frontend source tree.
 - **Respect serde attributes.** `ts-rs` reads `#[serde(rename_all = "camelCase")]` and `#[serde(tag = "event", content = "data")]` automatically. The generated TS will use `camelCase` field names and tagged union discriminants.
 - **Create a barrel `src/lib/bindings/index.ts`** that re-exports all generated types for clean imports: `import { SessionMetaDto, StreamEvent } from '@/lib/bindings'`.
-- **Do NOT generate types for internal Rust types** (e.g., `SessionMeta`, `WikiPage`). Only DTOs that cross the IPC boundary need `#[derive(TS)]`.
+- **Do NOT generate types for internal Rust types** (e.g., `SessionMeta` or raw graph records). Only DTOs that cross the IPC boundary need `#[derive(TS)]`.
 - **Run the export as part of the build.** Add an npm script or Makefile target: `cargo test -p moa-app export_bindings -- --nocapture` that regenerates bindings. Optionally add a `build.rs` or test that auto-exports.
 - **Keep `ContentBlock`, `ChatMessage`, and `eventsToMessages` in `src/types/chat.ts`.** These are frontend-only types that don't exist in Rust. They compose the generated DTOs, not replace them. But `StreamEvent` should be imported from bindings.
 - **All files remain kebab-case.** Generated files may use PascalCase names (e.g., `SessionMetaDto.ts`) — that's fine for auto-generated code, but the barrel `index.ts` normalizes the import path.
@@ -90,13 +90,13 @@ pub struct SessionMetaDto {
 }
 
 // Repeat for: RuntimeInfoDto, SessionSummaryDto, SessionPreviewDto,
-// EventRecordDto, MemorySearchResultDto, PageSummaryDto, WikiPageDto,
+// EventRecordDto, MemorySearchResultDto, MemoryRecordSummaryDto, MemoryRecordDto,
 // MoaConfigDto, ModelOptionDto
 ```
 
-For `serde_json::Value` fields (like `payload` in `EventRecordDto` and `metadata` in `WikiPageDto`), ts-rs maps these to `any` or you can override with `#[ts(type = "unknown")]`.
+For `serde_json::Value` fields (like `payload` in `EventRecordDto` and `properties` in `MemoryRecordDto`), ts-rs maps these to `any` or you can override with `#[ts(type = "unknown")]`.
 
-For `HashMap<String, Value>` in `WikiPageDto.metadata`, use `#[ts(type = "Record<string, unknown>")]`.
+For `HashMap<String, Value>` in `MemoryRecordDto.properties`, use `#[ts(type = "Record<string, unknown>")]`.
 
 ### 5c. Annotate `StreamEvent` in `src-tauri/src/stream.rs`
 
@@ -144,8 +144,8 @@ export type { SessionPreviewDto } from './SessionPreviewDto';
 export type { SessionMetaDto } from './SessionMetaDto';
 export type { EventRecordDto } from './EventRecordDto';
 export type { MemorySearchResultDto } from './MemorySearchResultDto';
-export type { PageSummaryDto } from './PageSummaryDto';
-export type { WikiPageDto } from './WikiPageDto';
+export type { MemoryRecordSummaryDto } from './MemoryRecordSummaryDto';
+export type { MemoryRecordDto } from './MemoryRecordDto';
 export type { MoaConfigDto } from './MoaConfigDto';
 export type { ModelOptionDto } from './ModelOptionDto';
 export type { StreamEvent } from './StreamEvent';

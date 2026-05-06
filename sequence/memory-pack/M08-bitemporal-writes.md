@@ -30,7 +30,7 @@ Bi-temporal correctness lives in this prompt. Every fact has `valid_from`/`valid
 
 ### 5a `NodeWriteIntent` + `EdgeWriteIntent`
 
-`crates/moa-memory-graph/src/node.rs`:
+`crates/moa-memory/graph/src/node.rs`:
 
 ```rust
 #[derive(Debug, Clone)]
@@ -244,7 +244,7 @@ async fn delete_in_tx<'a>(&self, tx: &mut sqlx::Transaction<'a, sqlx::Postgres>,
 
 ## 6 Deliverables
 
-- `crates/moa-memory-graph/src/write.rs` (~500 lines).
+- `crates/moa-memory/graph/src/write.rs` (~500 lines).
 - Updated `VectorStore` trait + `PgvectorStore` impl with `*_in_tx` variants.
 - Round-trip integration test exercising all four modes.
 

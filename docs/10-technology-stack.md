@@ -11,10 +11,10 @@ The root workspace currently contains:
 | `moa-core` | Shared traits, DTOs, config, events, telemetry, analytics helpers |
 | `moa-brain` | Context pipeline, query rewriting, task segmentation helpers, intent classification, resolution scoring |
 | `moa-session` | Postgres session store, event log, task segments, intents, learning log, analytics |
-| `moa-memory-graph` | Graph-memory sidecar tables, RLS, changelog, and AGE projection helpers |
-| `moa-memory-ingest` | Slow-path graph-memory ingestion DTOs and deterministic helpers |
-| `moa-memory-pii` | PII classification client and privacy-class aggregation helpers |
-| `moa-memory-vector` | VectorStore trait, Cohere Embed v4 client, pgvector halfvec backend, and Turbopuffer opt-in backend |
+| `moa-memory/graph` (`moa-memory-graph`) | Graph-memory sidecar tables, RLS, changelog, and AGE projection helpers |
+| `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph-memory ingestion DTOs and deterministic helpers |
+| `moa-memory/pii` (`moa-memory-pii`) | PII classification client and privacy-class aggregation helpers |
+| `moa-memory/vector` (`moa-memory-vector`) | VectorStore trait, Cohere Embed v4 client, pgvector halfvec backend, and Turbopuffer opt-in backend |
 | `moa-hands` | Tool router, local/Docker hands, Daytona, E2B, MCP |
 | `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring |
 | `moa-orchestrator` | Restate services, virtual objects, workflows, cloud binary |

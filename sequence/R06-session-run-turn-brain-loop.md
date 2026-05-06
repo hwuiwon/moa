@@ -82,7 +82,7 @@ pub async fn build_working_context(
 }
 ```
 
-`SessionReader` / `MemoryReader` are thin traits that the orchestrator implements by calling `SessionStore` / `MemoryStore` Services. This keeps `moa-brain` independent of Restate.
+`SessionReader` / `MemoryReader` are thin traits that the orchestrator implements by calling session and graph-memory services. This keeps `moa-brain` independent of Restate.
 
 ### 3. Replace the `run_turn` stub
 
@@ -225,7 +225,7 @@ impl<'a, 'b> moa_brain::SessionReader for SessionReaderOverRestate<'a, 'b> {
 }
 ```
 
-Same pattern for `MemoryReader` (calls `MemoryStore` Service — stubbed for R06 if not yet built).
+Same pattern for `MemoryReader` (calls graph-memory retrieval service — stubbed for R06 if not yet built).
 
 ### 5. Turn loop termination conditions
 

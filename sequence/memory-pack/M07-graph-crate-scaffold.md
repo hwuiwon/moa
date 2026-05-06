@@ -4,20 +4,19 @@ _Establish the canonical Rust crate for graph operations: the `GraphStore` trait
 
 ## 1 What this step is about
 
-This crate replaces the bulk of the old `moa-memory` crate. The old `MemoryStore` trait merged "store fact text," "search," and "list pages" into one interface that was a leaky abstraction over a filesystem. We split that into three: `GraphStore` (this prompt), `VectorStore` (M05, already done), and `LexicalStore` (a thin wrapper over Postgres tsvector inside this crate). Cypher is dangerous if string-formatted — every template in this crate uses parameterized agtype maps, never `format!("MATCH ... {}", ...)` interpolation.
+This crate establishes `GraphStore`, `VectorStore` integration, and `LexicalStore` as separate responsibilities. Cypher is dangerous if string-formatted — every template in this crate uses parameterized agtype maps, never `format!("MATCH ... {}", ...)` interpolation.
 
 ## 2 Files to read
 
 - M03 AGE bootstrap (label list)
 - M04 sidecar projection (`NodeIndexRow`, `NodeLabel`)
 - M06 changelog (`ChangelogRecord`, `write_and_bump`)
-- Existing `crates/moa-memory/src/lib.rs` (so we know what to deprecate)
+- Existing graph/vector crate docs under `crates/moa-memory/`
 
 ## 3 Goal
 
 1. `moa-memory-graph` crate with: `GraphStore` trait, `AgeGraphStore` impl, `LexicalStore` over `moa.node_index.name_tsv`, Cypher template library, and bi-temporal write helpers (M08 fills these).
-2. Old `MemoryStore` references in `moa-memory` marked `#[deprecated]`.
-3. Smoke test: insert a node via the trait, fetch it back.
+2. Smoke test: insert a node via the trait, fetch it back.
 
 ## 4 Rules
 
@@ -50,7 +49,7 @@ moa-core = { path = "../moa-core" }
 moa-runtime = { path = "../moa-runtime" }
 ```
 
-### 5b GraphStore trait (`crates/moa-memory-graph/src/lib.rs`)
+### 5b GraphStore trait (`crates/moa-memory/graph/src/lib.rs`)
 
 ```rust
 use async_trait::async_trait;
@@ -99,7 +98,7 @@ pub trait GraphStore: Send + Sync {
 
 ### 5c AGE adapter struct
 
-`crates/moa-memory-graph/src/age.rs`:
+`crates/moa-memory/graph/src/age.rs`:
 
 ```rust
 use sqlx::PgPool;
@@ -113,7 +112,7 @@ impl AgeGraphStore { pub fn new(pool: PgPool) -> Self { Self { pool } } }
 
 ### 5d Cypher template library
 
-`crates/moa-memory-graph/src/cypher.rs`:
+`crates/moa-memory/graph/src/cypher.rs`:
 
 ```rust
 //! Typed Cypher templates. Never interpolate user input into Cypher strings.
@@ -189,7 +188,7 @@ pub mod traverse {
 
 ### 5e Read-side impl
 
-`crates/moa-memory-graph/src/read.rs`:
+`crates/moa-memory/graph/src/read.rs`:
 
 ```rust
 use crate::{age::AgeGraphStore, error::GraphError, node::NodeIndexRow, GraphStore};
@@ -255,7 +254,7 @@ impl GraphStore for AgeGraphStore {
 ### 5f Error type
 
 ```rust
-// crates/moa-memory-graph/src/error.rs
+// crates/moa-memory/graph/src/error.rs
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {
     #[error("cypher: {0}")] Cypher(String),
@@ -271,8 +270,8 @@ pub enum GraphError {
 
 ## 6 Deliverables
 
-- `crates/moa-memory-graph/Cargo.toml`.
-- `crates/moa-memory-graph/src/{lib,age,cypher,node,edge,changelog,write,read,error}.rs`.
+- `crates/moa-memory/graph/Cargo.toml`.
+- `crates/moa-memory/graph/src/{lib,age,cypher,node,edge,changelog,write,read,error}.rs`.
 - Workspace member added.
 
 ## 7 Acceptance criteria
@@ -292,8 +291,7 @@ cargo test -p moa-memory-graph read_smoke
 
 ## 9 Cleanup
 
-- **Mark `moa-memory::MemoryStore` as `#[deprecated(note = "use moa-memory-graph::GraphStore + moa-memory-vector::VectorStore")]`.** Final removal in M28.
-- **Delete any module in `moa-memory` that hand-rolled openCypher**; that's all here now.
+- **Delete any module that hand-rolls openCypher**; that's all here now.
 - **Remove `// TODO(M02)` markers** in any consumer that the new `GraphStore::get_node` resolves; those consumers will be wired through retrieval in M15.
 
 ## 10 What's next

@@ -24,7 +24,7 @@ The engine supports running multiple configs against the same suite — the core
 - **`moa-brain/src/harness.rs`** — `run_brain_turn()`. The engine calls this (or a wrapper) to execute agent turns. Understand inputs/outputs.
 - **`moa-brain/src/pipeline/mod.rs`** — `ContextPipeline::new()`. The engine builds a custom pipeline per config.
 - **`moa-orchestrator/src/local.rs`** — `LocalOrchestrator`. The engine may use a stripped-down orchestrator or call the harness directly.
-- **`moa-memory/src/`** — `FileMemoryStore`. The engine creates temporary memory stores from config snapshots.
+- **`crates/moa-memory/`** — graph, vector, and ingestion crates. The engine creates temporary graph memory fixtures from config snapshots.
 - **`moa-providers/src/factory.rs`** — Provider factory. The engine creates providers based on `AgentConfig.model`.
 - **`moa-hands/src/router.rs`** — `ToolRouter`. The engine builds a custom router with restricted tools.
 - **`moa-session/src/`** — `SessionStore`. The engine needs a temporary session store per run.
@@ -149,7 +149,8 @@ This is the core setup logic — constructing an isolated agent from a config:
 ```rust
 pub struct AgentEnvironment {
     pub session_store: Arc<dyn SessionStore>,
-    pub memory_store: Arc<dyn MemoryStore>,
+    pub memory_graph: Arc<dyn GraphStore>,
+    pub memory_retriever: Arc<HybridRetriever>,
     pub llm_provider: Arc<dyn LLMProvider>,
     pub tool_router: Arc<ToolRouter>,
     pub pipeline: ContextPipeline,
@@ -167,8 +168,8 @@ pub async fn build_agent_environment(
     let workspace_dir = temp_dir.join(format!("eval-{}", Uuid::now_v7()));
     fs::create_dir_all(&workspace_dir).await?;
     
-    // 2. Set up memory
-    let memory_store = setup_memory(&agent_config.memory, &workspace_dir).await?;
+    // 2. Set up graph memory
+    let memory_handles = setup_graph_memory(&agent_config.memory, &workspace_dir).await?;
     
     // 3. Create session store (in-memory or temp SQLite)
     let session_store = create_temp_session_store(&workspace_dir).await?;
@@ -185,7 +186,7 @@ pub async fn build_agent_environment(
     let pipeline = build_pipeline(
         &agent_config.skills,
         &agent_config.instructions,
-        &memory_store,
+        &memory_handles,
         &llm_provider,
     ).await?;
     
@@ -196,15 +197,15 @@ pub async fn build_agent_environment(
 }
 ```
 
-### 5c. Handle memory snapshot setup
+### 5c. Handle memory fixture setup
 
 When `AgentConfig.memory.workspace_memory_path` is set, copy the snapshot into the temp workspace:
 
 ```rust
-async fn setup_memory(
+async fn setup_graph_memory(
     memory_config: &MemoryOverride,
     workspace_dir: &Path,
-) -> Result<Arc<dyn MemoryStore>> {
+) -> Result<EvalMemoryHandles> {
     let memory_dir = workspace_dir.join("memory");
     
     if let Some(snapshot_path) = &memory_config.workspace_memory_path {
@@ -218,8 +219,7 @@ async fn setup_memory(
         // ... copy or symlink default memory
     }
     
-    let store = FileMemoryStore::new(&memory_dir).await?;
-    Ok(Arc::new(store))
+    EvalMemoryHandles::from_fixture_dir(&memory_dir).await
 }
 ```
 

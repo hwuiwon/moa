@@ -3,3 +3,6 @@
 # Override with `cargo --config 'build.rustflags=[]' ...` when validating a
 # stable-only build path.
 rustflags = ["--cfg", "tokio_unstable"]
+
+[alias]
+xtask = "run --quiet -p xtask --bin xtask --"

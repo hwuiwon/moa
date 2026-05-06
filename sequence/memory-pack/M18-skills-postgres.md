@@ -166,7 +166,7 @@ cargo test -p moa-skills cli_export_import
 - **DELETE** any auto-load on startup that walked the filesystem.
 - **DELETE** `skills/_index.yml` style indexes if they exist.
 - **Note**: the `skills/` directory at repo root remains as an authoring convenience but is no longer read by the runtime. Add a `README.md` clarifying this.
-- **Remove** any `MEMORY.md` template skill — that's gone.
+- **Remove** any filesystem template skill that the runtime no longer reads.
 
 ## 10 What's next
 

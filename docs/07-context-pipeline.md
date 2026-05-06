@@ -69,11 +69,11 @@ It emits only a compact manifest. Full skill bodies are loaded later through mem
 
 ## Memory Retrieval
 
-`MemoryRetriever` loads:
-
-- user `MEMORY.md`
-- workspace `MEMORY.md`
-- relevant pages from user and workspace scopes
+`MemoryRetriever` loads ranked graph hits through the graph, sidecar, and vector
+memory crates. See
+`docs/architecture/decisions/0001-envelope-encryption-deferred.md` for the
+current privacy boundary and `crates/moa-memory/README.md` for crate-level
+details.
 
 Search uses the rewritten query when available, otherwise extracted keywords from the latest user message. Retrieval can be keyword, semantic, or hybrid depending on the memory store configuration.
 

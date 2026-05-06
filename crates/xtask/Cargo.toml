@@ -3,7 +3,7 @@ name = "xtask"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+default-run = "xtask"
 
-[[bin]]
-name = "audit_legacy_memory"
-path = "src/bin/audit_legacy_memory.rs"
+[dependencies]
+anyhow.workspace = true

@@ -17,12 +17,12 @@ fn graph_noop_report_has_no_memory_record_updates() {
 
     assert_eq!(report.workspace_id, workspace_id);
     assert_eq!(report.target_date, target_date);
-    assert_eq!(report.pages_updated, 0);
-    assert_eq!(report.pages_deleted, 0);
+    assert_eq!(report.records_updated, 0);
+    assert_eq!(report.records_deleted, 0);
     assert_eq!(report.relative_dates_normalized, 0);
     assert_eq!(report.contradictions_resolved, 0);
     assert_eq!(report.confidence_decayed, 0);
-    assert!(report.orphaned_pages.is_empty());
+    assert!(report.orphaned_records.is_empty());
     assert_eq!(report.duration_ms, 250);
     assert!(report.errors.is_empty());
 }

@@ -92,7 +92,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON moa.node_index TO moa_promoter;
 
 ### 5b Rust types
 
-`crates/moa-memory-graph/src/node.rs` (the crate is scaffolded properly in M07; for now create a minimal stub):
+`crates/moa-memory/graph/src/node.rs` (the crate is scaffolded properly in M07; for now create a minimal stub):
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,8 +156,8 @@ pub async fn bump_last_accessed(conn: &mut sqlx::PgConnection, uids: &[Uuid]) ->
 ## 6 Deliverables
 
 - `migrations/M04_node_index.sql` (~120 lines).
-- `crates/moa-memory-graph/src/node.rs` minimal stub (~80 lines).
-- `crates/moa-memory-graph/Cargo.toml` (new crate; full scaffold in M07; for now: lib, sqlx, uuid, chrono, serde, serde_json deps).
+- `crates/moa-memory/graph/src/node.rs` minimal stub (~80 lines).
+- `crates/moa-memory/graph/Cargo.toml` (new crate; full scaffold in M07; for now: lib, sqlx, uuid, chrono, serde, serde_json deps).
 - Add `moa-memory-graph` to workspace members.
 
 ## 7 Acceptance criteria
@@ -177,7 +177,7 @@ psql -d moa -c "EXPLAIN ANALYZE SELECT * FROM moa.node_index WHERE name_tsv @@ p
 
 ## 9 Cleanup
 
-- Confirm no leftover `MEMORY.md`-style index tables exist in any pre-existing migration. If a pre-3-tier `moa.wiki_index` or similar exists, drop it in this migration.
+- Confirm pre-existing migrations do not define superseded memory index tables. Drop any unused pre-3-tier index table in this migration.
 
 ## 10 What's next
 

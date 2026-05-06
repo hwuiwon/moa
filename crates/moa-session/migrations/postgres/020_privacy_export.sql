@@ -8,7 +8,6 @@ ALTER TABLE moa.graph_changelog
         'supersede',
         'invalidate',
         'erase',
-        'crypto_shred',
         'export'
     ));
 

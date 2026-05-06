@@ -30,7 +30,7 @@ Also reference:
 
 After this step:
 1. `cargo tauri dev` opens a Tauri window (blank React page with "MOA" header).
-2. The Rust backend initializes `LocalOrchestrator`, `SessionStore`, `MemoryStore` as managed Tauri state.
+2. The Rust backend initializes `LocalOrchestrator`, `SessionStore`, and graph memory handles as managed Tauri state.
 3. All 30+ ChatRuntime operations are exposed as `#[tauri::command]` functions.
 4. A `Channel<StreamEvent>` is defined for real-time LLM token streaming.
 5. The frontend can call `invoke("list_sessions")` and get back data.
@@ -184,16 +184,16 @@ async fn respond_to_approval(
 **Memory commands:**
 ```rust
 #[tauri::command]
-async fn list_memory_pages(state: State<'_, Mutex<ChatRuntime>>, filter: Option<String>) -> Result<Vec<PageSummaryDto>, MoaAppError> { ... }
+async fn list_memory_records(state: State<'_, Mutex<ChatRuntime>>, filter: Option<String>) -> Result<Vec<MemoryRecordSummaryDto>, MoaAppError> { ... }
 
 #[tauri::command]
-async fn read_memory_page(state: State<'_, Mutex<ChatRuntime>>, path: String) -> Result<WikiPageDto, MoaAppError> { ... }
+async fn read_memory_record(state: State<'_, Mutex<ChatRuntime>>, id: String) -> Result<MemoryRecordDto, MoaAppError> { ... }
 
 #[tauri::command]
 async fn search_memory(state: State<'_, Mutex<ChatRuntime>>, query: String, limit: usize) -> Result<Vec<MemorySearchResultDto>, MoaAppError> { ... }
 
 #[tauri::command]
-async fn delete_memory_page(state: State<'_, Mutex<ChatRuntime>>, path: String) -> Result<(), MoaAppError> { ... }
+async fn delete_memory_record(state: State<'_, Mutex<ChatRuntime>>, id: String) -> Result<(), MoaAppError> { ... }
 ```
 
 **Config commands:**
@@ -210,7 +210,7 @@ fn get_tool_names(state: State<'_, Mutex<ChatRuntime>>) -> Result<Vec<String>, M
 
 ### 5e. Define DTO types for the IPC boundary
 
-Create `src-tauri/src/dto.rs` with serializable DTOs that map from internal MOA types. Don't expose raw `SessionMeta`, `WikiPage`, etc. directly — create lean DTOs with only the fields the frontend needs.
+Create `src-tauri/src/dto.rs` with serializable DTOs that map from internal MOA types. Don't expose raw `SessionMeta` or graph records directly — create lean DTOs with only the fields the frontend needs.
 
 ### 5f. Wire up Tauri state in `main.rs`
 
@@ -329,6 +329,6 @@ This ensures the lock isn't held during the entire streaming operation.
 ## 10. Additional notes
 
 - **Why extract `moa-runtime`?** Without it, we'd duplicate all the ChatRuntime logic in the Tauri backend, or the Tauri crate would depend on `moa-tui` (which pulls in ratatui, crossterm, etc.). A clean `moa-runtime` crate is the right factoring.
-- **DTO pattern.** Don't serialize raw `SessionMeta` or `WikiPage` across IPC — they may contain types that don't serialize cleanly, or expose more fields than the frontend needs. Lean DTOs are better for IPC performance and TypeScript type generation.
+- **DTO pattern.** Don't serialize raw `SessionMeta` or graph records across IPC — they may contain types that don't serialize cleanly, or expose more fields than the frontend needs. Lean DTOs are better for IPC performance and TypeScript type generation.
 - **tauri-specta.** Consider adding `tauri-specta` for auto-generating TypeScript types from Rust command signatures. This eliminates type drift between frontend and backend. Can be added later as an enhancement.
 - **Platform::Desktop.** Add a `Desktop` variant to the `Platform` enum in `moa-core/src/types.rs` for sessions created from the Tauri app.

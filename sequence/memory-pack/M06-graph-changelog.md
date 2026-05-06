@@ -151,7 +151,7 @@ command:
 
 ### 5c Rust outbox writer
 
-`crates/moa-memory-graph/src/changelog.rs`:
+`crates/moa-memory/graph/src/changelog.rs`:
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,7 +232,7 @@ A `moa_replicator` Postgres role is created in the migration with `LOGIN REPLICA
 ## 6 Deliverables
 
 - `migrations/M06_graph_changelog.sql` (~250 lines).
-- `crates/moa-memory-graph/src/changelog.rs` (~120 lines).
+- `crates/moa-memory/graph/src/changelog.rs` (~120 lines).
 - `ops/debezium/moa-changelog-connector.json`.
 - `docs/ops/wal-logical-replication.md` runbook.
 

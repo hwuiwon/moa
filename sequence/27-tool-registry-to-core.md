@@ -51,7 +51,7 @@ This step promotes the tool registry *interface* (trait + shared types) into `mo
 Add `ToolDefinition`, `ToolInputShape`, `ToolDiffStrategy`, `ToolPolicySpec` and the helper constructors. Make sure they derive `Debug, Clone, Serialize, Deserialize` as appropriate.
 
 ### 3. Move `BuiltInTool` trait and `ToolContext` to `moa-core/src/traits.rs`
-`BuiltInTool` should use `#[async_trait]` (consistent with other traits in core). `ToolContext` needs to reference `MemoryStore` and `SessionMeta` which are already in core — verify no circular dependencies.
+`BuiltInTool` should use `#[async_trait]` (consistent with other traits in core). `ToolContext` needs to reference session metadata and graph memory handles without creating circular dependencies.
 
 ### 4. Update `moa-core/src/lib.rs` exports
 Add the new types and trait to the public exports.

@@ -22,7 +22,7 @@ This is where MOA's learning loop becomes *validated* — not just accumulating 
 
 - **`moa-skills/src/`** — Skill format, `SkillMetadata`, distillation, improvement.
 - **`moa-eval/src/`** — `TestSuite`, `TestCase`, `EvalEngine`, `EvalResult` (Steps 42-44).
-- **`moa-memory/src/`** — `FileMemoryStore`. Skills stored as memory pages.
+- **`crates/moa-memory/`** — graph memory fixtures and learning records used by skill evals.
 - **`docs/09-skills-and-learning.md`** — Skill lifecycle.
 
 ---

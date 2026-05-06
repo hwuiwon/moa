@@ -74,13 +74,12 @@ pub trait ChatRuntimeOps {
     async fn session_events(&self, session_id: SessionId) -> Result<Vec<EventRecord>>;
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>>;
     async fn list_session_previews(&self) -> Result<Vec<SessionPreview>>;
-    async fn list_memory_pages(&self, filter: Option<PageType>) -> Result<Vec<PageSummary>>;
-    async fn recent_memory_entries(&self, limit: usize) -> Result<Vec<PageSummary>>;
+    async fn list_memory_records(&self, filter: Option<MemoryRecordFilter>) -> Result<Vec<MemoryRecordSummary>>;
+    async fn recent_memory_entries(&self, limit: usize) -> Result<Vec<MemoryRecordSummary>>;
     async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<MemorySearchResult>>;
-    async fn read_memory_page(&self, path: &MemoryPath) -> Result<WikiPage>;
-    async fn write_memory_page(&self, page: WikiPage) -> Result<WikiPage>;
-    async fn delete_memory_page(&self, path: &MemoryPath) -> Result<()>;
-    async fn memory_index(&self) -> Result<String>;
+    async fn read_memory_record(&self, id: &str) -> Result<MemoryRecord>;
+    async fn write_memory_record(&self, record: MemoryRecordWrite) -> Result<MemoryRecord>;
+    async fn delete_memory_record(&self, id: &str) -> Result<()>;
     async fn observe_session(&self, session_id: SessionId, event_tx: mpsc::UnboundedSender<SessionRuntimeEvent>) -> Result<()>;
     async fn queue_message(&self, session_id: SessionId, prompt: String) -> Result<()>;
     async fn soft_cancel_session(&self, session_id: SessionId) -> Result<()>;

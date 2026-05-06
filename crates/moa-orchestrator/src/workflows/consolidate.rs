@@ -29,22 +29,22 @@ pub struct ConsolidateReport {
     pub target_date: NaiveDate,
     /// Timestamp at which the workflow executed.
     pub ran_at: DateTime<Utc>,
-    /// Number of memory records rewritten in place.
-    pub pages_updated: u64,
+    /// Number of graph records rewritten in place.
+    pub records_updated: u64,
     /// Number of memory records deleted.
-    pub pages_deleted: u64,
+    pub records_deleted: u64,
     /// Number of relative dates normalized.
     pub relative_dates_normalized: u64,
     /// Number of contradiction rewrites performed.
     pub contradictions_resolved: u64,
     /// Number of confidence decays performed.
     pub confidence_decayed: u64,
-    /// Orphaned page paths detected during the pass.
-    pub orphaned_pages: Vec<String>,
-    /// `MEMORY.md` line count before regeneration.
-    pub memory_lines_before: u64,
-    /// `MEMORY.md` line count after regeneration.
-    pub memory_lines_after: u64,
+    /// Orphaned graph record identifiers detected during the pass.
+    pub orphaned_records: Vec<String>,
+    /// Summary record count before consolidation.
+    pub summary_records_before: u64,
+    /// Summary record count after consolidation.
+    pub summary_records_after: u64,
     /// End-to-end workflow duration in milliseconds.
     pub duration_ms: u64,
     /// Non-fatal errors encountered while consolidating.
@@ -64,14 +64,14 @@ impl ConsolidateReport {
             workspace_id,
             target_date,
             ran_at,
-            pages_updated: 0,
-            pages_deleted: 0,
+            records_updated: 0,
+            records_deleted: 0,
             relative_dates_normalized: 0,
             contradictions_resolved: 0,
             confidence_decayed: 0,
-            orphaned_pages: Vec::new(),
-            memory_lines_before: 0,
-            memory_lines_after: 0,
+            orphaned_records: Vec::new(),
+            summary_records_before: 0,
+            summary_records_after: 0,
             duration_ms,
             errors: Vec::new(),
         }
@@ -90,14 +90,14 @@ impl ConsolidateReport {
             workspace_id,
             target_date,
             ran_at,
-            pages_updated: 0,
-            pages_deleted: 0,
+            records_updated: 0,
+            records_deleted: 0,
             relative_dates_normalized: 0,
             contradictions_resolved: 0,
             confidence_decayed: 0,
-            orphaned_pages: Vec::new(),
-            memory_lines_before: 0,
-            memory_lines_after: 0,
+            orphaned_records: Vec::new(),
+            summary_records_before: 0,
+            summary_records_after: 0,
             duration_ms,
             errors: vec![error.into()],
         }
@@ -160,8 +160,8 @@ async fn record_memory_learning(
     if !report.errors.is_empty() {
         return Ok(());
     }
-    if report.pages_updated == 0
-        && report.pages_deleted == 0
+    if report.records_updated == 0
+        && report.records_deleted == 0
         && report.relative_dates_normalized == 0
         && report.contradictions_resolved == 0
         && report.confidence_decayed == 0
@@ -180,8 +180,8 @@ async fn record_memory_learning(
                 target_label: Some("workspace_memory".to_string()),
                 payload: serde_json::json!({
                     "target_date": report.target_date,
-                    "pages_updated": report.pages_updated,
-                    "pages_deleted": report.pages_deleted,
+                    "records_updated": report.records_updated,
+                    "records_deleted": report.records_deleted,
                     "relative_dates_normalized": report.relative_dates_normalized,
                     "contradictions_resolved": report.contradictions_resolved,
                     "confidence_decayed": report.confidence_decayed,
