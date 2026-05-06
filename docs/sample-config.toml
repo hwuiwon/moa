@@ -41,6 +41,14 @@ otlp_protocol = "grpc" # grpc | http
 # release = "v0.1.0"
 sample_rate = 1.0
 
+[observability.lineage]
+enabled = false
+channel_capacity = 8192
+batch_size = 512
+batch_max_age_secs = 2
+journal_path = "~/.moa/lineage-journal"
+sample_pgvector_explain = 0.01
+
 # Custom OTLP headers are useful for direct Langfuse OTLP/HTTP export:
 # otlp_protocol = "http"
 # otlp_endpoint = "https://cloud.langfuse.com/api/public/otel"

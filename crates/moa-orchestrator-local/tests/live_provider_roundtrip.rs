@@ -138,12 +138,26 @@ async fn approve_matching_requests_until_complete(
             .get_session(session_id)
             .await
             .expect("session metadata");
-        if final_response_seen && meta.status == SessionStatus::Completed {
-            assert!(
-                saw_successful_file_write,
-                "{label} completed without a successful file_write result for {relative_path}"
+        if meta.status == SessionStatus::Completed {
+            if final_response_seen {
+                assert!(
+                    saw_successful_file_write,
+                    "{label} completed without a successful file_write result for {relative_path}; \
+                     events: {:?}",
+                    events
+                        .iter()
+                        .map(|record| &record.event)
+                        .collect::<Vec<_>>()
+                );
+                return;
+            }
+            panic!(
+                "{label} completed without final marker {token}; events: {:?}",
+                events
+                    .iter()
+                    .map(|record| &record.event)
+                    .collect::<Vec<_>>()
             );
-            return;
         }
 
         if let Some(request_id) = events.iter().find_map(|record| match &record.event {
@@ -199,19 +213,30 @@ async fn approve_matching_requests_until_complete(
 async fn run_live_provider_tool_approval_roundtrip(provider: LiveProvider) {
     let label = provider.label.to_string();
     let model = provider.model;
-    let token = format!("LIVE-E2E-{}", label.to_uppercase());
-    let (_dir, session_store, orchestrator) = live_orchestrator_with_provider(provider.provider)
+    let final_marker = format!("done writing the {label} live file");
+    let (dir, session_store, orchestrator) = live_orchestrator_with_provider(provider.provider)
         .await
         .unwrap_or_else(|error| panic!("{label} orchestrator setup failed: {error}"));
 
+    let workspace_id = WorkspaceId::new(format!("ws-{label}"));
+    let workspace_root = dir.path().join("workspace");
+    tokio::fs::create_dir_all(&workspace_root)
+        .await
+        .unwrap_or_else(|error| panic!("{label} workspace setup failed: {error}"));
+    orchestrator
+        .remember_workspace_root(workspace_id.clone(), workspace_root)
+        .await;
+
     let relative_path = format!("live/{label}.txt");
+    let file_contents = format!("live provider roundtrip for {label}");
     let prompt = format!(
-        "Use the file_write tool exactly once to write \"{token}\" to \"{relative_path}\". \
-         After the tool succeeds, answer with exactly {token}."
+        "Use the file_write tool exactly once to create \"{relative_path}\" with this text: \
+         \"{file_contents}\". After the tool result confirms success, reply with only \
+         \"{final_marker}\"."
     );
     let session = orchestrator
         .start_session(StartSessionRequest {
-            workspace_id: WorkspaceId::new(format!("ws-{label}")),
+            workspace_id,
             user_id: UserId::new(format!("u-{label}")),
             platform: Platform::Cli,
             model: model.into(),
@@ -231,7 +256,7 @@ async fn run_live_provider_tool_approval_roundtrip(provider: LiveProvider) {
         &session_store,
         session.session_id,
         &relative_path,
-        &token,
+        &final_marker,
     )
     .await;
 }

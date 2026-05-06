@@ -199,6 +199,33 @@ impl MoaConfig {
                 "observability.sample_rate",
                 Self::default().observability.sample_rate,
             )?
+            .set_default(
+                "observability.lineage.enabled",
+                Self::default().observability.lineage.enabled,
+            )?
+            .set_default(
+                "observability.lineage.channel_capacity",
+                Self::default().observability.lineage.channel_capacity as i64,
+            )?
+            .set_default(
+                "observability.lineage.batch_size",
+                Self::default().observability.lineage.batch_size as i64,
+            )?
+            .set_default(
+                "observability.lineage.batch_max_age_secs",
+                Self::default().observability.lineage.batch_max_age_secs as i64,
+            )?
+            .set_default(
+                "observability.lineage.journal_path",
+                Self::default().observability.lineage.journal_path,
+            )?
+            .set_default(
+                "observability.lineage.sample_pgvector_explain",
+                Self::default()
+                    .observability
+                    .lineage
+                    .sample_pgvector_explain,
+            )?
             .set_default("metrics.enabled", Self::default().metrics.enabled)?
             .set_default("metrics.listen", Self::default().metrics.listen.clone())?
             .set_default(
@@ -972,6 +999,8 @@ pub struct ObservabilityConfig {
     pub release: Option<String>,
     /// Trace sampling ratio from 0.0 to 1.0.
     pub sample_rate: f64,
+    /// Durable lineage capture settings.
+    pub lineage: LineageConfig,
 }
 
 impl Default for ObservabilityConfig {
@@ -985,6 +1014,38 @@ impl Default for ObservabilityConfig {
             environment: None,
             release: None,
             sample_rate: 1.0,
+            lineage: LineageConfig::default(),
+        }
+    }
+}
+
+/// Engineering-tier lineage capture configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LineageConfig {
+    /// Whether durable lineage capture is enabled.
+    pub enabled: bool,
+    /// Bounded hot-path channel capacity.
+    pub channel_capacity: usize,
+    /// Maximum rows written per worker flush.
+    pub batch_size: usize,
+    /// Maximum age for a partial worker batch.
+    pub batch_max_age_secs: u64,
+    /// Durable fjall journal path.
+    pub journal_path: String,
+    /// Fraction of pgvector queries that run full EXPLAIN ANALYZE.
+    pub sample_pgvector_explain: f64,
+}
+
+impl Default for LineageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            channel_capacity: 8192,
+            batch_size: 512,
+            batch_max_age_secs: 2,
+            journal_path: "~/.moa/lineage-journal".to_string(),
+            sample_pgvector_explain: 0.01,
         }
     }
 }

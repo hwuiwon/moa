@@ -1,0 +1,11 @@
+[package]
+name = "moa-lineage-otel"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+moa-lineage-core = { path = "../core" }
+opentelemetry.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-opentelemetry.workspace = true

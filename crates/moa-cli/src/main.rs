@@ -31,6 +31,7 @@ use moa_eval::{
     load_suite,
 };
 use moa_session::{NeonBranchManager, PostgresSessionStore, create_session_store};
+use sqlx::Row;
 use tokio::fs;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -95,6 +96,13 @@ enum CommandKind {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+    /// Explains one lineage session or turn from the TimescaleDB hot store.
+    Explain {
+        /// Session id or turn id to inspect.
+        id: String,
+    },
+    /// Runs graph-memory retrieval directly.
+    Retrieve(RetrieveArgs),
     /// Skill import, export, and listing operations.
     Skills {
         #[command(subcommand)]
@@ -252,6 +260,22 @@ struct IngestArgs {
     /// Workspace id override. Use `.` for the current directory workspace.
     #[arg(long)]
     workspace: Option<String>,
+}
+
+/// Arguments for `moa retrieve`.
+#[derive(Debug, Args)]
+struct RetrieveArgs {
+    /// Search query.
+    query: String,
+    /// Print full ranking details.
+    #[arg(long)]
+    debug: bool,
+    /// Do not wait for durable lineage flush; print in-memory debug output.
+    #[arg(long)]
+    no_flush_wait: bool,
+    /// Maximum number of hits to return.
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
 }
 
 /// Config CLI commands.
@@ -493,6 +517,12 @@ async fn main() -> Result<()> {
                 );
             }
         },
+        Some(CommandKind::Explain { id }) => {
+            print!("{}", explain_report(&config, &id).await?);
+        }
+        Some(CommandKind::Retrieve(args)) => {
+            print!("{}", retrieve_report(&config, &args).await?);
+        }
         Some(CommandKind::Skills { command }) => {
             print!("{}", handle_skills_command(&config, command).await?);
         }
@@ -939,6 +969,194 @@ async fn memory_search_report(config: &MoaConfig, query: &str, limit: usize) -> 
     Ok(report)
 }
 
+async fn retrieve_report(config: &MoaConfig, args: &RetrieveArgs) -> Result<String> {
+    if !args.debug {
+        return memory_search_report(config, &args.query, args.limit).await;
+    }
+
+    memory_retrieve_debug_report(config, &args.query, args.limit, args.no_flush_wait).await
+}
+
+async fn memory_retrieve_debug_report(
+    config: &MoaConfig,
+    query: &str,
+    limit: usize,
+    no_flush_wait: bool,
+) -> Result<String> {
+    let graph = load_graph_store(config).await?;
+    let seed_limit = i64::try_from(limit.max(1)).context("retrieve limit is too large")?;
+    let seeds = graph
+        .lookup_seeds(query, seed_limit)
+        .await?
+        .into_iter()
+        .map(|row| row.uid)
+        .collect::<Vec<_>>();
+    let retriever = load_hybrid_retriever(config).await?;
+    let hits = retriever
+        .retrieve(RetrievalRequest {
+            seeds,
+            query_text: query.to_string(),
+            query_embedding: Vec::new(),
+            scope: MemoryScope::Workspace {
+                workspace_id: current_workspace_id(),
+            },
+            label_filter: None,
+            max_pii_class: PiiClass::Restricted,
+            k_final: limit,
+            use_reranker: true,
+            strategy: None,
+        })
+        .await?;
+
+    let mut report = String::new();
+    report.push_str("# retrieval debug\n");
+    report.push_str(&format!("query: {query}\n"));
+    report.push_str(&format!(
+        "lineage_enabled: {}\n",
+        config.observability.lineage.enabled
+    ));
+    report.push_str(&format!("no_flush_wait: {no_flush_wait}\n\n"));
+    if hits.is_empty() {
+        report.push_str("no hits\n");
+        return Ok(report);
+    }
+
+    report.push_str("rank\tuid\tlabel\tname\tscore\tlegs\tsnippet\n");
+    for (rank, hit) in hits.iter().enumerate() {
+        report.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{:.3}\t{}\t{}\n",
+            rank + 1,
+            hit.uid,
+            hit.node.label.as_str(),
+            sanitize_table_cell(&hit.node.name),
+            hit.score,
+            leg_trace(hit.legs),
+            sanitize_table_cell(&node_snippet(&hit.node))
+        ));
+    }
+    Ok(report)
+}
+
+async fn explain_report(config: &MoaConfig, id: &str) -> Result<String> {
+    let id = Uuid::parse_str(id).with_context(|| format!("invalid session or turn id `{id}`"))?;
+    let store = load_session_store(config).await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT turn_id, ts, record_kind, payload
+        FROM analytics.turn_lineage
+        WHERE session_id = $1 OR turn_id = $1
+        ORDER BY ts ASC, record_kind ASC
+        "#,
+    )
+    .bind(id)
+    .fetch_all(store.pool())
+    .await?;
+
+    let mut report = String::new();
+    if rows.is_empty() {
+        report.push_str("no lineage records\n");
+        return Ok(report);
+    }
+
+    let mut last_turn: Option<Uuid> = None;
+    for row in rows {
+        let turn_id: Uuid = row.try_get("turn_id")?;
+        let ts: chrono::DateTime<Utc> = row.try_get("ts")?;
+        let record_kind: i16 = row.try_get("record_kind")?;
+        let payload: serde_json::Value = row.try_get("payload")?;
+        if Some(turn_id) != last_turn {
+            report.push_str(&format!("\n=== turn {turn_id}  {ts}\n"));
+            last_turn = Some(turn_id);
+        }
+        render_lineage_record(record_kind, &payload, &mut report);
+    }
+    Ok(report)
+}
+
+fn render_lineage_record(kind: i16, payload: &serde_json::Value, out: &mut String) {
+    let record = payload.get("record").unwrap_or(payload);
+    match kind {
+        1 => render_retrieval_record(record, out),
+        2 => render_context_record(record, out),
+        3 => render_generation_record(record, out),
+        _ => {}
+    }
+}
+
+fn render_retrieval_record(record: &serde_json::Value, out: &mut String) {
+    let query = record
+        .get("query_original")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let total_ms = record
+        .pointer("/timings/total_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let top_k = record
+        .get("top_k")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    out.push_str(&format!(
+        "retrieval: query=\"{query}\" top_k={top_k} total_ms={total_ms}\n"
+    ));
+}
+
+fn render_context_record(record: &serde_json::Value, out: &mut String) {
+    let chunks = record
+        .get("chunks_in_window")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let tokens = record
+        .get("total_input_tokens_estimated")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    out.push_str(&format!(
+        "context: chunks={chunks} estimated_input_tokens={tokens}\n"
+    ));
+}
+
+fn render_generation_record(record: &serde_json::Value, out: &mut String) {
+    let provider = record
+        .get("provider")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let model = record
+        .get("response_model")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let input = record
+        .pointer("/usage/input_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let output = record
+        .pointer("/usage/output_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    out.push_str(&format!(
+        "generation: provider={provider} model={model} input_tokens={input} output_tokens={output}\n"
+    ));
+}
+
+fn leg_trace(legs: moa_brain::retrieval::LegSources) -> String {
+    let mut out = Vec::new();
+    if legs.graph {
+        out.push("graph");
+    }
+    if legs.vector {
+        out.push("vector");
+    }
+    if legs.lexical {
+        out.push("lexical");
+    }
+    if out.is_empty() {
+        "none".to_string()
+    } else {
+        out.join("+")
+    }
+}
+
 async fn memory_show_report(config: &MoaConfig, uid_str: &str) -> Result<String> {
     let uid = Uuid::parse_str(uid_str).with_context(|| format!("invalid node uid `{uid_str}`"))?;
     let store = load_graph_store(config).await?;
@@ -1046,6 +1264,7 @@ async fn doctor_report(config: &MoaConfig, log_path: &Path) -> Result<String> {
         format!("disk: {}", disk_status(config).await),
         format!("database: {database_line}"),
         format!("graph_memory: {}", graph_memory_status(config).await),
+        format!("lineage: {}", lineage_status(config).await),
         format!(
             "log_file: {}{}",
             log_path.display(),
@@ -1098,6 +1317,28 @@ async fn doctor_metrics(config: &MoaConfig) -> String {
             )
         }
         Err(_) => format!("Metrics endpoint: {url} - unavailable"),
+    }
+}
+
+async fn lineage_status(config: &MoaConfig) -> String {
+    if !config.observability.lineage.enabled {
+        return "disabled".to_string();
+    }
+
+    match load_session_store(config).await {
+        Ok(store) => {
+            match sqlx::query_scalar::<_, i64>("SELECT count(*) FROM analytics.turn_lineage")
+                .fetch_one(store.pool())
+                .await
+            {
+                Ok(count) => format!(
+                    "enabled rows={} journal={}",
+                    count, config.observability.lineage.journal_path
+                ),
+                Err(error) => format!("enabled schema_unavailable ({error})"),
+            }
+        }
+        Err(error) => format!("enabled database_unavailable ({error})"),
     }
 }
 

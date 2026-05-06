@@ -40,6 +40,7 @@ async fn live_brain_turn_returns_brain_response() -> Result<()> {
             query_rewrite_llm_provider: None,
             discovered_workspace_instructions: None,
             tool_schemas: Vec::new(),
+            lineage: Arc::new(moa_core::NullLineageHandle),
         },
     );
 

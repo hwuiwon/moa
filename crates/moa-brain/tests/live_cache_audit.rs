@@ -252,6 +252,7 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
                 query_rewrite_llm_provider: Some(provider.clone()),
                 discovered_workspace_instructions: discovered_instructions.clone(),
                 tool_schemas: Vec::new(),
+                lineage: Arc::new(moa_core::NullLineageHandle),
             },
         );
 
@@ -440,6 +441,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
                 query_rewrite_llm_provider: Some(sonnet_provider.clone()),
                 discovered_workspace_instructions: discovered_instructions.clone(),
                 tool_schemas: tool_router.tool_schemas(),
+                lineage: Arc::new(moa_core::NullLineageHandle),
             },
         );
 
@@ -490,6 +492,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
                 query_rewrite_llm_provider: Some(cross_session_provider.clone()),
                 discovered_workspace_instructions: discovered_instructions.clone(),
                 tool_schemas: tool_router.tool_schemas(),
+                lineage: Arc::new(moa_core::NullLineageHandle),
             },
         );
     let session_b =
@@ -525,6 +528,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
                 query_rewrite_llm_provider: Some(cold_session_provider.clone()),
                 discovered_workspace_instructions: cold_instructions,
                 tool_schemas: tool_router.tool_schemas(),
+                lineage: Arc::new(moa_core::NullLineageHandle),
             },
         );
     let session_c =
@@ -566,6 +570,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
             query_rewrite_llm_provider: Some(opus_provider.clone()),
             discovered_workspace_instructions: discovered_instructions,
             tool_schemas: tool_router.tool_schemas(),
+            lineage: Arc::new(moa_core::NullLineageHandle),
         },
     );
     run_turn(

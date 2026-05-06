@@ -105,6 +105,7 @@ async fn steps_72_77_e2e() -> Result<()> {
             query_rewrite_llm_provider: None,
             discovered_workspace_instructions: None,
             tool_schemas: extend_tool_schemas(router.tool_schemas()),
+            lineage: Arc::new(moa_core::NullLineageHandle),
         },
     );
     let mut replay_snapshots = Vec::new();

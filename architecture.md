@@ -405,6 +405,10 @@ Details: [`docs/09-skills-and-learning.md`](docs/09-skills-and-learning.md).
 - **OTel export** via `tracing-opentelemetry` + `opentelemetry-otlp`. Config lives under `[observability]` in `config.toml`.
 - **Custom OTLP headers** supported for direct Langfuse OTLP/HTTP export (see `docs/sample-config.toml`).
 - **Cache-ratio logging** — `CacheOptimizer` reports prefix-tokens / total-tokens every turn; regressions in cache hit rate surface immediately.
+- **Lineage capture** via `crates/moa-lineage/{core,sink,otel}`. Retrieval, context, and generation records are emitted through the `LineageHandle` bridge, written asynchronously to `analytics.turn_lineage`, and annotated onto current spans with OTel GenAI + OpenInference attributes.
+- **Explainability CLI** — `moa explain <session-or-turn-id>` reads the TimescaleDB hot store as a turn tree, and `moa retrieve --debug "<query>"` prints the graph-memory ranking trace for interactive diagnosis.
+
+Details: [`sequence/lineage/README-LINEAGE.md`](sequence/lineage/README-LINEAGE.md).
 
 ---
 

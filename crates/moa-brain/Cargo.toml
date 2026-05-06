@@ -11,6 +11,8 @@ chrono.workspace = true
 metrics.workspace = true
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
+moa-lineage-core = { path = "../moa-lineage/core" }
+moa-lineage-otel = { path = "../moa-lineage/otel" }
 moa-memory-graph = { path = "../moa-memory/graph" }
 moa-memory-vector = { path = "../moa-memory/vector" }
 moa-providers = { path = "../moa-providers" }

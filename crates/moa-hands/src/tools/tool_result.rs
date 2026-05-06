@@ -664,6 +664,7 @@ mod tests {
         };
         let ctx = ToolContext {
             session: &session,
+            lineage: &moa_core::NULL_LINEAGE_HANDLE,
             session_store: Some(&store),
             cancel_token: None,
         };
@@ -707,6 +708,7 @@ mod tests {
         };
         let ctx = ToolContext {
             session: &session,
+            lineage: &moa_core::NULL_LINEAGE_HANDLE,
             session_store: Some(&store),
             cancel_token: None,
         };

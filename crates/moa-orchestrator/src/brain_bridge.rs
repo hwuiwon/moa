@@ -8,8 +8,9 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
 };
 use moa_core::{
-    CompletionRequest, CountedSessionStore, EventRange, Result, SessionId, SessionStore,
-    WorkingContext, record_pipeline_compile_duration, record_turn_pipeline_compile_duration,
+    CompletionRequest, CountedSessionStore, EventRange, NullLineageHandle, Result, SessionId,
+    SessionStore, WorkingContext, record_pipeline_compile_duration,
+    record_turn_pipeline_compile_duration,
 };
 use tracing::Instrument;
 
@@ -66,6 +67,7 @@ pub(crate) async fn prepare_turn_request(session_id: SessionId) -> Result<Prepar
             query_rewrite_llm_provider: query_rewrite_provider,
             discovered_workspace_instructions: None,
             tool_schemas: ctx.tool_schemas.as_ref().clone(),
+            lineage: Arc::new(NullLineageHandle),
         },
     );
     let mut context = WorkingContext::new(&session, capabilities);
