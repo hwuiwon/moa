@@ -31,3 +31,5 @@ dist
 
 .restate-dev/
 restate-data/
+
+__pycache__/

@@ -23,6 +23,7 @@ const SESSION_MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/016_ingest.sql"),
     include_str!("../migrations/postgres/017_skills.sql"),
     include_str!("../migrations/postgres/018_skill_addendum.sql"),
+    include_str!("../migrations/postgres/019_pgaudit.sql"),
 ];
 
 /// Runs all embedded `PostgreSQL` migrations idempotently on the provided pool.
