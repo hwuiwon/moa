@@ -19,8 +19,8 @@ pub enum LineageEvent {
     Context(ContextLineage),
     /// LLM request/response lineage.
     Generation(GenerationLineage),
-    /// Reserved for L02 citation payloads.
-    Citation(serde_json::Value),
+    /// Citation and verifier lineage.
+    Citation(CitationLineage),
     /// Reserved for L03 evaluation payloads.
     Eval(serde_json::Value),
     /// Reserved for L04 audit payloads.
@@ -351,6 +351,65 @@ pub struct ToolCallSummary {
     pub error: Option<String>,
 }
 
+/// Citation lineage for one completed provider answer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CitationLineage {
+    /// Shared agent turn identifier.
+    pub turn_id: TurnId,
+    /// Session identifier.
+    pub session_id: SessionId,
+    /// Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// User identifier.
+    pub user_id: UserId,
+    /// Event timestamp.
+    pub ts: DateTime<Utc>,
+    /// Full answer text that was checked.
+    pub answer_text: String,
+    /// Byte offsets for each answer sentence.
+    pub answer_sentence_offsets: Vec<(u32, u32)>,
+    /// Normalized citation records.
+    pub citations: Vec<Citation>,
+    /// Provider citation source when one was used.
+    pub vendor_used: Option<String>,
+    /// Verifier pipeline identifier.
+    pub verifier_used: Option<String>,
+}
+
+/// One normalized citation from a provider or verifier.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Citation {
+    /// Sentence index into `CitationLineage::answer_sentence_offsets`.
+    pub answer_span: u32,
+    /// Optional byte offsets within the cited sentence.
+    pub answer_span_bytes: Option<(u32, u32)>,
+    /// Source chunk identifier.
+    pub source_chunk_id: Uuid,
+    /// Source graph node identifier when known.
+    pub source_node_uid: Option<Uuid>,
+    /// Source text claimed by the model or verifier.
+    pub cited_text: Option<String>,
+    /// Vendor-supplied citation score when present.
+    pub vendor_score: Option<f32>,
+    /// Cascade verifier result.
+    pub verifier: VerifierResult,
+}
+
+/// Citation verifier output for one citation/source pair.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifierResult {
+    /// Whether the citation is considered grounded.
+    pub verified: bool,
+    /// BM25-like lexical score when available.
+    pub bm25_score: Option<f32>,
+    /// NLI entailment score when available.
+    pub nli_entailment: Option<f32>,
+    /// NLI contradiction score when available.
+    pub nli_contradiction: Option<f32>,
+    /// Verification method used.
+    pub method: String,
+}
+
 impl LineageEvent {
     /// Returns the turn ID when this event carries one.
     #[must_use]
@@ -359,7 +418,8 @@ impl LineageEvent {
             Self::Retrieval(record) => Some(record.turn_id),
             Self::Context(record) => Some(record.turn_id),
             Self::Generation(record) => Some(record.turn_id),
-            Self::Citation(_) | Self::Eval(_) | Self::Decision(_) => None,
+            Self::Citation(record) => Some(record.turn_id),
+            Self::Eval(_) | Self::Decision(_) => None,
         }
     }
 

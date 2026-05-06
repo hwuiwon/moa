@@ -18,7 +18,7 @@ api_key_env = "OPENAI_API_KEY"
 api_key_env = "GOOGLE_API_KEY"
 
 [database]
-url = "postgres://moa_owner:dev@localhost:5432/moa"
+url = "postgres://moa_owner:dev@localhost:25432/moa"
 # admin_url = "postgresql://..." # direct/non-pooled URL for migrations and admin flows
 max_connections = 20
 connect_timeout_seconds = 10
@@ -27,6 +27,18 @@ connect_timeout_seconds = 10
 docker_enabled = true
 sandbox_dir = "~/.moa/sandbox"
 memory_dir = "~/.moa/memory"
+
+[memory.vector.embedder]
+# One of: gemini-embedding-2 | cohere-embed-v4
+name = "gemini-embedding-2"
+output_dim = 1024
+
+[memory.vector.embedder.cohere]
+api_key_env = "COHERE_API_KEY"
+
+[memory.vector.embedder.gemini]
+api_key_env = "GEMINI_API_KEY"
+default_role = "search_query"
 
 [session]
 blob_threshold_bytes = 65536

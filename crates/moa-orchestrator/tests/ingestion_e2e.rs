@@ -17,7 +17,7 @@ use crate::support::restate_runtime::{OrchestratorPorts, reserve_orchestrator_po
 
 mod support;
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:5432/moa";
+const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:25432/moa";
 
 static LIVE_E2E_LOCK: Mutex<()> = Mutex::const_new(());
 

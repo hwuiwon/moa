@@ -313,7 +313,9 @@ pub(crate) fn extract_search_keywords(text: &str) -> Vec<String> {
 
     let mut keywords = Vec::new();
     for token in text
-        .split(|character: char| !character.is_alphanumeric())
+        .split(|character: char| {
+            !(character.is_alphanumeric() || character == '_' || character == '-')
+        })
         .map(str::trim)
         .filter(|token| token.len() >= 3)
     {
@@ -354,5 +356,12 @@ mod tests {
             keywords,
             vec!["oauth", "refresh", "token", "race", "condition", "bug"]
         );
+    }
+
+    #[test]
+    fn keyword_extraction_preserves_memory_article_ids() {
+        let keywords = extract_search_keywords("What is news_article_001 about?");
+
+        assert_eq!(keywords, vec!["news_article_001"]);
     }
 }

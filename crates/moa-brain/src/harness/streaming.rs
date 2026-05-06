@@ -12,8 +12,8 @@ use moa_core::{
 };
 use moa_hands::ToolRouter;
 use moa_lineage_core::{
-    ContextChunk, ContextLineage, GenerationLineage, LineageEvent, TokenUsage, ToolCallSummary,
-    TurnId,
+    CitationLineage, ContextChunk, ContextLineage, GenerationLineage, LineageEvent, TokenUsage,
+    ToolCallSummary, TurnId,
 };
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -694,6 +694,48 @@ fn emit_generation_lineage(
         Err(error) => tracing::warn!(%error, "failed to serialize generation lineage"),
     }
     moa_lineage_otel::emit_generation_attrs(span, &record);
+
+    let citation = CitationLineage {
+        turn_id,
+        session_id: session.id,
+        workspace_id: session.workspace_id.clone(),
+        user_id: session.user_id.clone(),
+        ts: chrono::Utc::now(),
+        answer_text: response.text.clone(),
+        answer_sentence_offsets: sentence_offsets(&response.text),
+        citations: Vec::new(),
+        vendor_used: Some(provider.to_string()),
+        verifier_used: Some("cascade-bm25-hhem".to_string()),
+    };
+    match serde_json::to_value(LineageEvent::Citation(citation)) {
+        Ok(json) => lineage.record(json),
+        Err(error) => tracing::warn!(%error, "failed to serialize citation lineage"),
+    }
+}
+
+fn sentence_offsets(text: &str) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    let mut start = 0_usize;
+    for (idx, ch) in text.char_indices() {
+        if matches!(ch, '.' | '!' | '?') {
+            let end = idx + ch.len_utf8();
+            push_offset(&mut out, start, end);
+            start = end;
+        }
+    }
+    if start < text.len() {
+        push_offset(&mut out, start, text.len());
+    }
+    out
+}
+
+fn push_offset(out: &mut Vec<(u32, u32)>, start: usize, end: usize) {
+    if start < end {
+        out.push((
+            start.min(u32::MAX as usize) as u32,
+            end.min(u32::MAX as usize) as u32,
+        ));
+    }
 }
 
 fn tool_call_summaries(response: &CompletionResponse) -> Vec<ToolCallSummary> {

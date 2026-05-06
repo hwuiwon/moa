@@ -5,7 +5,7 @@ use std::{error::Error, process::Command, time::Duration};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:5432/moa";
+const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:25432/moa";
 const M22_PGAUDIT_SQL: &str = include_str!("../migrations/postgres/019_pgaudit.sql");
 
 fn pgaudit_smoke_requested() -> bool {

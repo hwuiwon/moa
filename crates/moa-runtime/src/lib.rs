@@ -101,6 +101,14 @@ impl ChatRuntime {
             .map(Self::Local)
     }
 
+    /// Drains local-only background workers before a one-shot process exits.
+    pub async fn shutdown_background_workers(&self) -> Result<()> {
+        match self {
+            Self::Local(runtime) => runtime.shutdown_lineage_writer().await,
+            Self::Daemon(_) => Ok(()),
+        }
+    }
+
     /// Creates a daemon-backed runtime attached to a specific existing session.
     pub async fn attach_to_daemon_session(
         config: MoaConfig,

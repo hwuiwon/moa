@@ -25,12 +25,13 @@ pub use analytics::{
 };
 pub use broadcast_recv::{RecvResult, recv_with_lag_handling};
 pub use config::{
-    CloudConfig, CloudFlyioConfig, CloudHandsConfig, CompactionConfig, ContextSnapshotConfig,
-    DaemonConfig, DatabaseConfig, DatabaseNeonConfig, DesktopConfig, GatewayConfig, GeneralConfig,
-    LineageConfig, LocalConfig, McpCredentialConfig, McpServerConfig, McpTransportConfig,
-    MemoryConfig, MetricsConfig, MoaConfig, ModelsConfig, ObservabilityConfig, OtlpProtocol,
-    PermissionsConfig, ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig,
-    ResolutionConfig, ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig,
+    CloudConfig, CloudFlyioConfig, CloudHandsConfig, CohereEmbedderConfig, CompactionConfig,
+    ContextSnapshotConfig, DaemonConfig, DatabaseConfig, DatabaseNeonConfig, DesktopConfig,
+    GatewayConfig, GeminiEmbedderConfig, GeneralConfig, LineageConfig, LocalConfig,
+    McpCredentialConfig, McpServerConfig, McpTransportConfig, MemoryConfig, MemoryVectorConfig,
+    MetricsConfig, MoaConfig, ModelsConfig, ObservabilityConfig, OtlpProtocol, PermissionsConfig,
+    ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig, ResolutionConfig,
+    ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig, VectorEmbedderConfig,
 };
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
 pub use db::ScopedConn;

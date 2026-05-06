@@ -21,15 +21,20 @@ use memory_ingest::{IngestApplyReport, SessionTurn};
 use memory_vector::PgvectorStore;
 use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
 use moa_core::{
-    BranchManager, MemoryScope, MoaConfig, OtlpProtocol, ScopeContext, SessionFilter, SessionId,
-    SessionStatus, SessionStore, TelemetryConfig, UserId, WorkspaceId, default_log_path,
-    init_observability, metrics_endpoint_url,
+    BranchManager, LineageHandle, MemoryScope, MoaConfig, OtlpProtocol, ScopeContext,
+    SessionFilter, SessionId, SessionStatus, SessionStore, TelemetryConfig, UserId, WorkspaceId,
+    default_log_path, init_observability, metrics_endpoint_url,
 };
 use moa_eval::{
     AgentConfig, EngineOptions, EvalEngine, EvalRun, EvalStatus, EvaluatorOptions, ReporterOptions,
     build_evaluators, build_reporters, discover_suites, evaluate_run, load_agent_config,
     load_suite,
 };
+use moa_lineage_core::{
+    BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
+    StageTimings, TurnId, VecHit,
+};
+use moa_lineage_sink::{MpscSink, MpscSinkConfig};
 use moa_session::{NeonBranchManager, PostgresSessionStore, create_session_store};
 use sqlx::Row;
 use tokio::fs;
@@ -100,6 +105,11 @@ enum CommandKind {
     Explain {
         /// Session id or turn id to inspect.
         id: String,
+    },
+    /// Lineage hot/cold tier query operations.
+    Lineage {
+        #[command(subcommand)]
+        command: LineageCommand,
     },
     /// Runs graph-memory retrieval directly.
     Retrieve(RetrieveArgs),
@@ -276,6 +286,26 @@ struct RetrieveArgs {
     /// Maximum number of hits to return.
     #[arg(long, default_value_t = 10)]
     limit: usize,
+}
+
+/// Lineage CLI commands.
+#[derive(Debug, Subcommand)]
+enum LineageCommand {
+    /// Runs a read-only SQL query against the lineage tier.
+    Query(LineageQueryArgs),
+}
+
+/// Arguments for `moa lineage query`.
+#[derive(Debug, Args)]
+struct LineageQueryArgs {
+    /// SELECT query. Use `FROM lineage` as the logical source table.
+    sql: String,
+    /// Query cold Parquet objects instead of the hot TimescaleDB store.
+    #[arg(long)]
+    cold: bool,
+    /// Postgres interval for the hot-tier time window.
+    #[arg(long, default_value = "24 hours")]
+    since: String,
 }
 
 /// Config CLI commands.
@@ -520,6 +550,11 @@ async fn main() -> Result<()> {
         Some(CommandKind::Explain { id }) => {
             print!("{}", explain_report(&config, &id).await?);
         }
+        Some(CommandKind::Lineage { command }) => match command {
+            LineageCommand::Query(args) => {
+                print!("{}", lineage_query_report(&config, &args).await?);
+            }
+        },
         Some(CommandKind::Retrieve(args)) => {
             print!("{}", retrieve_report(&config, &args).await?);
         }
@@ -1007,6 +1042,11 @@ async fn memory_retrieve_debug_report(
             strategy: None,
         })
         .await?;
+    let lineage_turn = if config.observability.lineage.enabled && !no_flush_wait {
+        Some(record_debug_retrieval_lineage(config, query, &hits).await?)
+    } else {
+        None
+    };
 
     let mut report = String::new();
     report.push_str("# retrieval debug\n");
@@ -1016,6 +1056,9 @@ async fn memory_retrieve_debug_report(
         config.observability.lineage.enabled
     ));
     report.push_str(&format!("no_flush_wait: {no_flush_wait}\n\n"));
+    if let Some(turn_id) = lineage_turn {
+        report.push_str(&format!("lineage_turn: {}\n\n", turn_id.0));
+    }
     if hits.is_empty() {
         report.push_str("no hits\n");
         return Ok(report);
@@ -1035,6 +1078,77 @@ async fn memory_retrieve_debug_report(
         ));
     }
     Ok(report)
+}
+
+async fn record_debug_retrieval_lineage(
+    config: &MoaConfig,
+    query: &str,
+    hits: &[moa_brain::retrieval::RetrievalHit],
+) -> Result<TurnId> {
+    let store = load_session_store(config).await?;
+    let (sink, writer) = MpscSink::spawn(
+        MpscSinkConfig::from(&config.observability.lineage),
+        store.pool().clone(),
+    )
+    .await
+    .context("starting lineage writer for retrieve --debug")?;
+    let turn_id = TurnId::new_v7();
+    let record = RetrievalLineage {
+        turn_id,
+        session_id: SessionId::new(),
+        workspace_id: current_workspace_id(),
+        user_id: current_user_id(),
+        scope: MemoryScope::Workspace {
+            workspace_id: current_workspace_id(),
+        },
+        ts: Utc::now(),
+        query_original: query.to_string(),
+        query_expansions: Vec::new(),
+        vector_hits: hits
+            .iter()
+            .map(|hit| VecHit {
+                chunk_id: hit.uid,
+                score: hit.score as f32,
+                source: "hybrid".to_string(),
+                embedder: "debug".to_string(),
+                embed_dim: memory_vector::VECTOR_DIMENSION as u16,
+            })
+            .collect(),
+        graph_paths: Vec::new(),
+        fusion_scores: hits
+            .iter()
+            .map(|hit| FusedHit {
+                chunk_id: hit.uid,
+                fused_score: hit.score as f32,
+                vector_contribution: if hit.legs.vector { 1.0 } else { 0.0 },
+                graph_contribution: if hit.legs.graph { 1.0 } else { 0.0 },
+                lexical_contribution: if hit.legs.lexical { 1.0 } else { 0.0 },
+                fusion_method: "rrf".to_string(),
+            })
+            .collect(),
+        rerank_scores: hits
+            .iter()
+            .enumerate()
+            .map(|(idx, hit)| RerankHit {
+                chunk_id: hit.uid,
+                original_index: idx.min(u16::MAX as usize) as u16,
+                relevance_score: hit.score as f32,
+                rerank_model: "debug".to_string(),
+            })
+            .collect(),
+        top_k: hits.iter().map(|hit| hit.uid).collect(),
+        timings: StageTimings::default(),
+        introspection: BackendIntrospection::default(),
+        stage: RetrievalStage::Single,
+    };
+    let json = serde_json::to_value(LineageEvent::Retrieval(record))
+        .context("serializing retrieve --debug lineage")?;
+    sink.record(json);
+    writer
+        .shutdown()
+        .await
+        .context("flushing retrieve --debug lineage")?;
+    Ok(turn_id)
 }
 
 async fn explain_report(config: &MoaConfig, id: &str) -> Result<String> {
@@ -1073,12 +1187,79 @@ async fn explain_report(config: &MoaConfig, id: &str) -> Result<String> {
     Ok(report)
 }
 
+async fn lineage_query_report(config: &MoaConfig, args: &LineageQueryArgs) -> Result<String> {
+    if args.cold {
+        anyhow::bail!("cold lineage query is not configured in this CLI build");
+    }
+    let prepared = prepare_lineage_sql(&args.sql)?;
+    let store = load_session_store(config).await?;
+    let mut tx = store.pool().begin().await?;
+    sqlx::query("SET TRANSACTION READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SET LOCAL statement_timeout = '5s'")
+        .execute(&mut *tx)
+        .await?;
+    let rows: serde_json::Value = sqlx::query_scalar(&format!(
+        "SELECT COALESCE(jsonb_agg(row_to_json(lineage_query)), '[]'::jsonb) \
+         FROM ({prepared}) lineage_query"
+    ))
+    .bind(&args.since)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    serde_json::to_string_pretty(&rows).map_err(Into::into)
+}
+
+fn prepare_lineage_sql(sql: &str) -> Result<String> {
+    let trimmed = sql.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !(lower.starts_with("select ") || lower.starts_with("with ")) {
+        anyhow::bail!("only SELECT or WITH queries are permitted");
+    }
+    if trimmed.contains(';') {
+        anyhow::bail!("semicolon-separated statements are not permitted");
+    }
+    let Some(idx) = lower.find("from lineage") else {
+        anyhow::bail!("query must use `FROM lineage` as the source table");
+    };
+    let replacement = "FROM (SELECT * FROM analytics.turn_lineage WHERE ts > now() - ($1::text)::interval) lineage";
+    let mut prepared = String::with_capacity(trimmed.len() + replacement.len());
+    prepared.push_str(&trimmed[..idx]);
+    prepared.push_str(replacement);
+    prepared.push_str(&trimmed[idx + "from lineage".len()..]);
+    Ok(prepared)
+}
+
+#[cfg(test)]
+mod lineage_query_tests {
+    use super::prepare_lineage_sql;
+
+    #[test]
+    fn prepare_lineage_sql_replaces_logical_lineage_source() {
+        let sql = prepare_lineage_sql("SELECT count(*) FROM lineage WHERE record_kind = 4")
+            .expect("lineage query should prepare");
+
+        assert!(sql.contains("analytics.turn_lineage"));
+        assert!(sql.contains("record_kind = 4"));
+    }
+
+    #[test]
+    fn prepare_lineage_sql_rejects_mutating_statement() {
+        let error = prepare_lineage_sql("DELETE FROM lineage")
+            .expect_err("mutating lineage query should fail");
+
+        assert!(error.to_string().contains("only SELECT"));
+    }
+}
+
 fn render_lineage_record(kind: i16, payload: &serde_json::Value, out: &mut String) {
     let record = payload.get("record").unwrap_or(payload);
     match kind {
         1 => render_retrieval_record(record, out),
         2 => render_context_record(record, out),
         3 => render_generation_record(record, out),
+        4 => render_citation_record(record, out),
         _ => {}
     }
 }
@@ -1136,6 +1317,25 @@ fn render_generation_record(record: &serde_json::Value, out: &mut String) {
         .unwrap_or(0);
     out.push_str(&format!(
         "generation: provider={provider} model={model} input_tokens={input} output_tokens={output}\n"
+    ));
+}
+
+fn render_citation_record(record: &serde_json::Value, out: &mut String) {
+    let vendor = record
+        .get("vendor_used")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let verifier = record
+        .get("verifier_used")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let citations = record
+        .get("citations")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    out.push_str(&format!(
+        "citation: vendor={vendor} verifier={verifier} citations={citations}\n"
     ));
 }
 
@@ -1646,6 +1846,20 @@ fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result
         "local.sandbox_dir" => config.local.sandbox_dir = value.to_string(),
         "memory.embedding_provider" => config.memory.embedding_provider = value.to_string(),
         "memory.embedding_model" => config.memory.embedding_model = value.to_string(),
+        "memory.vector.embedder.name" => config.memory.vector.embedder.name = value.to_string(),
+        "memory.vector.embedder.output_dim" => {
+            config.memory.vector.embedder.output_dim =
+                value.parse().context("expected integer output dimension")?;
+        }
+        "memory.vector.embedder.cohere.api_key_env" => {
+            config.memory.vector.embedder.cohere.api_key_env = value.to_string();
+        }
+        "memory.vector.embedder.gemini.api_key_env" => {
+            config.memory.vector.embedder.gemini.api_key_env = value.to_string();
+        }
+        "memory.vector.embedder.gemini.default_role" => {
+            config.memory.vector.embedder.gemini.default_role = value.to_string();
+        }
         "database.url" => config.database.url = value.to_string(),
         "database.admin_url" => config.database.admin_url = Some(value.to_string()),
         "database.max_connections" => {

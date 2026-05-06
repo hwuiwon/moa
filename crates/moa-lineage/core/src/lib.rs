@@ -10,9 +10,9 @@ pub mod sink;
 
 pub use ids::{LineageRecordId, TurnId};
 pub use records::{
-    AgeIntrospection, BackendIntrospection, ContextChunk, ContextLineage, FusedHit,
-    GenerationLineage, GraphPath, LineageEvent, PgvectorIntrospection, RecordKind, RerankHit,
-    RetrievalLineage, RetrievalStage, StageTimings, TokenUsage, ToolCallSummary, TruncationEvent,
-    TurbopufferIntrospection, VecHit,
+    AgeIntrospection, BackendIntrospection, Citation, CitationLineage, ContextChunk,
+    ContextLineage, FusedHit, GenerationLineage, GraphPath, LineageEvent, PgvectorIntrospection,
+    RecordKind, RerankHit, RetrievalLineage, RetrievalStage, StageTimings, TokenUsage,
+    ToolCallSummary, TruncationEvent, TurbopufferIntrospection, VecHit, VerifierResult,
 };
 pub use sink::{LineageSink, NullSink};
