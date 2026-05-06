@@ -546,7 +546,7 @@ Recommended production rollout:
 | `moa-brain` | Minimal — pipeline and loop body ported into `Session::run_turn` |
 | `moa-hands` | Minimal — exposed via `ToolExecutor` Service |
 | `moa-providers` | None — wrapped by `LLMGateway` Service |
-| `moa-memory-graph`, `moa-memory-ingest`, `moa-memory-vector`, `moa-memory-pii`, `moa-security`, `moa-skills` | None — called as libraries |
+| `moa-memory/graph`, `moa-memory/ingest`, `moa-memory/vector`, `moa-memory/pii`, `moa-security`, `moa-skills` | None — called as libraries |
 | `moa-gateway` | Minor — add awakeable resolution via Restate admin API |
 | `moa-core` | Minor — add `invocation_id`, `attempt` fields |
 | optional helper crate | Extract Restate boilerplate only if it grows enough to justify a new crate |

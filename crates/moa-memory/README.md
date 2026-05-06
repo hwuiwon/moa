@@ -22,5 +22,5 @@ Consumers depend on the package names, not these folder names:
 The retriever lives in `moa-brain` because it composes graph, vector, and query
 planning concerns.
 
-For the legacy memory cutover record, see
-`docs/migrations/moa-memory-inventory.md`.
+For type ownership across the memory crates, see
+`docs/architecture/type-placement.md`.

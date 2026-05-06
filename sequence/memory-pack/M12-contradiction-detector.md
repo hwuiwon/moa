@@ -22,7 +22,7 @@ Naive nearest-neighbor matching produces too many false-positive supersessions (
 - **Same-entity-pair scoping**: candidates must share at least one entity uid with the new fact's extracted entity pair, or share a label.
 - **RRF k=60** for fusing vector and lexical ranks.
 - **Cohere Rerank v4.0-fast** for top-N=5 selection.
-- **LLM judge prompt is fixed** and committed in `crates/moa-memory-ingest/prompts/judge.txt`; cached on `(fact_hash, candidate_uid)`.
+- **LLM judge prompt is fixed** and committed in `crates/moa-memory/ingest/prompts/judge.txt`; cached on `(fact_hash, candidate_uid)`.
 - **Conflict enum is exhaustive**:
 
 ```rust
@@ -38,7 +38,7 @@ pub enum Conflict {
 
 ### 5a Trait
 
-`crates/moa-memory-ingest/src/contradiction.rs`:
+`crates/moa-memory/ingest/src/contradiction.rs`:
 
 ```rust
 #[async_trait::async_trait]
@@ -136,7 +136,7 @@ async fn judge(&self, fact_text: &str, candidates: &[NodeIndexRow])
 
 ### 5e Judge prompt template
 
-`crates/moa-memory-ingest/prompts/judge.txt`:
+`crates/moa-memory/ingest/prompts/judge.txt`:
 
 ```
 You are a fact-comparison judge. Given a NEW fact and CANDIDATE facts already
@@ -157,8 +157,8 @@ CANDIDATES (uid → name):
 
 ## 6 Deliverables
 
-- `crates/moa-memory-ingest/src/contradiction.rs` (~400 lines).
-- `crates/moa-memory-ingest/prompts/judge.txt`.
+- `crates/moa-memory/ingest/src/contradiction.rs` (~400 lines).
+- `crates/moa-memory/ingest/prompts/judge.txt`.
 - Cache impl: `moka` LRU keyed on prompt hash, 10k entries.
 
 ## 7 Acceptance criteria
@@ -178,9 +178,8 @@ cargo test -p moa-memory-ingest rrf_fusion
 
 ## 9 Cleanup
 
-- Remove any old wiki "diff and merge" code.
-- Remove any code that detected page-level conflicts in MEMORY.md.
+- Remove superseded text-diff conflict code.
 
 ## 10 What's next
 
-**M13 — Split vector code out of the legacy `moa-memory` crate.**
+**M14 — Ingest crate scaffold.**

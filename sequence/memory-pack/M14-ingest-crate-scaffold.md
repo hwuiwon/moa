@@ -10,8 +10,8 @@ We landed M10/M11/M12 in `moa-orchestrator` and `moa-memory-ingest` (the latter 
 
 - `crates/moa-orchestrator/src/ingestion_vo.rs` (M10)
 - `crates/moa-orchestrator/src/fast_path.rs` (M11)
-- `crates/moa-memory-ingest/src/contradiction.rs` (M12)
-- `crates/moa-memory-ingest/prompts/judge.txt` (M12)
+- `crates/moa-memory/ingest/src/contradiction.rs` (M12)
+- `crates/moa-memory/ingest/prompts/judge.txt` (M12)
 
 ## 3 Goal
 
@@ -61,7 +61,7 @@ moa-memory-pii = { path = "../moa-memory-pii" }
 ### 5b Module layout
 
 ```
-crates/moa-memory-ingest/
+crates/moa-memory/ingest/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs
@@ -99,8 +99,8 @@ pub use fast_path::{fast_remember, fast_forget, fast_supersede, FastRememberRequ
 ### 5d Move from moa-orchestrator
 
 ```sh
-git mv crates/moa-orchestrator/src/ingestion_vo.rs crates/moa-memory-ingest/src/slow_path.rs
-git mv crates/moa-orchestrator/src/fast_path.rs    crates/moa-memory-ingest/src/fast_path.rs
+git mv crates/moa-orchestrator/src/ingestion_vo.rs crates/moa-memory/ingest/src/slow_path.rs
+git mv crates/moa-orchestrator/src/fast_path.rs    crates/moa-memory/ingest/src/fast_path.rs
 ```
 
 ### 5e moa-orchestrator becomes thin
@@ -125,7 +125,7 @@ moa-memory-ingest = { path = "../moa-memory-ingest" }
 
 ### 5f IngestCtx
 
-`crates/moa-memory-ingest/src/ctx.rs`:
+`crates/moa-memory/ingest/src/ctx.rs`:
 
 ```rust
 use std::sync::Arc;

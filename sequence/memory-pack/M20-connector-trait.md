@@ -8,7 +8,7 @@ External-source ingestion is on the roadmap but not in scope for this pack. We s
 
 ## 2 Files to read
 
-- M14 (`moa-memory-ingest/src/connector.rs` placeholder)
+- M14 (`moa-memory/ingest/src/connector.rs` placeholder)
 - M10 (IngestionVO; we'll add a connector-driven entry point)
 
 ## 3 Goal
@@ -81,7 +81,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON moa.connector_state TO moa_app;
 
 ### 5b Trait
 
-`crates/moa-memory-ingest/src/connector.rs`:
+`crates/moa-memory/ingest/src/connector.rs`:
 
 ```rust
 use async_trait::async_trait;
@@ -190,8 +190,8 @@ impl ConnectorRegistry {
 ## 6 Deliverables
 
 - `migrations/M20_connector_state.sql`.
-- `crates/moa-memory-ingest/src/connector.rs` (~250 lines).
-- `crates/moa-memory-ingest/src/connector_mock.rs`.
+- `crates/moa-memory/ingest/src/connector.rs` (~250 lines).
+- `crates/moa-memory/ingest/src/connector_mock.rs`.
 - `crates/moa-runtime/src/connector_registry.rs`.
 - New IngestionVO handlers `ingest_from_connector` / `ingest_record`.
 

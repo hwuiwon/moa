@@ -71,8 +71,8 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Audit legacy memory removal
-        run: cargo run --locked -p xtask --bin audit_legacy_memory
+      - name: Path audit
+        run: cargo xtask audit-paths
 
       - name: Run clippy
         run: cargo clippy --all-targets --locked -- -D warnings

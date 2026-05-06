@@ -150,7 +150,7 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
 
         assert_eq!(report.workspace_id, workspace_id);
         assert_eq!(report.relative_dates_normalized, 0);
-        assert_eq!(report.pages_updated, 0);
+        assert_eq!(report.records_updated, 0);
         assert!(report.errors.is_empty(), "unexpected consolidation errors");
 
         let final_status = client

@@ -14,7 +14,7 @@ Turbopuffer (April 2026: SOC 2 Type 2, HIPAA BAA on Scale/Enterprise, BYOC GA) i
 
 ## 3 Goal
 
-`TurbopufferStore` impl in `moa-memory-vector/src/turbopuffer.rs` exposing the same `VectorStore` trait as `PgvectorStore`. Configurable per-workspace via `workspace_state.vector_backend ∈ {'pgvector','turbopuffer'}` (default pgvector).
+`TurbopufferStore` impl in `moa-memory/vector/src/turbopuffer.rs` exposing the same `VectorStore` trait as `PgvectorStore`. Configurable per-workspace via `workspace_state.vector_backend ∈ {'pgvector','turbopuffer'}` (default pgvector).
 
 ## 4 Rules
 
@@ -30,7 +30,7 @@ Turbopuffer (April 2026: SOC 2 Type 2, HIPAA BAA on Scale/Enterprise, BYOC GA) i
 ### 5a Cargo deps
 
 ```toml
-# moa-memory-vector/Cargo.toml
+# crates/moa-memory/vector/Cargo.toml
 [dependencies]
 reqwest = { workspace = true, features = ["json", "rustls-tls", "gzip"] }
 backon = "1"
@@ -124,7 +124,7 @@ impl VectorStore for TurbopufferStore {
 
 ### 5e Backend selection
 
-`crates/moa-memory-vector/src/backend.rs`:
+`crates/moa-memory/vector/src/backend.rs`:
 
 ```rust
 pub async fn vector_store_for_workspace(ws: Uuid, pool: &PgPool, pg: Arc<PgvectorStore>, tp: Option<Arc<TurbopufferStore>>) -> Arc<dyn VectorStore> {
@@ -143,8 +143,8 @@ Use `backon` for exponential backoff with jitter on 429/5xx; max 5 attempts; bud
 
 ## 6 Deliverables
 
-- `crates/moa-memory-vector/src/turbopuffer.rs` (~450 lines).
-- `crates/moa-memory-vector/src/backend.rs`.
+- `crates/moa-memory/vector/src/turbopuffer.rs` (~450 lines).
+- `crates/moa-memory/vector/src/backend.rs`.
 - `migrations/M26_vector_backend.sql` (mostly comments).
 - Integration test gated on `TURBOPUFFER_API_KEY` env var.
 

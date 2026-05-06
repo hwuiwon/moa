@@ -21,9 +21,9 @@ The crate defines no execution logic yet (that's Step 43) — only types, traits
 ## 2. Files/directories to read
 
 - **`moa-core/src/types.rs`** — `SessionId`, `WorkspaceId`, `UserId`, `ModelCapabilities`, `CompletionRequest`. The eval crate will reference these.
-- **`moa-core/src/traits.rs`** — `LLMProvider`, `SessionStore`, `MemoryStore`, `HandProvider`. The eval engine (Step 43) will construct these from `AgentConfig`.
+- **`moa-core/src/traits.rs`** — `LLMProvider`, `SessionStore`, `HandProvider`. The eval engine (Step 43) will construct these from `AgentConfig`.
 - **`moa-skills/src/`** — Skill format, `SkillMetadata`. `AgentConfig` references skills by path.
-- **`moa-memory/src/`** — `FileMemoryStore`. Eval suites can provide custom memory snapshots.
+- **`crates/moa-memory/`** — graph, vector, and ingestion crates. Eval suites can provide custom graph memory fixtures.
 - **`moa-brain/src/pipeline/`** — Pipeline stages. `AgentConfig` can override stage behavior.
 - **Existing sequence steps** — Scan `sequence/*.md` to understand the pattern for adding a new crate to the workspace.
 

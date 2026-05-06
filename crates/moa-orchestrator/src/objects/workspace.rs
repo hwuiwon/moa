@@ -296,8 +296,8 @@ impl WorkspaceObject for WorkspaceImpl {
         tracing::info!(
             workspace_id = %report.workspace_id,
             target_date = %report.target_date,
-            pages_updated = report.pages_updated,
-            pages_deleted = report.pages_deleted,
+            records_updated = report.records_updated,
+            records_deleted = report.records_deleted,
             duration_ms = report.duration_ms,
             errors = ?report.errors,
             "workspace consolidation completed"

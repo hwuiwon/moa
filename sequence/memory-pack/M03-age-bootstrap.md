@@ -239,7 +239,7 @@ psql -d moa -U moa_owner -f scripts/verify_age_indexes.sql
 
 - **No prior AGE state to delete** (this is the introduction).
 - **Remove any leftover comments** from M01/M02 that referenced "TODO: AGE not yet installed" — they're resolved here.
-- **Confirm no migration file references the old wiki schema** (search `MEMORY.md`, `_log.md` in `migrations/` — none should remain). Delete any stragglers.
+- **Confirm migration files only define the graph, sidecar, vector, and audit schemas needed by the current memory stack.**
 
 ## 10 What's next
 

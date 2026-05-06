@@ -85,7 +85,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON moa.embeddings TO moa_promoter;
 
 ### 5b `VectorStore` trait
 
-`crates/moa-memory-vector/src/lib.rs`:
+`crates/moa-memory/vector/src/lib.rs`:
 
 ```rust
 use async_trait::async_trait;
@@ -131,7 +131,7 @@ pub trait VectorStore: Send + Sync {
 
 ### 5c `PgvectorStore` impl
 
-`crates/moa-memory-vector/src/pgvector_store.rs`:
+`crates/moa-memory/vector/src/pgvector_store.rs`:
 
 ```rust
 use sqlx::PgPool;
@@ -200,7 +200,7 @@ impl VectorStore for PgvectorStore {
 
 ### 5d Embedder trait + Cohere v4 impl
 
-`crates/moa-memory-vector/src/embedder.rs`:
+`crates/moa-memory/vector/src/embedder.rs`:
 
 ```rust
 #[async_trait::async_trait]
@@ -234,7 +234,7 @@ impl Embedder for CohereV4Embedder {
 ### 5e Add `moa-memory-vector` to workspace; wire deps
 
 ```toml
-# crates/moa-memory-vector/Cargo.toml
+# crates/moa-memory/vector/Cargo.toml
 [package]
 name = "moa-memory-vector"
 version.workspace = true
@@ -255,9 +255,9 @@ secrecy = "0.10"
 ## 6 Deliverables
 
 - `migrations/M05_embeddings.sql` (~140 lines).
-- `crates/moa-memory-vector/src/lib.rs` — trait (~80 lines).
-- `crates/moa-memory-vector/src/pgvector_store.rs` (~150 lines).
-- `crates/moa-memory-vector/src/embedder.rs` (~120 lines).
+- `crates/moa-memory/vector/src/lib.rs` — trait (~80 lines).
+- `crates/moa-memory/vector/src/pgvector_store.rs` (~150 lines).
+- `crates/moa-memory/vector/src/embedder.rs` (~120 lines).
 - Cargo.toml updates.
 
 ## 7 Acceptance criteria

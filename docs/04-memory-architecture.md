@@ -10,7 +10,7 @@ _Graph memory, privacy filtering, sidecar indexes, pgvector semantic retrieval, 
 4. Retrieval combines graph structure, sidecar filters, keyword search, and vector similarity.
 5. Memory is part of the learning pipeline, not a separate cache.
 
-The graph stack (`moa-memory-graph`, `moa-memory-vector`, `moa-memory-pii`, `moa-memory-ingest`) is the only memory subsystem. The legacy file-wiki crate `moa-memory` was removed in C06; see `docs/migrations/moa-memory-inventory.md` for the per-consumer migration record.
+The graph stack (`moa-memory-graph`, `moa-memory-vector`, `moa-memory-pii`, `moa-memory-ingest`) is the only memory subsystem. See `crates/moa-memory/README.md` for crate-level details and `docs/architecture/type-placement.md` for ownership rules.
 
 ## Scopes
 
@@ -42,7 +42,7 @@ Edges represent relationships, evidence, provenance, supersession, contradiction
 
 `moa-memory-vector` owns vector storage for semantic retrieval. Embeddings are written for graph nodes that should participate in retrieval, and hybrid retrieval fuses graph/sidecar candidates with vector hits. The default backend is pgvector; large or isolation-sensitive workspaces can opt into Turbopuffer namespaces through `workspace_state.vector_backend`.
 
-Indexes are write-incremental. There is no user-facing rebuild-index command for the removed wiki store.
+Indexes are write-incremental. There is no user-facing rebuild-index command for graph memory.
 
 ## Ingestion
 

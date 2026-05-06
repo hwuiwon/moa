@@ -184,7 +184,7 @@ spec:
         - SessionStore
         - LLMGateway
         - ToolExecutor
-        - MemoryStore
+        - MemoryGraph
         - Health
   podTemplate:
     spec:

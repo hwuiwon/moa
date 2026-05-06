@@ -140,7 +140,7 @@ fn finalize_promotion(ws: Uuid) -> Result<()> {
 ## 6 Deliverables
 
 - `crates/moa-cli/src/commands/admin.rs` (~300 lines).
-- `crates/moa-memory-vector/src/promotion.rs` (~250 lines).
+- `crates/moa-memory/vector/src/promotion.rs` (~250 lines).
 - Updated `HybridRetriever::vector_leg`.
 - `docs/operations/workspace-promotion-runbook.md`.
 

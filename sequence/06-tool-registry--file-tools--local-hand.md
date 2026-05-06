@@ -16,7 +16,7 @@ The agent can read files, write files, search files, and execute shell commands 
 - Bash tool captures stdout, stderr, and exit code
 - Tool execution has a configurable timeout (default: 5 minutes)
 - Each tool has a JSON Schema for its parameters and a `RiskLevel`
-- `memory_search` and `memory_write` are also registered as tools (calling into `MemoryStore`)
+- Memory tools route through the graph ingestion and retrieval crates.
 
 ## Tasks
 1. **`moa-hands/src/local.rs`**: `LocalHandProvider` — direct execution + Docker detection
@@ -62,4 +62,3 @@ cargo test -p moa-brain  # re-run brain tests with tools
 ```
 
 ---
-

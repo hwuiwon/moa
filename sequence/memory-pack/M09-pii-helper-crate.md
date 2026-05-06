@@ -34,7 +34,7 @@ The model can run on CPU (200–400 tok/s, FP32) or GPU (1500 tok/s, FP16). Loca
 ### 5a Crate scaffold
 
 ```toml
-# crates/moa-memory-pii/Cargo.toml
+# crates/moa-memory/pii/Cargo.toml
 [package]
 name = "moa-memory-pii"
 version.workspace = true
@@ -52,7 +52,7 @@ moa-core = { path = "../moa-core" }
 
 ### 5b Public API
 
-`crates/moa-memory-pii/src/lib.rs`:
+`crates/moa-memory/pii/src/lib.rs`:
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -102,7 +102,7 @@ pub enum PiiError {
 
 ### 5c HTTP-backed impl
 
-`crates/moa-memory-pii/src/openai_filter.rs`:
+`crates/moa-memory/pii/src/openai_filter.rs`:
 
 ```rust
 use crate::*;
@@ -189,13 +189,13 @@ moa-pii-service:
 ```toml
 # Cargo.toml
 [workspace]
-members = [..., "crates/moa-memory-pii", ...]
+members = [..., "crates/moa-memory/pii", ...]
 ```
 
 ## 6 Deliverables
 
-- `crates/moa-memory-pii/Cargo.toml`.
-- `crates/moa-memory-pii/src/{lib,openai_filter,mock}.rs`.
+- `crates/moa-memory/pii/Cargo.toml`.
+- `crates/moa-memory/pii/src/{lib,openai_filter,mock}.rs`.
 - `services/pii-service/{Dockerfile,main.py,requirements.txt}`.
 - `docs/ops/pii-service.md` runbook.
 

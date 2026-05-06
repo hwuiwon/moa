@@ -240,8 +240,7 @@ cargo test -p moa-orchestrator --test ingestion_idempotent
 
 ## 9 Cleanup
 
-- Old wiki "auto-write to MEMORY.md" path in `moa-brain` is now redundant; delete the function and the cron job that scheduled it.
-- Remove any direct `MemoryStore::write_*` calls from session finalization — they all route through the VO now.
+- Session finalization must route durable memory writes through the ingestion VO.
 
 ## 10 What's next
 

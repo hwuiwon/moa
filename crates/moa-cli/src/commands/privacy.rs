@@ -1545,7 +1545,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn privacy_erase_crypto_shred_op_rejected() {
+    async fn privacy_erase_unknown_op_rejected() {
         let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
         let (store, database_url, schema_name) = testing::create_isolated_test_store()
             .await
@@ -1560,7 +1560,7 @@ mod tests {
             INSERT INTO moa.graph_changelog
                 (workspace_id, actor_id, actor_kind, op, target_kind, target_label,
                  target_uid, payload, pii_class)
-            VALUES ($1, 'ops-admin', 'admin', 'crypto_shred', 'user', 'User',
+            VALUES ($1, 'ops-admin', 'admin', 'deferred_encryption', 'user', 'User',
                     $2, '{}'::jsonb, 'phi')
             "#,
         )
@@ -1568,7 +1568,7 @@ mod tests {
         .bind(Uuid::now_v7())
         .execute(tx.as_mut())
         .await
-        .expect_err("crypto_shred must be rejected");
+        .expect_err("unknown changelog op must be rejected");
         assert!(error.to_string().contains("graph_changelog_op_check"));
         tx.rollback().await.expect("rollback failed insert");
 

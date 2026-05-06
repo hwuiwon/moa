@@ -85,6 +85,18 @@ Postgres / Neon
 
 The context pipeline is byte-stable where possible for prompt caching. With query rewriting enabled, the current processors are: identity, instructions, tools, skills, query rewrite, memory, history, runtime context, compactor, and cache optimizer.
 
+## Memory
+
+Memory is split across four crates under `crates/moa-memory/`:
+
+- `graph/` - Apache AGE adapter, bi-temporal write protocol
+- `vector/` - pgvector / Turbopuffer, Cohere Embed v4
+- `pii/` - redaction at ingestion via openai/privacy-filter HTTP service
+- `ingest/` - slow-path Restate VO, fast-path API, contradiction detector
+
+See `docs/architecture/type-placement.md` for how types are owned across these
+crates and `crates/moa-memory/README.md` for crate-level details.
+
 ## Workspace Layout
 
 | Crate | Role |

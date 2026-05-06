@@ -179,8 +179,8 @@ cargo bench -p moa-orchestrator fast_remember_p95
 
 ## 9 Cleanup
 
-- Remove any old "remember" tool that wrote to filesystem MEMORY.md. The new tool path is the only one.
-- Old "compact" / "summarize wiki" tool no longer exists; delete from registry.
+- Keep only the graph-backed remember/forget/supersede tool path.
+- Remove superseded compaction tools from the registry.
 
 ## 10 What's next
 
