@@ -28,10 +28,33 @@ services:
       - max_replication_slots=10
       - -c
       - max_wal_senders=10
+      - -c
+      - logging_collector=on
+      - -c
+      - log_destination=stderr,csvlog
+      - -c
+      - log_directory=/var/log/postgresql
+      - -c
+      - log_rotation_age=60min
+      - -c
+      - log_rotation_size=0
+      - -c
+      - pgaudit.log=write,ddl,role
+      - -c
+      - pgaudit.log_relation=on
+      - -c
+      - pgaudit.log_parameter=off
+      - -c
+      - pgaudit.log_parameter_max_size=0
+      - -c
+      - pgaudit.log_catalog=off
+      - -c
+      - pgaudit.log_statement_once=on
     ports:
       - "5432:5432"
     volumes:
       - moa-pg-data:/var/lib/postgresql/data
+      - moa-pg-audit:/var/log/postgresql
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U moa_owner -d moa"]
@@ -62,6 +85,30 @@ services:
       retries: 10
       start_period: 60s
 
+  moa-audit-shipper:
+    build:
+      context: .
+      dockerfile: services/audit-shipper/Dockerfile
+    image: moa/audit-shipper:0.1
+    container_name: moa-audit-shipper
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AWS_REGION: us-east-1
+      BUCKET: moa-audit-dev
+      OBJECT_LOCK_DAYS: "2190"
+      LOG_DIR: /var/log/postgresql
+      LOG_GLOB: "*.log,*.csv"
+      STATE_DIR: /var/lib/moa-audit-shipper
+      POLL_INTERVAL_SECONDS: "60"
+    volumes:
+      - moa-pg-audit:/var/log/postgresql:ro
+      - moa-audit-shipper-state:/var/lib/moa-audit-shipper
+
 volumes:
   moa-pg-data:
+  moa-pg-audit:
+  moa-audit-shipper-state:
   moa-pii-hf-cache:
