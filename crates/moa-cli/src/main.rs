@@ -36,6 +36,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use commands::privacy::{PrivacyCommand, handle_privacy_command};
 use commands::skills::{SkillsCommand, handle_skills_command};
 /// Top-level MOA command line interface.
 #[derive(Debug, Parser)]
@@ -95,6 +96,11 @@ enum CommandKind {
     Skills {
         #[command(subcommand)]
         command: SkillsCommand,
+    },
+    /// Privacy administration operations.
+    Privacy {
+        #[command(subcommand)]
+        command: PrivacyCommand,
     },
     /// Reads or updates config values.
     Config {
@@ -480,6 +486,9 @@ async fn main() -> Result<()> {
         },
         Some(CommandKind::Skills { command }) => {
             print!("{}", handle_skills_command(&config, command).await?);
+        }
+        Some(CommandKind::Privacy { command }) => {
+            print!("{}", handle_privacy_command(&config, command).await?);
         }
         Some(CommandKind::Config { command }) => match command {
             None => {

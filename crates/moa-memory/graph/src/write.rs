@@ -212,6 +212,16 @@ pub async fn invalidate_node(store: &AgeGraphStore, uid: Uuid, reason: &str) -> 
 
 /// Hard-purges one graph node while preserving a redacted audit changelog row.
 pub async fn hard_purge(store: &AgeGraphStore, uid: Uuid, redaction_marker: &str) -> Result<()> {
+    hard_purge_with_audit(store, uid, redaction_marker, None).await
+}
+
+/// Hard-purges one graph node with explicit audit metadata on the erase changelog row.
+pub async fn hard_purge_with_audit(
+    store: &AgeGraphStore,
+    uid: Uuid,
+    redaction_marker: &str,
+    audit_metadata: Option<Value>,
+) -> Result<()> {
     let mut conn = store.begin_required().await?;
     let old = fetch_stored_node(conn.as_mut(), uid)
         .await?
@@ -239,7 +249,7 @@ pub async fn hard_purge(store: &AgeGraphStore, uid: Uuid, redaction_marker: &str
             }),
             redaction_marker: Some(redaction_marker.to_string()),
             pii_class: old.pii_class.as_str().to_string(),
-            audit_metadata: None,
+            audit_metadata,
             cause_change_id: None,
         },
     )

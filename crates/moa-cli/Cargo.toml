@@ -12,9 +12,14 @@ path = "src/main.rs"
 anyhow.workspace = true
 async-stream = "0.3"
 axum = "0.8"
+base64 = "0.22"
+blake3 = "1"
 chrono.workspace = true
 clap.workspace = true
+ed25519-dalek = "2"
+flate2 = "1"
 futures-util.workspace = true
+hex = "0.4"
 libc = "0.2"
 moa-core = { path = "../moa-core" }
 moa-eval = { path = "../moa-eval" }
@@ -27,8 +32,11 @@ moa-runtime = { path = "../moa-runtime" }
 moa-session = { path = "../moa-session" }
 moa-skills = { path = "../moa-skills" }
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "json", "uuid"] }
+tar = "0.4"
 tokio.workspace = true
 toml = "0.8"
 tracing.workspace = true
