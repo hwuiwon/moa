@@ -17,7 +17,6 @@ use moa_core::{
     WorkspaceId,
 };
 use moa_hands::ToolRouter;
-use moa_memory::FileMemoryStore;
 use moa_orchestrator_local::LocalOrchestrator;
 use moa_providers::{ModelRouter, ScriptedResponse, resolve_provider_selection};
 use moa_session::{
@@ -802,16 +801,8 @@ async fn build_local_target(
     let session_store = Arc::new(
         PostgresSessionStore::new_in_schema(config.database.runtime_url(), &schema_name).await?,
     );
-    let memory_store = Arc::new(
-        FileMemoryStore::from_config_with_pool(
-            config,
-            Arc::new(session_store.pool().clone()),
-            session_store.schema_name(),
-        )
-        .await?,
-    );
     let tool_router = Arc::new(
-        ToolRouter::from_config(config, memory_store.clone())
+        ToolRouter::from_config(config)
             .await?
             .with_rule_store(session_store.clone())
             .with_session_store(session_store.clone()),
@@ -846,14 +837,7 @@ async fn build_local_target(
         .model_id;
     let workspace_id = workspace_id_for_root(&workspace_root, "local");
     let orchestrator = Arc::new(
-        LocalOrchestrator::new(
-            config.clone(),
-            session_store,
-            memory_store,
-            model_router,
-            tool_router,
-        )
-        .await?,
+        LocalOrchestrator::new(config.clone(), session_store, model_router, tool_router).await?,
     );
     orchestrator
         .remember_workspace_root(workspace_id.clone(), workspace_root)

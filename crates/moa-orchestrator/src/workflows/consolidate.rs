@@ -10,9 +10,6 @@ use uuid::Uuid;
 use crate::ctx::OrchestratorCtx;
 use crate::objects::workspace::WorkspaceClient;
 use crate::observability::annotate_restate_handler_span;
-use crate::services::memory_store::{
-    MemoryStoreClient, RunWorkspaceConsolidationRequest, WorkspaceConsolidationReport,
-};
 
 /// Workflow input for one workspace/date consolidation run.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -55,31 +52,26 @@ pub struct ConsolidateReport {
 }
 
 impl ConsolidateReport {
-    /// Builds a success report from the underlying memory-store result.
+    /// Builds a successful no-op report for graph memory.
     #[must_use]
-    pub fn from_memory_report(
+    pub fn graph_noop(
         workspace_id: WorkspaceId,
         target_date: NaiveDate,
         ran_at: DateTime<Utc>,
         duration_ms: u64,
-        report: WorkspaceConsolidationReport,
     ) -> Self {
         Self {
             workspace_id,
             target_date,
             ran_at,
-            pages_updated: report.pages_updated,
-            pages_deleted: report.pages_deleted,
-            relative_dates_normalized: report.relative_dates_normalized,
-            contradictions_resolved: report.contradictions_resolved,
-            confidence_decayed: report.confidence_decayed,
-            orphaned_pages: report
-                .orphaned_pages
-                .into_iter()
-                .map(|path| path.to_string())
-                .collect(),
-            memory_lines_before: report.memory_lines_before,
-            memory_lines_after: report.memory_lines_after,
+            pages_updated: 0,
+            pages_deleted: 0,
+            relative_dates_normalized: 0,
+            contradictions_resolved: 0,
+            confidence_decayed: 0,
+            orphaned_pages: Vec::new(),
+            memory_lines_before: 0,
+            memory_lines_after: 0,
             duration_ms,
             errors: Vec::new(),
         }
@@ -141,29 +133,15 @@ impl Consolidate for ConsolidateImpl {
             .call()
             .await?;
 
-        let report = match ctx
-            .service_client::<MemoryStoreClient>()
-            .run_workspace_consolidation(Json(RunWorkspaceConsolidationRequest {
-                workspace_id: request.workspace_id.clone(),
-            }))
-            .call()
-            .await
-        {
-            Ok(report) => ConsolidateReport::from_memory_report(
-                request.workspace_id.clone(),
-                request.target_date,
-                ran_at,
-                started_at.elapsed().as_millis() as u64,
-                report.into_inner(),
-            ),
-            Err(error) => ConsolidateReport::failed(
-                request.workspace_id.clone(),
-                request.target_date,
-                ran_at,
-                started_at.elapsed().as_millis() as u64,
-                error.to_string(),
-            ),
-        };
+        // MIGRATION: graph memory maintains indexes incrementally on writes. The scheduled
+        // consolidation workflow remains as a durable scheduling hook but does not call the
+        // deleted wiki `MemoryStore` service in C03.
+        let report = ConsolidateReport::graph_noop(
+            request.workspace_id.clone(),
+            request.target_date,
+            ran_at,
+            started_at.elapsed().as_millis() as u64,
+        );
 
         record_memory_learning(&ctx, &report).await?;
 
@@ -181,6 +159,14 @@ async fn record_memory_learning(
     report: &ConsolidateReport,
 ) -> Result<(), HandlerError> {
     if !report.errors.is_empty() {
+        return Ok(());
+    }
+    if report.pages_updated == 0
+        && report.pages_deleted == 0
+        && report.relative_dates_normalized == 0
+        && report.contradictions_resolved == 0
+        && report.confidence_decayed == 0
+    {
         return Ok(());
     }
     let store = OrchestratorCtx::current().session_store.clone();

@@ -1,83 +1,63 @@
 # 04 — Memory Architecture
 
-_File-backed wiki, Postgres keyword search, pgvector semantic search, and consolidation._
+_Graph memory, privacy filtering, sidecar indexes, pgvector semantic retrieval, and consolidation._
 
 ## Principles
 
-1. Markdown files are canonical.
-2. Postgres indexes are derived and rebuildable.
-3. Global, workspace, and user scopes compose at runtime.
-4. Memory updates should be inspectable, attributable, and reversible through normal file and event history.
+1. Graph memory is canonical; derived indexes are maintained from graph writes.
+2. Every memory item has an explicit scope: tenant, workspace, and optional workspace-bound user.
+3. Writes are attributable, bitemporal, privacy-classified, and auditable.
+4. Retrieval combines graph structure, sidecar filters, keyword search, and vector similarity.
 5. Memory is part of the learning pipeline, not a separate cache.
+
+The graph stack (`moa-memory-graph`, `moa-memory-vector`, `moa-memory-pii`, `moa-memory-ingest`) is the only memory subsystem. The legacy file-wiki crate `moa-memory` was removed in C06; see `docs/migrations/moa-memory-inventory.md` for the per-consumer migration record.
 
 ## Scopes
 
-| Scope | Local path | Cloud path | Contents |
-|---|---|---|---|
-| Global | Managed by the promotion path | Managed by the promotion path | organization-wide conventions, shared concepts, promoted facts |
-| Workspace | `~/.moa/workspaces/{workspace_id}/memory/` | `workspaces/{workspace_id}/memory/` | project architecture, conventions, decisions, sources, skills |
-| User | `~/.moa/workspaces/{workspace_id}/users/{user_id}/memory/` | `workspaces/{workspace_id}/users/{user_id}/memory/` | workspace-bound preferences, habits, and corrections |
-
-At context compilation time the memory stage loads workspace and user indexes, then searches Global -> Workspace -> User for task-relevant pages.
-
-## Wiki Layout
-
-```text
-memory/
-  MEMORY.md
-  _schema.md
-  _log.md
-  topics/
-  entities/
-  decisions/
-  skills/
-  sources/
-```
-
-`MEMORY.md` is the compact index. Topic/entity/decision/source/skill pages carry frontmatter for page type, timestamps, confidence, tags, related pages, source provenance, and reference counters.
-
-## Postgres Search Index
-
-`moa-memory` maintains a Postgres `wiki_pages` table derived from the markdown files:
-
-- weighted `search_tsv` generated column for keyword search
-- trigram index for title fallback and typo-prone short queries
-- `embedding vector(1536)` for semantic search
-- `wiki_embedding_queue` for asynchronous embedding work
-
-Retrieval modes:
-
-| Mode | Behavior |
+| Scope | Contents |
 |---|---|
-| `keyword` | Uses weighted `tsvector` search and trigram fallback |
-| `semantic` | Embeds the query and searches page embeddings with pgvector cosine distance |
-| `hybrid` | Runs keyword and semantic retrieval and fuses rankings with reciprocal rank fusion |
+| Global | Organization-wide conventions, shared concepts, promoted facts |
+| Workspace | Project architecture, conventions, decisions, sources, and reusable lessons |
+| User | Workspace-bound preferences, habits, and corrections for one user |
 
-Semantic search is eventually consistent. Page writes update keyword search immediately and enqueue embedding refresh work when an embedding provider is configured.
+Graph writes set scope context before touching Postgres. Row-level security, changelog rows, sidecar projections, and vector records all use the same scope boundary.
+
+## Graph Model
+
+Memory is stored as typed graph nodes:
+
+- `Entity`
+- `Concept`
+- `Decision`
+- `Incident`
+- `Lesson`
+- `Fact`
+- `Source`
+
+Edges represent relationships, evidence, provenance, supersession, contradiction, and source attribution. Bitemporal validity lets new facts supersede older facts without erasing history.
+
+## Sidecar And Vector Indexes
+
+`moa-memory-graph` owns the graph tables and SQL sidecars used by operational reads. The sidecars provide fast filters for labels, names, scopes, timestamps, and active validity windows.
+
+`moa-memory-vector` owns vector storage for semantic retrieval. Embeddings are written for graph nodes that should participate in retrieval, and hybrid retrieval fuses graph/sidecar candidates with vector hits.
+
+Indexes are write-incremental. There is no user-facing rebuild-index command for the removed wiki store.
+
+## Ingestion
+
+Memory enters the graph through two routes:
+
+- **Slow path**: `moa-memory-ingest` processes longer source text or turns through the ingestion VO. It chunks content, extracts facts/entities, classifies privacy, writes nodes and edges, embeds retrievable records, and records contradictions.
+- **Fast path**: short observations use remember/forget/supersede APIs for direct graph writes with the same scope and privacy controls.
+
+PII classification runs before durable memory writes. Sensitive text is either filtered, redacted, or tagged according to the privacy class and policy.
 
 ## Context Pipeline Integration
 
-The memory processor currently runs after query rewriting and before history compilation. It uses the rewritten query when available, otherwise it extracts keywords from the latest user message.
+The memory processor runs after query rewriting and before history compilation. It uses the rewritten query when available, otherwise it extracts keywords from the latest user message.
 
-It inserts:
-
-- truncated user `MEMORY.md`
-- truncated workspace `MEMORY.md`
-- top relevant pages from user and workspace scopes
-
-Memory content is inserted as a user-role reminder near the active turn so static prompt prefix caching remains stable.
-
-## Writes And Ingestion
-
-Memory can change through:
-
-- explicit `memory_write` tool calls
-- source ingestion
-- skill distillation and improvement
-- consolidation
-- manual user edits to markdown files
-
-After writes, the file store updates the derived Postgres index and, when semantic search is enabled, the embedding queue.
+It inserts ranked graph hits with labels, names, properties, provenance, and concise snippets. Memory content is inserted near the active turn so static prompt prefix caching remains stable.
 
 ## Consolidation
 
@@ -85,13 +65,11 @@ Workspace consolidation is a scheduled maintenance pass. In cloud mode it is the
 
 Consolidation can:
 
-- normalize relative dates
-- resolve contradictions
-- prune stale facts
-- merge duplicates
-- flag orphaned pages
-- decay confidence
-- regenerate `MEMORY.md`
+- resolve contradictions with superseding edges
+- prune or expire stale facts
+- merge duplicate nodes
+- refresh sidecar and vector projections
+- record memory learning entries for audit
 
 Successful consolidation appends a `memory_updated` entry to `learning_log`.
 
@@ -103,7 +81,7 @@ Memory is one output of the broader learning loop:
 Task segments
   -> resolution scores
   -> learning_log
-  -> skill ranking, intent discovery, memory consolidation
+  -> skill ranking, intent discovery, graph memory consolidation
 ```
 
-Memory pages explain what MOA knows; `learning_log` explains how and when a learned update entered the system.
+Graph memory describes current knowledge; `learning_log` explains how and when a learned update entered the system.

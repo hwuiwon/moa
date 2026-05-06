@@ -12,11 +12,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use moa_core::{
-    HandHandle, HandProvider, HandResources, HandSpec, HandStatus, McpServerConfig, MemoryStore,
-    MoaError, Result, SandboxTier, SessionMeta, SessionStore, ToolBudgetConfig, ToolContent,
-    ToolDefinition, ToolFailureClass, ToolInvocation, ToolOutput, ToolOutputArtifact,
-    ToolOutputConfig, WorkspaceId, classify_tool_error, record_sandbox_provision_duration,
-    record_tool_failure, record_tool_reprovision, record_tool_retry, truncate_head_tail,
+    HandHandle, HandProvider, HandResources, HandSpec, HandStatus, McpServerConfig, MoaError,
+    Result, SandboxTier, SessionMeta, SessionStore, ToolBudgetConfig, ToolContent, ToolDefinition,
+    ToolFailureClass, ToolInvocation, ToolOutput, ToolOutputArtifact, ToolOutputConfig,
+    WorkspaceId, classify_tool_error, record_sandbox_provision_duration, record_tool_failure,
+    record_tool_reprovision, record_tool_retry, truncate_head_tail,
 };
 use moa_security::{ApprovalRuleStore, MCPCredentialProxy, ToolPolicies};
 use serde_json::json;
@@ -51,7 +51,6 @@ struct HandFailureContext<'a> {
 /// Routes tool invocations to built-ins, local hands, or MCP backends.
 pub struct ToolRouter {
     registry: ToolRegistry,
-    memory_store: Arc<dyn MemoryStore>,
     providers: HashMap<String, Arc<dyn HandProvider>>,
     local_provider: Option<Arc<LocalHandProvider>>,
     mcp_clients: RwLock<HashMap<String, Arc<MCPClient>>>,
@@ -444,7 +443,6 @@ impl ToolRouter {
 
         let ctx = moa_core::ToolContext {
             session,
-            memory_store: &*self.memory_store,
             session_store: self.session_store.as_deref(),
             cancel_token,
         };
@@ -1458,12 +1456,10 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        HandHandle, HandProvider, HandSpec, HandStatus, MemoryStore, MoaError, Result, SessionId,
-        SessionMeta, ToolFailureClass, ToolInvocation, ToolOutput, UserId, WorkspaceId,
+        HandHandle, HandProvider, HandSpec, HandStatus, MoaError, Result, SessionId, SessionMeta,
+        ToolFailureClass, ToolInvocation, ToolOutput, UserId, WorkspaceId,
     };
-    use moa_memory::FileMemoryStore;
     use serde_json::json;
-    use tempfile::tempdir;
 
     use super::{SandboxTier, ToolRegistry, ToolRouter};
 
@@ -1577,18 +1573,12 @@ mod tests {
     }
 
     async fn router_with_provider(provider: Arc<dyn HandProvider>) -> ToolRouter {
-        let memory_root = tempdir().expect("create temporary memory root");
-        let memory_store: Arc<dyn MemoryStore> = Arc::new(
-            FileMemoryStore::new(memory_root.path())
-                .await
-                .expect("create memory store"),
-        );
         let mut registry = ToolRegistry::default_local();
         registry.retarget_hand_tools(provider.provider_name(), SandboxTier::Container);
         registry.retain_only(["bash"]);
         let mut providers = HashMap::new();
         providers.insert(provider.provider_name().to_string(), provider);
-        ToolRouter::new(registry, memory_store, providers)
+        ToolRouter::new(registry, providers)
     }
 
     fn session() -> SessionMeta {

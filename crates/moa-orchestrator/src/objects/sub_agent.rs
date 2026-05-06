@@ -18,8 +18,8 @@ use serde_json::json;
 use crate::OrchestratorCtx;
 use crate::observability::annotate_restate_handler_span;
 use crate::services::session_store::{
-    AppendEventRequest, RecordSegmentSkillActivationRequest, RecordSegmentToolUseRequest,
-    RecordSegmentTurnUsageRequest, SessionStoreClient,
+    AppendEventRequest, RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest,
+    SessionStoreClient,
 };
 use crate::sub_agent_dispatch::{DispatchedSubAgent, MAX_SUB_AGENT_DEPTH, dispatch_sub_agent};
 use crate::turn::approval::serialize_awakeable_decision;
@@ -484,20 +484,6 @@ impl AgentAdapter for SubAgentTurnAdapter {
             .record_segment_tool_use(Json(RecordSegmentToolUseRequest {
                 session_id: self.owning_session_id(ctx).await?,
                 tool_name: tool_name.to_string(),
-            }))
-            .send();
-        Ok(())
-    }
-
-    async fn record_segment_skill_activation(
-        &self,
-        ctx: &ObjectContext<'_>,
-        skill_name: &str,
-    ) -> Result<(), HandlerError> {
-        ctx.service_client::<SessionStoreClient>()
-            .record_segment_skill_activation(Json(RecordSegmentSkillActivationRequest {
-                session_id: self.owning_session_id(ctx).await?,
-                skill_name: skill_name.to_string(),
             }))
             .send();
         Ok(())

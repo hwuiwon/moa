@@ -66,9 +66,9 @@ Everything else in this document is a consequence of those two ideas.
          │
          ▼
 ┌──────────────────────────────────────────────────────┐
-│            MEMORY (moa-memory) — file-wiki           │
-│  User wiki │ Workspace wiki │ FTS index │ Skills     │
-│  Consolidation (Dream) · Git-branch writes + merge   │
+│            MEMORY GRAPH (moa-memory-graph)           │
+│  Nodes │ Edges │ sidecar index │ vector retrieval    │
+│  Ingestion VO · fast remember · hybrid retrieval     │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -87,7 +87,6 @@ All stable interfaces live in [`moa-core`](crates/moa-core/). Implementations sw
 | `HandProvider` | `provision` / `execute` / `pause` / `resume` / `destroy` | `LocalHandProvider` | `DaytonaHandProvider`, `E2BHandProvider` |
 | `LLMProvider` | Streaming completion + capabilities (context window, caching, tools) | Anthropic / OpenAI / Gemini | Same |
 | `PlatformAdapter` | Messaging-channel I/O + rendering caps | Desktop/CLI local bridge | Telegram / Slack / Discord |
-| `MemoryStore` | Wiki page read/write + search + indexing | `FileMemoryStore` | Same (synced volume) |
 | `ContextProcessor` | One stage of the context compilation pipeline | 7 built-in processors | Same |
 | `CredentialVault` | Service credential get/set/delete/list | `FileVault` (age-encrypted) | `HashiCorpVault` |
 
@@ -102,7 +101,10 @@ moa/
 ├── crates/moa-core/          # Types, traits, config, errors — the contract
 ├── crates/moa-brain/         # Harness loop + 7-stage context pipeline + compaction
 ├── crates/moa-session/       # PostgresSessionStore, event schema, FTS, replay
-├── crates/moa-memory/        # File-wiki, ingest, consolidation, git-branch writes
+├── crates/moa-memory-graph/  # AGE-backed graph store and sidecar indexes
+├── crates/moa-memory-ingest/ # Slow-path ingestion VO and fast memory writes
+├── crates/moa-memory-vector/ # pgvector-backed embeddings
+├── crates/moa-memory-pii/    # PII classification and filtering
 ├── crates/moa-hands/         # Local/Docker/Daytona/E2B/MCP, ToolRouter
 ├── crates/moa-providers/     # Anthropic, OpenAI, Gemini — streaming + prompt caching
 ├── crates/moa-orchestrator/  # LocalOrchestrator (tokio) + Restate-backed cloud runtime
@@ -176,7 +178,7 @@ Walking one request all the way through, so the layers connect:
     3. ToolDefinitionProcessor — active tool schemas          │  prefix
     4. SkillInjector           — skill metadata (Tier 1)      ┘
     ─────── cache_breakpoint ───────
-    5. MemoryRetriever         — relevant wiki pages
+    5. GraphMemoryRetriever    — ranked graph/vector hits
     6. HistoryCompiler         — checkpoint + recent turns
     7. CacheOptimizer          — deterministic ordering, report cache ratio
 7.  Brain calls LLMProvider.complete(compiled_context)
@@ -190,7 +192,7 @@ Walking one request all the way through, so the layers connect:
 15. Hand returns ToolOutput → Brain emits ToolResult event
 16. LLM says "Deployment complete. Staging is now v2.3.1."
 17. Brain emits BrainResponse event
-18. Brain considers memory write → writes deploy-skill update if applicable
+18. Brain considers learning updates → writes graph memory or skill registry updates if applicable
 19. Brain emits SessionCompleted
 20. Gateway renders final message to Telegram
 ```
@@ -219,7 +221,7 @@ Key event types:
 
 Triggered when event count since last checkpoint > 100 **or** estimated history tokens > 70 % of model context. A two-phase process:
 
-1. **Memory flush** — the brain is given only `memory_write` and asked to preserve anything important.
+1. **Learning flush** — the brain is asked to preserve durable lessons through graph memory or the skill registry.
 2. **Checkpoint summary** — LLM summarizes events-since-last-checkpoint into a `Checkpoint` event.
 
 Errors are **always** preserved through compaction — they're the strongest signal against repeated mistakes.
@@ -262,41 +264,31 @@ Details: [`docs/07-context-pipeline.md`](docs/07-context-pipeline.md).
 
 ---
 
-## 9. Memory ([`moa-memory`](crates/moa-memory/))
+## 9. Memory Graph
 
-The memory layer is a **file-backed wiki** with a Postgres FTS index. Files are the source of truth — the DB is an index you can rebuild any time.
+The graph stack is the only memory subsystem. It is split across:
+
+- [`moa-memory-graph`](crates/moa-memory-graph/) — graph nodes, edges, bitemporal state, RLS, changelog, and SQL sidecar indexes.
+- [`moa-memory-vector`](crates/moa-memory-vector/) — vector storage and embedding lookup for graph nodes.
+- [`moa-memory-pii`](crates/moa-memory-pii/) — privacy classification and filtering before durable writes.
+- [`moa-memory-ingest`](crates/moa-memory-ingest/) — slow-path ingestion and fast remember/forget/supersede APIs.
+
+The legacy file-wiki crate `moa-memory` was removed in C06. The per-consumer migration record lives in [`docs/migrations/moa-memory-inventory.md`](docs/migrations/moa-memory-inventory.md).
 
 ### Scopes
 
-- **User memory** (`~/.moa/memory/`) — preferences, cross-project learnings, communication style. Travels with the user.
-- **Workspace memory** (`~/.moa/workspaces/{id}/memory/`) — project architecture, conventions, decisions, skills. Shared across users in that workspace.
+Memory is scoped by tenant, workspace, and optional user. User memory is always workspace-bound so personal preferences do not leak across unrelated workspaces. Graph writes set scope context before touching Postgres so row-level security and sidecar writes share the same boundary.
 
 ### Structure
 
-```
-memory/
-├── MEMORY.md           # ≤200-line index, loaded every session
-├── _schema.md          # wiki conventions
-├── _log.md             # append-only change log
-├── topics/             # conceptual pages
-├── entities/           # concrete things (services, APIs, people)
-├── decisions/          # timestamped ADRs
-├── skills/             # Agent Skills (auto-distilled)
-└── sources/            # summaries of ingested documents
-```
-
-Each page has YAML frontmatter (type, confidence, related, sources, tags, reference_count, last_referenced) and a markdown body.
+Graph memory stores typed nodes such as entities, concepts, facts, decisions, incidents, lessons, and sources. Edges model relationships, provenance, supersession, and evidence. Sidecar tables expose queryable projections for SQL filters, search, and UI listings; vector tables store embeddings for semantic retrieval.
 
 ### Learning loop
 
-- **Correction capture** — user corrects the agent → page updated.
-- **Discovery filing** — agent finds something worth remembering → writes page.
-- **Skill distillation** — successful run with ≥5 tool calls → auto-generated `SKILL.md`.
-- **Consolidation ("Dream")** — cron job that normalizes dates, resolves contradictions, prunes stale entries, decays confidence on unreferenced pages, and keeps `MEMORY.md` under 200 lines.
-
-### Concurrent writes
-
-In cloud mode multiple brains may edit the same workspace memory. Each brain writes to its own branch directory (`memory/.branches/brain-<id>/`), and a reconciler cron merges branches — LLM-resolved when there are real conflicts.
+- **Correction capture** — user corrections become graph facts, lessons, or superseding edges.
+- **Discovery filing** — agent discoveries enter through fast remember or slow-path ingestion.
+- **Skill distillation** — successful workflows persist through the skill registry and learning log.
+- **Consolidation** — scheduled graph maintenance resolves contradictions, supersedes stale facts, and records audit entries.
 
 Details: [`docs/04-memory-architecture.md`](docs/04-memory-architecture.md).
 
@@ -312,7 +304,7 @@ Hands are **cattle, not pets**:
 
 `ToolRouter` decides *where* a tool runs:
 
-- **Built-in** — memory tools, web search, web fetch — run in-process.
+- **Built-in** — graph memory tools, web search, web fetch — run in-process.
 - **Hand** — bash, file_*, file_search — routed to a `HandProvider`.
 - **MCP** — anything from a configured MCP server — routed through the credential proxy.
 
@@ -320,7 +312,7 @@ Sandbox tiers:
 
 | Tier | Isolation | When |
 |---|---|---|
-| 0 | None | Built-in memory / search tools |
+| 0 | None | Built-in graph memory / search tools |
 | 1 | Container (Docker/Daytona) | Default for cloud code execution |
 | 2 | MicroVM (Firecracker / E2B) | Untrusted code, security-critical |
 
@@ -396,7 +388,7 @@ skills/deploy-to-fly/
 **Lifecycle:**
 
 1. **Distill** — ≥5-tool-call successful run → LLM generates `SKILL.md`.
-2. **Activate** — Stage 4 surfaces metadata; brain reads full body via `memory_read`.
+2. **Activate** — Stage 4 surfaces metadata; the skill registry loads the full body when the task selects the skill.
 3. **Improve** — if a better approach is used, the skill is versioned up and `improved_from` is recorded.
 4. **Decay** — consolidation lowers confidence on long-unused skills, flags low success rates, prunes references to deleted tools.
 

@@ -1,7 +1,7 @@
 //! Apache AGE smoke coverage for MOA's scoped Postgres transaction path.
 
+use memory_graph::cypher;
 use moa_core::{MemoryScope, ScopeContext, ScopedConn, WorkspaceId};
-use moa_memory_graph::cypher;
 use moa_session::testing;
 use serde_json::json;
 use sqlx::Row;

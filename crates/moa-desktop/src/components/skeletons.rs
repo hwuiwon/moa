@@ -47,42 +47,6 @@ pub fn chat_messages(count: usize) -> impl IntoElement {
     list
 }
 
-/// A vertical stack of memory-tree skeletons.
-pub fn memory_rows(count: usize) -> impl IntoElement {
-    let mut list = div().flex().flex_col().gap_2().p_3();
-    for i in 0..count {
-        let indent = px((i % 3) as f32 * 12.0);
-        list = list.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .pl(indent)
-                .child(Skeleton::new().w(px(12.0)).h(px(12.0)).rounded_sm())
-                .child(Skeleton::new().w(px(160.0)).h(px(10.0))),
-        );
-    }
-    list
-}
-
-/// A paragraph-shaped skeleton for the memory-page viewer.
-pub fn memory_page() -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .p_4()
-        .child(Skeleton::new().w(px(240.0)).h(px(20.0)))
-        .child(Skeleton::new().secondary().w(px(120.0)).h(px(12.0)))
-        .child(div().h(px(16.0)))
-        .child(Skeleton::new().w_full().h(px(12.0)))
-        .child(Skeleton::new().w_full().h(px(12.0)))
-        .child(Skeleton::new().w(px(380.0)).h(px(12.0)))
-        .child(div().h(px(12.0)))
-        .child(Skeleton::new().w_full().h(px(12.0)))
-        .child(Skeleton::new().w(px(300.0)).h(px(12.0)))
-}
-
 /// Timeline-node skeletons for the detail panel.
 pub fn timeline_nodes(count: usize) -> impl IntoElement {
     let mut list = div().flex().flex_col().gap_2().p_2();

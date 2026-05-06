@@ -3,13 +3,16 @@
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use moa_brain::{build_default_pipeline_with_runtime, run_brain_turn_with_tools};
+use moa_brain::{
+    GraphMemoryPipelineOptions,
+    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
+    run_brain_turn_with_tools,
+};
 use moa_core::{
     Event, EventRange, LLMProvider, MoaConfig, Result, SessionMeta, SessionStore, UserId,
     WorkspaceId,
 };
 use moa_hands::ToolRouter;
-use moa_memory::FileMemoryStore;
 use moa_providers::build_provider_from_config;
 use moa_session::{PostgresSessionStore, testing};
 
@@ -19,17 +22,9 @@ async fn main() -> Result<()> {
     let config = MoaConfig::load()?;
     let (store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     let store = Arc::new(store);
-    let memory_store = Arc::new(
-        FileMemoryStore::from_config_with_pool(
-            &config,
-            Arc::new(store.pool().clone()),
-            Some(&schema_name),
-        )
-        .await?,
-    );
     let provider = build_provider_from_config(&config)?;
     let tool_router = Arc::new(
-        ToolRouter::from_config(&config, memory_store.clone())
+        ToolRouter::from_config(&config)
             .await?
             .with_session_store(store.clone()),
     );
@@ -41,12 +36,16 @@ async fn main() -> Result<()> {
             ..SessionMeta::default()
         })
         .await?;
-    let pipeline = build_default_pipeline_with_runtime(
+    let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         &config,
         store.clone(),
-        memory_store,
-        Some(provider.clone()),
-        tool_router.tool_schemas(),
+        GraphMemoryPipelineOptions {
+            graph_pool: store.pool().clone(),
+            compaction_llm_provider: Some(provider.clone()),
+            query_rewrite_llm_provider: Some(provider.clone()),
+            discovered_workspace_instructions: None,
+            tool_schemas: tool_router.tool_schemas(),
+        },
     );
     let cli_prompt = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
 

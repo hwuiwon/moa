@@ -3,10 +3,9 @@
 use std::path::PathBuf;
 
 use moa_core::{
-    ApprovalDecision, DaemonCommand, DaemonReply, EventRecord, MemoryPath, MemorySearchResult,
-    MoaConfig, MoaError, ModelId, PageSummary, PageType, Platform, Result, RuntimeEvent,
-    SessionFilter, SessionId, SessionMeta, SessionSummary, StartSessionRequest, UserId, WikiPage,
-    WorkspaceBudgetStatus, WorkspaceId,
+    ApprovalDecision, DaemonCommand, DaemonReply, EventRecord, MoaConfig, MoaError, ModelId,
+    Platform, Result, RuntimeEvent, SessionFilter, SessionId, SessionMeta, SessionSummary,
+    StartSessionRequest, UserId, WorkspaceBudgetStatus, WorkspaceId,
 };
 use moa_providers::resolve_provider_selection;
 use tokio::sync::mpsc;
@@ -193,119 +192,6 @@ impl DaemonChatRuntime {
             DaemonReply::ToolNames(names) => Ok(names),
             DaemonReply::Error(message) => Err(MoaError::ProviderError(message)),
             other => Err(unexpected_daemon_reply("tool_names", &other)),
-        }
-    }
-
-    async fn list_memory_pages(&self, filter: Option<PageType>) -> Result<Vec<PageSummary>> {
-        let mut pages = match daemon_request(
-            &self.socket_path,
-            &DaemonCommand::RecentMemoryEntries {
-                workspace_id: self.workspace_id.clone(),
-                limit: usize::MAX / 4,
-            },
-        )
-        .await?
-        {
-            DaemonReply::MemoryEntries(pages) => pages,
-            DaemonReply::Error(message) => return Err(MoaError::ProviderError(message)),
-            other => return Err(unexpected_daemon_reply("memory_entries", &other)),
-        };
-        if let Some(filter) = filter {
-            pages.retain(|page| page.page_type == filter);
-        }
-        pages.sort_by_key(|page| std::cmp::Reverse(page.updated));
-        Ok(pages)
-    }
-
-    async fn recent_memory_entries(&self, limit: usize) -> Result<Vec<PageSummary>> {
-        match daemon_request(
-            &self.socket_path,
-            &DaemonCommand::RecentMemoryEntries {
-                workspace_id: self.workspace_id.clone(),
-                limit,
-            },
-        )
-        .await?
-        {
-            DaemonReply::MemoryEntries(pages) => Ok(pages),
-            DaemonReply::Error(message) => Err(MoaError::ProviderError(message)),
-            other => Err(unexpected_daemon_reply("memory_entries", &other)),
-        }
-    }
-
-    async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<MemorySearchResult>> {
-        match daemon_request(
-            &self.socket_path,
-            &DaemonCommand::SearchMemory {
-                workspace_id: self.workspace_id.clone(),
-                query: query.to_string(),
-                limit,
-            },
-        )
-        .await?
-        {
-            DaemonReply::MemorySearchResults(results) => Ok(results),
-            DaemonReply::Error(message) => Err(MoaError::ProviderError(message)),
-            other => Err(unexpected_daemon_reply("memory_search", &other)),
-        }
-    }
-
-    async fn read_memory_page(&self, path: &MemoryPath) -> Result<WikiPage> {
-        match daemon_request(
-            &self.socket_path,
-            &DaemonCommand::ReadMemoryPage {
-                workspace_id: self.workspace_id.clone(),
-                path: path.clone(),
-            },
-        )
-        .await?
-        {
-            DaemonReply::MemoryPage(page) => Ok(page),
-            DaemonReply::Error(message) => Err(MoaError::ProviderError(message)),
-            other => Err(unexpected_daemon_reply("memory_page", &other)),
-        }
-    }
-
-    async fn write_memory_page(&self, page: WikiPage) -> Result<WikiPage> {
-        let path = page
-            .path
-            .clone()
-            .ok_or_else(|| MoaError::ValidationError("memory page path is required".to_string()))?;
-        daemon_expect_ack(
-            &self.socket_path,
-            &DaemonCommand::WriteMemoryPage {
-                workspace_id: self.workspace_id.clone(),
-                path: path.clone(),
-                page,
-            },
-        )
-        .await?;
-        self.read_memory_page(&path).await
-    }
-
-    async fn delete_memory_page(&self, path: &MemoryPath) -> Result<()> {
-        daemon_expect_ack(
-            &self.socket_path,
-            &DaemonCommand::DeleteMemoryPage {
-                workspace_id: self.workspace_id.clone(),
-                path: path.clone(),
-            },
-        )
-        .await
-    }
-
-    async fn memory_index(&self) -> Result<String> {
-        match daemon_request(
-            &self.socket_path,
-            &DaemonCommand::MemoryIndex {
-                workspace_id: self.workspace_id.clone(),
-            },
-        )
-        .await?
-        {
-            DaemonReply::MemoryIndex(index) => Ok(index),
-            DaemonReply::Error(message) => Err(MoaError::ProviderError(message)),
-            other => Err(unexpected_daemon_reply("memory_index", &other)),
         }
     }
 

@@ -298,11 +298,6 @@ impl<A: AgentAdapter> TurnRunner<A> {
             self.adapter
                 .record_segment_tool_use(ctx, &invocation.name)
                 .await?;
-            if let Some(skill_name) = skill_name_from_memory_read(&invocation) {
-                self.adapter
-                    .record_segment_skill_activation(ctx, &skill_name)
-                    .await?;
-            }
         }
         Ok(())
     }
@@ -374,22 +369,6 @@ impl<A: AgentAdapter> TurnRunner<A> {
         }
         Ok(())
     }
-}
-
-fn skill_name_from_memory_read(invocation: &moa_core::ToolInvocation) -> Option<String> {
-    if invocation.name != "memory_read" {
-        return None;
-    }
-
-    let path = invocation.input.get("path")?.as_str()?.trim();
-    let skill_name = path
-        .strip_prefix("skills/")?
-        .strip_suffix("/SKILL.md")?
-        .trim();
-    if skill_name.is_empty() {
-        return None;
-    }
-    Some(skill_name.to_string())
 }
 
 async fn append_session_event(

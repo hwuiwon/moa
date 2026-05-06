@@ -4,7 +4,6 @@ members = [
     "crates/moa-core",
     "crates/moa-brain",
     "crates/moa-session",
-    "crates/moa-memory",
     "crates/moa-memory-graph",
     "crates/moa-memory-ingest",
     "crates/moa-memory-pii",
@@ -21,12 +20,12 @@ members = [
     "crates/moa-eval",
     "crates/moa-loadtest",
     "crates/moa-desktop",
+    "crates/xtask",
 ]
 default-members = [
     "crates/moa-core",
     "crates/moa-brain",
     "crates/moa-session",
-    "crates/moa-memory",
     "crates/moa-memory-graph",
     "crates/moa-memory-ingest",
     "crates/moa-memory-pii",

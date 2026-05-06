@@ -55,7 +55,7 @@ pub use session_replay::{
 pub use telemetry::{TelemetryConfig, TelemetryGuard, default_log_path, init_observability};
 pub use traits::{
     BlobStore, BrainOrchestrator, BranchManager, BuiltInTool, ContextProcessor, CredentialVault,
-    HandProvider, LLMProvider, MemoryStore, PlatformAdapter, SessionStore, ToolContext,
+    HandProvider, LLMProvider, PlatformAdapter, SessionStore, ToolContext,
 };
 pub use truncation::{truncate_head_tail, truncate_head_tail_lines};
 pub use turn_latency::{

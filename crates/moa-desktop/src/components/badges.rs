@@ -1,15 +1,14 @@
-//! Centralized badge components for status, confidence, risk, and tool
+//! Centralized badge components for status, risk, and tool
 //! outcomes. Replaces the duplicated hand-rolled badges previously living
-//! in `session_row.rs`, `memory_list.rs`, `skill_list.rs`,
-//! `memory_viewer.rs`, `message_bubble.rs`, and `detail_panel.rs`.
+//! in `session_row.rs`, `message_bubble.rs`, and `detail_panel.rs`.
 //!
 //! Every color flows through `cx.theme().*` so dark/light parity and
-//! WCAG audits work in one place. Adding a new status/confidence/risk
+//! WCAG audits work in one place. Adding a new status/risk
 //! variant only requires updating the matcher here.
 
 use gpui::{App, Hsla, IntoElement, ParentElement, SharedString, Styled, div, px};
 use gpui_component::ActiveTheme;
-use moa_core::{ConfidenceLevel, RiskLevel, SessionStatus};
+use moa_core::{RiskLevel, SessionStatus};
 
 // ---- session status -------------------------------------------------------
 
@@ -56,44 +55,6 @@ pub fn status_badge(cx: &App, status: &SessionStatus) -> impl IntoElement + use<
                 .text_color(theme.muted_foreground)
                 .child(SharedString::from(label.to_string())),
         )
-}
-
-// ---- confidence -----------------------------------------------------------
-
-pub fn confidence_color(cx: &App, level: &ConfidenceLevel) -> Hsla {
-    let theme = cx.theme();
-    match level {
-        ConfidenceLevel::High => theme.success,
-        ConfidenceLevel::Medium => theme.warning,
-        ConfidenceLevel::Low => theme.muted_foreground,
-    }
-}
-
-pub fn confidence_label(level: &ConfidenceLevel) -> &'static str {
-    match level {
-        ConfidenceLevel::High => "high",
-        ConfidenceLevel::Medium => "medium",
-        ConfidenceLevel::Low => "low",
-    }
-}
-
-/// Pill-style confidence badge for memory pages and skill cards.
-pub fn confidence_badge(cx: &App, level: &ConfidenceLevel) -> impl IntoElement + use<> {
-    let theme = cx.theme().clone();
-    let dot = confidence_color(cx, level);
-    let label = confidence_label(level);
-    div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .px_1p5()
-        .py_0p5()
-        .rounded_sm()
-        .bg(theme.muted)
-        .text_xs()
-        .text_color(theme.muted_foreground)
-        .child(div().size(px(5.0)).rounded_full().bg(dot))
-        .child(SharedString::from(label.to_string()))
 }
 
 // ---- risk -----------------------------------------------------------------

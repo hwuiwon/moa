@@ -273,7 +273,13 @@ where
         .await?;
     wait_for_status(harness, session.session_id, SessionStatus::Cancelled).await?;
 
-    let events = harness.session_events(session.session_id).await?;
+    let events = wait_for_status_transition(
+        harness,
+        session.session_id,
+        SessionStatus::WaitingApproval,
+        SessionStatus::Cancelled,
+    )
+    .await?;
     assert!(
         !events
             .iter()
@@ -417,6 +423,36 @@ where
         if Instant::now() >= deadline {
             panic!(
                 "{} timed out waiting for status {expected:?}.\n{}",
+                harness.harness_name(),
+                diagnostic_snapshot(harness, session_id)
+                    .await
+                    .expect("diagnostic snapshot")
+            );
+        }
+
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_status_transition<H>(
+    harness: &H,
+    session_id: SessionId,
+    from: SessionStatus,
+    to: SessionStatus,
+) -> Result<Vec<EventRecord>>
+where
+    H: OrchestratorContractHarness,
+{
+    let deadline = Instant::now() + DEFAULT_WAIT_TIMEOUT;
+    loop {
+        let events = harness.session_events(session_id).await?;
+        if status_transitions(&events).contains(&(from.clone(), to.clone())) {
+            return Ok(events);
+        }
+
+        if Instant::now() >= deadline {
+            panic!(
+                "{} timed out waiting for status transition {from:?} -> {to:?}.\n{}",
                 harness.harness_name(),
                 diagnostic_snapshot(harness, session_id)
                     .await

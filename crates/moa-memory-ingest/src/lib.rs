@@ -26,6 +26,6 @@ pub use fast_path::{
     fast_remember, fast_supersede, is_fast_memory_tool,
 };
 pub use slow_path::{
-    IngestionVO, IngestionVOClient, IngestionVOImpl, ingest_turn_direct, ingestion_object_key,
-    turn_transcript,
+    IngestionVO, IngestionVOClient, IngestionVOImpl, ingest_turn_direct,
+    ingest_turn_direct_with_pool, ingestion_object_key, turn_transcript,
 };

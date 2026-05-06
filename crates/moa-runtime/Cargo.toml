@@ -9,7 +9,6 @@ chrono.workspace = true
 enum_dispatch = "0.3"
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
-moa-memory = { path = "../moa-memory" }
 moa-orchestrator-local = { path = "../moa-orchestrator-local" }
 moa-providers = { path = "../moa-providers" }
 moa-session = { path = "../moa-session" }
@@ -18,5 +17,5 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-moa-memory-graph = { path = "../moa-memory-graph" }
+memory-graph = { package = "moa-memory-graph", path = "../moa-memory-graph" }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }

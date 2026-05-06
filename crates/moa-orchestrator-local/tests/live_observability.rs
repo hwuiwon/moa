@@ -11,7 +11,6 @@ use moa_core::{
     SessionStatus, SessionStore, StartSessionRequest, UserId, UserMessage, WorkspaceId,
 };
 use moa_hands::ToolRouter;
-use moa_memory::FileMemoryStore;
 use moa_orchestrator_local::LocalOrchestrator;
 use moa_providers::{ModelRouter, build_provider_from_config};
 use moa_session::{PostgresSessionStore, testing};
@@ -203,18 +202,11 @@ async fn live_orchestrator(
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = repo_root.display().to_string();
 
-    let (session_store, _database_url, schema_name) = testing::create_isolated_test_store().await?;
+    let (session_store, _database_url, _schema_name) =
+        testing::create_isolated_test_store().await?;
     let session_store = Arc::new(session_store);
-    let memory_store = Arc::new(
-        FileMemoryStore::from_config_with_pool(
-            &config,
-            Arc::new(session_store.pool().clone()),
-            Some(&schema_name),
-        )
-        .await?,
-    );
     let tool_router = Arc::new(
-        ToolRouter::from_config(&config, memory_store.clone())
+        ToolRouter::from_config(&config)
             .await?
             .with_rule_store(session_store.clone())
             .with_session_store(session_store.clone()),
@@ -223,7 +215,6 @@ async fn live_orchestrator(
     let orchestrator = LocalOrchestrator::new(
         config,
         session_store.clone(),
-        memory_store,
         Arc::new(ModelRouter::new(provider, None)),
         tool_router,
     )

@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use moa_brain::build_default_pipeline_with_rewriter_runtime_and_instructions;
+use moa_brain::{
+    GraphMemoryPipelineOptions,
+    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
+};
 use moa_core::{
     CompletionRequest, CountedSessionStore, EventRange, Result, SessionId, SessionStore,
     WorkingContext, record_pipeline_compile_duration, record_turn_pipeline_compile_duration,
@@ -54,14 +57,16 @@ pub(crate) async fn prepare_turn_request(session_id: SessionId) -> Result<Prepar
             None
         }
     };
-    let pipeline = build_default_pipeline_with_rewriter_runtime_and_instructions(
+    let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         ctx.config.as_ref(),
         counted_session_store,
-        ctx.memory_store.clone(),
-        None,
-        query_rewrite_provider,
-        None,
-        ctx.tool_schemas.as_ref().clone(),
+        GraphMemoryPipelineOptions {
+            graph_pool: ctx.graph_pool.clone(),
+            compaction_llm_provider: None,
+            query_rewrite_llm_provider: query_rewrite_provider,
+            discovered_workspace_instructions: None,
+            tool_schemas: ctx.tool_schemas.as_ref().clone(),
+        },
     );
     let mut context = WorkingContext::new(&session, capabilities);
     let pipeline_span = tracing::info_span!("pipeline_compile");

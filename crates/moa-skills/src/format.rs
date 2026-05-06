@@ -3,9 +3,8 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use moa_core::{ConfidenceLevel, MemoryPath, MoaError, PageType, Result, SkillMetadata, WikiPage};
+use moa_core::{MoaError, Result, SkillMetadata};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::Value;
 use tracing::warn;
 
 const FRONTMATTER_DELIMITER: &str = "---";
@@ -81,10 +80,6 @@ impl SkillFrontmatter {
     /// Returns the normalized skill tags.
     pub fn tags(&self) -> Vec<String> {
         metadata_csv(&self.metadata, META_TAGS)
-    }
-
-    pub(crate) fn set_tags(&mut self, tags: &[String]) {
-        self.set_metadata_csv(META_TAGS, tags);
     }
 
     /// Returns the creation timestamp tracked by MOA.
@@ -222,14 +217,6 @@ impl SkillFrontmatter {
             self.metadata.remove(key);
         }
     }
-
-    fn set_metadata_csv(&mut self, key: &str, values: &[String]) {
-        if values.is_empty() {
-            self.metadata.remove(key);
-        } else {
-            self.insert_metadata(key, values.join(", "));
-        }
-    }
 }
 
 /// Parses a `SKILL.md` document into a structured skill representation.
@@ -256,27 +243,8 @@ pub fn render_skill_markdown(skill: &SkillDocument) -> Result<String> {
     ))
 }
 
-/// Converts a parsed wiki page into a skill document.
-pub fn skill_from_wiki_page(page: &WikiPage) -> Result<SkillDocument> {
-    let metadata_json = serde_json::to_value(&page.metadata)?;
-    let mut frontmatter = serde_json::from_value::<SkillFrontmatter>(metadata_json)
-        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
-    frontmatter.set_created(page.created);
-    frontmatter.set_updated(page.updated);
-    frontmatter.set_auto_generated(page.auto_generated);
-    if !page.tags.is_empty() && frontmatter.tags().is_empty() {
-        frontmatter.set_tags(&page.tags);
-    }
-    let skill = SkillDocument {
-        frontmatter,
-        body: page.content.clone(),
-    };
-    validate_skill_document(&skill)?;
-    Ok(skill)
-}
-
 /// Builds pipeline metadata for a parsed skill document.
-pub fn skill_metadata_from_document(path: MemoryPath, skill: &SkillDocument) -> SkillMetadata {
+pub fn skill_metadata_from_document(path: String, skill: &SkillDocument) -> SkillMetadata {
     SkillMetadata {
         path,
         name: skill.frontmatter.name.clone(),
@@ -291,48 +259,9 @@ pub fn skill_metadata_from_document(path: MemoryPath, skill: &SkillDocument) -> 
     }
 }
 
-/// Builds pipeline metadata directly from a wiki page.
-pub fn skill_metadata_from_page(path: MemoryPath, page: &WikiPage) -> Result<SkillMetadata> {
-    let skill = skill_from_wiki_page(page)?;
-    Ok(skill_metadata_from_document(path, &skill))
-}
-
-/// Converts a structured skill document into a shared wiki page.
-pub fn wiki_page_from_skill(skill: &SkillDocument, path: Option<MemoryPath>) -> Result<WikiPage> {
-    validate_skill_document(skill)?;
-    let metadata = serde_json::from_value::<HashMap<String, Value>>(serde_json::to_value(
-        &skill.frontmatter,
-    )?)?;
-    let reference_count = u64::from(skill.frontmatter.use_count());
-    let last_referenced = skill
-        .frontmatter
-        .last_used()
-        .unwrap_or_else(|| skill.frontmatter.updated());
-
-    Ok(WikiPage {
-        path,
-        title: humanize_skill_name(&skill.frontmatter.name),
-        page_type: PageType::Skill,
-        content: skill.body.clone(),
-        created: skill.frontmatter.created(),
-        updated: skill.frontmatter.updated(),
-        confidence: confidence_for_skill(skill.frontmatter.success_rate()),
-        related: Vec::new(),
-        sources: Vec::new(),
-        tags: skill.frontmatter.tags(),
-        auto_generated: skill.frontmatter.auto_generated(),
-        last_referenced,
-        reference_count,
-        metadata,
-    })
-}
-
 /// Returns the canonical memory path for a skill name.
-pub fn build_skill_path(skill_name: &str) -> MemoryPath {
-    MemoryPath::new(format!(
-        "skills/{}/SKILL.md",
-        slugify_skill_name(skill_name)
-    ))
+pub fn build_skill_path(skill_name: &str) -> String {
+    format!("skills/{}/SKILL.md", slugify_skill_name(skill_name))
 }
 
 /// Converts an arbitrary skill name into a stable slug.
@@ -475,41 +404,9 @@ where
     serializer.serialize_str(&allowed_tools.join(" "))
 }
 
-fn humanize_skill_name(skill_name: &str) -> String {
-    skill_name
-        .split(['-', '_', ' '])
-        .filter(|segment| !segment.is_empty())
-        .map(|segment| {
-            let mut characters = segment.chars();
-            match characters.next() {
-                Some(first) => format!(
-                    "{}{}",
-                    first.to_ascii_uppercase(),
-                    characters.as_str().to_ascii_lowercase()
-                ),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn confidence_for_skill(success_rate: f32) -> ConfidenceLevel {
-    if success_rate >= 0.85 {
-        ConfidenceLevel::High
-    } else if success_rate >= 0.6 {
-        ConfidenceLevel::Medium
-    } else {
-        ConfidenceLevel::Low
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        SkillDocument, build_skill_path, parse_skill_markdown, render_skill_markdown,
-        slugify_skill_name, wiki_page_from_skill,
-    };
+    use super::{SkillDocument, parse_skill_markdown, render_skill_markdown, slugify_skill_name};
 
     const VALID_SKILL: &str = r#"---
 name: deploy-to-fly
@@ -565,20 +462,6 @@ Broken
 "#;
 
         assert!(parse_skill_markdown(invalid).is_err());
-    }
-
-    #[test]
-    fn roundtrips_skill_markdown_through_wiki_page() {
-        let skill = parse_skill_markdown(VALID_SKILL).unwrap();
-        let path = build_skill_path(&skill.frontmatter.name);
-        let page = wiki_page_from_skill(&skill, Some(path.clone())).unwrap();
-        let reparsed = super::skill_from_wiki_page(&page).unwrap();
-        let rendered = render_skill_markdown(&reparsed).unwrap();
-        let reparsed_markdown = parse_skill_markdown(&rendered).unwrap();
-
-        assert_eq!(reparsed.frontmatter, skill.frontmatter);
-        assert_eq!(reparsed_markdown.body, skill.body);
-        assert_eq!(page.path, Some(path));
     }
 
     #[test]

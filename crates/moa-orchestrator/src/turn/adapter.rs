@@ -97,15 +97,6 @@ pub(crate) trait AgentAdapter: Send + Sync {
         Ok(())
     }
 
-    /// Records that a skill was activated in the current task segment.
-    async fn record_segment_skill_activation(
-        &self,
-        _ctx: &ObjectContext<'_>,
-        _skill_name: &str,
-    ) -> Result<(), HandlerError> {
-        Ok(())
-    }
-
     /// Records a denied tool result in agent-local state.
     async fn record_denied_tool(
         &self,

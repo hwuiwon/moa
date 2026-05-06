@@ -1,33 +1,17 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use moa_core::{
-    Event, HandProvider, HandResources, HandSpec, MemoryPath, MemoryScope, MemorySearchMode,
-    MemorySearchResult, MemoryStore, ModelId, PageSummary, PageType, Result, SandboxTier,
-    SessionMeta, SessionStore, ToolBudgetConfig, ToolInvocation, UserId, WikiPage, WorkspaceId,
+    Event, HandProvider, HandResources, HandSpec, ModelId, SandboxTier, SessionMeta, SessionStore,
+    ToolBudgetConfig, ToolInvocation, UserId, WorkspaceId,
 };
 use moa_hands::{LocalHandProvider, ToolRouter};
-use moa_memory::FileMemoryStore;
 use moa_session::{PostgresSessionStore, testing};
 use serde_json::json;
 use tempfile::{TempDir, tempdir, tempdir_in};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-
-fn workspace_scope(workspace_id: &str) -> MemoryScope {
-    MemoryScope::Workspace {
-        workspace_id: WorkspaceId::new(workspace_id),
-    }
-}
-
-fn user_scope(workspace_id: &str, user_id: &str) -> MemoryScope {
-    MemoryScope::User {
-        workspace_id: WorkspaceId::new(workspace_id),
-        user_id: UserId::new(user_id),
-    }
-}
 
 fn docker_mountable_tempdir() -> TempDir {
     let macos_docker_tmp = Path::new("/private/tmp");
@@ -35,115 +19,6 @@ fn docker_mountable_tempdir() -> TempDir {
         return tempdir_in(macos_docker_tmp).expect("create Docker-mountable tempdir");
     }
     tempdir().expect("create tempdir")
-}
-
-#[derive(Default)]
-struct EmptyMemoryStore;
-
-#[async_trait]
-impl MemoryStore for EmptyMemoryStore {
-    async fn search(
-        &self,
-        _query: &str,
-        _scope: &MemoryScope,
-        _limit: usize,
-    ) -> Result<Vec<MemorySearchResult>> {
-        Ok(Vec::new())
-    }
-
-    async fn read_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
-        Err(moa_core::MoaError::StorageError("not found".to_string()))
-    }
-
-    async fn write_page(
-        &self,
-        _scope: &MemoryScope,
-        _path: &MemoryPath,
-        _page: WikiPage,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
-        Ok(())
-    }
-
-    async fn list_pages(
-        &self,
-        _scope: &MemoryScope,
-        _filter: Option<PageType>,
-    ) -> Result<Vec<PageSummary>> {
-        Ok(Vec::new())
-    }
-
-    async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
-        Ok(String::new())
-    }
-
-    async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct TrackingMemoryStore {
-    last_mode: Mutex<Option<MemorySearchMode>>,
-}
-
-#[async_trait]
-impl MemoryStore for TrackingMemoryStore {
-    async fn search(
-        &self,
-        _query: &str,
-        _scope: &MemoryScope,
-        _limit: usize,
-    ) -> Result<Vec<MemorySearchResult>> {
-        Ok(Vec::new())
-    }
-
-    async fn search_with_mode(
-        &self,
-        _query: &str,
-        _scope: &MemoryScope,
-        _limit: usize,
-        mode: MemorySearchMode,
-    ) -> Result<Vec<MemorySearchResult>> {
-        *self.last_mode.lock().unwrap() = Some(mode);
-        Ok(Vec::new())
-    }
-
-    async fn read_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<WikiPage> {
-        Err(moa_core::MoaError::StorageError("not found".to_string()))
-    }
-
-    async fn write_page(
-        &self,
-        _scope: &MemoryScope,
-        _path: &MemoryPath,
-        _page: WikiPage,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
-        Ok(())
-    }
-
-    async fn list_pages(
-        &self,
-        _scope: &MemoryScope,
-        _filter: Option<PageType>,
-    ) -> Result<Vec<PageSummary>> {
-        Ok(Vec::new())
-    }
-
-    async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
-        Ok(String::new())
-    }
-
-    async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
-        Ok(())
-    }
 }
 
 fn session() -> SessionMeta {
@@ -165,32 +40,10 @@ async fn test_session_store() -> Arc<PostgresSessionStore> {
     Arc::new(store)
 }
 
-fn sample_page(path: &str, title: &str, page_type: PageType, content: &str) -> WikiPage {
-    WikiPage {
-        path: Some(MemoryPath::new(path)),
-        title: title.to_string(),
-        page_type,
-        content: content.to_string(),
-        created: chrono::Utc::now(),
-        updated: chrono::Utc::now(),
-        confidence: moa_core::ConfidenceLevel::High,
-        related: Vec::new(),
-        sources: Vec::new(),
-        tags: Vec::new(),
-        auto_generated: false,
-        last_referenced: chrono::Utc::now(),
-        reference_count: 1,
-        metadata: std::collections::HashMap::new(),
-    }
-}
-
 #[tokio::test]
 async fn file_read_reads_written_content() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path())
-        .await
-        .unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
 
     router
@@ -222,10 +75,7 @@ async fn file_read_reads_written_content() {
 #[tokio::test]
 async fn str_replace_updates_only_the_target_region() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path())
-        .await
-        .unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
 
     router
@@ -285,10 +135,7 @@ async fn str_replace_updates_only_the_target_region() {
 #[tokio::test]
 async fn file_write_overwrite_returns_compact_diff() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path())
-        .await
-        .unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
 
     router
@@ -342,10 +189,7 @@ async fn file_write_overwrite_returns_compact_diff() {
 #[tokio::test]
 async fn file_search_finds_files_by_glob() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path())
-        .await
-        .unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
 
     router
@@ -396,10 +240,7 @@ async fn file_search_skips_git_directory_contents() {
     tokio::fs::write(git_dir.join("HEAD"), "secret history")
         .await
         .unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path())
-        .await
-        .unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
 
     router
@@ -451,8 +292,7 @@ async fn file_search_skips_python_virtualenvs_in_remembered_workspace() {
         .await
         .unwrap();
 
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path().join("sandboxes"))
+    let router = ToolRouter::new_local(dir.path().join("sandboxes"))
         .await
         .unwrap();
     let session = session();
@@ -497,8 +337,7 @@ async fn file_search_respects_moaignore_in_remembered_workspace() {
         .await
         .unwrap();
 
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path().join("sandboxes"))
+    let router = ToolRouter::new_local(dir.path().join("sandboxes"))
         .await
         .unwrap();
     let session = session();
@@ -526,10 +365,7 @@ async fn file_search_respects_moaignore_in_remembered_workspace() {
 #[tokio::test]
 async fn file_search_truncates_pathological_match_sets() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path())
-        .await
-        .unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
 
     for index in 0..1_050 {
@@ -580,10 +416,7 @@ async fn file_search_truncates_pathological_match_sets() {
 #[tokio::test]
 async fn default_router_excludes_provider_native_web_tools() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path())
-        .await
-        .unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
 
     assert!(!router.has_tool("web_search"));
     assert!(!router.has_tool("web_fetch"));
@@ -592,10 +425,7 @@ async fn default_router_excludes_provider_native_web_tools() {
 #[tokio::test]
 async fn file_operations_reject_path_traversal() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path())
-        .await
-        .unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
 
     let error = router
@@ -618,8 +448,7 @@ async fn approval_prompt_uses_remembered_workspace_root_for_commands() {
     let dir = tempdir().unwrap();
     let workspace_root = dir.path().join("workspace-root");
     tokio::fs::create_dir_all(&workspace_root).await.unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path().join("sandboxes"))
+    let router = ToolRouter::new_local(dir.path().join("sandboxes"))
         .await
         .unwrap();
     let session = session();
@@ -677,8 +506,7 @@ async fn approval_prompt_str_replace_diff_is_surgical() {
     )
     .await
     .unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path().join("sandboxes"))
+    let router = ToolRouter::new_local(dir.path().join("sandboxes"))
         .await
         .unwrap();
     let session = session();
@@ -713,10 +541,7 @@ async fn approval_prompt_str_replace_diff_is_surgical() {
 #[tokio::test]
 async fn bash_captures_stdout_and_stderr() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path())
-        .await
-        .unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
 
     let (_, output) = router
@@ -739,10 +564,7 @@ async fn bash_captures_stdout_and_stderr() {
 #[tokio::test]
 async fn bash_success_output_is_truncated_to_router_budget() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path())
-        .await
-        .unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
 
     let (_, output) = router
@@ -769,10 +591,7 @@ async fn bash_success_output_is_truncated_to_router_budget() {
 #[tokio::test]
 async fn bash_error_output_is_not_truncated() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path())
-        .await
-        .unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
 
     let (_, output) = router
@@ -800,10 +619,7 @@ async fn bash_error_output_is_not_truncated() {
 #[tokio::test]
 async fn file_read_within_budget_is_not_router_truncated() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path())
-        .await
-        .unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
     let content = (1..=100)
         .map(|index| format!("{index:03}: {}", "a".repeat(48)))
@@ -842,8 +658,7 @@ async fn file_read_within_budget_is_not_router_truncated() {
 #[tokio::test]
 async fn file_read_budget_override_truncates_large_results() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path())
+    let router = ToolRouter::new_local(dir.path())
         .await
         .unwrap()
         .with_tool_budgets(ToolBudgetConfig {
@@ -891,10 +706,7 @@ async fn file_read_budget_override_truncates_large_results() {
 #[tokio::test]
 async fn bash_respects_timeout() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = ToolRouter::new_local(memory_store, dir.path())
-        .await
-        .unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
 
     let error = router
@@ -917,9 +729,8 @@ async fn bash_respects_timeout() {
 #[tokio::test]
 async fn session_search_finds_prior_events() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
     let session_store = test_session_store().await;
-    let router = ToolRouter::new_local(memory_store, dir.path())
+    let router = ToolRouter::new_local(dir.path())
         .await
         .unwrap()
         .with_session_store(session_store.clone());
@@ -980,9 +791,8 @@ async fn session_search_finds_prior_events() {
 #[tokio::test]
 async fn session_search_filters_error_events() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
     let session_store = test_session_store().await;
-    let router = ToolRouter::new_local(memory_store, dir.path())
+    let router = ToolRouter::new_local(dir.path())
         .await
         .unwrap()
         .with_session_store(session_store.clone());
@@ -1038,12 +848,7 @@ async fn session_search_filters_error_events() {
 #[tokio::test]
 async fn local_bash_hard_cancel_kills_running_process() {
     let dir = tempdir().unwrap();
-    let memory_store: Arc<dyn MemoryStore> = Arc::new(EmptyMemoryStore);
-    let router = Arc::new(
-        ToolRouter::new_local(memory_store, dir.path())
-            .await
-            .unwrap(),
-    );
+    let router = Arc::new(ToolRouter::new_local(dir.path()).await.unwrap());
     let session = session();
     let cancel_token = CancellationToken::new();
     let started = Instant::now();
@@ -1069,463 +874,6 @@ async fn local_bash_hard_cancel_kills_running_process() {
     let error = task.await.unwrap().unwrap_err();
     assert!(matches!(error, moa_core::MoaError::Cancelled));
     assert!(started.elapsed() < Duration::from_secs(3));
-}
-
-#[tokio::test]
-async fn memory_search_returns_indexed_results() {
-    let dir = tempdir().unwrap();
-    let memory_root = dir.path().join("memory-root");
-    let (search_store, _database_url, schema_name) =
-        testing::create_isolated_test_store().await.unwrap();
-    let memory_store = Arc::new(
-        FileMemoryStore::new_with_pool_and_schema(
-            &memory_root,
-            Arc::new(search_store.pool().clone()),
-            Some(&schema_name),
-        )
-        .await
-        .unwrap(),
-    );
-    memory_store
-        .write_page(
-            &workspace_scope("workspace"),
-            &MemoryPath::new("topics/oauth.md"),
-            WikiPage {
-                path: Some(MemoryPath::new("topics/oauth.md")),
-                title: "OAuth Notes".to_string(),
-                page_type: PageType::Topic,
-                content: "# OAuth Notes\nFix the refresh token bug.".to_string(),
-                created: chrono::Utc::now(),
-                updated: chrono::Utc::now(),
-                confidence: moa_core::ConfidenceLevel::High,
-                related: Vec::new(),
-                sources: Vec::new(),
-                tags: vec!["auth".to_string()],
-                auto_generated: false,
-                last_referenced: chrono::Utc::now(),
-                reference_count: 1,
-                metadata: std::collections::HashMap::new(),
-            },
-        )
-        .await
-        .unwrap();
-
-    let memory_store_trait: Arc<dyn MemoryStore> = memory_store;
-    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
-        .await
-        .unwrap();
-    let session = session();
-    let (_, output) = router
-        .execute(
-            &session,
-            &ToolInvocation {
-                id: None,
-                name: "memory_search".to_string(),
-                input: json!({ "query": "refresh token", "scope": "workspace" }),
-            },
-        )
-        .await
-        .unwrap();
-
-    let rendered = output.to_text();
-    assert!(rendered.contains("OAuth Notes"));
-    assert!(rendered.contains("refresh"));
-    assert!(output.structured.is_some());
-}
-
-#[tokio::test]
-async fn memory_search_passes_through_explicit_mode() {
-    let dir = tempdir().unwrap();
-    let tracking_store = Arc::new(TrackingMemoryStore::default());
-    let memory_store_trait: Arc<dyn MemoryStore> = tracking_store.clone();
-    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
-        .await
-        .unwrap();
-    let session = session();
-
-    let _ = router
-        .execute(
-            &session,
-            &ToolInvocation {
-                id: None,
-                name: "memory_search".to_string(),
-                input: json!({
-                    "query": "refresh token",
-                    "scope": "workspace",
-                    "mode": "keyword"
-                }),
-            },
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(
-        *tracking_store.last_mode.lock().unwrap(),
-        Some(MemorySearchMode::Keyword)
-    );
-}
-
-#[tokio::test]
-async fn memory_read_returns_page_contents() {
-    let dir = tempdir().unwrap();
-    let memory_root = dir.path().join("memory-root");
-    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
-    memory_store
-        .write_page(
-            &workspace_scope("workspace"),
-            &MemoryPath::new("skills/oauth-refresh/SKILL.md"),
-            WikiPage {
-                path: Some(MemoryPath::new("skills/oauth-refresh/SKILL.md")),
-                title: "OAuth Refresh".to_string(),
-                page_type: PageType::Skill,
-                content: "# OAuth Refresh\nUse the exact workflow.".to_string(),
-                created: chrono::Utc::now(),
-                updated: chrono::Utc::now(),
-                confidence: moa_core::ConfidenceLevel::High,
-                related: Vec::new(),
-                sources: Vec::new(),
-                tags: vec!["auth".to_string()],
-                auto_generated: false,
-                last_referenced: chrono::Utc::now(),
-                reference_count: 1,
-                metadata: std::collections::HashMap::new(),
-            },
-        )
-        .await
-        .unwrap();
-
-    let memory_store_trait: Arc<dyn MemoryStore> = memory_store;
-    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
-        .await
-        .unwrap();
-    let session = session();
-    let (_, output) = router
-        .execute(
-            &session,
-            &ToolInvocation {
-                id: None,
-                name: "memory_read".to_string(),
-                input: json!({ "path": "skills/oauth-refresh/SKILL.md" }),
-            },
-        )
-        .await
-        .unwrap();
-
-    let rendered = output.to_text();
-    assert!(rendered.contains("# OAuth Refresh"));
-    assert!(rendered.contains("Use the exact workflow."));
-}
-
-#[tokio::test]
-async fn memory_write_with_scope_creates_new_workspace_page() {
-    let dir = tempdir().unwrap();
-    let memory_root = dir.path().join("memory-root");
-    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
-    let memory_store_trait: Arc<dyn MemoryStore> = memory_store.clone();
-    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
-        .await
-        .unwrap();
-    let session = session();
-
-    let (_, output) = router
-        .execute_authorized(
-            &session,
-            &ToolInvocation {
-                id: None,
-                name: "memory_write".to_string(),
-                input: json!({
-                    "path": "topics/new-page.md",
-                    "scope": "workspace",
-                    "title": "New Page",
-                    "content": "# New Page\nCreated from the tool."
-                }),
-            },
-        )
-        .await
-        .unwrap();
-
-    assert!(
-        output
-            .to_text()
-            .contains("Wrote memory page topics/new-page.md")
-    );
-    let page = memory_store
-        .read_page(
-            &workspace_scope("workspace"),
-            &MemoryPath::new("topics/new-page.md"),
-        )
-        .await
-        .unwrap();
-    assert_eq!(page.title, "New Page");
-    assert!(page.content.contains("Created from the tool."));
-}
-
-#[tokio::test]
-async fn memory_write_without_scope_updates_existing_page() {
-    let dir = tempdir().unwrap();
-    let memory_root = dir.path().join("memory-root");
-    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
-    memory_store
-        .write_page(
-            &workspace_scope("workspace"),
-            &MemoryPath::new("topics/existing.md"),
-            sample_page(
-                "topics/existing.md",
-                "Existing",
-                PageType::Topic,
-                "# Existing\nBefore.",
-            ),
-        )
-        .await
-        .unwrap();
-    let memory_store_trait: Arc<dyn MemoryStore> = memory_store.clone();
-    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
-        .await
-        .unwrap();
-    let session = session();
-
-    router
-        .execute_authorized(
-            &session,
-            &ToolInvocation {
-                id: None,
-                name: "memory_write".to_string(),
-                input: json!({
-                    "path": "topics/existing.md",
-                    "content": "# Existing\nAfter."
-                }),
-            },
-        )
-        .await
-        .unwrap();
-
-    let page = memory_store
-        .read_page(
-            &workspace_scope("workspace"),
-            &MemoryPath::new("topics/existing.md"),
-        )
-        .await
-        .unwrap();
-    assert!(page.content.contains("After."));
-}
-
-#[tokio::test]
-async fn memory_write_without_scope_requires_scope_for_new_page() {
-    let dir = tempdir().unwrap();
-    let memory_root = dir.path().join("memory-root");
-    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
-    let memory_store_trait: Arc<dyn MemoryStore> = memory_store;
-    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
-        .await
-        .unwrap();
-    let session = session();
-
-    let error = router
-        .execute_authorized(
-            &session,
-            &ToolInvocation {
-                id: None,
-                name: "memory_write".to_string(),
-                input: json!({
-                    "path": "topics/new-page.md",
-                    "content": "# New Page\nNeeds scope."
-                }),
-            },
-        )
-        .await
-        .unwrap_err();
-
-    assert!(matches!(
-        error,
-        moa_core::MoaError::ToolError(message)
-            if message.contains("specify `scope`") && message.contains("topics/new-page.md")
-    ));
-}
-
-#[tokio::test]
-async fn memory_ingest_creates_source_page_and_related_pages() {
-    let dir = tempdir().unwrap();
-    let memory_root = dir.path().join("memory-root");
-    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
-    let memory_store_trait: Arc<dyn MemoryStore> = memory_store.clone();
-    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
-        .await
-        .unwrap();
-    let session = session();
-
-    let (_, output) = router
-        .execute_authorized(
-            &session,
-            &ToolInvocation {
-                id: None,
-                name: "memory_ingest".to_string(),
-                input: json!({
-                    "content": "# API Design Doc\n\n## Entities\n- Auth Service\n\n## Topics\n- OAuth Tokens\n"
-                }),
-            },
-        )
-        .await
-        .unwrap();
-
-    let rendered = output.to_text();
-    assert!(rendered.contains("Ingested \"API Design Doc\""));
-    assert!(rendered.contains("Created: sources/api-design-doc.md"));
-    assert!(rendered.contains("Extracted: 1 entities, 1 topics, 0 decisions"));
-
-    let source_page = memory_store
-        .read_page(
-            &workspace_scope("workspace"),
-            &MemoryPath::new("sources/api-design-doc.md"),
-        )
-        .await
-        .unwrap();
-    assert!(source_page.content.contains("## Raw source"));
-
-    let entity_page = memory_store
-        .read_page(
-            &workspace_scope("workspace"),
-            &MemoryPath::new("entities/auth-service.md"),
-        )
-        .await
-        .unwrap();
-    assert!(entity_page.content.contains("Source update"));
-}
-
-#[tokio::test]
-async fn memory_ingest_emits_session_event() {
-    let dir = tempdir().unwrap();
-    let memory_root = dir.path().join("memory-root");
-    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
-    let session_store = test_session_store().await;
-    let router = ToolRouter::new_local(memory_store, dir.path().join("sandboxes"))
-        .await
-        .unwrap()
-        .with_session_store(session_store.clone());
-    let session = session();
-    session_store.create_session(session.clone()).await.unwrap();
-
-    router
-        .execute_authorized(
-            &session,
-            &ToolInvocation {
-                id: None,
-                name: "memory_ingest".to_string(),
-                input: json!({
-                    "source_name": "RFC 0042 Auth Redesign",
-                    "content": "## Topics\n- Token Rotation\n"
-                }),
-            },
-        )
-        .await
-        .unwrap();
-
-    let events = session_store
-        .get_events(session.id, moa_core::EventRange::all())
-        .await
-        .unwrap();
-    assert!(events.iter().any(|record| matches!(
-        &record.event,
-        Event::MemoryIngest {
-            source_name,
-            source_path,
-            ..
-        } if source_name == "RFC 0042 Auth Redesign"
-            && source_path == "sources/rfc-0042-auth-redesign.md"
-    )));
-}
-
-#[tokio::test]
-async fn memory_read_without_scope_falls_back_to_user_scope() {
-    let dir = tempdir().unwrap();
-    let memory_root = dir.path().join("memory-root");
-    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
-    memory_store
-        .write_page(
-            &user_scope("workspace", "user"),
-            &MemoryPath::new("topics/preferences.md"),
-            sample_page(
-                "topics/preferences.md",
-                "Preferences",
-                PageType::Topic,
-                "# Preferences\nUser-only page.",
-            ),
-        )
-        .await
-        .unwrap();
-    let memory_store_trait: Arc<dyn MemoryStore> = memory_store;
-    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
-        .await
-        .unwrap();
-    let session = session();
-
-    let (_, output) = router
-        .execute(
-            &session,
-            &ToolInvocation {
-                id: None,
-                name: "memory_read".to_string(),
-                input: json!({ "path": "topics/preferences.md" }),
-            },
-        )
-        .await
-        .unwrap();
-
-    assert!(output.to_text().contains("User-only page."));
-}
-
-#[tokio::test]
-async fn memory_read_with_explicit_scope_reads_only_that_scope() {
-    let dir = tempdir().unwrap();
-    let memory_root = dir.path().join("memory-root");
-    let memory_store = Arc::new(FileMemoryStore::new(&memory_root).await.unwrap());
-    let path = MemoryPath::new("topics/preferences.md");
-    memory_store
-        .write_page(
-            &user_scope("workspace", "user"),
-            &path,
-            sample_page(
-                "topics/preferences.md",
-                "Preferences",
-                PageType::Topic,
-                "# Preferences\nUser page.",
-            ),
-        )
-        .await
-        .unwrap();
-    memory_store
-        .write_page(
-            &workspace_scope("workspace"),
-            &path,
-            sample_page(
-                "topics/preferences.md",
-                "Preferences",
-                PageType::Topic,
-                "# Preferences\nWorkspace page.",
-            ),
-        )
-        .await
-        .unwrap();
-    let memory_store_trait: Arc<dyn MemoryStore> = memory_store;
-    let router = ToolRouter::new_local(memory_store_trait, dir.path().join("sandboxes"))
-        .await
-        .unwrap();
-    let session = session();
-
-    let (_, output) = router
-        .execute(
-            &session,
-            &ToolInvocation {
-                id: None,
-                name: "memory_read".to_string(),
-                input: json!({ "path": "topics/preferences.md", "scope": "user" }),
-            },
-        )
-        .await
-        .unwrap();
-
-    let rendered = output.to_text();
-    assert!(rendered.contains("User page."));
-    assert!(!rendered.contains("Workspace page."));
 }
 
 #[tokio::test]

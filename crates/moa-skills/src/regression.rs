@@ -3,24 +3,24 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::Utc;
+use memory_graph::GraphStore;
 use moa_core::{
-    Event, EventRecord, LLMProvider, MemoryPath, MemoryScope, MemoryStore, MoaConfig, MoaError,
-    Result, SessionMeta, SkillMetadata, WorkspaceId,
+    Event, EventRecord, LLMProvider, MoaConfig, MoaError, Result, SessionMeta, SkillMetadata,
+    WorkspaceId,
 };
 use moa_eval::{
     AgentConfig, EngineOptions, EvalEngine, EvalRun, EvalStatus, Evaluator, EvaluatorOptions,
     PermissionOverride, SkillOverride, TestCase, TestSuite, build_evaluators, evaluate_run,
     load_suite,
 };
-use moa_memory::FileMemoryStore;
-use moa_memory::index::{LogChange, LogEntry};
+use moa_session::{PostgresSessionStore, create_session_store};
 use tokio::fs;
 use uuid::Uuid;
 
 use crate::format::{
-    SkillDocument, parse_skill_markdown, render_skill_markdown, skill_from_wiki_page,
+    SkillDocument, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
 };
+use crate::registry::SkillRegistry;
 
 const DEFAULT_SUITE_TIMEOUT_SECONDS: u64 = 120;
 const DEFAULT_SKILL_TEST_BUDGET_DOLLARS: f64 = 0.50;
@@ -93,14 +93,15 @@ impl SkillRegressionReport {
 /// Runs the persisted suite for one workspace skill using the configured provider selection.
 pub async fn run_skill_suite(
     config: &MoaConfig,
-    memory_store: Arc<FileMemoryStore>,
+    _graph_store: Arc<dyn GraphStore>,
     workspace_id: &WorkspaceId,
     skill_selector: &str,
 ) -> Result<SkillEvalRun> {
-    let resolved =
-        resolve_workspace_skill(memory_store.as_ref(), workspace_id, skill_selector).await?;
+    let session_store = create_session_store(config).await?;
+    let registry = SkillRegistry::new(session_store.pool().clone());
+    let resolved = resolve_workspace_skill(&registry, workspace_id, skill_selector).await?;
     let skill_markdown = render_skill_markdown(&resolved.document)?;
-    let suite_path = skill_suite_path(memory_store.as_ref(), workspace_id, &resolved.metadata.path);
+    let suite_path = skill_suite_path(config, workspace_id, &resolved.metadata.name);
     let suite = load_suite(&suite_path).map_err(map_eval_error)?;
 
     let temp_root = std::env::temp_dir().join(format!("moa-skill-eval-{}", Uuid::now_v7()));
@@ -129,10 +130,9 @@ pub async fn run_skill_regression(
     existing: &SkillMetadata,
     current_markdown: &str,
     candidate_markdown: &str,
-    memory_store: Arc<FileMemoryStore>,
     llm: Arc<dyn LLMProvider>,
 ) -> Result<SkillRegressionReport> {
-    let suite_path = skill_suite_path(memory_store.as_ref(), &session.workspace_id, &existing.path);
+    let suite_path = skill_suite_path(config, &session.workspace_id, &existing.name);
     if !fs::try_exists(&suite_path).await? {
         return Ok(SkillRegressionReport {
             decision: SkillRegressionDecision::MissingSuite,
@@ -223,14 +223,13 @@ pub async fn run_skill_regression(
 
 /// Generates a minimal regression suite for a newly distilled skill.
 pub async fn generate_skill_test_suite(
+    config: &MoaConfig,
     session: &SessionMeta,
     skill: &SkillDocument,
-    skill_path: &MemoryPath,
     events: &[EventRecord],
-    memory_store: Arc<FileMemoryStore>,
 ) -> Result<PathBuf> {
     let suite = build_generated_suite(skill, events);
-    let suite_path = skill_suite_path(memory_store.as_ref(), &session.workspace_id, skill_path);
+    let suite_path = skill_suite_path(config, &session.workspace_id, &skill.frontmatter.name);
     if let Some(parent) = suite_path.parent() {
         fs::create_dir_all(parent).await?;
     }
@@ -254,45 +253,35 @@ pub fn compare_scores(
 
 /// Appends a skill improvement decision to the workspace `_log.md`.
 pub async fn append_skill_regression_log(
-    memory_store: &FileMemoryStore,
+    store: &PostgresSessionStore,
     session: &SessionMeta,
     skill_name: &str,
     previous_version: &str,
     candidate_version: &str,
     report: &SkillRegressionReport,
 ) -> Result<()> {
-    let mut changes = Vec::new();
-    if let Some(suite_path) = &report.suite_path
-        && let Some(relative) = suite_path
-            .strip_prefix(workspace_memory_root(memory_store, &session.workspace_id))
-            .ok()
-            .map(path_to_memory_path)
-    {
-        changes.push(LogChange {
-            action: "Compared".to_string(),
-            path: relative,
-            detail: Some(report.detail.clone()),
-        });
-    }
-    changes.push(LogChange {
-        action: "Updated".to_string(),
-        path: crate::format::build_skill_path(skill_name),
-        detail: Some(format!("Decision: {:?}", report.decision)),
-    });
-
-    memory_store
-        .append_scope_log(
-            &MemoryScope::Workspace {
-                workspace_id: session.workspace_id.clone(),
-            },
-            LogEntry {
-                timestamp: Utc::now(),
-                operation: "skill_improvement".to_string(),
-                description: format!("{skill_name} {previous_version} -> {candidate_version}"),
-                changes,
-                brain_session: Some(session.id),
-            },
-        )
+    store
+        .append_learning(&moa_core::LearningEntry {
+            id: Uuid::now_v7(),
+            tenant_id: session.workspace_id.to_string(),
+            learning_type: "skill_regression".to_string(),
+            target_id: skill_name.to_string(),
+            target_label: Some(skill_name.to_string()),
+            payload: serde_json::json!({
+                "previous_version": previous_version,
+                "candidate_version": candidate_version,
+                "decision": format!("{:?}", report.decision),
+                "detail": report.detail,
+                "suite_path": report.suite_path,
+            }),
+            confidence: Some(if report.accepted() { 1.0 } else { 0.0 }),
+            source_refs: vec![session.id.0],
+            actor: format!("brain:{}", session.id),
+            valid_from: chrono::Utc::now(),
+            valid_to: None,
+            batch_id: None,
+            version: 1,
+        })
         .await
 }
 
@@ -367,25 +356,21 @@ async fn execute_skill_suite(
 }
 
 async fn resolve_workspace_skill(
-    memory_store: &FileMemoryStore,
+    registry: &SkillRegistry,
     workspace_id: &WorkspaceId,
     selector: &str,
 ) -> Result<ResolvedWorkspaceSkill> {
-    let scope = MemoryScope::Workspace {
+    let scope = moa_core::MemoryScope::Workspace {
         workspace_id: workspace_id.clone(),
     };
-    let summaries = memory_store
-        .list_pages(&scope, Some(moa_core::PageType::Skill))
-        .await?;
+    let skills = registry.load_for_scope(&scope).await?;
 
-    for summary in summaries {
-        let page = memory_store.read_page(&scope, &summary.path).await?;
-        let document = skill_from_wiki_page(&page)?;
-        if skill_selector_matches(selector, &summary.path, &document.frontmatter.name) {
-            return Ok(ResolvedWorkspaceSkill {
-                metadata: crate::format::skill_metadata_from_document(summary.path, &document),
-                document,
-            });
+    for skill in skills {
+        let document = parse_skill_markdown(&skill.body)?;
+        let metadata =
+            skill_metadata_from_document(crate::format::build_skill_path(&skill.name), &document);
+        if skill_selector_matches(selector, &metadata.name) {
+            return Ok(ResolvedWorkspaceSkill { metadata, document });
         }
     }
 
@@ -501,30 +486,23 @@ async fn remove_dir_if_exists(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn workspace_memory_root(memory_store: &FileMemoryStore, workspace_id: &WorkspaceId) -> PathBuf {
-    memory_store
-        .base_dir()
+fn skill_suite_path(config: &MoaConfig, workspace_id: &WorkspaceId, skill_name: &str) -> PathBuf {
+    expand_local_path(&config.local.memory_dir)
         .join("workspaces")
         .join(workspace_id.as_str())
-        .join("memory")
-}
-
-fn skill_suite_path(
-    memory_store: &FileMemoryStore,
-    workspace_id: &WorkspaceId,
-    skill_path: &MemoryPath,
-) -> PathBuf {
-    let relative = Path::new(skill_path.as_str())
-        .parent()
-        .unwrap_or_else(|| Path::new("skills"));
-    workspace_memory_root(memory_store, workspace_id)
-        .join(relative)
+        .join("skills")
+        .join(crate::format::slugify_skill_name(skill_name))
         .join("tests")
         .join("suite.toml")
 }
 
-fn path_to_memory_path(path: &Path) -> MemoryPath {
-    MemoryPath::new(path.to_string_lossy().replace('\\', "/"))
+fn expand_local_path(path: &str) -> PathBuf {
+    if let Some(relative) = path.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(relative);
+    }
+    PathBuf::from(path)
 }
 
 fn extract_task_input(events: &[EventRecord]) -> String {
@@ -605,11 +583,8 @@ fn estimate_tokens(text: &str) -> usize {
     }
 }
 
-fn skill_selector_matches(selector: &str, path: &MemoryPath, name: &str) -> bool {
-    selector == name
-        || selector == path.as_str()
-        || path.as_str().contains(selector)
-        || name.contains(selector)
+fn skill_selector_matches(selector: &str, name: &str) -> bool {
+    selector == name || name.contains(selector)
 }
 
 fn map_eval_error(error: moa_eval::EvalError) -> MoaError {

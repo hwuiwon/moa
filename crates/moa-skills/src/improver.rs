@@ -1,22 +1,19 @@
 //! Existing-skill self-improvement logic.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;
 use moa_core::{
-    CompletionRequest, Event, EventRecord, MemoryScope, MemoryStore, MoaConfig, ModelTask, Result,
-    SessionMeta, SkillMetadata,
+    CompletionRequest, Event, EventRecord, MemoryScope, MoaConfig, ModelTask, Result, SessionMeta,
+    SkillMetadata,
 };
-use moa_memory::FileMemoryStore;
 use moa_providers::ModelRouter;
-use moa_session::PostgresSessionStore;
-use tokio::fs;
+use moa_session::{PostgresSessionStore, create_session_store};
 
 use crate::format::{
-    SkillDocument, parse_skill_markdown, render_skill_markdown, skill_from_wiki_page,
-    skill_metadata_from_document, wiki_page_from_skill,
+    SkillDocument, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
 };
+use crate::registry::{NewSkill, SkillRegistry};
 use crate::regression::{append_skill_regression_log, run_skill_regression};
 
 /// Compares a run against an existing skill and updates it when the LLM proposes a better version.
@@ -25,17 +22,16 @@ pub async fn maybe_improve_skill(
     session: &SessionMeta,
     existing: &SkillMetadata,
     events: &[EventRecord],
-    memory_store: Arc<FileMemoryStore>,
     model_router: Arc<ModelRouter>,
 ) -> Result<Option<SkillMetadata>> {
+    let learning_store = create_session_store(config).await?;
     maybe_improve_skill_with_learning(
         config,
         session,
         existing,
         events,
-        memory_store,
         model_router,
-        None,
+        Some(learning_store),
     )
     .await
 }
@@ -46,15 +42,20 @@ pub async fn maybe_improve_skill_with_learning(
     session: &SessionMeta,
     existing: &SkillMetadata,
     events: &[EventRecord],
-    memory_store: Arc<FileMemoryStore>,
     model_router: Arc<ModelRouter>,
     learning_store: Option<Arc<PostgresSessionStore>>,
 ) -> Result<Option<SkillMetadata>> {
+    let Some(store) = learning_store.clone() else {
+        return Ok(None);
+    };
+    let registry = SkillRegistry::new(store.pool().clone());
     let scope = MemoryScope::Workspace {
         workspace_id: session.workspace_id.clone(),
     };
-    let page = memory_store.read_page(&scope, &existing.path).await?;
-    let mut current = skill_from_wiki_page(&page)?;
+    let Some(row) = registry.load_by_name(&scope, &existing.name).await? else {
+        return Ok(None);
+    };
+    let mut current = parse_skill_markdown(&row.body)?;
     let current_markdown = render_skill_markdown(&current)?;
     let prompt = build_improvement_prompt(&current_markdown, events);
     let llm = model_router.provider_for(ModelTask::SkillDistillation);
@@ -68,9 +69,9 @@ pub async fn maybe_improve_skill_with_learning(
 
     if updated_text.trim() == "UNCHANGED" {
         record_successful_use(&mut current, now);
-        let updated_page = wiki_page_from_skill(&current, Some(existing.path.clone()))?;
-        memory_store
-            .write_page(&scope, &existing.path, updated_page)
+        let markdown = render_skill_markdown(&current)?;
+        registry
+            .upsert_by_name(NewSkill::from_document(scope, &current, markdown))
             .await?;
         return Ok(None);
     }
@@ -93,18 +94,14 @@ pub async fn maybe_improve_skill_with_learning(
         .frontmatter
         .set_version(bump_version(&current.frontmatter.version()));
     record_successful_use_with_baseline(&mut improved, &current, now);
-    persist_previous_version(
-        memory_store.as_ref(),
-        &session.workspace_id,
-        &existing.path,
-        &current_markdown,
-    )
-    .await?;
 
     let candidate_markdown = render_skill_markdown(&improved)?;
-    let updated_page = wiki_page_from_skill(&improved, Some(existing.path.clone()))?;
-    memory_store
-        .write_page(&scope, &existing.path, updated_page)
+    registry
+        .upsert_by_name(NewSkill::from_document(
+            scope.clone(),
+            &improved,
+            candidate_markdown.clone(),
+        ))
         .await?;
     let report = run_skill_regression(
         config,
@@ -112,12 +109,11 @@ pub async fn maybe_improve_skill_with_learning(
         existing,
         &current_markdown,
         &candidate_markdown,
-        memory_store.clone(),
         llm.clone(),
     )
     .await?;
     append_skill_regression_log(
-        memory_store.as_ref(),
+        store.as_ref(),
         session,
         &current.frontmatter.name,
         &current.frontmatter.version(),
@@ -132,29 +128,27 @@ pub async fn maybe_improve_skill_with_learning(
         restored
             .frontmatter
             .set_regression_count(restored.frontmatter.regression_count().saturating_add(1));
-        let restored_page = wiki_page_from_skill(&restored, Some(existing.path.clone()))?;
-        memory_store
-            .write_page(&scope, &existing.path, restored_page)
+        let markdown = render_skill_markdown(&restored)?;
+        registry
+            .upsert_by_name(NewSkill::from_document(scope, &restored, markdown))
             .await?;
         return Ok(None);
     }
 
     let metadata = skill_metadata_from_document(existing.path.clone(), &improved);
-    if let Some(store) = learning_store {
-        crate::distiller::append_skill_learning(
-            store.as_ref(),
-            session,
-            "skill_improved",
-            &metadata,
-            serde_json::json!({
-                "path": metadata.path.clone(),
-                "name": metadata.name.clone(),
-                "previous_version": current.frontmatter.version(),
-                "version": improved.frontmatter.version(),
-            }),
-        )
-        .await?;
-    }
+    crate::distiller::append_skill_learning(
+        store.as_ref(),
+        session,
+        "skill_improved",
+        &metadata,
+        serde_json::json!({
+            "path": metadata.path.clone(),
+            "name": metadata.name.clone(),
+            "previous_version": current.frontmatter.version(),
+            "version": improved.frontmatter.version(),
+        }),
+    )
+    .await?;
 
     Ok(Some(metadata))
 }
@@ -231,28 +225,6 @@ fn blended_success_rate(previous_uses: u32, previous_success_rate: f32, next_use
         return 1.0;
     }
     ((previous_success_rate * previous_uses as f32) + 1.0) / next_uses as f32
-}
-
-async fn persist_previous_version(
-    memory_store: &FileMemoryStore,
-    workspace_id: &moa_core::WorkspaceId,
-    skill_path: &moa_core::MemoryPath,
-    markdown: &str,
-) -> Result<()> {
-    let skill_root = memory_store
-        .base_dir()
-        .join("workspaces")
-        .join(workspace_id.as_str())
-        .join("memory");
-    let relative = Path::new(skill_path.as_str())
-        .parent()
-        .unwrap_or_else(|| Path::new("skills"));
-    let previous_path = skill_root.join(relative).join("SKILL.md.prev");
-    if let Some(parent) = previous_path.parent() {
-        fs::create_dir_all(parent).await?;
-    }
-    fs::write(previous_path, markdown).await?;
-    Ok(())
 }
 
 fn build_improvement_prompt(current_skill: &str, events: &[EventRecord]) -> String {

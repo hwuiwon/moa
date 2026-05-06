@@ -6,10 +6,9 @@ use std::sync::Arc;
 
 use moa_core::{
     ApprovalDecision, BrainOrchestrator, BroadcastChannel, DaemonSessionPreview, Event,
-    EventRecord, LagPolicy, LiveEvent, MemoryPath, MemorySearchResult, MoaConfig, MoaError,
-    PageSummary, PageType, Platform, RecvResult, Result, RuntimeEvent, SessionId, SessionMeta,
-    SessionSummary, StartSessionRequest, UserId, WikiPage, WorkspaceBudgetStatus, WorkspaceId,
-    recv_with_lag_handling,
+    EventRecord, LagPolicy, LiveEvent, MoaConfig, MoaError, Platform, RecvResult, Result,
+    RuntimeEvent, SessionId, SessionMeta, SessionSummary, StartSessionRequest, UserId,
+    WorkspaceBudgetStatus, WorkspaceId, recv_with_lag_handling,
 };
 use moa_orchestrator_local::LocalOrchestrator;
 use tokio::sync::{broadcast, mpsc};
@@ -345,53 +344,6 @@ macro_rules! impl_chat_runtime_ops {
                 <$ty>::list_session_previews(self).await
             }
 
-            async fn list_memory_pages(
-                &self,
-                filter: Option<moa_core::PageType>,
-            ) -> moa_core::Result<Vec<moa_core::PageSummary>> {
-                <$ty>::list_memory_pages(self, filter).await
-            }
-
-            async fn recent_memory_entries(
-                &self,
-                limit: usize,
-            ) -> moa_core::Result<Vec<moa_core::PageSummary>> {
-                <$ty>::recent_memory_entries(self, limit).await
-            }
-
-            async fn search_memory(
-                &self,
-                query: &str,
-                limit: usize,
-            ) -> moa_core::Result<Vec<moa_core::MemorySearchResult>> {
-                <$ty>::search_memory(self, query, limit).await
-            }
-
-            async fn read_memory_page(
-                &self,
-                path: &moa_core::MemoryPath,
-            ) -> moa_core::Result<moa_core::WikiPage> {
-                <$ty>::read_memory_page(self, path).await
-            }
-
-            async fn write_memory_page(
-                &self,
-                page: moa_core::WikiPage,
-            ) -> moa_core::Result<moa_core::WikiPage> {
-                <$ty>::write_memory_page(self, page).await
-            }
-
-            async fn delete_memory_page(
-                &self,
-                path: &moa_core::MemoryPath,
-            ) -> moa_core::Result<()> {
-                <$ty>::delete_memory_page(self, path).await
-            }
-
-            async fn memory_index(&self) -> moa_core::Result<String> {
-                <$ty>::memory_index(self).await
-            }
-
             async fn workspace_budget_status(
                 &self,
             ) -> moa_core::Result<moa_core::WorkspaceBudgetStatus> {
@@ -501,20 +453,6 @@ impl ChatRuntime {
         fn list_sessions(&self) -> Result<Vec<SessionSummary>>;
         /// Lists sessions with a compact last-message preview for the session picker.
         fn list_session_previews(&self) -> Result<Vec<SessionPreview>>;
-        /// Lists memory pages for the current workspace.
-        fn list_memory_pages(&self, filter: Option<PageType>) -> Result<Vec<PageSummary>>;
-        /// Returns recent memory entries for the sidebar.
-        fn recent_memory_entries(&self, limit: usize) -> Result<Vec<PageSummary>>;
-        /// Searches memory within the current workspace.
-        fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<MemorySearchResult>>;
-        /// Loads one wiki page from the current workspace.
-        fn read_memory_page(&self, path: &MemoryPath) -> Result<WikiPage>;
-        /// Creates or updates one wiki page in the current workspace.
-        fn write_memory_page(&self, page: WikiPage) -> Result<WikiPage>;
-        /// Deletes one wiki page from the current workspace.
-        fn delete_memory_page(&self, path: &MemoryPath) -> Result<()>;
-        /// Returns the current workspace memory index document.
-        fn memory_index(&self) -> Result<String>;
         /// Returns the current workspace budget snapshot.
         fn workspace_budget_status(&self) -> Result<WorkspaceBudgetStatus>;
         /// Relays live runtime updates for one session until the receiver closes.

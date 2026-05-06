@@ -5,15 +5,17 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use moa_core::{CancelMode, Event, EventRange, ModelId, SessionId, SessionStatus};
+use sqlx::PgPool;
 use tempfile::TempDir;
 use tokio::time::sleep;
 
-use crate::support::restate_runtime::{OrchestratorPorts, reserve_orchestrator_ports};
+use crate::support::graph_ingest::{test_database_url, wait_for_ingested_brain_responses};
+use crate::support::restate_runtime::{
+    OrchestratorPorts, RESTATE_E2E_LOCK, reserve_orchestrator_ports,
+};
 use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, test_session_meta, user_message,
 };
-
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:5432/moa";
 
 async fn register_deployment(endpoint_url: &str) -> Result<()> {
     for _attempt in 0..15 {
@@ -46,20 +48,18 @@ fn spawn_orchestrator(
     memory_dir: &TempDir,
     sandbox_dir: &TempDir,
 ) -> Result<Child> {
-    let postgres_url = std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string());
-
     Command::new(env!("CARGO_BIN_EXE_moa-orchestrator"))
         .arg("--port")
         .arg(ports.restate.to_string())
         .arg("--health-port")
         .arg(ports.health.to_string())
-        .env("POSTGRES_URL", postgres_url)
+        .env("POSTGRES_URL", test_database_url())
         .env("MOA_MEMORY_DIR", memory_dir.path())
         .env("MOA_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_DOCKER_ENABLED", "false")
         .env("RUST_LOG", "info")
+        .env_remove("COHERE_API_KEY")
+        .env_remove("MOA_COHERE_API_KEY")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -93,6 +93,7 @@ fn live_model() -> Option<&'static str> {
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, and at least one provider API key"]
 async fn session_vo_round_trip_through_restate() -> Result<()> {
+    let _guard = RESTATE_E2E_LOCK.lock().await;
     let Some(model) = live_model() else {
         return Ok(());
     };
@@ -106,6 +107,9 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
     let mut meta = test_session_meta("session-vo-e2e");
     meta.model = ModelId::new(model);
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
+    let pool = PgPool::connect(&test_database_url())
+        .await
+        .context("connect to test Postgres")?;
 
     let result = async {
         register_deployment(endpoint_url.as_str()).await?;
@@ -146,13 +150,14 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
             "idle Session::run_turn eventually maps to Paused in the existing MOA status model"
         );
 
-        let events = wait_for_user_message_event(&client, ingress, session_id).await?;
+        let events = wait_for_brain_response(&client, ingress, session_id).await?;
         assert!(
             events
                 .iter()
                 .any(|record| matches!(record.event, Event::UserMessage { .. })),
             "expected a persisted UserMessage event for session {session_id}"
         );
+        wait_for_ingested_brain_responses(&pool, &meta.workspace_id, session_id, &events).await?;
 
         let _ = orchestrator.kill();
         let _ = orchestrator.wait();
@@ -218,11 +223,12 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
 
     let _ = orchestrator.kill();
     let _ = orchestrator.wait();
+    pool.close().await;
 
     result
 }
 
-async fn wait_for_user_message_event(
+async fn wait_for_brain_response(
     client: &reqwest::Client,
     ingress: &str,
     session_id: SessionId,
@@ -240,7 +246,7 @@ async fn wait_for_user_message_event(
             .context("deserialize event response")?;
         if events
             .iter()
-            .any(|record| matches!(record.event, Event::UserMessage { .. }))
+            .any(|record| matches!(record.event, Event::BrainResponse { .. }))
         {
             return Ok(events);
         }
@@ -248,7 +254,7 @@ async fn wait_for_user_message_event(
         sleep(Duration::from_secs(1)).await;
     }
 
-    bail!("timed out waiting for UserMessage event for session {session_id}")
+    bail!("timed out waiting for BrainResponse event for session {session_id}")
 }
 
 async fn wait_for_status(

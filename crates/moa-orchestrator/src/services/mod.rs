@@ -3,7 +3,6 @@
 pub mod health;
 pub mod intent_manager;
 pub mod llm_gateway;
-pub mod memory_store;
 pub mod session_store;
 pub mod tool_executor;
 pub mod workspace_store;

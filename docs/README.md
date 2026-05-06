@@ -10,7 +10,7 @@ These docs describe the current MOA architecture as implemented in the Rust work
 | 01 | [Architecture Overview](01-architecture-overview.md) | System diagram, trait map, data flow, workspace layout |
 | 02 | [Brain Orchestration](02-brain-orchestration.md) | Restate session objects, sub-agents, turn loop, local runtime |
 | 03 | [Communication Layer](03-communication-layer.md) | REST/gateway surfaces, desktop/CLI, approvals, observation |
-| 04 | [Memory Architecture](04-memory-architecture.md) | File wiki, Postgres keyword search, pgvector semantic search, consolidation |
+| 04 | [Memory Architecture](04-memory-architecture.md) | Graph memory, privacy filtering, sidecar indexes, pgvector semantic retrieval, consolidation |
 | 05 | [Session & Event Log](05-session-event-log.md) | Postgres event schema, task segments, replay, compaction |
 | 06 | [Hands & MCP](06-hands-and-mcp.md) | Hand providers, tool routing, MCP, lazy provisioning |
 | 07 | [Context Pipeline](07-context-pipeline.md) | Ordered context processors, query rewriting, prompt caching |
@@ -39,10 +39,10 @@ Supporting notes:
 |---|---|---|
 | 1 | Rust workspace with explicit crate boundaries around core traits, brain, session storage, memory, hands, providers, orchestration, gateway, security, skills, eval, CLI, and desktop. | Implemented |
 | 2 | Restate is the durable cloud orchestration engine. Sessions and sub-agents are virtual objects; consolidation and intent discovery are workflows. | Implemented |
-| 3 | Local mode uses `moa-orchestrator-local`, a Tokio-task orchestrator sharing the same core brain/session/memory abstractions. | Implemented |
+| 3 | Local mode uses `moa-orchestrator-local`, a Tokio-task orchestrator sharing the same core brain/session/graph-memory abstractions. | Implemented |
 | 4 | Postgres is the single application database. Neon is the managed/cloud Postgres target and optional checkpoint branch provider. | Implemented |
 | 5 | Session events are append-only and replayable. Derived counters live in triggers, generated columns, views, and materialized views. | Implemented |
-| 6 | Memory remains a file-backed wiki; Postgres indexes it with weighted `tsvector`, trigram fallback, and pgvector embeddings. | Implemented |
+| 6 | Graph memory is canonical; Postgres stores graph state, sidecar indexes, changelog rows, and pgvector embeddings. | Implemented |
 | 7 | Query rewriting is a fail-open context pipeline processor that normalizes the current task, extracts high-level intent, and detects new task segments. | Implemented |
 | 8 | Sessions are split into task segments with independent intent metadata, tool/skill usage, token cost, and resolution outcomes. | Implemented |
 | 9 | Resolution detection is automated and signal-based: tool outcomes, verification commands, continuation signals, agent self-assessment, and structural baselines. | Implemented |

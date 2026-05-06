@@ -4,13 +4,13 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
+use memory_ingest::{execute_memory_tool, is_fast_memory_tool};
 use moa_core::{
     Event, EventRange, EventRecord, EventType, IdempotencyClass, MoaError, SessionId, SessionMeta,
     SessionStatus, ToolCallId, ToolCallRequest, ToolDefinition, ToolFailureClass, ToolInvocation,
     ToolOutput, classify_tool_error,
 };
 use moa_hands::ToolRouter;
-use moa_memory_ingest::{execute_memory_tool, is_fast_memory_tool};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 

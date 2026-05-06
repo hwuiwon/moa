@@ -51,7 +51,7 @@ Cloud mode runs the `moa-orchestrator` Restate handler service plus Postgres/Neo
 cargo run -p moa-orchestrator -- --port 9080 --health-port 9081
 ```
 
-The binary registers these Restate surfaces: `Session`, `SubAgent`, `Workspace`, `SessionStore`, `MemoryStore`, `ToolExecutor`, `LLMGateway`, `WorkspaceStore`, `IntentManager`, `Consolidate`, `IntentDiscovery`, and `Health`.
+The binary registers these Restate surfaces: `Session`, `SubAgent`, `Workspace`, `SessionStore`, `ToolExecutor`, `LLMGateway`, `WorkspaceStore`, `IntentManager`, `Consolidate`, `IntentDiscovery`, and `Health`.
 
 Required cloud configuration includes:
 
@@ -79,7 +79,7 @@ Restate handler service (`moa-orchestrator`)
         v
 Postgres / Neon
   sessions, events, task_segments, analytics views,
-  wiki search index, pgvector embeddings,
+  graph memory, sidecar indexes, pgvector embeddings,
   tenant_intents, global_intent_catalog, learning_log
 ```
 
@@ -92,11 +92,14 @@ The context pipeline is byte-stable where possible for prompt caching. With quer
 | [`moa-core`](crates/moa-core/) | Shared types, traits, config, events, telemetry, analytics DTOs |
 | [`moa-brain`](crates/moa-brain/) | Context pipeline, query rewriting, segment helpers, intent classifier, resolution scoring, streamed turns |
 | [`moa-session`](crates/moa-session/) | Postgres session store, event log, task segments, intent tables, learning log, analytics views |
-| [`moa-memory`](crates/moa-memory/) | File-backed wiki memory plus Postgres keyword, trigram, and pgvector search |
+| [`moa-memory-graph`](crates/moa-memory-graph/) | Graph memory store, SQL sidecars, RLS, bitemporal state, and changelog |
+| [`moa-memory-ingest`](crates/moa-memory-ingest/) | Slow-path graph ingestion and fast memory write APIs |
+| [`moa-memory-vector`](crates/moa-memory-vector/) | pgvector-backed graph embeddings and vector lookup |
+| [`moa-memory-pii`](crates/moa-memory-pii/) | PII classification and privacy filtering for memory writes |
 | [`moa-hands`](crates/moa-hands/) | Tool router, local/Docker hands, Daytona, E2B, MCP client |
 | [`moa-providers`](crates/moa-providers/) | LLM and embedding providers |
 | [`moa-orchestrator`](crates/moa-orchestrator/) | Restate services, virtual objects, workflows, and handler binary |
-| [`moa-orchestrator-local`](moa-orchestrator-local/) | Tokio-task local orchestrator for CLI and desktop |
+| [`moa-orchestrator-local`](crates/moa-orchestrator-local/) | Tokio-task local orchestrator for CLI and desktop |
 | [`moa-gateway`](crates/moa-gateway/) | Telegram, Slack, Discord adapters and platform rendering |
 | [`moa-runtime`](crates/moa-runtime/) | Shared runtime bootstrap |
 | [`moa-cli`](crates/moa-cli/) | `moa` CLI and daemon commands |

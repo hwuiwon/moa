@@ -11,7 +11,6 @@ use uuid::Uuid;
 
 use crate::OrchestratorCtx;
 use crate::observability::annotate_restate_handler_span;
-use crate::services::memory_store::{ListPagesRequest, MemoryStoreClient};
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar};
 use crate::workflows::consolidate::{ConsolidateClient, ConsolidateReport, ConsolidateRequest};
 
@@ -315,16 +314,7 @@ impl Workspace for WorkspaceImpl {
         annotate_restate_handler_span("Workspace", "status");
         let state = WorkspaceVoState::load_from(&ctx).await?;
         let workspace_id = parse_workspace_key(ctx.key());
-        let pages_count = ctx
-            .service_client::<MemoryStoreClient>()
-            .list_pages(Json(ListPagesRequest {
-                scope: moa_core::MemoryScope::Workspace { workspace_id },
-                page_type: None,
-            }))
-            .call()
-            .await?
-            .into_inner()
-            .len() as u64;
+        let pages_count = count_graph_nodes(&workspace_id).await?;
 
         Ok(Json::from(WorkspaceStatus {
             last_consolidation_at: state.last_consolidation,
@@ -333,6 +323,25 @@ impl Workspace for WorkspaceImpl {
             pages_count,
         }))
     }
+}
+
+async fn count_graph_nodes(workspace_id: &WorkspaceId) -> Result<u64, HandlerError> {
+    // MIGRATION: `pages_count` remains in the status DTO for compatibility with callers, but C03
+    // maps it to active graph-memory nodes rather than wiki pages.
+    let ctx = OrchestratorCtx::current();
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)::bigint
+        FROM moa.node_index
+        WHERE workspace_id = $1
+          AND valid_to IS NULL
+        "#,
+    )
+    .bind(workspace_id.as_str())
+    .fetch_one(&ctx.graph_pool)
+    .await
+    .map_err(HandlerError::from)?;
+    Ok(count.max(0) as u64)
 }
 
 fn schedule_consolidation_inner(

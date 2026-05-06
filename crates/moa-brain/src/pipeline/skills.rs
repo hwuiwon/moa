@@ -7,11 +7,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    CacheTtl, ContextProcessor, Event, EventRange, ExcludedItem, MemoryPath, MemoryScope,
-    MemoryStore, PageType, ProcessorOutput, Result, SessionStore, SkillBudgetConfig, SkillMetadata,
-    SkillResolutionRate, WikiPage, WorkingContext, WorkspaceId,
+    CacheTtl, ContextProcessor, Event, EventRange, ExcludedItem, ProcessorOutput, Result,
+    SessionStore, SkillBudgetConfig, SkillMetadata, SkillResolutionRate, WorkingContext,
 };
-use serde_json::{Value, json};
+use serde_json::json;
+use sqlx::{PgPool, Row};
 
 use super::memory::extract_search_keywords;
 
@@ -19,7 +19,7 @@ const MANIFEST_PREAMBLE: &str = "\
 <available_skills>
 When multiple skills apply, prefer the one whose trigger conditions most specifically match the current task.
 Skills can be composed - use multiple if the task requires steps from different skills.
-To activate a skill, call memory_read with the canonical skill path skills/<skill-name>/SKILL.md.
+To activate a skill, follow the listed skill when it matches the task.
 
 ";
 const MANIFEST_FOOTER: &str = "</available_skills>";
@@ -35,24 +35,35 @@ const MANIFEST_CHARS_USED_METADATA_KEY: &str = "manifest_chars_used";
 
 /// Injects workspace skill metadata into the stable prompt prefix.
 pub struct SkillInjector {
-    memory_store: Arc<dyn MemoryStore>,
+    source: SkillSource,
     session_store: Option<Arc<dyn SessionStore>>,
     budget_config: SkillBudgetConfig,
 }
 
+enum SkillSource {
+    Registry(PgPool),
+    #[cfg(test)]
+    Static(Vec<SkillMetadata>),
+}
+
 impl SkillInjector {
-    /// Creates a skill injector backed by the shared memory store.
-    pub fn new(memory_store: Arc<dyn MemoryStore>) -> Self {
+    /// Creates a skill injector backed by the Postgres skill registry.
+    pub fn new(pool: PgPool) -> Self {
         Self {
-            memory_store,
+            source: SkillSource::Registry(pool),
             session_store: None,
             budget_config: SkillBudgetConfig::default(),
         }
     }
 
-    /// Creates a skill injector from a memory store.
-    pub fn from_memory(memory_store: Arc<dyn MemoryStore>) -> Self {
-        Self::new(memory_store)
+    /// Creates a skill injector from static test metadata.
+    #[cfg(test)]
+    pub fn from_skills(skills: Vec<SkillMetadata>) -> Self {
+        Self {
+            source: SkillSource::Static(skills),
+            session_store: None,
+            budget_config: SkillBudgetConfig::default(),
+        }
     }
 
     /// Configures the injector to derive query keywords from recent session events.
@@ -68,7 +79,11 @@ impl SkillInjector {
     }
 
     async fn load_skill_metadata(&self, ctx: &WorkingContext) -> Result<Vec<SkillMetadata>> {
-        load_skills(self.memory_store.as_ref(), &ctx.workspace_id).await
+        match &self.source {
+            SkillSource::Registry(pool) => load_skills(pool, ctx).await,
+            #[cfg(test)]
+            SkillSource::Static(skills) => Ok(skills.clone()),
+        }
     }
 
     async fn query_keywords(&self, ctx: &WorkingContext) -> Result<Vec<String>> {
@@ -405,6 +420,18 @@ fn normalize_inline_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn slugify_skill_name(value: &str) -> String {
+    let mut slug = String::new();
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
 fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
     let char_count = value.chars().count();
     if char_count <= max_chars {
@@ -419,23 +446,39 @@ fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
     format!("{truncated}...")
 }
 
-async fn load_skills(
-    memory_store: &dyn MemoryStore,
-    workspace_id: &WorkspaceId,
-) -> Result<Vec<SkillMetadata>> {
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
-    let summaries = memory_store
-        .list_pages(&scope, Some(PageType::Skill))
-        .await?;
-    let mut skills = Vec::with_capacity(summaries.len());
+async fn load_skills(pool: &PgPool, ctx: &WorkingContext) -> Result<Vec<SkillMetadata>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT name, COALESCE(description, '') AS description, body, tags, updated_at
+        FROM moa.skill
+        WHERE valid_to IS NULL
+          AND (
+            scope = 'global'
+            OR (workspace_id = $1 AND user_id IS NULL)
+            OR (workspace_id = $1 AND user_id = $2)
+          )
+        ORDER BY CASE scope WHEN 'user' THEN 2 WHEN 'workspace' THEN 1 ELSE 0 END DESC,
+                 name ASC
+        "#,
+    )
+    .bind(ctx.workspace_id.as_str())
+    .bind(ctx.user_id.as_str())
+    .fetch_all(pool)
+    .await
+    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
 
-    for summary in summaries {
-        let page = memory_store.read_page(&scope, &summary.path).await?;
-        skills.push(skill_metadata_from_page(summary.path, &page));
+    let mut by_name = HashMap::new();
+    for row in rows {
+        let name: String = row
+            .try_get("name")
+            .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        by_name
+            .entry(name.clone())
+            .or_insert(skill_metadata_from_row(row)?);
     }
 
+    let mut skills = by_name.into_values().collect::<Vec<_>>();
+    skills.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(skills)
 }
 
@@ -452,124 +495,33 @@ fn extract_query_keywords_from_events(events: &[moa_core::EventRecord]) -> Vec<S
         .unwrap_or_default()
 }
 
-fn skill_metadata_from_page(path: MemoryPath, page: &WikiPage) -> SkillMetadata {
-    SkillMetadata {
-        path,
-        name: metadata_string(&page.metadata, "name").unwrap_or_else(|| page.title.clone()),
-        description: metadata_string(&page.metadata, "description")
-            .unwrap_or_else(|| page.title.clone()),
-        tags: skill_tags(page),
-        allowed_tools: allowed_tools(page),
-        estimated_tokens: metadata_nested_usize(&page.metadata, "metadata", "moa-estimated-tokens")
-            .unwrap_or_else(|| estimate_skill_tokens(&page.content)),
-        use_count: metadata_nested_u32(&page.metadata, "metadata", "moa-use-count")
-            .unwrap_or(page.reference_count.min(u64::from(u32::MAX)) as u32),
-        last_used: metadata_nested_timestamp(&page.metadata, "metadata", "moa-last-used")
-            .or(Some(page.last_referenced)),
-        success_rate: metadata_nested_f32(&page.metadata, "metadata", "moa-success-rate")
-            .unwrap_or(1.0),
-        auto_generated: page.auto_generated,
-    }
-}
-
-fn skill_tags(page: &WikiPage) -> Vec<String> {
-    if !page.tags.is_empty() {
-        return page.tags.clone();
-    }
-
-    metadata_nested_csv(&page.metadata, "metadata", "moa-tags")
-}
-
-fn allowed_tools(page: &WikiPage) -> Vec<String> {
-    match page.metadata.get("allowed-tools") {
-        Some(Value::String(value)) => value
-            .split_whitespace()
-            .map(str::trim)
-            .filter(|tool| !tool.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-        Some(Value::Array(values)) => values
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::trim)
-            .filter(|tool| !tool.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn metadata_string(metadata: &HashMap<String, Value>, key: &str) -> Option<String> {
-    metadata
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn metadata_nested_string(
-    metadata: &HashMap<String, Value>,
-    container: &str,
-    key: &str,
-) -> Option<String> {
-    metadata
-        .get(container)
-        .and_then(Value::as_object)
-        .and_then(|value| value.get(key))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn metadata_nested_csv(
-    metadata: &HashMap<String, Value>,
-    container: &str,
-    key: &str,
-) -> Vec<String> {
-    metadata_nested_string(metadata, container, key)
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-fn metadata_nested_usize(
-    metadata: &HashMap<String, Value>,
-    container: &str,
-    key: &str,
-) -> Option<usize> {
-    metadata_nested_string(metadata, container, key).and_then(|value| value.parse().ok())
-}
-
-fn metadata_nested_u32(
-    metadata: &HashMap<String, Value>,
-    container: &str,
-    key: &str,
-) -> Option<u32> {
-    metadata_nested_string(metadata, container, key).and_then(|value| value.parse().ok())
-}
-
-fn metadata_nested_f32(
-    metadata: &HashMap<String, Value>,
-    container: &str,
-    key: &str,
-) -> Option<f32> {
-    metadata_nested_string(metadata, container, key).and_then(|value| value.parse().ok())
-}
-
-fn metadata_nested_timestamp(
-    metadata: &HashMap<String, Value>,
-    container: &str,
-    key: &str,
-) -> Option<DateTime<Utc>> {
-    metadata_nested_string(metadata, container, key).and_then(|value| {
-        chrono::DateTime::parse_from_rfc3339(&value)
-            .ok()
-            .map(|timestamp| timestamp.with_timezone(&Utc))
+fn skill_metadata_from_row(row: sqlx::postgres::PgRow) -> Result<SkillMetadata> {
+    let name: String = row
+        .try_get("name")
+        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    let description: String = row
+        .try_get("description")
+        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    let body: String = row
+        .try_get("body")
+        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    let tags: Vec<String> = row
+        .try_get("tags")
+        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    let updated_at: DateTime<Utc> = row
+        .try_get("updated_at")
+        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    Ok(SkillMetadata {
+        path: format!("skills/{}/SKILL.md", slugify_skill_name(&name)),
+        name,
+        description,
+        tags,
+        allowed_tools: Vec::new(),
+        estimated_tokens: estimate_skill_tokens(&body),
+        use_count: 0,
+        last_used: Some(updated_at),
+        success_rate: 1.0,
+        auto_generated: false,
     })
 }
 
@@ -580,14 +532,11 @@ fn estimate_skill_tokens(body: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
 
-    use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use moa_core::{
-        ContextMessage, ContextProcessor, MemoryPath, MemoryScope, MemoryStore, ModelCapabilities,
-        ModelId, PageSummary, PageType, Platform, Result, SessionId, SessionMeta,
-        SkillBudgetConfig, SkillMetadata, TokenPricing, ToolCallFormat, UserId, WikiPage,
+        ContextMessage, ContextProcessor, ModelCapabilities, ModelId, Platform, SessionId,
+        SessionMeta, SkillBudgetConfig, SkillMetadata, TokenPricing, ToolCallFormat, UserId,
         WorkspaceId,
     };
     use serde_json::json;
@@ -653,7 +602,7 @@ mod tests {
         last_used_days_ago: i64,
     ) -> SkillMetadata {
         SkillMetadata {
-            path: MemoryPath::new(format!("skills/{name}/SKILL.md")),
+            path: format!("skills/{name}/SKILL.md"),
             name: name.to_string(),
             description: description.to_string(),
             tags: vec!["ops".to_string(), "debug".to_string()],
@@ -666,130 +615,26 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct StubSkillMemoryStore {
-        pages: HashMap<MemoryPath, WikiPage>,
-        summaries: Vec<PageSummary>,
-    }
-
-    #[async_trait]
-    impl MemoryStore for StubSkillMemoryStore {
-        async fn search(
-            &self,
-            _query: &str,
-            _scope: &MemoryScope,
-            _limit: usize,
-        ) -> Result<Vec<moa_core::MemorySearchResult>> {
-            Ok(Vec::new())
-        }
-
-        async fn read_page(&self, _scope: &MemoryScope, path: &MemoryPath) -> Result<WikiPage> {
-            self.pages
-                .get(path)
-                .cloned()
-                .ok_or_else(|| moa_core::MoaError::StorageError("skill page not found".to_string()))
-        }
-
-        async fn write_page(
-            &self,
-            _scope: &MemoryScope,
-            _path: &MemoryPath,
-            _page: WikiPage,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        async fn delete_page(&self, _scope: &MemoryScope, _path: &MemoryPath) -> Result<()> {
-            Ok(())
-        }
-
-        async fn list_pages(
-            &self,
-            _scope: &MemoryScope,
-            _filter: Option<PageType>,
-        ) -> Result<Vec<PageSummary>> {
-            Ok(self.summaries.clone())
-        }
-
-        async fn get_index(&self, _scope: &MemoryScope) -> Result<String> {
-            Ok(String::new())
-        }
-
-        async fn rebuild_search_index(&self, _scope: &MemoryScope) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    fn skill_page(
-        name: &str,
-        description: &str,
-        use_count: u32,
-        last_used_days_ago: i64,
-    ) -> WikiPage {
-        WikiPage {
-            path: Some(MemoryPath::new(format!("skills/{name}/SKILL.md"))),
-            title: name.to_string(),
-            page_type: PageType::Skill,
-            content: "## When to use\nUse this skill for testing.".to_string(),
-            created: fixed_time(),
-            updated: fixed_time(),
-            confidence: moa_core::ConfidenceLevel::High,
-            related: Vec::new(),
-            sources: Vec::new(),
-            tags: vec!["ops".to_string(), "debug".to_string()],
-            auto_generated: false,
-            last_referenced: older_time(last_used_days_ago),
-            reference_count: u64::from(use_count),
-            metadata: HashMap::from([
-                ("name".to_string(), serde_json::json!(name)),
-                ("description".to_string(), serde_json::json!(description)),
-                (
-                    "metadata".to_string(),
-                    serde_json::json!({
-                        "moa-estimated-tokens": "1200",
-                        "moa-use-count": use_count.to_string(),
-                        "moa-last-used": older_time(last_used_days_ago).to_rfc3339(),
-                        "moa-success-rate": "0.9",
-                        "moa-tags": "ops, debug",
-                    }),
-                ),
-            ]),
-        }
-    }
-
-    fn store_with_pages(pages: Vec<(MemoryPath, WikiPage)>) -> StubSkillMemoryStore {
-        let summaries = pages
-            .iter()
-            .map(|(path, page)| PageSummary {
-                path: path.clone(),
-                title: page.title.clone(),
-                page_type: PageType::Skill,
-                updated: page.updated,
-                confidence: moa_core::ConfidenceLevel::High,
+    fn skills(entries: Vec<(&str, &str, u32, i64)>) -> Vec<SkillMetadata> {
+        entries
+            .into_iter()
+            .map(|(name, description, use_count, days)| {
+                test_skill(name, description, use_count, days)
             })
-            .collect::<Vec<_>>();
-        let page_map = pages.into_iter().collect::<HashMap<_, _>>();
-        StubSkillMemoryStore {
-            pages: page_map,
-            summaries,
-        }
+            .collect()
     }
 
     #[tokio::test]
     async fn skill_injector_marks_cache_breakpoint_and_formats_metadata() {
         let mut ctx = moa_core::WorkingContext::new(&session(), capabilities(200_000));
-        let skill_path = MemoryPath::new("skills/debug-oauth/SKILL.md");
-        let store = store_with_pages(vec![(
-            skill_path.clone(),
-            skill_page(
-                "debug-oauth",
-                "OAuth refresh-token debugging workflow",
-                3,
-                0,
-            ),
+        let skills = skills(vec![(
+            "debug-oauth",
+            "OAuth refresh-token debugging workflow",
+            3,
+            0,
         )]);
 
-        let output = SkillInjector::from_memory(Arc::new(store))
+        let output = SkillInjector::from_skills(skills)
             .process(&mut ctx)
             .await
             .expect("skill injection should succeed");
@@ -797,7 +642,7 @@ mod tests {
         assert_eq!(ctx.cache_breakpoints, vec![1]);
         assert!(ctx.messages[0].content.contains("<available_skills>"));
         assert!(ctx.messages[0].content.contains("debug-oauth"));
-        assert!(ctx.messages[0].content.contains("memory_read"));
+        assert!(ctx.messages[0].content.contains("follow the listed skill"));
         assert!(!ctx.messages[0].content.contains("allowed-tools"));
         assert!(output.tokens_added > 0);
         assert_eq!(output.items_included, vec!["debug-oauth"]);
@@ -806,12 +651,8 @@ mod tests {
     #[tokio::test]
     async fn skill_injector_marks_breakpoint_without_skills() {
         let mut ctx = moa_core::WorkingContext::new(&session(), capabilities(200_000));
-        let store = StubSkillMemoryStore {
-            pages: HashMap::new(),
-            summaries: Vec::new(),
-        };
 
-        let output = SkillInjector::from_memory(Arc::new(store))
+        let output = SkillInjector::from_skills(Vec::new())
             .process(&mut ctx)
             .await
             .expect("skill injection should succeed");
@@ -825,30 +666,15 @@ mod tests {
     #[tokio::test]
     async fn emits_all_skills_alphabetically_when_budget_allows() {
         let mut ctx = moa_core::WorkingContext::new(&session(), capabilities(200_000));
-        let store = store_with_pages(vec![
-            (
-                MemoryPath::new("skills/zeta/SKILL.md"),
-                skill_page("zeta", "Zeta workflow", 1, 2),
-            ),
-            (
-                MemoryPath::new("skills/alpha/SKILL.md"),
-                skill_page("alpha", "Alpha workflow", 10, 0),
-            ),
-            (
-                MemoryPath::new("skills/gamma/SKILL.md"),
-                skill_page("gamma", "Gamma workflow", 5, 1),
-            ),
-            (
-                MemoryPath::new("skills/beta/SKILL.md"),
-                skill_page("beta", "Beta workflow", 7, 3),
-            ),
-            (
-                MemoryPath::new("skills/delta/SKILL.md"),
-                skill_page("delta", "Delta workflow", 3, 4),
-            ),
+        let skills = skills(vec![
+            ("zeta", "Zeta workflow", 1, 2),
+            ("alpha", "Alpha workflow", 10, 0),
+            ("gamma", "Gamma workflow", 5, 1),
+            ("beta", "Beta workflow", 7, 3),
+            ("delta", "Delta workflow", 3, 4),
         ]);
 
-        let output = SkillInjector::from_memory(Arc::new(store))
+        let output = SkillInjector::from_skills(skills)
             .process(&mut ctx)
             .await
             .expect("skill injection should succeed");
@@ -924,27 +750,21 @@ mod tests {
 
     #[tokio::test]
     async fn identical_query_produces_identical_manifest_output() {
-        let store = Arc::new(store_with_pages(vec![
-            (
-                MemoryPath::new("skills/auth/SKILL.md"),
-                skill_page("auth", "Handle auth incidents", 9, 0),
-            ),
-            (
-                MemoryPath::new("skills/db/SKILL.md"),
-                skill_page("db", "Handle database incidents", 7, 1),
-            ),
-        ]));
+        let static_skills = skills(vec![
+            ("auth", "Handle auth incidents", 9, 0),
+            ("db", "Handle database incidents", 7, 1),
+        ]);
 
         let mut first = moa_core::WorkingContext::new(&session(), capabilities(200_000));
         first.append_message(ContextMessage::user("Investigate auth failures"));
-        SkillInjector::from_memory(store.clone())
+        SkillInjector::from_skills(static_skills.clone())
             .process(&mut first)
             .await
             .expect("first manifest should render");
 
         let mut second = moa_core::WorkingContext::new(&session(), capabilities(200_000));
         second.append_message(ContextMessage::user("Investigate auth failures"));
-        SkillInjector::from_memory(store)
+        SkillInjector::from_skills(static_skills)
             .process(&mut second)
             .await
             .expect("second manifest should render");
@@ -954,31 +774,22 @@ mod tests {
 
     #[tokio::test]
     async fn different_queries_keep_manifest_identical_when_selected_set_does_not_change() {
-        let store = Arc::new(store_with_pages(vec![
-            (
-                MemoryPath::new("skills/auth/SKILL.md"),
-                skill_page("auth", "Handle auth incidents", 9, 0),
-            ),
-            (
-                MemoryPath::new("skills/db/SKILL.md"),
-                skill_page("db", "Handle database incidents", 7, 1),
-            ),
-            (
-                MemoryPath::new("skills/deploy/SKILL.md"),
-                skill_page("deploy", "Handle deploy incidents", 5, 2),
-            ),
-        ]));
+        let static_skills = skills(vec![
+            ("auth", "Handle auth incidents", 9, 0),
+            ("db", "Handle database incidents", 7, 1),
+            ("deploy", "Handle deploy incidents", 5, 2),
+        ]);
 
         let mut first = moa_core::WorkingContext::new(&session(), capabilities(200_000));
         first.append_message(ContextMessage::user("Investigate auth failures"));
-        SkillInjector::from_memory(store.clone())
+        SkillInjector::from_skills(static_skills.clone())
             .process(&mut first)
             .await
             .expect("first manifest should render");
 
         let mut second = moa_core::WorkingContext::new(&session(), capabilities(200_000));
         second.append_message(ContextMessage::user("Review database latency"));
-        SkillInjector::from_memory(store)
+        SkillInjector::from_skills(static_skills)
             .process(&mut second)
             .await
             .expect("second manifest should render");
@@ -1016,23 +827,14 @@ mod tests {
 
     #[tokio::test]
     async fn process_uses_budget_override_and_reports_excluded_skills() {
-        let store = store_with_pages(vec![
-            (
-                MemoryPath::new("skills/alpha/SKILL.md"),
-                skill_page("alpha", "Alpha workflow", 10, 0),
-            ),
-            (
-                MemoryPath::new("skills/beta/SKILL.md"),
-                skill_page("beta", "Beta workflow", 9, 1),
-            ),
-            (
-                MemoryPath::new("skills/gamma/SKILL.md"),
-                skill_page("gamma", "Gamma workflow", 8, 2),
-            ),
+        let static_skills = skills(vec![
+            ("alpha", "Alpha workflow", 10, 0),
+            ("beta", "Beta workflow", 9, 1),
+            ("gamma", "Gamma workflow", 8, 2),
         ]);
         let mut ctx = moa_core::WorkingContext::new(&session(), capabilities(200_000));
 
-        let output = SkillInjector::from_memory(Arc::new(store))
+        let output = SkillInjector::from_skills(static_skills)
             .with_budget_config(SkillBudgetConfig {
                 max_manifest_chars: Some(
                     MANIFEST_PREAMBLE.chars().count() + MANIFEST_FOOTER.chars().count() + 60,
@@ -1088,10 +890,7 @@ mod tests {
 
     #[test]
     fn compute_budget_uses_context_window_percentage_or_default_floor() {
-        let injector = SkillInjector::from_memory(Arc::new(StubSkillMemoryStore {
-            pages: HashMap::new(),
-            summaries: Vec::new(),
-        }));
+        let injector = SkillInjector::from_skills(Vec::new());
 
         assert_eq!(injector.compute_budget(200_000).max_manifest_chars, 8_000);
         assert_eq!(
