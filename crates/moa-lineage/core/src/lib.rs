@@ -10,10 +10,11 @@ pub mod sink;
 
 pub use ids::{LineageRecordId, TurnId};
 pub use records::{
-    AgeIntrospection, BackendIntrospection, Citation, CitationLineage, ContextChunk,
-    ContextLineage, FusedHit, GenerationLineage, GraphPath, LineageEvent, PgvectorIntrospection,
-    RecordKind, RerankHit, RetrievalLineage, RetrievalStage, ScoreRecord, ScoreSource, ScoreTarget,
-    ScoreValue, StageTimings, TokenUsage, ToolCallSummary, TruncationEvent,
-    TurbopufferIntrospection, VecHit, VerifierResult,
+    AclFilterDecision, AgeIntrospection, BackendIntrospection, Citation, CitationLineage,
+    ContextChunk, ContextLineage, DecisionKind, DecisionRecord, FusedHit, GenerationLineage,
+    GraphPath, LineageEvent, PgvectorIntrospection, PiiRedactionDecision, PrivacyEraseDecision,
+    PrivacyExportDecision, RecordKind, RerankHit, RetrievalLineage, RetrievalStage,
+    ScopeEnforcementDecision, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, StageTimings,
+    TokenUsage, ToolCallSummary, TruncationEvent, TurbopufferIntrospection, VecHit, VerifierResult,
 };
 pub use sink::{LineageSink, NullSink};

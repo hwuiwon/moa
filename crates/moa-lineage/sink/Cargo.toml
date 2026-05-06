@@ -12,6 +12,7 @@ metrics.workspace = true
 moa-core = { path = "../../moa-core" }
 moa-lineage-core = { path = "../core" }
 serde = { workspace = true, features = ["derive"] }
+serde_canonical_json = "1"
 serde_json.workspace = true
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "json", "uuid"] }
 thiserror.workspace = true

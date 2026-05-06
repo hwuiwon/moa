@@ -21,4 +21,7 @@ pub enum Error {
     /// Journal key had an unexpected shape.
     #[error("invalid lineage journal key")]
     InvalidJournalKey,
+    /// Invalid lineage payload or audit state.
+    #[error("invalid lineage sink input: {0}")]
+    Invalid(String),
 }
