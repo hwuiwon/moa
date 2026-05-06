@@ -12,7 +12,9 @@ use moa_core::{
 use moa_memory_graph::{
     AgeGraphStore, GraphError, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
 };
-use moa_memory_pii::{OpenAiPrivacyFilterClassifier, PiiClassifier, PiiError, PiiResult};
+use moa_memory_pii::{
+    OpenAiPrivacyFilterClassifier, PiiClassifier, PiiError, PiiResult, redact_text,
+};
 use moa_memory_vector::{
     CohereV4Embedder, Embedder, Error as VectorError, PgvectorStore, VECTOR_DIMENSION, VectorStore,
 };
@@ -226,11 +228,20 @@ async fn fast_remember_inner(
 ) -> Result<Uuid, FastError> {
     validate_remember_request(&req)?;
 
-    let embed_input = vec![req.text.clone()];
-    let embed = ctx.embedder.embed(&embed_input);
-    let classify = ctx.pii.classify(&req.text);
-    let (embedding_result, pii_result) = tokio::join!(embed, classify);
-    let embedding = embedding_result?
+    let pii_result = ctx.pii.classify(&req.text).await;
+    let pii = match pii_result {
+        Ok(result) => result,
+        Err(error) => {
+            warn!(%error, "PII classifier failed in fast path; failing closed");
+            PiiResult::fail_closed("fast-path-fallback")
+        }
+    };
+    let redacted_text = redact_text(&req.text, &pii.spans);
+    let embed_input = vec![redacted_text.clone()];
+    let embedding = ctx
+        .embedder
+        .embed(&embed_input)
+        .await?
         .into_iter()
         .next()
         .ok_or_else(|| FastError::Invalid("embedder returned no result".to_string()))?;
@@ -241,22 +252,18 @@ async fn fast_remember_inner(
         )));
     }
 
-    let pii = match pii_result {
-        Ok(result) => result,
-        Err(error) => {
-            warn!(%error, "PII classifier failed in fast path; failing closed");
-            PiiResult::fail_closed("fast-path-fallback")
-        }
-    };
-
     let conflict = if let Some(old_uid) = req.supersedes_specific {
         Conflict::Supersede(old_uid)
     } else {
         let contradiction_ctx = ctx.contradiction_context();
         match timeout(
             JUDGE_TIMEOUT,
-            ctx.contradict
-                .check_one_fast(&req.text, &embedding, req.label, &contradiction_ctx),
+            ctx.contradict.check_one_fast(
+                &redacted_text,
+                &embedding,
+                req.label,
+                &contradiction_ctx,
+            ),
         )
         .await
         {
@@ -267,7 +274,7 @@ async fn fast_remember_inner(
             }
             Err(_) => {
                 metrics::counter!("moa_fast_remember_indeterminate_total").increment(1);
-                parse_supersedes_marker(&req.text)
+                parse_supersedes_marker(&redacted_text)
                     .map(Conflict::Supersede)
                     .unwrap_or(Conflict::Indeterminate)
             }
@@ -290,6 +297,7 @@ async fn fast_remember_inner(
         confidence,
         ctx.embedder.model_name(),
         ctx.embedder.model_version(),
+        &redacted_text,
     );
 
     match conflict {
@@ -329,6 +337,7 @@ fn build_intent(
     confidence: f64,
     embedding_model: &str,
     embedding_model_version: i32,
+    redacted_text: &str,
 ) -> NodeWriteIntent {
     NodeWriteIntent {
         uid: Uuid::now_v7(),
@@ -336,9 +345,9 @@ fn build_intent(
         workspace_id: Some(req.workspace_id.to_string()),
         user_id: req.user_id.map(|user_id| user_id.to_string()),
         scope: req.scope.clone(),
-        name: short_name(&req.text),
+        name: short_name(redacted_text),
         properties: json!({
-            "summary": req.text,
+            "summary": redacted_text,
             "source": "fast_path",
         }),
         pii_class,

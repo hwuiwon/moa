@@ -6,6 +6,7 @@ pub mod error;
 pub mod evaluator;
 pub mod evaluators;
 pub mod loader;
+pub mod pentest;
 pub mod plan;
 pub mod reporter;
 pub mod reporters;
