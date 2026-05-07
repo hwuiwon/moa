@@ -31,6 +31,7 @@ const SESSION_MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/024_lineage.sql"),
     include_str!("../migrations/postgres/025_lineage_scores.sql"),
     include_str!("../migrations/postgres/026_lineage_audit.sql"),
+    include_str!("../migrations/postgres/027_events_append_only.sql"),
 ];
 
 pub(crate) const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;

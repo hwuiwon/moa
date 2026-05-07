@@ -29,6 +29,7 @@ pub struct GraphMemoryRetriever {
     pool: PgPool,
     assume_app_role: bool,
     lineage: Arc<dyn LineageHandle>,
+    result_limit: usize,
 }
 
 impl GraphMemoryRetriever {
@@ -39,6 +40,7 @@ impl GraphMemoryRetriever {
             pool,
             assume_app_role: false,
             lineage: Arc::new(NullLineageHandle),
+            result_limit: GRAPH_MEMORY_RESULTS,
         }
     }
 
@@ -53,6 +55,13 @@ impl GraphMemoryRetriever {
     #[must_use]
     pub fn with_lineage(mut self, lineage: Arc<dyn LineageHandle>) -> Self {
         self.lineage = lineage;
+        self
+    }
+
+    /// Overrides the number of final graph-memory hits injected into context.
+    #[must_use]
+    pub fn with_result_limit(mut self, result_limit: usize) -> Self {
+        self.result_limit = result_limit;
         self
     }
 
@@ -82,7 +91,7 @@ impl GraphMemoryRetriever {
                 scope,
                 label_filter: None,
                 max_pii_class: PiiClass::Restricted,
-                k_final: GRAPH_MEMORY_RESULTS,
+                k_final: self.result_limit,
                 use_reranker: false,
                 strategy: None,
             })

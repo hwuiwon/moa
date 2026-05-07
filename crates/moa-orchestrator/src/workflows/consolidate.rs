@@ -2,6 +2,7 @@
 
 use std::time::Instant;
 
+use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use moa_core::{LearningEntry, WorkspaceId};
 use restate_sdk::prelude::*;
@@ -125,31 +126,112 @@ impl Consolidate for ConsolidateImpl {
     ) -> Result<Json<ConsolidateReport>, HandlerError> {
         annotate_restate_handler_span("Consolidate", "run");
         let request = request.into_inner();
-        let started_at = Instant::now();
-        let ran_at = Utc::now();
-
-        ctx.object_client::<WorkspaceObjectClient>(request.workspace_id.to_string())
-            .mark_consolidation_started(Json::from(request.target_date))
-            .call()
-            .await?;
-
-        // Graph memory maintains indexes incrementally on writes. The scheduled workflow remains
-        // as a durable checkpoint hook and currently has no graph-local work to run.
-        let report = ConsolidateReport::graph_noop(
-            request.workspace_id.clone(),
-            request.target_date,
-            ran_at,
-            started_at.elapsed().as_millis() as u64,
-        );
-
-        record_memory_learning(&ctx, &report).await?;
-
-        ctx.object_client::<WorkspaceObjectClient>(request.workspace_id.to_string())
-            .consolidation_completed(Json::from(report.clone()))
-            .call()
-            .await?;
+        let mut steps = RestateConsolidateSteps { ctx: &ctx };
+        let report = run_consolidate_workflow(&mut steps, request).await?;
 
         Ok(Json::from(report))
+    }
+}
+
+/// Durable operations used by the consolidation workflow body.
+#[async_trait]
+pub trait ConsolidateDurableSteps {
+    /// Records that the owning workspace has started a consolidation run.
+    async fn mark_consolidation_started(
+        &mut self,
+        request: &ConsolidateRequest,
+    ) -> Result<(), HandlerError>;
+
+    /// Builds the consolidation report behind a journaled durable step.
+    async fn build_consolidate_report(
+        &mut self,
+        request: &ConsolidateRequest,
+    ) -> Result<ConsolidateReport, HandlerError>;
+
+    /// Persists any memory-learning entry derived from the report.
+    async fn record_memory_learning(
+        &mut self,
+        report: &ConsolidateReport,
+    ) -> Result<(), HandlerError>;
+
+    /// Records that the owning workspace has completed the consolidation run.
+    async fn consolidation_completed(
+        &mut self,
+        report: &ConsolidateReport,
+    ) -> Result<(), HandlerError>;
+}
+
+/// Runs the consolidation workflow body against a durable-step implementation.
+pub async fn run_consolidate_workflow(
+    steps: &mut impl ConsolidateDurableSteps,
+    request: ConsolidateRequest,
+) -> Result<ConsolidateReport, HandlerError> {
+    steps.mark_consolidation_started(&request).await?;
+    let report = steps.build_consolidate_report(&request).await?;
+    steps.record_memory_learning(&report).await?;
+    steps.consolidation_completed(&report).await?;
+    Ok(report)
+}
+
+struct RestateConsolidateSteps<'ctx, 'workflow> {
+    ctx: &'ctx WorkflowContext<'workflow>,
+}
+
+#[async_trait]
+impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
+    async fn mark_consolidation_started(
+        &mut self,
+        request: &ConsolidateRequest,
+    ) -> Result<(), HandlerError> {
+        self.ctx
+            .object_client::<WorkspaceObjectClient>(request.workspace_id.to_string())
+            .mark_consolidation_started(Json::from(request.target_date))
+            .call()
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    async fn build_consolidate_report(
+        &mut self,
+        request: &ConsolidateRequest,
+    ) -> Result<ConsolidateReport, HandlerError> {
+        let request = request.clone();
+        self.ctx
+            .run(|| async move {
+                let started_at = Instant::now();
+                let ran_at = Utc::now();
+                // Graph memory maintains indexes incrementally on writes. The scheduled workflow
+                // remains as a durable checkpoint hook and currently has no graph-local work to run.
+                Ok(Json::from(ConsolidateReport::graph_noop(
+                    request.workspace_id,
+                    request.target_date,
+                    ran_at,
+                    started_at.elapsed().as_millis() as u64,
+                )))
+            })
+            .name("build_consolidate_report")
+            .await
+            .map(Json::into_inner)
+            .map_err(HandlerError::from)
+    }
+
+    async fn record_memory_learning(
+        &mut self,
+        report: &ConsolidateReport,
+    ) -> Result<(), HandlerError> {
+        record_memory_learning(self.ctx, report).await
+    }
+
+    async fn consolidation_completed(
+        &mut self,
+        report: &ConsolidateReport,
+    ) -> Result<(), HandlerError> {
+        self.ctx
+            .object_client::<WorkspaceObjectClient>(report.workspace_id.to_string())
+            .consolidation_completed(Json::from(report.clone()))
+            .call()
+            .await
+            .map_err(HandlerError::from)
     }
 }
 

@@ -13,6 +13,15 @@ use uuid::Uuid;
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 const BLANK_SESSION_SETTLE_DELAY: Duration = Duration::from_millis(400);
 
+/// Exact approval event counts for one event stream or event slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApprovalEventCounts {
+    /// Number of approval request events.
+    pub requested: usize,
+    /// Number of approval decision events.
+    pub decided: usize,
+}
+
 /// Minimal harness API required to run the shared orchestrator contract tests.
 #[async_trait]
 pub trait OrchestratorContractHarness: Send + Sync {
@@ -41,6 +50,43 @@ pub trait OrchestratorContractHarness: Send + Sync {
     fn recorded_requests(&self) -> Option<Vec<CompletionRequest>> {
         None
     }
+}
+
+/// Counts approval request and decision events in a persisted event stream.
+pub fn count_approval_events(events: &[EventRecord]) -> ApprovalEventCounts {
+    ApprovalEventCounts {
+        requested: events
+            .iter()
+            .filter(|record| matches!(record.event, Event::ApprovalRequested { .. }))
+            .count(),
+        decided: events
+            .iter()
+            .filter(|record| matches!(record.event, Event::ApprovalDecided { .. }))
+            .count(),
+    }
+}
+
+/// Counts approval request and decision events for one session.
+pub async fn count_approval_events_in_session<H>(
+    harness: &H,
+    session_id: SessionId,
+) -> Result<ApprovalEventCounts>
+where
+    H: OrchestratorContractHarness,
+{
+    let events = harness.session_events(session_id).await?;
+    Ok(count_approval_events(&events))
+}
+
+/// Returns the ordered target statuses from `SessionStatusChanged` events.
+pub fn status_sequence(events: &[EventRecord]) -> Vec<SessionStatus> {
+    events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::SessionStatusChanged { to, .. } => Some(to.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Verifies that a blank session stays idle until its first queued message arrives.

@@ -25,4 +25,6 @@ workspace-hack = { version = "0.1", path = "../workspace-hack" }
 [dev-dependencies]
 axum.workspace = true
 moa-test-support.workspace = true
+proptest = "1"
+proptest-derive = "0.8"
 tempfile.workspace = true
