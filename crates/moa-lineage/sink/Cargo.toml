@@ -11,6 +11,7 @@ fjall = "3"
 metrics.workspace = true
 moa-core = { path = "../../moa-core" }
 moa-lineage-core = { path = "../core" }
+moa-lineage-otel = { path = "../otel" }
 serde = { workspace = true, features = ["derive"] }
 serde_canonical_json.workspace = true
 serde_json.workspace = true

@@ -207,7 +207,10 @@ impl GraphMemoryRetriever {
         };
 
         match serde_json::to_value(LineageEvent::Retrieval(retrieval.clone())) {
-            Ok(json) => self.lineage.record(json),
+            Ok(json) => {
+                self.lineage.record_span_attributes(&Span::current(), &json);
+                self.lineage.record(json);
+            }
             Err(error) => tracing::warn!(%error, "failed to serialize retrieval lineage"),
         }
         let zero_recall_score = ScoreRecord {
@@ -242,7 +245,6 @@ impl GraphMemoryRetriever {
             )
             .increment(1);
         }
-        moa_lineage_otel::emit_retrieval_attrs(&Span::current(), &retrieval);
     }
 }
 

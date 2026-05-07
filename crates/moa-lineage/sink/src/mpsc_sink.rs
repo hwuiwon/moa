@@ -146,6 +146,25 @@ impl LineageHandle for MpscSink {
         }
     }
 
+    fn record_span_attributes(&self, span: &tracing::Span, evt_json: &serde_json::Value) {
+        match serde_json::from_value::<LineageEvent>(evt_json.clone()) {
+            Ok(LineageEvent::Retrieval(record)) => {
+                moa_lineage_otel::emit_retrieval_attrs(span, &record);
+            }
+            Ok(LineageEvent::Context(record)) => {
+                moa_lineage_otel::emit_context_attrs(span, &record);
+            }
+            Ok(LineageEvent::Generation(record)) => {
+                moa_lineage_otel::emit_generation_attrs(span, &record);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                metrics::counter!("moa_lineage_malformed_total").increment(1);
+                tracing::warn!(%error, "malformed lineage event for span attributes");
+            }
+        }
+    }
+
     fn dropped_count(&self) -> u64 {
         LineageSink::dropped_count(self)
     }

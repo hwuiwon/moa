@@ -1,4 +1,7 @@
 //! Production hybrid graph-memory retriever.
+//!
+//! This remains one module because `HybridRetriever` owns the graph, vector,
+//! and reranker boundary while individual retrieval legs live in `legs`.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
