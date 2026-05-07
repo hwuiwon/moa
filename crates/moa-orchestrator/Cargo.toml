@@ -11,7 +11,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-axum = "0.8"
+axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
 futures = { version = "0.3" }
@@ -30,8 +30,8 @@ restate-sdk.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-shell-words = "1.1"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "json", "uuid", "chrono"] }
+shell-words.workspace = true
+sqlx = { workspace = true, features = ["tls-rustls", "migrate", "json", "uuid", "chrono"] }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -39,9 +39,10 @@ tracing.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 uuid.workspace = true
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 tracing-subscriber.workspace = true
 
 [lints.rust]

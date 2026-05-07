@@ -16,22 +16,23 @@ opentelemetry_sdk.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-shell-words = "1.1"
+shell-words.workspace = true
 similar.workspace = true
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
+sqlx = { workspace = true, features = ["chrono", "uuid"] }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-metrics.workspace = true
 tokio-util.workspace = true
-toml = "0.8"
+toml.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber = { workspace = true, features = ["json"] }
 uuid.workspace = true
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }

@@ -11,13 +11,14 @@ chrono.workspace = true
 moa-core = { path = "../../moa-core" }
 pgvector = { version = "0.4.1", features = ["sqlx", "halfvec"] }
 reqwest = { workspace = true, features = ["gzip"] }
-secrecy = "0.10"
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "json"] }
+sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid", "json"] }
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 moa-session = { path = "../../moa-session" }

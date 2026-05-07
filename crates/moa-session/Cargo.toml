@@ -12,15 +12,16 @@ moa-security = { path = "../moa-security" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros", "json", "uuid", "chrono"] }
+sha2.workspace = true
+sqlx = { workspace = true, features = ["tls-rustls", "migrate", "macros", "json", "uuid", "chrono"] }
 futures-util = { workspace = true }
 tokio.workspace = true
 tracing.workspace = true
 url = "2"
 uuid.workspace = true
-hex = "0.4"
+hex.workspace = true
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
-axum = "0.8"
-tempfile = "3"
+axum.workspace = true
+tempfile.workspace = true

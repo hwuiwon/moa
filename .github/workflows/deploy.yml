@@ -68,6 +68,12 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-hakari
+        run: cargo install cargo-hakari --locked
+
+      - name: Verify workspace-hack
+        run: cargo hakari verify
+
       - name: Check formatting
         run: cargo fmt --check
 

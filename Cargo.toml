@@ -25,6 +25,7 @@ members = [
     "crates/moa-skills",
     "crates/moa-eval",
     "crates/moa-loadtest",
+    "crates/workspace-hack",
     "crates/xtask",
 ]
 default-members = [
@@ -61,21 +62,32 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 anyhow = "1"
+arrow = "53"
 async-trait = "0.1"
 async-openai = { version = "0.34", default-features = false, features = [
     "responses",
     "rustls",
 ] }
+axum = "0.8"
+base64 = "0.22"
+blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 config = { version = "0.14", default-features = true, features = ["toml"] }
+ed25519-dalek = "2"
 eventsource-stream = "0.2"
 futures-util = "0.3"
+globset = "0.4"
+hex = "0.4"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", features = ["http-listener"] }
+moka = { version = "0.12", features = ["future"] }
+object_store = { version = "0.11", features = ["aws"] }
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-rustls"] }
 opentelemetry_sdk = "0.31"
+parquet = { version = "53", features = ["async", "arrow"] }
+regex = "1"
 restate-sdk = "0.8"
 restate-sdk-shared-core = "0.8"
 reqwest = { version = "0.13", default-features = false, features = [
@@ -85,9 +97,18 @@ reqwest = { version = "0.13", default-features = false, features = [
     "rustls",
     "stream",
 ] }
+secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
+serde_canonical_json = "1"
 serde_json = "1"
+sha2 = "0.10"
+shell-words = "1.1"
 similar = "2"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+] }
+tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-metrics = "0.4"
@@ -98,6 +119,15 @@ tracing-appender = "0.2"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde", "v7"] }
+
+[workspace.metadata.hakari]
+hakari-package = "workspace-hack"
+resolver = "2"
+platforms = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
 
 [profile.dev]
 # 1 = Line tables only. Enough for AI to see "Error at main.rs:42"

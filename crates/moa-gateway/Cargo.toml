@@ -21,6 +21,7 @@ uuid.workspace = true
 teloxide = { version = "0.17", default-features = false, features = ["ctrlc_handler", "rustls"], optional = true }
 slack-morphism = { version = "2.19.0", features = ["hyper"], optional = true }
 serenity = { version = "0.12.5", default-features = false, features = ["builder", "client", "gateway", "http", "model", "rustls_backend"], optional = true }
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 serde_json.workspace = true

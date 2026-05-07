@@ -11,26 +11,27 @@ e2b = []
 
 [dependencies]
 async-trait.workspace = true
-base64 = "0.22"
+base64.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
-globset = "0.4"
+globset.workspace = true
 ignore = "0.4"
 moa-core = { path = "../moa-core" }
 moa-memory-ingest = { path = "../moa-memory/ingest" }
 moa-security = { path = "../moa-security" }
 opentelemetry.workspace = true
-regex = "1"
+regex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-shell-words = "1.1"
+shell-words.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 uuid.workspace = true
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 moa-session = { path = "../moa-session" }
-tempfile = "3"
+tempfile.workspace = true

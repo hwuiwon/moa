@@ -6,25 +6,26 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-blake3 = "1"
+blake3.workspace = true
 chrono.workspace = true
 moa-core = { path = "../../moa-core" }
 moa-memory-graph = { path = "../graph" }
 moa-memory-pii = { path = "../pii" }
 moa-memory-vector = { path = "../vector" }
-moka = { version = "0.12", features = ["future"] }
+moka.workspace = true
 metrics.workspace = true
 reqwest.workspace = true
 restate-sdk.workspace = true
-secrecy = "0.10"
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "json", "uuid", "chrono"] }
+sha2.workspace = true
+sqlx = { workspace = true, features = ["tls-rustls", "json", "uuid", "chrono"] }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 moa-hands = { path = "../../moa-hands" }

@@ -11,17 +11,18 @@ moa-eval = { path = "../moa-eval" }
 memory-graph = { package = "moa-memory-graph", path = "../moa-memory/graph" }
 moa-providers = { path = "../moa-providers" }
 moa-session = { path = "../moa-session" }
-moka = { version = "0.12", features = ["future"] }
+moka.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
-sha2 = "0.10"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid"] }
+sha2.workspace = true
+sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid"] }
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 async-trait.workspace = true
-tempfile = "3"
+tempfile.workspace = true
