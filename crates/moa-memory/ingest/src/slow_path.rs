@@ -7,11 +7,13 @@ use std::time::Duration;
 use crate::{
     ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
     ExtractedFact, IngestApplyReport, IngestCtx, IngestDecision, RrfPlusJudgeDetector, SessionTurn,
-    TurnChunk, chunk_turn, current_runtime, extract_facts, fact_hash, scoped_fact_uid,
-    should_ingest_degraded,
+    TurnChunk, chunk_turn, current_runtime, extract_facts, extraction_confidence_hint, fact_hash,
+    scoped_fact_uid, should_ingest_degraded,
 };
 use moa_core::{ScopeContext, ScopedConn, traits::EmbeddingProvider};
-use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_graph::{
+    AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
+};
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiCategory, PiiClassifier, PiiResult, PiiSpan, redact_text,
 };
@@ -557,6 +559,10 @@ async fn apply_one_decision(
                 .supersede_node(*old_uid, node_intent(turn, fact, &hash, fact_uid))
                 .await
                 .map_err(HandlerError::from)?;
+            graph
+                .create_edge(contradicts_edge_intent(turn, uid, *old_uid))
+                .await
+                .map_err(HandlerError::from)?;
             insert_dedup(pool, scope, turn, &hash, uid).await?;
             Ok(ApplyOutcome::Superseded)
         }
@@ -592,6 +598,10 @@ async fn apply_one_decision_with_graph(
         IngestDecision::Supersede { old_uid, fact } => {
             let uid = graph
                 .supersede_node(*old_uid, node_intent(turn, fact, &hash, fact_uid))
+                .await
+                .map_err(HandlerError::from)?;
+            graph
+                .create_edge(contradicts_edge_intent(turn, uid, *old_uid))
                 .await
                 .map_err(HandlerError::from)?;
             insert_dedup(pool, scope, turn, &hash, uid).await?;
@@ -641,11 +651,34 @@ fn node_intent(
             "pii_class": fact.classified.pii_class.as_str(),
         }),
         pii_class: fact.classified.pii_class,
-        confidence: Some(0.70),
+        confidence: Some(extraction_confidence_hint(&extracted.summary)),
         valid_from: turn.finalized_at,
         embedding: fact.embedding.clone(),
         embedding_model: fact.embedding_model.clone(),
         embedding_model_version: fact.embedding_model_version,
+        actor_id: turn.user_id.to_string(),
+        actor_kind: "user".to_string(),
+    }
+}
+
+fn contradicts_edge_intent(
+    turn: &SessionTurn,
+    new_uid: uuid::Uuid,
+    old_uid: uuid::Uuid,
+) -> EdgeWriteIntent {
+    EdgeWriteIntent {
+        uid: uuid::Uuid::now_v7(),
+        label: EdgeLabel::Contradicts,
+        start_uid: new_uid,
+        end_uid: old_uid,
+        properties: json!({
+            "source_session_id": turn.session_id.to_string(),
+            "source_turn_seq": turn.turn_seq,
+            "reason": "slow_path_supersession_conflict",
+        }),
+        workspace_id: Some(turn.workspace_id.to_string()),
+        user_id: None,
+        scope: "workspace".to_string(),
         actor_id: turn.user_id.to_string(),
         actor_kind: "user".to_string(),
     }

@@ -630,12 +630,37 @@ fn heuristic_judge(fact_text: &str, candidates: &[NodeIndexRow]) -> JudgeRespons
     let normalized_fact = normalize_fact_text(fact_text);
     if let Some(candidate) = candidates
         .iter()
+        .filter(|candidate| candidate.valid_to.is_none())
         .find(|candidate| normalize_fact_text(&candidate.name) == normalized_fact)
     {
         return JudgeResponse {
             verdict: JudgeVerdict::Restates,
             candidate_uid: Some(candidate.uid),
             rationale: "normalized fact text matches candidate".to_string(),
+        };
+    }
+
+    if let Some(candidate) = candidates
+        .iter()
+        .filter(|candidate| candidate.valid_to.is_none())
+        .find(|candidate| structured_fact_match(fact_text, candidate, true))
+    {
+        return JudgeResponse {
+            verdict: JudgeVerdict::Restates,
+            candidate_uid: Some(candidate.uid),
+            rationale: "same subject, predicate, and object".to_string(),
+        };
+    }
+
+    if let Some(candidate) = candidates
+        .iter()
+        .filter(|candidate| candidate.valid_to.is_none())
+        .find(|candidate| structured_fact_match(fact_text, candidate, false))
+    {
+        return JudgeResponse {
+            verdict: JudgeVerdict::Contradicts,
+            candidate_uid: Some(candidate.uid),
+            rationale: "same subject and predicate with different object".to_string(),
         };
     }
 
@@ -654,6 +679,70 @@ fn heuristic_judge(fact_text: &str, candidates: &[NodeIndexRow]) -> JudgeRespons
         candidate_uid: candidates.first().map(|candidate| candidate.uid),
         rationale: "no strict contradiction or restatement found".to_string(),
     }
+}
+
+fn structured_fact_match(
+    fact_text: &str,
+    candidate: &NodeIndexRow,
+    require_same_object: bool,
+) -> bool {
+    let Some(fact) = fact_parts_from_text(fact_text) else {
+        return false;
+    };
+    let Some(candidate) = fact_parts_from_candidate(candidate) else {
+        return false;
+    };
+    fact.subject == candidate.subject
+        && fact.predicate == candidate.predicate
+        && (fact.object == candidate.object) == require_same_object
+}
+
+fn fact_parts_from_candidate(candidate: &NodeIndexRow) -> Option<FactParts> {
+    if let Some(properties) = candidate.properties_summary.as_ref() {
+        let subject = properties.get("subject").and_then(Value::as_str);
+        let predicate = properties.get("predicate").and_then(Value::as_str);
+        let object = properties.get("object").and_then(Value::as_str);
+        if let (Some(subject), Some(predicate), Some(object)) = (subject, predicate, object) {
+            return Some(FactParts {
+                subject: normalize_fact_component(subject),
+                predicate: normalize_fact_component(predicate),
+                object: normalize_fact_component(object),
+            });
+        }
+    }
+    fact_parts_from_text(&candidate_text(candidate))
+}
+
+fn fact_parts_from_text(text: &str) -> Option<FactParts> {
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    let [subject, predicate, rest @ ..] = words.as_slice() else {
+        return None;
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    Some(FactParts {
+        subject: normalize_fact_component(subject),
+        predicate: normalize_fact_component(predicate),
+        object: normalize_fact_component(&rest.join(" ")),
+    })
+}
+
+fn normalize_fact_component(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|part| part.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '.'))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FactParts {
+    subject: String,
+    predicate: String,
+    object: String,
 }
 
 fn contradictory_deployment_provider<'a>(

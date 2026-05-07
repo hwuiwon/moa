@@ -12,12 +12,16 @@ use std::path::Path;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
+use crate::chain::canonical_json_bytes;
 use crate::error::{AuditError, Result};
 use crate::signing::SigningKey;
+
+const PHI_REDACTION_TOKEN: &str = "[redacted:phi]";
 
 /// One Merkle root window included in a DSAR bundle.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,6 +51,30 @@ pub struct DsarBundle {
     pub windows: Vec<RootWindow>,
 }
 
+/// Options for JSONL DSAR exports.
+#[derive(Clone, Debug, Default)]
+pub struct ExportOptions {
+    /// Redact PHI-classified fields before writing the export.
+    pub redact_phi: bool,
+    /// Fixed export timestamp for deterministic callers and tests.
+    pub exported_at: Option<DateTime<Utc>>,
+}
+
+/// Result metadata for a JSONL DSAR export.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DsarJsonlExport {
+    /// Path to the JSONL records file.
+    pub jsonl_path: String,
+    /// Path to the signed manifest file.
+    pub manifest_path: String,
+    /// Number of records written.
+    pub record_count: u64,
+    /// BLAKE3 hash of the exact JSONL bytes.
+    pub file_hash_b3: String,
+    /// Signature over the canonical manifest claims hash.
+    pub manifest_signature: Vec<u8>,
+}
+
 /// DSAR exporter.
 #[derive(Clone)]
 pub struct DsarExporter {
@@ -58,6 +86,76 @@ impl DsarExporter {
     #[must_use]
     pub fn new(signing: SigningKey) -> Self {
         Self { signing }
+    }
+
+    /// Writes a filtered JSONL DSAR export and a signed sibling `manifest.json`.
+    ///
+    /// The input records are treated as the caller's already-isolated snapshot:
+    /// concurrent writes after this method is called are not observed unless the
+    /// caller includes them in `records`.
+    pub async fn export_jsonl_records(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+        records: Vec<Value>,
+        out_path: &Path,
+        options: ExportOptions,
+    ) -> Result<DsarJsonlExport> {
+        let mut filtered = Vec::new();
+        for mut record in records
+            .into_iter()
+            .filter(|record| record.get("user_id").and_then(Value::as_str) == Some(user_id))
+        {
+            if options.redact_phi {
+                redact_phi_fields(&mut record);
+            }
+            filtered.push(record);
+        }
+
+        let mut jsonl = Vec::new();
+        for record in &filtered {
+            serde_json::to_writer(&mut jsonl, record)?;
+            jsonl.push(b'\n');
+        }
+        tokio::fs::write(out_path, &jsonl).await?;
+
+        let file_hash = blake3::hash(&jsonl).to_hex().to_string();
+        let exported_at = options.exported_at.unwrap_or_else(Utc::now);
+        let manifest_claims = serde_json::json!({
+            "version": "1",
+            "workspace_id": workspace_id,
+            "user_id": user_id,
+            "record_count": filtered.len() as u64,
+            "file_hash_b3": file_hash,
+            "timestamp": exported_at,
+        });
+        let signed_root = blake3::hash(&canonical_json_bytes(&manifest_claims)?);
+        let signature = self
+            .signing
+            .sign_root(signed_root.as_bytes(), workspace_id)?;
+        let manifest = serde_json::json!({
+            "version": "1",
+            "workspace_id": workspace_id,
+            "user_id": user_id,
+            "record_count": filtered.len() as u64,
+            "file_hash_b3": file_hash,
+            "timestamp": exported_at,
+            "signed_root_b3": signed_root.to_hex().to_string(),
+            "signing_key_label": self.signing.label(),
+            "signature_b64": base64::engine::general_purpose::STANDARD.encode(&signature),
+            "verifying_key_b64": base64::engine::general_purpose::STANDARD
+                .encode(self.signing.verifying_key_bytes()),
+        });
+        let manifest_path = out_path.with_file_name("manifest.json");
+        tokio::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?).await?;
+
+        Ok(DsarJsonlExport {
+            jsonl_path: out_path.display().to_string(),
+            manifest_path: manifest_path.display().to_string(),
+            record_count: filtered.len() as u64,
+            file_hash_b3: file_hash,
+            manifest_signature: signature,
+        })
     }
 
     /// Writes a DSAR bundle to `out_path` from already-collected records.
@@ -132,6 +230,36 @@ fn write_zip(
     )?;
     zip.finish()?;
     Ok(())
+}
+
+fn redact_phi_fields(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            let classified_phi = ["privacy_class", "classification", "class"]
+                .iter()
+                .any(|key| {
+                    map.get(*key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| value.eq_ignore_ascii_case("phi"))
+                });
+            if classified_phi {
+                for key in ["value", "text", "raw", "field_value"] {
+                    if let Some(field) = map.get_mut(key) {
+                        *field = Value::String(PHI_REDACTION_TOKEN.to_string());
+                    }
+                }
+            }
+            for child in map.values_mut() {
+                redact_phi_fields(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_phi_fields(item);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }
 
 #[cfg(test)]

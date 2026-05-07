@@ -179,6 +179,40 @@ impl DiscordAdapter {
     }
 }
 
+/// Normalizes one Discord message JSON payload into MOA's canonical inbound shape.
+///
+/// This helper is intentionally network-free for tests and webhook-style callers. The live
+/// gateway still enriches channel context through Discord's HTTP API when it handles gateway
+/// events.
+pub fn normalize_message_json(payload: &str) -> Result<InboundMessage> {
+    let message: DiscordMessage = serde_json::from_str(payload)?;
+    normalize_message_payload(&message)
+}
+
+/// Normalizes one parsed Discord message into MOA's canonical inbound shape without HTTP lookups.
+pub fn normalize_message_payload(message: &DiscordMessage) -> Result<InboundMessage> {
+    inbound_from_message_payload(message)
+        .map(|(inbound, _context)| inbound)
+        .ok_or_else(|| MoaError::ValidationError("discord message missing content".to_string()))
+}
+
+/// Renders Discord action rows for action buttons.
+pub fn render_action_rows(
+    buttons: &[moa_core::ActionButton],
+    disabled: bool,
+) -> Vec<CreateActionRow> {
+    if buttons.is_empty() {
+        return Vec::new();
+    }
+
+    vec![CreateActionRow::Buttons(
+        buttons
+            .iter()
+            .map(|button| discord_button_with_disabled(button, disabled))
+            .collect(),
+    )]
+}
+
 #[async_trait]
 impl PlatformAdapter for DiscordAdapter {
     /// Returns the adapter platform identifier.
@@ -479,6 +513,45 @@ async fn inbound_from_message(
     Some((inbound, context_ref))
 }
 
+fn inbound_from_message_payload(
+    message: &DiscordMessage,
+) -> Option<(InboundMessage, DiscordInboundContext)> {
+    let text = if message.content.is_empty() {
+        return None;
+    } else {
+        message.content.clone()
+    };
+
+    let context_ref = DiscordInboundContext {
+        channel_id: message.channel_id,
+        message_id: message.id,
+        thread_id: message.thread.as_ref().map(|thread| thread.id),
+        parent_channel_id: None,
+        is_direct: message.guild_id.is_none(),
+    };
+
+    let inbound = InboundMessage {
+        platform: Platform::Discord,
+        platform_msg_id: message.id.get().to_string(),
+        user: PlatformUser {
+            platform_id: message.author.id.get().to_string(),
+            display_name: discord_user_name(&message.author),
+            moa_user_id: None,
+        },
+        channel: context_ref.channel_ref(message.author.id),
+        text,
+        attachments: attachments_from_message(message),
+        reply_to: message
+            .referenced_message
+            .as_ref()
+            .map(|reference| reference.id.get().to_string()),
+        timestamp: chrono::DateTime::<Utc>::from_timestamp(message.timestamp.unix_timestamp(), 0)
+            .unwrap_or_else(Utc::now),
+    };
+
+    Some((inbound, context_ref))
+}
+
 fn inbound_from_component_interaction(
     interaction: &ComponentInteraction,
 ) -> Option<(InboundMessage, DiscordInboundContext)> {
@@ -598,6 +671,10 @@ fn discord_embed(chunk: &DiscordRenderChunk) -> Option<CreateEmbed> {
 }
 
 fn discord_button(button: &moa_core::ActionButton) -> CreateButton {
+    discord_button_with_disabled(button, false)
+}
+
+fn discord_button_with_disabled(button: &moa_core::ActionButton, disabled: bool) -> CreateButton {
     CreateButton::new(button.callback_data.clone())
         .label(button.label.clone())
         .style(match button.style {
@@ -605,6 +682,7 @@ fn discord_button(button: &moa_core::ActionButton) -> CreateButton {
             moa_core::ButtonStyle::Danger => DiscordButtonStyle::Danger,
             moa_core::ButtonStyle::Secondary => DiscordButtonStyle::Secondary,
         })
+        .disabled(disabled)
 }
 
 #[cfg(test)]

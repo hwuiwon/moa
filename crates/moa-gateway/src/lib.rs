@@ -4,6 +4,10 @@
 use moa_core::{ChannelRef, InboundMessage, trace_name_from_message};
 
 pub mod approval;
+pub mod approval_state;
+pub mod control;
+pub mod edit_window;
+pub mod rate_limit;
 pub mod renderer;
 
 #[cfg(feature = "discord")]
@@ -15,7 +19,18 @@ pub mod slack;
 #[cfg(feature = "telegram")]
 pub mod telegram;
 
-pub use approval::{ApprovalCallbackAction, approval_buttons, prepare_outbound_message};
+pub use approval::{
+    ApprovalCallbackAction, approval_buttons, prepare_outbound_message, resolved_approval_buttons,
+};
+pub use approval_state::{
+    ApprovalClickOutcome, ApprovalLifecycleState, ApprovalStateTracker, approval_state_marker,
+    parse_approval_decision,
+};
+pub use control::{GatewayControlAction, control_action_for_inbound};
+pub use edit_window::{
+    GatewayEditOutcome, GatewayEditResponse, edit_with_followup_fallback, is_fallback_edit_error,
+};
+pub use rate_limit::{GatewayRateLimitMetrics, GatewayRateLimiter, GatewaySendResponse};
 pub use renderer::{
     DISCORD_MAX_MESSAGE_LENGTH, SLACK_MAX_MESSAGE_LENGTH, TELEGRAM_MAX_MESSAGE_LENGTH,
 };

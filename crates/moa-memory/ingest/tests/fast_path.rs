@@ -65,13 +65,13 @@ impl PiiClassifier for FixedPiiClassifier {
 }
 
 #[derive(Debug, Clone)]
-struct FixedConflictChecker {
+struct ScriptedConflictDetector {
     conflict: Conflict,
     delay: Duration,
 }
 
 #[async_trait]
-impl ContradictionDetector for FixedConflictChecker {
+impl ContradictionDetector for ScriptedConflictDetector {
     async fn check_one_fast(
         &self,
         _fact_text: &str,
@@ -148,7 +148,7 @@ fn test_ctx_for_scope(
         vector,
         Arc::new(MockEmbedder),
         Arc::new(FixedPiiClassifier { class: pii_class }),
-        Arc::new(FixedConflictChecker { conflict, delay }),
+        Arc::new(ScriptedConflictDetector { conflict, delay }),
     )
     .with_assume_app_role(true)
 }

@@ -1,0 +1,17 @@
+{
+  "_comment": "Hand-curated ground truth. Methodology: both facts intentionally share subject and predicate while changing object.",
+  "facts": [
+    {
+      "subject": "API",
+      "predicate": "runs_on_port",
+      "object": "3000"
+    },
+    {
+      "subject": "API",
+      "predicate": "runs_on_port",
+      "object": "8080"
+    }
+  ],
+  "expected_relation": "CONTRADICTS"
+}
+

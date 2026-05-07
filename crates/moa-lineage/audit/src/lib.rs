@@ -28,7 +28,7 @@ pub use decision::{
     PrivacyExportDecision, ScopeEnforcementDecision,
 };
 pub use error::{AuditError, Result};
-pub use export::{DsarBundle, DsarExporter, RootWindow};
+pub use export::{DsarBundle, DsarExporter, DsarJsonlExport, ExportOptions, RootWindow};
 pub use merkle::{
     AuditRootManifest, MerkleRootPublisher, ObjectLockMode, RootPublisherConfig,
     blake3_inclusion_proof, blake3_merkle_root, ct_sha256_root, verify_blake3_inclusion,

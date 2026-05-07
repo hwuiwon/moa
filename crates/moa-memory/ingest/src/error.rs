@@ -14,6 +14,16 @@ pub enum IngestError {
     /// A requested chunk size was invalid.
     #[error("chunk token target must be greater than zero")]
     InvalidChunkTarget,
+    /// A chunk exceeded the deterministic extractor's configured size budget.
+    #[error("chunk {index} has {actual_chars} chars, exceeding max {max_chars}")]
+    ChunkTooLarge {
+        /// Source chunk index.
+        index: usize,
+        /// Observed chunk length in Unicode scalar values.
+        actual_chars: usize,
+        /// Maximum allowed chunk length in Unicode scalar values.
+        max_chars: usize,
+    },
     /// The process-local ingestion runtime was not installed.
     #[error("ingestion runtime has not been installed")]
     RuntimeNotInstalled,

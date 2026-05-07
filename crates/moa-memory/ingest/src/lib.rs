@@ -17,8 +17,8 @@ pub use ctx::{
 pub use error::{IngestError, Result};
 pub use extract::{
     ClassifiedFact, EmbeddedFact, ExtractedFact, IngestApplyReport, IngestDecision, SessionTurn,
-    TurnChunk, chunk_turn, extract_facts, fact_hash, fact_uid_from_hash, scoped_fact_uid,
-    should_ingest_degraded,
+    TurnChunk, chunk_turn, extract_facts, extract_facts_checked, extraction_confidence_hint,
+    fact_hash, fact_uid_from_hash, scoped_fact_uid, should_ingest_degraded,
 };
 pub use fast_path::{
     FastError, FastMemoryToolExecutor, FastPathCtx, FastRememberRequest, ForgetPattern,

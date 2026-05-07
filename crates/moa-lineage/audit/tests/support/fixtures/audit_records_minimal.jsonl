@@ -1,0 +1,5 @@
+{"record_id":"rec-001","timestamp":"2026-05-07T12:00:00Z","event_type":"session_started","user_id":"user-001","payload":{"message":"session started","sequence":0}}
+{"record_id":"rec-002","timestamp":"2026-05-07T12:00:01Z","event_type":"user_message","user_id":"user-001","payload":{"message":"hello","sequence":1}}
+{"record_id":"rec-003","timestamp":"2026-05-07T12:00:02Z","event_type":"tool_call","user_id":"user-001","payload":{"tool":"bash","input":"cargo test","sequence":2}}
+{"record_id":"rec-004","timestamp":"2026-05-07T12:00:03Z","event_type":"tool_result","user_id":"user-001","payload":{"status":"ok","sequence":3}}
+{"record_id":"rec-005","timestamp":"2026-05-07T12:00:04Z","event_type":"assistant_response","user_id":"user-001","payload":{"message":"done","sequence":4}}

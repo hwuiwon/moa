@@ -1,0 +1,27 @@
+{
+  "token": "verification-token",
+  "team_id": "T12345",
+  "api_app_id": "A12345",
+  "event": {
+    "type": "message",
+    "channel": "C12345",
+    "user": "U12345",
+    "text": "hello",
+    "ts": "1700000000.000300",
+    "event_ts": "1700000000.000300",
+    "channel_type": "channel",
+    "blocks": [
+      {
+        "type": "section",
+        "block_id": "b-001",
+        "text": {
+          "type": "mrkdwn",
+          "text": "hello"
+        }
+      }
+    ]
+  },
+  "type": "event_callback",
+  "event_id": "Ev12347",
+  "event_time": 1700000000
+}

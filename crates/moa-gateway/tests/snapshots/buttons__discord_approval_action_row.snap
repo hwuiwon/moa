@@ -1,0 +1,32 @@
+---
+source: crates/moa-gateway/tests/buttons.rs
+expression: value
+---
+[
+  {
+    "components": [
+      {
+        "custom_id": "ap:o:018f6d7a-0b0c-7d00-8000-000000000001",
+        "disabled": false,
+        "label": "✅ Allow",
+        "style": 1,
+        "type": 2
+      },
+      {
+        "custom_id": "ap:a:018f6d7a-0b0c-7d00-8000-000000000001",
+        "disabled": false,
+        "label": "🔁 Always",
+        "style": 2,
+        "type": 2
+      },
+      {
+        "custom_id": "ap:d:018f6d7a-0b0c-7d00-8000-000000000001",
+        "disabled": false,
+        "label": "❌ Deny",
+        "style": 4,
+        "type": 2
+      }
+    ],
+    "type": 1
+  }
+]

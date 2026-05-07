@@ -53,6 +53,19 @@ impl SigningKey {
         Ok(self.inner.sign(&message).to_bytes().to_vec())
     }
 
+    /// Signs an arbitrary byte message with this Ed25519 key.
+    pub fn sign_message(&self, message: &[u8]) -> Vec<u8> {
+        self.inner.sign(message).to_bytes().to_vec()
+    }
+
+    /// Verifies an arbitrary byte message signature with this key's public key.
+    pub fn verify_message(&self, message: &[u8], signature: &[u8]) -> Result<()> {
+        let signature = Signature::try_from(signature).map_err(|_| AuditError::Signature)?;
+        self.verifying
+            .verify(message, &signature)
+            .map_err(|_| AuditError::Signature)
+    }
+
     /// Verifies a Merkle root signature.
     pub fn verify_root(&self, root: &[u8], workspace_id: &str, signature: &[u8]) -> Result<()> {
         let metadata = serde_json::json!({

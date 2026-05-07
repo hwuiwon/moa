@@ -5,8 +5,8 @@ use std::{collections::HashMap, env, sync::Arc};
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    ChannelRef, InboundMessage, MessageId, MoaConfig, MoaError, OutboundMessage, Platform,
-    PlatformAdapter, PlatformCapabilities, PlatformUser, Result,
+    Attachment, ChannelRef, InboundMessage, MessageId, MoaConfig, MoaError, OutboundMessage,
+    Platform, PlatformAdapter, PlatformCapabilities, PlatformUser, Result,
 };
 use teloxide::{
     dptree,
@@ -138,6 +138,29 @@ impl TelegramAdapter {
             .map_err(|error| MoaError::ProviderError(error.to_string()))?;
         Ok(())
     }
+}
+
+/// Normalizes one Telegram Bot API update JSON payload into MOA's canonical inbound shape.
+pub fn normalize_update_json(payload: &str) -> Result<InboundMessage> {
+    let value: serde_json::Value = serde_json::from_str(payload)?;
+    let message = value
+        .get("message")
+        .or_else(|| value.get("edited_message"))
+        .ok_or_else(|| MoaError::ValidationError("telegram update missing message".to_string()))?;
+    let message: Message = serde_json::from_value(message.clone())?;
+    normalize_message(&message)
+}
+
+/// Normalizes one Telegram message object into MOA's canonical inbound shape.
+pub fn normalize_message(message: &Message) -> Result<InboundMessage> {
+    inbound_from_message(message).ok_or_else(|| {
+        MoaError::ValidationError("telegram message missing text or sender".to_string())
+    })
+}
+
+/// Renders Telegram inline keyboard markup for the provided action buttons.
+pub fn render_inline_keyboard(buttons: &[moa_core::ActionButton]) -> Option<InlineKeyboardMarkup> {
+    inline_keyboard(buttons)
 }
 
 #[async_trait]
@@ -418,10 +441,41 @@ fn inbound_from_message(msg: &Message) -> Option<InboundMessage> {
             is_direct,
         ),
         text,
-        attachments: Vec::new(),
+        attachments: attachments_from_message(msg),
         reply_to,
         timestamp: msg.date,
     })
+}
+
+fn attachments_from_message(msg: &Message) -> Vec<Attachment> {
+    let mut attachments = Vec::new();
+    if let Some(document) = msg.document() {
+        attachments.push(Attachment {
+            name: document
+                .file_name
+                .clone()
+                .unwrap_or_else(|| document.file.id.0.clone()),
+            mime_type: document.mime_type.as_ref().map(ToString::to_string),
+            url: Some(format!("telegram://file/{}", document.file.id.0)),
+            path: None,
+            size_bytes: Some(u64::from(document.file.size)),
+        });
+    }
+
+    if let Some(photo) = msg
+        .photo()
+        .and_then(|sizes| sizes.iter().max_by_key(|size| size.file.size))
+    {
+        attachments.push(Attachment {
+            name: "photo".to_string(),
+            mime_type: Some("image/jpeg".to_string()),
+            url: Some(format!("telegram://file/{}", photo.file.id.0)),
+            path: None,
+            size_bytes: Some(u64::from(photo.file.size)),
+        });
+    }
+
+    attachments
 }
 
 fn channel_from_chat_and_reply(chat_id: i64, reply_to: Option<i32>, is_direct: bool) -> ChannelRef {
