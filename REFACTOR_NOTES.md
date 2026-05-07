@@ -57,3 +57,16 @@ Vector embedder implementations now return `moa_core::MoaError` from the trait
 method; the crate maps its local embedder errors into core provider/http/storage
 errors at that boundary. Vector storage APIs and implementation bodies were not
 otherwise changed.
+
+## [S05] Orchestrator SessionStore Trait Audit
+
+Verdict: LEAVE. `moa-orchestrator` defines `RestateSessionStore`, a Restate RPC
+facade externally named `SessionStore`, not a duplicate Rust trait of
+`moa_core::traits::SessionStore`. See `struct-pack/S05-decision.md`.
+
+## [S07] moa-session Store and Query Split
+
+`moa-session` now uses folder modules for `store/` and `queries/`. The split was
+mechanical: SQL strings and method signatures were moved without behavior
+changes, and the single `impl SessionStore for PostgresSessionStore` remains in
+`store/session_store.rs`.
