@@ -1,0 +1,378 @@
+//! Task-segment operations for the Postgres session store.
+
+use super::*;
+
+impl PostgresSessionStore {
+    /// Creates or refreshes one task segment metadata row.
+    pub async fn create_segment(&self, segment: &TaskSegment) -> Result<()> {
+        let task_segments = self.table_name("task_segments");
+        let sessions = self.table_name("sessions");
+        sqlx::query(&format!(
+            "INSERT INTO {task_segments} \
+             (id, session_id, workspace_id, user_id, tenant_id, segment_index, intent_label, intent_confidence, \
+              task_summary, started_at, ended_at, resolution, resolution_signal, resolution_confidence, \
+              tools_used, skills_activated, turn_count, token_cost, previous_segment_id) \
+             SELECT $1, $2, s.workspace_id, s.user_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17 \
+             FROM {sessions} s WHERE s.id = $2 \
+             ON CONFLICT (id) DO UPDATE SET \
+                 workspace_id = EXCLUDED.workspace_id, \
+                 user_id = EXCLUDED.user_id, \
+                 tenant_id = EXCLUDED.tenant_id, \
+                 intent_label = EXCLUDED.intent_label, \
+                 intent_confidence = EXCLUDED.intent_confidence, \
+                 task_summary = EXCLUDED.task_summary, \
+                 ended_at = EXCLUDED.ended_at, \
+                 resolution = EXCLUDED.resolution, \
+                 resolution_signal = EXCLUDED.resolution_signal, \
+                 resolution_confidence = EXCLUDED.resolution_confidence, \
+                 tools_used = EXCLUDED.tools_used, \
+                 skills_activated = EXCLUDED.skills_activated, \
+                 turn_count = EXCLUDED.turn_count, \
+                 token_cost = EXCLUDED.token_cost, \
+                 previous_segment_id = EXCLUDED.previous_segment_id"
+        ))
+        .bind(segment.id.0)
+        .bind(segment.session_id.0)
+        .bind(&segment.tenant_id)
+        .bind(segment.segment_index as i32)
+        .bind(segment.intent_label.as_deref())
+        .bind(segment.intent_confidence)
+        .bind(segment.task_summary.as_deref())
+        .bind(segment.started_at)
+        .bind(segment.ended_at)
+        .bind(segment.resolution.as_deref())
+        .bind(serialize_resolution_signal(
+            segment.resolution_signal.as_ref(),
+        )?)
+        .bind(segment.resolution_confidence)
+        .bind(&segment.tools_used)
+        .bind(&segment.skills_activated)
+        .bind(segment.turn_count as i32)
+        .bind(segment.token_cost as i64)
+        .bind(segment.previous_segment_id.map(|id| id.0))
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        Ok(())
+    }
+
+    /// Completes a task segment and stores its final counters.
+    pub async fn complete_segment(
+        &self,
+        segment_id: SegmentId,
+        update: SegmentCompletion,
+    ) -> Result<()> {
+        let task_segments = self.table_name("task_segments");
+        let affected = sqlx::query(&format!(
+            "UPDATE {task_segments} SET \
+                 ended_at = $1, \
+                 turn_count = $2, \
+                 tools_used = $3, \
+                 skills_activated = $4, \
+                 token_cost = $5 \
+             WHERE id = $6"
+        ))
+        .bind(update.ended_at)
+        .bind(update.turn_count as i32)
+        .bind(&update.tools_used)
+        .bind(&update.skills_activated)
+        .bind(update.token_cost as i64)
+        .bind(segment_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(MoaError::StorageError(format!(
+                "task segment `{segment_id}` was not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Loads the active task segment for a session, if present.
+    pub async fn get_active_segment(
+        &self,
+        session_id: moa_core::SessionId,
+    ) -> Result<Option<TaskSegment>> {
+        let task_segments = self.table_name("task_segments");
+        let row = sqlx::query(&format!(
+            "SELECT {TASK_SEGMENT_COLUMNS} FROM {task_segments} \
+             WHERE session_id = $1 AND ended_at IS NULL \
+             ORDER BY segment_index DESC \
+             LIMIT 1"
+        ))
+        .bind(session_id.0)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        row.as_ref().map(task_segment_from_row).transpose()
+    }
+
+    /// Lists all task segments for a session in segment order.
+    pub async fn list_segments(&self, session_id: moa_core::SessionId) -> Result<Vec<TaskSegment>> {
+        let task_segments = self.table_name("task_segments");
+        let rows = sqlx::query(&format!(
+            "SELECT {TASK_SEGMENT_COLUMNS} FROM {task_segments} \
+             WHERE session_id = $1 \
+             ORDER BY segment_index ASC"
+        ))
+        .bind(session_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        rows.iter().map(task_segment_from_row).collect()
+    }
+
+    /// Updates a task segment resolution outcome.
+    pub async fn update_segment_resolution(
+        &self,
+        segment_id: SegmentId,
+        resolution: &str,
+        confidence: f64,
+    ) -> Result<()> {
+        let task_segments = self.table_name("task_segments");
+        let affected = sqlx::query(&format!(
+            "UPDATE {task_segments} SET \
+                 resolution = $1, \
+                 resolution_confidence = $2 \
+             WHERE id = $3"
+        ))
+        .bind(resolution)
+        .bind(confidence)
+        .bind(segment_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(MoaError::StorageError(format!(
+                "task segment `{segment_id}` was not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Updates a task segment resolution outcome and signal breakdown.
+    pub async fn update_segment_resolution_score(
+        &self,
+        segment_id: SegmentId,
+        score: &ResolutionScore,
+    ) -> Result<()> {
+        let task_segments = self.table_name("task_segments");
+        let affected = sqlx::query(&format!(
+            "UPDATE {task_segments} SET \
+                 resolution = $1, \
+                 resolution_signal = $2, \
+                 resolution_confidence = $3 \
+             WHERE id = $4"
+        ))
+        .bind(score.label.as_str())
+        .bind(serialize_resolution_signal(Some(score))?)
+        .bind(score.confidence)
+        .bind(segment_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(MoaError::StorageError(format!(
+                "task segment `{segment_id}` was not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Loads the historical structural baseline for one tenant and intent label.
+    pub async fn get_segment_baseline(
+        &self,
+        tenant_id: &str,
+        intent_label: Option<&str>,
+    ) -> Result<Option<SegmentBaseline>> {
+        let Some(intent_label) = intent_label else {
+            return Ok(None);
+        };
+        let segment_baselines = self.table_name("segment_baselines");
+        let row = sqlx::query(&format!(
+            "SELECT sample_count, avg_turns, stddev_turns, avg_cost, stddev_cost, \
+                    avg_duration_secs, stddev_duration_secs \
+             FROM {segment_baselines} \
+             WHERE tenant_id = $1 AND intent_label = $2 \
+             LIMIT 1"
+        ))
+        .bind(tenant_id)
+        .bind(intent_label)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        row.map(|row| {
+            Ok(SegmentBaseline {
+                sample_count: row
+                    .try_get::<i64, _>("sample_count")
+                    .map_err(map_sqlx_error)? as usize,
+                avg_turns: row.try_get::<f64, _>("avg_turns").map_err(map_sqlx_error)?,
+                stddev_turns: row
+                    .try_get::<Option<f64>, _>("stddev_turns")
+                    .map_err(map_sqlx_error)?,
+                avg_cost: row.try_get::<f64, _>("avg_cost").map_err(map_sqlx_error)?,
+                stddev_cost: row
+                    .try_get::<Option<f64>, _>("stddev_cost")
+                    .map_err(map_sqlx_error)?,
+                avg_duration_secs: row
+                    .try_get::<f64, _>("avg_duration_secs")
+                    .map_err(map_sqlx_error)?,
+                stddev_duration_secs: row
+                    .try_get::<Option<f64>, _>("stddev_duration_secs")
+                    .map_err(map_sqlx_error)?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Lists skill resolution-rate aggregates for ranking.
+    pub async fn list_skill_resolution_rates(
+        &self,
+        tenant_id: &str,
+        intent_label: Option<&str>,
+    ) -> Result<Vec<SkillResolutionRate>> {
+        let skill_resolution_rates = self.table_name("skill_resolution_rates");
+        let rows = sqlx::query(&format!(
+            "SELECT skill_name, uses, resolution_rate, avg_token_cost, avg_turn_count \
+             FROM {skill_resolution_rates} \
+             WHERE tenant_id = $1 AND ($2::TEXT IS NULL OR intent_label = $2) \
+             ORDER BY resolution_rate DESC, uses DESC, skill_name ASC"
+        ))
+        .bind(tenant_id)
+        .bind(intent_label)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        rows.iter()
+            .map(|row| {
+                Ok(SkillResolutionRate {
+                    skill_name: row
+                        .try_get::<String, _>("skill_name")
+                        .map_err(map_sqlx_error)?,
+                    uses: row.try_get::<i64, _>("uses").map_err(map_sqlx_error)? as u64,
+                    resolution_rate: row
+                        .try_get::<f64, _>("resolution_rate")
+                        .map_err(map_sqlx_error)?,
+                    avg_token_cost: row
+                        .try_get::<f64, _>("avg_token_cost")
+                        .map_err(map_sqlx_error)?,
+                    avg_turn_count: row
+                        .try_get::<f64, _>("avg_turn_count")
+                        .map_err(map_sqlx_error)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Refreshes task-segment derived materialized views.
+    pub async fn refresh_segment_materialized_views(&self) -> Result<()> {
+        for view_name in [
+            "skill_resolution_rates",
+            "intent_transitions",
+            "segment_baselines",
+        ] {
+            let qualified = self.table_name(view_name);
+            sqlx::query(&format!(
+                "REFRESH MATERIALIZED VIEW CONCURRENTLY {qualified}"
+            ))
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+        Ok(())
+    }
+    /// Records a tool name on the active task segment for a session.
+    pub async fn record_active_segment_tool_use(
+        &self,
+        session_id: moa_core::SessionId,
+        tool_name: &str,
+    ) -> Result<()> {
+        self.append_unique_active_segment_value(session_id, "tools_used", tool_name)
+            .await
+    }
+
+    /// Records a skill activation on the active task segment for a session.
+    pub async fn record_active_segment_skill_activation(
+        &self,
+        session_id: moa_core::SessionId,
+        skill_name: &str,
+    ) -> Result<()> {
+        self.append_unique_active_segment_value(session_id, "skills_activated", skill_name)
+            .await
+    }
+
+    /// Adds one turn and token usage to the active task segment for a session.
+    pub async fn record_active_segment_turn_usage(
+        &self,
+        session_id: moa_core::SessionId,
+        token_cost: u64,
+    ) -> Result<()> {
+        let task_segments = self.table_name("task_segments");
+        sqlx::query(&format!(
+            "UPDATE {task_segments} SET \
+                 turn_count = turn_count + 1, \
+                 token_cost = token_cost + $1 \
+             WHERE id = ( \
+                 SELECT id FROM {task_segments} \
+                 WHERE session_id = $2 AND ended_at IS NULL \
+                 ORDER BY segment_index DESC \
+                 LIMIT 1 \
+             )"
+        ))
+        .bind(token_cost as i64)
+        .bind(session_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    async fn append_unique_active_segment_value(
+        &self,
+        session_id: moa_core::SessionId,
+        column: &str,
+        value: &str,
+    ) -> Result<()> {
+        let task_segments = self.table_name("task_segments");
+        let column = match column {
+            "tools_used" => "tools_used",
+            "skills_activated" => "skills_activated",
+            _ => {
+                return Err(MoaError::StorageError(format!(
+                    "unsupported task segment array column `{column}`"
+                )));
+            }
+        };
+        sqlx::query(&format!(
+            "UPDATE {task_segments} SET \
+                 {column} = CASE \
+                     WHEN $1 = ANY({column}) THEN {column} \
+                     ELSE array_append({column}, $1) \
+                 END \
+             WHERE id = ( \
+                 SELECT id FROM {task_segments} \
+                 WHERE session_id = $2 AND ended_at IS NULL \
+                 ORDER BY segment_index DESC \
+                 LIMIT 1 \
+             )"
+        ))
+        .bind(value)
+        .bind(session_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+}
