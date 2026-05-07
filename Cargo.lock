@@ -3327,6 +3327,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
+ "insta",
  "metrics",
  "moa-core",
  "moa-hands",
@@ -3756,6 +3757,7 @@ dependencies = [
  "reqwest 0.13.2",
  "restate-sdk",
  "serde",
+ "serde_canonical_json",
  "serde_json",
  "sqlx",
  "tempfile",
@@ -3781,6 +3783,7 @@ dependencies = [
  "moa-orchestrator",
  "moa-providers",
  "moa-session",
+ "moa-test-support",
  "reqwest 0.13.2",
  "serde_json",
  "sqlx",
@@ -3864,6 +3867,8 @@ dependencies = [
  "moa-core",
  "moa-security",
  "moa-test-support",
+ "proptest",
+ "proptest-derive",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -4591,6 +4596,17 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
+]
+
+[[package]]
+name = "proptest-derive"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c57924a81864dddafba92e1bf92f9bf82f97096c44489548a60e888e1547549b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

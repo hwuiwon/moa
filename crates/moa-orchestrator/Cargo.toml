@@ -35,6 +35,7 @@ workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 moa-test-support.workspace = true
+serde_canonical_json.workspace = true
 tempfile.workspace = true
 
 [lints.rust]
