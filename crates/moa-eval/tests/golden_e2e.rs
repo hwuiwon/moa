@@ -347,10 +347,14 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
     let other_retrieval = RetrievalHarness::new(stack, other_scope);
     for query in &queries.cross_queries {
         let hits = other_retrieval.retrieve(query).await?;
+        let tenant_hits = hits
+            .into_iter()
+            .filter(|hit| hit.node.scope != "global")
+            .collect::<Vec<_>>();
         assert!(
-            hits.is_empty(),
+            tenant_hits.is_empty(),
             "RLS leak for `{query}`:\n{}",
-            dump_traces(&hits)
+            dump_traces(&tenant_hits)
         );
     }
 

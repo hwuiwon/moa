@@ -9,8 +9,6 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{IngestError, Result};
-
-const APPROX_CHARS_PER_TOKEN: usize = 4;
 /// Maximum chunk length accepted by the checked deterministic extractor.
 pub const MAX_EXTRACT_CHUNK_CHARS: usize = 32_768;
 
@@ -127,40 +125,7 @@ pub fn chunk_turn(
     target_tokens: usize,
     overlap_tokens: usize,
 ) -> Result<Vec<TurnChunk>> {
-    if target_tokens == 0 {
-        return Err(IngestError::InvalidChunkTarget);
-    }
-    let transcript = turn.transcript.trim();
-    if transcript.is_empty() {
-        return Err(IngestError::EmptyTranscript);
-    }
-
-    let target_chars = target_tokens.saturating_mul(APPROX_CHARS_PER_TOKEN).max(1);
-    let overlap_chars = overlap_tokens.saturating_mul(APPROX_CHARS_PER_TOKEN);
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut in_fence = false;
-
-    for line in transcript.lines() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-        }
-        let projected = current.len().saturating_add(line.len()).saturating_add(1);
-        if !in_fence && !current.is_empty() && projected > target_chars {
-            push_chunk(&mut chunks, &current);
-            current = overlap_suffix(&current, overlap_chars);
-        }
-        if !current.is_empty() {
-            current.push('\n');
-        }
-        current.push_str(line);
-    }
-
-    if !current.trim().is_empty() {
-        push_chunk(&mut chunks, &current);
-    }
-
-    Ok(chunks)
+    crate::chunking::chunk_turn(turn, target_tokens, overlap_tokens)
 }
 
 /// Extracts deterministic fact candidates from chunks.
@@ -262,33 +227,6 @@ pub fn should_ingest_degraded(turn: &SessionTurn) -> bool {
     hasher.update(turn.turn_seq.to_be_bytes());
     let digest = hasher.finalize();
     digest[0] < 128
-}
-
-fn push_chunk(chunks: &mut Vec<TurnChunk>, text: &str) {
-    let text = text.trim().to_string();
-    if text.is_empty() {
-        return;
-    }
-    chunks.push(TurnChunk {
-        index: chunks.len(),
-        token_estimate: estimate_tokens(&text),
-        text,
-    });
-}
-
-fn overlap_suffix(text: &str, max_chars: usize) -> String {
-    if max_chars == 0 || text.len() <= max_chars {
-        return String::new();
-    }
-    let mut start = text.len().saturating_sub(max_chars);
-    while start < text.len() && !text.is_char_boundary(start) {
-        start += 1;
-    }
-    text[start..].trim_start().to_string()
-}
-
-fn estimate_tokens(text: &str) -> usize {
-    text.len().div_ceil(APPROX_CHARS_PER_TOKEN).max(1)
 }
 
 fn candidate_fact_summaries(text: &str) -> Vec<String> {
