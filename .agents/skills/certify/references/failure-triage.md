@@ -1,29 +1,29 @@
 # Failure Triage
 
-Use this file after something in the certification matrix fails.
+Use this file after something in the test matrix fails. Stay here only long enough to localize the regression to a layer; deeper diagnosis belongs in the `runtime-forensics` skill.
 
 ## First Principle
 
 Localize the regression before patching it.
 
-Do not jump from “a test failed” to “the orchestrator is broken.” In MOA, the failure could belong to:
+Do not jump from "a test failed" to "the orchestrator is broken." In MOA, the failure could belong to:
 
-- shared lifecycle logic
-- Local adapter
-- Temporal adapter
+- shared lifecycle logic in the orchestrator contract
+- local orchestrator (`moa-orchestrator-local`)
+- Restate orchestrator (`moa-orchestrator`)
 - provider request or parsing logic
-- session store or replay
-- tool routing or approval rendering
+- session store or replay (`moa-session`)
+- tool routing or approval rendering (`moa-hands` / `moa-gateway`)
 - live-service flake
 
 ## Fast Classification Rules
 
 - If `moa-providers --lib` fails, start in the provider layer.
 - If provider live tests fail but direct API requests succeed, start in provider request/response translation.
-- If Local and Temporal both fail the same shared contract assertion, start in shared lifecycle code or brain harness logic.
-- If Local passes and Temporal fails the shared contract suite, start in the Temporal adapter or worker/runtime boundary.
-- If only Temporal restart recovery fails, start in durability or workflow recovery, not shared lifecycle.
-- If Local and Temporal live matrices both fail the same provider while deterministic suites are green, start in live provider request shape or approval/tool-call formatting.
+- If both orchestrators fail the same shared contract assertion, start in shared lifecycle code or brain harness logic.
+- If local passes and Restate fails the shared contract suite, start in the Restate adapter (virtual objects, services, signal handling) before suspecting shared code.
+- If only Restate worker-recovery or workflow-resume fails, start in durability or workflow recovery, not shared lifecycle.
+- If both live matrices fail the same provider while deterministic suites are green, start in live provider request shape or approval/tool-call formatting.
 - If a session reaches `Failed` with a provider HTTP 4xx or 5xx in the event log, start in request construction or provider assumptions.
 - If a session stays `Running` with no later events, suspect a hung provider call, deadlock, or signal path stall.
 - If `ApprovalRequested` exists but resume never happens after `ApprovalDecided`, start in approval replay or signal processing.
@@ -32,22 +32,22 @@ Do not jump from “a test failed” to “the orchestrator is broken.” In MOA
 
 ## Artifacts To Collect
 
-Prefer artifacts already emitted by MOA’s tests before inventing new instrumentation.
+Prefer artifacts already emitted by MOA's tests before inventing new instrumentation.
 
 - exact failing command
 - `--nocapture` output for the failing test
 - persisted session events printed by the test harness
 - provider-specific live matrix result for the same model
-- Local vs Temporal pass/fail difference
+- local vs Restate pass/fail difference
 - any explicit provider HTTP status or body in `Event::Error`
 
 When observability changed or the fault domain is unclear, run:
 
 ```bash
-PROTOC=/opt/homebrew/bin/protoc cargo test -p moa-orchestrator --test live_observability live_observability_audit_tracks_cache_replay_and_latency -- --ignored --exact --nocapture
+cargo test -p moa-orchestrator-local --test live_observability -- --ignored --nocapture
 ```
 
-That gives you trace/event evidence instead of guessing.
+That gives you trace and event evidence instead of guessing.
 
 ## Debugging Order
 
@@ -55,10 +55,19 @@ That gives you trace/event evidence instead of guessing.
 2. Move one layer lower:
    - orchestrator failure -> provider matrix or store tests
    - live failure -> provider-only live smoke
-   - Temporal failure -> Local equivalent
-3. Confirm whether the same behavior reproduces in both Local and Temporal.
+   - Restate failure -> local-orchestrator equivalent
+3. Confirm whether the same behavior reproduces on both orchestrators.
 4. Patch only after the fault domain is clear.
 5. Re-run the original failing command, not just a smaller surrogate.
+
+## When to Hand Off
+
+Hand off to `runtime-forensics` if any of these are true:
+
+- two passes of triage have not localized the fault domain
+- the persisted event log disagrees with analytics or traces
+- replay or worker-recovery behavior is implicated
+- the bug only appears under live or production conditions
 
 ## Good End State
 
@@ -70,4 +79,3 @@ A good triage result says:
 - what command proves the fix
 
 If you cannot say which layer owns the regression, keep collecting evidence instead of widening the patch.
-

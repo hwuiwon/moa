@@ -1,7 +1,6 @@
-# Analytics And Traces
+# Analytics and Traces
 
-Use this when the question is not just "did the turn finish," but also "do the
-numbers and timings agree with the durable record?"
+Use this when the question is not just "did the turn finish," but also "do the numbers and timings agree with the durable record?"
 
 ## Source-Of-Truth Order
 
@@ -19,8 +18,8 @@ This order matters because analytics and traces are derived surfaces.
 The analytics model is documented in:
 
 - `docs/analytics.md`
-- `moa-core/src/analytics.rs`
-- `moa-session/src/schema.rs`
+- `crates/moa-core/src/analytics.rs` (or whichever current path holds the analytics types)
+- `crates/moa-session/src/schema.rs`
 
 Key invariants:
 
@@ -49,7 +48,7 @@ Turn-latency and replay guidance lives in:
 
 - `docs/observability/turn-latency.md`
 - `docs/11-event-replay-runbook.md`
-- `moa-orchestrator/tests/live_observability.rs`
+- `crates/moa-orchestrator-local/tests/live_observability.rs`
 
 The important span structure is:
 
@@ -80,14 +79,14 @@ Ask these in order:
 Examples:
 
 - `ToolResult` exists but no `BrainResponse`: focus on post-tool continuation logic, not provider latency
-- `ApprovalRequested` exists and `ApprovalDecided` exists, but Temporal stays paused: focus on workflow signal handling or wait conditions
+- `ApprovalRequested` exists and `ApprovalDecided` exists, but the orchestrator stays paused: focus on signal handling or wait conditions
 - trace shows healthy `llm_call` and `tool_dispatch`, but session counts stay zero: focus on event persistence or aggregate-trigger execution
 
 ## Useful Commands
 
 ```bash
-PROTOC=/opt/homebrew/bin/protoc cargo test -p moa-session --test postgres_store -- --test-threads=1
-PROTOC=/opt/homebrew/bin/protoc cargo test -p moa-orchestrator --test live_observability live_observability_audit_tracks_cache_replay_and_latency -- --ignored --exact --nocapture
+cargo test -p moa-session --tests
+cargo test -p moa-orchestrator-local --test live_observability -- --ignored --nocapture
 ```
 
 Operational reads:
