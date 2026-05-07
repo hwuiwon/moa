@@ -1,0 +1,90 @@
+//! Wiremock offline counterpart for Turbopuffer vector-store live coverage.
+
+use moa_memory_vector::{TurbopufferStore, VECTOR_DIMENSION, VectorItem, VectorQuery, VectorStore};
+use secrecy::SecretString;
+use serde_json::json;
+use uuid::Uuid;
+use wiremock::matchers::{body_string_contains, method};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+#[tokio::test]
+async fn turbopuffer_offline_round_trip() {
+    let server = MockServer::start().await;
+    let uid = Uuid::now_v7();
+    Mock::given(method("POST"))
+        .and(body_string_contains("upsert_rows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rows_affected": 1,
+            "rows_upserted": 1
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("rank_by"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rows": [{ "id": uid.to_string(), "$dist": 0.2 }]
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("deletes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rows_affected": 1
+        })))
+        .mount(&server)
+        .await;
+
+    let store = TurbopufferStore::new(server.uri(), SecretString::from("test-key"), "test", false)
+        .expect("store");
+    let workspace_id = Uuid::now_v7().to_string();
+    store
+        .upsert(&[test_item(uid, &workspace_id)])
+        .await
+        .expect("upsert");
+    let matches = store
+        .knn(&VectorQuery {
+            workspace_id: Some(workspace_id.clone()),
+            embedding: basis_vector(0),
+            k: 10,
+            label_filter: Some(vec!["Fact".to_string()]),
+            max_pii_class: "restricted".to_string(),
+            include_global: false,
+        })
+        .await
+        .expect("query");
+    store
+        .delete_in_workspace(&workspace_id, &[uid])
+        .await
+        .expect("delete");
+
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].uid, uid);
+    assert!((matches[0].score - 0.8).abs() < f32::EPSILON);
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests");
+    assert_eq!(requests.len(), 3);
+}
+
+fn test_item(uid: Uuid, workspace_id: &str) -> VectorItem {
+    VectorItem {
+        uid,
+        workspace_id: Some(workspace_id.to_string()),
+        user_id: None,
+        label: "Fact".to_string(),
+        pii_class: "none".to_string(),
+        embedding: basis_vector(0),
+        embedding_model: "test-embed".to_string(),
+        embedding_model_version: 1,
+        valid_to: None,
+    }
+}
+
+fn basis_vector(index: usize) -> Vec<f32> {
+    let mut embedding = vec![0.0; VECTOR_DIMENSION];
+    embedding[index % VECTOR_DIMENSION] = 1.0;
+    embedding
+}

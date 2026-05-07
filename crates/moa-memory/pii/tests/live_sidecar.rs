@@ -1,3 +1,5 @@
+// Live counterpart: see openai_filter_offline.rs for the wiremock version that runs in PR CI.
+
 //! Live end-to-end tests against a running `moa-pii-service` container.
 
 use std::time::Duration;

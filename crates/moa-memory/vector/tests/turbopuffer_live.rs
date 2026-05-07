@@ -1,3 +1,5 @@
+// Live counterpart: see turbopuffer_offline.rs for the wiremock version that runs in PR CI.
+
 //! Live Turbopuffer integration tests.
 
 use moa_memory_vector::{TurbopufferStore, VECTOR_DIMENSION, VectorItem, VectorQuery, VectorStore};

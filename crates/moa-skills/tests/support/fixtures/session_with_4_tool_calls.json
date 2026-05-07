@@ -1,0 +1,14 @@
+{
+  "comment": "Fixture: successful session with four tool calls; proves sessions below the learning threshold are skipped.",
+  "session_id": "018f1a30-0000-7000-8000-000000000014",
+  "workspace_id": "skills-distillation-workspace",
+  "user_id": "skills-user",
+  "task": "debug oauth refresh regression with bash file search and validation",
+  "final_response": "OAuth refresh regression inspected but not distilled",
+  "tool_calls": [
+    { "tool_name": "bash", "input": { "cmd": "cargo test auth_refresh" }, "output": "failing auth refresh test" },
+    { "tool_name": "file_search", "input": { "query": "refresh token" }, "output": "found refresh handler" },
+    { "tool_name": "file_read", "input": { "path": "auth.rs" }, "output": "refresh handler source" },
+    { "tool_name": "bash", "input": { "cmd": "cargo test auth_refresh" }, "output": "still failing" }
+  ]
+}

@@ -1,0 +1,73 @@
+//! Wiremock offline counterpart for prompt-cache audit live coverage.
+
+mod support;
+
+use std::sync::Arc;
+
+use moa_brain::{TurnResult, build_default_pipeline, run_brain_turn};
+use moa_core::{Event, LLMProvider, MoaConfig, SessionStore};
+use moa_providers::OpenAIProvider;
+use wiremock::MockServer;
+
+use support::{MockSessionStore, captured_json_bodies, mount_openai_text, session_meta};
+
+#[tokio::test]
+async fn cache_audit_offline_tracks_stable_prefix_reuse_and_cached_usage() -> moa_core::Result<()> {
+    let server = MockServer::start().await;
+    mount_openai_text(&server, "READY", 8).await;
+
+    let mut config = MoaConfig::default();
+    config.general.default_provider = "openai".to_string();
+    config.models.main = "gpt-5.4".to_string();
+    config.query_rewrite.enabled = false;
+    config.general.workspace_instructions =
+        Some("Offline cache audit stable instruction block.\n".repeat(24));
+
+    let provider: Arc<dyn LLMProvider> = Arc::new(
+        OpenAIProvider::new("test-key", "gpt-5.4")?
+            .with_api_base(format!("{}/v1", server.uri()))?,
+    );
+    let session = session_meta("offline-cache-audit", "gpt-5.4");
+    let session_id = session.id;
+    let store = Arc::new(MockSessionStore::new(session, Vec::new()));
+    let pipeline = build_default_pipeline(&config, store.clone());
+
+    for prompt in [
+        "Reply with READY and nothing else.",
+        "Reply with STEADY and nothing else.",
+    ] {
+        store
+            .emit_event(
+                session_id,
+                Event::UserMessage {
+                    text: prompt.to_string(),
+                    attachments: Vec::new(),
+                },
+            )
+            .await?;
+        assert_eq!(
+            run_brain_turn(session_id, store.clone(), provider.clone(), &pipeline).await?,
+            TurnResult::Complete
+        );
+    }
+
+    let bodies = captured_json_bodies(&server).await;
+    assert_eq!(bodies.len(), 2);
+    let first_key = bodies[0]["prompt_cache_key"]
+        .as_str()
+        .expect("first request should carry prompt_cache_key");
+    let second_key = bodies[1]["prompt_cache_key"]
+        .as_str()
+        .expect("second request should carry prompt_cache_key");
+    assert_eq!(first_key, second_key);
+
+    let brain_responses = store
+        .all_events()
+        .await
+        .into_iter()
+        .filter(|record| matches!(record.event, Event::BrainResponse { .. }))
+        .count();
+    assert_eq!(brain_responses, 2);
+
+    Ok(())
+}

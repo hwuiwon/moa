@@ -1,3 +1,5 @@
+// Live counterpart: see gemini_offline.rs for the wiremock version that runs in PR CI.
+
 use std::time::Duration;
 
 use moa_core::{CompletionContent, CompletionRequest, LLMProvider};

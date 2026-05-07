@@ -44,6 +44,11 @@ where
     }
 
     span_recorder.record_raw_response(&state.debug_snapshot());
+    if !state.saw_terminal_finish {
+        return Err(MoaError::StreamError(
+            "Gemini stream ended before the provider returned a terminal finishReason".to_string(),
+        ));
+    }
     Ok(state.finish(started_at))
 }
 
@@ -59,6 +64,7 @@ struct GeminiStreamState {
     thought_signature: Option<String>,
     search_started_emitted: bool,
     search_completed_emitted: bool,
+    saw_terminal_finish: bool,
     last_raw_response: Option<GeminiGenerateContentResponse>,
 }
 
@@ -75,6 +81,7 @@ impl GeminiStreamState {
             thought_signature: None,
             search_started_emitted: false,
             search_completed_emitted: false,
+            saw_terminal_finish: false,
             last_raw_response: None,
         }
     }
@@ -150,6 +157,7 @@ impl GeminiStreamState {
             }
 
             if let Some(finish_reason) = candidate.finish_reason.as_deref() {
+                self.saw_terminal_finish = true;
                 self.stop_reason = finish_reason_to_stop_reason(finish_reason);
                 if candidate.grounding_metadata.is_some() && !self.search_completed_emitted {
                     self.search_completed_emitted = true;

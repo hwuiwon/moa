@@ -59,11 +59,15 @@ pub(crate) async fn stream_responses_with_retry(
                     }
                 }
             }
-            Err(error) if is_rate_limit_error(&error) => {
+            Err(error) if is_retryable_openai_error(&error) => {
                 if attempt >= retry_policy.max_retries {
-                    let error = MoaError::RateLimited {
-                        retries: retry_policy.max_retries,
-                        message: error.to_string(),
+                    let error = if is_rate_limit_error(&error) {
+                        MoaError::RateLimited {
+                            retries: retry_policy.max_retries,
+                            message: error.to_string(),
+                        }
+                    } else {
+                        map_openai_error(error)
                     };
                     span_recorder.fail_at_stage("transport", &error);
                     return Err(error);
@@ -122,7 +126,7 @@ async fn consume_responses_stream_once(
             Ok(event) => event,
             Err(error) if is_ignorable_openai_stream_error(&error) => continue,
             Err(error) => {
-                let retryable = is_rate_limit_error(&error);
+                let retryable = is_retryable_openai_error(&error);
                 return Err(ResponsesStreamError {
                     error: map_openai_error(error),
                     retryable,
@@ -313,6 +317,11 @@ fn map_openai_error(error: OpenAIError) -> MoaError {
 
             MoaError::ProviderError(format!("provider request failed: {error}"))
         }
+        OpenAIError::ApiError(error) if is_server_error_api_error(&error) => MoaError::HttpStatus {
+            status: 500,
+            retry_after: None,
+            message: error.to_string(),
+        },
         OpenAIError::ApiError(error) => MoaError::ProviderError(error.to_string()),
         OpenAIError::JSONDeserialize(error, content) => MoaError::SerializationError(format!(
             "failed to decode provider response: {error}; content: {content}"
@@ -323,6 +332,23 @@ fn map_openai_error(error: OpenAIError) -> MoaError {
         OpenAIError::StreamError(error) => MoaError::StreamError(error.to_string()),
         OpenAIError::InvalidArgument(error) => MoaError::ValidationError(error),
     }
+}
+
+fn is_retryable_openai_error(error: &OpenAIError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    is_rate_limit_error(error)
+        || match error {
+            OpenAIError::Reqwest(error) => error
+                .status()
+                .is_some_and(|status| status.is_server_error()),
+            OpenAIError::ApiError(error) => is_server_error_api_error(error),
+            _ => false,
+        }
+        || message.contains("server_error")
+        || message.contains("upstream unavailable")
+        || message.contains("internal server error")
+        || message.contains("status 500")
+        || message.contains("http 500")
 }
 
 fn is_rate_limit_error(error: &OpenAIError) -> bool {
@@ -340,6 +366,27 @@ fn is_rate_limit_error(error: &OpenAIError) -> bool {
                 || generic_message.contains("too many requests")
         }
     }
+}
+
+fn is_server_error_api_error(error: &async_openai::error::ApiError) -> bool {
+    error
+        .r#type
+        .as_deref()
+        .is_some_and(|kind| kind.contains("server") || kind.contains("temporar"))
+        || error
+            .code
+            .as_deref()
+            .is_some_and(|code| code.contains("server") || code.contains("temporar"))
+        || error.message.to_ascii_lowercase().contains("server error")
+        || error.message.to_ascii_lowercase().contains("server_error")
+        || error
+            .message
+            .to_ascii_lowercase()
+            .contains("upstream unavailable")
+        || error
+            .message
+            .to_ascii_lowercase()
+            .contains("temporarily unavailable")
 }
 
 fn is_rate_limit_message(message: &str) -> bool {

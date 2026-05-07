@@ -1,3 +1,5 @@
+// No offline counterpart possible because: this live file verifies real E2B sandbox provisioning, lifecycle, and filesystem isolation semantics that a local HTTP mock cannot emulate.
+
 //! Live E2B integration tests.
 //!
 //! These tests are ignored by default because they provision real E2B sandboxes

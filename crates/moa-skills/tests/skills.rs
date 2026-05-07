@@ -30,6 +30,18 @@ async fn set_app_role(conn: &mut PgConnection) -> Result<()> {
     Ok(())
 }
 
+async fn purge_test_skill_name(
+    store: &moa_session::PostgresSessionStore,
+    skill_name: &str,
+) -> Result<()> {
+    sqlx::query("DELETE FROM moa.skill WHERE name = $1")
+        .bind(skill_name)
+        .execute(store.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
 fn map_sqlx_error(error: sqlx::Error) -> MoaError {
     MoaError::StorageError(error.to_string())
 }
@@ -104,6 +116,7 @@ async fn registry_lists_skill_metadata() -> Result<()> {
     let _guard = GRAPH_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
+    purge_test_skill_name(&store, "scope-skill").await?;
     let workspace_name = format!("workspace-{}", Uuid::now_v7());
     let scope = workspace_scope(&workspace_name);
     let skill = parse_skill_markdown(DISTILLED_SKILL)?;
@@ -130,6 +143,7 @@ async fn registry_upsert_is_idempotent_and_versions_changed_bodies() -> Result<(
     let _guard = GRAPH_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
+    purge_test_skill_name(&store, "scope-skill").await?;
     let workspace_name = format!("workspace-versioned-{}", Uuid::now_v7());
     let scope = workspace_scope(&workspace_name);
     let registry = SkillRegistry::new(store.pool().clone());

@@ -1,0 +1,9 @@
+# Source: OpenAI Responses streaming API docs, captured offline 2026-05-07.
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","created_at":1,"model":"gpt-5.4","output":[],"status":"in_progress"}}
+
+data: {"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"Hel","logprobs":null}
+
+data: {"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"lo","logprobs":null}
+
+data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_1","object":"response","created_at":1,"completed_at":2,"model":"gpt-5.4","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello","annotations":[],"logprobs":null}]}],"status":"completed","usage":{"input_tokens":8,"input_tokens_details":{"cached_tokens":0},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":13}}}
+

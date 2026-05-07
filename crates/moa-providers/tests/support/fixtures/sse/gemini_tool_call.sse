@@ -1,0 +1,3 @@
+# Source: Gemini function-call streaming API docs, captured offline 2026-05-07.
+data: {"candidates":[{"content":{"parts":[{"functionCall":{"id":"fc_stream_1","name":"emit_token","args":{"token":"OFFLINE"}},"thoughtSignature":"sig_stream_1"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4},"modelVersion":"gemini-2.5-flash"}
+

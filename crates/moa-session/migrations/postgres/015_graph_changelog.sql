@@ -76,12 +76,24 @@ CREATE TABLE IF NOT EXISTS moa.workspace_state (
     vector_backend_state TEXT NOT NULL DEFAULT 'steady'
         CHECK (vector_backend_state IN ('steady', 'migrating', 'dual_read')),
     dual_read_until TIMESTAMPTZ,
+    embedding_model TEXT NOT NULL DEFAULT 'cohere-embed-v4',
+    embedding_model_version INT NOT NULL DEFAULT 1,
+    embedding_dimension INT NOT NULL DEFAULT 1024 CHECK (embedding_dimension > 0),
+    reembed_state TEXT NOT NULL DEFAULT 'steady'
+        CHECK (reembed_state IN ('steady', 'in_progress')),
     hipaa_tier TEXT NOT NULL DEFAULT 'standard'
         CHECK (hipaa_tier IN ('standard', 'hipaa', 'restricted')),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (user_id IS NULL),
     CHECK (scope = 'workspace')
 );
+
+ALTER TABLE moa.workspace_state
+    ADD COLUMN IF NOT EXISTS embedding_model TEXT NOT NULL DEFAULT 'cohere-embed-v4',
+    ADD COLUMN IF NOT EXISTS embedding_model_version INT NOT NULL DEFAULT 1,
+    ADD COLUMN IF NOT EXISTS embedding_dimension INT NOT NULL DEFAULT 1024 CHECK (embedding_dimension > 0),
+    ADD COLUMN IF NOT EXISTS reembed_state TEXT NOT NULL DEFAULT 'steady'
+        CHECK (reembed_state IN ('steady', 'in_progress'));
 
 CREATE INDEX IF NOT EXISTS workspace_state_version_idx
     ON moa.workspace_state (workspace_id, changelog_version);

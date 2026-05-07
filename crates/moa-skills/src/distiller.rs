@@ -13,12 +13,47 @@ use moa_session::{PostgresSessionStore, create_session_store};
 use crate::format::{
     SkillDocument, build_skill_path, parse_skill_markdown, skill_metadata_from_document,
 };
-use crate::improver::{format_events_for_learning, normalize_llm_markdown, record_successful_use};
+use crate::improver::{
+    ImprovementResult, format_events_for_learning, normalize_llm_markdown, record_successful_use,
+};
 use crate::registry::{NewSkill, SkillRegistry};
 use crate::regression::generate_skill_test_suite;
 
-const MIN_TOOL_CALLS_FOR_DISTILLATION: usize = 5;
-const SIMILARITY_THRESHOLD: f32 = 0.5;
+/// Minimum number of tool calls required before a successful session can become a skill.
+pub const MIN_TOOL_CALLS_FOR_DISTILLATION: usize = 5;
+/// Similarity score at or above which distillation routes to existing-skill improvement.
+pub const SIMILARITY_THRESHOLD: f32 = 0.5;
+
+/// Reason a session was not distilled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DistillationSkipReason {
+    /// The session did not contain enough tool calls to justify distillation.
+    BelowThreshold,
+    /// The session failed, so it must not seed a reusable skill.
+    Failure,
+}
+
+/// Typed outcome of one skill-distillation attempt.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DistillationOutcome {
+    /// A new skill was proposed and persisted when a learning store was available.
+    NewSkillProposed {
+        /// Metadata for the proposed skill.
+        skill: SkillMetadata,
+    },
+    /// The session was routed to improvement of a similar existing skill.
+    ImprovementProposed {
+        /// Existing skill selected by similarity routing.
+        existing_skill_id: String,
+        /// Metadata for the improved skill when an update was accepted.
+        skill: Option<SkillMetadata>,
+    },
+    /// Distillation was intentionally skipped.
+    Skipped {
+        /// Stable skip reason.
+        reason: DistillationSkipReason,
+    },
+}
 
 /// Distills a successful multi-step session into a reusable workspace skill when appropriate.
 pub async fn maybe_distill_skill(
@@ -40,8 +75,31 @@ pub async fn maybe_distill_skill_with_learning(
     model_router: Arc<ModelRouter>,
     learning_store: Option<Arc<PostgresSessionStore>>,
 ) -> Result<Option<SkillMetadata>> {
+    match distill_skill_with_learning(config, session, events, model_router, learning_store).await?
+    {
+        DistillationOutcome::NewSkillProposed { skill } => Ok(Some(skill)),
+        DistillationOutcome::ImprovementProposed { skill, .. } => Ok(skill),
+        DistillationOutcome::Skipped { .. } => Ok(None),
+    }
+}
+
+/// Distills a successful session and returns the exact routing outcome.
+pub async fn distill_skill_with_learning(
+    config: &MoaConfig,
+    session: &SessionMeta,
+    events: &[EventRecord],
+    model_router: Arc<ModelRouter>,
+    learning_store: Option<Arc<PostgresSessionStore>>,
+) -> Result<DistillationOutcome> {
     if count_tool_calls(events) < MIN_TOOL_CALLS_FOR_DISTILLATION {
-        return Ok(None);
+        return Ok(DistillationOutcome::Skipped {
+            reason: DistillationSkipReason::BelowThreshold,
+        });
+    }
+    if session_failed(session, events) {
+        return Ok(DistillationOutcome::Skipped {
+            reason: DistillationSkipReason::Failure,
+        });
     }
 
     let task_summary = extract_task_summary(events);
@@ -54,7 +112,8 @@ pub async fn maybe_distill_skill_with_learning(
     };
 
     if let Some(existing) = find_similar_skill(&task_summary, &existing_skills) {
-        return crate::improver::maybe_improve_skill_with_learning(
+        let existing_skill_id = existing.name.clone();
+        let result = crate::improver::improve_skill_with_learning(
             config,
             session,
             existing,
@@ -63,6 +122,15 @@ pub async fn maybe_distill_skill_with_learning(
             learning_store,
         )
         .await;
+        return result.map(|result| DistillationOutcome::ImprovementProposed {
+            existing_skill_id,
+            skill: match result {
+                ImprovementResult::Improved { metadata, .. } => Some(metadata),
+                ImprovementResult::Unchanged { .. }
+                | ImprovementResult::Rejected { .. }
+                | ImprovementResult::Skipped => None,
+            },
+        });
     }
 
     let llm = model_router.provider_for(ModelTask::SkillDistillation);
@@ -106,7 +174,7 @@ pub async fn maybe_distill_skill_with_learning(
     }
 
     let metadata = skill_metadata_from_document(path, &skill);
-    Ok(Some(metadata))
+    Ok(DistillationOutcome::NewSkillProposed { skill: metadata })
 }
 
 fn render_skill_for_registry(skill: &SkillDocument) -> Result<String> {
@@ -144,6 +212,13 @@ fn count_tool_calls(events: &[EventRecord]) -> usize {
         .iter()
         .filter(|record| matches!(record.event, Event::ToolCall { .. }))
         .count()
+}
+
+fn session_failed(session: &SessionMeta, events: &[EventRecord]) -> bool {
+    session.status == moa_core::SessionStatus::Failed
+        || events
+            .iter()
+            .any(|record| matches!(record.event, Event::ToolError { .. } | Event::Error { .. }))
 }
 
 fn extract_task_summary(events: &[EventRecord]) -> String {
@@ -220,6 +295,9 @@ fn normalize_new_skill(session: &SessionMeta, skill: &mut SkillDocument) {
     skill
         .frontmatter
         .set_source_session(Some(session.id.to_string()));
+    skill
+        .frontmatter
+        .set_derived_from_session(Some(session.id.to_string()));
     skill.frontmatter.set_updated(now);
     record_successful_use(skill, now);
     if skill.frontmatter.use_count() == 0 {

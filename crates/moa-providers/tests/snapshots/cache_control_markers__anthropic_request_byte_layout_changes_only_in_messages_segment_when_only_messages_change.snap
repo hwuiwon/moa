@@ -1,0 +1,17 @@
+---
+source: crates/moa-providers/tests/anthropic-cache-markers.rs
+expression: value
+---
+{
+  "changed": [
+    "messages"
+  ],
+  "unchanged": [
+    "max_tokens",
+    "model",
+    "stream",
+    "system",
+    "temperature",
+    "tools"
+  ]
+}

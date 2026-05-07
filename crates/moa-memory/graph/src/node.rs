@@ -186,6 +186,11 @@ pub struct NodeWriteIntent {
 }
 
 /// Looks up graph nodes by name using the `moa.node_index` full-text projection.
+///
+/// Results are ordered first by text rank and then by the documented memory rank:
+/// `0.55 * recency_decay + 0.35 * confidence + 0.10 * normalized_reference_count`,
+/// where recency decay is `1 / (1 + age_days)` and references are log-normalized up to
+/// 100 references.
 pub async fn lookup_seed_by_name(
     conn: &mut PgConnection,
     name: &str,
@@ -203,7 +208,12 @@ pub async fn lookup_seed_by_name(
         WHERE valid_to IS NULL
           AND name_tsv @@ plainto_tsquery('simple', $1)
         ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', $1)) DESC,
-                 last_accessed_at DESC
+                 (
+                   0.55 * (1.0 / (1.0 + GREATEST(EXTRACT(EPOCH FROM (now() - valid_from)) / 86400.0, 0.0))) +
+                   0.35 * LEAST(GREATEST(COALESCE(confidence, 0.0), 0.0), 1.0) +
+                   0.10 * (LN(LEAST(reference_count, 100)::DOUBLE PRECISION + 1.0) / LN(101.0))
+                 ) DESC,
+                 uid ASC
         LIMIT $2
         "#,
     )

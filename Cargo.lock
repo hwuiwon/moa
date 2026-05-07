@@ -3352,6 +3352,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
  "workspace-hack",
 ]
 
@@ -3668,6 +3669,8 @@ dependencies = [
  "moa-core",
  "moa-memory-vector",
  "moa-session",
+ "moa-test-support",
+ "proptest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3721,6 +3724,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "wiremock",
  "workspace-hack",
 ]
 
@@ -3733,7 +3737,9 @@ dependencies = [
  "chrono",
  "moa-core",
  "moa-session",
+ "moa-test-support",
  "pgvector",
+ "proptest",
  "reqwest 0.13.2",
  "secrecy 0.10.3",
  "serde",
@@ -3741,6 +3747,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
  "wiremock",
  "workspace-hack",
@@ -3817,6 +3824,7 @@ dependencies = [
  "futures-util",
  "insta",
  "moa-core",
+ "moa-test-support",
  "opentelemetry",
  "reqwest 0.13.2",
  "serde",
@@ -3824,6 +3832,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-opentelemetry",
+ "wiremock",
  "workspace-hack",
 ]
 
@@ -3895,18 +3904,21 @@ dependencies = [
 name = "moa-skills"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "moa-core",
  "moa-eval",
  "moa-memory-graph",
  "moa-providers",
  "moa-session",
+ "moa-test-support",
  "moka",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
  "sqlx",
+ "tempfile",
  "tokio",
  "toml 0.8.23",
  "tracing",

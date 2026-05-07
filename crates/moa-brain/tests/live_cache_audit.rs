@@ -1,3 +1,5 @@
+// Live counterpart: see cache_audit_offline.rs for the wiremock version that runs in PR CI.
+
 //! Live cache audit coverage for prompt caching behavior across turns, sessions, and model switches.
 
 use std::collections::hash_map::DefaultHasher;

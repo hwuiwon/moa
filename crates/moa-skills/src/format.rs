@@ -17,6 +17,7 @@ const META_CREATED: &str = "moa-created";
 const META_UPDATED: &str = "moa-updated";
 const META_AUTO_GENERATED: &str = "moa-auto-generated";
 const META_SOURCE_SESSION: &str = "moa-source-session";
+const META_DERIVED_FROM_SESSION: &str = "derived-from-session";
 const META_USE_COUNT: &str = "moa-use-count";
 const META_LAST_USED: &str = "moa-last-used";
 const META_SUCCESS_RATE: &str = "moa-success-rate";
@@ -113,6 +114,10 @@ impl SkillFrontmatter {
 
     pub(crate) fn set_source_session(&mut self, value: Option<String>) {
         self.set_optional_metadata(META_SOURCE_SESSION, value);
+    }
+
+    pub(crate) fn set_derived_from_session(&mut self, value: Option<String>) {
+        self.set_optional_metadata(META_DERIVED_FROM_SESSION, value);
     }
 
     /// Returns how many times MOA has used this skill.

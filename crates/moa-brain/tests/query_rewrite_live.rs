@@ -1,3 +1,5 @@
+// Live counterpart: see query_rewrite_offline.rs for the wiremock version that runs in PR CI.
+
 //! Ignored live smoke test for query rewrite quality.
 
 use std::sync::Arc;

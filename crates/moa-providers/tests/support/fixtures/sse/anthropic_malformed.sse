@@ -1,0 +1,4 @@
+# Source: Synthetic malformed Anthropic SSE fixture, captured offline 2026-05-07.
+event: message_start
+data: {not json}
+

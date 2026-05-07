@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use moa_core::{ScopeContext, ScopedConn};
 use pgvector::HalfVector;
-use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::{
@@ -74,17 +74,18 @@ impl VectorStore for PgvectorStore {
 
     async fn upsert(&self, items: &[VectorItem]) -> Result<()> {
         let mut conn = self.begin().await?;
+        ensure_default_workspace_embedder(conn.as_mut(), items).await?;
         upsert_items(conn.as_mut(), items).await?;
         conn.commit().await?;
         Ok(())
     }
 
     async fn upsert_in_tx(&self, conn: &mut PgConnection, items: &[VectorItem]) -> Result<()> {
+        ensure_default_workspace_embedder(conn, items).await?;
         upsert_items(conn, items).await
     }
 
     async fn knn(&self, query: &VectorQuery) -> Result<Vec<VectorMatch>> {
-        validate_dimension(&query.embedding)?;
         let limit = i64::try_from(query.k).map_err(|_| Error::QueryLimitTooLarge(query.k))?;
         let max_pii_rank = pii_rank(&query.max_pii_class)?;
         if limit <= 0 {
@@ -92,6 +93,8 @@ impl VectorStore for PgvectorStore {
         }
 
         let mut conn = self.begin().await?;
+        guard_workspace_embedder(conn.as_mut(), query).await?;
+        validate_dimension(&query.embedding)?;
         let halfvec = HalfVector::from_f32_slice(&query.embedding);
         let mut builder = QueryBuilder::<Postgres>::new("SELECT uid, (1.0 - (embedding <=> ");
         builder.push_bind(halfvec.clone());
@@ -150,6 +153,83 @@ impl VectorStore for PgvectorStore {
     async fn delete_in_tx(&self, conn: &mut PgConnection, uids: &[Uuid]) -> Result<()> {
         delete_items(conn, uids).await
     }
+}
+
+async fn ensure_default_workspace_embedder(
+    conn: &mut PgConnection,
+    items: &[VectorItem],
+) -> Result<()> {
+    for workspace_id in items.iter().filter_map(|item| item.workspace_id.as_deref()) {
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO moa.workspace_state
+                (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+            VALUES ($1, 'cohere-embed-v4', 1, $2)
+            ON CONFLICT (workspace_id) DO NOTHING
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(i32::try_from(VECTOR_DIMENSION).unwrap_or(i32::MAX))
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        if inserted > 0 {
+            tracing::warn!(
+                workspace_id,
+                embedding_model = "cohere-embed-v4",
+                embedding_dimension = VECTOR_DIMENSION,
+                "workspace had no embedder configuration; using default embedder"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn guard_workspace_embedder(conn: &mut PgConnection, query: &VectorQuery) -> Result<()> {
+    let Some(workspace_id) = query.workspace_id.as_deref() else {
+        return Ok(());
+    };
+    let row = sqlx::query(
+        r#"
+        SELECT embedding_model, embedding_dimension, reembed_state
+          FROM moa.workspace_state
+         WHERE workspace_id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    let Some(row) = row else {
+        tracing::warn!(
+            workspace_id,
+            embedding_model = "cohere-embed-v4",
+            embedding_dimension = VECTOR_DIMENSION,
+            "workspace had no embedder configuration; falling back to default embedder"
+        );
+        return Ok(());
+    };
+
+    let reembed_state: String = row.try_get("reembed_state")?;
+    if reembed_state == "in_progress" {
+        return Err(Error::ReembedInProgress {
+            workspace_id: workspace_id.to_string(),
+        });
+    }
+
+    let configured_model: String = row.try_get("embedding_model")?;
+    let configured_dimension: i32 = row.try_get("embedding_dimension")?;
+    let configured_dimension = usize::try_from(configured_dimension).unwrap_or(0);
+    if configured_dimension != VECTOR_DIMENSION {
+        return Err(Error::EmbedderMismatch {
+            workspace_id: workspace_id.to_string(),
+            configured_model,
+            configured_dimension,
+            required_dimension: VECTOR_DIMENSION,
+        });
+    }
+
+    Ok(())
 }
 
 async fn upsert_items(conn: &mut PgConnection, items: &[VectorItem]) -> Result<()> {

@@ -38,3 +38,4 @@ moa-session = { path = "../moa-session" }
 proptest = "1"
 tempfile.workspace = true
 tracing-subscriber.workspace = true
+wiremock = "0.6"

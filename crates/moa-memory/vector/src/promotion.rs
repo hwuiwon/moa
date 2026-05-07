@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use pgvector::HalfVector;
+use serde_json::json;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -44,11 +45,165 @@ pub struct PromotionReport {
     pub vector_backend_state: String,
 }
 
+/// Summary returned after promoting one workspace-scoped node to global scope.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodePromotionReport {
+    /// Stable graph node UID preserved for citations.
+    pub uid: Uuid,
+    /// Workspace the node was promoted from.
+    pub source_workspace_id: String,
+    /// Validity timestamp assigned to the promoted global row.
+    pub valid_from: DateTime<Utc>,
+}
+
 /// Workspace promotion engine.
 pub struct WorkspacePromotion {
     pool: PgPool,
     source: Arc<dyn VectorStore>,
     target: Arc<dyn VectorStore>,
+}
+
+/// Promotes one workspace-scoped graph node to global scope while preserving its UID.
+///
+/// The current graph sidecar stores one row per UID, so promotion moves the active row to global
+/// scope in place and records a workspace supersession changelog row followed by a global create
+/// changelog row. Citation references continue to resolve through the same UID.
+pub async fn promote_workspace_node_to_global(
+    pool: &PgPool,
+    workspace_id: &str,
+    uid: Uuid,
+) -> Result<NodePromotionReport> {
+    let mut tx = pool.begin().await?;
+    let global_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1 FROM moa.node_index
+             WHERE uid = $1 AND workspace_id IS NULL AND user_id IS NULL AND valid_to IS NULL
+        )",
+    )
+    .bind(uid)
+    .fetch_one(&mut *tx)
+    .await?;
+    if global_exists {
+        return Err(Error::PromotionUidCollision { uid });
+    }
+
+    let row = sqlx::query(
+        r#"
+        SELECT node.label,
+               node.pii_class,
+               node.properties_summary,
+               embedding.embedding_model,
+               embedding.embedding_model_version
+          FROM moa.node_index AS node
+          LEFT JOIN moa.embeddings AS embedding
+            ON embedding.uid = node.uid
+           AND embedding.workspace_id IS NOT DISTINCT FROM node.workspace_id
+           AND embedding.user_id IS NOT DISTINCT FROM node.user_id
+         WHERE node.uid = $1
+           AND node.workspace_id = $2
+           AND node.user_id IS NULL
+           AND node.valid_to IS NULL
+         FOR UPDATE OF node
+        "#,
+    )
+    .bind(uid)
+    .bind(workspace_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| Error::InvalidPromotionState {
+        state: "missing_workspace_node".to_string(),
+        operation: "promote workspace node to global",
+    })?;
+
+    let label: String = row.try_get("label")?;
+    let pii_class: String = row.try_get("pii_class")?;
+    let properties: serde_json::Value = row
+        .try_get::<Option<serde_json::Value>, _>("properties_summary")?
+        .unwrap_or_else(|| json!({}));
+    let now = Utc::now();
+    let old_change = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO moa.graph_changelog
+            (workspace_id, actor_kind, op, target_kind, target_label, target_uid, payload,
+             pii_class)
+        VALUES ($1, 'promoter', 'supersede', 'node', $2, $3, $4, $5)
+        RETURNING change_id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(&label)
+    .bind(uid)
+    .bind(json!({
+        "valid_to": now.to_rfc3339(),
+        "replacement_uid": uid,
+        "promotion_scope": "global",
+    }))
+    .bind(&pii_class)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE moa.node_index
+           SET workspace_id = NULL,
+               user_id = NULL,
+               valid_from = $3,
+               properties_summary = jsonb_set(
+                   COALESCE(properties_summary, '{}'::jsonb),
+                   '{promoted_from_workspace}',
+                   to_jsonb($2::TEXT),
+                   true
+               )
+         WHERE uid = $1
+           AND workspace_id = $2
+           AND user_id IS NULL
+           AND valid_to IS NULL
+        "#,
+    )
+    .bind(uid)
+    .bind(workspace_id)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE moa.embeddings
+           SET workspace_id = NULL,
+               user_id = NULL
+         WHERE uid = $1
+           AND workspace_id = $2
+           AND user_id IS NULL
+           AND valid_to IS NULL
+        "#,
+    )
+    .bind(uid)
+    .bind(workspace_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.graph_changelog
+            (workspace_id, actor_kind, op, target_kind, target_label, target_uid, payload,
+             pii_class, cause_change_id)
+        VALUES (NULL, 'promoter', 'create', 'node', $1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(&label)
+    .bind(uid)
+    .bind(json!({ "after": properties, "promoted_from_workspace": workspace_id }))
+    .bind(&pii_class)
+    .bind(old_change)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(NodePromotionReport {
+        uid,
+        source_workspace_id: workspace_id.to_string(),
+        valid_from: now,
+    })
 }
 
 impl WorkspacePromotion {
