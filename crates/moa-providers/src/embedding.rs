@@ -10,7 +10,7 @@ use moa_core::{MoaConfig, MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::http::build_http_client;
+use crate::core::http::build_http_client;
 
 pub use moa_core::traits::EmbeddingProvider;
 
