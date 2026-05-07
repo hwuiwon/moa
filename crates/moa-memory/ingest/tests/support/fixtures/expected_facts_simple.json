@@ -1,0 +1,27 @@
+{
+  "_comment": "Hand-curated ground truth. Methodology: one expected structured fact per explicit Fact line in document_simple.md.",
+  "facts": [
+    {
+      "subject": "auth_service",
+      "predicate": "uses",
+      "object": "JWT",
+      "pii_class": "none",
+      "confidence": 0.7
+    },
+    {
+      "subject": "API",
+      "predicate": "runs_on_port",
+      "object": "3000",
+      "pii_class": "none",
+      "confidence": 0.7
+    },
+    {
+      "subject": "worker_queue",
+      "predicate": "uses",
+      "object": "Redis",
+      "pii_class": "none",
+      "confidence": 0.7
+    }
+  ]
+}
+

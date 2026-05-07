@@ -1,0 +1,47 @@
+---
+source: crates/moa-gateway/tests/buttons.rs
+expression: value
+---
+[
+  {
+    "text": {
+      "text": "🔴 Approval required: bash\nnpm test\nRequest: 018f6d7a-0b0c-7d00-8000-000000000001",
+      "type": "mrkdwn"
+    },
+    "type": "section"
+  },
+  {
+    "elements": [
+      {
+        "action_id": "allow",
+        "style": "primary",
+        "text": {
+          "text": "Allow",
+          "type": "plain_text"
+        },
+        "type": "button",
+        "value": "ap:o:018f6d7a-0b0c-7d00-8000-000000000001"
+      },
+      {
+        "action_id": "always",
+        "text": {
+          "text": "Always",
+          "type": "plain_text"
+        },
+        "type": "button",
+        "value": "ap:a:018f6d7a-0b0c-7d00-8000-000000000001"
+      },
+      {
+        "action_id": "deny",
+        "style": "danger",
+        "text": {
+          "text": "Deny",
+          "type": "plain_text"
+        },
+        "type": "button",
+        "value": "ap:d:018f6d7a-0b0c-7d00-8000-000000000001"
+      }
+    ],
+    "type": "actions"
+  }
+]

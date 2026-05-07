@@ -179,6 +179,19 @@ impl SlackAdapter {
     }
 }
 
+/// Normalizes one Slack Events API callback JSON payload into MOA's canonical inbound shape.
+pub fn normalize_event_json(payload: &str) -> Result<InboundMessage> {
+    let event: SlackPushEventCallback = serde_json::from_str(payload)?;
+    normalize_push_event(&event)
+}
+
+/// Normalizes one parsed Slack push event into MOA's canonical inbound shape.
+pub fn normalize_push_event(event: &SlackPushEventCallback) -> Result<InboundMessage> {
+    inbound_from_push_event(event).ok_or_else(|| {
+        MoaError::ValidationError("slack event is not a supported user message".to_string())
+    })
+}
+
 #[async_trait]
 impl PlatformAdapter for SlackAdapter {
     /// Returns the adapter platform identifier.

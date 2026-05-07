@@ -11,6 +11,8 @@ use uuid::Uuid;
 use crate::{IngestError, Result};
 
 const APPROX_CHARS_PER_TOKEN: usize = 4;
+/// Maximum chunk length accepted by the checked deterministic extractor.
+pub const MAX_EXTRACT_CHUNK_CHARS: usize = 32_768;
 
 /// Finalized session turn payload sent to the slow-path ingestion VO.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -177,6 +179,39 @@ pub fn extract_facts(chunks: &[TurnChunk]) -> Vec<ExtractedFact> {
         .collect()
 }
 
+/// Extracts deterministic fact candidates after validating chunk size.
+///
+/// The local extractor keeps size validation separate from [`extract_facts`] so existing Restate
+/// journals that call the original helper stay byte-compatible while tests and future production
+/// callers can fail with a typed error before oversized chunks reach model-backed extractors.
+pub fn extract_facts_checked(chunks: &[TurnChunk]) -> Result<Vec<ExtractedFact>> {
+    for chunk in chunks {
+        let actual_chars = chunk.text.chars().count();
+        if actual_chars > MAX_EXTRACT_CHUNK_CHARS {
+            return Err(IngestError::ChunkTooLarge {
+                index: chunk.index,
+                actual_chars,
+                max_chars: MAX_EXTRACT_CHUNK_CHARS,
+            });
+        }
+    }
+    Ok(extract_facts(chunks))
+}
+
+/// Returns a deterministic confidence hint for one extracted fact summary.
+#[must_use]
+pub fn extraction_confidence_hint(summary: &str) -> f64 {
+    let lower = summary.to_ascii_lowercase();
+    if ["probably", "maybe", "might", "likely", "appears to"]
+        .into_iter()
+        .any(|marker| lower.contains(marker))
+    {
+        0.45
+    } else {
+        0.70
+    }
+}
+
 /// Returns the canonical fact hash bytes used by `moa.ingest_dedup`.
 pub fn fact_hash(fact: &ExtractedFact) -> Result<Vec<u8>> {
     Ok(fact_hash_parts(
@@ -275,9 +310,19 @@ fn candidate_fact_summaries(text: &str) -> Vec<String> {
 
     text.split(['.', '!', '?'])
         .map(str::trim)
+        .filter(|sentence| !is_non_declarative(sentence))
         .filter(|sentence| sentence.split_whitespace().count() >= 4)
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn is_non_declarative(sentence: &str) -> bool {
+    let lower = sentence.trim().to_ascii_lowercase();
+    [
+        "should ", "could ", "would ", "can ", "please ", "review ", "do ",
+    ]
+    .into_iter()
+    .any(|prefix| lower.starts_with(prefix))
 }
 
 fn extracted_fact_from_summary(source_chunk: usize, summary: String) -> ExtractedFact {

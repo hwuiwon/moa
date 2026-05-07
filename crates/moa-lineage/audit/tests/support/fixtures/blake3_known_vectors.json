@@ -1,0 +1,25 @@
+{
+  "source": {
+    "name": "BLAKE3 official test vector input cases",
+    "url": "https://github.com/BLAKE3-team/BLAKE3/blob/master/test_vectors/test_vectors.json",
+    "captured_at": "2026-05-07",
+    "note": "Inputs are selected official vector sizes; expected roots pin MOA's domain-separated BLAKE3 Merkle construction."
+  },
+  "cases": [
+    {
+      "name": "single_empty",
+      "leaves_hex": [""],
+      "expected_root_hex": "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213"
+    },
+    {
+      "name": "balanced_4",
+      "leaves_utf8": ["record-0", "record-1", "record-2", "record-3"],
+      "expected_root_hex": "bc55230abe529030c6bfb97dff72f33c04a878e8559f70a0a48a310e64c89d57"
+    },
+    {
+      "name": "unbalanced_5",
+      "leaves_utf8": ["record-0", "record-1", "record-2", "record-3", "record-4"],
+      "expected_root_hex": "f3e59a834f25dd113b4fdbfc0937edca603bc51bb215d8de1037f6038ae4ddbe"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{"record_id":"usr1-001","timestamp":"2026-05-07T12:00:00Z","event_type":"session_started","user_id":"user-001","payload":{"message":"session started"}}
+{"record_id":"usr1-002","timestamp":"2026-05-07T12:00:01Z","event_type":"user_message","user_id":"user-001","payload":{"message":"my name is Test User"}}
+{"record_id":"usr1-003","timestamp":"2026-05-07T12:00:02Z","event_type":"tool_call","user_id":"user-001","payload":{"tool":"file_read","path":"notes.md"}}
+{"record_id":"usr1-004","timestamp":"2026-05-07T12:00:03Z","event_type":"memory_fact","user_id":"user-001","payload":{"fact":{"classification":"phi","field":"diagnosis","value":"hypertension"}}}
+{"record_id":"usr1-005","timestamp":"2026-05-07T12:00:04Z","event_type":"assistant_response","user_id":"user-001","payload":{"message":"I found the note."}}
+{"record_id":"usr2-001","timestamp":"2026-05-07T12:00:05Z","event_type":"session_started","user_id":"user-002","payload":{"message":"other session"}}
+{"record_id":"usr2-002","timestamp":"2026-05-07T12:00:06Z","event_type":"user_message","user_id":"user-002","payload":{"message":"other user message"}}
+{"record_id":"usr2-003","timestamp":"2026-05-07T12:00:07Z","event_type":"assistant_response","user_id":"user-002","payload":{"message":"other response"}}

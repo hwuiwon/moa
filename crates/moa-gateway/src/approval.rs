@@ -1,8 +1,8 @@
 //! Unified approval rendering and callback handling across platform adapters.
 
 use moa_core::{
-    ActionButton, ApprovalRequest, ButtonStyle, MessageContent, OutboundMessage, Platform,
-    PlatformCapabilities,
+    ActionButton, ApprovalDecision, ApprovalRequest, ButtonStyle, MessageContent, OutboundMessage,
+    Platform, PlatformCapabilities,
 };
 use uuid::Uuid;
 
@@ -116,6 +116,37 @@ pub fn approval_buttons(platform: Platform, request_id: Uuid) -> Vec<ActionButto
             callback_data: ApprovalCallbackAction::Deny { request_id }.encode(),
         },
     ]
+}
+
+/// Builds the visual post-decision approval controls for a platform.
+///
+/// Slack removes stale action buttons after a decision. Telegram cannot disable inline
+/// buttons, so it replaces them with a single inert status button. Discord carries the
+/// same labels into disabled component rendering via the Discord adapter helper.
+pub fn resolved_approval_buttons(
+    platform: Platform,
+    request_id: Uuid,
+    decision: &ApprovalDecision,
+    actor: &str,
+) -> Vec<ActionButton> {
+    match platform {
+        Platform::Slack => Vec::new(),
+        Platform::Telegram => vec![ActionButton {
+            id: "resolved".to_string(),
+            label: resolved_label(decision, actor),
+            style: ButtonStyle::Secondary,
+            callback_data: format!("ap:x:{request_id}"),
+        }],
+        Platform::Discord | Platform::Cli => approval_buttons(platform, request_id),
+    }
+}
+
+fn resolved_label(decision: &ApprovalDecision, actor: &str) -> String {
+    match decision {
+        ApprovalDecision::AllowOnce => format!("✓ Allowed by {actor}"),
+        ApprovalDecision::AlwaysAllow { .. } => format!("✓ Always allowed by {actor}"),
+        ApprovalDecision::Deny { .. } => format!("✕ Denied by {actor}"),
+    }
 }
 
 fn text_fallback(request: &ApprovalRequest) -> String {

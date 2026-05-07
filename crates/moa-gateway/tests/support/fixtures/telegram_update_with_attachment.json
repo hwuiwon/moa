@@ -1,0 +1,26 @@
+{
+  "update_id": 100002,
+  "message": {
+    "message_id": 43,
+    "date": 1712668801,
+    "chat": {
+      "id": -100987654321,
+      "type": "supergroup",
+      "title": "MOA Test"
+    },
+    "from": {
+      "id": 12345,
+      "is_bot": false,
+      "first_name": "Test",
+      "username": "test_user"
+    },
+    "caption": "see attached",
+    "document": {
+      "file_id": "tg-file-001",
+      "file_unique_id": "tg-file-unique-001",
+      "file_name": "notes.txt",
+      "mime_type": "text/plain",
+      "file_size": 1234
+    }
+  }
+}

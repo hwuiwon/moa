@@ -4,6 +4,7 @@ use moa_core::{
     ActionButton, ApprovalRequest, MessageContent, OutboundMessage, Platform, SessionStatus,
     ToolStatus, types::DiffHunk,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 #[cfg(feature = "slack")]
 use moa_core::ButtonStyle;
@@ -24,8 +25,6 @@ pub const DISCORD_MAX_MESSAGE_LENGTH: usize = 2_000;
 
 #[cfg(feature = "slack")]
 const SLACK_MAX_BLOCK_TEXT_LENGTH: usize = 3_000;
-#[cfg(feature = "discord")]
-const DISCORD_MAX_EMBED_DESCRIPTION_LENGTH: usize = 4_096;
 
 /// One Telegram-ready outbound text chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,7 +310,7 @@ impl DiscordRenderer {
             ),
         };
 
-        let mut chunks = split_plain_text(&body, DISCORD_MAX_EMBED_DESCRIPTION_LENGTH);
+        let mut chunks = split_plain_text(&body, DISCORD_MAX_MESSAGE_LENGTH);
         if chunks.is_empty() {
             chunks.push(String::new());
         }
@@ -482,7 +481,7 @@ fn split_plain_text(text: &str, limit: usize) -> Vec<String> {
     if text.is_empty() {
         return vec![String::new()];
     }
-    if text.chars().count() <= limit {
+    if text.graphemes(true).count() <= limit {
         return vec![text.to_string()];
     }
 
@@ -503,7 +502,7 @@ fn split_plain_text(text: &str, limit: usize) -> Vec<String> {
 }
 
 fn append_piece(piece: &str, limit: usize, current: &mut String, chunks: &mut Vec<String>) {
-    let piece_len = piece.chars().count();
+    let piece_len = piece.graphemes(true).count();
     if piece_len > limit {
         for fragment in split_hard(piece, limit) {
             append_piece(&fragment, limit, current, chunks);
@@ -511,7 +510,7 @@ fn append_piece(piece: &str, limit: usize, current: &mut String, chunks: &mut Ve
         return;
     }
 
-    let current_len = current.chars().count();
+    let current_len = current.graphemes(true).count();
     if current_len == 0 || current_len + piece_len <= limit {
         current.push_str(piece);
         return;
@@ -524,11 +523,11 @@ fn append_piece(piece: &str, limit: usize, current: &mut String, chunks: &mut Ve
 fn split_hard(text: &str, limit: usize) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
-    for ch in text.chars() {
-        if current.chars().count() == limit {
+    for grapheme in text.graphemes(true) {
+        if current.graphemes(true).count() == limit {
             parts.push(std::mem::take(&mut current));
         }
-        current.push(ch);
+        current.push_str(grapheme);
     }
     if !current.is_empty() {
         parts.push(current);
@@ -702,8 +701,8 @@ mod tests {
 
     #[cfg(feature = "discord")]
     #[test]
-    fn discord_renderer_uses_embed_limit_for_long_text() {
-        let text = "a".repeat(DISCORD_MAX_EMBED_DESCRIPTION_LENGTH + 50);
+    fn discord_renderer_uses_message_limit_for_long_text() {
+        let text = "a".repeat(DISCORD_MAX_MESSAGE_LENGTH + 50);
         let message = OutboundMessage {
             content: MessageContent::Text(text.clone()),
             buttons: Vec::new(),
@@ -717,7 +716,7 @@ mod tests {
             chunk
                 .embed_description
                 .as_ref()
-                .is_some_and(|text| text.chars().count() <= DISCORD_MAX_EMBED_DESCRIPTION_LENGTH)
+                .is_some_and(|text| text.chars().count() <= DISCORD_MAX_MESSAGE_LENGTH)
         }));
         assert_eq!(
             chunks

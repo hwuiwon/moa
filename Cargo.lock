@@ -3472,14 +3472,20 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "insta",
  "moa-core",
+ "moa-test-support",
+ "reqwest 0.13.2",
  "serde_json",
  "serenity",
  "slack-morphism",
  "teloxide",
  "tokio",
+ "tokio-test",
  "tracing",
+ "unicode-segmentation",
  "uuid",
+ "wiremock",
  "workspace-hack",
 ]
 
@@ -3522,6 +3528,7 @@ dependencies = [
  "chrono",
  "ct-merkle",
  "ed25519-dalek",
+ "hex",
  "hmac",
  "moa-lineage-core",
  "object_store",
@@ -3685,6 +3692,7 @@ dependencies = [
  "moa-memory-pii",
  "moa-memory-vector",
  "moa-session",
+ "moa-test-support",
  "moka",
  "reqwest 0.13.2",
  "restate-sdk",
@@ -3693,6 +3701,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6665,6 +6674,17 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "tokio-test"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6d24790a10a7af737693a3e8f1d03faef7e6ca0cc99aae5066f533766de545"
+dependencies = [
+ "futures-core",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
