@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use moa_core::{LLMProvider, MoaConfig, ModelTask, Result};
 
-use crate::factory::{
+use crate::core::factory::{
     ProviderSelection, build_provider_from_selection, resolve_provider_selection,
 };
 use crate::{

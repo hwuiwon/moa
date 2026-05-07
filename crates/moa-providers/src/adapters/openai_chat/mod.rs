@@ -11,12 +11,12 @@ use moa_core::{
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
-use crate::instrumentation::LLMSpanRecorder;
-use crate::openai_responses::{
+use crate::adapters::openai_responses::{
     build_openai_client, build_responses_request, stream_responses_with_retry,
 };
-use crate::provider_tools::enabled_native_tools;
-use crate::retry::RetryPolicy;
+use crate::core::instrumentation::LLMSpanRecorder;
+use crate::core::provider_tools::enabled_native_tools;
+use crate::core::retry::RetryPolicy;
 
 const DEFAULT_STREAM_BUFFER: usize = 128;
 const DEFAULT_MAX_RETRIES: usize = 3;
