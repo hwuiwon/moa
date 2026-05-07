@@ -91,7 +91,7 @@ async fn daemon_ping_create_and_shutdown_roundtrip() -> Result<()> {
                 workspace_id: WorkspaceId::new("default"),
                 user_id: UserId::new("tester"),
                 platform: Platform::Cli,
-                model: config.general.default_model.clone().into(),
+                model: config.models.main.clone().into(),
                 initial_message: Some(UserMessage {
                     text: "start".to_string(),
                     attachments: Vec::new(),
@@ -146,7 +146,7 @@ async fn daemon_lists_session_previews() -> Result<()> {
                 workspace_id: workspace_id.clone(),
                 user_id: UserId::new("tester"),
                 platform: Platform::Cli,
-                model: config.general.default_model.clone().into(),
+                model: config.models.main.clone().into(),
                 initial_message: Some(UserMessage {
                     text: "preview".to_string(),
                     attachments: Vec::new(),
@@ -198,7 +198,7 @@ async fn daemon_create_session_uses_explicit_client_scope() -> Result<()> {
                     workspace_id,
                     user_id: UserId::new("tester"),
                     platform: Platform::Cli,
-                    model: config.general.default_model.clone().into(),
+                    model: config.models.main.clone().into(),
                     initial_message: Some(UserMessage {
                         text: "scoped".to_string(),
                         attachments: Vec::new(),

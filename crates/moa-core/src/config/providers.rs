@@ -8,8 +8,6 @@ use serde::{Deserialize, Serialize};
 pub struct GeneralConfig {
     /// Default provider key.
     pub default_provider: String,
-    /// Default model identifier.
-    pub default_model: String,
     /// Requested reasoning effort.
     pub reasoning_effort: String,
     /// Whether provider-native web search should be offered to supported models.
@@ -24,7 +22,6 @@ impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
             default_provider: "openai".to_string(),
-            default_model: "gpt-5.4".to_string(),
             reasoning_effort: "medium".to_string(),
             web_search_enabled: true,
             workspace_instructions: None,
@@ -46,7 +43,7 @@ pub struct ModelsConfig {
 impl Default for ModelsConfig {
     fn default() -> Self {
         Self {
-            main: GeneralConfig::default().default_model,
+            main: "gpt-5.4".to_string(),
             auxiliary: None,
         }
     }

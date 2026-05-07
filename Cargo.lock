@@ -1151,15 +1151,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "conpty"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b72b06487a0d4683349ad74d62e87ad639b09667082b3c495c5b6bab7d84b3da"
-dependencies = [
- "windows",
-]
-
-[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1417,7 +1408,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0b1fab2ae45819af2d0731d60f2afe17227ebb1a1538a236da84c93e9a60162"
 dependencies = [
  "dispatch2",
- "nix 0.31.2",
+ "nix",
  "windows-sys 0.61.2",
 ]
 
@@ -1849,18 +1840,6 @@ dependencies = [
  "futures-core",
  "nom",
  "pin-project-lite",
-]
-
-[[package]]
-name = "expectrl"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ede784925953fcab9a3351d5009bcb8d2b0c13e940924c88087e8e2ce0c4717a"
-dependencies = [
- "conpty",
- "nix 0.26.4",
- "ptyprocess",
- "regex",
 ]
 
 [[package]]
@@ -3219,15 +3198,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "memoffset"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5de893c32cde5f383baa4c04c5d6dbdd735cfd4a794b0debdb2bb1b421da5ff4"
-dependencies = [
- "autocfg",
-]
-
-[[package]]
 name = "metrics"
 version = "0.24.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3347,7 +3317,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
  "workspace-hack",
@@ -3366,7 +3335,6 @@ dependencies = [
  "chrono",
  "clap",
  "ed25519-dalek",
- "expectrl",
  "flate2",
  "futures-util",
  "hex",
@@ -3394,7 +3362,6 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing",
- "tracing-subscriber",
  "uuid",
  "workspace-hack",
 ]
@@ -3473,7 +3440,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "moa-core",
- "serde",
  "serde_json",
  "serenity",
  "slack-morphism",
@@ -3517,7 +3483,6 @@ name = "moa-lineage-audit"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
- "arrow",
  "async-trait",
  "base64 0.22.1",
  "blake3",
@@ -3525,10 +3490,8 @@ dependencies = [
  "ct-merkle",
  "ed25519-dalek",
  "hmac",
- "moa-core",
  "moa-lineage-core",
  "object_store",
- "parquet",
  "serde",
  "serde_canonical_json",
  "serde_json",
@@ -3542,7 +3505,6 @@ dependencies = [
  "uuid",
  "workspace-hack",
  "zip",
- "zstd",
 ]
 
 [[package]]
@@ -3554,11 +3516,9 @@ dependencies = [
  "metrics",
  "moa-core",
  "moa-lineage-core",
- "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tracing",
  "uuid",
  "workspace-hack",
 ]
@@ -3568,13 +3528,10 @@ name = "moa-lineage-cold"
 version = "0.1.0"
 dependencies = [
  "arrow",
- "bytes",
  "chrono",
  "metrics",
- "moa-lineage-core",
  "object_store",
  "parquet",
- "serde_json",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
@@ -3592,7 +3549,6 @@ dependencies = [
  "moa-core",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "uuid",
  "workspace-hack",
 ]
@@ -3624,7 +3580,6 @@ dependencies = [
  "serde_canonical_json",
  "serde_json",
  "sqlx",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -3679,7 +3634,6 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
- "tracing",
  "uuid",
  "workspace-hack",
 ]
@@ -3718,7 +3672,6 @@ name = "moa-memory-pii"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "moa-core",
  "moa-memory-graph",
  "reqwest 0.13.2",
  "serde",
@@ -3760,31 +3713,23 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
- "futures",
- "futures-util",
- "metrics",
  "moa-brain",
  "moa-core",
  "moa-hands",
- "moa-memory-graph",
  "moa-memory-ingest",
  "moa-providers",
- "moa-security",
  "moa-session",
  "opentelemetry",
  "reqwest 0.13.2",
  "restate-sdk",
  "serde",
  "serde_json",
- "shell-words",
  "sqlx",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
  "tracing-opentelemetry",
- "tracing-subscriber",
  "uuid",
  "workspace-hack",
 ]
@@ -3799,7 +3744,6 @@ dependencies = [
  "moa-core",
  "moa-hands",
  "moa-lineage-sink",
- "moa-memory-graph",
  "moa-memory-ingest",
  "moa-orchestrator",
  "moa-providers",
@@ -3832,7 +3776,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tokio-util",
  "tracing",
  "tracing-opentelemetry",
  "workspace-hack",
@@ -3903,7 +3846,6 @@ dependencies = [
 name = "moa-skills"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "chrono",
  "moa-core",
  "moa-eval",
@@ -3916,7 +3858,6 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "sqlx",
- "tempfile",
  "tokio",
  "toml 0.8.23",
  "tracing",
@@ -3942,19 +3883,6 @@ dependencies = [
  "smallvec",
  "tagptr",
  "uuid",
-]
-
-[[package]]
-name = "nix"
-version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "598beaf3cc6fdd9a5dfb1630c2800c7acd31df7aaf0f565796fba2b53ca1af1b"
-dependencies = [
- "bitflags 1.3.2",
- "cfg-if",
- "libc",
- "memoffset",
- "pin-utils",
 ]
 
 [[package]]
@@ -4466,12 +4394,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
-name = "pin-utils"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
-
-[[package]]
 name = "pkcs1"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4671,15 +4593,6 @@ checksum = "3852766467df634d74f0b2d7819bf8dc483a0eb2e3b0f50f756f9cfe8b0d18d8"
 dependencies = [
  "ar_archive_writer",
  "cc",
-]
-
-[[package]]
-name = "ptyprocess"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e05aef7befb11a210468a2d77d978dde2c6381a0381e33beb575e91f57fe8cf"
-dependencies = [
- "nix 0.26.4",
 ]
 
 [[package]]
@@ -7531,15 +7444,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
-name = "windows"
-version = "0.44.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e745dab35a0c4c77aa3ce42d595e13d2003d6902d6b08c9ef5fc326d08da12b"
-dependencies = [
- "windows-targets 0.42.2",
-]
-
-[[package]]
 name = "windows-core"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8023,8 +7927,6 @@ dependencies = [
  "ahash",
  "aho-corasick",
  "arrayvec",
- "arrow",
- "arrow-cast",
  "base64 0.22.1",
  "bitflags 2.11.0",
  "byteorder",
@@ -8041,6 +7943,7 @@ dependencies = [
  "flate2",
  "form_urlencoded",
  "futures-channel",
+ "futures-executor",
  "futures-sink",
  "futures-task",
  "futures-util",
@@ -8054,7 +7957,6 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "i18n-embed",
- "libc",
  "log",
  "mime_guess",
  "num-bigint",
@@ -8073,6 +7975,7 @@ dependencies = [
  "rustls 0.23.37",
  "rustls-webpki 0.103.10",
  "secrecy 0.10.3",
+ "security-framework-sys",
  "semver",
  "serde",
  "serde_core",
@@ -8091,6 +7994,7 @@ dependencies = [
  "time-macros",
  "tinystr",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tokio-util",
  "tower",
  "tower-http",
@@ -8103,9 +8007,6 @@ dependencies = [
  "zerocopy",
  "zeroize",
  "zerovec",
- "zstd",
- "zstd-safe",
- "zstd-sys",
 ]
 
 [[package]]

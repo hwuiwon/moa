@@ -19,7 +19,7 @@ async fn live_brain_turn_returns_brain_response() -> Result<()> {
     let mut config = MoaConfig::default();
     let selection = resolve_provider_selection(&config, None)?;
     config.general.default_provider = selection.provider_name;
-    config.general.default_model = selection.model_id.clone();
+    config.models.main = selection.model_id.clone();
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     let store = Arc::new(store);
     let provider: Arc<dyn LLMProvider> = build_provider_from_config(&config)?;
@@ -27,7 +27,7 @@ async fn live_brain_turn_returns_brain_response() -> Result<()> {
         .create_session(SessionMeta {
             workspace_id: WorkspaceId::new("live-harness"),
             user_id: UserId::new("integration-test"),
-            model: config.general.default_model.clone().into(),
+            model: config.models.main.clone().into(),
             ..SessionMeta::default()
         })
         .await?;

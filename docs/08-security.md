@@ -122,10 +122,11 @@ pub struct FileVault {
     cipher: age::Encryptor,
 }
 
-// Cloud: HashiCorp Vault
-pub struct HashiCorpVault {
-    client: vaultrs::Client,
-    mount: String,
+// MCP server config can also expose an environment-backed vault for runtime
+// credential proxying. Managed cloud vault adapters should implement the same
+// trait without changing hands or MCP call sites.
+pub struct EnvironmentCredentialVault {
+    credentials: BTreeMap<String, Credential>,
 }
 ```
 

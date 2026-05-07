@@ -30,7 +30,7 @@ pub fn resolve_provider_selection(
     let requested = model_override
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(config.general.default_model.as_str());
+        .unwrap_or(config.models.main.as_str());
     let default_provider = config.general.default_provider.trim();
 
     if requested.contains('/') {

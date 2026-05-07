@@ -6,13 +6,10 @@ license.workspace = true
 
 [dependencies]
 arrow = { workspace = true, features = ["prettyprint"] }
-bytes = "1"
 chrono.workspace = true
 metrics.workspace = true
-moa-lineage-core = { path = "../core" }
 object_store.workspace = true
 parquet.workspace = true
-serde_json.workspace = true
 sqlx = { workspace = true, features = [
     "chrono",
     "json",

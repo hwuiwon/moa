@@ -4,7 +4,7 @@ _Product identity, principles, and differentiators._
 
 ## What MOA Is
 
-MOA is a cloud-first, Rust-based, multi-tenant AI agent platform for teams. It runs durable agent sessions, executes tools through isolated hands, stores all product-visible state in Postgres/Neon, and improves from completed work.
+MOA is a cloud-first, Rust-based, multi-tenant AI agent operations platform for enterprises. It runs durable agent sessions, executes tools through isolated hands, stores product-visible and audit state in Postgres/Neon, and improves from completed work under tenant control.
 
 The core product model is:
 
@@ -13,13 +13,15 @@ Platform
   -> Tenant (team)
        -> Users
        -> Workspaces
+       -> Admin controls
        -> Task segments
        -> Intent taxonomy
        -> Learning log
+       -> Lineage and audit evidence
        -> Workspace memory and skills
 ```
 
-MOA is not just a chat wrapper. It is an execution platform with durable orchestration, an auditable event log, graph memory, automated task resolution scoring, and a tenant-scoped learning pipeline.
+MOA is not a personal assistant or chat wrapper. It is an execution platform with durable orchestration, an auditable event log, graph memory, automated task resolution scoring, and a tenant-scoped learning pipeline.
 
 ## What MOA Provides
 
@@ -28,6 +30,7 @@ MOA is not just a chat wrapper. It is an execution platform with durable orchest
 - **Resolution detection:** MOA scores whether each task segment resolved, partially resolved, failed, was abandoned, or remains unknown without requiring explicit user feedback.
 - **Per-tenant intent learning:** tenants start with no intents; MOA proposes intents from conversation clusters and only uses active, tenant-approved intents for classification.
 - **Learning log:** every learned pattern, resolution score, intent decision, memory update, and skill change can be audited and invalidated by version or batch.
+- **Lineage and audit:** retrieval, context, generation, scores, DSAR exports, and optional compliance audit records are first-class operational artifacts.
 - **Workspace memory:** graph memory stores facts, decisions, lessons, sources, and provenance while Postgres sidecars and pgvector provide retrieval.
 - **Skills:** successful workflows can become reusable Agent Skills; ranking improves as segment outcomes accumulate.
 - **Pluggable execution:** local hands, Docker, Daytona, E2B, and MCP servers are routed through one tool abstraction.
@@ -42,6 +45,7 @@ MOA is not just a chat wrapper. It is an execution platform with durable orchest
 5. **Small stable abstractions.** Traits in `moa-core` define the boundaries; implementations can differ between local and cloud runtimes.
 6. **Progressive context.** The pipeline keeps stable prefix content cacheable and loads expensive dynamic context only when it matters.
 7. **Least necessary tool access.** Hands and MCP tools are selected, approved, and isolated based on the task.
+8. **Enterprise governance.** Admin operations, audit trails, and rollback paths are part of the product surface, not post-hoc logs.
 
 ## Differentiators
 
@@ -52,6 +56,7 @@ MOA's differentiators are architectural, not cosmetic:
 - **Resolution-weighted improvement:** skills and future retrieval decisions can use measured success rates.
 - **Tenant-owned taxonomies:** intent labels reflect a team's work patterns and admin review.
 - **Auditable learning:** the learning log gives provenance, confidence, versions, and rollback hooks.
+- **Operational evidence:** lineage, scores, analytics, and compliance audit tiers let operators explain what happened without scraping logs.
 - **Graph memory plus database retrieval:** learned knowledge keeps provenance and bitemporal history while retrieval gets production-grade indexes and embeddings.
 
 ## Non-Goals
@@ -60,3 +65,4 @@ MOA's differentiators are architectural, not cosmetic:
 - MOA does not force a global intent catalog onto tenants. Catalog entries are opt-in.
 - MOA does not keep durable product state only in Restate. Restate is orchestration state; Postgres is the product record.
 - MOA does not bind agent work to a single front door. CLI, REST/gateway, and messaging adapters are peers over the same runtime model.
+- MOA does not optimize for a single-user personal desktop workflow. Local mode is a development and operator path over the same enterprise runtime model.

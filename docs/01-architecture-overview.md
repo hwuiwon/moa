@@ -25,6 +25,7 @@ Product data in Postgres / Neon
   task_segments, segment analytics materialized views
   graph nodes, graph edges, sidecar indexes, pgvector embeddings
   tenant_intents, global_intent_catalog, learning_log
+  analytics.turn_lineage, analytics.scores, compliance audit tables
         |
         v
 Learning loop
@@ -33,6 +34,11 @@ Learning loop
 ```
 
 Restate owns durable cloud execution. Postgres owns product-visible data. Graph memory is the canonical memory source, with sidecar and vector indexes maintained by graph writes.
+
+MOA's enterprise boundary is the tenant. Runtime operators can run local mode for
+development and incident response, but the product model assumes organizations
+need governed execution, audit trails, tenant-owned learning, and clear rollback
+paths.
 
 ## Tenant Model
 
@@ -45,13 +51,16 @@ Platform
        -> Tenant learning log
        -> Workspace memory
        -> Workspace skills ranked by tenant-level outcomes
+       -> Lineage, analytics, and optional compliance evidence
 ```
 
 Intent taxonomies are tenant-scoped because teams tend to repeat work patterns across projects. Memory and skills remain workspace-scoped, but ranking signals aggregate at tenant level.
 
 ## Core Traits
 
-Current trait definitions live in `crates/moa-core/src/traits.rs`; shared DTOs live under `crates/moa-core/src/types/`.
+Current trait definitions live under `crates/moa-core/src/traits/` and
+`crates/moa-core/src/traits/mod.rs`; shared DTOs live under
+`crates/moa-core/src/types/`.
 
 | Trait | Purpose | Main implementations |
 |---|---|---|
@@ -61,10 +70,12 @@ Current trait definitions live in `crates/moa-core/src/traits.rs`; shared DTOs l
 | `BranchManager` | Optional database checkpoint branches | `NeonBranchManager` |
 | `HandProvider` | Provision, execute, pause/resume, destroy hands | local, Docker, Daytona, E2B |
 | `LLMProvider` | Provider completion interface | Anthropic, OpenAI, Gemini through `moa-providers` |
+| `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, Gemini embedding, and test/mock adapters |
 | `PlatformAdapter` | Gateway inbound/outbound normalization | Telegram, Slack, Discord |
 | `BuiltInTool` | Built-in tool execution | memory/search/web and other built-ins |
 | `ContextProcessor` | One stage in context compilation | identity, instructions, tools, skills, query rewrite, memory, history, runtime context, compactor, cache |
-| `CredentialVault` | Secret storage and retrieval | local encrypted vault; cloud vault integration |
+| `CredentialVault` | Secret storage and retrieval | local encrypted vault; environment-backed MCP vault |
+| `LineageHandle` | Transport-neutral lineage capture | null handle, async sink, OTel bridge |
 
 The local and cloud runtimes share these seams. They differ in how turns are scheduled and recovered.
 
@@ -74,7 +85,7 @@ The local and cloud runtimes share these seams. They differ in how turns are sch
 
 `moa-orchestrator` exposes Restate handlers:
 
-- Virtual objects: `Session`, `SubAgent`, `Workspace`
+- Virtual objects: `Session`, `SubAgent`, `Workspace`, `IngestionVO`
 - Services: `Health`, `SessionStore`, `IntentManager`, `LLMGateway`, `ToolExecutor`, `WorkspaceStore`
 - Workflows: `Consolidate`, `IntentDiscovery`
 
@@ -183,6 +194,12 @@ and replay resistance on the verify path.
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph ingestion and fast memory write APIs |
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification and privacy helpers |
 | `moa-memory/vector` (`moa-memory-vector`) | Graph-memory vector storage abstraction and pgvector backend |
+| `moa-lineage/core` (`moa-lineage-core`) | Lineage records and score record types |
+| `moa-lineage/sink` (`moa-lineage-sink`) | Async lineage sink writers |
+| `moa-lineage/otel` (`moa-lineage-otel`) | OTel/OpenInference bridge |
+| `moa-lineage/citation` (`moa-lineage-citation`) | Citation/provenance adapters |
+| `moa-lineage/cold` (`moa-lineage-cold`) | Cold lineage export and partition support |
+| `moa-lineage/audit` (`moa-lineage-audit`) | Compliance audit hashes, Merkle roots, signing, DSAR support |
 | `moa-hands` | Tool routing and hand providers |
 | `moa-providers` | LLM and embedding providers |
 | `moa-orchestrator` | Restate handlers and cloud orchestration binary |
@@ -194,6 +211,8 @@ and replay resistance on the verify path.
 | `moa-skills` | Skill parsing, distillation, improvement, regression generation |
 | `moa-eval` | Evaluation harness |
 | `moa-loadtest` | Load-test tooling |
+| `workspace-hack` | Generated `cargo-hakari` dependency feature unification crate |
+| `xtask` | Repo-local audit and maintenance commands |
 
 ## Where To Look Next
 

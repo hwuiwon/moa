@@ -240,6 +240,7 @@ pub(crate) fn scripted_responses_for_plan(plan: &SessionPlan) -> VecDeque<Script
                     turn_index,
                 ));
             }
+            #[cfg(test)]
             MockTurnBehavior::Bash { cmd } => {
                 let tool_id = Uuid::now_v7().to_string();
                 responses.push_back(

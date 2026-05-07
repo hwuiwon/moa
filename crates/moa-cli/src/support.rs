@@ -82,13 +82,8 @@ pub(crate) fn format_cents(cost_cents: u64) -> String {
 pub(crate) fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str) -> Result<()> {
     match key {
         "general.default_provider" => config.general.default_provider = value.to_string(),
-        "general.default_model" => {
-            config.general.default_model = value.to_string();
-            config.models.main = value.to_string();
-        }
         "models.main" => {
             config.models.main = value.to_string();
-            config.general.default_model = value.to_string();
         }
         "models.auxiliary" => {
             config.models.auxiliary = (!value.trim().is_empty()).then(|| value.to_string());

@@ -2,20 +2,22 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/hwuiwon/moa)
 
-**MOA is a cloud-first, Rust-based, multi-tenant AI agent platform that learns from work.**
+**MOA is a cloud-first, Rust-based, multi-tenant AI agent operations platform for enterprises.**
 
-MOA runs durable agent sessions on Restate, stores product data in Postgres/Neon with pgvector, segments conversations into discrete tasks, scores task resolution automatically, and feeds those outcomes into per-tenant learning. Tenants start with a blank intent taxonomy. MOA discovers candidate intents from their conversations, lets admins curate them, and uses confirmed intents to improve memory retrieval, skill ranking, and tool selection.
+MOA runs durable agent sessions on Restate, stores product and audit data in Postgres/Neon with pgvector, segments conversations into discrete tasks, scores task resolution automatically, and feeds those outcomes into tenant-controlled learning. It is built for organizations that need governed agent execution: auditable event logs, isolated tool execution, tenant-owned intent taxonomies, approval flows, lineage, and rollbackable learning.
 
-Local development uses the same core brain and storage model through the CLI. Cloud deployment uses Restate services, virtual objects, and workflows behind the REST/gateway surfaces.
+Local development uses the same core brain and storage model through the CLI and daemon. Cloud deployment uses Restate services, virtual objects, and workflows behind REST/gateway surfaces.
 
 Status: early active development. The architecture is stable enough to document, but APIs and product surfaces still move.
 
 ## What Matters
 
+- **Enterprise tenancy:** teams own users, workspaces, sessions, memory, skills, intents, learning entries, lineage, and audit evidence.
 - **Durable orchestration:** Restate virtual objects own sessions and sub-agents; workflows own one-shot jobs such as memory consolidation and intent discovery.
 - **Postgres everywhere:** sessions, events, analytics, task segments, memory indexes, embeddings, intents, and the learning log live in Postgres/Neon.
 - **Task-aware sessions:** every session can contain multiple task segments, each with intent metadata, tool and skill usage, cost, and a resolution score.
 - **Per-tenant learning:** tenants own their intent taxonomy and learning log. Global catalog intents are opt-in only.
+- **Governed execution:** risky actions require approval, secrets stay outside generated code, and hands/MCP tools run through explicit policy.
 - **Resolution-weighted skills:** skill ranking uses tenant-level resolution data, not only recency or usage count.
 - **Inspectable operation:** every event, learning entry, tool call, approval, and materialized analytics view is queryable.
 - **Pluggable hands:** local execution, Docker, Daytona, E2B, and MCP tools all route through the hand/tool abstraction.
@@ -39,18 +41,23 @@ cargo run -p moa-cli -- exec "What's 2+2?"
 
 ## Cloud Runtime
 
-Cloud mode runs the `moa-orchestrator` Restate handler service plus Postgres/Neon and the configured hand provider.
+Cloud mode runs the `moa-orchestrator-bin` Restate handler service plus Postgres/Neon and the configured hand provider.
 
 ```bash
-cargo run -p moa-orchestrator -- --port 9080 --health-port 9081
+POSTGRES_URL=postgres://...
+RESTATE_ADMIN_URL=http://localhost:9070
+OPENAI_API_KEY=...
+cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 9080 --health-port 9081
 ```
 
-The binary registers these Restate surfaces: `Session`, `SubAgent`, `Workspace`, `SessionStore`, `ToolExecutor`, `LLMGateway`, `WorkspaceStore`, `IntentManager`, `Consolidate`, `IntentDiscovery`, and `Health`.
+The binary registers these Restate surfaces: `Session`, `SubAgent`, `Workspace`, `SessionStore`, `ToolExecutor`, `LLMGateway`, `WorkspaceStore`, `IntentManager`, `Consolidate`, `IntentDiscovery`, `IngestionVO`, and `Health`.
 
-Required cloud configuration includes:
+The Docker image builds `moa-orchestrator-bin` and installs it as `/usr/local/bin/moa-orchestrator`.
+
+Required cloud process configuration includes:
 
 ```bash
-MOA__DATABASE__URL=postgres://...
+POSTGRES_URL=postgres://...
 RESTATE_ADMIN_URL=http://localhost:9070
 OPENAI_API_KEY=...
 DAYTONA_API_KEY=... # optional, depending on hand provider
@@ -62,7 +69,7 @@ DAYTONA_API_KEY=... # optional, depending on hand provider
 REST / Gateway / CLI
         |
         v
-Restate handler service (`moa-orchestrator`)
+Restate handler service (`moa-orchestrator-bin`)
         |
         +-- Session VO -> TurnRunner -> context pipeline -> LLMGateway
         +-- SubAgent VO -> bounded child agent execution
@@ -74,7 +81,8 @@ Restate handler service (`moa-orchestrator`)
 Postgres / Neon
   sessions, events, task_segments, analytics views,
   graph memory, sidecar indexes, pgvector embeddings,
-  tenant_intents, global_intent_catalog, learning_log
+  tenant_intents, global_intent_catalog, learning_log,
+  lineage, scores, compliance audit tables
 ```
 
 The context pipeline is byte-stable where possible for prompt caching. With query rewriting enabled, the current processors are: identity, instructions, tools, skills, query rewrite, memory, history, runtime context, compactor, and cache optimizer.
@@ -84,7 +92,7 @@ The context pipeline is byte-stable where possible for prompt caching. With quer
 Memory is split across four crates under `crates/moa-memory/`:
 
 - `graph/` - Apache AGE adapter, bi-temporal write protocol
-- `vector/` - pgvector / Turbopuffer, Cohere Embed v4
+- `vector/` - pgvector / Turbopuffer, Gemini and Cohere embedders
 - `pii/` - redaction at ingestion via openai/privacy-filter HTTP service
 - `ingest/` - slow-path Restate VO, fast-path API, contradiction detector
 
@@ -102,6 +110,12 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-memory-ingest`](crates/moa-memory/ingest/) | Slow-path graph ingestion and fast memory write APIs |
 | [`moa-memory-vector`](crates/moa-memory/vector/) | pgvector-backed graph embeddings and vector lookup |
 | [`moa-memory-pii`](crates/moa-memory/pii/) | PII classification and privacy filtering for memory writes |
+| [`moa-lineage-core`](crates/moa-lineage/core/) | Lineage records and score record types |
+| [`moa-lineage-sink`](crates/moa-lineage/sink/) | Async lineage sink writers |
+| [`moa-lineage-otel`](crates/moa-lineage/otel/) | OTel/OpenInference bridge |
+| [`moa-lineage-citation`](crates/moa-lineage/citation/) | Citation/provenance adapters |
+| [`moa-lineage-cold`](crates/moa-lineage/cold/) | Cold lineage export and partition support |
+| [`moa-lineage-audit`](crates/moa-lineage/audit/) | Compliance audit hashes, Merkle roots, signing, DSAR support |
 | [`moa-hands`](crates/moa-hands/) | Tool router, local/Docker hands, Daytona, E2B, MCP client |
 | [`moa-providers`](crates/moa-providers/) | LLM and embedding providers |
 | [`moa-orchestrator`](crates/moa-orchestrator/) | Restate services, virtual objects, workflows, and handler binary |
@@ -113,6 +127,8 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-skills`](crates/moa-skills/) | Agent Skills parsing, distillation, improvement, regression suites |
 | [`moa-eval`](crates/moa-eval/) | Evaluation harness |
 | [`moa-loadtest`](crates/moa-loadtest/) | Load-test harness |
+| [`workspace-hack`](crates/workspace-hack/) | Generated `cargo-hakari` crate for dependency feature unification |
+| [`xtask`](crates/xtask/) | Repo-local audit and maintenance commands |
 
 ## Documentation
 
@@ -122,13 +138,14 @@ Start with [`docs/README.md`](docs/README.md), then read:
 - [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md) for Restate session and sub-agent flow.
 - [`docs/13-task-segmentation.md`](docs/13-task-segmentation.md) for segments and resolution scoring.
 - [`docs/14-multi-tenancy-and-learning.md`](docs/14-multi-tenancy-and-learning.md) for tenants, intents, catalog adoption, and the learning log.
+- [`architecture.md`](architecture.md) for the current enterprise runtime map.
 
 ## Development
 
 ```bash
 cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --no-run
 ```
 
 ## License

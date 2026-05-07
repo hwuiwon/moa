@@ -9,6 +9,5 @@ chrono = { workspace = true, features = ["serde"] }
 moa-core = { path = "../../moa-core" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-thiserror.workspace = true
 uuid.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }

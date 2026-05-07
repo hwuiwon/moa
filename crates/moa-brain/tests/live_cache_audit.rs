@@ -256,13 +256,8 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
             },
         );
 
-        let session_id = create_session(
-            store.clone(),
-            &workspace_id,
-            &user_id,
-            &config.general.default_model,
-        )
-        .await?;
+        let session_id =
+            create_session(store.clone(), &workspace_id, &user_id, &config.models.main).await?;
         run_turn(
             store.clone(),
             session_id,
@@ -405,7 +400,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
 
     let mut sonnet_config = MoaConfig::default();
     sonnet_config.general.default_provider = "anthropic".to_string();
-    sonnet_config.general.default_model = "claude-sonnet-4-6".to_string();
+    sonnet_config.models.main = "claude-sonnet-4-6".to_string();
     sonnet_config.local.sandbox_dir = repo_root.display().to_string();
 
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
@@ -553,7 +548,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     .await?;
 
     let mut opus_config = sonnet_config.clone();
-    opus_config.general.default_model = "claude-opus-4-6".to_string();
+    opus_config.models.main = "claude-opus-4-6".to_string();
     let model_switch_audits = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let opus_provider: Arc<dyn LLMProvider> = Arc::new(AuditedProvider::new(
         build_provider_from_config(&opus_config)?,
@@ -753,7 +748,7 @@ fn available_live_cache_provider_configs(repo_root: &Path) -> Vec<(String, MoaCo
 fn live_cache_config(provider: &str, model: &str, repo_root: &Path) -> MoaConfig {
     let mut config = MoaConfig::default();
     config.general.default_provider = provider.to_string();
-    config.general.default_model = model.to_string();
+    config.models.main = model.to_string();
     config.general.workspace_instructions =
         Some("Cache audit static padding. Keep this prefix identical across turns.\n".repeat(220));
     config.local.sandbox_dir = repo_root.display().to_string();

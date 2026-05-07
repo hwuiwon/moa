@@ -23,9 +23,8 @@ fn version_command_uses_package_version() {
 #[test]
 fn config_updates_known_keys() {
     let mut config = MoaConfig::default();
-    apply_config_update(&mut config, "general.default_model", "claude-sonnet-4-6")
-        .expect("update config");
-    assert_eq!(config.general.default_model, "claude-sonnet-4-6");
+    apply_config_update(&mut config, "models.main", "claude-sonnet-4-6").expect("update config");
+    assert_eq!(config.models.main, "claude-sonnet-4-6");
     apply_config_update(&mut config, "database.max_connections", "5")
         .expect("update max connections");
     assert_eq!(config.database.max_connections, 5);

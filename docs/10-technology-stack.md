@@ -14,10 +14,16 @@ The root workspace currently contains:
 | `moa-memory/graph` (`moa-memory-graph`) | Graph-memory sidecar tables, RLS, changelog, and AGE projection helpers |
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph-memory ingestion DTOs and deterministic helpers |
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification client and privacy-class aggregation helpers |
-| `moa-memory/vector` (`moa-memory-vector`) | VectorStore trait, Cohere Embed v4 client, pgvector halfvec backend, and Turbopuffer opt-in backend |
+| `moa-memory/vector` (`moa-memory-vector`) | VectorStore trait, Gemini/Cohere embedders, pgvector halfvec backend, and Turbopuffer opt-in backend |
+| `moa-lineage/core` (`moa-lineage-core`) | Lineage record and score record types |
+| `moa-lineage/sink` (`moa-lineage-sink`) | Async lineage sink writers |
+| `moa-lineage/otel` (`moa-lineage-otel`) | OTel/OpenInference bridge |
+| `moa-lineage/citation` (`moa-lineage-citation`) | Citation/provenance adapters |
+| `moa-lineage/cold` (`moa-lineage-cold`) | Cold lineage export and partition support |
+| `moa-lineage/audit` (`moa-lineage-audit`) | Compliance audit hash chain, Merkle root, signing, and DSAR support |
 | `moa-hands` | Tool router, local/Docker hands, Daytona, E2B, MCP |
 | `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring |
-| `moa-orchestrator` | Restate services, virtual objects, workflows, cloud binary |
+| `moa-orchestrator` | Restate services, virtual objects, workflows, `moa-orchestrator-bin` cloud binary |
 | `moa-orchestrator-local` | Tokio-task local orchestrator |
 | `moa-gateway` | Telegram, Slack, Discord adapters and renderers |
 | `moa-runtime` | Shared runtime assembly |
@@ -26,6 +32,8 @@ The root workspace currently contains:
 | `moa-skills` | Skill parser, registry, distillation, improvement, regression generation |
 | `moa-eval` | Evaluation harness |
 | `moa-loadtest` | Load-test harness |
+| `workspace-hack` | Generated `cargo-hakari` feature unification crate |
+| `xtask` | Repo-local audits and maintenance commands |
 
 ## Core Dependencies
 
@@ -43,6 +51,7 @@ The root workspace currently contains:
 | Local scheduling | `tokio-cron-scheduler` |
 | Security | `age`, `secrecy`, `shell-words` |
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
+| Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
 
 ## External Services
 
@@ -65,7 +74,7 @@ Docker is used by the dev stack and optionally by local hand providers.
 | LLM provider | Model calls and optional embeddings |
 | Hand provider | Daytona, E2B, or configured local/container execution |
 | Kubernetes or equivalent | Hosting Restate and MOA services |
-| Debezium + Kafka-compatible broker | Graph changelog CDC for audit shipping, bridge sync, and cache invalidation |
+| Debezium + Kafka-compatible broker | Optional graph changelog CDC for audit shipping, bridge sync, and cache invalidation |
 
 ### Optional
 
@@ -80,11 +89,11 @@ Docker is used by the dev stack and optionally by local hand providers.
 
 ```bash
 cargo build
-cargo test
+cargo test --workspace --no-run
 cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p moa-cli -- doctor
-cargo run -p moa-orchestrator -- --port 9080 --health-port 9081
+POSTGRES_URL=postgres://... cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 9080 --health-port 9081
 ```
 
 ## Configuration
@@ -116,6 +125,7 @@ Implemented architectural pillars:
 - Query rewriting, segment creation, automated resolution scoring, and skill resolution-rate ranking.
 - Intent discovery workflow and intent manager service.
 - Skill distillation/improvement with learning-log emission.
+- Lineage, eval score storage, cold export support, and opt-in compliance audit tables.
 - CLI/daemon surfaces.
 
 Areas still evolving:
@@ -130,7 +140,7 @@ Areas still evolving:
 Cloud deployments need:
 
 ```bash
-MOA__DATABASE__URL=postgres://...
+POSTGRES_URL=postgres://...
 RESTATE_ADMIN_URL=http://...
 OPENAI_API_KEY=... # or another configured provider key
 ```

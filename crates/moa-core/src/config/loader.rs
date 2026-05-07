@@ -30,10 +30,6 @@ impl MoaConfig {
                 "general.default_provider",
                 Self::default().general.default_provider,
             )?
-            .set_default(
-                "general.default_model",
-                Self::default().general.default_model,
-            )?
             .set_default("models.main", Self::default().models.main.clone())?
             .set_default("models.auxiliary", Self::default().models.auxiliary.clone())?
             .set_default(
@@ -551,8 +547,7 @@ impl MoaConfig {
             .add_source(File::from(path).required(false))
             .add_source(Environment::with_prefix("MOA").separator("__"));
 
-        let mut config: Self = builder.build()?.try_deserialize()?;
-        config.general.default_model = config.models.main.clone();
+        let config: Self = builder.build()?.try_deserialize()?;
         config.validate()?;
         Ok(config)
     }

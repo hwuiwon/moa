@@ -23,7 +23,7 @@ pub struct ProviderModel {
     /// `"google"`).
     pub provider: &'static str,
     /// Canonical model id passed to the provider API. **This is what
-    /// gets written into `MoaConfig.general.default_model`.**
+    /// gets written into `MoaConfig.models.main`.**
     pub id: &'static str,
     /// Human-readable label shown in dropdowns.
     pub display_name: &'static str,

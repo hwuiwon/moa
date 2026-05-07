@@ -7,7 +7,7 @@ pub(crate) async fn doctor_report(config: &MoaConfig, log_path: &Path) -> Result
     let mut lines = vec![
         "MOA doctor".to_string(),
         format!("provider: {}", config.general.default_provider),
-        format!("model: {}", config.general.default_model),
+        format!("model: {}", config.models.main),
         format!(
             "anthropic_key: {} ({})",
             env_presence(&config.providers.anthropic.api_key_env),

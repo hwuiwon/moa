@@ -29,7 +29,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
     .await?;
 
     let mut config = moa_core::MoaConfig::default();
-    config.general.default_model = "claude-sonnet-4-6".to_string();
+    config.models.main = "claude-sonnet-4-6".to_string();
 
     let (session_store, _database_url, _schema_name) =
         testing::create_isolated_test_store().await?;
@@ -60,7 +60,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
         .create_session(SessionMeta {
             workspace_id: workspace_id.clone(),
             user_id: user_id.clone(),
-            model: config.general.default_model.clone().into(),
+            model: config.models.main.clone().into(),
             ..SessionMeta::default()
         })
         .await?;
@@ -89,7 +89,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
         .create_session(SessionMeta {
             workspace_id,
             user_id,
-            model: config.general.default_model.clone().into(),
+            model: config.models.main.clone().into(),
             ..SessionMeta::default()
         })
         .await?;

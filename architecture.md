@@ -1,460 +1,282 @@
 # MOA Architecture
 
-This document is the high-level map of MOA. It answers: *what are the moving parts, how do they talk, what guarantees do they hold, and where do I look when something goes wrong?*
+This is the high-level map of the current MOA system. The detailed specs live in
+[`docs/`](docs/); code remains the source of truth when an older design note
+drifts.
 
-Deep dives live in [`docs/`](docs/) — each section below cross-links to the authoritative spec. For **runtime sequence diagrams** (mermaid), see [`sequence-diagrams.md`](sequence-diagrams.md).
-
----
-
-## 1. Mental model
-
-MOA is built on two ideas:
-
-1. **Many brains, many hands.** Reasoning is separated from execution. A **brain** is a stateless harness that compiles context, calls an LLM, and emits events. A **hand** is an execution environment (Docker container, Daytona workspace, E2B microVM, MCP server) that runs `execute(tool, input) → output`. The brain never knows what kind of hand it's talking to.
-
-2. **The session event log is the source of truth.** Everything durable flows through an append-only Postgres log. Brains are crash-tolerant because they can always wake from the log and resume. Live observation is a *tail* on top of durable history — never a replacement for it.
-
-Everything else in this document is a consequence of those two ideas.
+MOA is now aimed at enterprise agent operations, not a personal desktop agent.
+The platform model is multi-tenant, auditable, Restate-backed, and Postgres-first.
+Local mode exists so engineers can develop and operate the same runtime model
+from the CLI, not as a separate consumer product.
 
 ---
 
-## 2. System diagram
+## 1. Mental Model
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        USER INTERFACES                          │
-│ Telegram │ Slack │ Discord │ Desktop App │ CLI (moa exec) │ ... │
-└─────┬─────┴───┬───┴────┬────┴──────┬──────┴─────────┬───────────┘
-      │         │        │           │                │
-      ▼         ▼        ▼           ▼                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    GATEWAY (moa-gateway)                        │
-│  PlatformAdapter per channel  ·  normalizes inbound             │
-│  Renders outbound (text / diff / tool card / approval)          │
-└───────────────────────────┬─────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────┐
-│           BRAIN ORCHESTRATOR (moa-orchestrator)                 │
-│  Cloud:  Restate-backed runtime on Kubernetes                   │
-│  Local:  LocalOrchestrator   — tokio tasks + mpsc/broadcast     │
-│                                                                 │
-│  · spawn / recover brains from session log                      │
-│  · route signals: approvals, stop, queue                        │
-│  · supervise brain lifecycle, destroy hands on terminal exit    │
-│  · schedule crons: consolidation, skill improvement             │
-└────────┬──────────────────┬─────────────────┬───────────────────┘
-         │                  │                 │
-         ▼                  ▼                 ▼
-┌──────────────┐    ┌──────────────┐   ┌──────────────┐
-│   BRAIN A    │    │   BRAIN B    │   │   BRAIN C    │
-│ (moa-brain)  │    │  stateless   │   │   harness    │
-└──┬───┬───┬───┘    └──┬───┬───┬───┘   └──┬───┬───┬───┘
-   │   │   │           │   │   │          │   │   │
-   ▼   ▼   ▼           ▼   ▼   ▼          ▼   ▼   ▼
-┌──────────────────────────────────────────────────────┐
-│            HANDS (moa-hands) — pluggable             │
-│  Local exec │ Docker │ Daytona │ E2B µVM │ MCP       │
-│  HandProvider::execute(tool, input) → ToolOutput     │
-└──────────────────────────────────────────────────────┘
-         │               │               │
-         ▼               ▼               ▼
-┌──────────────────────────────────────────────────────┐
-│         SESSION EVENT LOG (moa-session, Postgres)    │
-│  append-only  ·  emit_event / get_events / wake      │
-└──────────────────────────────────────────────────────┘
-         │
-         ▼
-┌──────────────────────────────────────────────────────┐
-│            MEMORY GRAPH (moa-memory-graph)           │
-│  Nodes │ Edges │ sidecar index │ vector retrieval    │
-│  Ingestion VO · fast remember · hybrid retrieval     │
-└──────────────────────────────────────────────────────┘
-```
+MOA has four durable boundaries:
 
-Source: [`docs/01-architecture-overview.md`](docs/01-architecture-overview.md).
+1. **Runtime boundary:** clients talk to either the local Tokio orchestrator or
+   the cloud Restate handler service.
+2. **Brain boundary:** `moa-brain` compiles context, calls model providers, runs
+   approval/tool loops, scores task resolution, and emits lineage.
+3. **Execution boundary:** `moa-hands` routes built-in tools, local/Docker
+   execution, Daytona, E2B, and MCP through one tool router.
+4. **Data boundary:** Postgres/Neon owns the product record: sessions, events,
+   graph memory, vectors, task segments, tenant intents, learning log, lineage,
+   analytics, and audit rows.
+
+Restate owns durable cloud orchestration. Postgres owns enterprise state and
+auditability.
 
 ---
 
-## 3. Core traits (the interface seam)
+## 2. System Diagram
 
-All stable interfaces live in [`moa-core`](crates/moa-core/). Implementations swap freely between local and cloud without touching brain logic.
-Shared type ownership is locked down in [`docs/architecture/type-placement.md`](docs/architecture/type-placement.md).
-
-| Trait | Responsibility | Local impl | Cloud impl |
-|---|---|---|---|
-| `BrainOrchestrator` | Session lifecycle, signals, observation, cron | `LocalOrchestrator` | Restate-backed runtime |
-| `SessionStore` | Append-only event log + queryable metadata | `PostgresSessionStore` | `PostgresSessionStore` (managed) |
-| `HandProvider` | `provision` / `execute` / `pause` / `resume` / `destroy` | `LocalHandProvider` | `DaytonaHandProvider`, `E2BHandProvider` |
-| `LLMProvider` | Streaming completion + capabilities (context window, caching, tools) | Anthropic / OpenAI / Gemini | Same |
-| `PlatformAdapter` | Messaging-channel I/O + rendering caps | Desktop/CLI local bridge | Telegram / Slack / Discord |
-| `ContextProcessor` | One stage of the context compilation pipeline | 7 built-in processors | Same |
-| `CredentialVault` | Service credential get/set/delete/list | `FileVault` (age-encrypted) | `HashiCorpVault` |
-
-Full trait signatures: [`docs/01-architecture-overview.md`](docs/01-architecture-overview.md) §Core trait hierarchy.
+```text
+Clients
+  CLI / daemon
+  REST and gateway surfaces
+  Telegram / Slack / Discord adapters
+        |
+        v
+Runtime boundary
+  Local: moa-orchestrator-local
+  Cloud: moa-orchestrator-bin Restate handler service
+        |
+        v
+Durable orchestration
+  Session VO       -> user session actor
+  SubAgent VO      -> delegated worker actor
+  Workspace VO     -> workspace coordination
+  IngestionVO      -> durable graph-memory ingestion
+  Services         -> SessionStore, LLMGateway, ToolExecutor,
+                      IntentManager, WorkspaceStore, Health
+  Workflows        -> Consolidate, IntentDiscovery
+        |
+        v
+Brain and execution
+  context pipeline -> provider router -> Anthropic / OpenAI / Gemini
+  ToolRouter       -> built-ins / local / Docker / Daytona / E2B / MCP
+        |
+        v
+Postgres / Neon
+  sessions, events, pending_signals, context_snapshots
+  task_segments, analytics views, skill_resolution_rates
+  graph nodes, graph edges, sidecar indexes, changelog, pgvector
+  tenant_intents, global_intent_catalog, learning_log
+  analytics.turn_lineage, analytics.scores, compliance audit tables
+```
 
 ---
 
-## 4. Workspace layout
+## 3. Enterprise Product Model
 
-```
-moa/
-├── crates/moa-core/          # Types, traits, config, errors — the contract
-├── crates/moa-brain/         # Harness loop + 7-stage context pipeline + compaction
-├── crates/moa-session/       # PostgresSessionStore, event schema, FTS, replay
-├── crates/moa-memory/graph/  # AGE-backed graph store and sidecar indexes
-├── crates/moa-memory/ingest/ # Slow-path ingestion VO and fast memory writes
-├── crates/moa-memory/vector/ # pgvector-backed embeddings
-├── crates/moa-memory/pii/    # PII classification and filtering
-├── crates/moa-hands/         # Local/Docker/Daytona/E2B/MCP, ToolRouter
-├── crates/moa-providers/     # Anthropic, OpenAI, Gemini — streaming + prompt caching
-├── crates/moa-orchestrator/  # LocalOrchestrator (tokio) + Restate-backed cloud runtime
-├── crates/moa-gateway/       # Telegram / Slack / Discord + platform renderers + approvals
-├── crates/moa-security/      # Credential vault, MCP proxy, sandbox policies, injection
-├── crates/moa-skills/        # Agent Skills registry, distillation, self-improvement
-├── crates/moa-eval/          # Evaluation harness (suites, reporters, CI gating)
-├── crates/moa-runtime/       # Shared bootstrap wiring for local + cloud
-├── crates/moa-cli/           # `moa` binary (clap-based) + daemon
-└── crates/moa-desktop/       # GPUI desktop app — NOT a default-member
+```text
+Platform
+  -> Tenant
+       -> Users
+       -> Workspaces
+       -> Sessions
+       -> Task segments
+       -> Intent taxonomy
+       -> Learning log
+       -> Workspace memory
+       -> Workspace skills
+       -> Lineage, analytics, and audit evidence
 ```
 
-`moa-desktop` is excluded from default builds because GPUI has heavy native deps. Build it explicitly:
+Enterprise behavior is tenant-controlled:
+
+- New tenants start with an empty intent taxonomy.
+- Platform catalog intents are opt-in.
+- Learning is append-only and invalidated by `valid_to`, not silently rewritten.
+- Workspace memory and skills remain scoped; ranking signals aggregate at tenant
+  level where the work pattern is team-level.
+- Compliance audit is an opt-in tier with explicit attestation caveats until
+  external cryptographic review is complete.
+
+---
+
+## 4. Core Traits
+
+Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
+
+| Trait | Responsibility | Current implementations |
+|---|---|---|
+| `BrainOrchestrator` | Start, resume, signal, list, and observe sessions | `LocalOrchestrator`; Restate objects/services |
+| `SessionStore` | Append-only event log, sessions, signals, snapshots, task segments, analytics, learning | `PostgresSessionStore` |
+| `BlobStore` | Claim-check storage for large session artifacts | `FileBlobStore` |
+| `BranchManager` | Optional database checkpoint branches | `NeonBranchManager` |
+| `LLMProvider` | Completion and streaming provider interface | Anthropic, OpenAI, Gemini, scripted tests |
+| `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, Gemini embedding, mock/test embedding |
+| `HandProvider` | Provision, execute, pause, resume, destroy execution environments | local, Docker, Daytona, E2B |
+| `BuiltInTool` | In-process tools with policy and schema metadata | memory, file/search/read/write, shell helpers |
+| `PlatformAdapter` | Gateway normalization/rendering | Telegram, Slack, Discord |
+| `ContextProcessor` | Ordered context-pipeline stage | identity, instructions, tools, skills, query rewrite, memory, history, runtime context, compactor, cache |
+| `CredentialVault` | Secret storage abstraction | encrypted local file vault, environment-backed MCP vault |
+| `LineageHandle` | Transport-neutral lineage capture | null handle, async sink/OTel bridge |
+
+---
+
+## 5. Workspace Layout
+
+| Crate | Role |
+|---|---|
+| `moa-core` | Shared types, traits, config, events, telemetry, analytics DTOs |
+| `moa-brain` | Context pipeline, retrieval, turn harness, approvals, resolution scoring, lineage emission |
+| `moa-session` | Postgres session store, event log, snapshots, task segments, intents, learning log, analytics |
+| `moa-memory-graph` | Graph memory, AGE projection helpers, sidecars, RLS, changelog |
+| `moa-memory-ingest` | Slow-path ingestion and fast memory write APIs |
+| `moa-memory-pii` | PII classification and memory privacy helpers |
+| `moa-memory-vector` | pgvector and Turbopuffer vector stores |
+| `moa-lineage-core` | Lineage record types and score records |
+| `moa-lineage-sink` | Async lineage sink writers |
+| `moa-lineage-otel` | OTel/OpenInference bridge |
+| `moa-lineage-citation` | Citation/provenance adapters |
+| `moa-lineage-cold` | Cold storage partition/export support |
+| `moa-lineage-audit` | Compliance audit hashes, roots, signing, and DSAR support |
+| `moa-hands` | Tool router and execution adapters |
+| `moa-providers` | Provider core and vendor adapters |
+| `moa-orchestrator` | Restate objects, services, workflows, and `moa-orchestrator-bin` |
+| `moa-orchestrator-local` | Local Tokio-task orchestrator |
+| `moa-gateway` | Messaging adapters and platform renderers |
+| `moa-runtime` | Shared runtime assembly |
+| `moa-cli` | `moa` CLI and local daemon |
+| `moa-security` | Vaults, MCP credential proxy, policies, prompt-injection controls |
+| `moa-skills` | Agent Skills parsing, distillation, improvement, and regression generation |
+| `moa-eval` | Evaluation harness |
+| `moa-loadtest` | Load-test harness |
+| `workspace-hack` | Generated `cargo-hakari` feature unification crate |
+| `xtask` | Repo-local audit and maintenance commands |
+
+---
+
+## 6. Runtime Modes
+
+### Local Development And Operator Mode
+
+```text
+CLI / daemon
+  -> moa-orchestrator-local
+  -> moa-brain
+  -> Postgres dev stack on localhost:25432
+  -> local/Docker hands and configured providers
+```
+
+Local development uses `docker-compose.yml` for Postgres 17 with AGE, pgvector,
+pgaudit, the PII service, and the audit shipper. `~/.moa/config.toml` plus
+`MOA__...` overrides configure the CLI/runtime. This is the fastest way to test
+the enterprise runtime without Restate.
+
+### Cloud Runtime
+
+```text
+Restate
+  -> moa-orchestrator-bin handler endpoint
+  -> Postgres/Neon product database
+  -> configured LLM providers
+  -> configured hand provider and MCP servers
+  -> observability, lineage, metrics, audit sinks
+```
+
+The orchestrator binary reads cloud process settings from environment variables:
 
 ```bash
-cargo build -p moa-desktop
+POSTGRES_URL=postgres://...
+RESTATE_ADMIN_URL=http://localhost:9070
+OPENAI_API_KEY=... # or ANTHROPIC_API_KEY / GOOGLE_API_KEY
+cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 9080 --health-port 9081
 ```
+
+The Docker image builds `moa-orchestrator-bin` and installs it as
+`/usr/local/bin/moa-orchestrator`.
 
 ---
 
-## 5. Runtime modes
+## 7. Turn Flow
 
-The same harness runs in two modes. Only the wiring differs.
-
-### Local mode — `moa exec`, `moa-desktop`, `moa daemon serve`
-
-```
-BrainOrchestrator  →  LocalOrchestrator (tokio + mpsc + broadcast)
-SessionStore       →  PostgresSessionStore (dockerized Postgres 18)
-HandProvider       →  LocalHandProvider (direct exec, or Docker if available)
-PlatformAdapter    →  Desktop GPUI window / CLI stdin-stdout
-CredentialVault    →  FileVault (age-encrypted ~/.moa/vault.enc)
-```
-
-- Zero cloud dependencies.
-- Postgres is the only required local service (`make dev`).
-- Sessions survive the process restarting — replay from event log.
-- `moa memory search` reads ranked graph nodes through hybrid retrieval, `moa memory show <uid>` inspects one graph node, and `moa memory ingest` sends documents through graph-memory ingestion. Wiki index and embedding rebuild commands are retired.
-
-### Cloud mode — `MOA__CLOUD__ENABLED=true`
-
-```
-BrainOrchestrator  →  Restate-backed runtime (objects, services, workflows)
-SessionStore       →  PostgresSessionStore (Neon / managed Postgres)
-HandProvider       →  DaytonaHandProvider (default) or E2BHandProvider (Tier 2)
-PlatformAdapter    →  Telegram / Slack / Discord adapters
-CredentialVault    →  HashiCorpVault
+```text
+User message
+  -> gateway or CLI normalizes input
+  -> Session VO / LocalOrchestrator appends UserMessage
+  -> context pipeline runs
+       1 identity
+       2 instructions
+       3 tools
+       4 skills
+       5 query_rewrite
+       6 memory
+       7 history
+       8 runtime_context
+       9 compactor
+      10 cache
+  -> provider router selects model for the task
+  -> LLM response streams through the harness
+  -> tool calls route through ToolExecutor / ToolRouter
+  -> approvals pause durably until a user/admin decision arrives
+  -> events, tool outputs, lineage, metrics, and segment counters persist
+  -> resolution scoring and learning entries update tenant signals
 ```
 
-- Durable execution via Restate — journaled handlers and idempotent writes (`UNIQUE(session_id, sequence_num)`) keep retries safe.
-- Fly.io Machines host brains. Auto-suspend on idle (~5 min) → only storage cost when nobody's active. Auto-resume in sub-second when a message arrives.
-- Multi-session: orchestrator tracks many concurrent workflows.
-
-Details: [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md).
+Replay is the recovery model. If the runtime restarts, durable state is rebuilt
+from Postgres events plus Restate journals.
 
 ---
 
-## 6. End-to-end request flow
+## 8. Data Planes
 
-Walking one request all the way through, so the layers connect:
-
-```
-1.  User sends "deploy to staging" via Telegram
-2.  TelegramAdapter → normalizes → InboundMessage { user_id, workspace_id, text }
-3.  Gateway routes → BrainOrchestrator.start_session() or .signal(QueueMessage)
-4.  Orchestrator spawns / signals a Brain workflow
-5.  Brain.wake(session_id)  →  load events from SessionStore
-6.  Brain runs the 7-stage context pipeline:
-    1. IdentityProcessor       — static system prompt         ┐
-    2. InstructionProcessor    — workspace + user prefs       │  cached
-    3. ToolDefinitionProcessor — active tool schemas          │  prefix
-    4. SkillInjector           — skill metadata (Tier 1)      ┘
-    ─────── cache_breakpoint ───────
-    5. GraphMemoryRetriever    — ranked graph/vector hits
-    6. HistoryCompiler         — checkpoint + recent turns
-    7. CacheOptimizer          — deterministic ordering, report cache ratio
-7.  Brain calls LLMProvider.complete(compiled_context)
-8.  LLM responds with tool_call: bash("fly deploy --app staging")
-9.  Brain emits ApprovalRequested event → SessionStore
-10. Orchestrator routes approval → Gateway → Telegram inline buttons
-11. User taps [Allow Once]
-12. TelegramAdapter sends ApprovalDecided signal → Orchestrator → Brain
-13. Brain provisions a hand via HandProvider.provision(Tier1)
-14. Brain calls hand.execute("bash", "fly deploy --app staging")
-15. Hand returns ToolOutput → Brain emits ToolResult event
-16. LLM says "Deployment complete. Staging is now v2.3.1."
-17. Brain emits BrainResponse event
-18. Brain considers learning updates → writes graph memory or skill registry updates if applicable
-19. Brain emits SessionCompleted
-20. Gateway renders final message to Telegram
-```
-
-If anything dies between step 5 and step 20, a new brain can resume from the last event. **No recovery code.** The replay is the recovery.
-
----
-
-## 7. Session event log ([`moa-session`](crates/moa-session/))
-
-Postgres is the single source of truth. Every change to a session is an event. The schema lives in [`docs/05-session-event-log.md`](docs/05-session-event-log.md).
-
-Key event types:
-
-- **Lifecycle:** `SessionCreated`, `SessionStatusChanged`, `SessionCompleted`
-- **User input:** `UserMessage`, `QueuedMessage`
-- **Brain output:** `BrainThinking`, `BrainResponse`
-- **Tools:** `ToolCall`, `ToolResult`, `ToolError`
-- **Approvals:** `ApprovalRequested`, `ApprovalDecided`
-- **Memory:** `MemoryRead`, `MemoryWrite`
-- **Hands:** `HandProvisioned`, `HandDestroyed`, `HandError`
-- **Compaction:** `Checkpoint`
-- **Errors:** `Error` (with `recoverable: bool`), `Warning`
-
-### Compaction
-
-Triggered when event count since last checkpoint > 100 **or** estimated history tokens > 70 % of model context. A two-phase process:
-
-1. **Learning flush** — the brain is asked to preserve durable lessons through graph memory or the skill registry.
-2. **Checkpoint summary** — LLM summarizes events-since-last-checkpoint into a `Checkpoint` event.
-
-Errors are **always** preserved through compaction — they're the strongest signal against repeated mistakes.
-
-### Observation semantics
-
-`BrainOrchestrator::observe()` replays durable history first, then attaches a live broadcast tail if a brain is active. If the tail lags beyond its in-memory buffer, the stream returns an error so the caller can reopen from durable history — silent loss is considered a bug.
-
----
-
-## 8. Context compilation ([`moa-brain`](crates/moa-brain/))
-
-The single biggest cost/latency lever in a production agent is KV-cache hit rate. Cached tokens cost ~10× less. The pipeline is deliberately ordered to maximize stable prefix reuse.
-
-```
-┌─ stable prefix (cached across turns)  ─┐
-│  1. IdentityProcessor                  │
-│  2. InstructionProcessor               │
-│  3. ToolDefinitionProcessor            │
-│  4. SkillInjector                      │
-├── cache_breakpoint ────────────────────┤
-│  5. MemoryRetriever                    │
-│  6. HistoryCompiler                    │
-│  7. CacheOptimizer                     │
-└────────────────────────────────────────┘
-```
-
-Guardrails built into the pipeline:
-
-| Failure mode | Check |
-|---|---|
-| Context Poisoning (malformed tool output) | Validate against expected schema before appending |
-| Context Distraction (bloated history) | Trigger compaction past token threshold |
-| Context Confusion (too many tools) | Hard cap at 30; warn at 20 |
-| Context Clash (contradictions) | Flag during consolidation; prefer recent |
-
-Every stage emits a `ProcessorOutput` with tokens added/removed and items included/excluded. When behavior regresses, the pipeline log tells you exactly what went in and out.
-
-Details: [`docs/07-context-pipeline.md`](docs/07-context-pipeline.md).
-
----
-
-## 9. Memory Graph
-
-The graph stack is the only memory subsystem. It is split across:
-
-- [`moa-memory-graph`](crates/moa-memory/graph/) — graph nodes, edges, bitemporal state, RLS, changelog, and SQL sidecar indexes.
-- [`moa-memory-vector`](crates/moa-memory/vector/) — vector storage and embedding lookup for graph nodes.
-- [`moa-memory-pii`](crates/moa-memory/pii/) — privacy classification and filtering before durable writes.
-- [`moa-memory-ingest`](crates/moa-memory/ingest/) — slow-path ingestion and fast remember/forget/supersede APIs.
-
-The current crate layout is documented in
-[`crates/moa-memory/README.md`](crates/moa-memory/README.md), and type ownership is documented in
-[`docs/architecture/type-placement.md`](docs/architecture/type-placement.md).
-
-### Scopes
-
-Memory is scoped by tenant, workspace, and optional user. User memory is always workspace-bound so personal preferences do not leak across unrelated workspaces. Graph writes set scope context before touching Postgres so row-level security and sidecar writes share the same boundary.
-
-### Structure
-
-Graph memory stores typed nodes such as entities, concepts, facts, decisions, incidents, lessons, and sources. Edges model relationships, provenance, supersession, and evidence. Sidecar tables expose queryable projections for SQL filters, search, and UI listings; vector tables store embeddings for semantic retrieval.
-
-### Learning loop
-
-- **Correction capture** — user corrections become graph facts, lessons, or superseding edges.
-- **Discovery filing** — agent discoveries enter through fast remember or slow-path ingestion.
-- **Skill distillation** — successful workflows persist through the skill registry and learning log.
-- **Consolidation** — scheduled graph maintenance resolves contradictions, supersedes stale facts, and records audit entries.
-
-Details: [`docs/04-memory-architecture.md`](docs/04-memory-architecture.md).
-
----
-
-## 10. Hands and MCP ([`moa-hands`](crates/moa-hands/))
-
-Hands are **cattle, not pets**:
-
-- Provisioned lazily on first tool call.
-- Paused when idle (Daytona auto-stop).
-- Destroyed at terminal session exit (done, failed, cancelled, panicked).
-
-`ToolRouter` decides *where* a tool runs:
-
-- **Built-in** — graph memory tools, web search, web fetch — run in-process.
-- **Hand** — bash, file_*, file_search — routed to a `HandProvider`.
-- **MCP** — anything from a configured MCP server — routed through the credential proxy.
-
-Sandbox tiers:
-
-| Tier | Isolation | When |
+| Plane | Primary owner | Notes |
 |---|---|---|
-| 0 | None | Built-in graph memory / search tools |
-| 1 | Container (Docker/Daytona) | Default for cloud code execution |
-| 2 | MicroVM (Firecracker / E2B) | Untrusted code, security-critical |
-
-Tier 1 hardening applies `no-new-privileges`, read-only rootfs except `/workspace`, dropped capabilities, seccomp blocks for dangerous syscalls, and `iptables` rules that block cloud metadata endpoints.
-
-Details: [`docs/06-hands-and-mcp.md`](docs/06-hands-and-mcp.md).
-
----
-
-## 11. Communication layer ([`moa-gateway`](crates/moa-gateway/))
-
-All platforms normalize to a common `InboundMessage` / `OutboundMessage` pair. `PlatformRenderer` converts the common format to platform-native output, respecting each platform's message size, button model, edit window, and rate limit.
-
-Session ↔ thread mapping:
-
-- **Telegram:** reply chain, pinned status message edited in-place.
-- **Slack:** thread with live parent; App Home dashboard for multi-session.
-- **Discord:** auto-created thread with embed + ActionRow controls.
-
-**Three-tier approvals** on every risky action — `Allow Once`, `Always Allow`, `Deny`. "Always Allow" rules match at the **parsed command level**, not the raw string, so `bash: npm test` does not implicitly approve `npm test && rm -rf /`.
-
-**Three observation verbosities** — `Summary` / `Normal` / `Verbose`. Throttled to each platform's edit interval to stay within rate limits.
-
-Details: [`docs/03-communication-layer.md`](docs/03-communication-layer.md).
+| Session/event log | `moa-session` | Append-only event history and queryable session state |
+| Task analytics | `moa-session` | Segments, skill rates, intent transitions, materialized views |
+| Memory graph | `moa-memory-graph` | Bitemporal graph records, sidecars, changelog, RLS scope |
+| Vector retrieval | `moa-memory-vector` | pgvector default; Turbopuffer promotion path |
+| Memory ingestion | `moa-memory-ingest` | Slow-path ingestion and deterministic fast writes |
+| Privacy | `moa-memory-pii` | PII classification before memory writes |
+| Lineage | `moa-lineage-*` | Hot lineage, scores, OTel bridge, cold export, audit tier |
+| Orchestration | Restate | VO/workflow state and invocation journals only |
 
 ---
 
-## 12. Security ([`moa-security`](crates/moa-security/))
+## 9. Security And Governance
 
-**Default posture:**
+Default enterprise posture:
 
-- **Local:** usable by default — present user can observe and intervene.
-- **Cloud:** secure by default — per-workspace tool enablement, approvals for write/exec, containers mandatory.
+- Product-visible state is tenant/workspace scoped in Postgres.
+- Tools are routed through explicit schemas and policies.
+- Risky write/execute operations request approval.
+- MCP credentials are proxied; secrets do not enter LLM-generated code.
+- Local hands are convenient for development; cloud deployments should use
+  container or microVM isolation for code execution.
+- Compliance audit is opt-in and clearly separated from engineering lineage.
 
-**Credential isolation — the core rule:** credentials never enter the sandbox where LLM-generated code runs. Two patterns carry this:
-
-1. **Bundled with resource** — e.g. a Git token embedded into a clone URL at provisioning time so the agent can `git push` without ever seeing the token.
-2. **MCP credential proxy** — the brain holds opaque session-scoped tokens. The proxy swaps tokens for real credentials just before dispatching to the external service. The brain never sees API keys, OAuth tokens, or passwords.
-
-**Prompt injection defense in depth:**
-
-- Layer 1 — heuristic + canary classification of untrusted content.
-- Layer 2 — instruction hierarchy (system > user memory > workspace memory > skills > tool results).
-- Layer 3 — tool permission policies (allow / deny / require approval, matched at parsed-command level).
-- Layer 4 — canary tokens; appearance in a tool call signals manipulation.
-
-Standards alignment: OWASP Top 10 for Agentic Apps 2026, NIST AI Agent Standards, Least-Agency principle.
-
-Details: [`docs/08-security.md`](docs/08-security.md).
+See [`docs/08-security.md`](docs/08-security.md) and
+[`docs/01-architecture-overview.md`](docs/01-architecture-overview.md).
 
 ---
 
-## 13. Skills and learning ([`moa-skills`](crates/moa-skills/))
-
-MOA adopts the **Agent Skills** format (agentskills.io) with MOA-specific metadata. Each skill is a directory:
-
-```
-skills/deploy-to-fly/
-├── SKILL.md          # YAML frontmatter + instructions
-├── scripts/          # executable — run, don't read
-├── references/
-└── assets/
-```
-
-**Progressive disclosure:**
-
-| Tier | Content | Loaded when |
-|---|---|---|
-| Metadata | name, description, tags | Every turn (Stage 4) |
-| Instructions | Full `SKILL.md` body | When activated for a task |
-| Resources | scripts / references / assets | When executing |
-
-**Lifecycle:**
-
-1. **Distill** — ≥5-tool-call successful run → LLM generates `SKILL.md`.
-2. **Activate** — Stage 4 surfaces metadata; the skill registry loads the full body when the task selects the skill.
-3. **Improve** — if a better approach is used, the skill is versioned up and `improved_from` is recorded.
-4. **Decay** — consolidation lowers confidence on long-unused skills, flags low success rates, prunes references to deleted tools.
-
-Details: [`docs/09-skills-and-learning.md`](docs/09-skills-and-learning.md).
-
----
-
-## 14. Observability
-
-- **Tracing** via `tracing` + `tracing-subscriber`. Every pipeline stage, tool call, and LLM request is a span.
-- **OTel export** via `tracing-opentelemetry` + `opentelemetry-otlp`. Config lives under `[observability]` in `config.toml`.
-- **Custom OTLP headers** supported for direct Langfuse OTLP/HTTP export (see `docs/sample-config.toml`).
-- **Cache-ratio logging** — `CacheOptimizer` reports prefix-tokens / total-tokens every turn; regressions in cache hit rate surface immediately.
-- **Lineage capture** via `crates/moa-lineage/{core,sink,otel}`. Retrieval, context, and generation records are emitted through the `LineageHandle` bridge, written asynchronously to `analytics.turn_lineage`, and annotated onto current spans with OTel GenAI + OpenInference attributes.
-- **Explainability CLI** — `moa explain <session-or-turn-id>` reads the TimescaleDB hot store as a turn tree, and `moa retrieve --debug "<query>"` prints the graph-memory ranking trace for interactive diagnosis.
-
-Details: [`sequence/lineage/README-LINEAGE.md`](sequence/lineage/README-LINEAGE.md).
-
----
-
-## 15. Technology stack
-
-| Layer | Crate(s) |
-|---|---|
-| Async runtime | `tokio`, `tokio-util` |
-| Serialization | `serde`, `serde_json`, `toml` |
-| IDs / time | `uuid` (v7), `chrono` |
-| DB | `sqlx` (Postgres) |
-| LLM | `async-openai`, `reqwest`, `eventsource-stream`, `tiktoken-rs` |
-| Messaging | `teloxide`, `serenity`, `slack-morphism-rust` |
-| Desktop | `gpui`, `gpui-component`, `tray-icon`, `pulldown-cmark`, `syntect`, `similar` |
-| Orchestration | `restate-sdk`, `tokio-cron-scheduler` |
-| Security | `age`, `secrecy`, `vaultrs`, `shell-words` |
-| Hands / MCP | `bollard`, `reqwest`, MCP (SDK or custom) |
-| Errors / CLI / config | `thiserror`, `anyhow` (bins only), `clap`, `config` |
-| Observability | `tracing`, `tracing-subscriber`, `tracing-appender`, `opentelemetry`, `tracing-opentelemetry` |
-
-Full list with versions: [`docs/10-technology-stack.md`](docs/10-technology-stack.md).
-
----
-
-## 16. Where to look when things break
+## 10. Where To Look When Things Break
 
 | Symptom | First stop |
 |---|---|
-| Brain won't resume after crash | [`docs/11-event-replay-runbook.md`](docs/11-event-replay-runbook.md) |
-| Context got huge / cost spiked | [`docs/07-context-pipeline.md`](docs/07-context-pipeline.md) — check stage logs & cache ratio |
-| Tool call rejected unexpectedly | [`docs/08-security.md`](docs/08-security.md) — policy evaluation order, canary checks |
-| Memory writes conflicting in cloud | [`docs/04-memory-architecture.md`](docs/04-memory-architecture.md) — branch reconciler |
-| Approval not reaching the user | [`docs/03-communication-layer.md`](docs/03-communication-layer.md) — platform rate limits, edit window |
-| Hand won't provision / destroy | [`docs/06-hands-and-mcp.md`](docs/06-hands-and-mcp.md) — orchestrator cleanup contract |
-| Session orchestration stuck | [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md) — state transitions, awakeables, runtime wiring |
+| Session stuck or not resuming | [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md), [`docs/12-restate-architecture.md`](docs/12-restate-architecture.md) |
+| Event replay mismatch | [`docs/11-event-replay-runbook.md`](docs/11-event-replay-runbook.md) |
+| Tool approval or sandbox issue | [`docs/06-hands-and-mcp.md`](docs/06-hands-and-mcp.md), [`docs/08-security.md`](docs/08-security.md) |
+| Context cost/cache regression | [`docs/07-context-pipeline.md`](docs/07-context-pipeline.md), [`docs/prompt-caching-architecture.md`](docs/prompt-caching-architecture.md) |
+| Memory retrieval or ingestion issue | [`docs/04-memory-architecture.md`](docs/04-memory-architecture.md) |
+| Tenant learning or intent issue | [`docs/14-multi-tenancy-and-learning.md`](docs/14-multi-tenancy-and-learning.md) |
+| Lineage/audit issue | [`docs/ops/audit-runbook.md`](docs/ops/audit-runbook.md), [`docs/operations/subject-access-runbook.md`](docs/operations/subject-access-runbook.md) |
 
 ---
 
-## 17. Design values
+## 11. Design Values
 
-Kept here because they explain a lot of surprising code decisions:
-
-- **Inspectability over magic.** If you can't see what the agent did, the fix for the next regression is guesswork.
-- **Reversible collaboration.** The human stays in control: inspect → approve → checkpoint → revert.
-- **Complexity must justify itself.** If a feature doesn't improve daily use, it doesn't ship in the default path.
-- **Daily-driver UX beats impressive demos.** Predictable, low-friction, no cognitive fatigue.
-- **Model/provider flexibility.** No vendor lock-in; the `LLMProvider` trait is small on purpose.
-
-For product identity and competitive positioning: [`docs/00-direction.md`](docs/00-direction.md).
+- **Enterprise inspectability over magic.** Every learned behavior needs
+  provenance and rollback.
+- **Durability before cleverness.** Long waits, approvals, and restarts are normal.
+- **Tenant control.** Platform defaults are libraries to adopt, not policy forced
+  across tenants.
+- **Small seams.** Traits in `moa-core` keep local/cloud and vendor adapters
+  replaceable.
+- **Least necessary tool access.** Tool execution is selected, approved, and
+  isolated based on risk.

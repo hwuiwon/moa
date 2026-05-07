@@ -22,8 +22,8 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = LoadTarget::Local)]
     target: LoadTarget,
 
-    /// Number of concurrent sessions to simulate. `--scale` is an alias.
-    #[arg(long, alias = "scale")]
+    /// Number of concurrent sessions to simulate.
+    #[arg(long)]
     sessions: Option<usize>,
 
     /// Session profile family to generate.
