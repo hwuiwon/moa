@@ -47,7 +47,7 @@ fn spawn_orchestrator(
     memory_dir: &tempfile::TempDir,
     sandbox_dir: &tempfile::TempDir,
 ) -> Result<Child> {
-    Command::new(env!("CARGO_BIN_EXE_moa-orchestrator"))
+    Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"))
         .arg("--port")
         .arg(ports.restate.to_string())
         .arg("--health-port")
