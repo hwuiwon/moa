@@ -3,7 +3,35 @@
 use crate::*;
 
 fn repo_root() -> PathBuf {
-    PathBuf::from("/Users/hwuiwon/Github/moa")
+    repo_root_from_manifest_dir(Path::new(env!("CARGO_MANIFEST_DIR")))
+}
+
+fn repo_root_from_manifest_dir(manifest_dir: &Path) -> PathBuf {
+    let root = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or_else(|| {
+            panic!(
+                "failed to resolve MOA workspace root by walking two parents up from CARGO_MANIFEST_DIR starting directory {}",
+                manifest_dir.display()
+            )
+        });
+    let workspace_manifest = root.join("Cargo.toml");
+    let manifest = std::fs::read_to_string(&workspace_manifest).unwrap_or_else(|error| {
+        panic!(
+            "failed to resolve MOA workspace root by walking two parents up from CARGO_MANIFEST_DIR starting directory {}; could not read expected workspace marker [workspace] in {}: {error}",
+            manifest_dir.display(),
+            workspace_manifest.display()
+        )
+    });
+    if !manifest.contains("[workspace]") {
+        panic!(
+            "failed to resolve MOA workspace root by walking two parents up from CARGO_MANIFEST_DIR starting directory {}; expected workspace marker [workspace] in {}",
+            manifest_dir.display(),
+            workspace_manifest.display()
+        );
+    }
+    root.to_path_buf()
 }
 
 fn inspection_files() -> InspectionFiles {
@@ -26,6 +54,7 @@ fn test_options(profile: SessionProfileKind) -> LoadTestOptions {
         config_path: None,
         workspace_root: Some(repo_root()),
         daemon_socket: None,
+        mock_provider_timing: Default::default(),
     }
 }
 
@@ -160,6 +189,7 @@ async fn approval_heavy_sessions_auto_deny_cleanly_under_concurrency() {
         config_path: None,
         workspace_root: Some(repo_root()),
         daemon_socket: None,
+        mock_provider_timing: Default::default(),
     };
 
     let report = run_custom_mock_loadtest(options, approval_heavy_plans(session_count))
@@ -177,6 +207,41 @@ async fn approval_heavy_sessions_auto_deny_cleanly_under_concurrency() {
         }),
         "approval-heavy sessions should complete after automatic denials"
     );
+}
+
+#[test]
+fn repo_root_resolves_from_cargo_manifest_dir_without_absolute_paths() {
+    let root = repo_root();
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let expected_root = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .expect("moa-loadtest manifest should live two parents below workspace root");
+
+    assert_eq!(root, expected_root);
+    assert!(root.join("crates/moa-loadtest").is_dir());
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+        .expect("workspace Cargo.toml should be readable");
+    assert!(manifest.contains("[workspace]"));
+}
+
+#[test]
+fn repo_root_panics_with_actionable_message_when_workspace_marker_missing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let manifest_dir = temp.path().join("crates/moa-loadtest");
+    std::fs::create_dir_all(&manifest_dir).expect("create synthetic manifest dir");
+
+    let panic = std::panic::catch_unwind(|| repo_root_from_manifest_dir(&manifest_dir))
+        .expect_err("missing workspace marker should panic");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("panic should carry a string message");
+
+    assert!(message.contains("walking two parents up from CARGO_MANIFEST_DIR"));
+    assert!(message.contains(&manifest_dir.display().to_string()));
+    assert!(message.contains("[workspace]"));
 }
 
 #[tokio::test]

@@ -1,0 +1,2 @@
+{"version":1,"scenario":"example_minimal"}
+{"user":{"text":"Say hello in one short sentence."},"expected":[{"type":"text_delta","text":"Hello from the recorded fixture."},{"type":"usage","usage":{"input_tokens_uncached":8,"input_tokens_cache_write":0,"input_tokens_cache_read":0,"output_tokens":6}},{"type":"terminal","stop_reason":"end_turn"}]}

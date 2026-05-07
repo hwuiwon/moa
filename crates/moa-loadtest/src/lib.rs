@@ -47,7 +47,9 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 use uuid::Uuid;
 
 pub use harness::run_loadtest;
-pub use options::{LoadMode, LoadTarget, LoadTestOptions, OutputFormat, SessionProfileKind};
+pub use options::{
+    LoadMode, LoadTarget, LoadTestOptions, MockProviderTiming, OutputFormat, SessionProfileKind,
+};
 pub use report::{
     LoadTestReport, PercentileSummary, SessionReport, render_human_report, render_json_report,
 };

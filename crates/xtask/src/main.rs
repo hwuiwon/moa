@@ -1,6 +1,7 @@
 //! Repository maintenance commands.
 
 use std::env;
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 
@@ -90,8 +91,79 @@ fn cmd_audit_paths() -> Result<()> {
         &[],
     )?;
 
+    audit_moa_test_support_dev_dependency_only()?;
+
     println!("path audit clean");
     Ok(())
+}
+
+fn audit_moa_test_support_dev_dependency_only() -> Result<()> {
+    let mut manifests = cargo_manifest_paths()?;
+    manifests.push("Cargo.toml".to_string());
+
+    for manifest in manifests {
+        if manifest == "crates/moa-test-support/Cargo.toml" {
+            continue;
+        }
+        let body = fs::read_to_string(&manifest)
+            .with_context(|| format!("read manifest for moa-test-support audit: {manifest}"))?;
+        let mut section = String::new();
+        for (line_index, line) in body.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                section = trimmed.trim_matches(&['[', ']'][..]).to_string();
+                continue;
+            }
+            if !trimmed.contains("moa-test-support") {
+                continue;
+            }
+            if manifest == "Cargo.toml"
+                && (section == "workspace" || section == "workspace.dependencies")
+            {
+                continue;
+            }
+            if section.ends_with("dev-dependencies") {
+                continue;
+            }
+            bail!(
+                "moa-test-support must only be used from dev-dependencies; found {manifest}:{} in [{section}]",
+                line_index + 1
+            );
+        }
+    }
+
+    rg_forbid(
+        "non-test moa-test-support Rust imports",
+        r"moa_test_support::",
+        &["crates/"],
+        &[
+            "--type",
+            "rust",
+            "--glob",
+            "**/src/**",
+            "--glob",
+            "!crates/moa-test-support/**",
+            "--glob",
+            "!crates/xtask/**",
+        ],
+    )
+}
+
+fn cargo_manifest_paths() -> Result<Vec<String>> {
+    let output = Command::new("rg")
+        .args(["--files", "-g", "Cargo.toml", "crates"])
+        .output()
+        .context("list crate Cargo.toml files")?;
+    if !output.status.success() {
+        bail!(
+            "rg failed while listing Cargo.toml files: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(ToString::to_string)
+        .collect())
 }
 
 fn existing_paths<'a>(paths: &'a [&'a str]) -> Vec<&'a str> {

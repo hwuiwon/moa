@@ -1,0 +1,65 @@
+---
+source: crates/moa-providers/tests/request_body_snapshots.rs
+expression: body
+---
+{
+  "input": [
+    {
+      "content": "Read the project status and list the next shell command.",
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "instructions": "You are MOA. Use tools only when they are necessary.",
+  "max_output_tokens": 256,
+  "model": "gpt-5.4-mini",
+  "parallel_tool_calls": true,
+  "prompt_cache_key": "moa:gpt-5.4-mini:2196cbee5b219241",
+  "prompt_cache_retention": "in_memory",
+  "reasoning": {
+    "effort": "medium"
+  },
+  "store": false,
+  "stream": true,
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "description": "Read a UTF-8 text file from the workspace.",
+      "name": "file_read",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "description": "Workspace-relative file path.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    },
+    {
+      "description": "Run a read-only shell command in the workspace.",
+      "name": "shell_command",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "cmd": {
+            "description": "Command and arguments to run.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cmd"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    }
+  ]
+}

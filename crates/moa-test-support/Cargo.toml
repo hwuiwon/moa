@@ -1,28 +1,21 @@
 [package]
-name = "moa-session"
+name = "moa-test-support"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
-async-trait.workspace = true
 chrono.workspace = true
 moa-core = { path = "../moa-core" }
 moa-security = { path = "../moa-security" }
-reqwest.workspace = true
+moa-session = { path = "../moa-session" }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
-sqlx = { workspace = true, features = ["tls-rustls", "migrate", "macros", "json", "uuid", "chrono"] }
-futures-util = { workspace = true }
+sqlx = { workspace = true, features = ["tls-rustls", "json", "uuid", "chrono"] }
+tempfile.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-url = "2"
 uuid.workspace = true
-hex.workspace = true
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
-
-[dev-dependencies]
-axum.workspace = true
-moa-test-support.workspace = true
-tempfile.workspace = true

@@ -5,14 +5,16 @@ use crate::*;
 #[derive(Clone)]
 pub(crate) struct PerSessionScriptedProvider {
     capabilities: ModelCapabilities,
+    timing: MockProviderTiming,
     responses: Arc<StdMutex<HashMap<String, VecDeque<ScriptedResponse>>>>,
     recorded_requests: Arc<StdMutex<Vec<CompletionRequest>>>,
 }
 
 impl PerSessionScriptedProvider {
-    pub(crate) fn new(capabilities: ModelCapabilities) -> Self {
+    pub(crate) fn new(capabilities: ModelCapabilities, timing: MockProviderTiming) -> Self {
         Self {
             capabilities,
+            timing,
             responses: Arc::new(StdMutex::new(HashMap::new())),
             recorded_requests: Arc::new(StdMutex::new(Vec::new())),
         }
@@ -64,6 +66,7 @@ impl LLMProvider for PerSessionScriptedProvider {
             return completion_stream_from_scripted_response(
                 &self.capabilities,
                 auxiliary_scripted_response(&request),
+                self.timing,
             );
         };
         let response = self
@@ -86,7 +89,7 @@ impl LLMProvider for PerSessionScriptedProvider {
                     "per-session scripted provider ran out of queued responses for session {session_key}"
                 ))
             })?;
-        completion_stream_from_scripted_response(&self.capabilities, response)
+        completion_stream_from_scripted_response(&self.capabilities, response, self.timing)
     }
 }
 
@@ -134,6 +137,7 @@ metadata:
 pub(crate) fn completion_stream_from_scripted_response(
     capabilities: &ModelCapabilities,
     response: ScriptedResponse,
+    timing: MockProviderTiming,
 ) -> Result<CompletionStream> {
     let text = response
         .content
@@ -163,7 +167,12 @@ pub(crate) fn completion_stream_from_scripted_response(
         })
         .sum();
 
-    Ok(CompletionStream::from_response(CompletionResponse {
+    let duration_ms = if timing.total.is_zero() {
+        response.duration_ms
+    } else {
+        timing.total.as_millis().min(u128::from(u64::MAX)) as u64
+    };
+    let completion_response = CompletionResponse {
         text,
         content: response.content,
         stop_reason: response.stop_reason,
@@ -177,9 +186,36 @@ pub(crate) fn completion_stream_from_scripted_response(
             input_tokens_cache_read: response.cached_input_tokens,
             output_tokens,
         },
-        duration_ms: response.duration_ms,
+        duration_ms,
         thought_signature: None,
-    }))
+    };
+
+    if timing.ttft.is_zero() && timing.total.is_zero() {
+        return Ok(CompletionStream::from_response(completion_response));
+    }
+
+    let buffered_blocks = completion_response.content.clone();
+    let capacity = buffered_blocks.len().max(1);
+    let (tx, rx) = mpsc::channel(capacity);
+    let completion = tokio::spawn(async move {
+        if !timing.ttft.is_zero() {
+            tokio::time::sleep(timing.ttft).await;
+        }
+        for block in buffered_blocks {
+            if tx.send(Ok(block)).await.is_err() {
+                break;
+            }
+        }
+
+        let remaining = timing.total.saturating_sub(timing.ttft);
+        if !remaining.is_zero() {
+            tokio::time::sleep(remaining).await;
+        }
+
+        Ok(completion_response)
+    });
+
+    Ok(CompletionStream::new(rx, completion))
 }
 
 pub(crate) fn scripted_capabilities() -> ModelCapabilities {

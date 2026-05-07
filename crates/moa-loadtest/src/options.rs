@@ -44,6 +44,24 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Synthetic timing applied by the mock provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MockProviderTiming {
+    /// Delay before the first streamed provider block.
+    pub ttft: Duration,
+    /// Delay before the final provider response is available.
+    pub total: Duration,
+}
+
+impl Default for MockProviderTiming {
+    fn default() -> Self {
+        Self {
+            ttft: Duration::ZERO,
+            total: Duration::ZERO,
+        }
+    }
+}
+
 /// User-configurable load-test options.
 #[derive(Debug, Clone)]
 pub struct LoadTestOptions {
@@ -69,6 +87,8 @@ pub struct LoadTestOptions {
     pub workspace_root: Option<PathBuf>,
     /// Optional daemon socket path.
     pub daemon_socket: Option<PathBuf>,
+    /// Synthetic timing for the mock provider.
+    pub mock_provider_timing: MockProviderTiming,
 }
 
 impl LoadTestOptions {
@@ -93,6 +113,12 @@ impl LoadTestOptions {
             return Err(MoaError::ValidationError(
                 "model overrides are only supported for the local in-process target".to_string(),
             ));
+        }
+        if self.mock_provider_timing.total < self.mock_provider_timing.ttft {
+            return Err(MoaError::ValidationError(format!(
+                "mock provider total duration {:?} must be greater than or equal to TTFT {:?}",
+                self.mock_provider_timing.total, self.mock_provider_timing.ttft
+            )));
         }
         Ok(())
     }

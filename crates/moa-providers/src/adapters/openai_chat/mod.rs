@@ -8,6 +8,7 @@ use moa_core::{
     CompletionRequest, CompletionStream, LLMProvider, MoaConfig, MoaError, ModelCapabilities,
     ModelId, ProviderNativeTool, Result, TokenPricing, ToolCallFormat,
 };
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
@@ -25,6 +26,27 @@ const MODEL_GPT_5_4_MINI: &str = "gpt-5.4-mini";
 const MODEL_GPT_5_4_NANO: &str = "gpt-5.4-nano";
 const MODEL_GPT_5_MINI: &str = "gpt-5-mini";
 const MODEL_GPT_5_NANO: &str = "gpt-5-nano";
+
+/// Builds an OpenAI Responses request body for inspection tests without sending it.
+pub fn debug_build_openai_request_body(
+    request: &CompletionRequest,
+    web_search_enabled: bool,
+) -> Result<Value> {
+    let requested_model = request
+        .model
+        .as_ref()
+        .map(ModelId::as_str)
+        .unwrap_or(MODEL_GPT_5_4);
+    let resolved_model = canonical_model_id(requested_model)?;
+    let capabilities = capabilities_for_model(&resolved_model)?;
+    let request = build_responses_request(
+        request,
+        &resolved_model,
+        "medium",
+        enabled_native_tools(&capabilities, web_search_enabled),
+    )?;
+    serde_json::to_value(request).map_err(MoaError::from)
+}
 
 /// `OpenAI` provider backed by the Responses API.
 pub struct OpenAIProvider {
