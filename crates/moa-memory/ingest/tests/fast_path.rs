@@ -5,9 +5,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::{
-    ScopeContext, ScopedConn, UserId, WorkspaceId, traits::EmbeddingProvider as Embedder,
-};
+use moa_core::{ScopeContext, ScopedConn, UserId, WorkspaceId, traits::EmbeddingProvider};
 use moa_hands::ToolRegistry;
 use moa_memory_graph::{AgeGraphStore, NodeLabel, NodeWriteIntent, PiiClass, cypher};
 use moa_memory_ingest::{
@@ -28,7 +26,7 @@ static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 struct MockEmbedder;
 
 #[async_trait]
-impl Embedder for MockEmbedder {
+impl EmbeddingProvider for MockEmbedder {
     fn model_id(&self) -> &str {
         "mock-fast-embedder"
     }

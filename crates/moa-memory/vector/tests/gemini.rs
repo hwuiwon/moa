@@ -1,6 +1,6 @@
 //! Deterministic Gemini embedder request-shape coverage.
 
-use moa_core::traits::EmbeddingProvider as Embedder;
+use moa_core::traits::EmbeddingProvider;
 use moa_memory_vector::{EmbedRole, GeminiEmbeddingEmbedder};
 use secrecy::SecretString;
 use serde_json::Value;

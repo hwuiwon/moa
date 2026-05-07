@@ -6,13 +6,12 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use moa_core::traits::EmbeddingProvider;
 use moa_core::{MoaConfig, MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::core::http::build_http_client;
-
-pub use moa_core::traits::EmbeddingProvider;
 
 const OPENAI_EMBEDDINGS_URL: &str = "https://api.openai.com/v1/embeddings";
 const OPENAI_PROVIDER_NAME: &str = "openai";

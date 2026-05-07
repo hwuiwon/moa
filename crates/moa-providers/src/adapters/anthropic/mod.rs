@@ -44,8 +44,14 @@ use model::{canonical_model_id, capabilities_for_model};
 use request::build_request_body;
 use streaming::consume_sse_events;
 
-#[cfg(any(test, feature = "test-util"))]
-pub use request::debug_build_request_body;
+/// Builds an Anthropic request body for inspection in integration tests without sending it.
+#[cfg(feature = "test-util")]
+pub fn debug_build_anthropic_request_body(
+    request: &CompletionRequest,
+    web_search_enabled: bool,
+) -> Result<Value> {
+    request::debug_build_anthropic_request_body(request, web_search_enabled)
+}
 
 #[cfg(test)]
 use tools::{anthropic_content_blocks, anthropic_message, anthropic_tool_from_schema};

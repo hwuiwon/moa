@@ -17,7 +17,6 @@ futures-util.workspace = true
 globset.workspace = true
 ignore = "0.4"
 moa-core = { path = "../moa-core" }
-moa-memory-ingest = { path = "../moa-memory/ingest" }
 moa-security = { path = "../moa-security" }
 opentelemetry.workspace = true
 regex.workspace = true

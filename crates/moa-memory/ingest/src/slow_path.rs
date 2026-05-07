@@ -10,7 +10,7 @@ use crate::{
     TurnChunk, chunk_turn, current_runtime, extract_facts, fact_hash, scoped_fact_uid,
     should_ingest_degraded,
 };
-use moa_core::{ScopeContext, ScopedConn, traits::EmbeddingProvider as Embedder};
+use moa_core::{ScopeContext, ScopedConn, traits::EmbeddingProvider};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiCategory, PiiClassifier, PiiResult, PiiSpan, redact_text,
@@ -403,7 +403,7 @@ async fn embed_batch(facts: &[ClassifiedFact]) -> Result<Vec<EmbeddedFact>, Hand
 }
 
 async fn embed_batch_with(
-    embedder: &dyn Embedder,
+    embedder: &dyn EmbeddingProvider,
     facts: &[ClassifiedFact],
 ) -> Result<Vec<EmbeddedFact>, HandlerError> {
     let texts = facts

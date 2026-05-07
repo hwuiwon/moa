@@ -18,7 +18,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use memory_ingest::{IngestApplyReport, SessionTurn, ingest_turn_direct_with_pool};
+use memory_ingest::{
+    FastMemoryToolExecutor, IngestApplyReport, SessionTurn, ingest_turn_direct_with_pool,
+};
 use moa_brain::{
     GraphMemoryPipelineOptions, LoopDetector, StreamedTurnResult,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,

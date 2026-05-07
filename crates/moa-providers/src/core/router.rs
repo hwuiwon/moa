@@ -7,10 +7,8 @@ use moa_core::{LLMProvider, MoaConfig, ModelTask, Result};
 use crate::core::factory::{
     ProviderSelection, build_provider_from_selection, resolve_provider_selection,
 };
-use crate::{
-    AnthropicProvider, GeminiProvider, OpenAIProvider, models::PROVIDER_ANTHROPIC,
-    models::PROVIDER_GOOGLE, models::PROVIDER_OPENAI,
-};
+use crate::core::models::{PROVIDER_ANTHROPIC, PROVIDER_GOOGLE, PROVIDER_OPENAI};
+use crate::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 
 /// Routes model calls to the configured main or auxiliary provider instance.
 pub struct ModelRouter {

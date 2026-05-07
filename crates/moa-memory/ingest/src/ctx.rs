@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use moa_core::traits::EmbeddingProvider as Embedder;
+use moa_core::traits::EmbeddingProvider;
 use moa_memory_graph::GraphStore;
 use moa_memory_pii::PiiClassifier;
 use moa_memory_vector::VectorStore;
@@ -20,7 +20,7 @@ pub struct IngestCtx {
     /// Vector store used for candidate retrieval and vector writes.
     pub vector: Arc<dyn VectorStore>,
     /// Embedder used by ingestion paths that produce vectors.
-    pub embedder: Arc<dyn Embedder>,
+    pub embedder: Arc<dyn EmbeddingProvider>,
     /// PII classifier used before graph writes.
     pub pii: Arc<dyn PiiClassifier>,
     /// Contradiction detector shared by slow and fast ingestion.
@@ -36,7 +36,7 @@ impl IngestCtx {
         pool: PgPool,
         graph: Arc<dyn GraphStore>,
         vector: Arc<dyn VectorStore>,
-        embedder: Arc<dyn Embedder>,
+        embedder: Arc<dyn EmbeddingProvider>,
         pii: Arc<dyn PiiClassifier>,
         contradict: Arc<dyn ContradictionDetector>,
     ) -> Self {

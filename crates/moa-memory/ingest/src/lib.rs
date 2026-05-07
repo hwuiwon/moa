@@ -21,8 +21,8 @@ pub use extract::{
     should_ingest_degraded,
 };
 pub use fast_path::{
-    FastError, FastPathCtx, FastRememberRequest, ForgetPattern, execute_memory_tool, fast_forget,
-    fast_remember, fast_supersede, is_fast_memory_tool,
+    FastError, FastMemoryToolExecutor, FastPathCtx, FastRememberRequest, ForgetPattern,
+    execute_memory_tool, fast_forget, fast_remember, fast_supersede, is_fast_memory_tool,
 };
 pub use slow_path::{
     IngestionVO, IngestionVOClient, IngestionVOImpl, ingest_turn_direct,

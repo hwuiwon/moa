@@ -8,7 +8,9 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
-use crate::{Embedder, Error, Result, VECTOR_DIMENSION, validate_dimension};
+use moa_core::traits::EmbeddingProvider;
+
+use crate::{Error, Result, VECTOR_DIMENSION, validate_dimension};
 
 const COHERE_EMBED_URL: &str = "https://api.cohere.com/v2/embed";
 const COHERE_MODEL: &str = "embed-v4.0";
@@ -88,7 +90,7 @@ impl CohereV4Embedder {
 }
 
 #[async_trait]
-impl Embedder for CohereV4Embedder {
+impl EmbeddingProvider for CohereV4Embedder {
     fn model_id(&self) -> &str {
         "cohere-embed-v4"
     }

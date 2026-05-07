@@ -3496,7 +3496,6 @@ dependencies = [
  "globset",
  "ignore",
  "moa-core",
- "moa-memory-ingest",
  "moa-security",
  "moa-session",
  "opentelemetry",

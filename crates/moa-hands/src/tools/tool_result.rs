@@ -667,6 +667,7 @@ mod tests {
             lineage: &moa_core::NULL_LINEAGE_HANDLE,
             session_store: Some(&store),
             cancel_token: None,
+            memory_tool_executor: None,
         };
 
         let output = ToolResultReadTool
@@ -711,6 +712,7 @@ mod tests {
             lineage: &moa_core::NULL_LINEAGE_HANDLE,
             session_store: Some(&store),
             cancel_token: None,
+            memory_tool_executor: None,
         };
 
         let output = ToolResultSearchTool

@@ -85,9 +85,8 @@ pub(super) fn build_request_body(
     Ok(Value::Object(body))
 }
 
-#[cfg(any(test, feature = "test-util"))]
-/// Builds the Anthropic request body for inspection in integration tests without sending it.
-pub fn debug_build_request_body(
+#[cfg(feature = "test-util")]
+pub(super) fn debug_build_anthropic_request_body(
     request: &CompletionRequest,
     web_search_enabled: bool,
 ) -> Result<Value> {
