@@ -1,5 +1,7 @@
 //! Stable trait interfaces shared across MOA crates.
 
+pub mod embedding;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -18,6 +20,8 @@ use crate::types::{
     SessionStatus, SessionSummary, SkillResolutionRate, StartSessionRequest, TaskSegment,
     ToolOutput, WorkingContext, WorkspaceId,
 };
+
+pub use embedding::*;
 
 /// Orchestrates session lifecycle and observation.
 #[async_trait]

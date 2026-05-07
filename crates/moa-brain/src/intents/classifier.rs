@@ -2,8 +2,7 @@
 
 use std::sync::Arc;
 
-use moa_core::{MoaError, Result, TenantIntent};
-use moa_providers::EmbeddingProvider;
+use moa_core::{MoaError, Result, TenantIntent, traits::EmbeddingProvider};
 use moa_session::PostgresSessionStore;
 
 /// Default cosine-distance threshold for active intent classification.

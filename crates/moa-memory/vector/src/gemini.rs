@@ -1,7 +1,7 @@
 //! Gemini embedding provider clients.
 //!
 //! `gemini-embedding-2` is exposed through MOA's existing text-only
-//! [`Embedder`] trait. The API is multimodal, but binary chunking and sandboxed
+//! [`EmbeddingProvider`](moa_core::traits::EmbeddingProvider) trait. The API is multimodal, but binary chunking and sandboxed
 //! media handling are out of scope for this layer.
 
 use std::sync::Arc;
@@ -160,7 +160,7 @@ impl GeminiEmbeddingEmbedder {
 
 #[async_trait]
 impl Embedder for GeminiEmbeddingEmbedder {
-    fn model_name(&self) -> &'static str {
+    fn model_id(&self) -> &str {
         GEMINI_V2_MODEL
     }
 
@@ -168,11 +168,11 @@ impl Embedder for GeminiEmbeddingEmbedder {
         2
     }
 
-    fn dimension(&self) -> usize {
+    fn dimensions(&self) -> usize {
         self.output_dim
     }
 
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    async fn embed(&self, texts: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
         let mut out = Vec::with_capacity(texts.len());
         for text in texts {
             out.push(self.embed_as(&self.default_role, text).await?);

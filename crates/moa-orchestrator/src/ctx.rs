@@ -2,9 +2,8 @@
 
 use std::sync::{Arc, OnceLock};
 
-use moa_core::MoaConfig;
+use moa_core::{MoaConfig, traits::EmbeddingProvider};
 use moa_hands::ToolRouter;
-use moa_providers::EmbeddingProvider;
 use moa_session::PostgresSessionStore;
 use serde_json::Value;
 

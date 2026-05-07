@@ -3,7 +3,8 @@
 //! These tests are intentionally ignored and additionally gated by
 //! `MOA_RUN_LIVE_COHERE_TESTS=1` because they call a billed external API.
 
-use moa_memory_vector::{CohereV4Embedder, Embedder, VECTOR_DIMENSION};
+use moa_core::traits::EmbeddingProvider as Embedder;
+use moa_memory_vector::{CohereV4Embedder, VECTOR_DIMENSION};
 use secrecy::SecretString;
 
 fn live_cohere_requested() -> bool {

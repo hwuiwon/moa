@@ -2,9 +2,10 @@
 
 use std::sync::{Arc, OnceLock};
 
+use moa_core::traits::EmbeddingProvider as Embedder;
 use moa_memory_graph::GraphStore;
 use moa_memory_pii::PiiClassifier;
-use moa_memory_vector::{Embedder, VectorStore};
+use moa_memory_vector::VectorStore;
 use sqlx::PgPool;
 
 use crate::{ContradictionDetector, IngestError, Result};

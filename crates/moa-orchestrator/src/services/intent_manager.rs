@@ -6,9 +6,8 @@ use chrono::Utc;
 use moa_brain::intents::IntentClassifier;
 use moa_core::{
     CatalogIntent, IntentSource, IntentStatus, LearningEntry, MoaConfig, MoaError,
-    Result as MoaResult, TenantIntent,
+    Result as MoaResult, TenantIntent, traits::EmbeddingProvider,
 };
-use moa_providers::EmbeddingProvider;
 use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
 use uuid::Uuid;

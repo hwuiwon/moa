@@ -12,21 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::http::build_http_client;
 
+pub use moa_core::traits::EmbeddingProvider;
+
 const OPENAI_EMBEDDINGS_URL: &str = "https://api.openai.com/v1/embeddings";
 const OPENAI_PROVIDER_NAME: &str = "openai";
-
-/// Shared abstraction over embedding backends used by memory search.
-#[async_trait]
-pub trait EmbeddingProvider: Send + Sync {
-    /// Returns the configured embedding model identifier.
-    fn model_id(&self) -> &str;
-
-    /// Returns the fixed dimensionality produced by this embedding model.
-    fn dimensions(&self) -> usize;
-
-    /// Computes embeddings for one or more UTF-8 inputs.
-    async fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>>;
-}
 
 /// OpenAI embeddings client backed by the `/v1/embeddings` endpoint.
 #[derive(Clone)]
