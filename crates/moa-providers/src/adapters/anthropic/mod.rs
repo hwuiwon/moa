@@ -44,8 +44,7 @@ use model::{canonical_model_id, capabilities_for_model};
 use request::build_request_body;
 use streaming::consume_sse_events;
 
-/// Builds an Anthropic request body for inspection in integration tests without sending it.
-#[cfg(feature = "test-util")]
+/// Builds an Anthropic request body for inspection tests without sending it.
 pub fn debug_build_anthropic_request_body(
     request: &CompletionRequest,
     web_search_enabled: bool,

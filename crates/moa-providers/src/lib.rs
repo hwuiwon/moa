@@ -6,10 +6,11 @@ mod core;
 pub mod embedding;
 
 pub use adapters::anthropic::AnthropicProvider;
-#[cfg(feature = "test-util")]
 pub use adapters::anthropic::debug_build_anthropic_request_body;
 pub use adapters::gemini::GeminiProvider;
+pub use adapters::gemini::debug_build_gemini_request_body;
 pub use adapters::openai_chat::OpenAIProvider;
+pub use adapters::openai_chat::debug_build_openai_request_body;
 #[cfg(any(test, feature = "test-util"))]
 pub use adapters::scripted::{ScriptedBlock, ScriptedProvider, ScriptedResponse};
 pub use core::factory::{

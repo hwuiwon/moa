@@ -1151,6 +1151,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "console"
+version = "0.16.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d64e8af5551369d19cf50138de61f1c42074ab970f74e99be916646777f8fc87"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1751,6 +1762,12 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "encode_unicode"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "encoding_rs"
@@ -2761,6 +2778,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "insta"
+version = "1.47.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b4a6248eb93a4401ed2f37dfe8ea592d3cf05b7cf4f8efa867b6895af7e094e"
+dependencies = [
+ "console",
+ "once_cell",
+ "pest",
+ "pest_derive",
+ "serde",
+ "similar",
+ "tempfile",
+]
+
+[[package]]
 name = "instant"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3719,6 +3751,7 @@ dependencies = [
  "moa-memory-ingest",
  "moa-providers",
  "moa-session",
+ "moa-test-support",
  "opentelemetry",
  "reqwest 0.13.2",
  "restate-sdk",
@@ -3770,6 +3803,7 @@ dependencies = [
  "chrono",
  "eventsource-stream",
  "futures-util",
+ "insta",
  "moa-core",
  "opentelemetry",
  "reqwest 0.13.2",
@@ -3829,6 +3863,7 @@ dependencies = [
  "hex",
  "moa-core",
  "moa-security",
+ "moa-test-support",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -3860,6 +3895,25 @@ dependencies = [
  "sqlx",
  "tokio",
  "toml 0.8.23",
+ "tracing",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moa-test-support"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "moa-core",
+ "moa-security",
+ "moa-session",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "uuid",
  "workspace-hack",
@@ -7982,6 +8036,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "simd-adler32",
+ "similar",
  "slab",
  "smallvec",
  "sqlx",

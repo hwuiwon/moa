@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
         config_path: cli.config,
         workspace_root: cli.workspace_root,
         daemon_socket: cli.daemon_socket,
+        mock_provider_timing: Default::default(),
     };
 
     let report = run_loadtest(options.clone()).await?;

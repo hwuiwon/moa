@@ -69,6 +69,7 @@ serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["alloc", "raw_value"] }
 sha2 = { version = "0.10" }
 simd-adler32 = { version = "0.3", default-features = false, features = ["std"] }
+similar = { version = "2", features = ["inline"] }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "serde"] }
 sqlx = { version = "0.8", default-features = false, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls", "uuid"] }

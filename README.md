@@ -148,6 +148,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --no-run
 ```
 
+### Testing
+
+Provider request-body and other byte-stability snapshots follow the pattern in [`docs/testing/snapshot-pattern.md`](docs/testing/snapshot-pattern.md).
+
 ## License
 
 Apache-2.0. See [`LICENSE`](LICENSE).

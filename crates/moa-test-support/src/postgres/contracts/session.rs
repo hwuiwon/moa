@@ -1,0 +1,364 @@
+//! Session-store contract tests.
+
+use chrono::{Duration, Utc};
+use moa_core::{
+    Event, EventFilter, EventRange, EventType, ModelId, PendingSignal, PendingSignalType,
+    SessionFilter, SessionMeta, SessionStatus, SessionStore, UserId, UserMessage, WorkspaceId,
+};
+use serde_json::json;
+
+fn test_session_meta(workspace: &str) -> SessionMeta {
+    SessionMeta {
+        workspace_id: WorkspaceId::new(workspace),
+        user_id: UserId::new("u1"),
+        model: ModelId::new("test-model"),
+        ..SessionMeta::default()
+    }
+}
+
+/// Verifies session creation, event append, and aggregate counters.
+pub async fn test_create_and_get_session<S>(store: &S)
+where
+    S: SessionStore + ?Sized,
+{
+    let session_id = store
+        .create_session(test_session_meta("ws1"))
+        .await
+        .expect("create session");
+
+    let seq1 = store
+        .emit_event(
+            session_id,
+            Event::UserMessage {
+                text: "Hello".into(),
+                attachments: vec![],
+            },
+        )
+        .await
+        .expect("emit user message");
+    assert_eq!(seq1, 0);
+
+    let seq2 = store
+        .emit_event(
+            session_id,
+            Event::BrainResponse {
+                text: "Hi there".into(),
+                thought_signature: None,
+                model: "test".into(),
+                model_tier: moa_core::ModelTier::Main,
+                input_tokens_uncached: 10,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 5,
+                cost_cents: 1,
+                duration_ms: 100,
+            },
+        )
+        .await
+        .expect("emit assistant response");
+    assert_eq!(seq2, 1);
+
+    let events = store
+        .get_events(session_id, EventRange::all())
+        .await
+        .expect("get events");
+    assert_eq!(events.len(), 2);
+
+    let session = store.get_session(session_id).await.expect("get session");
+    assert_eq!(session.event_count, 2);
+    assert_eq!(session.total_input_tokens, 10);
+    assert_eq!(session.total_cost_cents, 1);
+}
+
+/// Verifies ranged event reads.
+pub async fn test_emit_and_get_events<S>(store: &S)
+where
+    S: SessionStore + ?Sized,
+{
+    let session_id = store
+        .create_session(test_session_meta("ws1"))
+        .await
+        .expect("create session");
+
+    for index in 0..10 {
+        store
+            .emit_event(
+                session_id,
+                Event::UserMessage {
+                    text: format!("message {index}"),
+                    attachments: vec![],
+                },
+            )
+            .await
+            .expect("emit message");
+    }
+
+    let ranged = store
+        .get_events(
+            session_id,
+            EventRange {
+                from_seq: Some(3),
+                to_seq: Some(7),
+                event_types: None,
+                limit: None,
+            },
+        )
+        .await
+        .expect("get ranged events");
+    assert_eq!(ranged.len(), 5);
+    assert_eq!(ranged[0].sequence_num, 3);
+    assert_eq!(ranged[4].sequence_num, 7);
+
+    let filtered = store
+        .get_events(
+            session_id,
+            EventRange {
+                event_types: Some(vec![EventType::UserMessage]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("get filtered events");
+    assert_eq!(filtered.len(), 10);
+    assert!(
+        filtered
+            .iter()
+            .all(|record| record.event_type == EventType::UserMessage)
+    );
+
+    let recent = store
+        .get_events(session_id, EventRange::recent(3))
+        .await
+        .expect("get recent events");
+    assert_eq!(recent.len(), 3);
+    assert_eq!(recent[0].sequence_num, 7);
+    assert_eq!(recent[2].sequence_num, 9);
+}
+
+/// Verifies event search, including hyphenated queries.
+pub async fn test_event_search<S>(store: &S)
+where
+    S: SessionStore + ?Sized,
+{
+    let session_id = store
+        .create_session(test_session_meta("ws1"))
+        .await
+        .expect("create session");
+
+    store
+        .emit_event(
+            session_id,
+            Event::UserMessage {
+                text: "Fix the OAuth refresh token bug".into(),
+                attachments: vec![],
+            },
+        )
+        .await
+        .expect("emit oauth event");
+    store
+        .emit_event(
+            session_id,
+            Event::UserMessage {
+                text: "Debug the refresh-token rotation failure".into(),
+                attachments: vec![],
+            },
+        )
+        .await
+        .expect("emit hyphen event");
+
+    let oauth = store
+        .search_events("OAuth refresh", EventFilter::default())
+        .await
+        .expect("search oauth");
+    assert!(!oauth.is_empty());
+
+    let hyphen = store
+        .search_events("refresh-token", EventFilter::default())
+        .await
+        .expect("search hyphen");
+    assert!(hyphen.iter().any(|record| matches!(
+        &record.event,
+        Event::UserMessage { text, .. } if text.contains("refresh-token")
+    )));
+}
+
+/// Verifies persisted session status updates.
+pub async fn test_session_status_update<S>(store: &S)
+where
+    S: SessionStore + ?Sized,
+{
+    let session_id = store
+        .create_session(test_session_meta("ws1"))
+        .await
+        .expect("create session");
+
+    store
+        .update_status(session_id, SessionStatus::Completed)
+        .await
+        .expect("update status");
+
+    let session = store.get_session(session_id).await.expect("get session");
+    assert_eq!(session.status, SessionStatus::Completed);
+    assert!(session.completed_at.is_some());
+}
+
+/// Verifies workspace-filtered session listing.
+pub async fn test_list_sessions_with_filter<S>(store: &S)
+where
+    S: SessionStore + ?Sized,
+{
+    store
+        .create_session(test_session_meta("ws1"))
+        .await
+        .expect("create ws1");
+    store
+        .create_session(test_session_meta("ws2"))
+        .await
+        .expect("create ws2");
+
+    let sessions = store
+        .list_sessions(SessionFilter {
+            workspace_id: Some(WorkspaceId::new("ws1")),
+            ..Default::default()
+        })
+        .await
+        .expect("list sessions");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].workspace_id, WorkspaceId::new("ws1"));
+}
+
+/// Verifies workspace spend aggregation since a specific timestamp.
+pub async fn test_workspace_cost_since<S>(store: &S)
+where
+    S: SessionStore + ?Sized,
+{
+    let first_session_id = store
+        .create_session(test_session_meta("ws1"))
+        .await
+        .expect("create first session");
+    let second_session_id = store
+        .create_session(test_session_meta("ws1"))
+        .await
+        .expect("create second session");
+    let other_workspace_session_id = store
+        .create_session(test_session_meta("ws2"))
+        .await
+        .expect("create other workspace session");
+
+    let since = Utc::now() - Duration::minutes(1);
+    let future_since = Utc::now() + Duration::minutes(1);
+
+    store
+        .emit_event(
+            first_session_id,
+            Event::BrainResponse {
+                text: "first".into(),
+                thought_signature: None,
+                model: "test".into(),
+                model_tier: moa_core::ModelTier::Main,
+                input_tokens_uncached: 10,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 5,
+                cost_cents: 7,
+                duration_ms: 50,
+            },
+        )
+        .await
+        .expect("emit first response");
+    store
+        .emit_event(
+            second_session_id,
+            Event::BrainResponse {
+                text: "second".into(),
+                thought_signature: None,
+                model: "test".into(),
+                model_tier: moa_core::ModelTier::Main,
+                input_tokens_uncached: 8,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 4,
+                cost_cents: 11,
+                duration_ms: 50,
+            },
+        )
+        .await
+        .expect("emit second response");
+    store
+        .emit_event(
+            other_workspace_session_id,
+            Event::BrainResponse {
+                text: "other".into(),
+                thought_signature: None,
+                model: "test".into(),
+                model_tier: moa_core::ModelTier::Main,
+                input_tokens_uncached: 8,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 4,
+                cost_cents: 99,
+                duration_ms: 50,
+            },
+        )
+        .await
+        .expect("emit other workspace response");
+
+    let workspace_total = store
+        .workspace_cost_since(&WorkspaceId::new("ws1"), since)
+        .await
+        .expect("load workspace spend");
+    assert_eq!(workspace_total, 18);
+
+    let future_total = store
+        .workspace_cost_since(&WorkspaceId::new("ws1"), future_since)
+        .await
+        .expect("load future workspace spend");
+    assert_eq!(future_total, 0);
+}
+
+/// Verifies pending signal persistence and resolution.
+pub async fn test_pending_signals<S>(store: &S)
+where
+    S: SessionStore + ?Sized,
+{
+    let session_id = store
+        .create_session(test_session_meta("ws1"))
+        .await
+        .expect("create session");
+
+    let signal = PendingSignal::queue_message(
+        session_id,
+        UserMessage {
+            text: "queued follow-up".into(),
+            attachments: vec![],
+        },
+    )
+    .expect("build pending signal");
+
+    let signal_id = store
+        .store_pending_signal(session_id, signal.clone())
+        .await
+        .expect("store pending signal");
+    assert_eq!(signal_id, signal.id);
+
+    let pending = store
+        .get_pending_signals(session_id)
+        .await
+        .expect("get pending");
+    assert_eq!(pending, vec![signal.clone()]);
+    assert_eq!(pending[0].signal_type, PendingSignalType::QueueMessage);
+    assert_eq!(
+        pending[0].payload,
+        json!({"text":"queued follow-up","attachments":[]})
+    );
+
+    store
+        .resolve_pending_signal(signal_id)
+        .await
+        .expect("resolve pending");
+    let pending = store
+        .get_pending_signals(session_id)
+        .await
+        .expect("get pending after resolution");
+    assert!(pending.is_empty());
+}

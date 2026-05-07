@@ -34,6 +34,7 @@ uuid.workspace = true
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
+moa-test-support.workspace = true
 tempfile.workspace = true
 
 [lints.rust]

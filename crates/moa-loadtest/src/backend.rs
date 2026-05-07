@@ -278,6 +278,7 @@ pub(crate) async fn build_local_target(
     let mock_provider = match options.mode {
         LoadMode::Mock => Some(Arc::new(PerSessionScriptedProvider::new(
             scripted_capabilities(),
+            options.mock_provider_timing,
         ))),
         LoadMode::Live => None,
     };

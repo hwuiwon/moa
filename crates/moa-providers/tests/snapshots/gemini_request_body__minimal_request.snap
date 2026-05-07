@@ -1,0 +1,68 @@
+---
+source: crates/moa-providers/tests/request_body_snapshots.rs
+expression: body
+---
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Read the project status and list the next shell command."
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 256,
+    "temperature": 0.20000000298023224,
+    "thinkingConfig": {
+      "thinkingBudget": 4096
+    }
+  },
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "You are MOA. Use tools only when they are necessary."
+      }
+    ]
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "Read a UTF-8 text file from the workspace.",
+          "name": "file_read",
+          "parameters": {
+            "properties": {
+              "path": {
+                "description": "Workspace-relative file path.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Run a read-only shell command in the workspace.",
+          "name": "shell_command",
+          "parameters": {
+            "properties": {
+              "cmd": {
+                "description": "Command and arguments to run.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cmd"
+            ],
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

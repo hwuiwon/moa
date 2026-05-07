@@ -10,6 +10,9 @@ use moa_core::{
 use moa_orchestrator::services::llm_gateway::{
     LLMGatewayImpl, ProviderKind, ProviderRegistry, compute_cost_cents,
 };
+use moa_test_support::pricing::PricingTable;
+
+const CENTS_PER_DOLLAR: f64 = 100.0;
 
 #[derive(Clone)]
 struct MockProvider {
@@ -108,7 +111,7 @@ fn llm_gateway_resolve_provider_for_claude_model() {
         Some(Arc::new(MockProvider::success(
             "anthropic",
             "claude-sonnet-4-6",
-            pricing(3.0, 15.0, Some(0.3)),
+            token_pricing_from_fixture("anthropic", "claude-sonnet-4-6"),
         ))),
         None,
         None,
@@ -129,7 +132,7 @@ fn llm_gateway_resolve_provider_for_gpt_model() {
         Some(Arc::new(MockProvider::success(
             "openai",
             "gpt-5.4",
-            pricing(2.5, 15.0, Some(0.25)),
+            token_pricing_from_fixture("openai", "gpt-4.1"),
         ))),
         None,
     );
@@ -150,7 +153,7 @@ fn llm_gateway_resolve_provider_for_prefixed_google_model() {
         Some(Arc::new(MockProvider::success(
             "google",
             "gemini-2.5-flash",
-            pricing(0.3, 2.5, Some(0.03)),
+            token_pricing_from_fixture("gemini", "gemini-2.5-flash"),
         ))),
     );
 
@@ -163,18 +166,26 @@ fn llm_gateway_resolve_provider_for_prefixed_google_model() {
 }
 
 #[test]
-fn llm_gateway_compute_cost_cents_sonnet() {
-    let cents = compute_cost_cents(
-        "claude-sonnet-4-6",
-        TokenUsage {
-            input_tokens_uncached: 100_000,
-            input_tokens_cache_write: 25_000,
-            input_tokens_cache_read: 50_000,
-            output_tokens: 20_000,
-        },
-    );
+fn llm_gateway_compute_cost_cents_matches_pricing_table_v1_for_sonnet() {
+    let model = "claude-sonnet-4-6";
+    let usage = TokenUsage {
+        input_tokens_uncached: 100_000,
+        input_tokens_cache_write: 25_000,
+        input_tokens_cache_read: 50_000,
+        output_tokens: 20_000,
+    };
+    let table = PricingTable::load_v1();
+    let expected = table
+        .cost_cents(
+            "anthropic",
+            model,
+            (usage.input_tokens_uncached + usage.input_tokens_cache_write) as u64,
+            usage.output_tokens as u64,
+            usage.input_tokens_cache_read as u64,
+        )
+        .expect("sonnet pricing fixture");
 
-    assert_eq!(cents, 69);
+    assert_eq!(compute_cost_cents(model, usage), expected);
 }
 
 #[tokio::test]
@@ -184,7 +195,7 @@ async fn llm_gateway_complete_propagates_provider_error() {
         Some(Arc::new(MockProvider::error(
             "openai",
             "gpt-5.4",
-            pricing(2.5, 15.0, Some(0.25)),
+            token_pricing_from_fixture("openai", "gpt-4.1"),
             "provider boom",
         ))),
         None,
@@ -204,8 +215,11 @@ async fn llm_gateway_complete_propagates_provider_error() {
 
 #[tokio::test]
 async fn llm_gateway_complete_normalizes_explicit_provider_prefix() {
-    let provider =
-        MockProvider::success("google", "gemini-2.5-flash", pricing(0.3, 2.5, Some(0.03)));
+    let provider = MockProvider::success(
+        "google",
+        "gemini-2.5-flash",
+        token_pricing_from_fixture("gemini", "gemini-2.5-flash"),
+    );
     let registry =
         ProviderRegistry::with_static_providers(None, None, Some(Arc::new(provider.clone())));
     let gateway = LLMGatewayImpl::new(Arc::new(registry));
@@ -228,15 +242,17 @@ async fn llm_gateway_complete_normalizes_explicit_provider_prefix() {
     );
 }
 
-fn pricing(
-    input_per_mtok: f64,
-    output_per_mtok: f64,
-    cached_input_per_mtok: Option<f64>,
-) -> TokenPricing {
+fn token_pricing_from_fixture(provider: &str, model: &str) -> TokenPricing {
+    let table = PricingTable::load_v1();
+    let pricing = table
+        .get(provider, model)
+        .unwrap_or_else(|error| panic!("missing fixture pricing for {provider}/{model}: {error}"));
     TokenPricing {
-        input_per_mtok,
-        output_per_mtok,
-        cached_input_per_mtok,
+        input_per_mtok: f64::from(pricing.input_per_mtok_cents) / CENTS_PER_DOLLAR,
+        output_per_mtok: f64::from(pricing.output_per_mtok_cents) / CENTS_PER_DOLLAR,
+        cached_input_per_mtok: pricing
+            .cached_input_per_mtok_cents
+            .map(|cents| f64::from(cents) / CENTS_PER_DOLLAR),
     }
 }
 

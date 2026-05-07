@@ -56,6 +56,26 @@ const DEFAULT_STREAM_BUFFER: usize = 128;
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 8_192;
 const DEFAULT_MAX_RETRIES: usize = 3;
 
+/// Builds a Gemini request body for inspection tests without sending it.
+pub fn debug_build_gemini_request_body(
+    request: &CompletionRequest,
+    web_search_enabled: bool,
+) -> Result<Value> {
+    let requested_model = request
+        .model
+        .as_ref()
+        .map(ModelId::as_str)
+        .unwrap_or("gemini-2.5-flash");
+    let resolved_model = canonical_model_id(requested_model)?;
+    let capabilities = capabilities_for_model(&resolved_model);
+    request::build_request_body(
+        request,
+        &resolved_model,
+        "medium",
+        enabled_native_tools(&capabilities, web_search_enabled),
+    )
+}
+
 /// Google Gemini provider backed by `streamGenerateContent`.
 pub struct GeminiProvider {
     client: reqwest::Client,
