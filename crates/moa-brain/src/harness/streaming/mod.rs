@@ -1,24 +1,25 @@
-//! Shared streamed-turn execution loop and live signal handling.
+//! Shared streamed-turn execution loop.
+
+mod lineage;
+mod signals;
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    BufferedUserMessage, CompletionContent, CompletionRequest, CompletionResponse, ContextMessage,
-    Event, EventRange, EventRecord, LLMProvider, LineageHandle, MoaError, ModelTask, Result,
-    RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, StopReason,
-    TraceContext, WorkingContext, record_turn_llm_call_duration,
+    BufferedUserMessage, CompletionContent, Event, EventRange, EventRecord, LLMProvider,
+    LineageHandle, MoaError, ModelTask, Result, RuntimeEvent, SessionId, SessionSignal,
+    SessionStatus, SessionStore, StopReason, TraceContext, record_turn_llm_call_duration,
     record_turn_tool_dispatch_duration,
 };
 use moa_hands::ToolRouter;
-use moa_lineage_core::{
-    CitationLineage, ContextChunk, ContextLineage, GenerationLineage, LineageEvent, ScoreRecord,
-    ScoreSource, ScoreTarget, ScoreValue, TokenUsage, ToolCallSummary, TurnId,
-};
+use moa_lineage_core::TurnId;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+use self::lineage::{emit_context_lineage, emit_generation_lineage};
+use self::signals::{drain_signal_queue, handle_stream_signal};
 use crate::pipeline::ContextPipeline;
 use crate::turn::{
     StreamSignalDisposition, find_pending_approval_request, find_pending_tool_approval,
@@ -28,9 +29,9 @@ use crate::turn::{
 use super::approval_flow::{process_resolved_approval, wait_for_approval};
 use super::budget::enforce_workspace_budget;
 use super::context_build::{
-    BuildTurnContextOptions, append_event, buffer_queued_message, build_cache_report,
-    build_turn_context, calculate_response_cost_cents, last_user_message_text,
-    record_turn_span_metrics, turn_number_for_events,
+    BuildTurnContextOptions, append_event, build_cache_report, build_turn_context,
+    calculate_response_cost_cents, last_user_message_text, record_turn_span_metrics,
+    turn_number_for_events,
 };
 use super::tool_dispatch::{ToolCallOutcome, handle_tool_call};
 use super::{StreamedTurnResult, ToolLoopMode};
@@ -593,286 +594,4 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
         }
     }
     .await
-}
-
-fn emit_context_lineage(
-    lineage: &dyn LineageHandle,
-    turn_id: TurnId,
-    session: &SessionMeta,
-    ctx: &WorkingContext,
-    span: &tracing::Span,
-) {
-    let chunks = ctx
-        .messages
-        .iter()
-        .enumerate()
-        .map(|(idx, message)| context_chunk(session, idx, message))
-        .collect::<Vec<_>>();
-    let record = ContextLineage {
-        turn_id,
-        session_id: session.id,
-        workspace_id: session.workspace_id.clone(),
-        user_id: session.user_id.clone(),
-        ts: chrono::Utc::now(),
-        chunks_in_window: chunks,
-        truncations: Vec::new(),
-        prefix_cache_hit_tokens: None,
-        prefix_cache_miss_tokens: None,
-        total_input_tokens_estimated: ctx.token_count.min(u32::MAX as usize) as u32,
-    };
-
-    match serde_json::to_value(LineageEvent::Context(record.clone())) {
-        Ok(json) => lineage.record(json),
-        Err(error) => tracing::warn!(%error, "failed to serialize context lineage"),
-    }
-    let recall_proxy = if record.chunks_in_window.is_empty() {
-        0.0
-    } else {
-        1.0
-    };
-    let score = ScoreRecord {
-        score_id: uuid::Uuid::now_v7(),
-        ts: chrono::Utc::now(),
-        target: ScoreTarget::Turn { turn_id },
-        workspace_id: session.workspace_id.clone(),
-        user_id: Some(session.user_id.clone()),
-        name: "retrieval_recall_proxy".to_string(),
-        value: ScoreValue::Numeric(recall_proxy),
-        source: ScoreSource::OnlineJudge,
-        model_or_evaluator: "context-compiler".to_string(),
-        run_id: None,
-        dataset_id: None,
-        comment: None,
-    };
-    match serde_json::to_value(LineageEvent::Eval(score)) {
-        Ok(json) => lineage.record(json),
-        Err(error) => tracing::warn!(%error, "failed to serialize context score"),
-    }
-    moa_lineage_otel::emit_context_attrs(span, &record);
-}
-
-fn context_chunk(session: &SessionMeta, idx: usize, message: &ContextMessage) -> ContextChunk {
-    ContextChunk {
-        chunk_id: uuid::Uuid::now_v7(),
-        source_uid: session.id.0,
-        position: idx.min(u16::MAX as usize) as u16,
-        estimated_tokens: estimate_tokens(&message.content),
-        role: format!("{:?}", message.role).to_ascii_lowercase(),
-    }
-}
-
-fn estimate_tokens(text: &str) -> u32 {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        0
-    } else {
-        trimmed.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_generation_lineage(
-    lineage: &dyn LineageHandle,
-    turn_id: TurnId,
-    session: &SessionMeta,
-    provider: &str,
-    request: &CompletionRequest,
-    response: &CompletionResponse,
-    cost_cents: u32,
-    duration: std::time::Duration,
-    span: &tracing::Span,
-) {
-    let usage = response.token_usage();
-    let record = GenerationLineage {
-        turn_id,
-        session_id: session.id,
-        workspace_id: session.workspace_id.clone(),
-        user_id: session.user_id.clone(),
-        ts: chrono::Utc::now(),
-        provider: provider.to_string(),
-        request_model: request
-            .model
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| session.model.to_string()),
-        response_model: response.model.to_string(),
-        usage: TokenUsage {
-            input_tokens: usage.total_input_tokens().min(u32::MAX as usize) as u32,
-            output_tokens: usage.output_tokens.min(u32::MAX as usize) as u32,
-            cache_read_tokens: Some(usage.input_tokens_cache_read.min(u32::MAX as usize) as u32),
-            cache_creation_tokens: Some(
-                usage.input_tokens_cache_write.min(u32::MAX as usize) as u32
-            ),
-        },
-        finish_reasons: vec![format!("{:?}", response.stop_reason)],
-        tool_calls: tool_call_summaries(response),
-        cost_micros: u64::from(cost_cents).saturating_mul(10_000),
-        duration,
-        trace_id: None,
-        span_id: None,
-    };
-
-    match serde_json::to_value(LineageEvent::Generation(record.clone())) {
-        Ok(json) => lineage.record(json),
-        Err(error) => tracing::warn!(%error, "failed to serialize generation lineage"),
-    }
-    let score = ScoreRecord {
-        score_id: uuid::Uuid::now_v7(),
-        ts: chrono::Utc::now(),
-        target: ScoreTarget::Turn { turn_id },
-        workspace_id: session.workspace_id.clone(),
-        user_id: Some(session.user_id.clone()),
-        name: "cost_micros".to_string(),
-        value: ScoreValue::Numeric(record.cost_micros as f64),
-        source: ScoreSource::OnlineJudge,
-        model_or_evaluator: provider.to_string(),
-        run_id: None,
-        dataset_id: None,
-        comment: None,
-    };
-    match serde_json::to_value(LineageEvent::Eval(score)) {
-        Ok(json) => lineage.record(json),
-        Err(error) => tracing::warn!(%error, "failed to serialize generation score"),
-    }
-    metrics::gauge!(
-        "moa_cost_micros_per_turn",
-        "workspace_id" => session.workspace_id.to_string(),
-        "provider" => provider.to_string()
-    )
-    .set(record.cost_micros as f64);
-    moa_lineage_otel::emit_generation_attrs(span, &record);
-
-    let citation = CitationLineage {
-        turn_id,
-        session_id: session.id,
-        workspace_id: session.workspace_id.clone(),
-        user_id: session.user_id.clone(),
-        ts: chrono::Utc::now(),
-        answer_text: response.text.clone(),
-        answer_sentence_offsets: sentence_offsets(&response.text),
-        citations: Vec::new(),
-        vendor_used: Some(provider.to_string()),
-        verifier_used: Some("cascade-bm25-hhem".to_string()),
-    };
-    match serde_json::to_value(LineageEvent::Citation(citation)) {
-        Ok(json) => lineage.record(json),
-        Err(error) => tracing::warn!(%error, "failed to serialize citation lineage"),
-    }
-}
-
-fn sentence_offsets(text: &str) -> Vec<(u32, u32)> {
-    let mut out = Vec::new();
-    let mut start = 0_usize;
-    for (idx, ch) in text.char_indices() {
-        if matches!(ch, '.' | '!' | '?') {
-            let end = idx + ch.len_utf8();
-            push_offset(&mut out, start, end);
-            start = end;
-        }
-    }
-    if start < text.len() {
-        push_offset(&mut out, start, text.len());
-    }
-    out
-}
-
-fn push_offset(out: &mut Vec<(u32, u32)>, start: usize, end: usize) {
-    if start < end {
-        out.push((
-            start.min(u32::MAX as usize) as u32,
-            end.min(u32::MAX as usize) as u32,
-        ));
-    }
-}
-
-fn tool_call_summaries(response: &CompletionResponse) -> Vec<ToolCallSummary> {
-    response
-        .content
-        .iter()
-        .filter_map(|content| {
-            let CompletionContent::ToolCall(call) = content else {
-                return None;
-            };
-            let argument_size_bytes = serde_json::to_vec(&call.invocation.input)
-                .map(|bytes| bytes.len().min(u32::MAX as usize) as u32)
-                .unwrap_or(0);
-            Some(ToolCallSummary {
-                tool_name: call.invocation.name.clone(),
-                call_id: call
-                    .invocation
-                    .id
-                    .clone()
-                    .unwrap_or_else(|| call.invocation.name.clone()),
-                argument_size_bytes,
-                result_size_bytes: 0,
-                duration: std::time::Duration::ZERO,
-                error: None,
-            })
-        })
-        .collect()
-}
-
-fn handle_stream_signal(
-    signal: SessionSignal,
-    runtime_tx: &broadcast::Sender<RuntimeEvent>,
-    turn_requested: &mut bool,
-    queued_messages: &mut Vec<BufferedUserMessage>,
-    soft_cancel_requested: &mut bool,
-) -> StreamSignalDisposition {
-    match signal {
-        SessionSignal::QueueMessage(message) => {
-            buffer_queued_message(queued_messages, message);
-            *turn_requested = true;
-            let _ = runtime_tx.send(RuntimeEvent::Notice(
-                "Message queued. Will process after current turn.".to_string(),
-            ));
-            StreamSignalDisposition::Continue
-        }
-        SessionSignal::SoftCancel => {
-            *soft_cancel_requested = true;
-            let _ = runtime_tx.send(RuntimeEvent::Notice(
-                "Stop requested. MOA will stop after the current step.".to_string(),
-            ));
-            StreamSignalDisposition::Continue
-        }
-        SessionSignal::HardCancel => StreamSignalDisposition::CancelImmediately,
-        SessionSignal::ApprovalDecided { .. } => StreamSignalDisposition::Continue,
-    }
-}
-
-fn drain_signal_queue(
-    signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
-    runtime_tx: &broadcast::Sender<RuntimeEvent>,
-    turn_requested: &mut bool,
-    queued_messages: &mut Vec<BufferedUserMessage>,
-    soft_cancel_requested: &mut bool,
-) -> Result<()> {
-    let Some(signal_rx) = signal_rx else {
-        return Ok(());
-    };
-
-    loop {
-        match signal_rx.try_recv() {
-            Ok(SessionSignal::QueueMessage(message)) => {
-                buffer_queued_message(queued_messages, message);
-                *turn_requested = true;
-                let _ = runtime_tx.send(RuntimeEvent::Notice(
-                    "Message queued. Will process after current turn.".to_string(),
-                ));
-            }
-            Ok(SessionSignal::SoftCancel) => {
-                *soft_cancel_requested = true;
-            }
-            Ok(SessionSignal::HardCancel) => {
-                *soft_cancel_requested = true;
-            }
-            Ok(SessionSignal::ApprovalDecided { .. }) => {}
-            Err(mpsc::error::TryRecvError::Empty) => return Ok(()),
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                return Err(MoaError::ProviderError(
-                    "session signal channel closed".to_string(),
-                ));
-            }
-        }
-    }
 }

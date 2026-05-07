@@ -411,6 +411,9 @@ pub trait LineageHandle: Send + Sync {
     /// Records one lineage event encoded as JSON.
     fn record(&self, evt_json: Value);
 
+    /// Adds transport-specific trace span attributes for a lineage event.
+    fn record_span_attributes(&self, _span: &tracing::Span, _evt_json: &Value) {}
+
     /// Returns the number of dropped events observed by the handle.
     fn dropped_count(&self) -> u64 {
         0
