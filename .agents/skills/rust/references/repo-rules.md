@@ -1,4 +1,4 @@
-# MOA Rust Rules
+# Repo Rules
 
 This reference condenses the repository-specific instructions that matter when applying generic Rust advice inside MOA.
 
@@ -11,15 +11,16 @@ This reference condenses the repository-specific instructions that matter when a
 - Use `tracing` for logging. Do not add `println!` or `eprintln!` to library code.
 - Use `tokio` for async work. Keep I/O async.
 - Do not use `unwrap()` in library code.
-- Optional integrations stay behind feature flags: `telegram`, `slack`, `discord`, `cloud`, `temporal`.
+- Optional integrations stay behind feature flags: `telegram`, `slack`, `discord`, `cloud`.
 - Close-out for Rust work is `cargo fmt --all` and `cargo clippy ... -D warnings`.
 - If `graphify-out/GRAPH_REPORT.md` exists, consult it before broad repo exploration.
 
 ## Workspace Facts
 
 - The workspace uses `edition = "2024"`.
+- Crates live under `crates/`. The workspace verification confirmed: `moa-brain`, `moa-cli`, `moa-core`, `moa-eval`, `moa-gateway`, `moa-hands`, `moa-lineage`, `moa-loadtest`, `moa-memory`, `moa-orchestrator`, `moa-orchestrator-local`, `moa-providers`, `moa-runtime`, `moa-security`, `moa-session`, `moa-skills`, `moa-test-support`, `xtask`.
 - Default members exclude `moa-desktop`, so desktop changes need an explicit `cargo build -p moa-desktop`.
-- The current workspace dependencies already standardize `tokio`, `serde`, `chrono`, `uuid`, `thiserror`, `anyhow`, and `tracing`.
+- The current workspace dependencies standardize `tokio`, `serde`, `chrono`, `uuid`, `thiserror`, `anyhow`, `tracing`, `restate-sdk`.
 
 ## Project Conventions
 
@@ -31,15 +32,16 @@ This reference condenses the repository-specific instructions that matter when a
 
 ## Design-Doc Map
 
-- `docs/02-brain-orchestration.md`: orchestrators, Temporal, local brain lifecycle
-- `docs/03-communication-layer.md`: gateway, approvals, observation, desktop and CLI message flow
-- `docs/04-memory-architecture.md`: memory wiki, indexing, consolidation
+- `docs/02-brain-orchestration.md`: Restate orchestrator, local brain lifecycle
+- `docs/03-communication-layer.md`: gateway, approvals, observation, CLI message flow
+- `docs/04-memory-architecture.md`: graph memory, indexing, consolidation
 - `docs/05-session-event-log.md`: Postgres event schema, event types, compaction
 - `docs/06-hands-and-mcp.md`: hands, MCP routing, sandbox providers
 - `docs/07-context-pipeline.md`: seven-stage context compilation pipeline
 - `docs/08-security.md`: credential vault, sandbox, prompt injection
 - `docs/09-skills-and-learning.md`: skill format, distillation, self-improvement
 - `docs/10-technology-stack.md`: crate selection, external services, implementation phases
+- `docs/12-restate-architecture.md`: Restate-specific virtual objects, services, workflow detail
 
 ## Practical Implications
 
