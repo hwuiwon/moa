@@ -252,7 +252,7 @@ async fn test_orchestrator() -> Result<(TempDir, LocalOrchestrator)> {
 
 async fn test_orchestrator_with_delay(delay: Duration) -> Result<(TempDir, LocalOrchestrator)> {
     let provider: Arc<dyn LLMProvider> = Arc::new(MockProvider {
-        model: MoaConfig::default().general.default_model,
+        model: MoaConfig::default().models.main,
         first_turn_delay: delay,
     });
     test_orchestrator_with_provider(provider).await
@@ -1173,7 +1173,7 @@ async fn starts_two_sessions_and_processes_both() -> Result<()> {
 async fn blank_session_waits_for_first_message() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
-        model: MoaConfig::default().general.default_model,
+        model: MoaConfig::default().models.main,
         first_turn_delay: Duration::from_millis(50),
         requests: requests.clone(),
     });
@@ -1228,7 +1228,7 @@ async fn soft_cancel_marks_session_cancelled() -> Result<()> {
 #[tokio::test]
 async fn hard_cancel_aborts_stream_and_emits_cancelled_status() -> Result<()> {
     let provider: Arc<dyn LLMProvider> = Arc::new(SlowStreamingProvider {
-        model: MoaConfig::default().general.default_model,
+        model: MoaConfig::default().models.main,
         text: "streaming response that should be interrupted".to_string(),
         delay: Duration::from_millis(40),
     });
@@ -1313,7 +1313,7 @@ async fn hard_cancel_aborts_stream_and_emits_cancelled_status() -> Result<()> {
 #[tokio::test]
 async fn soft_cancel_stops_after_current_tool_call() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let model = MoaConfig::default().general.default_model;
+    let model = MoaConfig::default().models.main;
     let provider: Arc<dyn LLMProvider> = Arc::new(ToolCancelProvider {
         model,
         requests: requests.clone(),
@@ -1455,7 +1455,7 @@ async fn resume_session_recovers_unresolved_pending_prompt() -> Result<()> {
     reopened_config.local.memory_dir = dir.path().join("memory").display().to_string();
     reopened_config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
     let reopened_provider: Arc<dyn LLMProvider> = Arc::new(MockProvider {
-        model: reopened_config.general.default_model.clone(),
+        model: reopened_config.models.main.clone(),
         first_turn_delay: Duration::from_millis(5),
     });
     let reopened_router = Arc::new(
@@ -1561,7 +1561,7 @@ async fn approval_requested_event_persists_full_prompt_details() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let _dir_guard = CurrentDirGuard::set(workspace.path())?;
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let model = MoaConfig::default().general.default_model;
+    let model = MoaConfig::default().models.main;
     let provider: Arc<dyn LLMProvider> = Arc::new(FileWriteApprovalProvider { model, requests });
     let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
     let session = start_session(&orchestrator).await?;
@@ -1661,7 +1661,7 @@ async fn observe_runtime_streams_assistant_text_and_turn_completion() -> Result<
 #[tokio::test]
 async fn observe_runtime_reports_tool_updates_and_approval_flow() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let model = MoaConfig::default().general.default_model;
+    let model = MoaConfig::default().models.main;
     let provider: Arc<dyn LLMProvider> = Arc::new(FileWriteApprovalProvider { model, requests });
     let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
     let session = start_session(&orchestrator).await?;
@@ -1800,7 +1800,7 @@ async fn resumed_session_observe_runtime_streams_from_persisted_events() -> Resu
 #[tokio::test]
 async fn queued_follow_up_request_ends_with_user_message() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let model = MoaConfig::default().general.default_model;
+    let model = MoaConfig::default().models.main;
     let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
         model,
         first_turn_delay: Duration::from_millis(200),
@@ -1856,7 +1856,7 @@ async fn compaction_uses_auxiliary_model_router_tier() -> Result<()> {
     config.local.docker_enabled = false;
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
-    config.general.default_model = "claude-sonnet-4-6".to_string();
+    config.models.main = "claude-sonnet-4-6".to_string();
     config.models.main = "claude-sonnet-4-6".to_string();
     config.models.auxiliary = Some("claude-haiku-4-5".to_string());
     config.compaction.event_threshold = 1;
@@ -1935,7 +1935,7 @@ async fn compaction_uses_auxiliary_model_router_tier() -> Result<()> {
 #[tokio::test]
 async fn multiple_queued_messages_are_processed_fifo_one_turn_at_a_time() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let model = MoaConfig::default().general.default_model;
+    let model = MoaConfig::default().models.main;
     let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
         model,
         first_turn_delay: Duration::from_millis(200),
@@ -1949,7 +1949,7 @@ async fn multiple_queued_messages_are_processed_fifo_one_turn_at_a_time() -> Res
 #[tokio::test]
 async fn burst_of_queued_messages_preserves_fifo_under_hot_session_pressure() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let model = MoaConfig::default().general.default_model;
+    let model = MoaConfig::default().models.main;
     let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
         model,
         first_turn_delay: Duration::from_millis(150),
@@ -2032,7 +2032,7 @@ async fn burst_of_queued_messages_preserves_fifo_under_hot_session_pressure() ->
 #[tokio::test]
 async fn queued_message_waiting_for_approval_runs_after_allowed_turn() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let model = MoaConfig::default().general.default_model;
+    let model = MoaConfig::default().models.main;
     let provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
         model,
         first_tool_cmd: "python3 -c 'print(\"tool-complete\")'".to_string(),
@@ -2048,7 +2048,7 @@ async fn queued_message_waiting_for_approval_runs_after_allowed_turn() -> Result
 async fn soft_cancel_waiting_for_approval_cancels_cleanly() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
-        model: MoaConfig::default().general.default_model,
+        model: MoaConfig::default().models.main,
         first_tool_cmd: "printf 'awaiting approval'".to_string(),
         requests,
     });
@@ -2060,7 +2060,7 @@ async fn soft_cancel_waiting_for_approval_cancels_cleanly() -> Result<()> {
 #[tokio::test]
 async fn denied_tool_preserves_queued_follow_up() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let model = MoaConfig::default().general.default_model;
+    let model = MoaConfig::default().models.main;
     let provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
         model,
         first_tool_cmd: "python3 -c 'print(\"tool-complete\")'".to_string(),
@@ -2121,7 +2121,7 @@ async fn denied_tool_preserves_queued_follow_up() -> Result<()> {
 #[tokio::test]
 async fn resume_cancelled_session_waits_for_new_input() -> Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let model = MoaConfig::default().general.default_model;
+    let model = MoaConfig::default().models.main;
     let provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
         model,
         first_tool_cmd: "sleep 0.35 && printf 'tool-finished\\n'".to_string(),
@@ -2194,7 +2194,7 @@ async fn resume_cancelled_session_waits_for_new_input() -> Result<()> {
 #[tokio::test]
 async fn panicking_provider_marks_session_failed() -> Result<()> {
     let provider: Arc<dyn LLMProvider> = Arc::new(PanicProvider {
-        model: MoaConfig::default().general.default_model,
+        model: MoaConfig::default().models.main,
     });
     let (_dir, orchestrator) = test_orchestrator_with_provider(provider).await?;
     let session = start_session(&orchestrator).await?;
@@ -2241,7 +2241,7 @@ async fn completed_tool_turn_destroys_cached_hand() -> Result<()> {
             .with_session_store(session_store.clone()),
     );
     let llm_provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
-        model: config.general.default_model.clone(),
+        model: config.models.main.clone(),
         first_tool_cmd: "echo tracked".to_string(),
         requests: Arc::new(Mutex::new(Vec::new())),
     });
@@ -2363,7 +2363,7 @@ async fn observe_uses_postgres_listener_for_remote_active_sessions() -> Result<(
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
 
     let provider: Arc<dyn LLMProvider> = Arc::new(MockProvider {
-        model: config.general.default_model.clone(),
+        model: config.models.main.clone(),
         first_turn_delay: Duration::from_millis(20),
     });
     let session_store = create_test_store().await?;
@@ -2483,7 +2483,7 @@ async fn workspace_graph_memory_bootstrap_ingests_agents_file_without_provider_c
     config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
-        model: config.general.default_model.clone(),
+        model: config.models.main.clone(),
         first_turn_delay: Duration::from_millis(5),
         requests: requests.clone(),
     });
@@ -2527,7 +2527,7 @@ async fn workspace_memory_bootstrap_informs_first_turn_from_instruction_file() -
     config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
-        model: config.general.default_model.clone(),
+        model: config.models.main.clone(),
         first_turn_delay: Duration::from_millis(5),
         requests: requests.clone(),
     });
@@ -2580,7 +2580,7 @@ async fn workspace_graph_memory_bootstrap_skips_when_nodes_already_exist() -> Re
     config.memory.auto_bootstrap = true;
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
-        model: config.general.default_model.clone(),
+        model: config.models.main.clone(),
         first_turn_delay: Duration::from_millis(5),
         requests: requests.clone(),
     });
@@ -2645,7 +2645,7 @@ async fn workspace_memory_bootstrap_can_be_disabled() -> Result<()> {
     config.local.sandbox_dir = base.path().join("sandbox").display().to_string();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
-        model: config.general.default_model.clone(),
+        model: config.models.main.clone(),
         first_turn_delay: Duration::from_millis(5),
         requests: requests.clone(),
     });
@@ -2690,7 +2690,7 @@ async fn workspace_instruction_file_is_injected_into_prompt_with_config_instruct
     config.general.workspace_instructions = Some("Config workspace guidance.".to_string());
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
-        model: config.general.default_model.clone(),
+        model: config.models.main.clone(),
         first_turn_delay: Duration::from_millis(5),
         requests: requests.clone(),
     });
@@ -2743,7 +2743,7 @@ async fn workspace_instruction_file_is_reloaded_for_each_new_session() -> Result
     config.memory.auto_bootstrap = false;
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider: Arc<dyn LLMProvider> = Arc::new(RequestGuardProvider {
-        model: config.general.default_model.clone(),
+        model: config.models.main.clone(),
         first_turn_delay: Duration::from_millis(5),
         requests: requests.clone(),
     });
@@ -2821,7 +2821,7 @@ async fn local_bash_tools_run_in_detected_workspace_root() -> Result<()> {
 
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
-        model: MoaConfig::default().general.default_model,
+        model: MoaConfig::default().models.main,
         first_tool_cmd: "printf 'PWD: '; pwd; echo; printf 'marker: '; cat repo-marker.txt"
             .to_string(),
         requests,
@@ -2887,7 +2887,7 @@ async fn local_bash_tools_prefer_git_root_over_nested_cwd() -> Result<()> {
 
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider: Arc<dyn LLMProvider> = Arc::new(ToolThenEchoProvider {
-        model: MoaConfig::default().general.default_model,
+        model: MoaConfig::default().models.main,
         first_tool_cmd: "printf 'PWD: '; pwd; echo; printf 'marker: '; cat repo-marker.txt"
             .to_string(),
         requests,
@@ -2959,7 +2959,7 @@ async fn session_pauses_after_max_turns_and_resume_processes_pending_work() -> R
     config.session_limits.max_turns = 1;
 
     let provider: Arc<dyn LLMProvider> = Arc::new(MockProvider {
-        model: config.general.default_model.clone(),
+        model: config.models.main.clone(),
         first_turn_delay: Duration::from_millis(5),
     });
     let orchestrator = test_orchestrator_with_config_and_provider(config, provider).await?;
@@ -3043,7 +3043,7 @@ async fn session_pauses_on_loop_detection() -> Result<()> {
     config.session_limits.loop_detection_threshold = 3;
 
     let provider: Arc<dyn LLMProvider> = Arc::new(RepeatingToolTurnProvider {
-        model: config.general.default_model.clone(),
+        model: config.models.main.clone(),
         search_pattern: "moa-brain/Cargo.toml".to_string(),
         requests: Arc::new(Mutex::new(Vec::new())),
     });

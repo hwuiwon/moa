@@ -43,11 +43,9 @@ tar = "0.4"
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 uuid.workspace = true
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 async-trait.workspace = true
-expectrl = "0.7"
 tempfile.workspace = true

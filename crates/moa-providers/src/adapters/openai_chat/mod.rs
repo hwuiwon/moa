@@ -67,7 +67,7 @@ impl OpenAIProvider {
 
     /// Creates a provider from the configured `OpenAI` environment variable.
     pub fn from_config(config: &MoaConfig) -> Result<Self> {
-        Self::from_config_with_model(config, config.general.default_model.clone())
+        Self::from_config_with_model(config, config.models.main.clone())
     }
 
     /// Creates a provider from config with an explicit default model override.

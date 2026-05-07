@@ -14,36 +14,27 @@ async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
-futures = { version = "0.3" }
-futures-util.workspace = true
-metrics.workspace = true
 moa-brain = { path = "../moa-brain" }
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
-moa-memory-graph = { path = "../moa-memory/graph" }
 memory-ingest = { package = "moa-memory-ingest", path = "../moa-memory/ingest" }
 moa-providers = { path = "../moa-providers" }
-moa-security = { path = "../moa-security" }
 moa-session = { path = "../moa-session" }
 opentelemetry.workspace = true
 restate-sdk.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-shell-words.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "migrate", "json", "uuid", "chrono"] }
-thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
-tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 uuid.workspace = true
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 tempfile.workspace = true
-tracing-subscriber.workspace = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }

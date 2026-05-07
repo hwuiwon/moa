@@ -129,6 +129,9 @@ platforms = [
     "x86_64-apple-darwin",
 ]
 
+[workspace.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
 [profile.dev]
 # 1 = Line tables only. Enough for AI to see "Error at main.rs:42"
 # This is the single biggest space saver.

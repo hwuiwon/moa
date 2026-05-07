@@ -23,7 +23,13 @@ mod requests;
 #[cfg(test)]
 mod tests;
 
-pub use requests::*;
+pub use requests::{
+    AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest,
+    GetSegmentBaselineRequest, InitSessionVoRequest, ListSkillResolutionRatesRequest,
+    RecordSegmentSkillActivationRequest, RecordSegmentToolUseRequest,
+    RecordSegmentTurnUsageRequest, SearchEventsRequest, UpdateSegmentResolutionRequest,
+    UpdateSegmentResolutionScoreRequest, UpdateStatusRequest,
+};
 
 /// Restate service surface for durable session/event storage.
 #[restate_sdk::service]

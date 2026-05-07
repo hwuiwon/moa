@@ -1,6 +1,6 @@
 # MOA Architecture Docs
 
-These docs describe the current MOA architecture as implemented in the Rust workspace. Code remains the source of truth when a detail differs from an older design note.
+These docs describe the current MOA architecture as implemented in the Rust workspace. MOA's current target is enterprise agent operations: durable multi-tenant sessions, governed tool execution, auditability, lineage, and tenant-controlled learning. Code remains the source of truth when a detail differs from an older design note.
 
 ## Reading Order
 
@@ -33,6 +33,9 @@ Supporting notes:
 | [Event Fanout](event-fanout.md) | Event broadcast and observation behavior |
 | [Observability](observability/) | Dashboard and metric notes |
 
+For a current end-to-end map, start with the root [`architecture.md`](../architecture.md)
+before diving into the numbered specs.
+
 ## Current Architectural Decisions
 
 | # | Decision | Status |
@@ -51,6 +54,8 @@ Supporting notes:
 | 12 | Learning is recorded in a bitemporal append-only `learning_log` with provenance, confidence, batch IDs, and invalidation via `valid_to`. | Implemented |
 | 13 | Skills are ranked with a mix of keyword relevance, resolution rate, use count, and recency, with prompt-budget controls. | Implemented |
 | 14 | CLI and REST/gateway surfaces are separate product interfaces over the same runtime model. | Implemented |
+| 15 | Lineage, scoring, cold export, and compliance audit tiers are first-class enterprise evidence planes, not debugging-only logs. | Implemented |
+| 16 | Local mode is an operator/development runtime over the same storage and brain abstractions, not a separate personal-agent product. | Implemented |
 
 ## Consistency Rules
 
@@ -58,3 +63,4 @@ Supporting notes:
 - Do not add a second application database. New product state belongs in Postgres unless a doc explicitly records an exception.
 - Tenant-level learning state belongs at tenant scope; workspace memory and skills remain workspace-scoped unless intentionally promoted.
 - Any new learned behavior should write a `learning_log` entry with source references and actor identity.
+- Any new enterprise-facing action should define its audit, lineage, and rollback story before becoming a default workflow.

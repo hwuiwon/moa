@@ -21,7 +21,7 @@ use crate::types::{
     ToolOutput, WorkingContext, WorkspaceId,
 };
 
-pub use embedding::*;
+pub use embedding::EmbeddingProvider;
 
 /// Orchestrates session lifecycle and observation.
 #[async_trait]

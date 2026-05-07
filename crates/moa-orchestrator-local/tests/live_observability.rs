@@ -198,7 +198,7 @@ async fn live_orchestrator(
     let mut config = MoaConfig::default();
     config.memory.auto_bootstrap = false;
     config.general.default_provider = "anthropic".to_string();
-    config.general.default_model = "claude-sonnet-4-6".to_string();
+    config.models.main = "claude-sonnet-4-6".to_string();
     config.local.memory_dir = dir.path().join("memory").display().to_string();
     config.local.sandbox_dir = repo_root.display().to_string();
 

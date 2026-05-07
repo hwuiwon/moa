@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         .create_session(SessionMeta {
             workspace_id: WorkspaceId::new("step-04-harness"),
             user_id: UserId::new("local-user"),
-            model: config.general.default_model.clone().into(),
+            model: config.models.main.clone().into(),
             ..SessionMeta::default()
         })
         .await?;
@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
     let cli_prompt = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
 
     println!("MOA Step 04 chat harness");
-    println!("model: {}", config.general.default_model);
+    println!("model: {}", config.models.main);
     println!("session: {}", session_id);
     println!("database: {} schema={}", database_url, schema_name);
 

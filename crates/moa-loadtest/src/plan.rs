@@ -22,7 +22,6 @@ pub(crate) struct TurnPlan {
 }
 
 #[derive(Clone)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum MockTurnBehavior {
     Simple,
     FileRead {
@@ -30,6 +29,7 @@ pub(crate) enum MockTurnBehavior {
         start_line: Option<usize>,
         end_line: Option<usize>,
     },
+    #[cfg(test)]
     Bash {
         cmd: String,
     },

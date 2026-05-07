@@ -65,7 +65,7 @@ async fn steps_72_77_e2e() -> Result<()> {
     tokio::fs::write(workspace.join(".gitignore"), "ignored_dir/\n").await?;
 
     let mut config = moa_core::MoaConfig::default();
-    config.general.default_model = "claude-sonnet-4-6".to_string();
+    config.models.main = "claude-sonnet-4-6".to_string();
     config.general.workspace_instructions = Some("Cache integration guidance.\n".repeat(200));
     config.compaction.recent_turns_verbatim = 2;
     config.permissions.auto_approve = vec!["bash".to_string(), "str_replace".to_string()];
@@ -80,7 +80,7 @@ async fn steps_72_77_e2e() -> Result<()> {
     let session = SessionMeta {
         workspace_id: workspace_id.clone(),
         user_id: UserId::new("integration-test"),
-        model: config.general.default_model.clone().into(),
+        model: config.models.main.clone().into(),
         ..SessionMeta::default()
     };
     let session_id = session_store.create_session(session.clone()).await?;

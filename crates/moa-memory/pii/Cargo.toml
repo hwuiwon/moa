@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-moa-core = { path = "../../moa-core" }
 moa-memory-graph = { path = "../graph" }
 reqwest.workspace = true
 serde.workspace = true

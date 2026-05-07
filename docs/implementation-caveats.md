@@ -115,16 +115,10 @@ These caveats are deliberate security trade-offs where the current implementatio
 
 These caveats relate to the gap between "cloud build succeeds" and "cloud deployment is fully self-service."
 
-### `moa sync enable` validates the session-store path, not the full cloud stack
+### Cloud handler startup requires explicit database, Restate, and provider configuration
 
-- `crates/moa-cli/src/main.rs` exposes `moa sync enable`. The command writes cloud sync config only after it can open the embedded replica and perform an initial database sync.
-- The command only validates the session-store sync path; it does not validate Fly deployment readiness, memory storage readiness, or platform gateway credentials.
-- On this machine, full cloud-feature builds require `PROTOC=/opt/homebrew/bin/protoc` because the earlier `~/.local/bin/protoc` in `PATH` is not executable.
-
-### Fly deployment requires explicit cloud-hand and provider boot configuration
-
-- `Dockerfile` installs `libprotobuf-dev` in addition to `protobuf-compiler` (required for `prost-wkt-types` standard Google protobuf include files).
-- `Dockerfile` and `fly.toml` set `MOA__CLOUD__HANDS__DEFAULT_PROVIDER=local`, so the cloud image can boot without the optional `daytona` or `e2b` features enabled.
-- A live Fly deployment to `moa-brains.fly.dev` succeeded after staging `OPENAI_API_KEY` and `MOA__DATABASE__URL` as Fly secrets.
-- The daemon constructs the default LLM provider during boot, so health-only startup requires a valid provider API key secret even before the first user request.
+- `Dockerfile` builds `moa-orchestrator-bin` and installs it as `/usr/local/bin/moa-orchestrator`.
+- The orchestrator process reads `POSTGRES_URL` directly and optionally reads `RESTATE_ADMIN_URL`, `MOA_SANDBOX_DIR`, `MOA_MEMORY_DIR`, `MOA_DOCKER_ENABLED`, OTLP settings, and metrics settings from the process environment.
+- Provider registration is environment-backed. Health readiness validates Postgres and optional Restate registration, not provider reachability; real LLM requests still need a configured key such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GOOGLE_API_KEY`.
+- `fly.toml` still carries shared `MOA__...` settings used by config-driven subsystems, but the Restate handler binary's required database setting is `POSTGRES_URL`.
 - In live validation, a manually stopped machine took roughly 6 seconds to answer the next `/health` request, while a suspended machine resumed in about 1.29 seconds — close to, but not consistently below, the sub-second resume target from the step spec.

@@ -12,16 +12,26 @@ mod security;
 mod session;
 mod telemetry;
 
-pub use context::*;
-pub use database::*;
-pub use gateway::*;
-pub use lineage::*;
-pub use memory::*;
-pub use providers::*;
-pub use sandbox::*;
-pub use security::*;
-pub use session::*;
-pub use telemetry::*;
+pub use context::{
+    BudgetConfig, CompactionConfig, ContextSnapshotConfig, IntentConfig, QueryRewriteConfig,
+    ResolutionConfig, ResolutionWeights, SessionLimitsConfig, SkillBudgetConfig, ToolBudgetConfig,
+    ToolOutputConfig,
+};
+pub use database::{DatabaseConfig, DatabaseNeonConfig};
+pub use gateway::GatewayConfig;
+pub use lineage::LineageConfig;
+pub use memory::{
+    CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryVectorConfig,
+    VectorEmbedderConfig,
+};
+pub use providers::{GeneralConfig, ModelsConfig, ProviderCredentialConfig, ProvidersConfig};
+pub use sandbox::{
+    CloudConfig, CloudFlyioConfig, CloudHandsConfig, LocalConfig, McpCredentialConfig,
+    McpServerConfig, McpTransportConfig,
+};
+pub use security::PermissionsConfig;
+pub use session::{DaemonConfig, SessionConfig};
+pub use telemetry::{MetricsConfig, ObservabilityConfig, OtlpProtocol};
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -84,9 +94,7 @@ pub struct MoaConfig {
 
 impl MoaConfig {
     fn serialize_config(&self) -> Result<String> {
-        let mut config = self.clone();
-        config.models.main = config.general.default_model.clone();
-        toml::to_string_pretty(&config).map_err(|error| MoaError::ConfigError(error.to_string()))
+        toml::to_string_pretty(self).map_err(|error| MoaError::ConfigError(error.to_string()))
     }
 
     fn validate(&self) -> Result<()> {
@@ -130,13 +138,10 @@ impl MoaConfig {
         }
     }
 
-    /// Sets the configured main-loop provider/model pair and mirrors it into routing config.
+    /// Sets the configured main-loop provider/model pair.
     pub fn set_main_model(&mut self, provider: impl Into<String>, model: impl Into<String>) {
-        let provider = provider.into();
-        let model = model.into();
-        self.general.default_provider = provider;
-        self.general.default_model = model.clone();
-        self.models.main = model;
+        self.general.default_provider = provider.into();
+        self.models.main = model.into();
     }
 }
 
@@ -152,7 +157,6 @@ mod tests {
     fn default_config_is_valid() {
         let config = MoaConfig::default();
         assert_eq!(config.general.default_provider, "openai");
-        assert_eq!(config.general.default_model, "gpt-5.4");
         assert_eq!(config.models.main, "gpt-5.4");
         assert!(config.models.auxiliary.is_none());
     }
@@ -162,7 +166,6 @@ mod tests {
         let toml = r#"
             [general]
             default_provider = "openai"
-            default_model = "gpt-4o"
             reasoning_effort = "high"
 
             [models]
@@ -177,7 +180,6 @@ mod tests {
         "#;
         let config: MoaConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.general.default_provider, "openai");
-        assert_eq!(config.general.default_model, "gpt-4o");
         assert_eq!(config.models.main, "claude-sonnet-4-6");
         assert_eq!(config.models.auxiliary.as_deref(), Some("claude-haiku-4-5"));
         assert!(!config.local.docker_enabled);
@@ -310,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn observability_config_backward_compat() {
+    fn observability_config_defaults_missing_fields() {
         let toml = r"
             [observability]
             enabled = false

@@ -64,7 +64,7 @@ trait Consolidate {
 }
 ```
 
-**Use for**: one-shot tasks with a well-defined start and end where re-invocation must be structurally impossible. Memory consolidation runs. Source ingestion. Never use for agents — agents are conversational by nature.
+**Use for**: one-shot tasks with a well-defined start and end where re-invocation must be structurally impossible. Memory consolidation and intent discovery runs fit this shape. Never use for agents — agents are conversational by nature.
 
 ### Primitives inside handlers
 
@@ -96,11 +96,11 @@ The mapping is deliberate and reversible only with significant cost. Each choice
 | Tool call | **Service** handler (`ToolExecutor::execute`) | — |
 | LLM call | Service handler (`LLMGateway::complete`) called from Session | — |
 | Hand execution | Service handler (`HandRunner::execute`) | — |
-| Memory read/write | Graph memory services and ingestion workflow | — |
+| Memory read/write | Graph memory services and `IngestionVO` | workspace/session-derived object key |
 | Session event log append | Service handler (`SessionStore::append_event`) | — |
 | Workspace | Virtual Object (`Workspace`) | `workspace_id` |
 | Consolidation / dream cycle | **Workflow** (`Consolidate`) — scheduled from `Workspace` VO | `workspace_id:YYYY-MM-DD` |
-| Source ingestion | **Workflow** (`IngestSource`) | `source_hash` |
+| Slow-path turn ingestion | **Virtual Object** (`IngestionVO`) | ingestion object key |
 | Approval request | `ctx.awakeable::<Decision>()` inside turn, resolved by gateway | — |
 | Session cancellation | Handler on `Session` VO, sets a cancel flag in state | — |
 
@@ -118,11 +118,16 @@ One-shot tasks that happen to be LLM-driven — research-and-summarize, classify
 
 Tool calls are ephemeral and called from within Session VO turns via typed clients. Service semantics (no keyed state, durable per-invocation) are correct. Wrapping them in Workflows adds no value and pollutes the journal with extra workflow starts.
 
-### Why Consolidate and graph ingestion are Workflows
+### Why Consolidate and intent discovery are Workflows
 
 These are genuine one-shot operations where re-invocation must be structurally impossible:
 - **Consolidate**: running it twice on the same workspace for the same date would double-apply graph maintenance. Workflow's runs-once-per-ID guarantee is the correctness property we want.
-- **Graph ingestion**: ingesting the same source document twice should not produce duplicate facts or embeddings. Keying the workflow on source identity makes re-ingestion a no-op.
+- **IntentDiscovery**: one tenant discovery pass over a bounded segment window should have a stable run identity and audit trail.
+
+Slow-path graph-memory turn ingestion is a Virtual Object (`IngestionVO`) because
+the implementation tracks per-turn completion keys and uses Restate journaled
+steps for chunking, extraction, classification, embedding, contradiction
+detection, and graph writes.
 
 Everything else is either a conversational actor (VO) or a stateless operation (Service).
 
@@ -409,7 +414,7 @@ Configured via handler attributes or `restate-server` per-service config:
 | `ToolExecutor::execute` | **1h** | Only retained long enough for in-flight retries |
 | `LLMGateway::complete` | **1h** | Same |
 | `Consolidate::run` | **7d** | Billing/audit |
-| `IngestSource::run` | **30d** | Source hash is durable ID; long retention prevents dup-ingestion |
+| `IngestionVO::ingest_turn` | **30d** | Slow-path ingestion needs enough journal history to avoid duplicate turn application |
 | Graph memory writes | **6h** | Compliance log lives in Postgres, not Restate |
 
 Retention is **completion retention** — the journal is kept for this long *after* the invocation finishes. In-progress invocations retain the journal until completion regardless. A 6-hour session holds its journal for 54 hours total under the 48h setting.
@@ -555,11 +560,14 @@ Recommended production rollout:
 
 ## Local development
 
-Restate ships a single-binary dev server. `just dev` runs:
+Restate ships a single-binary dev server. A local cloud-runtime loop uses the
+repo dev database plus the orchestrator handler binary:
 
 ```bash
 restate-server --node-name local --data-dir .restate-dev &
-cargo run -p moa-orchestrator -- --restate http://localhost:9070
+POSTGRES_URL=postgres://moa_owner:dev@localhost:25432/moa \
+RESTATE_ADMIN_URL=http://localhost:9070 \
+cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 9080 --health-port 9081
 restate deployments register http://localhost:9080
 ```
 
@@ -584,4 +592,7 @@ Restate fits MOA cleanly because three of its primitives match the domain:
 - **Awakeables** = durable approval pauses without gateway-side state.
 - **Per-handler retention and invocation pause** = bounded journal growth and human-in-the-loop recovery.
 
-The programming model in Rust is idiomatic. The K8s operator handles the stateful cluster. Observability is OTel-native and lands in Grafana without translation layers.
+The programming model in Rust is idiomatic. The MOA handler service is a normal
+binary that can run under Kubernetes, Fly, or any equivalent platform that can
+serve the Restate handler endpoint and health endpoint. Observability is
+OTel-native and lands in Grafana without translation layers.

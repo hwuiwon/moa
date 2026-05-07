@@ -108,7 +108,7 @@ async fn create_test_orchestrator(
             .with_session_store(session_store.clone()),
     );
     let provider: Arc<dyn LLMProvider> = Arc::new(StreamingMockProvider {
-        model: config.general.default_model.clone(),
+        model: config.models.main.clone(),
     });
     let orchestrator = LocalOrchestrator::new(
         config,
