@@ -55,7 +55,7 @@ impl BuiltInTool for MemoryRememberTool {
         input: &serde_json::Value,
         ctx: &ToolContext<'_>,
     ) -> Result<ToolOutput> {
-        moa_memory_ingest::execute_memory_tool(ctx.session, self.name(), input).await
+        execute_memory_tool(ctx, self.name(), input).await
     }
 }
 
@@ -97,7 +97,7 @@ impl BuiltInTool for MemoryForgetTool {
         input: &serde_json::Value,
         ctx: &ToolContext<'_>,
     ) -> Result<ToolOutput> {
-        moa_memory_ingest::execute_memory_tool(ctx.session, self.name(), input).await
+        execute_memory_tool(ctx, self.name(), input).await
     }
 }
 
@@ -141,6 +141,21 @@ impl BuiltInTool for MemorySupersedeTool {
         input: &serde_json::Value,
         ctx: &ToolContext<'_>,
     ) -> Result<ToolOutput> {
-        moa_memory_ingest::execute_memory_tool(ctx.session, self.name(), input).await
+        execute_memory_tool(ctx, self.name(), input).await
     }
+}
+
+async fn execute_memory_tool(
+    ctx: &ToolContext<'_>,
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let executor = ctx.memory_tool_executor.ok_or_else(|| {
+        moa_core::MoaError::Unsupported(
+            "graph-memory tools require a runtime memory executor".to_string(),
+        )
+    })?;
+    executor
+        .execute_memory_tool(ctx.session, tool_name, input)
+        .await
 }

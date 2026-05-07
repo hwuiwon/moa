@@ -16,7 +16,7 @@ use moa_core::{
     scope_turn_replay_counters,
 };
 use moa_hands::ToolRouter;
-use moa_providers::{ScriptedProvider, ScriptedResponse, anthropic::debug_build_request_body};
+use moa_providers::{ScriptedProvider, ScriptedResponse, debug_build_anthropic_request_body};
 use moa_security::ToolPolicies;
 use moa_session::testing;
 use serde_json::{Value, json};
@@ -297,7 +297,7 @@ async fn steps_72_77_e2e() -> Result<()> {
         "Current working directory: {}",
         workspace.display()
     )));
-    let turn_six_body = debug_build_request_body(&turn_six_request, false)?;
+    let turn_six_body = debug_build_anthropic_request_body(&turn_six_request, false)?;
     let cache_control_ttls = collect_cache_control_ttls(&turn_six_body);
     assert_eq!(
         cache_control_ttls,

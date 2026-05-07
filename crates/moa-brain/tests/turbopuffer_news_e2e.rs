@@ -5,8 +5,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
 use moa_core::{
-    MemoryScope, ScopeContext, SessionId, UserId, WorkspaceId,
-    traits::EmbeddingProvider as Embedder,
+    MemoryScope, ScopeContext, SessionId, UserId, WorkspaceId, traits::EmbeddingProvider,
 };
 use moa_memory_graph::{AgeGraphStore, PiiClass};
 use moa_memory_ingest::{SessionTurn, ingest_turn_direct_with_pool};

@@ -3,12 +3,11 @@
 use std::borrow::Cow;
 
 use moa_core::{
-    CompactionConfig, CompletionRequest, ContextMessage, Event, EventRange, EventRecord,
-    LLMProvider, ModelTask, ModelTier, Result, SessionId, SessionStore, TokenPricing,
+    CompactionConfig, CompletionRequest, ContextMessage, Event, EventRecord, LLMProvider,
+    ModelTier, Result, SessionId, SessionStore, TokenPricing,
 };
 use tracing::Instrument;
 
-use crate::pipeline::ContextPipeline;
 use crate::pipeline::estimate_tokens;
 
 /// Latest checkpoint summary state derived from the append-only event log.
@@ -155,26 +154,6 @@ pub(crate) async fn maybe_compact_events(
         Ok(true)
     }
     .instrument(span)
-    .await
-}
-
-/// Backward-compatible entry point retained for existing exports.
-pub async fn maybe_compact(
-    store: &dyn SessionStore,
-    llm: &dyn LLMProvider,
-    session_id: SessionId,
-    _pipeline: &ContextPipeline,
-) -> Result<bool> {
-    let events = store.get_events(session_id, EventRange::all()).await?;
-    maybe_compact_events(
-        &CompactionConfig::default(),
-        store,
-        llm,
-        ModelTask::Summarization.tier(),
-        session_id,
-        llm.capabilities().context_window,
-        &events,
-    )
     .await
 }
 

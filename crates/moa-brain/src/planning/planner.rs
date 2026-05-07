@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use moa_core::{MemoryScope, MoaError, traits::EmbeddingProvider as Embedder};
+use moa_core::{MemoryScope, MoaError, traits::EmbeddingProvider};
 use moa_memory_graph::{GraphError, GraphStore, NodeLabel, PiiClass};
 use uuid::Uuid;
 
@@ -166,7 +166,7 @@ pub struct QueryRetrievalCtx<'a> {
     /// Request-scoped graph planning inputs.
     pub planning: &'a PlanningCtx,
     /// Embedder used to produce the query vector.
-    pub embedder: &'a dyn Embedder,
+    pub embedder: &'a dyn EmbeddingProvider,
     /// Cached hybrid retriever used after planning.
     pub hybrid: &'a CachedHybridRetriever,
     /// Maximum PII class visible to the caller.
@@ -183,7 +183,7 @@ impl<'a> QueryRetrievalCtx<'a> {
     pub fn new(
         planner: &'a QueryPlanner,
         planning: &'a PlanningCtx,
-        embedder: &'a dyn Embedder,
+        embedder: &'a dyn EmbeddingProvider,
         hybrid: &'a CachedHybridRetriever,
         max_pii_class: PiiClass,
     ) -> Self {

@@ -428,6 +428,18 @@ impl LineageHandle for NullLineageHandle {
 /// Shared no-op lineage handle for simple borrowed contexts.
 pub static NULL_LINEAGE_HANDLE: NullLineageHandle = NullLineageHandle;
 
+/// Executes graph-memory tools without making the hands crate depend on ingestion.
+#[async_trait]
+pub trait MemoryToolExecutor: Send + Sync {
+    /// Executes one graph-memory built-in tool for an active session.
+    async fn execute_memory_tool(
+        &self,
+        session: &SessionMeta,
+        tool_name: &str,
+        input: &Value,
+    ) -> Result<ToolOutput>;
+}
+
 /// Execution context passed to built-in tool implementations.
 pub struct ToolContext<'a> {
     /// Active session metadata.
@@ -438,6 +450,8 @@ pub struct ToolContext<'a> {
     pub session_store: Option<&'a dyn SessionStore>,
     /// Cooperative cancellation token for the current session, when available.
     pub cancel_token: Option<&'a CancellationToken>,
+    /// Optional graph-memory executor installed by runtimes that support memory writes.
+    pub memory_tool_executor: Option<&'a dyn MemoryToolExecutor>,
 }
 
 /// Async built-in tool handler.

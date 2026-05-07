@@ -17,7 +17,6 @@ pub use embedder::CohereV4Embedder;
 pub use gemini::{
     EmbedRole, EmbedderConstructionRole, GeminiEmbeddingEmbedder, build_embedder_from_config,
 };
-pub use moa_core::traits::EmbeddingProvider as Embedder;
 pub use pgvector_store::PgvectorStore;
 pub use promotion::{
     PROMOTION_BATCH_SIZE, PROMOTION_OVERLAP_THRESHOLD, PromotionOptions, PromotionReport,

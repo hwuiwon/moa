@@ -7,12 +7,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_core::MoaConfig;
+use moa_core::{MoaConfig, traits::EmbeddingProvider};
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
-use crate::{CohereV4Embedder, Embedder, Error, Result};
+use crate::{CohereV4Embedder, Error, Result};
 
 const GEMINI_ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta";
 const GEMINI_V2_MODEL: &str = "gemini-embedding-2";
@@ -159,7 +159,7 @@ impl GeminiEmbeddingEmbedder {
 }
 
 #[async_trait]
-impl Embedder for GeminiEmbeddingEmbedder {
+impl EmbeddingProvider for GeminiEmbeddingEmbedder {
     fn model_id(&self) -> &str {
         GEMINI_V2_MODEL
     }
@@ -185,7 +185,7 @@ impl Embedder for GeminiEmbeddingEmbedder {
 pub fn build_embedder_from_config(
     config: &MoaConfig,
     role: EmbedderConstructionRole,
-) -> Result<Arc<dyn Embedder>> {
+) -> Result<Arc<dyn EmbeddingProvider>> {
     let cfg = &config.memory.vector.embedder;
     match cfg.name.as_str() {
         "cohere-embed-v4" => {

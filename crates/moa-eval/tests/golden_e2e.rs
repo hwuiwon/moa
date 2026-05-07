@@ -17,7 +17,7 @@ use moa_brain::{
 };
 use moa_core::{
     MemoryScope, ScopeContext, ScopedConn, SessionId, UserId, WorkspaceId,
-    traits::EmbeddingProvider as Embedder,
+    traits::EmbeddingProvider,
 };
 use moa_eval::golden::comparator::{compare_top_k_within_window, dump_traces};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, PiiClass, cypher};
@@ -83,7 +83,7 @@ struct HistoricalQuery {
 struct GoldenEmbedder;
 
 #[async_trait]
-impl Embedder for GoldenEmbedder {
+impl EmbeddingProvider for GoldenEmbedder {
     fn model_id(&self) -> &str {
         "golden-mock-embedder"
     }

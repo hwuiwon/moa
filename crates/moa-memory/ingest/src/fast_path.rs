@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    MemoryScope, MoaError, ScopeContext, ScopedConn, SessionMeta, ToolOutput, UserId, WorkspaceId,
-    traits::EmbeddingProvider as Embedder,
+    MemoryScope, MemoryToolExecutor, MoaError, ScopeContext, ScopedConn, SessionMeta, ToolOutput,
+    UserId, WorkspaceId, traits::EmbeddingProvider,
 };
 use moa_memory_graph::{
     AgeGraphStore, GraphError, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
@@ -74,7 +74,7 @@ pub struct FastPathCtx {
     scope: ScopeContext,
     graph: Arc<dyn GraphStore>,
     vector: Arc<dyn VectorStore>,
-    embedder: Arc<dyn Embedder>,
+    embedder: Arc<dyn EmbeddingProvider>,
     pii: Arc<dyn PiiClassifier>,
     contradict: Arc<dyn ContradictionDetector>,
     assume_app_role: bool,
@@ -88,7 +88,7 @@ impl FastPathCtx {
         scope: ScopeContext,
         graph: Arc<dyn GraphStore>,
         vector: Arc<dyn VectorStore>,
-        embedder: Arc<dyn Embedder>,
+        embedder: Arc<dyn EmbeddingProvider>,
         pii: Arc<dyn PiiClassifier>,
         contradict: Arc<dyn ContradictionDetector>,
     ) -> Self {
@@ -221,6 +221,22 @@ pub async fn execute_memory_tool(
         ))),
     };
     output.map_err(|error| MoaError::ToolError(error.to_string()))
+}
+
+/// Runtime adapter that lets `moa-hands` execute graph-memory tools without depending on ingest.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FastMemoryToolExecutor;
+
+#[async_trait]
+impl MemoryToolExecutor for FastMemoryToolExecutor {
+    async fn execute_memory_tool(
+        &self,
+        session: &SessionMeta,
+        tool_name: &str,
+        input: &Value,
+    ) -> moa_core::Result<ToolOutput> {
+        execute_memory_tool(session, tool_name, input).await
+    }
 }
 
 async fn fast_remember_inner(

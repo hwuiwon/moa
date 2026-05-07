@@ -11,7 +11,6 @@ pub mod retrieval;
 pub mod tool_stats;
 pub mod turn;
 
-pub use compaction::maybe_compact;
 pub use harness::{
     StreamedTurnResult, TurnResult, run_brain_turn, run_brain_turn_with_tools,
     run_brain_turn_with_tools_stepwise, run_streamed_turn, run_streamed_turn_with_signals,

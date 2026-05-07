@@ -17,9 +17,7 @@ use moa_brain::{
     planning::{PlannedQuery, Strategy},
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest},
 };
-use moa_core::{
-    MemoryScope, ScopeContext, ScopedConn, WorkspaceId, traits::EmbeddingProvider as Embedder,
-};
+use moa_core::{MemoryScope, ScopeContext, ScopedConn, WorkspaceId, traits::EmbeddingProvider};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VECTOR_DIMENSION};
 use moa_session::{PostgresSessionStore, testing::cleanup_test_schema};
@@ -487,7 +485,7 @@ fn install_metrics_recorder() -> Result<PrometheusHandle> {
         .context("failed to install Prometheus metrics recorder")
 }
 
-async fn embed_texts(embedder: &dyn Embedder, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+async fn embed_texts(embedder: &dyn EmbeddingProvider, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     let started = Instant::now();
     let embeddings = embedder
         .embed(texts)
@@ -568,7 +566,7 @@ async fn drive_load(stack: Stack, cfg: &PerfGateConfig) -> Result<LoadReport> {
 }
 
 async fn hydrate_queries(
-    embedder: &dyn Embedder,
+    embedder: &dyn EmbeddingProvider,
     templates: Vec<QueryTemplate>,
 ) -> Result<Vec<RetrievalQuery>> {
     let mut unique_texts = templates

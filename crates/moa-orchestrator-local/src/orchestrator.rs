@@ -23,6 +23,9 @@ impl LocalOrchestrator {
             Arc::new(CountedSessionStore::new(session_store.clone()));
         let graph_pool = session_store.pool().clone();
         let _ = memory_ingest::install_runtime_with_pool(graph_pool.clone());
+        tool_router
+            .set_memory_tool_executor(Arc::new(FastMemoryToolExecutor))
+            .await;
         let (lineage, lineage_writer) = build_lineage_sink(&config, graph_pool.clone()).await?;
         let session_task_monitor = SessionTaskMonitor::shared();
         let orchestrator = Self {

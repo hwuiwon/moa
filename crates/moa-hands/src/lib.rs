@@ -1,18 +1,13 @@
 //! Tool routing, local hand provisioning, and built-in tools for MOA.
 
-#[cfg(feature = "daytona")]
-pub mod daytona;
-#[cfg(feature = "e2b")]
-pub mod e2b;
-pub mod local;
-pub mod mcp;
-pub mod router;
+pub mod adapters;
+pub mod core;
 pub mod tools;
 
 #[cfg(feature = "daytona")]
-pub use daytona::DaytonaHandProvider;
+pub use adapters::daytona::DaytonaHandProvider;
 #[cfg(feature = "e2b")]
-pub use e2b::E2BHandProvider;
-pub use local::LocalHandProvider;
-pub use mcp::{MCPClient, McpDiscoveredTool};
-pub use router::{ToolExecution, ToolRegistry, ToolRouter};
+pub use adapters::e2b::E2BHandProvider;
+pub use adapters::local::LocalHandProvider;
+pub use adapters::mcp::{MCPClient, McpDiscoveredTool};
+pub use core::{ToolExecution, ToolRegistry, ToolRouter};
