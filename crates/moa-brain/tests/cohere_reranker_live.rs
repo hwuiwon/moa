@@ -1,3 +1,5 @@
+// Live counterpart: see cohere_reranker_offline.rs for the wiremock version that runs in PR CI.
+
 //! Live Cohere Rerank coverage for the hybrid retriever client.
 //!
 //! These tests are intentionally ignored and additionally gated by

@@ -1,0 +1,48 @@
+---
+source: crates/moa-providers/tests/gemini_safety_settings.rs
+expression: value
+---
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Inspect the provider request shape."
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 256,
+    "temperature": 0.0,
+    "thinkingConfig": {
+      "thinkingBudget": 4096
+    }
+  },
+  "safetySettings": [
+    {
+      "category": "HARM_CATEGORY_HARASSMENT",
+      "threshold": "BLOCK_ONLY_HIGH"
+    },
+    {
+      "category": "HARM_CATEGORY_HATE_SPEECH",
+      "threshold": "BLOCK_ONLY_HIGH"
+    },
+    {
+      "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+      "threshold": "BLOCK_ONLY_HIGH"
+    },
+    {
+      "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+      "threshold": "BLOCK_ONLY_HIGH"
+    }
+  ],
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "Follow the workspace policy."
+      }
+    ]
+  }
+}

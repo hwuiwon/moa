@@ -61,11 +61,12 @@ impl PostgresSessionStore {
 
     /// Creates a session store from config using the configured `PostgreSQL` pool settings.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
-        Self::new_with_options_and_blob_store(
+        Self::new_with_options_and_schema(
             config.database.runtime_url(),
             1,
             config.database.max_connections,
             config.database.connect_timeout_seconds,
+            config.database.schema.as_deref(),
             Arc::new(FileBlobStore::from_config(config)?),
             config.session.blob_threshold_bytes,
         )
@@ -74,11 +75,12 @@ impl PostgresSessionStore {
 
     /// Creates a session store from config using the direct/admin `PostgreSQL` URL when present.
     pub async fn from_admin_config(config: &MoaConfig) -> Result<Self> {
-        Self::new_with_options_and_blob_store(
+        Self::new_with_options_and_schema(
             config.database.admin_url(),
             1,
             config.database.max_connections,
             config.database.connect_timeout_seconds,
+            config.database.schema.as_deref(),
             Arc::new(FileBlobStore::from_config(config)?),
             config.session.blob_threshold_bytes,
         )

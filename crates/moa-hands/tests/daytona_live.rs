@@ -1,3 +1,5 @@
+// No offline counterpart possible because: this live file verifies real Daytona sandbox provisioning, lifecycle, and proxy execution semantics that a local HTTP mock cannot emulate.
+
 //! Live Daytona integration tests.
 //!
 //! These tests are ignored by default because they provision real Daytona

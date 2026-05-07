@@ -1,0 +1,9 @@
+# Source: OpenAI Responses function-call streaming API docs, captured offline 2026-05-07.
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","created_at":1,"model":"gpt-5.4","output":[],"status":"in_progress"}}
+
+data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"emit_token","arguments":"","status":"in_progress"}}
+
+data: {"type":"response.function_call_arguments.done","sequence_number":2,"item_id":"fc_1","output_index":0,"arguments":"{\"token\":\"OFFLINE\"}","name":"emit_token"}
+
+data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_1","object":"response","created_at":1,"completed_at":2,"model":"gpt-5.4","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"emit_token","arguments":"{\"token\":\"OFFLINE\"}","status":"completed"}],"status":"completed","usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":0},"output_tokens":4,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":14}}}
+

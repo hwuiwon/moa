@@ -5,6 +5,22 @@ use sqlx::PgPool;
 
 use crate::{GraphError, NodeIndexRow};
 
+const RANKING_SQL: &str = r#"
+        SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
+               valid_to, valid_from, properties_summary, last_accessed_at
+        FROM moa.node_index
+        WHERE valid_to IS NULL
+          AND name_tsv @@ plainto_tsquery('simple', $1)
+        ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', $1)) DESC,
+                 (
+                   0.55 * (1.0 / (1.0 + GREATEST(EXTRACT(EPOCH FROM (now() - valid_from)) / 86400.0, 0.0))) +
+                   0.35 * LEAST(GREATEST(COALESCE(confidence, 0.0), 0.0), 1.0) +
+                   0.10 * (LN(LEAST(reference_count, 100)::DOUBLE PRECISION + 1.0) / LN(101.0))
+                 ) DESC,
+                 uid ASC
+        LIMIT $2
+        "#;
+
 /// Thin lexical store for NER seed lookup through `name_tsv`.
 #[derive(Clone)]
 pub struct LexicalStore {
@@ -42,6 +58,11 @@ impl LexicalStore {
     }
 
     /// Looks up seed nodes by name using `plainto_tsquery`.
+    ///
+    /// Results are ordered first by text rank and then by the documented memory rank:
+    /// `0.55 * recency_decay + 0.35 * confidence + 0.10 * normalized_reference_count`,
+    /// where recency decay is `1 / (1 + age_days)` and references are log-normalized up to
+    /// 100 references.
     pub async fn lookup_seeds(
         &self,
         name: &str,
@@ -76,21 +97,10 @@ pub(crate) async fn lookup_seed_rows(
         return Ok(Vec::new());
     }
 
-    sqlx::query_as::<_, NodeIndexRow>(
-        r#"
-        SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
-               valid_to, valid_from, properties_summary, last_accessed_at
-        FROM moa.node_index
-        WHERE valid_to IS NULL
-          AND name_tsv @@ plainto_tsquery('simple', $1)
-        ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', $1)) DESC,
-                 last_accessed_at DESC
-        LIMIT $2
-        "#,
-    )
-    .bind(name)
-    .bind(limit)
-    .fetch_all(pool)
-    .await
-    .map_err(GraphError::from)
+    sqlx::query_as::<_, NodeIndexRow>(RANKING_SQL)
+        .bind(name)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .map_err(GraphError::from)
 }

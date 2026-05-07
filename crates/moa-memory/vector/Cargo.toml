@@ -17,9 +17,12 @@ serde_json.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid", "json"] }
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+moa-test-support.workspace = true
 moa-session = { path = "../../moa-session" }
+proptest = "1"
 wiremock = "0.6"

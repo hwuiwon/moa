@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS moa.node_index (
     pii_class TEXT NOT NULL DEFAULT 'none'
         CHECK (pii_class IN ('none', 'pii', 'phi', 'restricted')),
     confidence DOUBLE PRECISION,
+    reference_count BIGINT NOT NULL DEFAULT 0 CHECK (reference_count >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     valid_from TIMESTAMPTZ NOT NULL DEFAULT now(),
     valid_to TIMESTAMPTZ,
@@ -21,6 +22,9 @@ CREATE TABLE IF NOT EXISTS moa.node_index (
     last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     properties_summary JSONB
 );
+
+ALTER TABLE moa.node_index
+    ADD COLUMN IF NOT EXISTS reference_count BIGINT NOT NULL DEFAULT 0 CHECK (reference_count >= 0);
 
 CREATE INDEX IF NOT EXISTS node_index_ws_scope_label
     ON moa.node_index (workspace_id, scope, label)

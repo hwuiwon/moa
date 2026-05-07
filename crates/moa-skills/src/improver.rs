@@ -1,6 +1,6 @@
 //! Existing-skill self-improvement logic.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use chrono::Utc;
 use moa_core::{
@@ -15,6 +15,34 @@ use crate::format::{
 };
 use crate::registry::{NewSkill, SkillRegistry};
 use crate::regression::{append_skill_regression_log, run_skill_regression};
+
+static IMPROVEMENT_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+/// Outcome of one attempted existing-skill improvement.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImprovementResult {
+    /// The candidate was accepted and became the active skill version.
+    Improved {
+        /// Metadata for the active improved version.
+        metadata: SkillMetadata,
+        /// Previous semantic skill version.
+        previous_version: String,
+        /// Accepted semantic skill version.
+        version: String,
+    },
+    /// The LLM concluded the current skill already covers the successful run.
+    Unchanged {
+        /// Metadata for the unchanged active skill.
+        metadata: SkillMetadata,
+    },
+    /// The proposed candidate regressed and the previous version remains active.
+    Rejected {
+        /// Regression report explaining why the candidate was rejected.
+        report: crate::regression::SkillRegressionReport,
+    },
+    /// No improvement was attempted because the requested skill could not be loaded.
+    Skipped,
+}
 
 /// Compares a run against an existing skill and updates it when the LLM proposes a better version.
 pub async fn maybe_improve_skill(
@@ -45,17 +73,45 @@ pub async fn maybe_improve_skill_with_learning(
     model_router: Arc<ModelRouter>,
     learning_store: Option<Arc<PostgresSessionStore>>,
 ) -> Result<Option<SkillMetadata>> {
+    match improve_skill_with_learning(
+        config,
+        session,
+        existing,
+        events,
+        model_router,
+        learning_store,
+    )
+    .await?
+    {
+        ImprovementResult::Improved { metadata, .. } => Ok(Some(metadata)),
+        ImprovementResult::Unchanged { .. }
+        | ImprovementResult::Rejected { .. }
+        | ImprovementResult::Skipped => Ok(None),
+    }
+}
+
+/// Compares a run against an existing skill and returns a typed outcome for tests and callers.
+pub async fn improve_skill_with_learning(
+    config: &MoaConfig,
+    session: &SessionMeta,
+    existing: &SkillMetadata,
+    events: &[EventRecord],
+    model_router: Arc<ModelRouter>,
+    learning_store: Option<Arc<PostgresSessionStore>>,
+) -> Result<ImprovementResult> {
     let Some(store) = learning_store.clone() else {
-        return Ok(None);
+        return Ok(ImprovementResult::Skipped);
     };
+    let lock = IMPROVEMENT_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
+    let _guard = lock.lock().await;
     let registry = SkillRegistry::new(store.pool().clone());
     let scope = MemoryScope::Workspace {
         workspace_id: session.workspace_id.clone(),
     };
     let Some(row) = registry.load_by_name(&scope, &existing.name).await? else {
-        return Ok(None);
+        return Ok(ImprovementResult::Skipped);
     };
-    let mut current = parse_skill_markdown(&row.body)?;
+    let current = parse_skill_markdown(&row.body)?;
     let current_markdown = render_skill_markdown(&current)?;
     let prompt = build_improvement_prompt(&current_markdown, events);
     let llm = model_router.provider_for(ModelTask::SkillDistillation);
@@ -68,14 +124,12 @@ pub async fn maybe_improve_skill_with_learning(
     let now = Utc::now();
 
     if updated_text.trim() == "UNCHANGED" {
-        record_successful_use(&mut current, now);
-        let markdown = render_skill_markdown(&current)?;
-        registry
-            .upsert_by_name(NewSkill::from_document(scope, &current, markdown))
-            .await?;
-        return Ok(None);
+        return Ok(ImprovementResult::Unchanged {
+            metadata: skill_metadata_from_document(existing.path.clone(), &current),
+        });
     }
 
+    let previous_version = current.frontmatter.version();
     let mut improved = parse_skill_markdown(updated_text)?;
     improved
         .frontmatter
@@ -89,10 +143,11 @@ pub async fn maybe_improve_skill_with_learning(
         .set_source_session(Some(session.id.to_string()));
     improved
         .frontmatter
-        .set_improved_from(Some(current.frontmatter.version()));
+        .set_improved_from(Some(previous_version.clone()));
+    let breaking_change = skill_signature_changed(&current, &improved);
     improved
         .frontmatter
-        .set_version(bump_version(&current.frontmatter.version()));
+        .set_version(bump_version_for_change(&previous_version, breaking_change));
     record_successful_use_with_baseline(&mut improved, &current, now);
 
     let candidate_markdown = render_skill_markdown(&improved)?;
@@ -132,10 +187,11 @@ pub async fn maybe_improve_skill_with_learning(
         registry
             .upsert_by_name(NewSkill::from_document(scope, &restored, markdown))
             .await?;
-        return Ok(None);
+        return Ok(ImprovementResult::Rejected { report });
     }
 
     let metadata = skill_metadata_from_document(existing.path.clone(), &improved);
+    let version = improved.frontmatter.version();
     crate::distiller::append_skill_learning(
         store.as_ref(),
         session,
@@ -144,13 +200,19 @@ pub async fn maybe_improve_skill_with_learning(
         serde_json::json!({
             "path": metadata.path.clone(),
             "name": metadata.name.clone(),
-            "previous_version": current.frontmatter.version(),
-            "version": improved.frontmatter.version(),
+            "previous_version": previous_version,
+            "version": version,
+            "originating_session_id": session.id.to_string(),
+            "diff_summary": summarize_diff(&current_markdown, &candidate_markdown),
         }),
     )
     .await?;
 
-    Ok(Some(metadata))
+    Ok(ImprovementResult::Improved {
+        metadata,
+        previous_version: current.frontmatter.version(),
+        version: improved.frontmatter.version(),
+    })
 }
 
 pub(crate) fn normalize_llm_markdown(text: &str) -> &str {
@@ -220,11 +282,44 @@ pub(crate) fn bump_version(version: &str) -> String {
         .join(".")
 }
 
+fn bump_version_for_change(version: &str, breaking_change: bool) -> String {
+    if breaking_change {
+        return bump_major_version(version);
+    }
+    bump_version(version)
+}
+
+fn bump_major_version(version: &str) -> String {
+    let Some(major) = version.split('.').next() else {
+        return "2.0".to_string();
+    };
+    match major.parse::<u64>() {
+        Ok(major) => format!("{}.0", major.saturating_add(1)),
+        Err(_) => "2.0".to_string(),
+    }
+}
+
+fn skill_signature_changed(previous: &SkillDocument, candidate: &SkillDocument) -> bool {
+    previous.frontmatter.allowed_tools != candidate.frontmatter.allowed_tools
+        || previous.frontmatter.compatibility != candidate.frontmatter.compatibility
+}
+
 fn blended_success_rate(previous_uses: u32, previous_success_rate: f32, next_uses: u32) -> f32 {
     if next_uses == 0 {
         return 1.0;
     }
     ((previous_success_rate * previous_uses as f32) + 1.0) / next_uses as f32
+}
+
+fn summarize_diff(previous: &str, candidate: &str) -> String {
+    if previous == candidate {
+        return "unchanged".to_string();
+    }
+
+    let previous_lines = previous.lines().count();
+    let candidate_lines = candidate.lines().count();
+    let line_delta = candidate_lines as isize - previous_lines as isize;
+    format!("body changed; line_delta={line_delta}")
 }
 
 fn build_improvement_prompt(current_skill: &str, events: &[EventRecord]) -> String {

@@ -1,31 +1,28 @@
-//! Shared deterministic fixtures for context-pipeline integration tests.
+//! Shared helpers for offline brain integration tests.
+#![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ContextMessage, ModelCapabilities, ModelId, Platform, SessionId, SessionMeta, SessionStatus,
-    TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
+    ContextMessage, Event, EventFilter, EventRange, EventRecord, ModelCapabilities, ModelId,
+    PendingSignal, PendingSignalId, Platform, Result, SequenceNum, SessionFilter, SessionId,
+    SessionMeta, SessionStatus, SessionStore, SessionSummary, TokenPricing, ToolCallFormat, UserId,
+    WorkingContext, WorkspaceId,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tokio::sync::Mutex;
 use uuid::Uuid;
+use wiremock::matchers::any;
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const DEFAULT_CLOCK: &str = "2026-05-07T12:00:00Z";
 const WORKSPACE_ROOT_METADATA_KEY: &str = "_moa.runtime.workspace_root";
 
 /// Builds a deterministic [`WorkingContext`] fixture for one-stage pipeline tests.
-///
-/// Example:
-/// ```ignore
-/// let fixture = WorkingContextFixture::new()
-///     .with_workspace_id("ws-001")
-///     .with_tools(&["bash", "file_read", "file_write"])
-///     .with_memory_hits(&[mem_hit("auth.rs", "uses jwt")])
-///     .with_user_message("fix the auth bug")
-///     .with_clock_at("2026-05-07T12:00:00Z")
-///     .build();
-/// ```
 pub struct WorkingContextFixture {
     workspace_id: String,
     user_id: String,
@@ -273,6 +270,237 @@ pub fn capabilities(model_id: &str) -> ModelCapabilities {
         },
         native_tools: Vec::new(),
     }
+}
+
+/// In-memory session store for brain harness tests that do not need Postgres.
+#[derive(Clone)]
+pub struct MockSessionStore {
+    session: Arc<Mutex<SessionMeta>>,
+    events: Arc<Mutex<Vec<EventRecord>>>,
+}
+
+impl MockSessionStore {
+    /// Creates a store with the provided initial session metadata and events.
+    pub fn new(session: SessionMeta, events: Vec<EventRecord>) -> Self {
+        Self {
+            session: Arc::new(Mutex::new(session)),
+            events: Arc::new(Mutex::new(events)),
+        }
+    }
+
+    /// Returns all stored events for assertions.
+    pub async fn all_events(&self) -> Vec<EventRecord> {
+        self.events.lock().await.clone()
+    }
+}
+
+#[async_trait]
+impl SessionStore for MockSessionStore {
+    async fn create_session(&self, meta: SessionMeta) -> Result<SessionId> {
+        let id = meta.id;
+        *self.session.lock().await = meta;
+        Ok(id)
+    }
+
+    async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<SequenceNum> {
+        let mut events = self.events.lock().await;
+        let sequence_num = events.len() as SequenceNum;
+        events.push(EventRecord {
+            id: uuid::Uuid::now_v7(),
+            session_id,
+            sequence_num,
+            event_type: event.event_type(),
+            event,
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        });
+        Ok(sequence_num)
+    }
+
+    async fn get_events(
+        &self,
+        session_id: SessionId,
+        range: EventRange,
+    ) -> Result<Vec<EventRecord>> {
+        Ok(self
+            .events
+            .lock()
+            .await
+            .iter()
+            .filter(|record| record.session_id == session_id)
+            .filter(|record| {
+                range
+                    .from_seq
+                    .map(|from_seq| record.sequence_num >= from_seq)
+                    .unwrap_or(true)
+            })
+            .filter(|record| {
+                range
+                    .to_seq
+                    .map(|to_seq| record.sequence_num <= to_seq)
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn get_session(&self, _session_id: SessionId) -> Result<SessionMeta> {
+        Ok(self.session.lock().await.clone())
+    }
+
+    async fn update_status(&self, _session_id: SessionId, status: SessionStatus) -> Result<()> {
+        self.session.lock().await.status = status;
+        Ok(())
+    }
+
+    async fn store_pending_signal(
+        &self,
+        _session_id: SessionId,
+        signal: PendingSignal,
+    ) -> Result<PendingSignalId> {
+        Ok(signal.id)
+    }
+
+    async fn get_pending_signals(&self, _session_id: SessionId) -> Result<Vec<PendingSignal>> {
+        Ok(Vec::new())
+    }
+
+    async fn resolve_pending_signal(&self, _signal_id: PendingSignalId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn search_events(&self, _query: &str, _filter: EventFilter) -> Result<Vec<EventRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_sessions(&self, _filter: SessionFilter) -> Result<Vec<SessionSummary>> {
+        Ok(Vec::new())
+    }
+
+    async fn workspace_cost_since(
+        &self,
+        workspace_id: &WorkspaceId,
+        since: DateTime<Utc>,
+    ) -> Result<u32> {
+        let session = self.session.lock().await.clone();
+        if &session.workspace_id != workspace_id {
+            return Ok(0);
+        }
+
+        Ok(self
+            .events
+            .lock()
+            .await
+            .iter()
+            .filter(|record| record.timestamp >= since)
+            .filter_map(|record| match &record.event {
+                Event::BrainResponse { cost_cents, .. } => Some(*cost_cents),
+                _ => None,
+            })
+            .sum())
+    }
+
+    async fn delete_session(&self, _session_id: SessionId) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Builds session metadata for an offline brain test.
+pub fn session_meta(label: &str, model: &str) -> SessionMeta {
+    SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new(format!("{label}-workspace")),
+        user_id: moa_core::UserId::new(format!("{label}-user")),
+        model: ModelId::new(model),
+        ..SessionMeta::default()
+    }
+}
+
+/// Mounts a wiremock OpenAI Responses stream that returns the supplied text.
+pub async fn mount_openai_text(server: &MockServer, text: impl Into<String>, cached_tokens: usize) {
+    Mock::given(any())
+        .respond_with(openai_text_response(text.into(), cached_tokens))
+        .mount(server)
+        .await;
+}
+
+/// Returns captured request bodies as JSON values.
+pub async fn captured_json_bodies(server: &MockServer) -> Vec<serde_json::Value> {
+    server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests")
+        .into_iter()
+        .filter_map(|request| serde_json::from_slice(&request.body).ok())
+        .collect()
+}
+
+fn openai_text_response(text: String, cached_tokens: usize) -> ResponseTemplate {
+    let events = [
+        json!({
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+                "id": "resp_offline",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-5.4",
+                "output": [],
+                "status": "in_progress"
+            }
+        }),
+        json!({
+            "type": "response.output_text.delta",
+            "sequence_number": 1,
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": text,
+            "logprobs": null
+        }),
+        json!({
+            "type": "response.completed",
+            "sequence_number": 2,
+            "response": {
+                "id": "resp_offline",
+                "object": "response",
+                "created_at": 1,
+                "completed_at": 2,
+                "model": "gpt-5.4",
+                "output": [{
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{
+                        "type": "output_text",
+                        "text": text,
+                        "annotations": [],
+                        "logprobs": null
+                    }]
+                }],
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 16,
+                    "input_tokens_details": { "cached_tokens": cached_tokens },
+                    "output_tokens": 4,
+                    "output_tokens_details": { "reasoning_tokens": 0 },
+                    "total_tokens": 20
+                }
+            }
+        }),
+    ];
+    let body = events
+        .into_iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>();
+
+    ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .insert_header("cache-control", "no-cache")
+        .set_body_raw(body, "text/event-stream")
 }
 
 fn parse_utc(timestamp: &str) -> DateTime<Utc> {

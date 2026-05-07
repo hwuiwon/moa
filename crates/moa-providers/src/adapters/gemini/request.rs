@@ -1,5 +1,7 @@
 //! Gemini request construction and explicit cache planning.
 
+use std::collections::HashMap;
+
 use super::response::GeminiCachedContent;
 use super::tools::{
     content_message, flush_pending_parts, flush_tool_responses, function_call_part,
@@ -7,6 +9,22 @@ use super::tools::{
     thinking_config_for_model,
 };
 use super::*;
+
+const SAFETY_THRESHOLD_METADATA_KEY: &str = "_moa.gemini.safety_threshold";
+const DEFAULT_SAFETY_THRESHOLD: &str = "BLOCK_MEDIUM_AND_ABOVE";
+const SAFETY_CATEGORIES: [&str; 4] = [
+    "HARM_CATEGORY_HARASSMENT",
+    "HARM_CATEGORY_HATE_SPEECH",
+    "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+    "HARM_CATEGORY_DANGEROUS_CONTENT",
+];
+const SAFETY_THRESHOLDS: [&str; 5] = [
+    "HARM_BLOCK_THRESHOLD_UNSPECIFIED",
+    "BLOCK_LOW_AND_ABOVE",
+    "BLOCK_MEDIUM_AND_ABOVE",
+    "BLOCK_ONLY_HIGH",
+    "BLOCK_NONE",
+];
 
 impl GeminiProvider {
     pub(super) async fn build_request_body_with_cache(
@@ -21,7 +39,11 @@ impl GeminiProvider {
         {
             match self.cached_content_name(&plan).await {
                 Ok(cache_name) => {
-                    return build_request_body_from_parts(plan.tail_parts, Some(cache_name));
+                    return build_request_body_from_parts(
+                        plan.tail_parts,
+                        Some(cache_name),
+                        build_safety_settings(&request.metadata)?,
+                    );
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -125,7 +147,7 @@ pub(super) fn build_request_body(
             include_tools: true,
         },
     )?;
-    build_request_body_from_parts(parts, None)
+    build_request_body_from_parts(parts, None, build_safety_settings(&request.metadata)?)
 }
 
 fn build_request_parts(
@@ -158,6 +180,7 @@ fn build_request_parts(
 fn build_request_body_from_parts(
     parts: GeminiRequestParts,
     cached_content_name: Option<String>,
+    safety_settings: Vec<Value>,
 ) -> Result<Value> {
     if parts.contents.is_empty() {
         return Err(MoaError::ValidationError(
@@ -176,6 +199,9 @@ fn build_request_body_from_parts(
     if let Some(generation_config) = parts.generation_config {
         body.insert("generationConfig".to_string(), generation_config);
     }
+    if !safety_settings.is_empty() {
+        body.insert("safetySettings".to_string(), Value::Array(safety_settings));
+    }
     if let Some(cached_content_name) = cached_content_name {
         body.insert(
             "cachedContent".to_string(),
@@ -184,6 +210,31 @@ fn build_request_body_from_parts(
     }
 
     Ok(Value::Object(body))
+}
+
+fn build_safety_settings(metadata: &HashMap<String, Value>) -> Result<Vec<Value>> {
+    let threshold = metadata
+        .get(SAFETY_THRESHOLD_METADATA_KEY)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_SAFETY_THRESHOLD);
+
+    if !SAFETY_THRESHOLDS.contains(&threshold) {
+        return Err(MoaError::ValidationError(format!(
+            "unsupported Gemini safety threshold '{threshold}'"
+        )));
+    }
+
+    Ok(SAFETY_CATEGORIES
+        .iter()
+        .map(|category| {
+            json!({
+                "category": category,
+                "threshold": threshold,
+            })
+        })
+        .collect())
 }
 
 fn build_contents_from_messages(messages: &[ContextMessage]) -> (Option<Value>, Vec<Value>) {

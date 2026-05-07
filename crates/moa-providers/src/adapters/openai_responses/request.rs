@@ -7,6 +7,9 @@ use super::tools::{
 };
 use super::*;
 
+const PREVIOUS_RESPONSE_ID_METADATA_KEY: &str = "_moa.openai.previous_response_id";
+const TOOL_CHOICE_METADATA_KEY: &str = "_moa.openai.tool_choice";
+
 /// Builds an async-openai client around MOA's shared `OpenAI` configuration.
 pub(crate) fn build_openai_client(config: OpenAIConfig) -> OpenAiClient<OpenAIConfig> {
     OpenAiClient::with_config(config)
@@ -94,17 +97,14 @@ pub(crate) fn build_responses_request(
         prompt_cache_key: prompt_cache_key(request, default_model),
         prompt_cache_retention: Some(PromptCacheRetention::InMemory),
         tools,
-        tool_choice: Some(ToolChoiceParam::Mode(if has_tools {
-            ToolChoiceOptions::Auto
-        } else {
-            ToolChoiceOptions::None
-        })),
+        tool_choice: Some(tool_choice_param(request, has_tools)?),
         parallel_tool_calls: has_tools.then_some(true),
         max_output_tokens: request.max_output_tokens.map(|value| value as u32),
         metadata: metadata_as_strings(&request.metadata),
         reasoning,
         stream: Some(true),
         store: Some(false),
+        previous_response_id: metadata_string(request, PREVIOUS_RESPONSE_ID_METADATA_KEY),
         text: request
             .response_format
             .as_ref()
@@ -137,4 +137,33 @@ fn prompt_cache_key(request: &CompletionRequest, model: &str) -> Option<String> 
     }
 
     Some(format!("moa:{model}:{prefix_fingerprint:016x}"))
+}
+
+fn metadata_string(request: &CompletionRequest, key: &str) -> Option<String> {
+    request
+        .metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn tool_choice_param(request: &CompletionRequest, has_tools: bool) -> Result<ToolChoiceParam> {
+    let Some(choice) = metadata_string(request, TOOL_CHOICE_METADATA_KEY) else {
+        return Ok(ToolChoiceParam::Mode(if has_tools {
+            ToolChoiceOptions::Auto
+        } else {
+            ToolChoiceOptions::None
+        }));
+    };
+
+    match choice.to_ascii_lowercase().as_str() {
+        "none" => Ok(ToolChoiceParam::Mode(ToolChoiceOptions::None)),
+        "auto" => Ok(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
+        "required" => Ok(ToolChoiceParam::Mode(ToolChoiceOptions::Required)),
+        other => Err(MoaError::ValidationError(format!(
+            "unsupported OpenAI Responses tool_choice '{other}'"
+        ))),
+    }
 }

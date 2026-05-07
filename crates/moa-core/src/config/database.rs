@@ -10,6 +10,8 @@ pub struct DatabaseConfig {
     pub url: String,
     /// Optional direct/admin database URL for migrations and other session-sensitive flows.
     pub admin_url: Option<String>,
+    /// Optional Postgres schema name for isolated runtime stores.
+    pub schema: Option<String>,
     /// Maximum pool size for the shared Postgres client.
     pub max_connections: u32,
     /// Connection timeout in seconds.
@@ -23,6 +25,7 @@ impl Default for DatabaseConfig {
         Self {
             url: "postgres://moa_owner:dev@localhost:25432/moa".to_string(),
             admin_url: None,
+            schema: None,
             max_connections: 20,
             connect_timeout_seconds: 10,
             neon: DatabaseNeonConfig::default(),

@@ -1,0 +1,86 @@
+---
+source: crates/moa-providers/tests/gemini_safety_settings.rs
+expression: value
+---
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Inspect the provider request shape."
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 256,
+    "temperature": 0.0,
+    "thinkingConfig": {
+      "thinkingBudget": 4096
+    }
+  },
+  "safetySettings": [
+    {
+      "category": "HARM_CATEGORY_HARASSMENT",
+      "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+    },
+    {
+      "category": "HARM_CATEGORY_HATE_SPEECH",
+      "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+    },
+    {
+      "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+      "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+    },
+    {
+      "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+      "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+    }
+  ],
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "Follow the workspace policy."
+      }
+    ]
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "Read a UTF-8 file from the workspace.",
+          "name": "file_read",
+          "parameters": {
+            "properties": {
+              "path": {
+                "description": "Workspace-relative path",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Run a read-only shell command.",
+          "name": "shell_command",
+          "parameters": {
+            "properties": {
+              "cmd": {
+                "description": "Command and arguments",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cmd"
+            ],
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

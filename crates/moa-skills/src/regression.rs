@@ -57,6 +57,8 @@ pub enum SkillRegressionDecision {
     Accepted,
     /// Candidate skill version regressed and should be rolled back.
     Rejected,
+    /// The eval suite itself errored or timed out, so no quality decision was made.
+    EvalFailed,
     /// Regression tests were skipped because their projected cost exceeded the budget.
     SkippedBudget,
     /// No regression suite exists for the skill yet.
@@ -194,6 +196,17 @@ pub async fn run_skill_regression(
 
     let previous = summarize_regression_run(&previous_run.run);
     let candidate = summarize_regression_run(&candidate_run.run);
+    if run_has_execution_failure(&previous_run.run) || run_has_execution_failure(&candidate_run.run)
+    {
+        return Ok(SkillRegressionReport {
+            decision: SkillRegressionDecision::EvalFailed,
+            suite_path: Some(suite_path),
+            previous: Some(previous),
+            candidate: Some(candidate),
+            detail: format!("suite={} failed to complete cleanly", suite.name),
+        });
+    }
+
     let accepted = compare_scores(&previous, &candidate);
     let detail = format!(
         "suite={} previous(avg={:.3}, failed={}/{}, cost=${:.4}) candidate(avg={:.3}, failed={}/{}, cost=${:.4})",
@@ -219,6 +232,12 @@ pub async fn run_skill_regression(
         candidate: Some(candidate),
         detail,
     })
+}
+
+fn run_has_execution_failure(run: &EvalRun) -> bool {
+    run.results
+        .iter()
+        .any(|result| matches!(result.status, EvalStatus::Error | EvalStatus::Timeout))
 }
 
 /// Generates a minimal regression suite for a newly distilled skill.

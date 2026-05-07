@@ -1,6 +1,8 @@
 //! Atomic graph write protocol for AGE, sidecar rows, vectors, and changelog records.
 
-use chrono::{DateTime, Utc};
+use std::collections::HashSet;
+
+use chrono::{DateTime, Duration, Utc};
 use moa_memory_vector::{VectorItem, VectorStore};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -56,31 +58,22 @@ pub async fn create_node_in_conn(
 pub async fn supersede_node(
     store: &AgeGraphStore,
     old_uid: Uuid,
-    new: NodeWriteIntent,
+    mut new: NodeWriteIntent,
 ) -> Result<Uuid> {
     validate_node_scope(&new)?;
-    let vector_item = vector_item_from_intent(&new)?;
     let mut conn = store.begin_required().await?;
-    let old = fetch_stored_node(conn.as_mut(), old_uid)
-        .await?
-        .ok_or(GraphError::NotFound(old_uid))?;
-    if old.valid_to.is_some() {
-        return Err(GraphError::BiTemporal(format!(
-            "{old_uid} is already invalidated"
-        )));
-    }
+    let (current_uid, old) = fetch_current_supersession_target(conn.as_mut(), old_uid).await?;
     if new.valid_from <= old.valid_from {
-        return Err(GraphError::BiTemporal(
-            "new.valid_from must follow old.valid_from".to_string(),
-        ));
+        new.valid_from = old.valid_from + Duration::microseconds(1);
     }
+    let vector_item = vector_item_from_intent(&new)?;
 
     let now = Utc::now();
     let mut params = node_params(&new, now);
     let object = params
         .as_object_mut()
         .ok_or_else(|| GraphError::Conflict("node params must be an object".to_string()))?;
-    object.insert("old_uid".to_string(), json!(old_uid.to_string()));
+    object.insert("old_uid".to_string(), json!(current_uid.to_string()));
     object.insert("valid_to".to_string(), json!(new.valid_from.to_rfc3339()));
     object.insert("invalidated_at".to_string(), json!(now.to_rfc3339()));
     object.insert("actor".to_string(), json!(new.actor_id.clone()));
@@ -93,7 +86,7 @@ pub async fn supersede_node(
         .map_err(|error| GraphError::Cypher(error.to_string()))?;
     close_node_index(
         conn.as_mut(),
-        old_uid,
+        current_uid,
         new.valid_from,
         now,
         actor_uuid(&new.actor_id),
@@ -103,7 +96,7 @@ pub async fn supersede_node(
     insert_node_index(conn.as_mut(), &new).await?;
 
     if let Some(vector) = store.vector() {
-        vector.delete_in_tx(conn.as_mut(), &[old_uid]).await?;
+        vector.delete_in_tx(conn.as_mut(), &[current_uid]).await?;
         if let Some(item) = vector_item.as_ref() {
             vector
                 .upsert_in_tx(conn.as_mut(), std::slice::from_ref(item))
@@ -126,7 +119,7 @@ pub async fn supersede_node(
             op: "supersede".to_string(),
             target_kind: "node".to_string(),
             target_label: old.label.as_str().to_string(),
-            target_uid: old_uid,
+            target_uid: current_uid,
             payload: json!({
                 "before": old.properties_summary,
                 "valid_to": new.valid_from.to_rfc3339(),
@@ -414,8 +407,8 @@ async fn insert_node_index(conn: &mut PgConnection, intent: &NodeWriteIntent) ->
         r#"
         INSERT INTO moa.node_index
             (uid, label, workspace_id, user_id, name, pii_class, confidence,
-             valid_from, properties_summary)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             reference_count, valid_from, properties_summary)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         "#,
     )
     .bind(intent.uid)
@@ -425,11 +418,20 @@ async fn insert_node_index(conn: &mut PgConnection, intent: &NodeWriteIntent) ->
     .bind(&intent.name)
     .bind(intent.pii_class.as_str())
     .bind(intent.confidence)
+    .bind(reference_count_from_properties(&intent.properties))
     .bind(intent.valid_from)
     .bind(&intent.properties)
     .execute(conn)
     .await?;
     Ok(())
+}
+
+fn reference_count_from_properties(properties: &Value) -> i64 {
+    properties
+        .get("reference_count")
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0)
+        .unwrap_or(0)
 }
 
 async fn close_node_index(
@@ -546,6 +548,52 @@ async fn fetch_stored_node(conn: &mut PgConnection, uid: Uuid) -> Result<Option<
     .fetch_optional(conn)
     .await?;
     row.map(stored_node_from_row).transpose()
+}
+
+async fn fetch_current_supersession_target(
+    conn: &mut PgConnection,
+    initial_uid: Uuid,
+) -> Result<(Uuid, StoredNode)> {
+    let mut uid = initial_uid;
+    let mut seen = HashSet::new();
+
+    loop {
+        if !seen.insert(uid) {
+            return Err(GraphError::BiTemporal(format!(
+                "supersession cycle detected while resolving {initial_uid}"
+            )));
+        }
+
+        let stored = fetch_stored_node(conn, uid)
+            .await?
+            .ok_or(GraphError::NotFound(uid))?;
+        if stored.valid_to.is_none() {
+            return Ok((uid, stored));
+        }
+
+        let replacement_uid = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT (payload->>'replacement_uid')::uuid
+              FROM moa.graph_changelog
+             WHERE target_uid = $1
+               AND op = 'supersede'
+             ORDER BY change_id DESC
+             LIMIT 1
+            "#,
+        )
+        .bind(uid)
+        .fetch_optional(&mut *conn)
+        .await?;
+
+        match replacement_uid {
+            Some(next_uid) => uid = next_uid,
+            None => {
+                return Err(GraphError::BiTemporal(format!(
+                    "{uid} is invalidated and has no supersession replacement"
+                )));
+            }
+        }
+    }
 }
 
 async fn delete_age_node(conn: &mut PgConnection, label: NodeLabel, uid: Uuid) -> Result<()> {

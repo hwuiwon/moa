@@ -19,8 +19,9 @@ pub use gemini::{
 };
 pub use pgvector_store::PgvectorStore;
 pub use promotion::{
-    PROMOTION_BATCH_SIZE, PROMOTION_OVERLAP_THRESHOLD, PromotionOptions, PromotionReport,
-    WorkspacePromotion, finalize_promotion, rollback_promotion,
+    NodePromotionReport, PROMOTION_BATCH_SIZE, PROMOTION_OVERLAP_THRESHOLD, PromotionOptions,
+    PromotionReport, WorkspacePromotion, finalize_promotion, promote_workspace_node_to_global,
+    rollback_promotion,
 };
 pub use turbopuffer::TurbopufferStore;
 
@@ -63,6 +64,26 @@ pub enum Error {
     /// Embedder configuration is invalid.
     #[error("invalid embedder configuration: {0}")]
     EmbedderConfig(String),
+    /// The workspace embedder configuration does not match the pgvector index shape.
+    #[error(
+        "workspace {workspace_id} embedder `{configured_model}` uses {configured_dimension} dimensions, but pgvector KNN requires {required_dimension}"
+    )]
+    EmbedderMismatch {
+        /// Workspace with the mismatched embedder.
+        workspace_id: String,
+        /// Configured embedder model.
+        configured_model: String,
+        /// Configured embedding dimensionality.
+        configured_dimension: usize,
+        /// Dimensionality required by the active vector index.
+        required_dimension: usize,
+    },
+    /// The workspace is being re-embedded and cannot serve stale KNN reads.
+    #[error("workspace {workspace_id} re-embedding is in progress")]
+    ReembedInProgress {
+        /// Workspace whose vectors are being rewritten.
+        workspace_id: String,
+    },
     /// The vector provider returned a non-success status.
     #[error("vector provider `{provider}` returned HTTP {status}: {body}")]
     VectorProviderStatus {
@@ -117,6 +138,12 @@ pub enum Error {
         state: String,
         /// Operation being attempted.
         operation: &'static str,
+    },
+    /// A workspace node cannot be promoted because an active global row already uses the UID.
+    #[error("global node uid collision during promotion: {uid}")]
+    PromotionUidCollision {
+        /// Colliding graph node UID.
+        uid: Uuid,
     },
     /// A core storage helper failed.
     #[error("core storage helper failed: {0}")]

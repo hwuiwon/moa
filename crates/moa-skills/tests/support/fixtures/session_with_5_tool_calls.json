@@ -1,0 +1,15 @@
+{
+  "comment": "Fixture: successful session with exactly five tool calls; proves the distillation threshold admits real multi-step runs.",
+  "session_id": "018f1a30-0000-7000-8000-000000000015",
+  "workspace_id": "skills-distillation-workspace",
+  "user_id": "skills-user",
+  "task": "debug oauth refresh regression with bash file search and validation",
+  "final_response": "OAuth refresh regression fixed and validated",
+  "tool_calls": [
+    { "tool_name": "bash", "input": { "cmd": "cargo test auth_refresh" }, "output": "failing auth refresh test" },
+    { "tool_name": "file_search", "input": { "query": "refresh token" }, "output": "found refresh handler" },
+    { "tool_name": "file_read", "input": { "path": "auth.rs" }, "output": "refresh handler source" },
+    { "tool_name": "file_write", "input": { "path": "auth.rs" }, "output": "patched refresh handler" },
+    { "tool_name": "bash", "input": { "cmd": "cargo test auth_refresh" }, "output": "auth refresh test passed" }
+  ]
+}

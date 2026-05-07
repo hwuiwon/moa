@@ -1,0 +1,3 @@
+# Source: Gemini streamGenerateContent SSE API docs, captured offline 2026-05-07.
+data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":5,"cachedContentTokenCount":2},"modelVersion":"gemini-2.5-flash"}
+

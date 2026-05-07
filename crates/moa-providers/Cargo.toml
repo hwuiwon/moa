@@ -26,3 +26,6 @@ workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 insta.workspace = true
+moa-test-support = { path = "../moa-test-support" }
+tokio = { workspace = true, features = ["test-util"] }
+wiremock = "0.6"

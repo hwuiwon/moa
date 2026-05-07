@@ -1,3 +1,5 @@
+// Live counterpart: see cohere_offline.rs for the wiremock version that runs in PR CI.
+
 //! Live Cohere Embed v4 coverage.
 //!
 //! These tests are intentionally ignored and additionally gated by

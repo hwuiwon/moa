@@ -35,6 +35,11 @@ where
     }
 
     span_recorder.record_raw_response(&state.debug_snapshot());
+    if !state.saw_message_stop {
+        return Err(MoaError::StreamError(
+            "Anthropic stream ended before the provider returned message_stop".to_string(),
+        ));
+    }
     span_recorder.set_cached_input_tokens(state.cached_input_tokens);
     span_recorder.set_cache_creation_input_tokens(state.cache_creation_input_tokens);
     Ok(state.finish(started_at))
@@ -59,6 +64,7 @@ struct AnthropicStreamState {
     output_tokens: usize,
     cached_input_tokens: usize,
     cache_creation_input_tokens: usize,
+    saw_message_stop: bool,
     blocks: Vec<BlockAccumulator>,
     completed_content: Vec<Option<CompletionContent>>,
 }
@@ -72,6 +78,7 @@ impl AnthropicStreamState {
             output_tokens: 0,
             cached_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            saw_message_stop: false,
             blocks: Vec::new(),
             completed_content: Vec::new(),
         }
@@ -110,7 +117,11 @@ impl AnthropicStreamState {
                 }
                 Ok(Vec::new())
             }
-            "message_stop" | "ping" => Ok(Vec::new()),
+            "message_stop" => {
+                self.saw_message_stop = true;
+                Ok(Vec::new())
+            }
+            "ping" => Ok(Vec::new()),
             "error" => {
                 let payload: ErrorEvent = parse_sse_json(event)?;
                 Err(MoaError::ProviderError(format!(

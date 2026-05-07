@@ -1,3 +1,5 @@
+// Live counterpart: see turbopuffer_news_offline.rs for the wiremock version that runs in PR CI.
+
 //! Live end-to-end Turbopuffer promotion and retrieval test.
 
 use std::sync::Arc;

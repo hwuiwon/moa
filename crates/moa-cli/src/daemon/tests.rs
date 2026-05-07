@@ -19,20 +19,49 @@ use moa_core::{
 static DAEMON_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn spawn_daemon_server(config: MoaConfig) -> tokio::task::JoinHandle<Result<()>> {
-    tokio::task::spawn_blocking(move || {
-        tokio::runtime::Handle::current().block_on(run_daemon_server(config))
-    })
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || handle.block_on(run_daemon_server(config)))
 }
 
-fn test_config() -> Option<MoaConfig> {
+async fn wait_for_test_daemon(
+    config: &MoaConfig,
+    server: &mut tokio::task::JoinHandle<Result<()>>,
+) -> Result<()> {
+    tokio::select! {
+        result = server => {
+            result.expect("daemon task join")?;
+            anyhow::bail!("daemon exited before becoming ready")
+        }
+        result = wait_for_daemon(config, std::time::Duration::from_secs(5)) => result,
+    }
+}
+
+struct DaemonTestConfig {
+    config: MoaConfig,
+    database_url: String,
+    schema_name: String,
+}
+
+impl DaemonTestConfig {
+    async fn cleanup(self) -> Result<()> {
+        testing::cleanup_test_schema(&self.database_url, &self.schema_name)
+            .await
+            .map_err(anyhow::Error::from)
+    }
+}
+
+fn test_config() -> Option<DaemonTestConfig> {
     if !live_provider_tests_enabled() {
         return None;
     }
 
     let dir = tempdir().ok()?;
     let base = dir.keep();
+    let database_url = testing::test_database_url();
+    let schema_name = format!("daemon_{}", Uuid::now_v7().simple());
     let mut config = MoaConfig::default();
-    config.database.url = testing::test_database_url();
+    config.database.url = database_url.clone();
+    config.database.schema = Some(schema_name.clone());
     config.local.memory_dir = base.join("memory").display().to_string();
     config.local.sandbox_dir = base.join("sandbox").display().to_string();
     config.daemon.socket_path = base.join("daemon.sock").display().to_string();
@@ -44,15 +73,27 @@ fn test_config() -> Option<MoaConfig> {
     }
 
     if std::env::var(&config.providers.openai.api_key_env).is_ok() {
-        return Some(config);
+        return Some(DaemonTestConfig {
+            config,
+            database_url,
+            schema_name,
+        });
     }
     if std::env::var(&config.providers.anthropic.api_key_env).is_ok() {
         config.set_main_model("anthropic", "claude-sonnet-4-6");
-        return Some(config);
+        return Some(DaemonTestConfig {
+            config,
+            database_url,
+            schema_name,
+        });
     }
     if std::env::var(&config.providers.google.api_key_env).is_ok() {
         config.set_main_model("google", "gemini-3.1-pro-preview");
-        return Some(config);
+        return Some(DaemonTestConfig {
+            config,
+            database_url,
+            schema_name,
+        });
     }
 
     None
@@ -75,11 +116,12 @@ fn random_port() -> u16 {
 #[tokio::test]
 async fn daemon_ping_create_and_shutdown_roundtrip() -> Result<()> {
     let _guard = DAEMON_TEST_LOCK.lock().await;
-    let Some(config) = test_config() else {
+    let Some(test_config) = test_config() else {
         return Ok(());
     };
-    let server = spawn_daemon_server(config.clone());
-    wait_for_daemon(&config, std::time::Duration::from_secs(5)).await?;
+    let config = test_config.config.clone();
+    let mut server = spawn_daemon_server(config.clone());
+    wait_for_test_daemon(&config, &mut server).await?;
 
     let info = daemon_info(&config).await?;
     assert!(info.pid > 0);
@@ -110,18 +152,20 @@ async fn daemon_ping_create_and_shutdown_roundtrip() -> Result<()> {
 
     stop_daemon(&config).await?;
     server.await.expect("daemon task join")?;
+    test_config.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn daemon_lists_session_previews() -> Result<()> {
     let _guard = DAEMON_TEST_LOCK.lock().await;
-    let Some(config) = test_config() else {
+    let Some(test_config) = test_config() else {
         return Ok(());
     };
+    let config = test_config.config.clone();
     let workspace_id = WorkspaceId::new(format!("preview-{}", Uuid::now_v7()));
-    let server = spawn_daemon_server(config.clone());
-    wait_for_daemon(&config, std::time::Duration::from_secs(5)).await?;
+    let mut server = spawn_daemon_server(config.clone());
+    wait_for_test_daemon(&config, &mut server).await?;
 
     let empty_previews = match request(
         &config,
@@ -175,20 +219,22 @@ async fn daemon_lists_session_previews() -> Result<()> {
 
     stop_daemon(&config).await?;
     server.await.expect("daemon task join")?;
+    test_config.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn daemon_create_session_uses_explicit_client_scope() -> Result<()> {
     let _guard = DAEMON_TEST_LOCK.lock().await;
-    let Some(config) = test_config() else {
+    let Some(test_config) = test_config() else {
         return Ok(());
     };
+    let config = test_config.config.clone();
     let scope_suffix = Uuid::now_v7().simple().to_string();
     let alpha_workspace = WorkspaceId::new(format!("alpha-{scope_suffix}"));
     let beta_workspace = WorkspaceId::new(format!("beta-{scope_suffix}"));
-    let server = spawn_daemon_server(config.clone());
-    wait_for_daemon(&config, std::time::Duration::from_secs(5)).await?;
+    let mut server = spawn_daemon_server(config.clone());
+    wait_for_test_daemon(&config, &mut server).await?;
 
     for workspace_id in [alpha_workspace.clone(), beta_workspace.clone()] {
         let reply = request(
@@ -248,15 +294,17 @@ async fn daemon_create_session_uses_explicit_client_scope() -> Result<()> {
 
     stop_daemon(&config).await?;
     server.await.expect("daemon task join")?;
+    test_config.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn daemon_health_endpoint_responds_when_cloud_enabled() -> Result<()> {
     let _guard = DAEMON_TEST_LOCK.lock().await;
-    let Some(mut config) = test_config() else {
+    let Some(test_config) = test_config() else {
         return Ok(());
     };
+    let mut config = test_config.config.clone();
     config.cloud.enabled = true;
     config.cloud.hands = None;
     if let Some(fly) = config.cloud.flyio.as_mut() {
@@ -271,8 +319,8 @@ async fn daemon_health_endpoint_responds_when_cloud_enabled() -> Result<()> {
         .as_ref()
         .expect("fly config")
         .internal_port;
-    let server = spawn_daemon_server(config.clone());
-    wait_for_daemon(&config, Duration::from_secs(5)).await?;
+    let mut server = spawn_daemon_server(config.clone());
+    wait_for_test_daemon(&config, &mut server).await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
@@ -285,5 +333,6 @@ async fn daemon_health_endpoint_responds_when_cloud_enabled() -> Result<()> {
 
     stop_daemon(&config).await?;
     server.await.expect("daemon task join")?;
+    test_config.cleanup().await?;
     Ok(())
 }

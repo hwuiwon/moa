@@ -1,3 +1,5 @@
+// Live counterpart: see live_harness_offline.rs for the wiremock version that runs in PR CI.
+
 //! Live integration coverage for the Step 04 brain harness.
 
 use std::sync::Arc;
