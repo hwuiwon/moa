@@ -46,7 +46,7 @@ fn spawn_orchestrator(ports: OrchestratorPorts) -> Result<Child> {
         .or_else(|_| std::env::var("DATABASE_URL"))
         .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string());
 
-    Command::new(env!("CARGO_BIN_EXE_moa-orchestrator"))
+    Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"))
         .arg("--port")
         .arg(ports.restate.to_string())
         .arg("--health-port")

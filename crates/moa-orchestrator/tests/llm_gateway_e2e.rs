@@ -45,7 +45,7 @@ async fn register_deployment(endpoint_url: &str) -> Result<()> {
 }
 
 fn spawn_orchestrator(ports: OrchestratorPorts) -> Result<Child> {
-    Command::new(env!("CARGO_BIN_EXE_moa-orchestrator"))
+    Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"))
         .arg("--port")
         .arg(ports.restate.to_string())
         .arg("--health-port")

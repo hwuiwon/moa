@@ -122,7 +122,7 @@ fn spawn_orchestrator(
 ) -> Result<Child> {
     let postgres_url = test_database_url();
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_moa-orchestrator"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"));
     command
         .arg("--port")
         .arg(ports.restate.to_string())

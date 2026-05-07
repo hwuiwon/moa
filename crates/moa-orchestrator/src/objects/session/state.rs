@@ -1,0 +1,298 @@
+//! Durable Session VO state projection.
+
+use super::*;
+
+pub(super) const K_META: &str = "meta";
+pub(super) const K_STATUS: &str = "status";
+pub(super) const K_PENDING: &str = "pending";
+pub(super) const K_PENDING_APPROVAL: &str = "pending_approval";
+pub(super) const K_CHILDREN: &str = "children";
+pub(super) const K_LAST_TURN_SUMMARY: &str = "last_turn_summary";
+pub(super) const K_CANCEL_FLAG: &str = "cancel_flag";
+pub(super) const K_CURRENT_SEGMENT: &str = "current_segment";
+pub(super) const MAX_TURNS_PER_POST: usize = 50;
+
+/// Serializable projection of the Session VO's durable state keys.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SessionVoState {
+    /// Persisted session metadata mirror.
+    pub meta: Option<SessionMeta>,
+    /// Current lifecycle status held in Restate state.
+    pub status: Option<SessionStatus>,
+    /// Buffered user messages waiting to be consumed by `run_turn`.
+    pub pending: Vec<UserMessage>,
+    /// Placeholder for approval state introduced in R07.
+    pub pending_approval: Option<String>,
+    /// Placeholder for sub-agent children introduced in R08.
+    pub children: Vec<SubAgentChildRef>,
+    /// Human-readable stub summary of the last drained turn.
+    pub last_turn_summary: Option<String>,
+    /// Cooperative cancellation flag checked at turn boundaries.
+    pub cancel_flag: Option<CancelMode>,
+    /// Active task segment, when one has been created for the session.
+    pub current_segment: Option<ActiveSegment>,
+}
+
+impl SessionVoState {
+    /// Initializes the projection from persisted session metadata.
+    pub fn set_meta(&mut self, meta: SessionMeta) {
+        self.status = Some(meta.status.clone());
+        self.meta = Some(meta);
+    }
+
+    /// Returns the current lifecycle status, defaulting to `Created` when state is empty.
+    pub fn current_status(&self) -> SessionStatus {
+        self.status.clone().unwrap_or(SessionStatus::Created)
+    }
+
+    /// Ensures that session metadata has been initialized before mutations proceed.
+    pub fn ensure_initialized(&self) -> MoaResult<&SessionMeta> {
+        self.meta.as_ref().ok_or_else(|| {
+            MoaError::ValidationError(
+                "Session metadata missing. Initialize the VO via SessionStore/init_session_vo first."
+                    .to_string(),
+            )
+        })
+    }
+
+    /// Queues one user message and transitions the session into `Running`.
+    pub fn enqueue_message(&mut self, msg: UserMessage) -> MoaResult<()> {
+        self.ensure_initialized()?;
+        self.pending.push(msg);
+        self.set_status(SessionStatus::Running);
+        Ok(())
+    }
+
+    /// Applies a turn outcome to the lifecycle state.
+    ///
+    /// In the existing MOA status model, an idle turn parks the session in `Paused`.
+    pub fn apply_turn_outcome(&mut self, outcome: TurnOutcome) -> SessionStatus {
+        let next_status = match outcome {
+            TurnOutcome::Continue => SessionStatus::Running,
+            TurnOutcome::Idle => SessionStatus::Paused,
+            TurnOutcome::WaitingApproval => SessionStatus::WaitingApproval,
+            TurnOutcome::Cancelled => SessionStatus::Cancelled,
+        };
+        self.set_status(next_status.clone());
+        next_status
+    }
+
+    /// Records a cooperative cancellation request.
+    pub fn set_cancel_flag(&mut self, mode: CancelMode) {
+        self.cancel_flag = Some(mode);
+    }
+
+    /// Consumes the current cancellation flag, if any.
+    pub fn take_cancel_flag(&mut self) -> Option<CancelMode> {
+        self.cancel_flag.take()
+    }
+
+    /// Drains buffered user messages and records a short stub summary.
+    pub fn drain_pending_messages(&mut self) -> usize {
+        let drained = self.pending.len();
+        self.pending.clear();
+        self.last_turn_summary = if drained == 0 {
+            None
+        } else if drained == 1 {
+            Some("drained 1 queued message".to_string())
+        } else {
+            Some(format!("drained {drained} queued messages"))
+        };
+        drained
+    }
+
+    /// Clears the in-memory projection back to an empty VO.
+    pub fn destroy(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Replaces the active task segment.
+    pub fn set_current_segment(&mut self, segment: ActiveSegment) {
+        self.current_segment = Some(segment);
+    }
+
+    /// Records a tool usage on the active task segment.
+    pub fn record_segment_tool_use(&mut self, tool_name: &str) {
+        let Some(segment) = self.current_segment.as_mut() else {
+            return;
+        };
+        if !segment.tools_used.iter().any(|tool| tool == tool_name) {
+            segment.tools_used.push(tool_name.to_string());
+        }
+    }
+
+    /// Records one completed model turn on the active task segment.
+    pub fn record_segment_turn_usage(&mut self, token_cost: u64) {
+        let Some(segment) = self.current_segment.as_mut() else {
+            return;
+        };
+        segment.turn_count = segment.turn_count.saturating_add(1);
+        segment.token_cost = segment.token_cost.saturating_add(token_cost);
+    }
+
+    pub(super) fn set_status(&mut self, status: SessionStatus) {
+        self.status = Some(status.clone());
+        if let Some(meta) = self.meta.as_mut() {
+            meta.status = status.clone();
+            meta.updated_at = Utc::now();
+            if matches!(
+                status,
+                SessionStatus::Completed | SessionStatus::Cancelled | SessionStatus::Failed
+            ) && meta.completed_at.is_none()
+            {
+                meta.completed_at = Some(Utc::now());
+            }
+        }
+    }
+}
+
+impl VoState for SessionVoState {
+    async fn load_from<R: VoReader>(reader: &R) -> Result<Self, HandlerError> {
+        Ok(Self {
+            meta: reader.get_json(K_META).await?,
+            status: reader.get_json(K_STATUS).await?,
+            pending: reader.get_json(K_PENDING).await?.unwrap_or_default(),
+            pending_approval: reader.get_json(K_PENDING_APPROVAL).await?,
+            children: reader.get_json(K_CHILDREN).await?.unwrap_or_default(),
+            last_turn_summary: reader.get_json(K_LAST_TURN_SUMMARY).await?,
+            cancel_flag: reader.get_json(K_CANCEL_FLAG).await?,
+            current_segment: reader.get_json(K_CURRENT_SEGMENT).await?,
+        })
+    }
+
+    fn persist_into(&self, ctx: &ObjectContext<'_>) {
+        set_or_clear_opt(ctx, K_META, self.meta.as_ref());
+        set_or_clear_opt(ctx, K_STATUS, self.status.as_ref());
+        set_or_clear_vec(ctx, K_PENDING, &self.pending);
+        set_or_clear_opt(ctx, K_PENDING_APPROVAL, self.pending_approval.as_ref());
+        set_or_clear_vec(ctx, K_CHILDREN, &self.children);
+        set_or_clear_opt(ctx, K_LAST_TURN_SUMMARY, self.last_turn_summary.as_ref());
+        set_or_clear_opt(ctx, K_CANCEL_FLAG, self.cancel_flag.as_ref());
+        set_or_clear_opt(ctx, K_CURRENT_SEGMENT, self.current_segment.as_ref());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use moa_core::{ApprovalDecision, Attachment, ModelId, Platform, UserId, WorkspaceId};
+
+    use super::SessionVoState;
+    use moa_core::TurnOutcome;
+
+    fn test_message(text: &str) -> moa_core::UserMessage {
+        moa_core::UserMessage {
+            text: text.to_string(),
+            attachments: vec![Attachment {
+                name: "a.txt".to_string(),
+                mime_type: Some("text/plain".to_string()),
+                url: None,
+                path: None,
+                size_bytes: Some(3),
+            }],
+        }
+    }
+
+    fn test_meta() -> moa_core::SessionMeta {
+        moa_core::SessionMeta {
+            workspace_id: WorkspaceId::new("workspace-1"),
+            user_id: UserId::new("user-1"),
+            platform: Platform::Cli,
+            model: ModelId::new("test-model"),
+            ..moa_core::SessionMeta::default()
+        }
+    }
+
+    #[test]
+    fn session_vo_requires_meta_before_enqueue() {
+        let mut state = SessionVoState::default();
+        let error = state
+            .enqueue_message(test_message("hello"))
+            .expect_err("enqueue should fail without metadata");
+
+        assert!(error.to_string().contains("Session metadata missing"));
+    }
+
+    #[test]
+    fn session_vo_queues_messages_and_transitions_to_running() {
+        let mut state = SessionVoState::default();
+        state.set_meta(test_meta());
+        state
+            .enqueue_message(test_message("hello"))
+            .expect("enqueue should succeed");
+
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.current_status(), moa_core::SessionStatus::Running);
+    }
+
+    #[test]
+    fn session_vo_idle_turn_maps_to_paused_status() {
+        let mut state = SessionVoState::default();
+        state.set_meta(test_meta());
+        let status = state.apply_turn_outcome(TurnOutcome::Idle);
+
+        assert_eq!(status, moa_core::SessionStatus::Paused);
+        assert_eq!(state.current_status(), moa_core::SessionStatus::Paused);
+    }
+
+    #[test]
+    fn session_vo_cancel_flag_round_trips() {
+        let mut state = SessionVoState::default();
+        state.set_cancel_flag(moa_core::CancelMode::Soft);
+
+        assert_eq!(state.take_cancel_flag(), Some(moa_core::CancelMode::Soft));
+        assert_eq!(state.take_cancel_flag(), None);
+    }
+
+    #[test]
+    fn session_vo_destroy_clears_projection() {
+        let mut state = SessionVoState::default();
+        state.set_meta(test_meta());
+        state
+            .enqueue_message(test_message("hello"))
+            .expect("enqueue should succeed");
+        state.pending_approval = Some("approval-1".to_string());
+        state.children.push(moa_core::SubAgentChildRef {
+            id: "child-1".to_string(),
+            task_hash: "hash-1".to_string(),
+        });
+        state.last_turn_summary = Some("summary".to_string());
+        state.set_cancel_flag(moa_core::CancelMode::Hard);
+        state.destroy();
+
+        assert_eq!(state, SessionVoState::default());
+    }
+
+    #[test]
+    fn session_vo_turn_outcome_and_approval_types_round_trip() {
+        let outcome =
+            serde_json::to_string(&TurnOutcome::WaitingApproval).expect("serialize turn outcome");
+        let decision = serde_json::to_string(&ApprovalDecision::AllowOnce)
+            .expect("serialize approval decision");
+
+        assert!(outcome.contains("waiting_approval"));
+        assert!(decision.contains("allow_once"));
+    }
+
+    #[test]
+    fn session_vo_current_segment_serializes() {
+        let mut state = SessionVoState::default();
+        let session_id = moa_core::SessionId::new();
+        state.current_segment = Some(moa_core::ActiveSegment {
+            id: moa_core::deterministic_segment_id(session_id, 0),
+            segment_index: 0,
+            intent_label: Some("coding".to_string()),
+            task_summary: Some("Fix failing tests".to_string()),
+            started_at: chrono::Utc::now(),
+            tools_used: vec!["bash".to_string()],
+            skills_activated: vec!["moa-rust".to_string()],
+            turn_count: 1,
+            token_cost: 123,
+        });
+
+        let json = serde_json::to_string(&state).expect("serialize session state");
+        let decoded: SessionVoState =
+            serde_json::from_str(&json).expect("deserialize session state");
+
+        assert_eq!(decoded.current_segment, state.current_segment);
+    }
+}
