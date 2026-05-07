@@ -10,12 +10,12 @@ use crate::{
     TurnChunk, chunk_turn, current_runtime, extract_facts, fact_hash, scoped_fact_uid,
     should_ingest_degraded,
 };
-use moa_core::{ScopeContext, ScopedConn};
+use moa_core::{ScopeContext, ScopedConn, traits::EmbeddingProvider as Embedder};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiCategory, PiiClassifier, PiiResult, PiiSpan, redact_text,
 };
-use moa_memory_vector::{CohereV4Embedder, Embedder, PgvectorStore, VectorStore};
+use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
 use restate_sdk::prelude::*;
 use secrecy::SecretString;
 use serde_json::json;

@@ -15,7 +15,10 @@ use moa_brain::{
     planning::{NerExtractor, PlanningCtx, QueryPlanner, QueryRetrievalCtx, retrieve_for_query},
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalHit},
 };
-use moa_core::{MemoryScope, ScopeContext, ScopedConn, SessionId, UserId, WorkspaceId};
+use moa_core::{
+    MemoryScope, ScopeContext, ScopedConn, SessionId, UserId, WorkspaceId,
+    traits::EmbeddingProvider as Embedder,
+};
 use moa_eval::golden::comparator::{compare_top_k_within_window, dump_traces};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, PiiClass, cypher};
 use moa_memory_ingest::{
@@ -24,7 +27,7 @@ use moa_memory_ingest::{
     ingest_turn_direct_with_ctx,
 };
 use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
-use moa_memory_vector::{Embedder, Error as VectorError, PgvectorStore, VECTOR_DIMENSION};
+use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -81,7 +84,7 @@ struct GoldenEmbedder;
 
 #[async_trait]
 impl Embedder for GoldenEmbedder {
-    fn model_name(&self) -> &'static str {
+    fn model_id(&self) -> &str {
         "golden-mock-embedder"
     }
 
@@ -89,11 +92,11 @@ impl Embedder for GoldenEmbedder {
         29
     }
 
-    fn dimension(&self) -> usize {
+    fn dimensions(&self) -> usize {
         VECTOR_DIMENSION
     }
 
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, VectorError> {
+    async fn embed(&self, texts: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
         Ok(texts.iter().map(|text| golden_vector(text)).collect())
     }
 }

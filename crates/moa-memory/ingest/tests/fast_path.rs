@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::{ScopeContext, ScopedConn, UserId, WorkspaceId};
+use moa_core::{
+    ScopeContext, ScopedConn, UserId, WorkspaceId, traits::EmbeddingProvider as Embedder,
+};
 use moa_hands::ToolRegistry;
 use moa_memory_graph::{AgeGraphStore, NodeLabel, NodeWriteIntent, PiiClass, cypher};
 use moa_memory_ingest::{
@@ -13,7 +15,7 @@ use moa_memory_ingest::{
     FastRememberRequest, ForgetPattern, IngestError, fast_forget, fast_remember, fast_supersede,
 };
 use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
-use moa_memory_vector::{Embedder, Error as VectorError, PgvectorStore, VECTOR_DIMENSION};
+use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use serde_json::json;
 use sqlx::PgPool;
@@ -27,7 +29,7 @@ struct MockEmbedder;
 
 #[async_trait]
 impl Embedder for MockEmbedder {
-    fn model_name(&self) -> &'static str {
+    fn model_id(&self) -> &str {
         "mock-fast-embedder"
     }
 
@@ -35,11 +37,11 @@ impl Embedder for MockEmbedder {
         7
     }
 
-    fn dimension(&self) -> usize {
+    fn dimensions(&self) -> usize {
         VECTOR_DIMENSION
     }
 
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, VectorError> {
+    async fn embed(&self, texts: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
         Ok(texts
             .iter()
             .map(|text| deterministic_vector(text))

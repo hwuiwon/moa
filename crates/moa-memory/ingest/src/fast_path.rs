@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
     MemoryScope, MoaError, ScopeContext, ScopedConn, SessionMeta, ToolOutput, UserId, WorkspaceId,
+    traits::EmbeddingProvider as Embedder,
 };
 use moa_memory_graph::{
     AgeGraphStore, GraphError, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
@@ -16,7 +17,7 @@ use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiClassifier, PiiError, PiiResult, redact_text,
 };
 use moa_memory_vector::{
-    CohereV4Embedder, Embedder, Error as VectorError, PgvectorStore, VECTOR_DIMENSION, VectorStore,
+    CohereV4Embedder, Error as VectorError, PgvectorStore, VECTOR_DIMENSION, VectorStore,
 };
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};

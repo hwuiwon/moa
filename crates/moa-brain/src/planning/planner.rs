@@ -3,9 +3,8 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use moa_core::MemoryScope;
+use moa_core::{MemoryScope, MoaError, traits::EmbeddingProvider as Embedder};
 use moa_memory_graph::{GraphError, GraphStore, NodeLabel, PiiClass};
-use moa_memory_vector::{Embedder, Error as VectorError};
 use uuid::Uuid;
 
 use crate::planning::ner::{NerExtractor, NerSpan};
@@ -24,7 +23,7 @@ pub enum PlanError {
     Graph(#[from] GraphError),
     /// Query embedding failed.
     #[error("query embedding failed: {0}")]
-    Embed(#[from] VectorError),
+    Embed(#[from] MoaError),
     /// Query embedding returned no vector.
     #[error("query embedding returned no vector")]
     EmptyQueryEmbedding,

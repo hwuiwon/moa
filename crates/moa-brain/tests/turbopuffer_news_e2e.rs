@@ -4,12 +4,15 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
-use moa_core::{MemoryScope, ScopeContext, SessionId, UserId, WorkspaceId};
+use moa_core::{
+    MemoryScope, ScopeContext, SessionId, UserId, WorkspaceId,
+    traits::EmbeddingProvider as Embedder,
+};
 use moa_memory_graph::{AgeGraphStore, PiiClass};
 use moa_memory_ingest::{SessionTurn, ingest_turn_direct_with_pool};
 use moa_memory_vector::{
-    CohereV4Embedder, Embedder, PgvectorStore, PromotionOptions, TurbopufferStore,
-    WorkspacePromotion, finalize_promotion,
+    CohereV4Embedder, PgvectorStore, PromotionOptions, TurbopufferStore, WorkspacePromotion,
+    finalize_promotion,
 };
 use moa_session::testing;
 use secrecy::SecretString;

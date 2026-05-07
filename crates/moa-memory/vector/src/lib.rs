@@ -13,10 +13,11 @@ pub mod promotion;
 pub mod turbopuffer;
 
 pub use backend::vector_store_for_workspace;
-pub use embedder::{CohereV4Embedder, Embedder};
+pub use embedder::CohereV4Embedder;
 pub use gemini::{
     EmbedRole, EmbedderConstructionRole, GeminiEmbeddingEmbedder, build_embedder_from_config,
 };
+pub use moa_core::traits::EmbeddingProvider as Embedder;
 pub use pgvector_store::PgvectorStore;
 pub use promotion::{
     PROMOTION_BATCH_SIZE, PROMOTION_OVERLAP_THRESHOLD, PromotionOptions, PromotionReport,
@@ -133,6 +134,28 @@ pub enum Error {
     /// JSON serialization or deserialization failed.
     #[error("vector JSON serialization failed: {0}")]
     SerdeJson(#[from] serde_json::Error),
+}
+
+impl From<Error> for moa_core::MoaError {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::Core(error) => error,
+            Error::ProviderStatus { status, body } => Self::HttpStatus {
+                status,
+                retry_after: None,
+                message: body,
+            },
+            Error::VectorProviderStatus { status, body, .. } => Self::HttpStatus {
+                status,
+                retry_after: None,
+                message: body,
+            },
+            Error::Sqlx(error) => Self::StorageError(error.to_string()),
+            Error::Reqwest(error) => Self::ProviderError(error.to_string()),
+            Error::SerdeJson(error) => Self::SerializationError(error.to_string()),
+            other => Self::ProviderError(other.to_string()),
+        }
+    }
 }
 
 /// One vector row to upsert into the vector store.

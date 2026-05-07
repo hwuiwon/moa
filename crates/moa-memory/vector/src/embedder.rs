@@ -1,4 +1,4 @@
-//! Embedding provider abstraction and Cohere Embed v4 client.
+//! Cohere Embed v4 client.
 
 use std::time::Duration;
 
@@ -8,27 +8,11 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
-use crate::{Error, Result, VECTOR_DIMENSION, validate_dimension};
+use crate::{Embedder, Error, Result, VECTOR_DIMENSION, validate_dimension};
 
 const COHERE_EMBED_URL: &str = "https://api.cohere.com/v2/embed";
 const COHERE_MODEL: &str = "embed-v4.0";
 const COHERE_MAX_TEXTS: usize = 96;
-
-/// Text embedding provider used before vectors are written to storage.
-#[async_trait]
-pub trait Embedder: Send + Sync {
-    /// Returns the model name stored beside embeddings.
-    fn model_name(&self) -> &'static str;
-
-    /// Returns the model-version integer stored beside embeddings.
-    fn model_version(&self) -> i32;
-
-    /// Returns the fixed output dimensionality.
-    fn dimension(&self) -> usize;
-
-    /// Embeds UTF-8 texts into fixed-size vectors.
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
-}
 
 /// Cohere Embed v4 client configured for 1024-dimensional float embeddings.
 #[derive(Clone)]
@@ -105,7 +89,7 @@ impl CohereV4Embedder {
 
 #[async_trait]
 impl Embedder for CohereV4Embedder {
-    fn model_name(&self) -> &'static str {
+    fn model_id(&self) -> &str {
         "cohere-embed-v4"
     }
 
@@ -113,11 +97,11 @@ impl Embedder for CohereV4Embedder {
         1
     }
 
-    fn dimension(&self) -> usize {
+    fn dimensions(&self) -> usize {
         VECTOR_DIMENSION
     }
 
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    async fn embed(&self, texts: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -129,7 +113,8 @@ impl Embedder for CohereV4Embedder {
                 return Err(Error::EmbeddingResponseLength {
                     expected: chunk.len(),
                     actual: chunk_embeddings.len(),
-                });
+                }
+                .into());
             }
             for embedding in &chunk_embeddings {
                 validate_dimension(embedding)?;

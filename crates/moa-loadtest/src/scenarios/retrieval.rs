@@ -17,9 +17,11 @@ use moa_brain::{
     planning::{PlannedQuery, Strategy},
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest},
 };
-use moa_core::{MemoryScope, ScopeContext, ScopedConn, WorkspaceId};
+use moa_core::{
+    MemoryScope, ScopeContext, ScopedConn, WorkspaceId, traits::EmbeddingProvider as Embedder,
+};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
-use moa_memory_vector::{CohereV4Embedder, Embedder, PgvectorStore, VECTOR_DIMENSION};
+use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VECTOR_DIMENSION};
 use moa_session::{PostgresSessionStore, testing::cleanup_test_schema};
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use secrecy::SecretString;

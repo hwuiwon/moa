@@ -43,3 +43,17 @@ Maintenance requirement: after any dependency or feature change, run
 `cargo hakari generate && cargo hakari manage-deps --yes && cargo hakari verify`
 and commit the resulting manifest updates. CI now runs `cargo hakari verify` in
 the deploy test job before formatting, clippy, and tests.
+
+## [S04] Embedding Trait Consolidation
+
+`moa_providers::EmbeddingProvider` and `moa_memory_vector::Embedder` were
+mergeable but used different method names and error types. The canonical trait
+now lives at `moa_core::traits::EmbeddingProvider` with the union of the old
+method surface: `model_id`/`dimensions`, `model_name`/`model_version`/
+`dimension`, and `embed`.
+
+`moa-memory-vector` keeps `Embedder` as a compatibility alias to the core trait.
+Vector embedder implementations now return `moa_core::MoaError` from the trait
+method; the crate maps its local embedder errors into core provider/http/storage
+errors at that boundary. Vector storage APIs and implementation bodies were not
+otherwise changed.
