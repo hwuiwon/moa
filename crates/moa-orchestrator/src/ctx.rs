@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use moa_core::{MoaConfig, traits::EmbeddingProvider};
+use moa_core::{LineageHandle, MoaConfig, traits::EmbeddingProvider};
 use moa_hands::ToolRouter;
 use moa_session::PostgresSessionStore;
 use serde_json::Value;
@@ -31,6 +31,10 @@ pub struct OrchestratorCtx {
     pub tool_router: Arc<ToolRouter>,
     /// Precompiled tool schemas exposed to the model.
     pub tool_schemas: Arc<Vec<Value>>,
+    /// Hot-path lineage capture bridge selected at startup.
+    pub lineage: Arc<dyn LineageHandle>,
+    /// Optional durable lineage writer used for graceful shutdown.
+    pub lineage_writer: Option<Arc<moa_lineage_sink::WriterHandle>>,
 }
 
 impl OrchestratorCtx {

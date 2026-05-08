@@ -3,6 +3,7 @@
 mod brain_bridge;
 pub mod config;
 pub mod ctx;
+pub mod lineage;
 pub mod objects;
 pub mod restate_register;
 pub mod services;

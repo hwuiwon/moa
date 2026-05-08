@@ -3766,6 +3766,8 @@ dependencies = [
  "moa-brain",
  "moa-core",
  "moa-hands",
+ "moa-lineage-core",
+ "moa-lineage-sink",
  "moa-memory-ingest",
  "moa-providers",
  "moa-session",

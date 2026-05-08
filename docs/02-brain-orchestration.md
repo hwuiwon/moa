@@ -61,6 +61,15 @@ client sends message
 
 The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries.
 
+### Lineage Sink Selection
+
+`MOA_LINEAGE_SINK` controls how the cloud orchestrator emits lineage events:
+
+- unset / `null` / `otel`: drops events at the sink boundary; lineage attributes are still attached to OpenTelemetry spans by the `restate_observability` helpers and are exported by the configured OTel exporter. This is the production default.
+- `postgres`: writes events to the `analytics.turn_lineage` and related lineage tables in the same Postgres database the orchestrator already uses. This is recommended for local development so lineage can be queried with `psql`.
+
+The Postgres sink runs an in-memory queue (`MpscSink`) and a background writer that drains on shutdown. Maximum queue depth and batch size come from `config.observability.lineage` in `MoaConfig`.
+
 ## Approvals
 
 Risky tool calls emit `ApprovalRequested` events. In cloud mode the blocked invocation stores an awakeable ID in VO state and event payload. The gateway or REST surface resolves the approval by calling the appropriate handler with an `ApprovalDecision`.
