@@ -24,9 +24,11 @@ use moa_orchestrator::{
     objects::workspace::{WorkspaceImpl, WorkspaceObject},
     restate_register::{IngestionVO, IngestionVOImpl},
     services::{
+        graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
         intent_manager::{IntentManager, IntentManagerImpl},
         llm_gateway::{LLMGateway, LLMGatewayImpl, ProviderRegistry},
+        neon_maint::{NeonMaint, NeonMaintImpl},
         session_store::{RestateSessionStore, SessionStoreImpl},
         tool_executor::{ToolExecutor, ToolExecutorImpl},
         workspace_store::{WorkspaceStore, WorkspaceStoreImpl},
@@ -47,17 +49,22 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_RESTATE_PORT: u16 = 9080;
+const DEFAULT_RESTATE_INGRESS_PORT: u16 = 8080;
 const DEFAULT_HEALTH_PORT: u16 = 9081;
 const ADMIN_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+const CRON_BOOTSTRAP_ATTEMPTS: u32 = 60;
+const CRON_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
 const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Consolidate",
     "CronJob",
+    "GraphMemoryMaint",
     "Health",
     "IntentManager",
     "IntentDiscovery",
     "IngestionVO",
     "LLMGateway",
+    "NeonMaint",
     "Session",
     "SessionStore",
     "SubAgent",
@@ -136,6 +143,8 @@ async fn main() -> anyhow::Result<()> {
         .bind(IngestionVOImpl.serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
         .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
+        .bind(GraphMemoryMaintImpl.serve())
+        .bind(NeonMaintImpl.serve())
         .bind(CronJobImpl.serve())
         .bind(SessionImpl.serve())
         .bind(SubAgentImpl.serve())
@@ -162,6 +171,10 @@ async fn main() -> anyhow::Result<()> {
         "starting moa-orchestrator"
     );
     readiness.store(true, Ordering::Release);
+    let _cron_bootstrap = spawn_default_cron_bootstrap(
+        probe_state.clone(),
+        cron_bootstrap_ingress_url(probe_state.admin_base_url()),
+    );
 
     tokio::select! {
         result = &mut restate_server => {
@@ -356,6 +369,109 @@ fn spawn_health_server(
     tokio::spawn(async move { serve_health_server(listener, state, shutdown).await })
 }
 
+fn spawn_default_cron_bootstrap(state: ProbeState, ingress_url: String) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        for attempt in 1..=CRON_BOOTSTRAP_ATTEMPTS {
+            match state.fetch_deployments().await {
+                Ok(deployments) if services_registered(&deployments) => {
+                    if let Err(error) = install_default_cron_jobs(&ingress_url).await {
+                        tracing::warn!(
+                            error = %error,
+                            "failed to install default cron jobs; will not retry"
+                        );
+                    }
+                    return;
+                }
+                Ok(_) => tracing::debug!(
+                    attempt,
+                    "waiting for Restate service registration before cron bootstrap"
+                ),
+                Err(error) => tracing::debug!(
+                    attempt,
+                    error = %error,
+                    "failed to check Restate registration before cron bootstrap"
+                ),
+            }
+            tokio::time::sleep(CRON_BOOTSTRAP_INTERVAL).await;
+        }
+
+        tracing::warn!(
+            attempts = CRON_BOOTSTRAP_ATTEMPTS,
+            "default cron job bootstrap timed out waiting for Restate registration"
+        );
+    })
+}
+
+fn cron_bootstrap_ingress_url(admin_base_url: &str) -> String {
+    if let Ok(value) = std::env::var("MOA_LOCAL_INGRESS_URL") {
+        let trimmed = value.trim().trim_end_matches('/');
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    reqwest::Url::parse(admin_base_url)
+        .ok()
+        .and_then(|mut url| {
+            url.set_port(Some(DEFAULT_RESTATE_INGRESS_PORT)).ok()?;
+            Some(url.to_string().trim_end_matches('/').to_string())
+        })
+        .unwrap_or_else(|| format!("http://localhost:{DEFAULT_RESTATE_INGRESS_PORT}"))
+}
+
+async fn install_default_cron_jobs(ingress_url: &str) -> anyhow::Result<()> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("build cron-bootstrap HTTP client")?;
+    let ingress_url = ingress_url.trim_end_matches('/');
+    let jobs = [
+        (
+            "graph_memory_compact",
+            serde_json::json!({
+                "schedule": "0 0 * * * *",
+                "timezone": "UTC",
+                "target_service": "GraphMemoryMaint",
+                "target_handler": "compact",
+                "payload": {}
+            }),
+            "v1",
+        ),
+        (
+            "neon_prune_branches",
+            serde_json::json!({
+                "schedule": "0 0 0,6,12,18 * * *",
+                "timezone": "UTC",
+                "target_service": "NeonMaint",
+                "target_handler": "prune_branches",
+                "payload": null
+            }),
+            "v1",
+        ),
+    ];
+
+    for (key, body, version) in jobs {
+        let response = client
+            .post(format!("{ingress_url}/CronJob/{key}/configure"))
+            .header("idempotency-key", format!("cron-config-{key}-{version}"))
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("configure cron job {key}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            bail!("cron configure {key} returned {status}: {text}");
+        }
+
+        tracing::info!(key, "cron job configured");
+    }
+
+    Ok(())
+}
+
 async fn bind_listener(port: u16) -> anyhow::Result<TcpListener> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     TcpListener::bind(addr)
@@ -492,11 +608,13 @@ mod tests {
         let deployments = vec![deployment_with_services(&[
             "Consolidate",
             "CronJob",
+            "GraphMemoryMaint",
             "Health",
             "IntentManager",
             "IntentDiscovery",
             "IngestionVO",
             "LLMGateway",
+            "NeonMaint",
             "Session",
             "SessionStore",
             "SubAgent",
