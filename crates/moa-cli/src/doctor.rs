@@ -26,6 +26,11 @@ pub(crate) async fn doctor_report(config: &MoaConfig, log_path: &Path) -> Result
         format!("docker: {}", docker_status().await),
         format!("disk: {}", disk_status(config).await),
         format!("database: {database_line}"),
+        format!(
+            "orchestrator: {} ({})",
+            orchestrator_status(config).await,
+            daemon::orchestrator_endpoint(config)
+        ),
         format!("graph_memory: {}", graph_memory_status(config).await),
         format!("lineage: {}", lineage_status(config).await),
         format!(
@@ -40,16 +45,14 @@ pub(crate) async fn doctor_report(config: &MoaConfig, log_path: &Path) -> Result
     ];
     lines.push(doctor_metrics(config).await);
 
-    if let Ok(info) = daemon::daemon_info(config).await {
-        lines.push(format!(
-            "daemon: running (pid {}, active {})",
-            info.pid, info.active_session_count
-        ));
-    } else {
-        lines.push("daemon: stopped".to_string());
-    }
-
     Ok(lines.join("\n") + "\n")
+}
+
+pub(crate) async fn orchestrator_status(config: &MoaConfig) -> String {
+    match daemon::health_check(config).await {
+        Ok(()) => "healthy".to_string(),
+        Err(error) => format!("unavailable ({error})"),
+    }
 }
 
 pub(crate) async fn doctor_metrics(config: &MoaConfig) -> String {

@@ -6,7 +6,7 @@
 
 MOA runs durable agent sessions on Restate, stores product and audit data in Postgres/Neon with pgvector, segments conversations into discrete tasks, scores task resolution automatically, and feeds those outcomes into tenant-controlled learning. It is built for organizations that need governed agent execution: auditable event logs, isolated tool execution, tenant-owned intent taxonomies, approval flows, lineage, and rollbackable learning.
 
-Local development uses the same core brain and storage model through the CLI and daemon. Cloud deployment uses Restate services, virtual objects, and workflows behind REST/gateway surfaces.
+Local development uses the same Restate-backed orchestrator that production uses. The CLI is a thin client pointed at a Restate ingress endpoint.
 
 Status: early active development. The architecture is stable enough to document, but APIs and product surfaces still move.
 
@@ -62,6 +62,15 @@ make dev-wipe
 
 If `localhost:18080` is already in use, override the Restate ingress port in a
 local `compose.override.yml`.
+
+Use the CLI against the local stack:
+
+```bash
+MOA__ORCHESTRATOR__ENDPOINT=http://localhost:18080 cargo run -p moa-cli -- exec "What is 2+2?"
+```
+
+For a remote orchestrator, set `MOA__ORCHESTRATOR__ENDPOINT` to that Restate
+ingress URL or configure `[orchestrator].endpoint` in `~/.moa/config.toml`.
 
 ## Cloud Runtime
 
@@ -143,10 +152,10 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-hands`](crates/moa-hands/) | Tool router, local/Docker hands, Daytona, E2B, MCP client |
 | [`moa-providers`](crates/moa-providers/) | LLM and embedding providers |
 | [`moa-orchestrator`](crates/moa-orchestrator/) | Restate services, virtual objects, workflows, and handler binary |
-| [`moa-orchestrator-local`](crates/moa-orchestrator-local/) | Tokio-task local orchestrator for CLI and daemon flows |
+| [`moa-orchestrator-local`](crates/moa-orchestrator-local/) | Legacy Tokio-task local orchestrator retained for migration-only consumers |
 | [`moa-gateway`](crates/moa-gateway/) | Telegram, Slack, Discord adapters and platform rendering |
 | [`moa-runtime`](crates/moa-runtime/) | Shared runtime bootstrap |
-| [`moa-cli`](crates/moa-cli/) | `moa` CLI and daemon commands |
+| [`moa-cli`](crates/moa-cli/) | Thin-client `moa` CLI and orchestrator diagnostics |
 | [`moa-security`](crates/moa-security/) | Credential vault, MCP proxy, policies, prompt-injection controls |
 | [`moa-skills`](crates/moa-skills/) | Agent Skills parsing, distillation, improvement, regression suites |
 | [`moa-eval`](crates/moa-eval/) | Evaluation harness |

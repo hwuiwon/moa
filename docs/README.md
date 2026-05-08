@@ -8,7 +8,7 @@ These docs describe the current MOA architecture as implemented in the Rust work
 |---|---|---|
 | 00 | [Direction](00-direction.md) | Product identity, principles, and differentiators |
 | 01 | [Architecture Overview](01-architecture-overview.md) | System diagram, trait map, data flow, workspace layout |
-| 02 | [Brain Orchestration](02-brain-orchestration.md) | Restate session objects, sub-agents, turn loop, local runtime |
+| 02 | [Brain Orchestration](02-brain-orchestration.md) | Restate session objects, sub-agents, turn loop, thin-client runtime |
 | 03 | [Communication Layer](03-communication-layer.md) | REST/gateway surfaces, CLI, approvals, observation |
 | 04 | [Memory Architecture](04-memory-architecture.md) | Graph memory, privacy filtering, sidecar indexes, pgvector semantic retrieval, consolidation |
 | 05 | [Session & Event Log](05-session-event-log.md) | Postgres event schema, task segments, replay, compaction |

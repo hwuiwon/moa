@@ -6,17 +6,16 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
-enum_dispatch = "0.3"
 moa-core = { path = "../moa-core" }
-moa-hands = { path = "../moa-hands" }
-moa-orchestrator-local = { path = "../moa-orchestrator-local" }
-moa-providers = { path = "../moa-providers" }
-moa-session = { path = "../moa-session" }
-serde_json.workspace = true
+moa-orchestrator-client = { path = "../moa-orchestrator-client" }
 tokio.workspace = true
 uuid.workspace = true
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 memory-graph = { package = "moa-memory-graph", path = "../moa-memory/graph" }
+moa-session = { path = "../moa-session" }
+mockito = "1"
+serde_json.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls"] }
+uuid.workspace = true

@@ -143,11 +143,7 @@ pub(crate) async fn dispatch(cli: Cli, config: MoaConfig) -> Result<()> {
             print!("{}", doctor_report(&config, &log_path).await?);
         }
         Some(CommandKind::Daemon { command }) => match command {
-            DaemonCommand::Start => daemon::start_daemon(&config).await?,
-            DaemonCommand::Stop => daemon::stop_daemon(&config).await?,
             DaemonCommand::Status => print!("{}", daemon_status_report(&config).await?),
-            DaemonCommand::Logs => print!("{}", daemon::daemon_logs(&config).await?),
-            DaemonCommand::Serve => daemon::run_daemon_server(config).await?,
         },
         Some(CommandKind::Checkpoint { command }) => match command {
             CheckpointCommand::Create { label } => {

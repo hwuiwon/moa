@@ -4,6 +4,11 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use moa_core::wire::{
+    CancelResponse, PendingMessage, QueueMessageRequest, QueueMessageResponse, RunTurnRequest,
+    SessionSnapshot, StartTurnRequest, StartTurnResponse, TurnOutcome as ExecutionTurnOutcome,
+    TurnOutcomeKind as ExecutionTurnOutcomeKind,
+};
 use moa_core::{
     ActiveSegment, ApprovalDecision, CancelMode, Event, EventRange, MoaError, Result as MoaResult,
     SessionId, SessionMeta, SessionStatus, SubAgentChildRef, TurnOutcome, UserMessage,
@@ -18,10 +23,7 @@ use crate::services::session_store::{
 };
 use crate::turn::approval::serialize_awakeable_decision;
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_vec};
-use crate::workflows::turn_execution::{
-    RunTurnRequest, TurnExecutionClient, TurnOutcome as ExecutionTurnOutcome,
-    TurnOutcomeKind as ExecutionTurnOutcomeKind,
-};
+use crate::workflows::turn_execution::TurnExecutionClient;
 use moa_core::restate_observability::{annotate_restate_handler_span, event_persist_span};
 
 mod handlers;
@@ -34,85 +36,11 @@ pub use state::SessionVoState;
 
 const K_PENDING_STATE: &str = "pending_state";
 
-/// Request for starting a turn through the durable `TurnExecution` workflow.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct StartTurnRequest {
-    /// User message text that initiates the turn.
-    pub user_message: String,
-    /// Attachments included with the user message.
-    #[serde(default)]
-    pub attachments: Vec<moa_core::Attachment>,
-    /// Optional per-turn model override.
-    #[serde(default)]
-    pub model: Option<String>,
-}
-
-/// Response returned by `Session/start_turn`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct StartTurnResponse {
-    /// Turn ID when a workflow was started immediately.
-    pub turn_id: Option<String>,
-    /// Whether the request was queued behind an already-active turn.
-    pub queued: bool,
-}
-
-/// Request for queueing a message behind the active `TurnExecution` workflow.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct QueueMessageRequest {
-    /// User message text to enqueue or start immediately.
-    pub user_message: String,
-    /// Attachments included with the user message.
-    #[serde(default)]
-    pub attachments: Vec<moa_core::Attachment>,
-    /// Optional per-turn model override.
-    #[serde(default)]
-    pub model: Option<String>,
-}
-
-/// Response returned by `Session/queue_message`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct QueueMessageResponse {
-    /// Whether the message was queued behind an active turn.
-    pub queued: bool,
-    /// Turn ID when the message started a workflow immediately.
-    pub started_turn_id: Option<String>,
-}
-
-/// Response returned by `Session/request_cancel`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CancelResponse {
-    /// Whether a cancel signal was forwarded to an active turn.
-    pub cancelled: bool,
-    /// Human-readable cancel forwarding result.
-    pub reason: String,
-}
-
-/// Read-only projection of the additive `TurnExecution` session state.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SessionSnapshot {
-    /// Session object key.
-    pub session_id: String,
-    /// Currently active `TurnExecution` workflow ID, if any.
-    pub active_turn_id: Option<String>,
-    /// Number of messages waiting behind the active turn.
-    pub pending_message_count: u64,
-    /// Last outcome delivered by `TurnExecution`.
-    pub last_outcome: Option<ExecutionTurnOutcome>,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct SessionPendingState {
     active_turn_id: Option<String>,
     pending_messages: VecDeque<PendingMessage>,
     last_outcome: Option<ExecutionTurnOutcome>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct PendingMessage {
-    queued_at: DateTime<Utc>,
-    user_message: String,
-    attachments: Vec<moa_core::Attachment>,
-    model: Option<String>,
 }
 
 /// Restate virtual object surface for one durable session key.

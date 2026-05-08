@@ -127,6 +127,14 @@ impl MoaConfig {
             .set_default("daemon.log_file", Self::default().daemon.log_file)?
             .set_default("daemon.auto_connect", Self::default().daemon.auto_connect)?
             .set_default(
+                "orchestrator.endpoint",
+                Self::default().orchestrator.endpoint,
+            )?
+            .set_default(
+                "orchestrator.health_url",
+                Self::default().orchestrator.health_url,
+            )?
+            .set_default(
                 "session.blob_threshold_bytes",
                 Self::default().session.blob_threshold_bytes as i64,
             )?

@@ -30,15 +30,16 @@ use moa_core::restate_observability::{
     annotate_restate_handler_span, emit_turn_latency_summary, emit_turn_replay_summary,
     event_persist_span, llm_call_span, session_turn_span, tool_dispatch_span,
 };
+use moa_core::wire::{RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress};
 use moa_core::{
-    ActiveSegment, ApprovalDecision, ApprovalPrompt, Attachment, CompletionRequest,
-    CompletionResponse, DispatchSubAgentInput, Event, EventRange, EventRecord, LearningEntry,
-    MessageRole, MoaError, PolicyAction, QueryRewriteResult, ScoringPhase, SegmentId, SessionId,
-    SessionMeta, SessionStatus, SubAgentChildRef, ToolCallContent, ToolCallId, ToolCallRequest,
-    ToolInvocation, ToolOutput, TurnLatencyCounters, TurnOutcome as CoreTurnOutcome,
-    TurnReplayCounters, record_approval_wait, record_session_error,
-    record_turn_event_persist_duration, record_turn_latency, record_turn_llm_call_duration,
-    record_turn_tool_dispatch_duration, scope_turn_latency_counters, scope_turn_replay_counters,
+    ActiveSegment, ApprovalDecision, ApprovalPrompt, CompletionRequest, CompletionResponse,
+    DispatchSubAgentInput, Event, EventRange, EventRecord, LearningEntry, MessageRole, MoaError,
+    PolicyAction, QueryRewriteResult, ScoringPhase, SegmentId, SessionId, SessionMeta,
+    SessionStatus, SubAgentChildRef, ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation,
+    ToolOutput, TurnLatencyCounters, TurnOutcome as CoreTurnOutcome, TurnReplayCounters,
+    record_approval_wait, record_session_error, record_turn_event_persist_duration,
+    record_turn_latency, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
+    scope_turn_latency_counters, scope_turn_replay_counters,
 };
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -73,80 +74,6 @@ const K_PHASE: &str = "phase";
 const K_CHILDREN: &str = "children";
 const APPROVAL_TIMEOUT_SECS_ENV: &str = "MOA_APPROVAL_TIMEOUT_SECS";
 const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 30 * 60;
-
-/// Input accepted by one `TurnExecution` workflow run.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RunTurnRequest {
-    /// Session that owns the turn.
-    pub session_id: String,
-    /// Stable turn identifier and workflow key.
-    pub turn_id: String,
-    /// User message that initiated the turn.
-    pub user_message: String,
-    /// User message attachments that initiated the turn.
-    #[serde(default)]
-    pub attachments: Vec<Attachment>,
-    /// Optional per-turn model override.
-    #[serde(default)]
-    pub model: Option<String>,
-}
-
-/// Durable lifecycle phase for one turn workflow.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
-pub enum TurnPhase {
-    /// Workflow has not started visible work.
-    #[default]
-    Pending,
-    /// Workflow is compiling context and request state.
-    Compiling,
-    /// Workflow is producing model output.
-    Streaming,
-    /// Workflow is executing tools.
-    Tooling,
-    /// Workflow is persisting turn output.
-    Persisting,
-    /// Workflow completed successfully.
-    Completed,
-    /// Workflow was cancelled.
-    Cancelled,
-    /// Workflow failed.
-    Failed,
-}
-
-/// Terminal outcome returned by one turn workflow.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct TurnOutcome {
-    /// Stable turn identifier.
-    pub turn_id: String,
-    /// Terminal outcome kind.
-    pub kind: TurnOutcomeKind,
-    /// Human-readable outcome message.
-    pub message: String,
-}
-
-/// Terminal outcome category for a turn workflow.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum TurnOutcomeKind {
-    /// The placeholder turn body completed.
-    Completed,
-    /// The cancel awakeable resolved before the body completed.
-    Cancelled,
-    /// The turn body failed.
-    Failed,
-}
-
-/// Read-only progress projection for one turn workflow.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct TurnProgress {
-    /// Stable turn identifier.
-    pub turn_id: String,
-    /// Current durable phase.
-    pub phase: TurnPhase,
-    /// Whether a cancel signal has been recorded.
-    pub cancel_requested: bool,
-    /// Optional cancel reason recorded by `request_cancel`.
-    pub cancel_reason: Option<String>,
-}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct PendingApprovalState {

@@ -1,7 +1,6 @@
-//! CLI entry point for MOA subcommands and daemon management.
+//! CLI entry point for MOA subcommands and orchestrator diagnostics.
 
 mod analytics;
-mod api;
 mod checkpoint;
 mod cli;
 mod commands;
@@ -36,7 +35,7 @@ use memory_vector::PgvectorStore;
 use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
 use moa_core::{
     BranchManager, LineageHandle, MemoryScope, MoaConfig, OtlpProtocol, ScopeContext,
-    SessionFilter, SessionId, SessionStatus, SessionStore, TelemetryConfig, UserId, WorkspaceId,
+    SessionFilter, SessionId, SessionStatus, TelemetryConfig, UserId, WorkspaceId,
     default_log_path, init_observability, metrics_endpoint_url,
 };
 use moa_eval::{

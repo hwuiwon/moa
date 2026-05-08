@@ -7,9 +7,8 @@
 use std::sync::Arc;
 
 use moa_core::{
-    Event, EventFilter, EventRange, EventRecord, ResolutionScore, SegmentBaseline,
-    SegmentCompletion, SegmentId, SessionId, SessionMeta, SessionStatus,
-    SessionStore as CoreSessionStore, SkillResolutionRate, TaskSegment, record_session_error,
+    Event, EventRecord, SegmentBaseline, SessionId, SessionMeta, SessionStore as CoreSessionStore,
+    SessionSummary, SkillResolutionRate, TaskSegment, record_session_error,
 };
 use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
@@ -25,10 +24,11 @@ mod tests;
 
 pub use requests::{
     AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest,
-    GetSegmentBaselineRequest, InitSessionVoRequest, ListSkillResolutionRatesRequest,
-    RecordSegmentSkillActivationRequest, RecordSegmentToolUseRequest,
-    RecordSegmentTurnUsageRequest, SearchEventsRequest, UpdateSegmentResolutionRequest,
-    UpdateSegmentResolutionScoreRequest, UpdateStatusRequest,
+    GetSegmentBaselineRequest, InitSessionVoRequest, ListSessionsRequest,
+    ListSkillResolutionRatesRequest, RecordSegmentSkillActivationRequest,
+    RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest, SearchEventsRequest,
+    UpdateSegmentResolutionRequest, UpdateSegmentResolutionScoreRequest, UpdateStatusRequest,
+    WorkspaceCostSinceRequest,
 };
 
 /// Restate service surface for durable session/event storage.
@@ -56,6 +56,16 @@ pub trait RestateSessionStore {
     async fn search_events(
         request: Json<SearchEventsRequest>,
     ) -> Result<Json<Vec<EventRecord>>, HandlerError>;
+
+    /// Lists persisted session summaries matching the provided filter.
+    async fn list_sessions(
+        request: Json<ListSessionsRequest>,
+    ) -> Result<Json<Vec<SessionSummary>>, HandlerError>;
+
+    /// Aggregates workspace spend since the requested timestamp.
+    async fn workspace_cost_since(
+        request: Json<WorkspaceCostSinceRequest>,
+    ) -> Result<u32, HandlerError>;
 
     /// Bootstraps VO state after the session row exists in Postgres.
     async fn init_session_vo(request: Json<InitSessionVoRequest>) -> Result<(), HandlerError>;

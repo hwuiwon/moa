@@ -4,7 +4,7 @@ use super::*;
 
 /// Top-level MOA command line interface.
 #[derive(Debug, Parser)]
-#[command(name = "moa", about = "MOA local terminal agent", version)]
+#[command(name = "moa", about = "MOA terminal agent client", version)]
 pub(crate) struct Cli {
     /// Enable debug logging to a file instead of the terminal.
     #[arg(long)]
@@ -27,7 +27,7 @@ pub(crate) struct Cli {
 pub(crate) enum CommandKind {
     /// Runs one prompt and prints the final assistant response to stdout.
     Exec(ExecArgs),
-    /// Shows active daemon/session status.
+    /// Shows orchestrator and session status.
     Status,
     /// Lists persisted sessions.
     Sessions(SessionsArgs),
@@ -95,7 +95,7 @@ pub(crate) enum CommandKind {
     Version,
     /// Prints a local environment diagnostic report.
     Doctor,
-    /// Controls the background daemon.
+    /// Inspects the configured orchestrator endpoint.
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
@@ -319,20 +319,11 @@ pub(crate) enum ConfigCommand {
     },
 }
 
-/// Daemon CLI commands.
+/// Orchestrator endpoint diagnostic commands.
 #[derive(Debug, Subcommand)]
 pub(crate) enum DaemonCommand {
-    /// Starts the background daemon.
-    Start,
-    /// Stops the background daemon.
-    Stop,
-    /// Shows daemon status.
+    /// Shows orchestrator endpoint status.
     Status,
-    /// Prints the daemon log tail.
-    Logs,
-    /// Runs the daemon server in the foreground.
-    #[command(hide = true)]
-    Serve,
 }
 
 /// Checkpoint CLI commands.

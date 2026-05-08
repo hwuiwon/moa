@@ -48,6 +48,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc
 hyper-util = { version = "0.1", features = ["client-legacy", "server-auto", "server-graceful", "service"] }
 i18n-embed = { version = "0.15", features = ["filesystem-assets", "fluent-system"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
+memchr = { version = "2" }
 mime_guess = { version = "2" }
 num-bigint = { version = "0.4", default-features = false, features = ["std"] }
 num-integer = { version = "0.1", default-features = false, features = ["i128", "std"] }
@@ -109,9 +110,12 @@ getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-f
 hashbrown-582f2526e08bb6a0 = { package = "hashbrown", version = "0.14", features = ["raw"] }
 i18n-embed = { version = "0.15", features = ["filesystem-assets", "fluent-system"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
+memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
 proc-macro-error2 = { version = "2" }
+proc-macro2 = { version = "1" }
+quote = { version = "1" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
 ring = { version = "0.17", features = ["std"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "aws_lc_rs", "ring", "std", "tls12"] }
@@ -128,6 +132,7 @@ sqlx-macros = { version = "0.8", features = ["_rt-tokio", "_tls-rustls-ring-webp
 sqlx-macros-core = { version = "0.8", features = ["_rt-tokio", "_tls-rustls-ring-webpki", "chrono", "derive", "json", "macros", "migrate", "postgres", "uuid"] }
 sqlx-postgres = { version = "0.8", default-features = false, features = ["chrono", "json", "migrate", "offline", "uuid"] }
 subtle = { version = "2" }
+syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing", "serde"] }
 tinystr = { version = "0.8", features = ["zerovec"] }
 tokio = { version = "1", features = ["full", "test-util", "tracing"] }

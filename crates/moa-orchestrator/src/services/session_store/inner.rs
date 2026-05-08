@@ -66,6 +66,26 @@ impl SessionStoreImpl {
             .map_err(HandlerError::from)
     }
 
+    pub(super) async fn list_sessions_inner(
+        &self,
+        request: ListSessionsRequest,
+    ) -> Result<Vec<SessionSummary>, HandlerError> {
+        self.store
+            .list_sessions(request.filter)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    pub(super) async fn workspace_cost_since_inner(
+        &self,
+        request: WorkspaceCostSinceRequest,
+    ) -> Result<u32, HandlerError> {
+        self.store
+            .workspace_cost_since(&request.workspace_id, request.since)
+            .await
+            .map_err(HandlerError::from)
+    }
+
     pub(super) async fn create_segment_inner(
         &self,
         request: CreateSegmentRequest,
