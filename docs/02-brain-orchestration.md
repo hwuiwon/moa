@@ -31,7 +31,7 @@ Bound surfaces:
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob` |
 | Service | `Health`, `SessionStore`, `IntentManager`, `LLMGateway`, `ToolExecutor`, `WorkspaceStore`, `GraphMemoryMaint`, `NeonMaint` |
-| Workflow | `Consolidate`, `IntentDiscovery` |
+| Workflow | `Consolidate`, `IntentDiscovery`, `TurnExecution` |
 
 Restate state is used for hot orchestration state: queued messages, status, pending approvals, child refs, active segment, cancellation flags, and child budgets. Product-visible history is written to Postgres.
 
@@ -41,14 +41,22 @@ Restate state is used for hot orchestration state: queued messages, status, pend
 client sends message
   -> SessionStore creates/loads session metadata
   -> Session::set_meta initializes VO state when needed
-  -> Session::post_message appends the message and sets status running
-  -> Session::run_turn executes one turn
-  -> post_message loops until idle, blocked, cancelled, or max turns reached
+  -> Session::post_message / Session::start_turn records an active turn id
+  -> Session sends TurnExecution::run keyed by turn_id
+  -> TurnExecution appends the message, runs the brain loop, and records events
+  -> TurnExecution calls back to Session::record_turn_outcome
+  -> Session drains the next queued message, if any
 ```
 
-`Session::post_message` is serialized by Restate's single-writer-per-key semantics. Concurrent messages for the same session queue behind the active invocation instead of requiring application locks.
+`Session::post_message` and the explicit `Session::start_turn` path are
+serialized by Restate's single-writer-per-key semantics, but they stay fast:
+the VO mutates K/V state and sends a durable workflow invocation. The
+long-running LLM/tool loop lives in `TurnExecution`, so concurrent `snapshot`,
+`queue_message`, and `request_cancel` calls do not wait behind a running turn.
+`Session::run_turn` is retained only as a legacy wire-compatible handler and no
+longer drives turn execution.
 
-`Session::run_turn` delegates most turn mechanics to `TurnRunner` through `SessionTurnAdapter`:
+`TurnExecution` owns the turn mechanics:
 
 1. Build a `CompletionRequest` from session events and the context pipeline.
 2. Ensure a task segment exists or roll to a new segment when query rewrite marks `is_new_task`.
@@ -60,7 +68,7 @@ client sends message
 8. Apply turn outcome and update session status.
 9. Score idle, cancelled, or completed segments and append `learning_log` entries.
 
-The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries.
+The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries. Cancellation is delivered through a workflow promise plus awakeable ID; the workflow checks it at deterministic boundaries and races it against the in-flight LLM call.
 
 ### Lineage Sink Selection
 
@@ -106,6 +114,7 @@ Only one-shot background jobs use workflows:
 
 - `Consolidate`: one workspace/date memory consolidation pass.
 - `IntentDiscovery`: one tenant intent-discovery pass over recent undefined task segments.
+- `TurnExecution`: one durable session turn keyed by `turn_id`; runs the top-level session brain loop and calls back to `Session` on completion, cancellation, or failure.
 
 These are workflow-shaped because rerunning the same logical job should be explicit and observable.
 

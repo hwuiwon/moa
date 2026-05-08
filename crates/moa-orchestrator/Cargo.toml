@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+integration = []
+
 [[bin]]
 name = "moa-orchestrator-bin"
 path = "src/main.rs"

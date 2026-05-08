@@ -10,7 +10,6 @@ pub(super) const K_CHILDREN: &str = "children";
 pub(super) const K_LAST_TURN_SUMMARY: &str = "last_turn_summary";
 pub(super) const K_CANCEL_FLAG: &str = "cancel_flag";
 pub(super) const K_CURRENT_SEGMENT: &str = "current_segment";
-pub(super) const MAX_TURNS_PER_POST: usize = 50;
 
 /// Serializable projection of the Session VO's durable state keys.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
