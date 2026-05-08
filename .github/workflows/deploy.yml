@@ -150,12 +150,64 @@ jobs:
           path: target/perf-gate/mock-smoke.prom
           if-no-files-found: error
 
+  long-conversation-eval-recorded:
+    name: long-conv recorded
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    services:
+      postgres:
+        image: ghcr.io/hwuiwon/moa-postgres-age:17.6-age1.7.0
+        ports:
+          - "5432:5432"
+        env:
+          POSTGRES_DB: moa
+          POSTGRES_PASSWORD: ci
+        options: >-
+          --health-cmd "pg_isready -U postgres -d moa"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      MOA_TEST_POSTGRES_URL: postgres://postgres:ci@localhost:5432/moa
+      TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/moa
+      DATABASE_URL: postgres://postgres:ci@localhost:5432/moa
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Probe test database
+        run: cargo run -p xtask --release -- migrate-test-db
+
+      - name: Run recorded long-conversation scenarios
+        run: cargo test -p moa-eval --test long_conversation_smoke --locked -- --ignored
+
+      - name: Check long-conversation budgets
+        run: cargo run -p xtask --release -- check-eval-budgets --suite long_conversation --max-regression-pct 5
+
+      - name: Upload long-conversation failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: long-conv-failure-artifacts-${{ github.sha }}
+          path: |
+            target/eval-output/
+            target/score-cards/
+          if-no-files-found: ignore
+
   build-image:
     runs-on: ubuntu-latest
     needs:
       - test
       - loadtest-mock-smoke
-    if: always() && needs.test.result == 'success' && (needs.loadtest-mock-smoke.result == 'success' || needs.loadtest-mock-smoke.result == 'skipped') && github.event_name != 'pull_request' && github.event_name != 'schedule'
+      - long-conversation-eval-recorded
+    if: always() && needs.test.result == 'success' && (needs.loadtest-mock-smoke.result == 'success' || needs.loadtest-mock-smoke.result == 'skipped') && (needs.long-conversation-eval-recorded.result == 'success' || needs.long-conversation-eval-recorded.result == 'skipped') && github.event_name != 'pull_request' && github.event_name != 'schedule'
     outputs:
       image: ${{ steps.image.outputs.image }}
     steps:

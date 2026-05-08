@@ -1,0 +1,100 @@
+name: long-conv nightly
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recorded-against-real-anthropic:
+    name: recorded long-conv trend collection
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: ghcr.io/hwuiwon/moa-postgres-age:17.6-age1.7.0
+        ports:
+          - "5432:5432"
+        env:
+          POSTGRES_DB: moa
+          POSTGRES_PASSWORD: ci
+        options: >-
+          --health-cmd "pg_isready -U postgres -d moa"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      MOA_EVAL_PROVIDER: anthropic
+      MOA_TEST_POSTGRES_URL: postgres://postgres:ci@localhost:5432/moa
+      TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/moa
+      DATABASE_URL: postgres://postgres:ci@localhost:5432/moa
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Probe test database
+        run: cargo run -p xtask --release -- migrate-test-db
+
+      - name: Run recorded long-conversation scenarios
+        run: cargo test -p moa-eval --test long_conversation_smoke --locked -- --ignored
+
+      - name: Check long-conversation budgets
+        run: cargo run -p xtask --release -- check-eval-budgets --suite long_conversation --max-regression-pct 5
+
+      - name: Upload nightly score cards
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-long-conv-score-cards-${{ github.run_id }}
+          path: |
+            target/score-cards/
+            target/eval-output/
+          if-no-files-found: ignore
+
+  scripted-user-against-real-anthropic:
+    name: scripted-user long-conv
+    runs-on: ubuntu-latest
+    if: vars.MOA_ENABLE_SCRIPTED_USER_NIGHTLY == '1'
+    services:
+      postgres:
+        image: ghcr.io/hwuiwon/moa-postgres-age:17.6-age1.7.0
+        ports:
+          - "5432:5432"
+        env:
+          POSTGRES_DB: moa
+          POSTGRES_PASSWORD: ci
+        options: >-
+          --health-cmd "pg_isready -U postgres -d moa"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      MOA_EVAL_MODE: scripted_user
+      MOA_EVAL_PROVIDER: anthropic
+      MOA_TEST_POSTGRES_URL: postgres://postgres:ci@localhost:5432/moa
+      TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/moa
+      DATABASE_URL: postgres://postgres:ci@localhost:5432/moa
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run scripted-user nightly gate
+        run: |
+          echo "scripted_user long-conversation mode is feature-gated by MOA_ENABLE_SCRIPTED_USER_NIGHTLY."
+          echo "Enable this job after the scripted_user runner lands and uses the same score-card budget gate."

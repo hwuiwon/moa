@@ -137,6 +137,7 @@ async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
         provider,
     )
     .await?;
+    write_report_artifacts(scenario_name, &report)?;
 
     let budgets = expectations.to_budgets();
     let budget_result = budgets.evaluate(&report.score_card);
@@ -155,6 +156,29 @@ async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
     expectations.assert_safety_exact(scenario_name, &report.score_card.safety);
     assert_scenario_specific_invariants(scenario_name, &report.events, &report.score_card);
 
+    Ok(())
+}
+
+fn write_report_artifacts(
+    scenario_name: &str,
+    report: &moa_eval::long_conversation::LongRunReport,
+) -> TestResult {
+    let target_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("target");
+    let score_card_dir = target_dir.join("score-cards");
+    let eval_output_dir = target_dir.join("eval-output");
+    std::fs::create_dir_all(&score_card_dir)?;
+    std::fs::create_dir_all(&eval_output_dir)?;
+
+    std::fs::write(
+        score_card_dir.join(format!("{scenario_name}.json")),
+        serde_json::to_vec_pretty(&report.score_card)?,
+    )?;
+    std::fs::write(
+        eval_output_dir.join(format!("{scenario_name}-events.json")),
+        serde_json::to_vec_pretty(&report.events)?,
+    )?;
     Ok(())
 }
 
