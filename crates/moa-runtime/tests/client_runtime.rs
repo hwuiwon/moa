@@ -79,7 +79,7 @@ async fn run_turn_queues_message_and_relays_completed_outcome_as_runtime_events(
         .await;
     let snapshot_mock = server
         .mock("POST", format!("/Session/{session_id}/snapshot").as_str())
-        .match_body(Matcher::Json(serde_json::Value::Null))
+        .match_body(Matcher::Missing)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(format!(

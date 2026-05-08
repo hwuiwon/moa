@@ -2,16 +2,21 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::{fs, path::Path};
 
 use chrono::Utc;
 use memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_core::{
-    CompletionRequest, CompletionResponse, Event, LLMProvider, MoaError, ModelCapabilities,
-    ModelId, ModelTier, QueryRewriteConfig, SessionId, TokenPricing, TokenUsage, UserId,
-    WorkspaceId, record_llm_cost_cents,
+    CompletionContent, CompletionRequest, CompletionResponse, Event, LLMProvider, MoaError,
+    ModelCapabilities, ModelId, ModelTier, QueryRewriteConfig, SessionId, StopReason, TokenPricing,
+    TokenUsage, ToolCallContent, ToolCallFormat, ToolInvocation, UserId, WorkspaceId,
+    record_llm_cost_cents,
 };
-use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
+use moa_providers::{
+    AnthropicProvider, GeminiProvider, OpenAIProvider, ScriptedProvider, ScriptedResponse,
+};
 use restate_sdk::prelude::*;
+use serde::Deserialize;
 use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
@@ -174,6 +179,43 @@ impl ProviderRegistry {
         }
     }
 
+    /// Builds a deterministic scripted registry from a JSON fixture file.
+    pub fn scripted(path: impl AsRef<Path>) -> moa_core::Result<Self> {
+        let path = path.as_ref();
+        let body = fs::read_to_string(path).map_err(|error| {
+            MoaError::ConfigError(format!(
+                "failed to read scripted provider fixture {}: {error}",
+                path.display()
+            ))
+        })?;
+        let file: ScriptedProviderFile = serde_json::from_str(&body).map_err(|error| {
+            MoaError::ConfigError(format!(
+                "failed to parse scripted provider fixture {}: {error}",
+                path.display()
+            ))
+        })?;
+        scripted_registry_from_file(file)
+    }
+
+    /// Builds a deterministic mock registry with an unbounded fallback response.
+    #[must_use]
+    pub fn mock(seed: u64) -> Self {
+        let response = ScriptedResponse::text(format!("OK mock response seed={seed}"));
+        let provider = Arc::new(
+            ScriptedProvider::new(scripted_capabilities("scripted-mock"))
+                .with_fallback_response(response),
+        );
+        Self::all_kinds_from_static(provider)
+    }
+
+    fn all_kinds_from_static(provider: Arc<dyn LLMProvider>) -> Self {
+        Self::with_static_providers(
+            Some(provider.clone()),
+            Some(provider.clone()),
+            Some(provider),
+        )
+    }
+
     /// Resolves which provider family should serve the requested model.
     pub fn resolve_provider_kind(
         &self,
@@ -243,6 +285,10 @@ impl ProviderRegistry {
             return Ok((provider_kind, ModelId::new(model_id)));
         }
 
+        if let Some(provider_kind) = self.provider_kind_for_default_model(trimmed) {
+            return Ok((provider_kind, ModelId::new(trimmed)));
+        }
+
         let provider_kind = infer_provider_kind(trimmed).ok_or_else(|| {
             MoaError::ConfigError(format!(
                 "could not infer a configured provider for model `{trimmed}`"
@@ -256,6 +302,31 @@ impl ProviderRegistry {
         })?;
 
         Ok((provider_kind, ModelId::new(trimmed)))
+    }
+
+    fn provider_kind_for_default_model(&self, model: &str) -> Option<ProviderKind> {
+        if self
+            .openai
+            .as_ref()
+            .is_some_and(|provider| provider.default_model == model)
+        {
+            return Some(ProviderKind::OpenAI);
+        }
+        if self
+            .anthropic
+            .as_ref()
+            .is_some_and(|provider| provider.default_model == model)
+        {
+            return Some(ProviderKind::Anthropic);
+        }
+        if self
+            .google
+            .as_ref()
+            .is_some_and(|provider| provider.default_model == model)
+        {
+            return Some(ProviderKind::Google);
+        }
+        None
     }
 
     fn resolve_default_model(&self) -> moa_core::Result<(ProviderKind, ModelId)> {
@@ -298,6 +369,155 @@ impl ProviderRegistry {
             ProviderKind::OpenAI => self.openai.as_ref(),
             ProviderKind::Google => self.google.as_ref(),
         }
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct ScriptedProviderFile {
+    default: Option<ScriptedEntry>,
+    responses: Vec<ScriptedEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ScriptedEntry {
+    Wrapped { completion: ScriptedCompletion },
+    Direct(ScriptedCompletion),
+}
+
+impl ScriptedEntry {
+    fn into_completion(self) -> ScriptedCompletion {
+        match self {
+            Self::Wrapped { completion } => completion,
+            Self::Direct(completion) => completion,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct ScriptedCompletion {
+    content: String,
+    tool_calls: Vec<ScriptedToolCall>,
+    duration_ms: u64,
+    input_tokens: usize,
+    cached_input_tokens: usize,
+    cache_write_input_tokens: usize,
+    stop_reason: Option<String>,
+}
+
+impl Default for ScriptedCompletion {
+    fn default() -> Self {
+        Self {
+            content: "OK".to_string(),
+            tool_calls: Vec::new(),
+            duration_ms: 1,
+            input_tokens: 64,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            stop_reason: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ScriptedToolCall {
+    name: String,
+    #[serde(default)]
+    input: Value,
+    #[serde(default)]
+    id: Option<String>,
+}
+
+fn scripted_registry_from_file(file: ScriptedProviderFile) -> moa_core::Result<ProviderRegistry> {
+    let mut provider = ScriptedProvider::new(scripted_capabilities("scripted-loadtest"));
+    if let Some(default) = file.default {
+        provider = provider.with_fallback_response(scripted_response(default)?);
+    }
+    for response in file.responses {
+        provider = provider.push_response(scripted_response(response)?);
+    }
+    Ok(ProviderRegistry::all_kinds_from_static(Arc::new(provider)))
+}
+
+fn scripted_response(entry: ScriptedEntry) -> moa_core::Result<ScriptedResponse> {
+    let completion = entry.into_completion();
+    let mut blocks = Vec::new();
+    if !completion.content.is_empty() {
+        blocks.push(CompletionContent::Text(completion.content));
+    }
+    for (index, call) in completion.tool_calls.into_iter().enumerate() {
+        blocks.push(CompletionContent::ToolCall(ToolCallContent {
+            invocation: ToolInvocation {
+                id: Some(
+                    call.id
+                        .unwrap_or_else(|| format!("scripted-tool-call-{}", index + 1)),
+                ),
+                name: call.name,
+                input: call.input,
+            },
+            provider_metadata: None,
+        }));
+    }
+
+    let mut response = ScriptedResponse::from_blocks(
+        blocks
+            .into_iter()
+            .map(|block| match block {
+                CompletionContent::Text(text) => moa_providers::ScriptedBlock::text(text),
+                CompletionContent::ToolCall(call) => moa_providers::ScriptedBlock::tool_call(
+                    call.invocation.name,
+                    call.invocation.input,
+                    call.invocation
+                        .id
+                        .unwrap_or_else(|| "scripted-tool-call".to_string()),
+                ),
+                CompletionContent::ProviderToolResult { tool_name, summary } => {
+                    moa_providers::ScriptedBlock::provider_tool_result(tool_name, summary)
+                }
+            })
+            .collect(),
+    );
+    response.duration_ms = completion.duration_ms;
+    response.input_tokens = completion.input_tokens;
+    response.cached_input_tokens = completion.cached_input_tokens;
+    response.cache_write_input_tokens = completion.cache_write_input_tokens;
+    if let Some(stop_reason) = completion.stop_reason {
+        response.stop_reason = parse_scripted_stop_reason(&stop_reason)?;
+    }
+    Ok(response)
+}
+
+fn parse_scripted_stop_reason(raw: &str) -> moa_core::Result<StopReason> {
+    match raw {
+        "end_turn" => Ok(StopReason::EndTurn),
+        "max_tokens" => Ok(StopReason::MaxTokens),
+        "tool_use" => Ok(StopReason::ToolUse),
+        "cancelled" => Ok(StopReason::Cancelled),
+        other if !other.trim().is_empty() => Ok(StopReason::Other(other.to_string())),
+        _ => Err(MoaError::ConfigError(
+            "scripted stop_reason must be non-empty".to_string(),
+        )),
+    }
+}
+
+fn scripted_capabilities(model_id: &str) -> ModelCapabilities {
+    ModelCapabilities {
+        model_id: ModelId::new(model_id),
+        context_window: 200_000,
+        max_output: 8_192,
+        supports_tools: true,
+        supports_vision: false,
+        supports_prefix_caching: true,
+        cache_ttl: Some(Duration::from_secs(300)),
+        tool_call_format: ToolCallFormat::Anthropic,
+        pricing: TokenPricing {
+            input_per_mtok: 0.0,
+            output_per_mtok: 0.0,
+            cached_input_per_mtok: Some(0.0),
+        },
+        native_tools: Vec::new(),
     }
 }
 

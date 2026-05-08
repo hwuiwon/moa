@@ -1,8 +1,7 @@
 //! Periodic Neon branch maintenance triggered by the CronJob virtual object.
 //!
-//! This mirrors the six-hourly Neon checkpoint cleanup job in
-//! `moa-orchestrator-local`. If `MOA_NEON_API_KEY` is unset, the service is a
-//! no-op so local development and self-hosted deployments do not require Neon.
+//! If `MOA_NEON_API_KEY` is unset, the service is a no-op so local development
+//! and self-hosted deployments do not require Neon.
 
 use moa_core::{BranchManager, restate_observability::annotate_restate_handler_span};
 use restate_sdk::prelude::*;

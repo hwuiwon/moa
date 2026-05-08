@@ -1,0 +1,52 @@
+name: integration tests
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  restate-fixture-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MOA_PROVIDERS_OVERRIDE: scripted:/loadtest-scripts/perf-gate.json
+      MOA_TEST_EXTERNAL_INGRESS_URL: http://localhost:18080
+      MOA_TEST_EXTERNAL_ADMIN_URL: http://localhost:9070
+      MOA_TEST_EXTERNAL_POSTGRES_URL: postgres://moa_owner:dev@localhost:25432/moa
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Start Restate-backed orchestrator stack
+        run: docker compose up -d --build postgres restate moa-orchestrator restate-register
+
+      - name: Wait for Restate registration
+        run: |
+          for i in $(seq 1 60); do
+            if docker compose logs restate-register 2>&1 | grep -q "registration complete"; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs restate-register
+          exit 1
+
+      - name: Run fixture smoke
+        run: cargo test -p moa-test-support --features integration --test orchestrator_fixture_smoke -- --nocapture
+
+      - name: Dump compose logs
+        if: failure()
+        run: docker compose logs postgres restate moa-orchestrator restate-register
+
+      - name: Stop compose stack
+        if: always()
+        run: docker compose down -v

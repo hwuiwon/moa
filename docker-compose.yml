@@ -103,6 +103,7 @@ services:
       POSTGRES_URL: postgres://moa_owner:dev@postgres:5432/moa
       RESTATE_ADMIN_URL: http://restate:9070
       MOA_LINEAGE_SINK: postgres
+      MOA_PROVIDERS_OVERRIDE: ${MOA_PROVIDERS_OVERRIDE:-}
       MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS: "false"
       MOA_DEREGISTER_ON_SHUTDOWN: "false"
       RUST_LOG: "info,moa_orchestrator=debug"
@@ -111,6 +112,8 @@ services:
     ports:
       - "9080:9080"
       - "9081:9081"
+    volumes:
+      - ./crates/moa-loadtest/scripts:/loadtest-scripts:ro
 
   restate-register:
     image: docker.restate.dev/restatedev/restate-cli:1.6.2

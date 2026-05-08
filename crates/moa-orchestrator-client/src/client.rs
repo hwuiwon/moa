@@ -189,6 +189,15 @@ impl OrchestratorClient {
         self.post_call_with_idempotency(path, body, None).await
     }
 
+    pub(crate) async fn post_empty_call<Resp>(&self, path: &str) -> Result<Resp>
+    where
+        Resp: serde::de::DeserializeOwned,
+    {
+        let url = format!("{}{path}", self.config.endpoint);
+        let resp = self.http.post(url).send().await?;
+        decode_response(resp).await
+    }
+
     pub(crate) async fn post_void<Req>(&self, path: &str, body: &Req) -> Result<()>
     where
         Req: Serialize + ?Sized,

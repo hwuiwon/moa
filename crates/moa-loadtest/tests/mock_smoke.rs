@@ -4,14 +4,24 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
+#[ignore = "requires a running Restate orchestrator with MOA_PROVIDERS_OVERRIDE=scripted:<fixture>"]
 fn mock_short_profile_completes_within_budget_with_zero_errors() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let prom_out = temp.path().join("mock-short.prom");
+    if std::env::var("MOA_RUN_LOADTEST_REMOTE_SMOKE").as_deref() != Ok("1") {
+        panic!("set MOA_RUN_LOADTEST_REMOTE_SMOKE=1 and RESTATE_INGRESS_URL to run this test");
+    }
+    let endpoint =
+        std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://localhost:18080".into());
+    let prom_out = repo_root().join(format!(
+        "target/perf-gate/mock-short-{}.prom",
+        uuid::Uuid::now_v7()
+    ));
     let output = Command::new(env!("CARGO_BIN_EXE_perf_gate"))
         .current_dir(repo_root())
         .args([
             "--profile",
             "mock-short",
+            "--endpoint",
+            &endpoint,
             "--duration",
             "5s",
             "--max-p95-ms",

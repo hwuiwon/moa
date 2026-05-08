@@ -141,6 +141,7 @@ impl ScriptedResponse {
 pub struct ScriptedProvider {
     capabilities: ModelCapabilities,
     responses: Arc<Mutex<VecDeque<ScriptedResponse>>>,
+    fallback_response: Arc<Mutex<Option<ScriptedResponse>>>,
     recorded_requests: Arc<Mutex<Vec<CompletionRequest>>>,
 }
 
@@ -150,6 +151,7 @@ impl ScriptedProvider {
         Self {
             capabilities,
             responses: Arc::new(Mutex::new(VecDeque::new())),
+            fallback_response: Arc::new(Mutex::new(None)),
             recorded_requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -158,6 +160,14 @@ impl ScriptedProvider {
     pub fn push_response(self, response: ScriptedResponse) -> Self {
         if let Ok(mut responses) = self.responses.lock() {
             responses.push_back(response);
+        }
+        self
+    }
+
+    /// Configures a response used after the explicit response queue is exhausted.
+    pub fn with_fallback_response(self, response: ScriptedResponse) -> Self {
+        if let Ok(mut fallback) = self.fallback_response.lock() {
+            *fallback = Some(response);
         }
         self
     }
@@ -223,12 +233,24 @@ impl LLMProvider for ScriptedProvider {
                     "scripted provider response queue poisoned: {error}"
                 ))
             })?
-            .pop_front()
-            .ok_or_else(|| {
-                moa_core::MoaError::ProviderError(
-                    "scripted provider ran out of queued responses".to_string(),
-                )
-            })?;
+            .pop_front();
+        let response = match response {
+            Some(response) => response,
+            None => self
+                .fallback_response
+                .lock()
+                .map_err(|error| {
+                    moa_core::MoaError::ProviderError(format!(
+                        "scripted provider fallback response poisoned: {error}"
+                    ))
+                })?
+                .clone()
+                .ok_or_else(|| {
+                    moa_core::MoaError::ProviderError(
+                        "scripted provider ran out of queued responses".to_string(),
+                    )
+                })?,
+        };
         let text = response
             .content
             .iter()

@@ -1,4 +1,4 @@
-.PHONY: dev dev-down dev-wipe dev-logs dev-restate-ui dev-status
+.PHONY: dev dev-down dev-wipe dev-logs dev-restate-ui dev-status loadtest-mock loadtest-live
 
 dev:
 	docker compose up -d --build
@@ -35,3 +35,13 @@ dev-logs:
 
 dev-restate-ui:
 	@echo "open http://localhost:9070"
+
+loadtest-mock:
+	@echo "restarting orchestrator with scripted providers..."
+	@MOA_PROVIDERS_OVERRIDE=scripted:/loadtest-scripts/perf-gate.json \
+	  docker compose up -d --build --force-recreate moa-orchestrator restate-register
+	@$(MAKE) dev-status
+	cargo run -p moa-loadtest --release --bin moa-loadtest -- --mode mock --endpoint http://localhost:18080
+
+loadtest-live:
+	cargo run -p moa-loadtest --release --bin moa-loadtest -- --mode live --endpoint http://localhost:18080

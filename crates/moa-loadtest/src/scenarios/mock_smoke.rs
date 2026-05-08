@@ -14,6 +14,7 @@ const DEFAULT_MAX_P95_MS: u64 = 5_000;
 const DEFAULT_MAX_ERROR_RATE: f64 = 0.01;
 const DEFAULT_TTFT: Duration = Duration::from_millis(50);
 const DEFAULT_TURN_DURATION: Duration = Duration::from_millis(200);
+const DEFAULT_ENDPOINT: &str = "http://localhost:18080";
 
 /// Mock smoke performance gate configuration.
 #[derive(Debug, Clone)]
@@ -32,6 +33,8 @@ pub struct MockSmokeConfig {
     pub ttft: Duration,
     /// Synthetic delay before one provider response completes.
     pub turn_duration: Duration,
+    /// Restate ingress endpoint fronting `moa-orchestrator`.
+    pub endpoint: String,
 }
 
 impl Default for MockSmokeConfig {
@@ -44,6 +47,7 @@ impl Default for MockSmokeConfig {
             prom_out: PathBuf::from("target/perf-gate/snapshot.prom"),
             ttft: DEFAULT_TTFT,
             turn_duration: DEFAULT_TURN_DURATION,
+            endpoint: DEFAULT_ENDPOINT.to_string(),
         }
     }
 }
@@ -54,7 +58,7 @@ pub async fn run_mock_smoke_gate(cfg: MockSmokeConfig) -> Result<()> {
 
     let report = match run_loadtest(LoadTestOptions {
         mode: LoadMode::Mock,
-        target: LoadTarget::Local,
+        endpoint: cfg.endpoint.clone(),
         sessions: cfg.virtual_users,
         profile: SessionProfileKind::Short,
         inter_message_delay: Duration::ZERO,
@@ -62,12 +66,6 @@ pub async fn run_mock_smoke_gate(cfg: MockSmokeConfig) -> Result<()> {
         output: OutputFormat::Json,
         model: None,
         config_path: None,
-        workspace_root: None,
-        daemon_socket: None,
-        mock_provider_timing: MockProviderTiming {
-            ttft: cfg.ttft,
-            total: cfg.turn_duration,
-        },
     })
     .await
     {

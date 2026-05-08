@@ -42,7 +42,7 @@ before diving into the numbered specs.
 |---|---|---|
 | 1 | Rust workspace with explicit crate boundaries around core traits, brain, session storage, memory, hands, providers, orchestration, gateway, security, skills, eval, and CLI. | Implemented |
 | 2 | Restate is the durable cloud orchestration engine. Sessions and sub-agents are virtual objects; consolidation and intent discovery are workflows. | Implemented |
-| 3 | Local mode uses `moa-orchestrator-local`, a Tokio-task orchestrator sharing the same core brain/session/graph-memory abstractions. | Implemented |
+| 3 | Local development uses the same Restate-backed `moa-orchestrator` binary as cloud deployments, started through the compose stack. | Implemented |
 | 4 | Postgres is the single application database. Neon is the managed/cloud Postgres target and optional checkpoint branch provider. | Implemented |
 | 5 | Session events are append-only and replayable. Derived counters live in triggers, generated columns, views, and materialized views. | Implemented |
 | 6 | Graph memory is canonical; Postgres stores graph state, sidecar indexes, changelog rows, and pgvector embeddings. | Implemented |
@@ -55,7 +55,7 @@ before diving into the numbered specs.
 | 13 | Skills are ranked with a mix of keyword relevance, resolution rate, use count, and recency, with prompt-budget controls. | Implemented |
 | 14 | CLI and REST/gateway surfaces are separate product interfaces over the same runtime model. | Implemented |
 | 15 | Lineage, scoring, cold export, and compliance audit tiers are first-class enterprise evidence planes, not debugging-only logs. | Implemented |
-| 16 | Local mode is an operator/development runtime over the same storage and brain abstractions, not a separate personal-agent product. | Implemented |
+| 16 | Local development is a thin-client flow against the Restate-backed orchestrator, not a separate personal-agent product. | Implemented |
 
 ## Consistency Rules
 

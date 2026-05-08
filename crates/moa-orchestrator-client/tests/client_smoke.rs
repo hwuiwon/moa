@@ -173,12 +173,13 @@ async fn request_cancel_posts_string_body_and_decodes_response() {
 }
 
 #[tokio::test]
-async fn snapshot_posts_null_body_and_decodes_state() {
-    // Pins: snapshot uses the shared Session handler's null JSON request body.
+async fn snapshot_posts_empty_body_and_decodes_state() {
+    // Pins: snapshot calls the no-input shared Session handler with an empty body.
     let mut server = Server::new_async().await;
     let mock = server
         .mock("POST", "/Session/sess-1/snapshot")
-        .match_body(Matcher::Json(serde_json::Value::Null))
+        .match_header("content-type", Matcher::Missing)
+        .match_body(Matcher::Missing)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -207,7 +208,8 @@ async fn await_turn_outcome_returns_matching_terminal_outcome() {
     let mut server = Server::new_async().await;
     let mock = server
         .mock("POST", "/Session/sess-1/snapshot")
-        .match_body(Matcher::Json(serde_json::Value::Null))
+        .match_header("content-type", Matcher::Missing)
+        .match_body(Matcher::Missing)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(

@@ -6,21 +6,21 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::Parser;
 use moa_loadtest::{
-    LoadMode, LoadTarget, LoadTestOptions, OutputFormat, SessionProfileKind, render_human_report,
+    LoadMode, LoadTestOptions, OutputFormat, SessionProfileKind, render_human_report,
     render_json_report, run_loadtest,
 };
 
-/// Runs a synthetic MOA workload against the local orchestrator or daemon.
+/// Runs a synthetic MOA workload against a Restate-backed orchestrator.
 #[derive(Debug, Parser)]
 #[command(name = "moa-loadtest", about = "MOA multi-turn workload generator")]
 struct Cli {
-    /// Infrastructure mode: `mock` uses ScriptedProvider, `live` uses a real provider.
+    /// Infrastructure mode. `mock` expects the orchestrator to run with MOA_PROVIDERS_OVERRIDE.
     #[arg(long, value_enum, default_value_t = LoadMode::Mock)]
     mode: LoadMode,
 
-    /// Target backend: `local` runs in-process, `daemon` drives a running MOA daemon.
-    #[arg(long, value_enum, default_value_t = LoadTarget::Local)]
-    target: LoadTarget,
+    /// Restate ingress endpoint fronting `moa-orchestrator`.
+    #[arg(long, default_value = "http://localhost:18080")]
+    endpoint: String,
 
     /// Number of concurrent sessions to simulate.
     #[arg(long)]
@@ -42,21 +42,13 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     output: OutputFormat,
 
-    /// Optional model override for local live runs.
+    /// Optional model override for turn requests.
     #[arg(long)]
     model: Option<String>,
 
     /// Optional explicit MOA config path.
     #[arg(long)]
     config: Option<PathBuf>,
-
-    /// Optional explicit workspace root for local runs.
-    #[arg(long)]
-    workspace_root: Option<PathBuf>,
-
-    /// Optional daemon socket override for daemon target runs.
-    #[arg(long)]
-    daemon_socket: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -68,7 +60,7 @@ async fn main() -> Result<()> {
     });
     let options = LoadTestOptions {
         mode: cli.mode,
-        target: cli.target,
+        endpoint: cli.endpoint,
         sessions,
         profile: cli.profile,
         inter_message_delay: Duration::from_millis(cli.inter_message_delay_ms),
@@ -76,9 +68,6 @@ async fn main() -> Result<()> {
         output: cli.output,
         model: cli.model,
         config_path: cli.config,
-        workspace_root: cli.workspace_root,
-        daemon_socket: cli.daemon_socket,
-        mock_provider_timing: Default::default(),
     };
 
     let report = run_loadtest(options.clone()).await?;

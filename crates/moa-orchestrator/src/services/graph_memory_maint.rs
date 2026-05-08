@@ -1,8 +1,8 @@
 //! Periodic graph-memory maintenance triggered by the CronJob virtual object.
 //!
 //! TODO(graph-memory): the real compaction algorithm lives in `moa-brain` and
-//! operates per session. This service currently runs a no-op shell that mirrors
-//! the scheduled local job in `moa-orchestrator-local`.
+//! operates per session. This service currently runs a no-op shell until a
+//! global cross-session consolidation pass is implemented.
 
 use moa_core::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;

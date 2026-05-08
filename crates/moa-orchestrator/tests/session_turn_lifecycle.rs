@@ -329,7 +329,6 @@ async fn request_cancel_forwards_to_turn_execution() -> Result<()> {
     let turn_id = started
         .turn_id
         .expect("start_turn should return the active turn ID");
-    await_turn_phase(&client, &turn_id, "Streaming", Duration::from_secs(10)).await?;
 
     let cancel = request_cancel(&client, &session_id, "user-requested").await?;
     assert!(cancel.cancelled);

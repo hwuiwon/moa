@@ -2,12 +2,14 @@
 
 use moa_core::{MoaError, Result};
 use sqlx::postgres::PgPoolOptions;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::PostgresSessionStore;
 use crate::schema::SCHEMA_MIGRATION_LOCK_ID;
 
 const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:25432/moa";
+static TEST_SCHEMA_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// Returns the Postgres URL used by workspace tests.
 pub fn test_database_url() -> String {
@@ -18,6 +20,7 @@ pub fn test_database_url() -> String {
 
 /// Creates a Postgres-backed session store in an isolated schema for tests.
 pub async fn create_isolated_test_store() -> Result<(PostgresSessionStore, String, String)> {
+    let _guard = TEST_SCHEMA_LOCK.lock().await;
     let database_url = test_database_url();
     let schema_name = format!("moa_test_{}", Uuid::now_v7().simple());
     let store = PostgresSessionStore::new_in_schema(&database_url, &schema_name).await?;
@@ -26,6 +29,7 @@ pub async fn create_isolated_test_store() -> Result<(PostgresSessionStore, Strin
 
 /// Drops one isolated Postgres schema created by `create_isolated_test_store`.
 pub async fn cleanup_test_schema(database_url: &str, schema_name: &str) -> Result<()> {
+    let _guard = TEST_SCHEMA_LOCK.lock().await;
     let pool = PgPoolOptions::new()
         .min_connections(1)
         .max_connections(1)

@@ -1,8 +1,9 @@
 //! Environment-backed configuration for the Restate orchestrator binary.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use moa_core::{MoaConfig, OtlpProtocol};
 use serde::Deserialize;
 
@@ -93,6 +94,82 @@ impl OrchestratorConfig {
     }
 }
 
+/// Provider override mode selected by `MOA_PROVIDERS_OVERRIDE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProvidersOverride {
+    /// Use providers configured from normal credentials.
+    None,
+    /// Use a scripted provider fixture loaded from disk.
+    Scripted {
+        /// JSON fixture path.
+        path: PathBuf,
+    },
+    /// Use a deterministic built-in mock provider.
+    Mock {
+        /// Seed recorded for reproducible diagnostics.
+        seed: u64,
+    },
+}
+
+impl ProvidersOverride {
+    /// Reads the provider override mode from `MOA_PROVIDERS_OVERRIDE`.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::from_raw(std::env::var("MOA_PROVIDERS_OVERRIDE").ok().as_deref())
+    }
+
+    /// Returns true when an override is active.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Fails if a provider override is configured in a production environment.
+    pub fn ensure_allowed(&self, config: &MoaConfig) -> Result<()> {
+        if self.is_active() && production_environment(config) {
+            bail!("MOA_PROVIDERS_OVERRIDE is not allowed when environment=prod");
+        }
+        Ok(())
+    }
+
+    fn from_raw(raw: Option<&str>) -> Self {
+        let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Self::None;
+        };
+
+        match raw.split_once(':') {
+            Some(("scripted", path)) if !path.trim().is_empty() => Self::Scripted {
+                path: PathBuf::from(path.trim()),
+            },
+            Some(("mock", seed)) => Self::Mock {
+                seed: seed.trim().parse().unwrap_or(0),
+            },
+            _ => {
+                tracing::warn!(value = %raw, "MOA_PROVIDERS_OVERRIDE not parseable; ignoring");
+                Self::None
+            }
+        }
+    }
+}
+
+fn production_environment(config: &MoaConfig) -> bool {
+    if is_prod_value(config.observability.environment.as_deref()) {
+        return true;
+    }
+
+    ["MOA__ENVIRONMENT", "MOA_ENVIRONMENT", "DEPLOY_ENV"]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .any(|value| is_prod_value(Some(value.as_str())))
+}
+
+fn is_prod_value(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .map(|value| value.eq_ignore_ascii_case("prod") || value.eq_ignore_ascii_case("production"))
+        .unwrap_or(false)
+}
+
 fn parse_otlp_protocol(raw: Option<String>) -> OtlpProtocol {
     match raw.as_deref().map(str::trim) {
         Some("http") | Some("http/protobuf") => OtlpProtocol::Http,
@@ -117,7 +194,9 @@ fn parse_otlp_headers(raw: Option<String>) -> std::collections::HashMap<String, 
 
 #[cfg(test)]
 mod tests {
-    use super::OrchestratorConfig;
+    use moa_core::MoaConfig;
+
+    use super::{OrchestratorConfig, ProvidersOverride};
 
     #[test]
     fn from_reader_uses_defaults_and_optional_values() {
@@ -159,5 +238,33 @@ mod tests {
         assert_eq!(moa_config.local.sandbox_dir, "/tmp/moa-sandbox");
         assert_eq!(moa_config.local.memory_dir, "/tmp/moa-memory");
         assert!(!moa_config.local.docker_enabled);
+    }
+
+    #[test]
+    fn providers_override_parses_scripted_fixture_path() {
+        let override_mode =
+            ProvidersOverride::from_raw(Some("scripted:/tmp/moa-loadtest-script.json"));
+
+        assert_eq!(
+            override_mode,
+            ProvidersOverride::Scripted {
+                path: "/tmp/moa-loadtest-script.json".into()
+            }
+        );
+    }
+
+    #[test]
+    fn providers_override_blocks_prod_environment() {
+        let mut config = MoaConfig::default();
+        config.observability.environment = Some("prod".to_string());
+
+        let error = ProvidersOverride::Mock { seed: 7 }
+            .ensure_allowed(&config)
+            .expect_err("provider overrides must be blocked in prod");
+
+        assert_eq!(
+            error.to_string(),
+            "MOA_PROVIDERS_OVERRIDE is not allowed when environment=prod"
+        );
     }
 }

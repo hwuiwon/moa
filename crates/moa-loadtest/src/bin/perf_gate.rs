@@ -56,6 +56,9 @@ struct Args {
     /// Prometheus textfile output path.
     #[arg(long, default_value = "target/perf-gate/snapshot.prom")]
     prom_out: PathBuf,
+    /// Restate ingress endpoint fronting `moa-orchestrator`.
+    #[arg(long, default_value = "http://localhost:18080")]
+    endpoint: String,
 }
 
 impl Args {
@@ -79,6 +82,7 @@ impl Args {
             max_p95_ms: self.max_p95_ms.unwrap_or(5_000),
             max_error_rate: self.max_error_rate.unwrap_or(0.01),
             prom_out: self.prom_out.clone(),
+            endpoint: self.endpoint.clone(),
             ..Default::default()
         }
     }

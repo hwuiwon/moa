@@ -68,7 +68,7 @@ impl SessionHandle<'_> {
     /// Reads a non-blocking snapshot of the Session virtual object's turn state.
     pub async fn snapshot(&self) -> Result<SessionSnapshot> {
         let path = format!("/Session/{}/snapshot", self.session_id);
-        self.client.post_call(&path, &serde_json::Value::Null).await
+        self.client.post_empty_call(&path).await
     }
 
     /// Returns a polling-based event subscription placeholder.

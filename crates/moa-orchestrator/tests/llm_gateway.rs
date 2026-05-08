@@ -166,6 +166,30 @@ fn llm_gateway_resolve_provider_for_prefixed_google_model() {
 }
 
 #[test]
+fn llm_gateway_resolve_provider_for_configured_static_default_model() {
+    let registry = ProviderRegistry::with_static_providers(
+        None,
+        Some(Arc::new(MockProvider::success(
+            "scripted",
+            "scripted-loadtest",
+            TokenPricing {
+                input_per_mtok: 0.0,
+                output_per_mtok: 0.0,
+                cached_input_per_mtok: Some(0.0),
+            },
+        ))),
+        None,
+    );
+
+    let (provider_kind, model_id) = registry
+        .resolve_provider_kind(Some("scripted-loadtest"))
+        .expect("configured static default model should resolve");
+
+    assert_eq!(provider_kind, ProviderKind::OpenAI);
+    assert_eq!(model_id.as_str(), "scripted-loadtest");
+}
+
+#[test]
 fn llm_gateway_compute_cost_cents_matches_pricing_table_v1_for_sonnet() {
     let model = "claude-sonnet-4-6";
     let usage = TokenUsage {
