@@ -13,7 +13,9 @@ anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
+chrono-tz = "0.10"
 clap.workspace = true
+croner = "2.2"
 moa-brain = { path = "../moa-brain" }
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }

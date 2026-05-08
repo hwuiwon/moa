@@ -18,6 +18,7 @@ use moa_orchestrator::{
     OrchestratorCtx,
     config::OrchestratorConfig,
     lineage::build_lineage_sink,
+    objects::cron_job::{CronJob, CronJobImpl},
     objects::session::{Session, SessionImpl},
     objects::sub_agent::{SubAgent, SubAgentImpl},
     objects::workspace::{WorkspaceImpl, WorkspaceObject},
@@ -51,6 +52,7 @@ const ADMIN_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
 const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Consolidate",
+    "CronJob",
     "Health",
     "IntentManager",
     "IntentDiscovery",
@@ -134,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(IngestionVOImpl.serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
         .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
+        .bind(CronJobImpl.serve())
         .bind(SessionImpl.serve())
         .bind(SubAgentImpl.serve())
         .bind(WorkspaceImpl.serve())
@@ -488,6 +491,7 @@ mod tests {
     fn registration_check_requires_all_expected_services() {
         let deployments = vec![deployment_with_services(&[
             "Consolidate",
+            "CronJob",
             "Health",
             "IntentManager",
             "IntentDiscovery",

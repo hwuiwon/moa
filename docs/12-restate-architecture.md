@@ -100,6 +100,7 @@ The mapping is deliberate and reversible only with significant cost. Each choice
 | Session event log append | Service handler (`SessionStore::append_event`) | — |
 | Workspace | Virtual Object (`Workspace`) | `workspace_id` |
 | Consolidation / dream cycle | **Workflow** (`Consolidate`) — scheduled from `Workspace` VO | `workspace_id:YYYY-MM-DD` |
+| Reusable scheduled job | **Virtual Object** (`CronJob`) | job name |
 | Slow-path turn ingestion | **Virtual Object** (`IngestionVO`) | ingestion object key |
 | Approval request | `ctx.awakeable::<Decision>()` inside turn, resolved by gateway | — |
 | Session cancellation | Handler on `Session` VO, sets a cancel flag in state | — |
