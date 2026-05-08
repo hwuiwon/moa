@@ -16,7 +16,7 @@ use moa_core::{TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_hands::ToolRouter;
 use moa_orchestrator::{
     OrchestratorCtx,
-    config::OrchestratorConfig,
+    config::{OrchestratorConfig, ProvidersOverride},
     lineage::build_lineage_sink,
     objects::cron_job::{CronJob, CronJobImpl},
     objects::session::{Session, SessionImpl},
@@ -98,6 +98,8 @@ async fn main() -> anyhow::Result<()> {
             ..TelemetryConfig::default()
         },
     )?;
+    let providers_override = ProvidersOverride::from_env();
+    providers_override.ensure_allowed(moa_config.as_ref())?;
     let pool = PgPoolOptions::new()
         .max_connections(25)
         .connect(&config.postgres_url)
@@ -107,7 +109,20 @@ async fn main() -> anyhow::Result<()> {
         PostgresSessionStore::from_existing_pool(&config.postgres_url, pool.clone()).await?,
     );
 
-    let providers = Arc::new(ProviderRegistry::from_env());
+    let providers = Arc::new(match providers_override {
+        ProvidersOverride::None => ProviderRegistry::from_env(),
+        ProvidersOverride::Scripted { path } => {
+            tracing::warn!(
+                path = %path.display(),
+                "loading scripted provider override (test mode)"
+            );
+            ProviderRegistry::scripted(path)?
+        }
+        ProvidersOverride::Mock { seed } => {
+            tracing::warn!(seed, "using mock provider override (test mode)");
+            ProviderRegistry::mock(seed)
+        }
+    });
     let embedding_provider = build_embedding_provider_from_config(moa_config.as_ref())?;
     let tool_router = Arc::new(
         ToolRouter::from_config(moa_config.as_ref())

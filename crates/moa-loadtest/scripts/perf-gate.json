@@ -1,0 +1,12 @@
+{
+  "default": {
+    "completion": {
+      "content": "OK",
+      "duration_ms": 1,
+      "input_tokens": 64,
+      "cached_input_tokens": 0,
+      "cache_write_input_tokens": 0,
+      "tool_calls": []
+    }
+  }
+}

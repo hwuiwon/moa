@@ -15,22 +15,11 @@ pub async fn run_loadtest(options: LoadTestOptions) -> Result<LoadTestReport> {
         config.session_limits.loop_detection_threshold = 0;
     }
 
-    let workspace_root = match options.target {
-        LoadTarget::Local => Some(resolve_workspace_root(options.workspace_root.as_deref())?),
-        LoadTarget::Daemon => None,
-    };
-    let inspection_files = inspectable_files(workspace_root.as_deref()).await?;
+    let inspection_files = inspectable_files(None).await?;
     let plans = build_session_plans(options.sessions, options.profile, &inspection_files);
-    let backend = build_backend(&options, &mut config, workspace_root.clone()).await?;
+    let backend = build_backend(&options, &config).await?;
     let started = Instant::now();
-    let run_result = run_sessions(
-        backend.clone(),
-        &options,
-        plans,
-        workspace_root.clone(),
-        started,
-    )
-    .await;
+    let run_result = run_sessions(backend.clone(), &options, plans, started).await;
     let cleanup_result = backend.cleanup().await;
 
     match (run_result, cleanup_result) {

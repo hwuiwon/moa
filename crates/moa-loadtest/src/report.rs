@@ -57,8 +57,8 @@ pub struct PercentileSummary {
 pub struct LoadTestReport {
     /// Execution mode.
     pub mode: LoadMode,
-    /// Backend target.
-    pub target: LoadTarget,
+    /// Restate ingress endpoint used by the run.
+    pub endpoint: String,
     /// Requested profile family.
     pub profile: SessionProfileKind,
     /// Requested session count.
@@ -83,8 +83,6 @@ pub struct LoadTestReport {
     pub cache_hit_rate: PercentileSummary,
     /// Total spend in cents.
     pub total_cost_cents: u64,
-    /// Workspace root used for the run when known.
-    pub workspace_root: Option<PathBuf>,
     /// Per-session results.
     pub sessions: Vec<SessionReport>,
 }
@@ -96,15 +94,12 @@ pub fn render_human_report(report: &LoadTestReport) -> String {
     let _ = writeln!(&mut output, "====================");
     let _ = writeln!(
         &mut output,
-        "Mode: {} | Target: {} | Sessions: {} | Profile: {}",
+        "Mode: {} | Endpoint: {} | Sessions: {} | Profile: {}",
         report.mode.as_str(),
-        report.target.as_str(),
+        report.endpoint,
         report.sessions_requested,
         report.profile.as_str()
     );
-    if let Some(root) = &report.workspace_root {
-        let _ = writeln!(&mut output, "Workspace: {}", root.display());
-    }
     let _ = writeln!(
         &mut output,
         "Duration: {:.2}s",

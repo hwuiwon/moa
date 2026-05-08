@@ -25,7 +25,7 @@ moa-hands = { path = "../moa-hands" }
 moa-lineage-core = { path = "../moa-lineage/core" }
 moa-lineage-sink = { path = "../moa-lineage/sink" }
 memory-ingest = { package = "moa-memory-ingest", path = "../moa-memory/ingest" }
-moa-providers = { path = "../moa-providers" }
+moa-providers = { path = "../moa-providers", features = ["test-util"] }
 moa-session = { path = "../moa-session" }
 opentelemetry.workspace = true
 restate-sdk.workspace = true

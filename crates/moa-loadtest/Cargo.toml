@@ -15,19 +15,17 @@ metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 moa-brain = { path = "../moa-brain" }
 moa-core = { path = "../moa-core" }
-moa-hands = { path = "../moa-hands" }
 moa-memory-graph = { path = "../moa-memory/graph" }
 moa-memory-vector = { path = "../moa-memory/vector" }
-moa-orchestrator-local = { path = "../moa-orchestrator-local" }
-moa-providers = { path = "../moa-providers", features = ["test-util"] }
+moa-orchestrator-client = { path = "../moa-orchestrator-client" }
 moa-session = { path = "../moa-session" }
 rand = "0.8"
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid", "json"] }
-tempfile.workspace = true
 tokio.workspace = true
+url = "2.5"
 uuid.workspace = true
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
 

@@ -79,6 +79,20 @@ The turn loop is durable because external calls and side effects are wrapped thr
 
 The Postgres sink runs an in-memory queue (`MpscSink`) and a background writer that drains on shutdown. Maximum queue depth and batch size come from `config.observability.lineage` in `MoaConfig`.
 
+### Provider Overrides For Test Runs
+
+`MOA_PROVIDERS_OVERRIDE` is a dev/CI-only startup switch for replacing normal
+LLM providers inside `moa-orchestrator`:
+
+- unset: use providers configured from normal API keys.
+- `scripted:<path>`: use a JSON fixture with deterministic responses.
+- `mock:<seed>`: use the built-in deterministic mock response.
+
+The orchestrator refuses to start with an override when the environment is
+`prod` or `production`. The checked-in load-test fixture lives at
+`crates/moa-loadtest/scripts/perf-gate.json`; see
+`docs/testing/providers-override.md` for the script format.
+
 ## Approvals
 
 Risky tool calls emit `ApprovalRequested` events. In cloud mode the blocked invocation stores an awakeable ID in VO state and event payload. The gateway or REST surface resolves the approval by calling the appropriate handler with an `ApprovalDecision`.
@@ -149,8 +163,8 @@ and bump the bootstrap idempotency-key version suffix in code.
 
 `moa-cli` and `moa-runtime` call the Restate-backed orchestrator over the
 configured ingress endpoint. Local development starts that service through
-`make dev`; the legacy `moa-orchestrator-local` crate remains only for
-migration-only consumers until the follow-up deletion work lands.
+`make dev`, so development and cloud execution exercise the same orchestrator
+binary and Restate handler surface.
 
 The local compose stack still uses:
 

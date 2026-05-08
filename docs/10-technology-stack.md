@@ -24,7 +24,6 @@ The root workspace currently contains:
 | `moa-hands` | Tool router, local/Docker hands, Daytona, E2B, MCP |
 | `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring |
 | `moa-orchestrator` | Restate services, virtual objects, workflows, `moa-orchestrator-bin` cloud binary |
-| `moa-orchestrator-local` | Legacy Tokio-task local orchestrator retained for migration-only consumers |
 | `moa-gateway` | Telegram, Slack, Discord adapters and renderers |
 | `moa-runtime` | Thin runtime facade over `moa-orchestrator-client` |
 | `moa-cli` | Thin-client CLI and orchestrator diagnostics |
@@ -48,7 +47,7 @@ The root workspace currently contains:
 | HTTP | `reqwest`, `axum` |
 | Database | `sqlx` with Postgres, migrations, JSON, UUID, chrono |
 | Orchestration | `restate-sdk` |
-| Local scheduling | `tokio-cron-scheduler` |
+| Scheduling | Restate `CronJob` virtual object |
 | Security | `age`, `secrecy`, `shell-words` |
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |

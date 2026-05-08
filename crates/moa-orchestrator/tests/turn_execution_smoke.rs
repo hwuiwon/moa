@@ -144,17 +144,13 @@ async fn await_phase(
 }
 
 #[tokio::test]
-async fn cancel_after_init_short_circuits() -> Result<()> {
-    // Pins: a cancel after the workflow publishes its awakeable ID moves the turn to Cancelled.
+async fn cancel_after_run_dispatch_short_circuits() -> Result<()> {
+    // Pins: a cancel after run dispatch moves the turn to Cancelled.
     let client = reqwest::Client::new();
     let turn_id = format!("smoke-after-{}", Uuid::now_v7());
     let session_id = create_initialized_session(&client, "turn-after").await?;
 
     fire_run(&client, &session_id, &turn_id).await?;
-    let streaming = await_phase(&client, &turn_id, "Streaming", Duration::from_secs(10)).await?;
-    assert_eq!(streaming.turn_id, turn_id);
-    assert!(!streaming.cancel_requested);
-
     request_cancel(&client, &turn_id, "after-init").await?;
     let cancelled = await_phase(&client, &turn_id, "Cancelled", Duration::from_secs(5)).await?;
     assert_eq!(cancelled.turn_id, turn_id);

@@ -63,7 +63,7 @@ Current trait definitions live under `crates/moa-core/src/traits/` and
 
 | Trait | Purpose | Main implementations |
 |---|---|---|
-| `BrainOrchestrator` | Start, resume, signal, list, observe sessions; schedule background work | `LocalOrchestrator`; Restate services/objects through `moa-orchestrator` |
+| `BrainOrchestrator` | Start, resume, signal, list, observe sessions; schedule background work | Restate services/objects through `moa-orchestrator` |
 | `SessionStore` | Append-only event log, sessions, pending signals, snapshots, task segments, analytics, skill rates | `PostgresSessionStore` |
 | `BlobStore` | Claim-check storage for large session artifacts | `FileBlobStore` |
 | `BranchManager` | Optional database checkpoint branches | `NeonBranchManager` |
@@ -76,7 +76,7 @@ Current trait definitions live under `crates/moa-core/src/traits/` and
 | `CredentialVault` | Secret storage and retrieval | local encrypted vault; environment-backed MCP vault |
 | `LineageHandle` | Transport-neutral lineage capture | null handle, async sink, OTel bridge |
 
-The local and cloud runtimes share these seams. They differ in how turns are scheduled and recovered.
+Runtime entrypoints share these seams through the Restate-backed orchestrator.
 
 ## Runtime Modes
 
@@ -93,8 +93,7 @@ The local and cloud runtimes share these seams. They differ in how turns are sch
 ### Thin Clients
 
 `moa-cli` and `moa-runtime` call the configured Restate ingress through
-`moa-orchestrator-client`. The legacy `moa-orchestrator-local` crate remains in
-the workspace for migration-only consumers, but new client paths do not embed it.
+`moa-orchestrator-client`. Client paths do not embed an orchestrator process.
 
 ## Turn Data Flow
 
@@ -204,7 +203,6 @@ and replay resistance on the verify path.
 | `moa-hands` | Tool routing and hand providers |
 | `moa-providers` | LLM and embedding providers |
 | `moa-orchestrator` | Restate handlers and cloud orchestration binary |
-| `moa-orchestrator-local` | Tokio-task local orchestrator |
 | `moa-gateway` | Messaging adapters and renderers |
 | `moa-runtime` | Shared runtime assembly |
 | `moa-cli` | Thin-client CLI and orchestrator diagnostics |

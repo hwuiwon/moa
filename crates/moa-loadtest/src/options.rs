@@ -12,16 +12,6 @@ pub enum LoadMode {
     Live,
 }
 
-/// Backend target for the load harness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum LoadTarget {
-    /// Run an in-process local orchestrator.
-    Local,
-    /// Drive a running MOA daemon over its Unix socket.
-    Daemon,
-}
-
 /// Session profile family for the generated workload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -44,31 +34,13 @@ pub enum OutputFormat {
     Json,
 }
 
-/// Synthetic timing applied by the mock provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MockProviderTiming {
-    /// Delay before the first streamed provider block.
-    pub ttft: Duration,
-    /// Delay before the final provider response is available.
-    pub total: Duration,
-}
-
-impl Default for MockProviderTiming {
-    fn default() -> Self {
-        Self {
-            ttft: Duration::ZERO,
-            total: Duration::ZERO,
-        }
-    }
-}
-
 /// User-configurable load-test options.
 #[derive(Debug, Clone)]
 pub struct LoadTestOptions {
     /// Execution mode.
     pub mode: LoadMode,
-    /// Backend target.
-    pub target: LoadTarget,
+    /// Restate ingress endpoint fronting `moa-orchestrator`.
+    pub endpoint: String,
     /// Number of concurrent sessions to simulate.
     pub sessions: usize,
     /// Session profile family.
@@ -79,16 +51,10 @@ pub struct LoadTestOptions {
     pub turn_timeout: Duration,
     /// Final output format.
     pub output: OutputFormat,
-    /// Optional explicit model override for local live runs.
+    /// Optional explicit model override for turn requests.
     pub model: Option<String>,
     /// Optional explicit config path.
     pub config_path: Option<PathBuf>,
-    /// Optional explicit workspace root for local runs.
-    pub workspace_root: Option<PathBuf>,
-    /// Optional daemon socket path.
-    pub daemon_socket: Option<PathBuf>,
-    /// Synthetic timing for the mock provider.
-    pub mock_provider_timing: MockProviderTiming,
 }
 
 impl LoadTestOptions {
@@ -99,26 +65,18 @@ impl LoadTestOptions {
                 self.sessions
             )));
         }
-        if matches!(self.mode, LoadMode::Mock) && matches!(self.target, LoadTarget::Daemon) {
+        if self.endpoint.trim().is_empty() {
             return Err(MoaError::ValidationError(
-                "mock mode supports only the in-process local target".to_string(),
+                "endpoint must be non-empty".to_string(),
             ));
         }
+        url::Url::parse(self.endpoint.trim()).map_err(|error| {
+            MoaError::ValidationError(format!("endpoint is not a valid URL: {error}"))
+        })?;
         if self.turn_timeout.is_zero() {
             return Err(MoaError::ValidationError(
                 "turn_timeout must be greater than zero".to_string(),
             ));
-        }
-        if self.model.is_some() && matches!(self.target, LoadTarget::Daemon) {
-            return Err(MoaError::ValidationError(
-                "model overrides are only supported for the local in-process target".to_string(),
-            ));
-        }
-        if self.mock_provider_timing.total < self.mock_provider_timing.ttft {
-            return Err(MoaError::ValidationError(format!(
-                "mock provider total duration {:?} must be greater than or equal to TTFT {:?}",
-                self.mock_provider_timing.total, self.mock_provider_timing.ttft
-            )));
         }
         Ok(())
     }
@@ -129,15 +87,6 @@ impl LoadMode {
         match self {
             Self::Mock => "mock",
             Self::Live => "live",
-        }
-    }
-}
-
-impl LoadTarget {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Local => "local",
-            Self::Daemon => "daemon",
         }
     }
 }

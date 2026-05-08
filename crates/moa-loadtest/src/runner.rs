@@ -13,7 +13,6 @@ pub(crate) async fn run_sessions(
     backend: Arc<dyn SessionTarget>,
     options: &LoadTestOptions,
     plans: Vec<SessionPlan>,
-    workspace_root: Option<PathBuf>,
     started: Instant,
 ) -> Result<LoadTestReport> {
     let (results_tx, mut results_rx) = mpsc::channel(plans.len());
@@ -65,7 +64,7 @@ pub(crate) async fn run_sessions(
 
     Ok(LoadTestReport {
         mode: options.mode,
-        target: options.target,
+        endpoint: options.endpoint.clone(),
         profile: options.profile,
         sessions_requested: options.sessions,
         sessions_completed,
@@ -78,7 +77,6 @@ pub(crate) async fn run_sessions(
         ttft_ms: summarize_percentiles(&ttft_samples),
         cache_hit_rate: summarize_percentiles(&cache_samples),
         total_cost_cents,
-        workspace_root,
         sessions,
     })
 }
@@ -183,11 +181,9 @@ pub(crate) async fn simulate_session(
 
     match backend.session_meta(session_id).await {
         Ok(meta) => {
-            let include_session_note = failure_reason.is_some()
-                || matches!(
-                    meta.status,
-                    SessionStatus::Failed | SessionStatus::Cancelled | SessionStatus::Paused
-                );
+            let status_failure =
+                session_status_failure_reason(&meta.status, completed_turns, plan.turns.len());
+            let include_session_note = failure_reason.is_some() || status_failure.is_some();
             SessionReport {
                 session_id,
                 profile: plan.profile,
@@ -204,14 +200,7 @@ pub(crate) async fn simulate_session(
                 ttft_ms,
                 failure_reason: merge_failure_reason(
                     failure_reason,
-                    if matches!(
-                        meta.status,
-                        SessionStatus::Failed | SessionStatus::Cancelled | SessionStatus::Paused
-                    ) {
-                        Some(format!("session ended in status {:?}", meta.status))
-                    } else {
-                        None
-                    },
+                    status_failure,
                     if include_session_note {
                         final_session_note
                     } else {
@@ -243,6 +232,22 @@ pub(crate) async fn simulate_session(
                 .unwrap_or_else(|| format!("failed to load session metadata: {error}")),
             ),
         },
+    }
+}
+
+fn session_status_failure_reason(
+    status: &SessionStatus,
+    completed_turns: usize,
+    planned_turns: usize,
+) -> Option<String> {
+    match status {
+        SessionStatus::Failed | SessionStatus::Cancelled => {
+            Some(format!("session ended in status {status:?}"))
+        }
+        SessionStatus::Paused if completed_turns < planned_turns => {
+            Some(format!("session ended in status {status:?}"))
+        }
+        _ => None,
     }
 }
 
@@ -284,75 +289,34 @@ pub(crate) fn merge_failure_reason(
     }
 }
 
-pub(crate) async fn wait_for_turn_completion<Recv, RecvFuture, Approve, ApproveFuture>(
-    timeout: Duration,
-    mut recv_event: Recv,
-    mut respond_to_approval: Approve,
-) -> Result<TurnObservation>
-where
-    Recv: FnMut() -> RecvFuture + Send,
-    RecvFuture: std::future::Future<Output = Result<RuntimeEvent>> + Send,
-    Approve: FnMut(Uuid) -> ApproveFuture + Send,
-    ApproveFuture: std::future::Future<Output = Result<()>> + Send,
-{
-    let started = Instant::now();
-    let deadline = started + timeout;
-    let mut ttft = None;
-    let mut auto_denied_approvals = 0usize;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(MoaError::ProviderError(format!(
-                "turn timed out after {:.2}s",
-                timeout.as_secs_f64()
-            )));
-        }
-        let remaining = deadline.saturating_duration_since(now);
-        let event = tokio::time::timeout(remaining, recv_event())
-            .await
-            .map_err(|_| {
-                MoaError::ProviderError(format!(
-                    "turn timed out after {:.2}s",
-                    timeout.as_secs_f64()
-                ))
-            })??;
+    #[test]
+    fn paused_after_all_planned_turns_is_success_status() {
+        // Pins: a Restate Session parked in Paused after all planned turns is a successful idle session.
+        assert_eq!(
+            session_status_failure_reason(&SessionStatus::Paused, 5, 5),
+            None
+        );
+    }
 
-        if matches!(
-            event,
-            RuntimeEvent::AssistantStarted
-                | RuntimeEvent::AssistantDelta(_)
-                | RuntimeEvent::AssistantFinished { .. }
-                | RuntimeEvent::ToolUpdate(_)
-                | RuntimeEvent::ApprovalRequested(_)
-                | RuntimeEvent::Notice(_)
-                | RuntimeEvent::Error(_)
-        ) && ttft.is_none()
-        {
-            ttft = Some(started.elapsed());
-        }
+    #[test]
+    fn paused_before_all_planned_turns_is_failure_status() {
+        // Pins: Paused is still a failure when the remote turn loop stopped before the plan completed.
+        assert_eq!(
+            session_status_failure_reason(&SessionStatus::Paused, 4, 5),
+            Some("session ended in status Paused".to_string())
+        );
+    }
 
-        match event {
-            RuntimeEvent::ApprovalRequested(prompt) => {
-                auto_denied_approvals += 1;
-                respond_to_approval(prompt.request.request_id).await?;
-            }
-            RuntimeEvent::TurnCompleted => {
-                return Ok(TurnObservation {
-                    latency: started.elapsed(),
-                    ttft,
-                    auto_denied_approvals,
-                });
-            }
-            RuntimeEvent::Error(message) => {
-                return Err(MoaError::ProviderError(message));
-            }
-            RuntimeEvent::AssistantStarted
-            | RuntimeEvent::AssistantDelta(_)
-            | RuntimeEvent::AssistantFinished { .. }
-            | RuntimeEvent::ToolUpdate(_)
-            | RuntimeEvent::UsageUpdated { .. }
-            | RuntimeEvent::Notice(_) => {}
-        }
+    #[test]
+    fn failed_status_is_always_failure_status() {
+        // Pins: failed remote sessions are never reclassified as success by completed-turn accounting.
+        assert_eq!(
+            session_status_failure_reason(&SessionStatus::Failed, 5, 5),
+            Some("session ended in status Failed".to_string())
+        );
     }
 }

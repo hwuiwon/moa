@@ -72,6 +72,21 @@ MOA__ORCHESTRATOR__ENDPOINT=http://localhost:18080 cargo run -p moa-cli -- exec 
 For a remote orchestrator, set `MOA__ORCHESTRATOR__ENDPOINT` to that Restate
 ingress URL or configure `[orchestrator].endpoint` in `~/.moa/config.toml`.
 
+Run the deterministic load-test smoke profile against the local stack:
+
+```bash
+make loadtest-mock
+```
+
+For a live-provider run against the same Restate ingress:
+
+```bash
+make loadtest-live
+```
+
+`make loadtest-mock` restarts the orchestrator with
+`MOA_PROVIDERS_OVERRIDE=scripted:/loadtest-scripts/perf-gate.json`.
+
 ## Cloud Runtime
 
 Cloud mode runs the `moa-orchestrator-bin` Restate handler service plus Postgres/Neon and the configured hand provider.
@@ -152,9 +167,8 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-hands`](crates/moa-hands/) | Tool router, local/Docker hands, Daytona, E2B, MCP client |
 | [`moa-providers`](crates/moa-providers/) | LLM and embedding providers |
 | [`moa-orchestrator`](crates/moa-orchestrator/) | Restate services, virtual objects, workflows, and handler binary |
-| [`moa-orchestrator-local`](crates/moa-orchestrator-local/) | Legacy Tokio-task local orchestrator retained for migration-only consumers |
 | [`moa-gateway`](crates/moa-gateway/) | Telegram, Slack, Discord adapters and platform rendering |
-| [`moa-runtime`](crates/moa-runtime/) | Shared runtime bootstrap |
+| [`moa-runtime`](crates/moa-runtime/) | Thin runtime facade over the orchestrator HTTP client |
 | [`moa-cli`](crates/moa-cli/) | Thin-client `moa` CLI and orchestrator diagnostics |
 | [`moa-security`](crates/moa-security/) | Credential vault, MCP proxy, policies, prompt-injection controls |
 | [`moa-skills`](crates/moa-skills/) | Agent Skills parsing, distillation, improvement, regression suites |
