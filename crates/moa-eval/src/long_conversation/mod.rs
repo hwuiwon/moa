@@ -6,6 +6,7 @@ pub mod memory_metrics;
 pub mod provider_recorded;
 pub mod safety_metrics;
 pub mod score_card;
+pub mod transcript;
 pub mod transcript_runner;
 
 pub use budgets::{BudgetResult, BudgetViolation, Budgets};
@@ -25,4 +26,5 @@ pub use score_card::{
     CacheScores, ContextScores, CostScores, FunctionalScores, LatencyScores, MemoryScores,
     MetricRow, SafetyScores, ScoreCard, ToolScores,
 };
+pub use transcript::{ProviderEvent, Transcript, TranscriptError, Turn, UserUtterance};
 pub use transcript_runner::{LongRunReport, run_scenario_with_provider};

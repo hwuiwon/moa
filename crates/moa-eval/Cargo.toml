@@ -23,7 +23,6 @@ moa-memory-vector = { path = "../moa-memory/vector" }
 moa-providers = { path = "../moa-providers" }
 moa-security = { path = "../moa-security" }
 moa-session = { path = "../moa-session" }
-moa-test-support = { path = "../moa-test-support" }
 opentelemetry.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, optional = true }
@@ -40,4 +39,5 @@ uuid.workspace = true
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
+moa-test-support = { path = "../moa-test-support" }
 tempfile.workspace = true
