@@ -12,10 +12,11 @@ use moa_core::{
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
-use crate::OrchestratorCtx;
-use crate::observability::{
+use moa_core::restate_observability::{
     emit_turn_latency_summary, emit_turn_replay_summary, session_turn_span,
 };
+
+use crate::OrchestratorCtx;
 
 use super::adapter::AgentAdapter;
 use super::approval::handle_approval_gate;

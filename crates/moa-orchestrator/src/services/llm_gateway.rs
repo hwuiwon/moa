@@ -16,8 +16,8 @@ use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
-use crate::observability::annotate_restate_handler_span;
 use crate::services::session_store::{AppendEventRequest, RestateSessionStoreClient};
+use moa_core::restate_observability::annotate_restate_handler_span;
 
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4";

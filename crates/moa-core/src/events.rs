@@ -1,5 +1,7 @@
 //! Session event definitions and helpers.
 
+pub mod tool_approval;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -9,6 +11,8 @@ use crate::types::{
     ApprovalDecision, ApprovalPrompt, Attachment, CacheReport, EventType, ModelId, ModelTier,
     RiskLevel, SegmentId, SessionStatus, SubAgentId, ToolCallId, ToolOutput, UserId, WorkspaceId,
 };
+
+pub use tool_approval::*;
 
 /// Append-only session event payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

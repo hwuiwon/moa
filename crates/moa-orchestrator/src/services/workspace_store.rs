@@ -9,7 +9,7 @@ use moa_hands::ToolRouter;
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
-use crate::observability::annotate_restate_handler_span;
+use moa_core::restate_observability::annotate_restate_handler_span;
 
 /// Request payload for `WorkspaceStore/prepare_tool_approval`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

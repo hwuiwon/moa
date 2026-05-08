@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::ctx::OrchestratorCtx;
-use crate::observability::annotate_restate_handler_span;
 use crate::services::llm_gateway::LLMGatewayClient;
+use moa_core::restate_observability::annotate_restate_handler_span;
 
 /// Workflow input for one tenant intent-discovery run.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

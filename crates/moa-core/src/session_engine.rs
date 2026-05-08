@@ -1,7 +1,9 @@
 //! Shared session-lifecycle rules used by multiple orchestrator adapters.
 
-use moa_brain::{find_pending_tool_approval, find_resolved_pending_tool_approval};
-use moa_core::{Event, EventRecord, SessionMeta, SessionStatus};
+use crate::events::tool_approval::{
+    find_pending_tool_approval, find_resolved_pending_tool_approval,
+};
+use crate::{Event, EventRecord, SessionMeta, SessionStatus};
 
 /// Returns whether the persisted session log indicates more work is required.
 pub fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) -> bool {

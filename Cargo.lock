@@ -3797,7 +3797,6 @@ dependencies = [
  "moa-hands",
  "moa-lineage-sink",
  "moa-memory-ingest",
- "moa-orchestrator",
  "moa-providers",
  "moa-session",
  "moa-test-support",

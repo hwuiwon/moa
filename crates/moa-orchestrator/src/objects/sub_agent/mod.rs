@@ -16,7 +16,6 @@ use restate_sdk::prelude::*;
 use serde_json::json;
 
 use crate::OrchestratorCtx;
-use crate::observability::annotate_restate_handler_span;
 use crate::services::session_store::{
     AppendEventRequest, RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest,
     RestateSessionStoreClient,
@@ -28,6 +27,7 @@ use crate::turn::util::{
 };
 use crate::turn::{AgentAdapter, TurnRunner};
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar, set_or_clear_vec};
+use moa_core::restate_observability::annotate_restate_handler_span;
 
 mod adapter;
 mod handlers;

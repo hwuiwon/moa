@@ -10,12 +10,11 @@ use moa_brain::{
 use moa_core::{
     CompletionRequest, CountedSessionStore, EventRange, NullLineageHandle, Result, SessionId,
     SessionStore, WorkingContext, record_pipeline_compile_duration,
-    record_turn_pipeline_compile_duration,
+    record_turn_pipeline_compile_duration, session_engine::session_requires_processing,
 };
 use tracing::Instrument;
 
 use crate::OrchestratorCtx;
-use crate::session_engine::session_requires_processing;
 
 const TURN_EVENT_TAIL_LIMIT: usize = 16;
 

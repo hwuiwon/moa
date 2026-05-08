@@ -2,7 +2,7 @@
 
 use restate_sdk::prelude::*;
 
-use crate::observability::annotate_restate_handler_span;
+use moa_core::restate_observability::annotate_restate_handler_span;
 
 const RESTATE_SDK_VERSION: &str = "0.8";
 
