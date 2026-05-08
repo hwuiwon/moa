@@ -8,8 +8,8 @@ use moa_core::{
     MessageRole, MoaError, ModelCapabilities, ModelId, Result as MoaResult, StopReason,
     TokenPricing, TokenUsage, ToolCallFormat,
 };
-use moa_test_support::transcript::{ProviderEvent, Transcript};
 
+use super::transcript::{ProviderEvent, Transcript};
 const COMPACTION_MAX_OUTPUT_TOKENS: usize = 700;
 const RECORDED_COMPACTION_SUMMARY: &str =
     "Recorded checkpoint summary for deterministic long-conversation replay.";

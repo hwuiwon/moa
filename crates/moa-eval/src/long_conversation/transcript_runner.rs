@@ -10,7 +10,6 @@ use moa_core::{
     ApprovalDecision, BufferedUserMessage, Event, EventRange, EventRecord, LLMProvider, MoaConfig,
     RuntimeEvent, SessionId, SessionMeta, SessionSignal,
 };
-use moa_test_support::transcript::Transcript;
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -22,6 +21,7 @@ use super::score_card::{
     CacheScores, ContextScores, CostScores, FunctionalScores, LatencyScores, MemoryScores,
     SafetyScores, ScoreCard, ToolScores,
 };
+use super::transcript::Transcript;
 use crate::collector::{CollectedExecution, TrajectoryCollector};
 use crate::setup::build_agent_environment_with_provider;
 use crate::{

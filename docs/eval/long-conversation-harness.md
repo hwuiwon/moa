@@ -56,7 +56,7 @@ need to change.
 
 ## Transcript Replay
 
-Recorded transcripts use `moa-test-support::transcript::Transcript`.
+Recorded transcripts use `moa_eval::long_conversation::Transcript`.
 
 The first JSONL line is metadata:
 
