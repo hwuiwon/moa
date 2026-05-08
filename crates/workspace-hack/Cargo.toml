@@ -47,12 +47,13 @@ hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "native-tokio", "ring"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "server-auto", "server-graceful", "service"] }
 i18n-embed = { version = "0.15", features = ["filesystem-assets", "fluent-system"] }
+libc = { version = "0.2", features = ["extra_traits"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
 mime_guess = { version = "2" }
 num-bigint = { version = "0.4", default-features = false, features = ["std"] }
 num-integer = { version = "0.1", default-features = false, features = ["i128", "std"] }
-num-traits = { version = "0.2", features = ["i128", "libm"] }
+num-traits = { version = "0.2", default-features = false, features = ["i128", "libm", "std"] }
 once_cell = { version = "1" }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
@@ -68,6 +69,7 @@ secrecy = { version = "0.10", default-features = false, features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["alloc", "raw_value"] }
+serde_with = { version = "3", features = ["json"] }
 sha2 = { version = "0.10" }
 simd-adler32 = { version = "0.3", default-features = false, features = ["std"] }
 similar = { version = "2", features = ["inline"] }
@@ -93,6 +95,7 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 zerovec = { version = "0.11", default-features = false, features = ["alloc", "derive", "yoke"] }
 
 [build-dependencies]
+aho-corasick = { version = "1" }
 base64 = { version = "0.22" }
 bitflags = { version = "2", default-features = false, features = ["serde"] }
 byteorder = { version = "1" }
@@ -111,12 +114,15 @@ hashbrown-582f2526e08bb6a0 = { package = "hashbrown", version = "0.14", features
 i18n-embed = { version = "0.15", features = ["filesystem-assets", "fluent-system"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
-num-traits = { version = "0.2", features = ["i128", "libm"] }
+num-traits = { version = "0.2", default-features = false, features = ["i128", "libm", "std"] }
 once_cell = { version = "1" }
 proc-macro-error2 = { version = "2" }
 proc-macro2 = { version = "1" }
 quote = { version = "1" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
+regex = { version = "1" }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
+regex-syntax = { version = "0.8" }
 ring = { version = "0.17", features = ["std"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "aws_lc_rs", "ring", "std", "tls12"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
@@ -162,6 +168,7 @@ ahash = { version = "0.8", default-features = false, features = ["runtime-rng"] 
 bitflags = { version = "2", default-features = false, features = ["std"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std", "wasm_js"] }
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+libc = { version = "0.2", features = ["extra_traits"] }
 
 [target.aarch64-apple-darwin.dependencies]
 ahash = { version = "0.8", default-features = false, features = ["runtime-rng"] }
@@ -180,6 +187,7 @@ ahash = { version = "0.8", default-features = false, features = ["runtime-rng"] 
 bitflags = { version = "2", default-features = false, features = ["std"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std", "wasm_js"] }
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+libc = { version = "0.2", features = ["extra_traits"] }
 
 [target.x86_64-apple-darwin.dependencies]
 ahash = { version = "0.8", default-features = false, features = ["runtime-rng"] }
@@ -198,5 +206,6 @@ ahash = { version = "0.8", default-features = false, features = ["runtime-rng"] 
 bitflags = { version = "2", default-features = false, features = ["std"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std", "wasm_js"] }
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+libc = { version = "0.2", features = ["extra_traits"] }
 
 ### END HAKARI SECTION
