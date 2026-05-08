@@ -19,38 +19,20 @@ impl Session for SessionImpl {
     #[tracing::instrument(skip(self, ctx, msg))]
     async fn post_message(
         &self,
-        ctx: ObjectContext<'_>,
+        mut ctx: ObjectContext<'_>,
         msg: Json<UserMessage>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Session", "post_message");
-        let session_id = parse_session_key(ctx.key())?;
         let msg = msg.into_inner();
-        let mut state = SessionVoState::load_from(&ctx).await?;
-        let should_start_turn_runner = !matches!(
-            state.current_status(),
-            SessionStatus::Running | SessionStatus::WaitingApproval
-        );
-        state
-            .enqueue_message(msg.clone())
-            .map_err(to_handler_error)?;
-        state.persist_into(&ctx);
-
-        persist_session_event(
-            &ctx,
-            session_id,
-            Event::UserMessage {
-                text: msg.text,
+        start_turn_inner(
+            &mut ctx,
+            StartTurnRequest {
+                user_message: msg.text,
                 attachments: msg.attachments,
+                model: None,
             },
         )
         .await?;
-        sync_status(&ctx, session_id, &state).await?;
-        if should_start_turn_runner {
-            ctx.object_client::<SessionClient>(ctx.key().to_string())
-                .run_turn()
-                .send();
-        }
-
         Ok(())
     }
 
@@ -61,11 +43,7 @@ impl Session for SessionImpl {
         decision: Json<ApprovalDecision>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Session", "approve");
-        let awakeable_id = ctx
-            .get::<Json<String>>(K_PENDING_APPROVAL)
-            .await?
-            .map(Json::into_inner)
-            .ok_or_else(|| TerminalError::new("no pending approval for this session"))?;
+        let awakeable_id = pending_approval_awakeable(&ctx).await?;
         let decision = decision.into_inner();
         let serialized_decision = serialize_awakeable_decision(&decision)?;
 
@@ -90,6 +68,11 @@ impl Session for SessionImpl {
         state.set_cancel_flag(mode.into_inner());
         let children = state.children.clone();
         state.persist_into(&ctx);
+        if let Some(turn_id) = load_pending_state(&ctx).await?.active_turn_id {
+            ctx.workflow_client::<TurnExecutionClient>(turn_id)
+                .request_cancel(Json::from("session cancel requested".to_string()))
+                .send();
+        }
         for child in children {
             ctx.object_client::<SubAgentClient>(child.id)
                 .cancel("parent session cancelled".to_string())
@@ -110,15 +93,157 @@ impl Session for SessionImpl {
         ))
     }
 
-    #[tracing::instrument(skip(self, ctx))]
-    async fn run_turn(
+    #[tracing::instrument(skip(self, _ctx))]
+    async fn run_turn(&self, _ctx: ObjectContext<'_>) -> Result<Json<TurnOutcome>, HandlerError> {
+        annotate_restate_handler_span("Session", "run_turn");
+        Err(TerminalError::new(
+            "Session::run_turn has moved to the TurnExecution workflow; use post_message or start_turn",
+        )
+        .into())
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn start_turn(
         &self,
         mut ctx: ObjectContext<'_>,
-    ) -> Result<Json<TurnOutcome>, HandlerError> {
-        annotate_restate_handler_span("Session", "run_turn");
-        let runner = TurnRunner::new(SessionTurnAdapter);
-        let outcome = runner.run_until_idle(&mut ctx, MAX_TURNS_PER_POST).await?;
-        Ok(Json::from(outcome))
+        request: Json<StartTurnRequest>,
+    ) -> Result<Json<StartTurnResponse>, HandlerError> {
+        annotate_restate_handler_span("Session", "start_turn");
+        Ok(Json::from(
+            start_turn_inner(&mut ctx, request.into_inner()).await?,
+        ))
+    }
+
+    #[tracing::instrument(skip(self, ctx, outcome))]
+    async fn record_turn_outcome(
+        &self,
+        mut ctx: ObjectContext<'_>,
+        outcome: Json<ExecutionTurnOutcome>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("Session", "record_turn_outcome");
+        let outcome = outcome.into_inner();
+        let mut pending_state = load_pending_state(&ctx).await?;
+        let matches_active =
+            pending_state.active_turn_id.as_deref() == Some(outcome.turn_id.as_str());
+        let session_id = parse_session_key(ctx.key())?;
+        let mut state = SessionVoState::load_from(&ctx).await?;
+
+        if matches_active {
+            pending_state.active_turn_id = None;
+        }
+        pending_state.last_outcome = Some(outcome.clone());
+        state.last_turn_summary = Some(outcome.message.clone());
+
+        if matches_active
+            && matches!(outcome.kind, ExecutionTurnOutcomeKind::Completed)
+            && let Some(next) = pending_state.pending_messages.pop_front()
+        {
+            let next_turn_id = generate_turn_id(&mut ctx);
+            pending_state.active_turn_id = Some(next_turn_id.clone());
+            state.set_status(SessionStatus::Running);
+            state.persist_into(&ctx);
+            persist_pending_state(&ctx, &pending_state);
+            sync_status(&ctx, session_id, &state).await?;
+            dispatch_turn_execution(
+                &ctx,
+                next_turn_id,
+                next.user_message,
+                next.attachments,
+                next.model,
+            );
+            return Ok(());
+        }
+
+        if matches_active {
+            match outcome.kind {
+                ExecutionTurnOutcomeKind::Completed => state.set_status(SessionStatus::Paused),
+                ExecutionTurnOutcomeKind::Cancelled => state.set_status(SessionStatus::Cancelled),
+                ExecutionTurnOutcomeKind::Failed => state.set_status(SessionStatus::Failed),
+            }
+            state.persist_into(&ctx);
+            sync_status(&ctx, session_id, &state).await?;
+        }
+        persist_pending_state(&ctx, &pending_state);
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, reason))]
+    async fn request_cancel(
+        &self,
+        ctx: ObjectContext<'_>,
+        reason: Json<String>,
+    ) -> Result<Json<CancelResponse>, HandlerError> {
+        annotate_restate_handler_span("Session", "request_cancel");
+        let pending_state = load_pending_state(&ctx).await?;
+        let Some(turn_id) = pending_state.active_turn_id else {
+            return Ok(Json::from(CancelResponse {
+                cancelled: false,
+                reason: "no active turn".to_string(),
+            }));
+        };
+
+        ctx.workflow_client::<TurnExecutionClient>(turn_id.clone())
+            .request_cancel(reason)
+            .send();
+
+        Ok(Json::from(CancelResponse {
+            cancelled: true,
+            reason: format!("cancel forwarded to turn {turn_id}"),
+        }))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn queue_message(
+        &self,
+        mut ctx: ObjectContext<'_>,
+        request: Json<QueueMessageRequest>,
+    ) -> Result<Json<QueueMessageResponse>, HandlerError> {
+        annotate_restate_handler_span("Session", "queue_message");
+        let request = request.into_inner();
+        let mut pending_state = load_pending_state(&ctx).await?;
+
+        if pending_state.active_turn_id.is_none() {
+            let response = start_turn_inner(
+                &mut ctx,
+                StartTurnRequest {
+                    user_message: request.user_message,
+                    attachments: request.attachments,
+                    model: request.model,
+                },
+            )
+            .await?;
+            return Ok(Json::from(QueueMessageResponse {
+                queued: false,
+                started_turn_id: response.turn_id,
+            }));
+        }
+
+        pending_state.pending_messages.push_back(PendingMessage {
+            queued_at: durable_utc_now(&ctx).await?,
+            user_message: request.user_message,
+            attachments: request.attachments,
+            model: request.model,
+        });
+        persist_pending_state(&ctx, &pending_state);
+        Ok(Json::from(QueueMessageResponse {
+            queued: true,
+            started_turn_id: None,
+        }))
+    }
+
+    #[tracing::instrument(skip(self, ctx))]
+    async fn snapshot(
+        &self,
+        ctx: SharedObjectContext<'_>,
+    ) -> Result<Json<SessionSnapshot>, HandlerError> {
+        annotate_restate_handler_span("Session", "snapshot");
+        let pending_state = load_pending_state(&ctx).await?;
+        Ok(Json::from(SessionSnapshot {
+            session_id: ctx.key().to_string(),
+            active_turn_id: pending_state.active_turn_id,
+            pending_message_count: pending_state.pending_messages.len() as u64,
+            last_outcome: pending_state.last_outcome,
+        }))
     }
 
     #[tracing::instrument(skip(self, ctx))]
@@ -128,4 +253,87 @@ impl Session for SessionImpl {
         tracing::info!(key = %ctx.key(), "session VO state cleared");
         Ok(())
     }
+}
+
+async fn start_turn_inner(
+    ctx: &mut ObjectContext<'_>,
+    request: StartTurnRequest,
+) -> Result<StartTurnResponse, HandlerError> {
+    let session_id = parse_session_key(ctx.key())?;
+    let mut state = SessionVoState::load_from(ctx).await?;
+    state.ensure_initialized().map_err(to_handler_error)?;
+    let mut pending_state = load_pending_state(ctx).await?;
+
+    if pending_state.active_turn_id.is_some() {
+        pending_state.pending_messages.push_back(PendingMessage {
+            queued_at: durable_utc_now(ctx).await?,
+            user_message: request.user_message,
+            attachments: request.attachments,
+            model: request.model,
+        });
+        persist_pending_state(ctx, &pending_state);
+        return Ok(StartTurnResponse {
+            turn_id: None,
+            queued: true,
+        });
+    }
+
+    let turn_id = generate_turn_id(ctx);
+    pending_state.active_turn_id = Some(turn_id.clone());
+    state.set_status(SessionStatus::Running);
+    state.persist_into(ctx);
+    persist_pending_state(ctx, &pending_state);
+    sync_status(ctx, session_id, &state).await?;
+    dispatch_turn_execution(
+        ctx,
+        turn_id.clone(),
+        request.user_message,
+        request.attachments,
+        request.model,
+    );
+
+    Ok(StartTurnResponse {
+        turn_id: Some(turn_id),
+        queued: false,
+    })
+}
+
+async fn pending_approval_awakeable(ctx: &SharedObjectContext<'_>) -> Result<String, HandlerError> {
+    if let Some(awakeable_id) = ctx
+        .get::<Json<String>>(K_PENDING_APPROVAL)
+        .await?
+        .map(Json::into_inner)
+    {
+        return Ok(awakeable_id);
+    }
+
+    let session_id = parse_session_key(ctx.key())?;
+    let events = ctx
+        .service_client::<RestateSessionStoreClient>()
+        .get_events(Json(GetEventsRequest {
+            session_id,
+            range: EventRange::all(),
+        }))
+        .call()
+        .await?
+        .into_inner();
+    let mut decided = std::collections::HashSet::new();
+    for record in &events {
+        if let Event::ApprovalDecided { request_id, .. } = &record.event {
+            decided.insert(*request_id);
+        }
+    }
+
+    events
+        .iter()
+        .rev()
+        .find_map(|record| match &record.event {
+            Event::ApprovalRequested {
+                request_id,
+                awakeable_id: Some(awakeable_id),
+                ..
+            } if !decided.contains(request_id) => Some(awakeable_id.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| TerminalError::new("no pending approval for this session").into())
 }

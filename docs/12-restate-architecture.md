@@ -107,7 +107,7 @@ The mapping is deliberate and reversible only with significant cost. Each choice
 
 ### Why session is a Virtual Object, not a Workflow
 
-Sessions are long-lived and receive many user messages over time. Workflows run once and die; a session that runs for hours and accepts dozens of messages fits the VO model, not the workflow model. The VO's **single-writer queue is exactly the serialization we want**: if a user sends three messages while a turn is running, they queue up and process in order without any application-level locking. This is the pattern LangGraph Platform and Letta both converged on.
+Sessions are long-lived and receive many user messages over time. Workflows run once and die; a session that runs for hours and accepts dozens of messages fits the VO model, not the workflow model. The VO's **single-writer queue is exactly the serialization we want** for session state: if a user sends three messages while a turn is running, the VO queues them in order and dispatches one `TurnExecution` workflow per turn without application-level locking. This is the pattern LangGraph Platform and Letta both converged on.
 
 ### Why sub-agents are Virtual Objects
 
@@ -117,7 +117,7 @@ One-shot tasks that happen to be LLM-driven — research-and-summarize, classify
 
 ### Why tools are Services, not Workflows
 
-Tool calls are ephemeral and called from within Session VO turns via typed clients. Service semantics (no keyed state, durable per-invocation) are correct. Wrapping them in Workflows adds no value and pollutes the journal with extra workflow starts.
+Tool calls are ephemeral and called from within `TurnExecution` workflows or SubAgent VO turns via typed clients. Service semantics (no keyed state, durable per-invocation) are correct. Wrapping them in Workflows adds no value and pollutes the journal with extra workflow starts.
 
 ### Why Consolidate and intent discovery are Workflows
 
@@ -231,7 +231,7 @@ trait LLMGateway {
 }
 ```
 
-The streaming variant returns a handle that references a stream held in the gateway pod; the Session VO polls the handle via subsequent service calls. Restate does not support true streaming return values from handlers.
+The streaming variant returns a handle that references a stream held in the gateway pod; the turn executor polls the handle via subsequent service calls. Restate does not support true streaming return values from handlers.
 
 ### Session turn loop (shape)
 
@@ -365,13 +365,13 @@ let result = result_future.await?;
 Approvals are the canonical Restate pattern for "pause until human decides." The flow:
 
 ```
-Session VO turn
+TurnExecution workflow or SubAgent VO turn
   → ctx.awakeable::<ApprovalDecision>() returns (id, future)
-  → id stored in VO state + written to Postgres event log
+  → id stored in Restate state + written to Postgres event log
   → gateway renders approval card, sends id to user UI
   → user clicks button
   → gateway calls Restate admin API: resolve_awakeable(id, decision)
-  → VO handler resumes at future.await
+  → blocked turn resumes at future.await
 ```
 
 The gateway never holds the turn's execution state. Restate does. This removes an entire class of "gateway crashed, lost pending approvals" bugs that plague simpler architectures.

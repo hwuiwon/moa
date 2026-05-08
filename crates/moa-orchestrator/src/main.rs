@@ -36,6 +36,7 @@ use moa_orchestrator::{
     workflows::{
         consolidate::{Consolidate, ConsolidateImpl},
         intent_discovery::{IntentDiscovery, IntentDiscoveryImpl},
+        turn_execution::{TurnExecution, TurnExecutionImpl},
     },
 };
 use moa_providers::build_embedding_provider_from_config;
@@ -60,15 +61,16 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "CronJob",
     "GraphMemoryMaint",
     "Health",
-    "IntentManager",
-    "IntentDiscovery",
     "IngestionVO",
+    "IntentDiscovery",
+    "IntentManager",
     "LLMGateway",
     "NeonMaint",
     "Session",
     "SessionStore",
     "SubAgent",
     "ToolExecutor",
+    "TurnExecution",
     "Workspace",
     "WorkspaceStore",
 ];
@@ -151,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(WorkspaceImpl.serve())
         .bind(ConsolidateImpl.serve())
         .bind(IntentDiscoveryImpl.serve())
+        .bind(TurnExecutionImpl.serve())
         .build();
 
     let readiness = Arc::new(AtomicBool::new(false));
@@ -610,15 +613,16 @@ mod tests {
             "CronJob",
             "GraphMemoryMaint",
             "Health",
-            "IntentManager",
-            "IntentDiscovery",
             "IngestionVO",
+            "IntentDiscovery",
+            "IntentManager",
             "LLMGateway",
             "NeonMaint",
             "Session",
             "SessionStore",
             "SubAgent",
             "ToolExecutor",
+            "TurnExecution",
             "Workspace",
             "WorkspaceStore",
         ])];

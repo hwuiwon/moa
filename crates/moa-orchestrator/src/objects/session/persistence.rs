@@ -2,22 +2,6 @@
 
 use super::*;
 
-pub(super) async fn persist_session_event(
-    ctx: &ObjectContext<'_>,
-    session_id: SessionId,
-    event: Event,
-) -> Result<(), HandlerError> {
-    let persist_span = event_persist_span(1);
-    let persist_started = Instant::now();
-    ctx.service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest { session_id, event }))
-        .call()
-        .instrument(persist_span)
-        .await?;
-    record_turn_event_persist_duration(persist_started.elapsed(), 1);
-    Ok(())
-}
-
 pub(super) async fn sync_status(
     ctx: &ObjectContext<'_>,
     session_id: SessionId,
