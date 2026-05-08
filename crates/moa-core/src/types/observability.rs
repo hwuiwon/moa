@@ -37,6 +37,9 @@ pub struct CacheReport {
     pub dynamic_tokens_estimate: usize,
     /// Estimated stable-prefix ratio within the full request.
     pub cache_ratio_estimate: f64,
+    /// Serialized JSON byte size of the stable provider-request prefix.
+    #[serde(default)]
+    pub stable_prefix_bytes: usize,
     /// Stable fingerprint of the cacheable prompt prefix.
     pub stable_prefix_fingerprint: u64,
     /// Stable fingerprint of the full request payload.
@@ -67,6 +70,7 @@ impl Default for CacheReport {
             total_tokens_estimate: 0,
             dynamic_tokens_estimate: 0,
             cache_ratio_estimate: 0.0,
+            stable_prefix_bytes: 0,
             stable_prefix_fingerprint: 0,
             full_request_fingerprint: 0,
             stable_prefix_reused: false,
@@ -131,6 +135,7 @@ impl CacheReport {
             total_tokens_estimate,
             dynamic_tokens_estimate,
             cache_ratio_estimate,
+            stable_prefix_bytes: stable_prefix_byte_len(request),
             stable_prefix_fingerprint: stable_prefix_fingerprint(request),
             full_request_fingerprint: full_request_fingerprint(request),
             stable_prefix_reused,
@@ -161,6 +166,13 @@ where
     let mut hasher = DefaultHasher::new();
     serialized.hash(&mut hasher);
     hasher.finish()
+}
+
+fn stable_prefix_byte_len(request: &CompletionRequest) -> usize {
+    let stable_message_count = stable_prefix_message_count(request);
+    serde_json::to_vec(&(&request.tools, &request.messages[..stable_message_count]))
+        .map(|bytes| bytes.len())
+        .unwrap_or_default()
 }
 
 fn stable_prefix_message_count(request: &CompletionRequest) -> usize {

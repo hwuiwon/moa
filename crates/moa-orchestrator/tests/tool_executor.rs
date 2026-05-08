@@ -137,7 +137,7 @@ fn tool_result_record(tool_call_id: ToolCallId) -> EventRecord {
 }
 
 #[test]
-fn tool_executor_ctx_run_retries_are_disabled_after_router_recovery() {
+fn build_tool_run_plan_uses_max_attempts_one_for_idempotent_tools() {
     let definition = tool_definition(
         "mock_read",
         IdempotencyClass::Idempotent,

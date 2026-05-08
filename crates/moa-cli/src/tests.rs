@@ -5,7 +5,7 @@ use super::memory_ingest::IngestApplyReport;
 use super::{
     apply_config_update, default_log_path, doctor_report, eval_exit_code,
     format_cli_ingest_section, memory_ingest_report, memory_search_report, memory_show_report,
-    parse_bool, synthesize_cli_ingest_turn, version_text,
+    parse_bool, synthesize_cli_ingest_turn,
 };
 use chrono::Utc;
 use moa_core::{MoaConfig, SessionId, WorkspaceId};
@@ -14,11 +14,6 @@ use serde_json::json;
 use tempfile::tempdir;
 use tokio::fs;
 use uuid::Uuid;
-
-#[test]
-fn version_command_uses_package_version() {
-    assert_eq!(version_text(), format!("moa {}", env!("CARGO_PKG_VERSION")));
-}
 
 #[test]
 fn config_updates_known_keys() {

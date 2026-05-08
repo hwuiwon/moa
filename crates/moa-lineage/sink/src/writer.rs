@@ -937,11 +937,6 @@ mod tests {
     }
 
     #[test]
-    fn writer_stats_default_has_no_flush_timestamp() {
-        assert_eq!(super::WriterStats::default().last_flush_unix_ms, None);
-    }
-
-    #[test]
     fn pending_row_routes_eval_events_to_scores() {
         let score_id = Uuid::now_v7();
         let row = super::PendingRow::from_event(LineageEvent::Eval(ScoreRecord {

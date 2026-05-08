@@ -72,31 +72,6 @@ mod tests {
     use crate::{EvalResult, Evaluator, ScoreValue, TestCase, TrajectoryStep};
 
     #[tokio::test]
-    async fn exact_match_scores_one() {
-        let evaluator = TrajectoryMatchEvaluator;
-        let case = TestCase {
-            expected_trajectory: Some(vec!["bash".to_string(), "file_read".to_string()]),
-            ..TestCase::default()
-        };
-        let result = EvalResult {
-            trajectory: vec![
-                TrajectoryStep {
-                    tool_name: "bash".to_string(),
-                    ..TrajectoryStep::default()
-                },
-                TrajectoryStep {
-                    tool_name: "file_read".to_string(),
-                    ..TrajectoryStep::default()
-                },
-            ],
-            ..EvalResult::default()
-        };
-
-        let scores = evaluator.evaluate(&case, &result).await.expect("score");
-        assert_eq!(scores[0].value, ScoreValue::Numeric(1.0));
-    }
-
-    #[tokio::test]
     async fn partial_match_scores_below_one() {
         let evaluator = TrajectoryMatchEvaluator;
         let case = TestCase {

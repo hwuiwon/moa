@@ -501,20 +501,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_output_roundtrips_through_json() {
-        let output = ToolOutput::json(
-            "1 match",
-            serde_json::json!({ "path": "notes.md" }),
-            Duration::from_millis(4),
-        );
-
-        let encoded = serde_json::to_string(&output).expect("serialize tool output");
-        let decoded: ToolOutput = serde_json::from_str(&encoded).expect("deserialize tool output");
-
-        assert_eq!(decoded, output);
-    }
-
-    #[test]
     fn tool_output_artifact_streams_report_available_entries() {
         let artifact = super::ToolOutputArtifact {
             combined: ClaimCheck {

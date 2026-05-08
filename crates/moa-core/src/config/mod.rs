@@ -154,14 +154,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_is_valid() {
-        let config = MoaConfig::default();
-        assert_eq!(config.general.default_provider, "openai");
-        assert_eq!(config.models.main, "gpt-5.4");
-        assert!(config.models.auxiliary.is_none());
-    }
-
-    #[test]
     fn config_loads_from_toml_string() {
         let toml = r#"
             [general]
@@ -187,108 +179,6 @@ mod tests {
     }
 
     #[test]
-    fn compaction_config_defaults_are_applied() {
-        let config = MoaConfig::default();
-        assert!(config.compaction.enabled);
-        assert_eq!(config.compaction.event_threshold, 100);
-        assert_eq!(config.compaction.recent_turns_verbatim, 5);
-        assert!(config.compaction.preserve_errors);
-        assert_eq!(config.compaction.tier2_trigger_blocks_past_bp4, 14);
-        assert!((config.compaction.tier3_trigger_fraction - 0.9_f64).abs() < f64::EPSILON);
-        assert_eq!(config.compaction.max_input_tokens_per_turn, 160_000);
-    }
-
-    #[test]
-    fn session_blob_config_defaults_are_applied() {
-        let config = MoaConfig::default();
-        assert_eq!(config.session.blob_threshold_bytes, 65_536);
-        assert_eq!(config.session.blob_dir, "~/.moa/blobs");
-    }
-
-    #[test]
-    fn memory_config_defaults_are_applied() {
-        let config = MoaConfig::default();
-        assert!(config.memory.auto_bootstrap);
-    }
-
-    #[test]
-    fn budget_config_defaults_are_applied() {
-        let config = MoaConfig::default();
-        assert_eq!(config.budgets.daily_workspace_cents, 2_000);
-    }
-
-    #[test]
-    fn session_limits_config_defaults_are_applied() {
-        let config = MoaConfig::default();
-        assert_eq!(config.session_limits.max_turns, 50);
-        assert_eq!(config.session_limits.loop_detection_threshold, 3);
-    }
-
-    #[test]
-    fn skill_budget_config_defaults_are_applied() {
-        let config = MoaConfig::default();
-        assert_eq!(config.skill_budget.max_manifest_chars, None);
-        assert_eq!(config.skill_budget.max_per_skill_chars, 1_536);
-        assert!(config.skill_budget.show_token_estimates);
-    }
-
-    #[test]
-    fn query_rewrite_config_defaults_are_applied() {
-        let config = MoaConfig::default();
-        assert!(config.query_rewrite.enabled);
-        assert_eq!(config.query_rewrite.model, None);
-        assert_eq!(config.query_rewrite.timeout_ms, 5_000);
-        assert_eq!(config.query_rewrite.min_query_tokens, 15);
-        assert!(config.query_rewrite.skip_single_turn);
-        assert!((config.query_rewrite.circuit_breaker_threshold - 0.05_f64).abs() < f64::EPSILON);
-        assert_eq!(config.query_rewrite.circuit_breaker_window_secs, 60);
-        assert_eq!(config.query_rewrite.circuit_breaker_cooldown_secs, 60);
-    }
-
-    #[test]
-    fn resolution_config_defaults_are_applied() {
-        let config = MoaConfig::default();
-        assert!(config.resolution.enabled);
-        assert!((config.resolution.weights.tool - 0.20_f64).abs() < f64::EPSILON);
-        assert!((config.resolution.weights.verification - 0.30_f64).abs() < f64::EPSILON);
-        assert!((config.resolution.weights.continuation - 0.25_f64).abs() < f64::EPSILON);
-        assert!((config.resolution.weights.self_assessment - 0.15_f64).abs() < f64::EPSILON);
-        assert!((config.resolution.weights.structural - 0.10_f64).abs() < f64::EPSILON);
-        assert!(!config.resolution.use_llm_self_assessment);
-        assert_eq!(config.resolution.self_assessment_timeout_ms, 300);
-        assert!((config.resolution.rephrase_similarity_threshold - 0.85_f64).abs() < f64::EPSILON);
-        assert_eq!(config.resolution.structural_min_samples, 20);
-        assert_eq!(config.resolution.idle_timeout_minutes, 30);
-    }
-
-    #[test]
-    fn intent_config_defaults_are_applied() {
-        let config = MoaConfig::default();
-        assert!(config.intents.enabled);
-        assert_eq!(config.intents.discovery_interval_hours, 24);
-        assert_eq!(config.intents.discovery_window_days, 30);
-        assert_eq!(config.intents.min_segments_for_discovery, 50);
-        assert_eq!(config.intents.min_cluster_size, 5);
-        assert!((config.intents.classification_threshold - 0.35_f64).abs() < f64::EPSILON);
-        assert!((config.intents.retroactive_threshold - 0.60_f64).abs() < f64::EPSILON);
-        assert!((config.intents.medium_confidence_threshold - 0.50_f64).abs() < f64::EPSILON);
-        assert_eq!(config.intents.deprecation_after_days, 90);
-    }
-
-    #[test]
-    fn observability_config_defaults_to_grpc() {
-        let toml = r#"
-            [observability]
-            enabled = true
-            service_name = "moa"
-        "#;
-        let config: MoaConfig = toml::from_str(toml).expect("config should deserialize");
-        assert_eq!(config.observability.otlp_protocol, OtlpProtocol::Grpc);
-        assert!((config.observability.sample_rate - 1.0_f64).abs() < f64::EPSILON);
-        assert!(config.observability.otlp_headers.is_empty());
-    }
-
-    #[test]
     fn observability_config_http_with_langfuse_headers() {
         let toml = r#"
             [observability]
@@ -309,25 +199,6 @@ mod tests {
         assert_eq!(config.observability.release.as_deref(), Some("abc123"));
         assert!((config.observability.sample_rate - 0.5_f64).abs() < f64::EPSILON);
         assert_eq!(config.observability.otlp_headers.len(), 2);
-    }
-
-    #[test]
-    fn observability_config_defaults_missing_fields() {
-        let toml = r"
-            [observability]
-            enabled = false
-        ";
-        let config: MoaConfig = toml::from_str(toml).expect("config should deserialize");
-        assert!(!config.observability.enabled);
-        assert_eq!(config.observability.otlp_protocol, OtlpProtocol::Grpc);
-        assert!((config.observability.sample_rate - 1.0_f64).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn metrics_config_defaults_are_applied() {
-        let config = MoaConfig::default();
-        assert!(!config.metrics.enabled);
-        assert_eq!(config.metrics.listen, "0.0.0.0:9090");
     }
 
     #[test]

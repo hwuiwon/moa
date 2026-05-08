@@ -2,3 +2,5 @@
 
 #[allow(dead_code)]
 pub mod orchestrator_contract;
+
+pub mod local_orchestrator;

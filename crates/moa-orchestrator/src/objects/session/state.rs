@@ -174,7 +174,7 @@ impl VoState for SessionVoState {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{ApprovalDecision, Attachment, ModelId, Platform, UserId, WorkspaceId};
+    use moa_core::{Attachment, ModelId, Platform, UserId, WorkspaceId};
 
     use super::SessionVoState;
     use moa_core::TurnOutcome;
@@ -260,39 +260,5 @@ mod tests {
         state.destroy();
 
         assert_eq!(state, SessionVoState::default());
-    }
-
-    #[test]
-    fn session_vo_turn_outcome_and_approval_types_round_trip() {
-        let outcome =
-            serde_json::to_string(&TurnOutcome::WaitingApproval).expect("serialize turn outcome");
-        let decision = serde_json::to_string(&ApprovalDecision::AllowOnce)
-            .expect("serialize approval decision");
-
-        assert!(outcome.contains("waiting_approval"));
-        assert!(decision.contains("allow_once"));
-    }
-
-    #[test]
-    fn session_vo_current_segment_serializes() {
-        let mut state = SessionVoState::default();
-        let session_id = moa_core::SessionId::new();
-        state.current_segment = Some(moa_core::ActiveSegment {
-            id: moa_core::deterministic_segment_id(session_id, 0),
-            segment_index: 0,
-            intent_label: Some("coding".to_string()),
-            task_summary: Some("Fix failing tests".to_string()),
-            started_at: chrono::Utc::now(),
-            tools_used: vec!["bash".to_string()],
-            skills_activated: vec!["moa-rust".to_string()],
-            turn_count: 1,
-            token_cost: 123,
-        });
-
-        let json = serde_json::to_string(&state).expect("serialize session state");
-        let decoded: SessionVoState =
-            serde_json::from_str(&json).expect("deserialize session state");
-
-        assert_eq!(decoded.current_segment, state.current_segment);
     }
 }

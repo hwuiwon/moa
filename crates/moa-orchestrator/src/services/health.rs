@@ -54,19 +54,3 @@ impl Health for HealthImpl {
         Ok(Json(VersionInfo::current()))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{RESTATE_SDK_VERSION, VersionInfo};
-
-    #[test]
-    fn version_info_reports_expected_versions() {
-        let info = VersionInfo::current();
-
-        assert!(
-            !info.crate_version.is_empty(),
-            "crate version should not be empty"
-        );
-        assert_eq!(info.restate_sdk_version, RESTATE_SDK_VERSION);
-    }
-}

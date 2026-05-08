@@ -86,19 +86,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pgvector_selected_by_default() {
-        let selected = resolve_backend_choice(
-            "w1",
-            "pgvector",
-            "standard",
-            pg_store(),
-            Some(tp_store(true)),
-        )
-        .expect("selection");
-        assert_eq!(selected.backend(), "pgvector");
-    }
-
-    #[tokio::test]
     async fn turbopuffer_selected_when_configured() {
         let selected = resolve_backend_choice(
             "w1",

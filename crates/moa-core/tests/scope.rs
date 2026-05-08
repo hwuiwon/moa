@@ -3,55 +3,56 @@
 use moa_core::{MemoryScope, UserId, WorkspaceId};
 
 #[test]
-fn ancestors_global_is_just_global() {
-    assert_eq!(MemoryScope::Global.ancestors(), vec![MemoryScope::Global]);
-}
+fn memory_scope_ancestors_and_serialization_cover_all_scope_tiers() {
+    let workspace = WorkspaceId::new("workspace");
+    let user = UserId::new("user");
+    let cases = [
+        (
+            MemoryScope::Global,
+            vec![MemoryScope::Global],
+            Some(r#"{"kind":"global"}"#),
+        ),
+        (
+            MemoryScope::Workspace {
+                workspace_id: workspace.clone(),
+            },
+            vec![
+                MemoryScope::Global,
+                MemoryScope::Workspace {
+                    workspace_id: workspace.clone(),
+                },
+            ],
+            None,
+        ),
+        (
+            MemoryScope::User {
+                workspace_id: workspace.clone(),
+                user_id: user.clone(),
+            },
+            vec![
+                MemoryScope::Global,
+                MemoryScope::Workspace {
+                    workspace_id: workspace.clone(),
+                },
+                MemoryScope::User {
+                    workspace_id: workspace,
+                    user_id: user,
+                },
+            ],
+            None,
+        ),
+    ];
 
-#[test]
-fn ancestors_workspace_includes_global() {
-    let w = WorkspaceId::new("workspace");
-    let s = MemoryScope::Workspace {
-        workspace_id: w.clone(),
-    };
-    assert_eq!(s.ancestors(), vec![MemoryScope::Global, s.clone()]);
-}
+    for (scope, expected_ancestors, expected_json) in cases {
+        assert_eq!(scope.ancestors(), expected_ancestors);
 
-#[test]
-fn ancestors_user_is_three_tier() {
-    let w = WorkspaceId::new("workspace");
-    let u = UserId::new("user");
-    let s = MemoryScope::User {
-        workspace_id: w,
-        user_id: u,
-    };
-    let anc = s.ancestors();
-    assert_eq!(anc.len(), 3);
-    assert!(matches!(anc[0], MemoryScope::Global));
-    assert_eq!(anc[2], s);
-}
+        let json = serde_json::to_string(&scope).expect("serialize memory scope");
+        let round_trip: MemoryScope =
+            serde_json::from_str(&json).expect("deserialize memory scope");
+        assert_eq!(scope, round_trip);
 
-#[test]
-fn serde_round_trip_all_three() {
-    for s in [
-        MemoryScope::Global,
-        MemoryScope::Workspace {
-            workspace_id: WorkspaceId::new("workspace"),
-        },
-        MemoryScope::User {
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
-        },
-    ] {
-        let j = serde_json::to_string(&s).expect("serialize memory scope");
-        let r: MemoryScope = serde_json::from_str(&j).expect("deserialize memory scope");
-        assert_eq!(s, r);
+        if let Some(expected_json) = expected_json {
+            assert_eq!(json, expected_json);
+        }
     }
-}
-
-#[test]
-fn serde_global_uses_tagged_shape() {
-    assert_eq!(
-        serde_json::to_string(&MemoryScope::Global).expect("serialize global scope"),
-        r#"{"kind":"global"}"#
-    );
 }
