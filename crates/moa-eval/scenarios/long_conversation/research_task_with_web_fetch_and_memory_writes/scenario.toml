@@ -1,0 +1,13 @@
+[suite]
+name = "research_task_with_web_fetch_and_memory_writes"
+description = "Recorded research task with web-fetch-like evidence gathering, memory notes, cross-turn recall, and cited final answer."
+default_timeout_seconds = 60
+tags = ["long_conversation", "recorded", "research", "memory"]
+
+[[cases]]
+kind = "long"
+name = "research_task_with_web_fetch_and_memory_writes"
+goal_card = "scenarios/long_conversation/research_task_with_web_fetch_and_memory_writes/goal_card.md"
+transcript = "scenarios/long_conversation/research_task_with_web_fetch_and_memory_writes/transcript.jsonl"
+expectations = "scenarios/long_conversation/research_task_with_web_fetch_and_memory_writes/expectations.toml"
+mode = "recorded"

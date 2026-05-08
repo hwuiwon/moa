@@ -1,0 +1,13 @@
+[suite]
+name = "multi_observer_local_and_daemon_runtime_parity"
+description = "Recorded observer parity workflow for LocalRuntime and DaemonRuntime event streams."
+default_timeout_seconds = 90
+tags = ["long_conversation", "recorded", "observability", "runtime"]
+
+[[cases]]
+kind = "long"
+name = "multi_observer_local_and_daemon_runtime_parity"
+goal_card = "scenarios/long_conversation/multi_observer_local_and_daemon_runtime_parity/goal_card.md"
+transcript = "scenarios/long_conversation/multi_observer_local_and_daemon_runtime_parity/transcript.jsonl"
+expectations = "scenarios/long_conversation/multi_observer_local_and_daemon_runtime_parity/expectations.toml"
+mode = "recorded"

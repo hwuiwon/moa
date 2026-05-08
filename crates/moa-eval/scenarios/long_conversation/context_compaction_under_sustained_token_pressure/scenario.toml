@@ -1,0 +1,18 @@
+[suite]
+name = "context_compaction_under_sustained_token_pressure"
+description = "Recorded sustained-token-pressure session that forces compaction and verifies error preservation."
+default_timeout_seconds = 90
+tags = ["long_conversation", "recorded", "compaction", "cache"]
+
+[[cases]]
+kind = "long"
+name = "context_compaction_under_sustained_token_pressure"
+goal_card = "scenarios/long_conversation/context_compaction_under_sustained_token_pressure/goal_card.md"
+transcript = "scenarios/long_conversation/context_compaction_under_sustained_token_pressure/transcript.jsonl"
+expectations = "scenarios/long_conversation/context_compaction_under_sustained_token_pressure/expectations.toml"
+mode = "recorded"
+
+[cases.metadata]
+tokens_at_first_trigger = 20000
+post_compaction_tokens = 8000
+errors_preserved = 2

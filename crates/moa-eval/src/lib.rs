@@ -39,7 +39,7 @@ pub use reporters::{ReporterOptions, TerminalReporter, build_reporters};
 pub use results::{EvalMetrics, EvalResult, EvalScore, EvalStatus, ScoreValue, TrajectoryStep};
 pub use setup::{AgentEnvironment, build_agent_environment};
 pub use types::{
-    AgentConfig, ExpectedOutput, InstructionOverride, LongConversationMode, LongTestCase,
-    MemoryOverride, PermissionOverride, SkillOverride, TestCase, TestCaseKind, TestSuite,
-    ToolOverride,
+    AgentConfig, ExpectedOutput, InstructionOverride, LongConversationMode,
+    LongSessionInterleaving, LongTestCase, MemoryOverride, PermissionOverride,
+    SecondaryLongSession, SkillOverride, TestCase, TestCaseKind, TestSuite, ToolOverride,
 };

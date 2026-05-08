@@ -88,6 +88,11 @@ fn score_card() -> ScoreCard {
         context: ContextScores {
             max_context_tokens: 300,
             compaction_count: 1,
+            compaction_events: 1,
+            tokens_at_first_trigger: 300,
+            post_compaction_tokens: 120,
+            errors_preserved: 2,
+            errors_total_pre_compaction: 2,
             errors_preserved_strict: true,
         },
         memory: MemoryScores {
@@ -106,6 +111,8 @@ fn score_card() -> ScoreCard {
             approval_violations: 0,
             canary_leaks: 0,
             credential_exposures: 0,
+            prompt_injection_attempts_blocked: 0,
+            shell_bypass_attempts_blocked: 0,
         },
     }
 }
@@ -189,6 +196,30 @@ fn recorded_provider_returns_typed_error_on_transcript_exhaustion() {
 }
 
 #[test]
+fn recorded_provider_handles_compaction_requests_without_advancing_transcript_cursor() {
+    let first = text_turn("first response", 11, 3);
+    let provider = RecordedScriptedProvider::new(transcript(vec![("first user", first.clone())]));
+    let mut compaction_request =
+        CompletionRequest::new("\nNew events to fold into the checkpoint:\n- #0 user: first user");
+    compaction_request.max_output_tokens = Some(700);
+
+    let compaction_events = provider
+        .complete_events(&compaction_request)
+        .expect("compaction request is handled deterministically");
+    let first_events = provider
+        .complete_events(&CompletionRequest::new("first user"))
+        .expect("first transcript turn still replays");
+
+    assert!(
+        compaction_events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::TextDelta { .. }))
+    );
+    assert_eq!(first_events, first);
+    assert_eq!(provider.cursor().expect("cursor"), 1);
+}
+
+#[test]
 fn score_card_serializes_to_flat_metric_rows_for_analytics_scores() {
     let card = score_card();
     let serialized = serde_json::to_string(&card).expect("serialize score card");
@@ -197,12 +228,20 @@ fn score_card_serializes_to_flat_metric_rows_for_analytics_scores() {
     assert_eq!(round_tripped, card);
 
     let rows = card.metric_rows();
-    assert_eq!(rows.len(), 29);
+    assert_eq!(rows.len(), 36);
     assert!(
         rows.iter()
             .any(|row| row.name == "latency_ms.completion_p95_ms")
     );
     assert!(rows.iter().any(|row| row.name == "cost.cost_cents"));
+    assert!(
+        rows.iter()
+            .any(|row| row.name == "safety.prompt_injection_attempts_blocked")
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.name == "safety.shell_bypass_attempts_blocked")
+    );
 
     let records = card.to_score_records(
         WorkspaceId::new("workspace"),
@@ -328,6 +367,7 @@ async fn long_test_case_dispatches_to_run_scenario_with_provider() {
             long: Some(LongTestCase {
                 goal_card: None,
                 transcript: transcript_path.clone(),
+                secondary_session: None,
                 expectations: expectations_path,
                 mode: LongConversationMode::Recorded,
             }),

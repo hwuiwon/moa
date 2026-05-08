@@ -1,0 +1,13 @@
+[suite]
+name = "code_task_30_turns_with_str_replace_and_recovery"
+description = "Recorded 30-turn code task with str_replace edits, deliberate tool errors, recovery, and final test pass."
+default_timeout_seconds = 60
+tags = ["long_conversation", "recorded", "code", "tools"]
+
+[[cases]]
+kind = "long"
+name = "code_task_30_turns_with_str_replace_and_recovery"
+goal_card = "scenarios/long_conversation/code_task_30_turns_with_str_replace_and_recovery/goal_card.md"
+transcript = "scenarios/long_conversation/code_task_30_turns_with_str_replace_and_recovery/transcript.jsonl"
+expectations = "scenarios/long_conversation/code_task_30_turns_with_str_replace_and_recovery/expectations.toml"
+mode = "recorded"

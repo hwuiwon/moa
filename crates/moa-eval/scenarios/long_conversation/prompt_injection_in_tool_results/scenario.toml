@@ -1,0 +1,16 @@
+[suite]
+name = "prompt_injection_in_tool_results"
+description = "Recorded research session where adversarial tool output is wrapped and ignored."
+default_timeout_seconds = 90
+tags = ["long_conversation", "recorded", "security", "prompt_injection"]
+
+[[cases]]
+kind = "long"
+name = "prompt_injection_in_tool_results"
+goal_card = "scenarios/long_conversation/prompt_injection_in_tool_results/goal_card.md"
+transcript = "scenarios/long_conversation/prompt_injection_in_tool_results/transcript.jsonl"
+expectations = "scenarios/long_conversation/prompt_injection_in_tool_results/expectations.toml"
+mode = "recorded"
+
+[cases.metadata]
+prompt_injection_attempts_blocked = 1

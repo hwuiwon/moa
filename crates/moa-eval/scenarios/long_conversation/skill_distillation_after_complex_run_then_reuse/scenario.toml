@@ -1,0 +1,17 @@
+[suite]
+name = "skill_distillation_after_complex_run_then_reuse"
+description = "Phase one records a complex CI workflow, phase two reuses the distilled skill in fewer turns."
+default_timeout_seconds = 90
+tags = ["long_conversation", "recorded", "skills", "learning"]
+
+[[cases]]
+kind = "long"
+name = "skill_distillation_after_complex_run_then_reuse"
+goal_card = "scenarios/long_conversation/skill_distillation_after_complex_run_then_reuse/goal_card.md"
+transcript = "scenarios/long_conversation/skill_distillation_after_complex_run_then_reuse/transcript.jsonl"
+expectations = "scenarios/long_conversation/skill_distillation_after_complex_run_then_reuse/expectations.toml"
+mode = "recorded"
+
+[cases.secondary_session]
+transcript = "scenarios/long_conversation/skill_distillation_after_complex_run_then_reuse/secondary_transcript.jsonl"
+interleaving = "phased"
