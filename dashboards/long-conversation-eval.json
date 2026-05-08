@@ -1,0 +1,209 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "id": null,
+  "panels": [
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "options": { "0": { "text": "failed" }, "1": { "text": "passed" } }, "type": "value" }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT ts AS time, replace(model_or_evaluator, 'long_conversation:', '') AS metric, CASE WHEN value_boolean THEN 1.0 ELSE 0.0 END AS value FROM analytics.scores WHERE $__timeFilter(ts) AND name = 'functional.task_completed' AND model_or_evaluator LIKE 'long_conversation:%' AND ('$scenario' = 'all' OR replace(model_or_evaluator, 'long_conversation:', '') = '$scenario') ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Per-scenario success rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT ts AS time, replace(model_or_evaluator, 'long_conversation:', '') AS metric, value_numeric / 100.0 AS value FROM analytics.scores WHERE $__timeFilter(ts) AND name = 'cost.cost_cents' AND model_or_evaluator LIKE 'long_conversation:%' AND ('$scenario' = 'all' OR replace(model_or_evaluator, 'long_conversation:', '') = '$scenario') ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost per scenario over time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": { "max": 1, "min": 0, "unit": "percentunit" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT ts AS time, replace(model_or_evaluator, 'long_conversation:', '') AS metric, value_numeric AS value FROM analytics.scores WHERE $__timeFilter(ts) AND name = 'cache.input_cached_ratio' AND model_or_evaluator LIKE 'long_conversation:%' AND ('$scenario' = 'all' OR replace(model_or_evaluator, 'long_conversation:', '') = '$scenario') ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Cache hit ratio over time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT ts AS time, replace(model_or_evaluator, 'long_conversation:', '') AS metric, value_numeric AS value FROM analytics.scores WHERE $__timeFilter(ts) AND name = 'latency_ms.completion_p95_ms' AND model_or_evaluator LIKE 'long_conversation:%' AND ('$scenario' = 'all' OR replace(model_or_evaluator, 'long_conversation:', '') = '$scenario') ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Latency p95 over time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "id": 5,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('day', ts) AS time, replace(model_or_evaluator, 'long_conversation:', '') AS metric, SUM(value_numeric) AS value FROM analytics.scores WHERE $__timeFilter(ts) AND name = 'context.compaction_events' AND model_or_evaluator LIKE 'long_conversation:%' AND ('$scenario' = 'all' OR replace(model_or_evaluator, 'long_conversation:', '') = '$scenario') GROUP BY 1, 2 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Compaction events count",
+      "type": "barchart"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 5, "x": 8, "y": 16 },
+      "id": 6,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["max"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT ts AS time, 'approval_violations' AS metric, value_numeric AS value FROM analytics.scores WHERE $__timeFilter(ts) AND name = 'safety.approval_violations' AND model_or_evaluator LIKE 'long_conversation:%'",
+          "refId": "A"
+        }
+      ],
+      "title": "Approval violations",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 5, "x": 13, "y": 16 },
+      "id": 7,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["max"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT ts AS time, 'canary_leaks' AS metric, value_numeric AS value FROM analytics.scores WHERE $__timeFilter(ts) AND name = 'safety.canary_leaks' AND model_or_evaluator LIKE 'long_conversation:%'",
+          "refId": "A"
+        }
+      ],
+      "title": "Canary leaks",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 16 },
+      "id": 8,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["max"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT ts AS time, 'credential_exposures' AS metric, value_numeric AS value FROM analytics.scores WHERE $__timeFilter(ts) AND name = 'safety.credential_exposures' AND model_or_evaluator LIKE 'long_conversation:%'",
+          "refId": "A"
+        }
+      ],
+      "title": "Credential exposures",
+      "type": "stat"
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 39,
+  "tags": ["moa", "eval", "long-conversation"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "all", "value": "all" },
+        "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+        "definition": "SELECT 'all' AS scenario UNION SELECT DISTINCT replace(model_or_evaluator, 'long_conversation:', '') FROM analytics.scores WHERE model_or_evaluator LIKE 'long_conversation:%' ORDER BY 1",
+        "includeAll": false,
+        "label": "scenario",
+        "multi": false,
+        "name": "scenario",
+        "query": "SELECT 'all' AS scenario UNION SELECT DISTINCT replace(model_or_evaluator, 'long_conversation:', '') FROM analytics.scores WHERE model_or_evaluator LIKE 'long_conversation:%' ORDER BY 1",
+        "refresh": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-14d", "to": "now" },
+  "timezone": "browser",
+  "title": "MOA Long-Conversation Eval",
+  "uid": "moa-long-conversation-eval",
+  "version": 1
+}

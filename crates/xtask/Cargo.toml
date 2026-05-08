@@ -7,4 +7,7 @@ default-run = "xtask"
 
 [dependencies]
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
