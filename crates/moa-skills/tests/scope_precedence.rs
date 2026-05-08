@@ -1,5 +1,7 @@
 //! Integration tests for three-tier skill scope precedence.
 
+#![recursion_limit = "256"]
+
 mod support;
 
 use moa_core::{MemoryScope, UserId, WorkspaceId};

@@ -16,10 +16,12 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::collector::{CollectedExecution, TrajectoryCollector};
+use crate::long_conversation::run_scenario_with_provider;
 use crate::plan::{EvalPlan, build_eval_plan};
 use crate::setup::{build_agent_environment, build_agent_environment_with_provider};
 use crate::{
-    AgentConfig, EvalError, EvalMetrics, EvalResult, EvalStatus, Result, TestCase, TestSuite,
+    AgentConfig, EvalError, EvalMetrics, EvalResult, EvalStatus, Result, TestCase, TestCaseKind,
+    TestSuite,
 };
 
 const DEFAULT_SINGLE_TIMEOUT_SECONDS: u64 = 300;
@@ -271,6 +273,18 @@ impl EvalEngine {
             });
         }
 
+        if case.kind == TestCaseKind::Long {
+            return self
+                .run_long_with_timeout(
+                    case,
+                    config,
+                    default_timeout_seconds,
+                    llm_provider,
+                    started_at,
+                )
+                .await;
+        }
+
         let environment = if let Some(llm_provider) = llm_provider {
             match build_agent_environment_with_provider(
                 &self.base_config,
@@ -377,6 +391,54 @@ impl EvalEngine {
 
         let _ = cleanup_workspace(&run_root).await;
         Ok(result)
+    }
+
+    async fn run_long_with_timeout(
+        &self,
+        case: &TestCase,
+        config: &AgentConfig,
+        default_timeout_seconds: u64,
+        llm_provider: Option<Arc<dyn LLMProvider>>,
+        started_at: DateTime<Utc>,
+    ) -> Result<EvalResult> {
+        let Some(llm_provider) = llm_provider else {
+            return Ok(build_error_result(
+                case,
+                config,
+                started_at,
+                "long conversation cases require an explicit provider".to_string(),
+                EvalStatus::Error,
+            ));
+        };
+        let timeout = Duration::from_secs(case.timeout_seconds.unwrap_or(default_timeout_seconds));
+        match tokio::time::timeout(
+            timeout,
+            run_scenario_with_provider(
+                &self.base_config,
+                config,
+                &self.options,
+                case,
+                llm_provider,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(report)) => Ok(report.result),
+            Ok(Err(error)) => Ok(build_error_result(
+                case,
+                config,
+                started_at,
+                error.to_string(),
+                EvalStatus::Error,
+            )),
+            Err(_) => Ok(build_error_result(
+                case,
+                config,
+                started_at,
+                format!("run exceeded timeout of {} seconds", timeout.as_secs()),
+                EvalStatus::Timeout,
+            )),
+        }
     }
 }
 

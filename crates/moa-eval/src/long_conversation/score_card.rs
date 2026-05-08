@@ -1,0 +1,464 @@
+//! Score card schema and analytics-score flattening helpers.
+
+use chrono::{DateTime, Utc};
+use moa_core::{SessionId, UserId, WorkspaceId};
+use moa_lineage_core::{
+    LineageEvent, LineageSink, ScoreRecord, ScoreSource, ScoreTarget,
+    ScoreValue as LineageScoreValue,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Number, Value};
+use uuid::Uuid;
+
+/// Long-conversation score card consumed by regression dashboards.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScoreCard {
+    /// Stable scenario name.
+    pub scenario: String,
+    /// Unique run identifier shared by every emitted score row.
+    pub run_id: Uuid,
+    /// Score-card creation timestamp.
+    pub timestamp: DateTime<Utc>,
+    /// Provider mode or provider name used for the run.
+    pub provider: String,
+    /// Functional correctness scores.
+    pub functional: FunctionalScores,
+    /// Latency scores in milliseconds.
+    pub latency_ms: LatencyScores,
+    /// Token and cost scores.
+    pub cost: CostScores,
+    /// Prompt-cache scores.
+    pub cache: CacheScores,
+    /// Context-management scores.
+    pub context: ContextScores,
+    /// Memory-recall scores.
+    pub memory: MemoryScores,
+    /// Tool-use scores.
+    pub tools: ToolScores,
+    /// Safety counters.
+    pub safety: SafetyScores,
+}
+
+impl Default for ScoreCard {
+    fn default() -> Self {
+        Self {
+            scenario: String::new(),
+            run_id: Uuid::now_v7(),
+            timestamp: Utc::now(),
+            provider: "recorded".to_string(),
+            functional: FunctionalScores::default(),
+            latency_ms: LatencyScores::default(),
+            cost: CostScores::default(),
+            cache: CacheScores::default(),
+            context: ContextScores::default(),
+            memory: MemoryScores::default(),
+            tools: ToolScores::default(),
+            safety: SafetyScores::default(),
+        }
+    }
+}
+
+impl ScoreCard {
+    /// Returns one flat metric row per dashboard score.
+    #[must_use]
+    pub fn metric_rows(&self) -> Vec<MetricRow> {
+        let mut rows = Vec::new();
+        push_functional_rows(&mut rows, &self.functional);
+        push_latency_rows(&mut rows, &self.latency_ms);
+        push_cost_rows(&mut rows, &self.cost);
+        push_cache_rows(&mut rows, &self.cache);
+        push_context_rows(&mut rows, &self.context);
+        push_memory_rows(&mut rows, &self.memory);
+        push_tool_rows(&mut rows, &self.tools);
+        push_safety_rows(&mut rows, &self.safety);
+        rows
+    }
+
+    /// Converts metric rows into lineage score records for `analytics.scores`.
+    #[must_use]
+    pub fn to_score_records(
+        &self,
+        workspace_id: WorkspaceId,
+        user_id: UserId,
+        session_id: SessionId,
+    ) -> Vec<ScoreRecord> {
+        self.metric_rows()
+            .into_iter()
+            .map(|row| ScoreRecord {
+                score_id: Uuid::now_v7(),
+                ts: self.timestamp,
+                target: ScoreTarget::Session { session_id },
+                workspace_id: workspace_id.clone(),
+                user_id: Some(user_id.clone()),
+                name: row.name,
+                value: lineage_score_value(row.value),
+                source: ScoreSource::OfflineReplay,
+                model_or_evaluator: format!("long_conversation:{}", self.scenario),
+                run_id: Some(self.run_id),
+                dataset_id: None,
+                comment: Some(format!("provider={}", self.provider)),
+            })
+            .collect()
+    }
+
+    /// Converts metric rows into lineage eval events for the existing sink path.
+    #[must_use]
+    pub fn to_lineage_events(
+        &self,
+        workspace_id: WorkspaceId,
+        user_id: UserId,
+        session_id: SessionId,
+    ) -> Vec<LineageEvent> {
+        self.to_score_records(workspace_id, user_id, session_id)
+            .into_iter()
+            .map(LineageEvent::Eval)
+            .collect()
+    }
+
+    /// Emits every score-card metric through the existing lineage sink.
+    pub fn emit_to_lineage_sink(
+        &self,
+        sink: &dyn LineageSink,
+        workspace_id: WorkspaceId,
+        user_id: UserId,
+        session_id: SessionId,
+    ) -> usize {
+        let events = self.to_lineage_events(workspace_id, user_id, session_id);
+        let count = events.len();
+        for event in events {
+            sink.record(event);
+        }
+        count
+    }
+}
+
+/// A flat score-card metric row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricRow {
+    /// Dot-delimited metric name, such as `cache.input_cached_ratio`.
+    pub name: String,
+    /// Metric value.
+    pub value: Value,
+}
+
+/// Functional correctness scores.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FunctionalScores {
+    /// Whether the scenario task completed.
+    pub task_completed: bool,
+    /// Number of user turns driven through the scenario.
+    pub turn_count: usize,
+    /// Number of error events observed.
+    pub error_count: u32,
+    /// Whether important errors survived context management.
+    pub errors_preserved: bool,
+}
+
+impl Default for FunctionalScores {
+    fn default() -> Self {
+        Self {
+            task_completed: false,
+            turn_count: 0,
+            error_count: 0,
+            errors_preserved: true,
+        }
+    }
+}
+
+/// Latency scores in milliseconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LatencyScores {
+    /// Median submit-to-first-token latency.
+    pub first_token_p50_ms: u64,
+    /// P95 submit-to-first-token latency.
+    pub first_token_p95_ms: u64,
+    /// Median submit-to-completion latency.
+    pub completion_p50_ms: u64,
+    /// P95 submit-to-completion latency.
+    pub completion_p95_ms: u64,
+}
+
+/// Token and cost scores.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CostScores {
+    /// Input token count.
+    pub input_tokens: usize,
+    /// Output token count.
+    pub output_tokens: usize,
+    /// Cached input token count.
+    pub cached_input_tokens: usize,
+    /// Rounded final cost in cents.
+    pub cost_cents: u32,
+}
+
+/// Prompt-cache scores.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheScores {
+    /// Fraction of input tokens served from cache.
+    pub input_cached_ratio: f64,
+    /// Whether stable provider-request prefixes matched across adjacent turns.
+    pub prefix_stable: bool,
+    /// Longest byte prefix shared across compiled provider requests.
+    pub stable_prefix_bytes: usize,
+}
+
+/// Context-management scores.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextScores {
+    /// Maximum context token count observed.
+    pub max_context_tokens: usize,
+    /// Number of compaction events observed.
+    pub compaction_count: usize,
+    /// Whether strict error-preservation checks passed.
+    pub errors_preserved_strict: bool,
+}
+
+impl Default for ContextScores {
+    fn default() -> Self {
+        Self {
+            max_context_tokens: 0,
+            compaction_count: 0,
+            errors_preserved_strict: true,
+        }
+    }
+}
+
+/// Memory-recall scores.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryScores {
+    /// Planted-fact recall@K.
+    pub planted_fact_recall: f64,
+    /// Number of memory pages written.
+    pub pages_written: usize,
+    /// Successful consolidation outcomes.
+    pub consolidation_successes: usize,
+    /// Failed consolidation outcomes.
+    pub consolidation_failures: usize,
+}
+
+/// Tool-use scores.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolScores {
+    /// Tool calls issued.
+    pub tool_call_count: usize,
+    /// Tool calls that completed successfully.
+    pub tool_success_count: usize,
+    /// Tool calls that errored.
+    pub tool_error_count: usize,
+    /// Successful tool-call fraction.
+    pub success_rate: f64,
+}
+
+/// Safety counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SafetyScores {
+    /// Tool calls that bypassed required approval.
+    pub approval_violations: u32,
+    /// Canary token leaks into tools.
+    pub canary_leaks: u32,
+    /// Non-redacted credential exposures.
+    pub credential_exposures: u32,
+}
+
+fn push_row(rows: &mut Vec<MetricRow>, name: impl Into<String>, value: Value) {
+    rows.push(MetricRow {
+        name: name.into(),
+        value,
+    });
+}
+
+fn push_functional_rows(rows: &mut Vec<MetricRow>, scores: &FunctionalScores) {
+    push_row(
+        rows,
+        "functional.task_completed",
+        Value::Bool(scores.task_completed),
+    );
+    push_row(
+        rows,
+        "functional.turn_count",
+        number(scores.turn_count as u64),
+    );
+    push_row(
+        rows,
+        "functional.error_count",
+        number(u64::from(scores.error_count)),
+    );
+    push_row(
+        rows,
+        "functional.errors_preserved",
+        Value::Bool(scores.errors_preserved),
+    );
+}
+
+fn push_latency_rows(rows: &mut Vec<MetricRow>, scores: &LatencyScores) {
+    push_row(
+        rows,
+        "latency_ms.first_token_p50_ms",
+        number(scores.first_token_p50_ms),
+    );
+    push_row(
+        rows,
+        "latency_ms.first_token_p95_ms",
+        number(scores.first_token_p95_ms),
+    );
+    push_row(
+        rows,
+        "latency_ms.completion_p50_ms",
+        number(scores.completion_p50_ms),
+    );
+    push_row(
+        rows,
+        "latency_ms.completion_p95_ms",
+        number(scores.completion_p95_ms),
+    );
+}
+
+fn push_cost_rows(rows: &mut Vec<MetricRow>, scores: &CostScores) {
+    push_row(
+        rows,
+        "cost.input_tokens",
+        number(scores.input_tokens as u64),
+    );
+    push_row(
+        rows,
+        "cost.output_tokens",
+        number(scores.output_tokens as u64),
+    );
+    push_row(
+        rows,
+        "cost.cached_input_tokens",
+        number(scores.cached_input_tokens as u64),
+    );
+    push_row(
+        rows,
+        "cost.cost_cents",
+        number(u64::from(scores.cost_cents)),
+    );
+}
+
+fn push_cache_rows(rows: &mut Vec<MetricRow>, scores: &CacheScores) {
+    push_row(
+        rows,
+        "cache.input_cached_ratio",
+        float_number(scores.input_cached_ratio),
+    );
+    push_row(
+        rows,
+        "cache.prefix_stable",
+        Value::Bool(scores.prefix_stable),
+    );
+    push_row(
+        rows,
+        "cache.stable_prefix_bytes",
+        number(scores.stable_prefix_bytes as u64),
+    );
+}
+
+fn push_context_rows(rows: &mut Vec<MetricRow>, scores: &ContextScores) {
+    push_row(
+        rows,
+        "context.max_context_tokens",
+        number(scores.max_context_tokens as u64),
+    );
+    push_row(
+        rows,
+        "context.compaction_count",
+        number(scores.compaction_count as u64),
+    );
+    push_row(
+        rows,
+        "context.errors_preserved_strict",
+        Value::Bool(scores.errors_preserved_strict),
+    );
+}
+
+fn push_memory_rows(rows: &mut Vec<MetricRow>, scores: &MemoryScores) {
+    push_row(
+        rows,
+        "memory.planted_fact_recall",
+        float_number(scores.planted_fact_recall),
+    );
+    push_row(
+        rows,
+        "memory.pages_written",
+        number(scores.pages_written as u64),
+    );
+    push_row(
+        rows,
+        "memory.consolidation_successes",
+        number(scores.consolidation_successes as u64),
+    );
+    push_row(
+        rows,
+        "memory.consolidation_failures",
+        number(scores.consolidation_failures as u64),
+    );
+}
+
+fn push_tool_rows(rows: &mut Vec<MetricRow>, scores: &ToolScores) {
+    push_row(
+        rows,
+        "tools.tool_call_count",
+        number(scores.tool_call_count as u64),
+    );
+    push_row(
+        rows,
+        "tools.tool_success_count",
+        number(scores.tool_success_count as u64),
+    );
+    push_row(
+        rows,
+        "tools.tool_error_count",
+        number(scores.tool_error_count as u64),
+    );
+    push_row(
+        rows,
+        "tools.success_rate",
+        float_number(scores.success_rate),
+    );
+}
+
+fn push_safety_rows(rows: &mut Vec<MetricRow>, scores: &SafetyScores) {
+    push_row(
+        rows,
+        "safety.approval_violations",
+        number(u64::from(scores.approval_violations)),
+    );
+    push_row(
+        rows,
+        "safety.canary_leaks",
+        number(u64::from(scores.canary_leaks)),
+    );
+    push_row(
+        rows,
+        "safety.credential_exposures",
+        number(u64::from(scores.credential_exposures)),
+    );
+}
+
+fn number(value: u64) -> Value {
+    Value::Number(Number::from(value))
+}
+
+fn float_number(value: f64) -> Value {
+    Number::from_f64(value)
+        .map(Value::Number)
+        .unwrap_or_else(|| Value::Number(Number::from(0_u64)))
+}
+
+fn lineage_score_value(value: Value) -> LineageScoreValue {
+    match value {
+        Value::Bool(value) => LineageScoreValue::Boolean(value),
+        Value::Number(value) => LineageScoreValue::Numeric(value.as_f64().unwrap_or(0.0)),
+        Value::String(value) => LineageScoreValue::Categorical(value),
+        other => LineageScoreValue::Categorical(other.to_string()),
+    }
+}

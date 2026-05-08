@@ -1,5 +1,7 @@
 //! Integration tests for existing-skill improvement and versioning.
 
+#![recursion_limit = "256"]
+
 mod support;
 
 use moa_skills::improver::{ImprovementResult, improve_skill_with_learning};

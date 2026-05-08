@@ -26,6 +26,9 @@ pub struct TestSuite {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct TestCase {
+    /// Case execution kind.
+    #[serde(skip_serializing_if = "TestCaseKind::is_single")]
+    pub kind: TestCaseKind,
     /// Stable case name.
     pub name: String,
     /// User input sent to the agent.
@@ -40,6 +43,96 @@ pub struct TestCase {
     pub tags: Vec<String>,
     /// Arbitrary case metadata.
     pub metadata: HashMap<String, Value>,
+    /// Long-conversation case details when `kind = "long"`.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub long: Option<LongTestCase>,
+}
+
+impl TestCase {
+    /// Returns long-conversation details for a long test case.
+    pub fn long_case(&self) -> crate::Result<&LongTestCase> {
+        if self.kind != TestCaseKind::Long {
+            return Err(crate::EvalError::InvalidConfig(format!(
+                "test case '{}' is not a long-conversation case",
+                self.name
+            )));
+        }
+
+        let long = self.long.as_ref().ok_or_else(|| {
+            crate::EvalError::InvalidConfig(format!(
+                "long test case '{}' is missing transcript details",
+                self.name
+            ))
+        })?;
+        if long.transcript.as_os_str().is_empty() {
+            return Err(crate::EvalError::InvalidConfig(format!(
+                "long test case '{}' must set transcript",
+                self.name
+            )));
+        }
+        if long.expectations.as_os_str().is_empty() {
+            return Err(crate::EvalError::InvalidConfig(format!(
+                "long test case '{}' must set expectations",
+                self.name
+            )));
+        }
+
+        Ok(long)
+    }
+}
+
+/// Discriminator for single-turn vs long-conversation test cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TestCaseKind {
+    /// Existing single-turn eval behavior.
+    #[default]
+    Single,
+    /// Multi-turn long-conversation eval behavior.
+    Long,
+}
+
+impl TestCaseKind {
+    /// Returns true when this is the default single-turn case kind.
+    #[must_use]
+    pub const fn is_single(&self) -> bool {
+        matches!(self, Self::Single)
+    }
+}
+
+/// Long-conversation execution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LongConversationMode {
+    /// Replays a recorded provider transcript.
+    #[default]
+    Recorded,
+    /// Simulates a user from a goal card.
+    ScriptedUser,
+    /// Uses a live provider.
+    Live,
+}
+
+impl LongConversationMode {
+    /// Returns true when the mode is implemented by the foundation runner.
+    #[must_use]
+    pub const fn is_recorded(&self) -> bool {
+        matches!(self, Self::Recorded)
+    }
+}
+
+/// TOML-loadable long-conversation test-case details.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LongTestCase {
+    /// Optional goal card used by future scripted-user mode.
+    pub goal_card: Option<PathBuf>,
+    /// JSONL transcript used by recorded mode.
+    pub transcript: PathBuf,
+    /// Scenario expectations file.
+    pub expectations: PathBuf,
+    /// Long-conversation execution mode.
+    pub mode: LongConversationMode,
 }
 
 /// Flexible expected-output rules for an agent response.
