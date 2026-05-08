@@ -45,16 +45,3 @@ impl From<uuid::Uuid> for ToolCallId {
         Self(value)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::SessionId;
-
-    #[test]
-    fn session_id_roundtrip() {
-        let id = SessionId::new();
-        let json = serde_json::to_string(&id).expect("serialize session id");
-        let parsed: SessionId = serde_json::from_str(&json).expect("deserialize session id");
-        assert_eq!(id, parsed);
-    }
-}

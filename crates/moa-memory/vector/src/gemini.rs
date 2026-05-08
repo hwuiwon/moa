@@ -335,15 +335,4 @@ mod tests {
         );
         assert_eq!(EmbedRole::Raw.format("oauth"), "oauth");
     }
-
-    #[test]
-    fn v2_keeps_already_normalized_values_unchanged() {
-        let values = vec![0.6_f32, 0.8_f32];
-        assert_eq!(values, vec![0.6, 0.8]);
-    }
-
-    #[test]
-    fn vector_dimension_constant_still_matches_cohere_default() {
-        assert_eq!(crate::VECTOR_DIMENSION, 1024);
-    }
 }

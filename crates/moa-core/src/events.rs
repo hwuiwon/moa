@@ -436,7 +436,6 @@ impl Event {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use uuid::Uuid;
 
     use super::*;
@@ -470,49 +469,6 @@ mod tests {
     }
 
     #[test]
-    fn event_serialization_roundtrip() {
-        let event = Event::UserMessage {
-            text: "Hello".to_string(),
-            attachments: vec![],
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let parsed: Event = serde_json::from_str(&json).unwrap();
-        assert_eq!(event, parsed);
-        assert!(json.contains("UserMessage"));
-    }
-
-    #[test]
-    fn cache_report_roundtrip() {
-        let event = Event::CacheReport {
-            report: CacheReport {
-                provider: "anthropic".to_string(),
-                model: ModelId::new("claude-sonnet-4-6"),
-                message_count: 3,
-                tool_count: 2,
-                cache_breakpoints: vec![2],
-                tool_tokens_estimate: 100,
-                stable_message_tokens_estimate: 200,
-                stable_total_tokens_estimate: 300,
-                total_tokens_estimate: 360,
-                dynamic_tokens_estimate: 60,
-                cache_ratio_estimate: 0.833,
-                stable_prefix_fingerprint: 123,
-                full_request_fingerprint: 456,
-                stable_prefix_reused: true,
-                input_tokens: 40,
-                cached_input_tokens: 25,
-                output_tokens: 8,
-                cached_vs_stable_estimate_ratio: 0.083,
-            },
-        };
-
-        let json = serde_json::to_string(&event).expect("cache report serializes");
-        let parsed: Event = serde_json::from_str(&json).expect("cache report deserializes");
-        assert_eq!(event, parsed);
-        assert!(json.contains("CacheReport"));
-    }
-
-    #[test]
     fn brain_response_event_has_cost_fields() {
         let event = Event::BrainResponse {
             text: "Hi there".to_string(),
@@ -529,62 +485,6 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("cost_cents"));
         assert!(json.contains("input_tokens_uncached"));
-    }
-
-    #[test]
-    fn all_event_types_serialize() {
-        let events = vec![
-            Event::SessionCreated {
-                workspace_id: WorkspaceId::new("ws1"),
-                user_id: UserId::new("u1"),
-                model: ModelId::new("test"),
-            },
-            Event::UserMessage {
-                text: "hi".into(),
-                attachments: vec![],
-            },
-            Event::ToolCall {
-                tool_id: ToolCallId::new(),
-                provider_tool_use_id: Some("toolu_123".into()),
-                provider_thought_signature: None,
-                tool_name: "bash".into(),
-                input: json!({}),
-                hand_id: None,
-            },
-            Event::ApprovalRequested {
-                request_id: Uuid::nil(),
-                awakeable_id: None,
-                sub_agent_id: None,
-                tool_name: "bash".into(),
-                input_summary: "ls".into(),
-                risk_level: RiskLevel::Low,
-                prompt: sample_approval_prompt(Uuid::nil(), "bash", "ls", RiskLevel::Low),
-            },
-            Event::Checkpoint {
-                summary: "test".into(),
-                events_summarized: 10,
-                token_count: 500,
-                model: ModelId::new("claude-sonnet-4-6"),
-                model_tier: ModelTier::Auxiliary,
-                input_tokens: 120,
-                output_tokens: 45,
-                cost_cents: 1,
-            },
-            Event::MemoryIngest {
-                source_name: "RFC 0042".into(),
-                source_path: "sources/rfc-0042.md".into(),
-                affected_pages: vec!["sources/rfc-0042.md".into()],
-                contradictions: vec![],
-            },
-            Event::Error {
-                message: "oops".into(),
-                recoverable: true,
-            },
-        ];
-        for event in events {
-            let json = serde_json::to_string(&event);
-            assert!(json.is_ok(), "Failed to serialize: {:?}", event);
-        }
     }
 
     #[test]

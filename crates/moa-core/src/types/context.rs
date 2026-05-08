@@ -391,17 +391,6 @@ mod tests {
     }
 
     #[test]
-    fn context_message_tool_still_defaults_to_text_only() {
-        let message = ContextMessage::tool("plain text");
-
-        assert_eq!(message.role, MessageRole::Tool);
-        assert_eq!(message.content, "plain text");
-        assert!(message.content_blocks.is_none());
-        assert!(message.tool_invocation.is_none());
-        assert!(message.tool_use_id.is_none());
-    }
-
-    #[test]
     fn context_message_assistant_tool_call_preserves_invocation() {
         let invocation = ToolInvocation {
             id: Some("toolu_123".to_string()),

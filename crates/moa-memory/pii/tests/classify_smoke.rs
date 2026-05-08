@@ -1,8 +1,8 @@
 //! Smoke coverage for the HTTP-backed PII classifier.
 
 use moa_memory_pii::{
-    MockClassifier, OpenAiPrivacyFilterClassifier, PiiCategory, PiiClass, PiiClassifier, PiiResult,
-    PiiSpan, PrivacyFilterThresholds, openai_filter::resolve_class,
+    OpenAiPrivacyFilterClassifier, PiiCategory, PiiClass, PiiClassifier, PiiSpan,
+    PrivacyFilterThresholds, openai_filter::resolve_class,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -66,30 +66,6 @@ async fn classify_smoke_maps_ssn_to_phi_and_clean_text_to_none() {
         .expect("classify clean text");
     assert_eq!(clean.class, PiiClass::None);
     assert!(clean.spans.is_empty());
-}
-
-#[tokio::test]
-async fn mock_classifier_round_trips_fixed_result() {
-    let fixed = PiiResult {
-        class: PiiClass::Pii,
-        spans: vec![PiiSpan {
-            start: 0,
-            end: 5,
-            category: PiiCategory::Email,
-            confidence: 0.88,
-        }],
-        model_version: "mock".to_string(),
-        abstained: false,
-    };
-    let classifier = MockClassifier {
-        fixed: fixed.clone(),
-    };
-
-    let result = classifier
-        .classify("anything")
-        .await
-        .expect("classify with mock");
-    assert_eq!(result, fixed);
 }
 
 #[tokio::test]

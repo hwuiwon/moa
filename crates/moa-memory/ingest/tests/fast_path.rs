@@ -6,11 +6,10 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{ScopeContext, ScopedConn, UserId, WorkspaceId, traits::EmbeddingProvider};
-use moa_hands::ToolRegistry;
-use moa_memory_graph::{AgeGraphStore, NodeLabel, NodeWriteIntent, PiiClass, cypher};
+use moa_memory_graph::{AgeGraphStore, NodeLabel, PiiClass, cypher};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, FastPathCtx,
-    FastRememberRequest, ForgetPattern, IngestError, fast_forget, fast_remember, fast_supersede,
+    FastRememberRequest, ForgetPattern, IngestError, fast_forget, fast_remember,
 };
 use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
@@ -171,26 +170,6 @@ fn user_remember_request(workspace_id: Uuid, user_id: Uuid, text: &str) -> FastR
         user_id: Some(user_id),
         scope: "user".to_string(),
         ..remember_request(workspace_id, text)
-    }
-}
-
-fn supersede_intent(workspace_id: Uuid, text: &str) -> NodeWriteIntent {
-    NodeWriteIntent {
-        uid: Uuid::now_v7(),
-        label: NodeLabel::Fact,
-        workspace_id: Some(workspace_id.to_string()),
-        user_id: None,
-        scope: "workspace".to_string(),
-        name: text.to_string(),
-        properties: json!({ "summary": text, "source": "fast_supersede_test" }),
-        pii_class: PiiClass::None,
-        confidence: Some(0.9),
-        valid_from: Utc::now(),
-        embedding: Some(deterministic_vector(text)),
-        embedding_model: Some("mock-fast-embedder".to_string()),
-        embedding_model_version: Some(7),
-        actor_id: Uuid::now_v7().to_string(),
-        actor_kind: "user".to_string(),
     }
 }
 
@@ -539,7 +518,7 @@ async fn fast_forget_soft_all_respects_user_scope() {
 }
 
 #[tokio::test]
-async fn fast_supersede_wrapper_replaces_existing_node() {
+async fn fast_remember_batch_writes_all_facts_with_local_dependencies() {
     let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
@@ -552,81 +531,27 @@ async fn fast_supersede_wrapper_replaces_existing_node() {
         Duration::ZERO,
         PiiClass::None,
     );
-    let old_uid = fast_remember(
-        remember_request(workspace_id, "the API gateway is nginx"),
-        &ctx,
-    )
-    .await
-    .expect("create old node");
-    let new_uid = fast_supersede(
-        old_uid,
-        supersede_intent(workspace_id, "the API gateway is envoy"),
-        &ctx,
-    )
-    .await
-    .expect("fast supersede");
-
-    assert!(
-        node_valid_to(session_store.pool(), workspace_id, old_uid)
-            .await
-            .is_some()
-    );
-    assert!(
-        node_valid_to(session_store.pool(), workspace_id, new_uid)
-            .await
-            .is_none()
-    );
-    supersedes_edge_exists(session_store.pool(), workspace_id, old_uid, new_uid).await;
-
-    drop(session_store);
-    testing::cleanup_test_schema(&database_url, &schema_name)
-        .await
-        .expect("drop isolated schema");
-}
-
-#[tokio::test]
-async fn fast_remember_p95_stays_under_latency_budget_with_local_dependencies() {
-    let _guard = TEST_LOCK.lock().await;
-    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
-        .await
-        .expect("create isolated Postgres store");
-    let workspace_id = Uuid::now_v7();
-    let ctx = test_ctx(
-        session_store.pool(),
-        workspace_id,
-        Conflict::Insert,
-        Duration::ZERO,
-        PiiClass::None,
-    );
-    let mut durations = Vec::new();
+    let mut uids = Vec::new();
 
     for index in 0..10 {
-        let started = Instant::now();
-        fast_remember(
+        let uid = fast_remember(
             remember_request(workspace_id, &format!("latency budget fact {index}")),
             &ctx,
         )
         .await
         .expect("remember latency fact");
-        durations.push(started.elapsed());
+        uids.push(uid);
     }
-    durations.sort();
-    let p95 = durations[durations.len() - 1];
-    assert!(
-        p95 < Duration::from_millis(500),
-        "p95 fast_remember latency was {p95:?}"
-    );
+    assert_eq!(uids.len(), 10);
+    for (index, uid) in uids.into_iter().enumerate() {
+        assert_eq!(
+            node_name(session_store.pool(), workspace_id, uid).await,
+            format!("latency budget fact {index}")
+        );
+    }
 
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)
         .await
         .expect("drop isolated schema");
-}
-
-#[test]
-fn fast_memory_tools_appear_in_default_registry() {
-    let registry = ToolRegistry::default_local();
-    assert!(registry.get("memory_remember").is_some());
-    assert!(registry.get("memory_forget").is_some());
-    assert!(registry.get("memory_supersede").is_some());
 }

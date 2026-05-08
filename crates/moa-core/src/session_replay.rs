@@ -663,20 +663,4 @@ mod tests {
         assert!(snapshot.get_events_total_duration > Duration::ZERO);
         assert_eq!(snapshot.pipeline_compile_ms(), 12);
     }
-
-    #[tokio::test]
-    async fn counted_store_is_noop_outside_scope() {
-        let inner: Arc<dyn SessionStore> = Arc::new(MockSessionStore {
-            events: vec![event_record(Event::Warning {
-                message: "warn".to_string(),
-            })],
-        });
-        let store = CountedSessionStore::new(inner);
-
-        let events = store
-            .get_events(SessionId::new(), EventRange::all())
-            .await
-            .expect("get_events should succeed");
-        assert_eq!(events.len(), 1);
-    }
 }

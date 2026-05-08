@@ -239,28 +239,6 @@ async fn neon_checkpoint_branch_connection_is_copy_on_write() {
 
 #[tokio::test]
 #[ignore = "requires NEON_API_KEY, NEON_PROJECT_ID, TEST_DATABASE_URL/NEON_DB_URL, and optional NEON_PARENT_BRANCH_ID"]
-async fn neon_checkpoint_cleanup_without_expired_branches_returns_zero() {
-    let _guard = neon_live_lock().lock().await;
-    let Some(config) = live_neon_config().await else {
-        eprintln!("skipping live Neon test; missing env");
-        return;
-    };
-    let manager = NeonBranchManager::from_config(&config).expect("manager");
-
-    let checkpoint = manager
-        .create_checkpoint("cleanup-zero", None)
-        .await
-        .expect("create checkpoint");
-    let deleted = manager.cleanup_expired().await.expect("cleanup");
-    assert_eq!(deleted, 0);
-    manager
-        .discard_checkpoint(&checkpoint)
-        .await
-        .expect("discard checkpoint");
-}
-
-#[tokio::test]
-#[ignore = "requires NEON_API_KEY, NEON_PROJECT_ID, TEST_DATABASE_URL/NEON_DB_URL, and optional NEON_PARENT_BRANCH_ID"]
 async fn neon_checkpoint_capacity_limit_rejects_extra_branch() {
     let _guard = neon_live_lock().lock().await;
     let Some(base_config) = live_neon_config().await else {

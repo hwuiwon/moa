@@ -373,16 +373,7 @@ pub struct WakeContext {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        PendingSignal, PendingSignalType, SessionId, SessionMeta, SessionStatus, UserMessage,
-    };
-
-    #[test]
-    fn session_status_serialization() {
-        let status = SessionStatus::WaitingApproval;
-        let json = serde_json::to_string(&status).expect("serialize session status");
-        assert!(json.contains("WaitingApproval") || json.contains("waiting_approval"));
-    }
+    use super::{PendingSignal, PendingSignalType, SessionId, UserMessage};
 
     #[test]
     fn pending_signal_queue_message_round_trip() {
@@ -405,11 +396,5 @@ mod tests {
                 .text,
             "queued"
         );
-    }
-
-    #[test]
-    fn session_meta_default_builds_created_session() {
-        let meta = SessionMeta::default();
-        assert_eq!(meta.status, SessionStatus::Created);
     }
 }

@@ -145,6 +145,7 @@ async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
         budget_result.passed,
         "Budget violations for {scenario_name}:\n{budget_result}"
     );
+    assert_prompt_cache_metrics(scenario_name, &report.score_card);
 
     let event_log = serde_json::to_string(&report.events)?;
     for fact in &expectations.functional.facts_planted {
@@ -157,6 +158,24 @@ async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
     assert_scenario_specific_invariants(scenario_name, &report.events, &report.score_card);
 
     Ok(())
+}
+
+fn assert_prompt_cache_metrics(
+    scenario_name: &str,
+    score_card: &moa_eval::long_conversation::ScoreCard,
+) {
+    assert!(
+        score_card.cache.prefix_stable,
+        "prompt cache prefix drifted in long-conversation scenario {scenario_name}"
+    );
+    assert!(
+        score_card.cache.stable_prefix_bytes > 0,
+        "long-conversation scenario {scenario_name} did not report stable prompt-prefix bytes"
+    );
+    assert!(
+        score_card.cache.input_cached_ratio > 0.0,
+        "long-conversation scenario {scenario_name} did not report any cached input tokens"
+    );
 }
 
 fn write_report_artifacts(

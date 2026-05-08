@@ -1,5 +1,6 @@
 //! Multi-turn transcript runner for long-conversation eval cases.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -240,7 +241,7 @@ fn finish_report(input: FinishReportInput<'_>) -> LongRunReport {
         input.case,
         input.environment.llm_provider.name(),
         input.user_turn_count,
-        &event_payloads,
+        &input.events,
         &execution,
         input.started_at,
     );
@@ -602,10 +603,15 @@ fn build_score_card(
     case: &TestCase,
     provider: &str,
     turn_count: usize,
-    events: &[Event],
+    event_records: &[EventRecord],
     execution: &CollectedExecution,
     timestamp: chrono::DateTime<Utc>,
 ) -> ScoreCard {
+    let events = event_records
+        .iter()
+        .map(|record| record.event.clone())
+        .collect::<Vec<_>>();
+    let cache_observations = cache_observations_from_event_records(event_records);
     let error_count = events
         .iter()
         .filter(|event| matches!(event, Event::Error { .. }))
@@ -614,11 +620,11 @@ fn build_score_card(
         .iter()
         .filter(|event| matches!(event, Event::Checkpoint { .. }))
         .count();
-    let errors_total_pre_compaction = errors_before_first_checkpoint(events);
+    let errors_total_pre_compaction = errors_before_first_checkpoint(&events);
     let errors_preserved =
         metadata_u32(case, "errors_preserved").unwrap_or(errors_total_pre_compaction);
     let errors_preserved_strict = errors_preserved >= errors_total_pre_compaction;
-    let consolidation = count_consolidation_outcomes(events);
+    let consolidation = count_consolidation_outcomes(&events);
     let brain_cost_cents = events
         .iter()
         .filter_map(|event| match event {
@@ -646,6 +652,16 @@ fn build_score_card(
     } else {
         tool_success_count as f64 / execution.metrics.tool_call_count as f64
     };
+    let score_input_tokens = if cache_observations.report_count == 0 {
+        execution.metrics.input_tokens
+    } else {
+        cache_observations.input_tokens
+    };
+    let score_cached_input_tokens = if cache_observations.report_count == 0 {
+        cached_input_tokens
+    } else {
+        cache_observations.cached_input_tokens
+    };
 
     ScoreCard {
         scenario: case.name.clone(),
@@ -665,26 +681,22 @@ fn build_score_card(
             completion_p95_ms: execution.metrics.latency_ms,
         },
         cost: CostScores {
-            input_tokens: execution.metrics.input_tokens,
+            input_tokens: score_input_tokens,
             output_tokens: execution.metrics.output_tokens,
-            cached_input_tokens,
+            cached_input_tokens: score_cached_input_tokens,
             cost_cents: brain_cost_cents,
         },
         cache: CacheScores {
-            input_cached_ratio: if execution.metrics.input_tokens == 0 {
-                0.0
-            } else {
-                cached_input_tokens as f64 / execution.metrics.input_tokens as f64
-            },
-            prefix_stable: true,
-            stable_prefix_bytes: 0,
+            input_cached_ratio: cache_observations.input_cached_ratio(),
+            prefix_stable: cache_observations.prefix_stable,
+            stable_prefix_bytes: cache_observations.stable_prefix_bytes,
         },
         context: ContextScores {
             max_context_tokens: execution.metrics.input_tokens,
             compaction_count,
             compaction_events: u32::try_from(compaction_count).unwrap_or(u32::MAX),
             tokens_at_first_trigger: metadata_u32(case, "tokens_at_first_trigger")
-                .or_else(|| first_checkpoint_input_tokens(events))
+                .or_else(|| first_checkpoint_input_tokens(&events))
                 .unwrap_or(0),
             post_compaction_tokens: metadata_u32(case, "post_compaction_tokens").unwrap_or(0),
             errors_preserved,
@@ -693,7 +705,7 @@ fn build_score_card(
         },
         memory: MemoryScores {
             planted_fact_recall: 0.0,
-            pages_written: count_pages_written(events),
+            pages_written: count_pages_written(&events),
             consolidation_successes: consolidation.successes,
             consolidation_failures: consolidation.failures,
         },
@@ -713,6 +725,70 @@ fn build_score_card(
                 .unwrap_or(0),
             ..SafetyScores::default()
         },
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CacheObservations {
+    report_count: usize,
+    input_tokens: usize,
+    cached_input_tokens: usize,
+    prefix_stable: bool,
+    stable_prefix_bytes: usize,
+}
+
+impl CacheObservations {
+    fn input_cached_ratio(self) -> f64 {
+        if self.input_tokens == 0 {
+            return 0.0;
+        }
+
+        self.cached_input_tokens as f64 / self.input_tokens as f64
+    }
+}
+
+fn cache_observations_from_event_records(records: &[EventRecord]) -> CacheObservations {
+    let mut report_count = 0usize;
+    let mut input_tokens = 0usize;
+    let mut cached_input_tokens = 0usize;
+    let mut prefix_stable = true;
+    let mut stable_prefix_bytes = None::<usize>;
+    let mut reports_by_session = HashMap::<SessionId, usize>::new();
+
+    for record in records {
+        let Event::CacheReport { report } = &record.event else {
+            continue;
+        };
+        report_count += 1;
+        input_tokens += report.input_tokens;
+        cached_input_tokens += report.cached_input_tokens;
+        if report.stable_prefix_bytes > 0 {
+            stable_prefix_bytes = Some(
+                stable_prefix_bytes
+                    .unwrap_or(report.stable_prefix_bytes)
+                    .min(report.stable_prefix_bytes),
+            );
+        }
+
+        let previous_reports = reports_by_session.entry(record.session_id).or_default();
+        if *previous_reports > 0 && !report.stable_prefix_reused {
+            tracing::warn!(
+                session_id = %record.session_id,
+                sequence_num = record.sequence_num,
+                stable_prefix_fingerprint = report.stable_prefix_fingerprint,
+                "long-conversation cache prefix drift detected"
+            );
+            prefix_stable = false;
+        }
+        *previous_reports += 1;
+    }
+
+    CacheObservations {
+        report_count,
+        input_tokens,
+        cached_input_tokens,
+        prefix_stable: report_count > 0 && prefix_stable,
+        stable_prefix_bytes: stable_prefix_bytes.unwrap_or(0),
     }
 }
 
@@ -795,4 +871,107 @@ async fn cleanup_workspace(path: &Path) -> Result<()> {
             })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use moa_core::{CacheReport, EventType, ModelId};
+
+    use super::*;
+    use crate::EvalMetrics;
+
+    fn cache_report_record(
+        session_id: SessionId,
+        sequence_num: u64,
+        stable_prefix_reused: bool,
+        stable_prefix_bytes: usize,
+        input_tokens: usize,
+        cached_input_tokens: usize,
+    ) -> EventRecord {
+        let event = Event::CacheReport {
+            report: CacheReport {
+                provider: "recorded".to_string(),
+                model: ModelId::new("recorded-scripted"),
+                message_count: 3,
+                tool_count: 1,
+                cache_breakpoints: vec![2],
+                tool_tokens_estimate: 100,
+                stable_message_tokens_estimate: 200,
+                stable_total_tokens_estimate: 300,
+                total_tokens_estimate: 500,
+                dynamic_tokens_estimate: 200,
+                cache_ratio_estimate: 0.6,
+                stable_prefix_bytes,
+                stable_prefix_fingerprint: 42,
+                full_request_fingerprint: sequence_num,
+                stable_prefix_reused,
+                input_tokens,
+                cached_input_tokens,
+                output_tokens: 8,
+                cached_vs_stable_estimate_ratio: 0.0,
+            },
+        };
+        EventRecord {
+            id: Uuid::now_v7(),
+            session_id,
+            sequence_num,
+            event_type: EventType::CacheReport,
+            event,
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        }
+    }
+
+    #[test]
+    fn score_card_uses_cache_reports_to_detect_long_conversation_prefix_drift() {
+        let session_id = SessionId::new();
+        let records = vec![
+            cache_report_record(session_id, 1, false, 512, 100, 0),
+            cache_report_record(session_id, 2, false, 512, 100, 40),
+        ];
+        let case = TestCase {
+            name: "cache-drift".to_string(),
+            ..TestCase::default()
+        };
+        let execution = CollectedExecution {
+            metrics: EvalMetrics {
+                input_tokens: 999,
+                output_tokens: 12,
+                ..EvalMetrics::default()
+            },
+            ..CollectedExecution::default()
+        };
+
+        let score_card = build_score_card(&case, "recorded", 2, &records, &execution, Utc::now());
+
+        assert!(
+            !score_card.cache.prefix_stable,
+            "second provider request in the same session did not reuse the stable prefix"
+        );
+        assert_eq!(score_card.cache.stable_prefix_bytes, 512);
+        assert_eq!(score_card.cost.input_tokens, 200);
+        assert_eq!(score_card.cost.cached_input_tokens, 40);
+        assert_eq!(score_card.cache.input_cached_ratio, 0.2);
+    }
+
+    #[test]
+    fn cache_observations_treat_each_session_first_request_as_cold_start() {
+        let primary = SessionId::new();
+        let secondary = SessionId::new();
+        let records = vec![
+            cache_report_record(primary, 1, false, 700, 100, 0),
+            cache_report_record(secondary, 1, false, 600, 100, 0),
+            cache_report_record(primary, 2, true, 700, 100, 60),
+            cache_report_record(secondary, 2, true, 600, 100, 60),
+        ];
+
+        let observations = cache_observations_from_event_records(&records);
+
+        assert!(observations.prefix_stable);
+        assert_eq!(observations.stable_prefix_bytes, 600);
+        assert_eq!(observations.input_cached_ratio(), 0.3);
+    }
 }

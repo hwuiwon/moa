@@ -336,11 +336,6 @@ mod tests {
     }
 
     #[test]
-    fn format_skill_manifest_is_empty_without_selected_skills() {
-        assert!(format_skill_manifest(&[]).is_empty());
-    }
-
-    #[test]
     fn ranking_prefers_keyword_overlap_then_deterministic_name_tie_breaks() {
         let skills = vec![
             test_skill("alpha-auth", "Handle auth failures", 5, 0),

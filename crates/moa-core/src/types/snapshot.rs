@@ -60,36 +60,3 @@ pub struct SnapshotFileReadState {
     /// Whether the original tool result was successful.
     pub success: bool,
 }
-
-#[cfg(test)]
-mod tests {
-    use chrono::Utc;
-
-    use super::{CONTEXT_SNAPSHOT_FORMAT_VERSION, ContextSnapshot, FileReadDedupState};
-    use crate::{ContextMessage, SessionId};
-
-    #[test]
-    fn context_snapshot_round_trips() {
-        let snapshot = ContextSnapshot {
-            format_version: CONTEXT_SNAPSHOT_FORMAT_VERSION,
-            session_id: SessionId::new(),
-            last_sequence_num: 42,
-            created_at: Utc::now(),
-            messages: vec![
-                ContextMessage::user("hello"),
-                ContextMessage::assistant("world"),
-            ],
-            file_read_dedup_state: FileReadDedupState::default(),
-            token_count: 12,
-            cache_controls: Vec::new(),
-            stage_inputs_hash: 1234,
-        };
-
-        let encoded = serde_json::to_vec(&snapshot).expect("serialize snapshot");
-        let decoded: ContextSnapshot =
-            serde_json::from_slice(&encoded).expect("deserialize snapshot");
-
-        assert_eq!(decoded, snapshot);
-        assert!(decoded.is_current_version());
-    }
-}

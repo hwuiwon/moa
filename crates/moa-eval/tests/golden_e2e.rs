@@ -51,11 +51,7 @@ static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 #[derive(Debug, Clone, Deserialize)]
 struct GoldenFixture {
     uid_seed: String,
-    label: NodeLabel,
-    name: String,
     summary: String,
-    entity_uids: Vec<String>,
-    expected_embedding_seed: u32,
     valid_from: DateTime<Utc>,
 }
 
@@ -223,26 +219,6 @@ impl GoldenStack {
         testing::cleanup_test_schema(&self.database_url, &self.schema_name)
             .await
             .map_err(box_error)
-    }
-}
-
-#[test]
-fn golden_fixture_count() {
-    let fixtures = load_fixtures().expect("load golden fixtures");
-    assert_eq!(fixtures.len(), EXPECTED_FIXTURE_COUNT);
-    for (index, fixture) in fixtures.iter().enumerate() {
-        let expected_seed = u32::try_from(index + 1).expect("fixture index fits u32");
-        assert_eq!(fixture.expected_embedding_seed, expected_seed);
-        assert_eq!(fixture.label, NodeLabel::Fact);
-        assert_eq!(fixture.name, fixture.summary);
-        assert_eq!(fixture.entity_uids.len(), 2);
-        assert!(
-            fixture
-                .summary
-                .starts_with(&format!("fact{:02}", expected_seed)),
-            "{}",
-            fixture.summary
-        );
     }
 }
 

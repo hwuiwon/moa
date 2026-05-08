@@ -119,16 +119,3 @@ pub enum HandStatus {
     /// Failed.
     Failed,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::SandboxTier;
-
-    #[test]
-    fn all_sandbox_tiers_exist() {
-        let _ = SandboxTier::None;
-        let _ = SandboxTier::Container;
-        let _ = SandboxTier::MicroVM;
-        let _ = SandboxTier::Local;
-    }
-}

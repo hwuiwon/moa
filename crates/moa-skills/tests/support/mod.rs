@@ -409,3 +409,5 @@ pub fn user_scope(workspace_id: &WorkspaceId, user_id: &UserId) -> MemoryScope {
         user_id: user_id.clone(),
     }
 }
+
+pub mod skill_graph;
