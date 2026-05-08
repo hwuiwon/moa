@@ -30,7 +30,7 @@ expression: value
     },
     "temperature": 0.0,
     "thinkingConfig": {
-      "thinkingBudget": 4096
+      "thinkingLevel": "medium"
     }
   },
   "safetySettings": [

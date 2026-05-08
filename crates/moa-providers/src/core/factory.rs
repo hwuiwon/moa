@@ -11,7 +11,7 @@ const PROVIDER_OPENAI: &str = "openai";
 const PROVIDER_GOOGLE: &str = "google";
 const REWRITER_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
 const REWRITER_OPENAI_MODEL: &str = "gpt-5.4-mini";
-const REWRITER_GOOGLE_MODEL: &str = "gemini-3.1-flash-lite-preview";
+const REWRITER_GOOGLE_MODEL: &str = "gemini-3-flash-preview";
 
 /// Resolved provider/model choice used to construct one provider instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,17 +199,20 @@ mod tests {
     #[test]
     fn infers_google_for_gemini_models() {
         let selection =
-            resolve_provider_selection(&MoaConfig::default(), Some("gemini-2.5-flash")).unwrap();
+            resolve_provider_selection(&MoaConfig::default(), Some("gemini-3-flash-preview"))
+                .unwrap();
         assert_eq!(selection.provider_name, PROVIDER_GOOGLE);
     }
 
     #[test]
     fn explicit_provider_prefix_overrides_inference() {
-        let selection =
-            resolve_provider_selection(&MoaConfig::default(), Some("google:gemini-2.5-flash"))
-                .unwrap();
+        let selection = resolve_provider_selection(
+            &MoaConfig::default(),
+            Some("google:gemini-3-flash-preview"),
+        )
+        .unwrap();
         assert_eq!(selection.provider_name, PROVIDER_GOOGLE);
-        assert_eq!(selection.model_id, "gemini-2.5-flash");
+        assert_eq!(selection.model_id, "gemini-3-flash-preview");
     }
 
     #[test]
@@ -230,10 +233,7 @@ mod tests {
         assert_eq!(default_rewriter_model(&config), "claude-haiku-4-5");
 
         config.general.default_provider = "google".to_string();
-        assert_eq!(
-            default_rewriter_model(&config),
-            "gemini-3.1-flash-lite-preview"
-        );
+        assert_eq!(default_rewriter_model(&config), "gemini-3-flash-preview");
 
         config.general.default_provider = "openai".to_string();
         assert_eq!(default_rewriter_model(&config), "gpt-5.4-mini");

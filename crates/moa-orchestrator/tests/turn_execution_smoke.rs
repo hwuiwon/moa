@@ -37,7 +37,7 @@ fn live_model() -> &'static str {
         return "gpt-5.4-mini";
     }
     if std::env::var("GOOGLE_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
-        return "gemini-2.5-flash";
+        return "gemini-3-flash-preview";
     }
     "gpt-5.4-mini"
 }
@@ -144,6 +144,7 @@ async fn await_phase(
 }
 
 #[tokio::test]
+#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
 async fn cancel_after_run_dispatch_short_circuits() -> Result<()> {
     // Pins: a cancel after run dispatch moves the turn to Cancelled.
     let client = reqwest::Client::new();
@@ -160,6 +161,7 @@ async fn cancel_after_run_dispatch_short_circuits() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
 async fn cancel_before_init_short_circuits_via_self_resolve() -> Result<()> {
     // Pins: a cancel recorded before run starts is observed by the body after awakeable publish.
     let client = reqwest::Client::new();

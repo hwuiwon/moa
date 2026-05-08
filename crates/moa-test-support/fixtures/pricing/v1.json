@@ -36,15 +36,20 @@
       }
     },
     "gemini": {
-      "gemini-2.5-pro": {
-        "input_per_mtok_cents": 125,
-        "output_per_mtok_cents": 1000,
-        "cached_input_per_mtok_cents": 13
+      "gemini-3.1-pro-preview": {
+        "input_per_mtok_cents": 200,
+        "output_per_mtok_cents": 1200,
+        "cached_input_per_mtok_cents": 20
       },
-      "gemini-2.5-flash": {
-        "input_per_mtok_cents": 30,
-        "output_per_mtok_cents": 250,
-        "cached_input_per_mtok_cents": 3
+      "gemini-3-pro-preview": {
+        "input_per_mtok_cents": 200,
+        "output_per_mtok_cents": 1200,
+        "cached_input_per_mtok_cents": 20
+      },
+      "gemini-3-flash-preview": {
+        "input_per_mtok_cents": 50,
+        "output_per_mtok_cents": 300,
+        "cached_input_per_mtok_cents": 5
       }
     }
   }

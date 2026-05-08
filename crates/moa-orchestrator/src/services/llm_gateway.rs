@@ -26,10 +26,10 @@ use moa_core::restate_observability::annotate_restate_handler_span;
 
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4";
-const DEFAULT_GOOGLE_MODEL: &str = "gemini-3.1-pro-preview";
+const DEFAULT_GOOGLE_MODEL: &str = "gemini-3-flash-preview";
 const REWRITER_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
 const REWRITER_OPENAI_MODEL: &str = "gpt-5.4-mini";
-const REWRITER_GOOGLE_MODEL: &str = "gemini-3.1-flash-lite-preview";
+const REWRITER_GOOGLE_MODEL: &str = "gemini-3-flash-preview";
 
 /// Restate service surface for journaled LLM completions.
 #[restate_sdk::service]
@@ -797,39 +797,25 @@ fn pricing_for_model(model: &str) -> TokenPricing {
             cached_input_per_mtok: Some(0.005),
         };
     }
-    if model.starts_with("gemini-3.1-pro-preview") {
+    if model.starts_with("gemini-3-pro-preview") || model.starts_with("gemini-3.1-pro") {
         return TokenPricing {
             input_per_mtok: 2.0,
-            output_per_mtok: 8.0,
+            output_per_mtok: 12.0,
             cached_input_per_mtok: Some(0.2),
         };
     }
-    if model.starts_with("gemini-3.1-flash-lite-preview") {
+    if model.starts_with("gemini-3.1-flash-lite") {
         return TokenPricing {
             input_per_mtok: 0.25,
-            output_per_mtok: 1.0,
+            output_per_mtok: 1.5,
             cached_input_per_mtok: Some(0.025),
         };
     }
     if model.starts_with("gemini-3-flash-preview") {
         return TokenPricing {
             input_per_mtok: 0.5,
-            output_per_mtok: 2.0,
+            output_per_mtok: 3.0,
             cached_input_per_mtok: Some(0.05),
-        };
-    }
-    if model.starts_with("gemini-2.5-pro") {
-        return TokenPricing {
-            input_per_mtok: 1.25,
-            output_per_mtok: 10.0,
-            cached_input_per_mtok: Some(0.125),
-        };
-    }
-    if model.starts_with("gemini-2.5-flash") {
-        return TokenPricing {
-            input_per_mtok: 0.3,
-            output_per_mtok: 2.5,
-            cached_input_per_mtok: Some(0.03),
         };
     }
 

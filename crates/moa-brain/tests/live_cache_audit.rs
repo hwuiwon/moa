@@ -739,7 +739,7 @@ fn available_live_cache_provider_configs(repo_root: &Path) -> Vec<(String, MoaCo
         configs.push(("openai".to_string(), config));
     }
     if env::var("GOOGLE_API_KEY").is_ok() {
-        let mut config = live_cache_config("google", "gemini-2.5-flash", repo_root);
+        let mut config = live_cache_config("google", "gemini-3-flash-preview", repo_root);
         config.providers.google.api_key_env = "GOOGLE_API_KEY".to_string();
         configs.push(("google".to_string(), config));
     }

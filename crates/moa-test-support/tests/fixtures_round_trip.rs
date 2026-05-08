@@ -17,8 +17,9 @@ fn pricing_table_v1_loads_with_all_required_provider_model_pairs() {
         ("anthropic", "claude-haiku-4"),
         ("openai", "gpt-4.1"),
         ("openai", "gpt-4.1-mini"),
-        ("gemini", "gemini-2.5-pro"),
-        ("gemini", "gemini-2.5-flash"),
+        ("gemini", "gemini-3.1-pro-preview"),
+        ("gemini", "gemini-3-pro-preview"),
+        ("gemini", "gemini-3-flash-preview"),
     ] {
         table
             .get(provider, model)

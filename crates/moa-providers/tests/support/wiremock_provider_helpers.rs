@@ -11,7 +11,7 @@ pub const ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 /// Canonical OpenAI model used by offline provider tests.
 pub const OPENAI_MODEL: &str = "gpt-5.4";
 /// Canonical Gemini model used by offline provider tests.
-pub const GEMINI_MODEL: &str = "gemini-2.5-flash";
+pub const GEMINI_MODEL: &str = "gemini-3-flash-preview";
 
 /// Builds a minimal completion request with deterministic output controls.
 pub fn minimal_request(prompt: impl Into<String>) -> CompletionRequest {

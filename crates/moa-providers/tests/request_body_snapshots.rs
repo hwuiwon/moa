@@ -16,7 +16,7 @@ const TEMPERATURE: f32 = 0.2;
 
 const ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 const OPENAI_MODEL: &str = "gpt-5.4-mini";
-const GEMINI_MODEL: &str = "gemini-2.5-flash";
+const GEMINI_MODEL: &str = "gemini-3-flash-preview";
 
 const FILE_READ_TOOL_NAME: &str = "file_read";
 const FILE_READ_TOOL_DESCRIPTION: &str = "Read a UTF-8 text file from the workspace.";

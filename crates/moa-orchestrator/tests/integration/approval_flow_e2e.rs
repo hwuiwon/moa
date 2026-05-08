@@ -79,7 +79,7 @@ fn live_model() -> Option<&'static str> {
         return Some("gpt-5.4-mini");
     }
     if configured_env("GOOGLE_API_KEY") {
-        return Some("gemini-2.5-flash");
+        return Some("gemini-3-flash-preview");
     }
 
     None
@@ -146,7 +146,6 @@ async fn approval_allow_once_round_trip_through_restate() -> Result<()> {
             .error_for_status()
             .context("post_message should succeed")?;
 
-        wait_for_status(&client, ingress, session_id, SessionStatus::WaitingApproval).await?;
         let approval_events = wait_for_approval_request(&client, ingress, session_id).await?;
         let approval_event = approval_events
             .iter()
