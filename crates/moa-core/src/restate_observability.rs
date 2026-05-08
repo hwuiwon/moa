@@ -3,7 +3,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use moa_core::{
+use crate::{
     SessionId, SessionMeta, TraceContext, TurnLatencySnapshot, TurnReplaySnapshot,
     current_turn_root_span,
 };
@@ -11,14 +11,14 @@ use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceId, TraceState}
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Annotates the current tracing span with the Restate service and handler names.
-pub(crate) fn annotate_restate_handler_span(service: &str, handler: &str) {
+pub fn annotate_restate_handler_span(service: &str, handler: &str) {
     let span = tracing::Span::current();
     span.set_attribute("restate.service", service.to_string());
     span.set_attribute("restate.handler", handler.to_string());
 }
 
 /// Applies stable session/user/workspace tracing attributes to the provided span.
-pub(crate) fn apply_session_trace(
+pub fn apply_session_trace(
     span: &tracing::Span,
     meta: &SessionMeta,
     prompt: Option<&str>,
@@ -30,7 +30,7 @@ pub(crate) fn apply_session_trace(
 }
 
 /// Adds a deterministic session-root link so all turns can be grouped by session in Tempo.
-pub(crate) fn add_session_trace_link(span: &tracing::Span, session_id: SessionId) {
+pub fn add_session_trace_link(span: &tracing::Span, session_id: SessionId) {
     span.add_link(synthetic_session_span_context(session_id));
 }
 

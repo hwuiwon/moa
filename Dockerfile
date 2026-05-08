@@ -10,6 +10,8 @@ FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=builder /build/target/release/moa-orchestrator-bin /usr/local/bin/moa-orchestrator
 COPY --from=builder /build/crates/moa-session/migrations /migrations
 
+EXPOSE 9080 9081
+
 USER nonroot
 ENTRYPOINT ["/usr/local/bin/moa-orchestrator"]
 CMD ["--port", "9080", "--health-port", "9081"]

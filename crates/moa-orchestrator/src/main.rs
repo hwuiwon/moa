@@ -17,6 +17,8 @@ use moa_hands::ToolRouter;
 use moa_orchestrator::{
     OrchestratorCtx,
     config::OrchestratorConfig,
+    lineage::build_lineage_sink,
+    objects::cron_job::{CronJob, CronJobImpl},
     objects::session::{Session, SessionImpl},
     objects::sub_agent::{SubAgent, SubAgentImpl},
     objects::workspace::{WorkspaceImpl, WorkspaceObject},
@@ -50,6 +52,7 @@ const ADMIN_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
 const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Consolidate",
+    "CronJob",
     "Health",
     "IntentManager",
     "IntentDiscovery",
@@ -103,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
             .with_rule_store(session_store.clone())
             .with_session_store(session_store.clone()),
     );
+    let lineage = build_lineage_sink(moa_config.as_ref(), pool.clone()).await?;
     let ctx = Arc::new(OrchestratorCtx {
         config: moa_config.clone(),
         session_store: session_store.clone(),
@@ -111,6 +115,8 @@ async fn main() -> anyhow::Result<()> {
         embedding_provider: embedding_provider.clone(),
         tool_router: tool_router.clone(),
         tool_schemas: Arc::new(tool_router.tool_schemas()),
+        lineage: lineage.handle.clone(),
+        lineage_writer: lineage.writer.clone(),
     });
     OrchestratorCtx::install(ctx).expect("install orchestrator ctx");
     let _ = memory_ingest::install_runtime_with_pool(pool.clone());
@@ -130,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(IngestionVOImpl.serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
         .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
+        .bind(CronJobImpl.serve())
         .bind(SessionImpl.serve())
         .bind(SubAgentImpl.serve())
         .bind(WorkspaceImpl.serve())
@@ -175,6 +182,18 @@ async fn main() -> anyhow::Result<()> {
             signal?;
             tracing::info!("shutdown signal received, draining");
             readiness.store(false, Ordering::Release);
+
+            if let Some(writer) = OrchestratorCtx::current().lineage_writer.clone() {
+                tracing::info!("draining lineage writer");
+                match writer.shutdown().await {
+                    Ok(stats) => tracing::info!(
+                        written = stats.written,
+                        journal_depth = stats.journal_depth,
+                        "lineage writer drained"
+                    ),
+                    Err(error) => tracing::warn!(?error, "lineage writer drain failed"),
+                }
+            }
 
             if probe_state.deregister_on_shutdown() {
                 best_effort_deregister(&probe_state).await;
@@ -472,6 +491,7 @@ mod tests {
     fn registration_check_requires_all_expected_services() {
         let deployments = vec![deployment_with_services(&[
             "Consolidate",
+            "CronJob",
             "Health",
             "IntentManager",
             "IntentDiscovery",

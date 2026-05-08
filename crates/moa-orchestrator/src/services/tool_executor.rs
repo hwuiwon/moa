@@ -14,10 +14,10 @@ use moa_hands::ToolRouter;
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
-use crate::observability::annotate_restate_handler_span;
 use crate::services::session_store::{
     AppendEventRequest, GetEventsRequest, RestateSessionStoreClient,
 };
+use moa_core::restate_observability::annotate_restate_handler_span;
 
 /// Restate service surface for durable tool execution.
 #[restate_sdk::service]

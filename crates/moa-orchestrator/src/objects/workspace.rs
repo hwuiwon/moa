@@ -10,9 +10,9 @@ use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
-use crate::observability::annotate_restate_handler_span;
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar};
 use crate::workflows::consolidate::{ConsolidateClient, ConsolidateReport, ConsolidateRequest};
+use moa_core::restate_observability::annotate_restate_handler_span;
 
 const K_CONFIG: &str = "config";
 const K_APPROVAL_POLICY: &str = "approval_policy";

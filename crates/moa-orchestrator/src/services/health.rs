@@ -2,13 +2,16 @@
 
 use restate_sdk::prelude::*;
 
-use crate::observability::annotate_restate_handler_span;
+use moa_core::restate_observability::annotate_restate_handler_span;
 
 const RESTATE_SDK_VERSION: &str = "0.8";
 
 /// Health and version RPCs exposed through Restate.
 #[restate_sdk::service]
 pub trait Health {
+    /// Returns a fixed readiness response.
+    async fn check() -> Result<String, HandlerError>;
+
     /// Returns a fixed liveness response.
     async fn ping() -> Result<String, HandlerError>;
 
@@ -42,6 +45,12 @@ impl VersionInfo {
 pub struct HealthImpl;
 
 impl Health for HealthImpl {
+    #[tracing::instrument(skip(self, _ctx))]
+    async fn check(&self, _ctx: Context<'_>) -> Result<String, HandlerError> {
+        annotate_restate_handler_span("Health", "check");
+        Ok("ok".to_string())
+    }
+
     #[tracing::instrument(skip(self, _ctx))]
     async fn ping(&self, _ctx: Context<'_>) -> Result<String, HandlerError> {
         annotate_restate_handler_span("Health", "ping");

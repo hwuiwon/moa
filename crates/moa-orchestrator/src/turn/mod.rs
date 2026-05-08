@@ -10,8 +10,10 @@ pub(crate) mod approval;
 pub(crate) mod runner;
 pub(crate) mod util;
 
-// The canonical home for span helpers is `crate::observability`; the turn
+// The canonical home for span helpers is `moa_core::restate_observability`; the turn
 // module re-exports them for compact internal imports.
-pub(crate) use crate::observability::{event_persist_span, llm_call_span, tool_dispatch_span};
 pub(crate) use adapter::AgentAdapter;
+pub(crate) use moa_core::restate_observability::{
+    event_persist_span, llm_call_span, tool_dispatch_span,
+};
 pub(crate) use runner::TurnRunner;

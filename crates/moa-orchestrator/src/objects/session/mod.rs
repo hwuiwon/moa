@@ -22,7 +22,6 @@ use tracing::Instrument;
 use crate::brain_bridge::{PreparedTurnRequest, prepare_turn_request};
 use crate::ctx::OrchestratorCtx;
 use crate::objects::sub_agent::SubAgentClient;
-use crate::observability::{annotate_restate_handler_span, event_persist_span};
 use crate::services::session_store::{
     AppendEventRequest, RestateSessionStoreClient, UpdateStatusRequest,
 };
@@ -36,6 +35,7 @@ use crate::turn::approval::serialize_awakeable_decision;
 use crate::turn::util::summarize_response_text;
 use crate::turn::{AgentAdapter, TurnRunner};
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_vec};
+use moa_core::restate_observability::{annotate_restate_handler_span, event_persist_span};
 
 mod adapter;
 mod handlers;

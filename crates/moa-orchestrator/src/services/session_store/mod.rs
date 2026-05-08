@@ -15,7 +15,7 @@ use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
 
 use crate::objects::session::SessionClient;
-use crate::observability::annotate_restate_handler_span;
+use moa_core::restate_observability::annotate_restate_handler_span;
 
 mod handlers;
 mod inner;

@@ -6,8 +6,8 @@
 //!
 //! The Restate-based multi-tenant orchestrator lives in `moa-orchestrator`
 //! and does not share handler code with this crate, only the session
-//! lifecycle helpers re-exported from `moa_orchestrator::session_engine`
-//! and the tracing helpers in `moa_orchestrator::observability`.
+//! lifecycle helpers in `moa_core::session_engine` and the tracing helpers
+//! in `moa_core::restate_observability`.
 
 use std::collections::HashMap;
 use std::env;
@@ -26,6 +26,9 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
     run_streamed_turn_with_signals_stepwise_and_lineage,
 };
+use moa_core::restate_observability::{
+    emit_turn_latency_summary, emit_turn_replay_summary, event_persist_span, session_turn_span,
+};
 use moa_core::{
     BrainOrchestrator, BranchManager, BufferedUserMessage, CountedSessionStore, CronHandle,
     CronSpec, Event, EventRange, EventRecord, EventStream, MoaConfig, MoaError, ModelTask,
@@ -33,14 +36,10 @@ use moa_core::{
     SessionMeta, SessionSignal, SessionStatus, SessionStore, SessionSummary, SessionTaskMonitor,
     StartSessionRequest, TurnLatencyCounters, TurnReplayCounters, UserId, UserMessage, WorkspaceId,
     record_turn_event_persist_duration, record_turn_latency, scope_turn_latency_counters,
-    scope_turn_replay_counters,
+    scope_turn_replay_counters, session_engine::session_requires_processing,
 };
 use moa_hands::ToolRouter;
 use moa_lineage_sink::{MpscSink, MpscSinkConfig, ensure_schema};
-use moa_orchestrator::observability::{
-    emit_turn_latency_summary, emit_turn_replay_summary, event_persist_span, session_turn_span,
-};
-use moa_orchestrator::session_engine::session_requires_processing;
 use moa_providers::{ModelRouter, resolve_provider_selection};
 use moa_session::{
     NeonBranchManager, PostgresSessionStore, SessionEventStream, create_session_store,

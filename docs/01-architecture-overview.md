@@ -85,7 +85,7 @@ The local and cloud runtimes share these seams. They differ in how turns are sch
 
 `moa-orchestrator` exposes Restate handlers:
 
-- Virtual objects: `Session`, `SubAgent`, `Workspace`, `IngestionVO`
+- Virtual objects: `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO`
 - Services: `Health`, `SessionStore`, `IntentManager`, `LLMGateway`, `ToolExecutor`, `WorkspaceStore`
 - Workflows: `Consolidate`, `IntentDiscovery`
 

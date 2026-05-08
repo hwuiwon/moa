@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::ctx::OrchestratorCtx;
 use crate::objects::workspace::WorkspaceObjectClient;
-use crate::observability::annotate_restate_handler_span;
+use moa_core::restate_observability::annotate_restate_handler_span;
 
 /// Workflow input for one workspace/date consolidation run.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

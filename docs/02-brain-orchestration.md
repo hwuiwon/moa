@@ -11,6 +11,7 @@ _Restate orchestration, local runtime mode, turn execution, and sub-agents._
 - Shared turn helpers: `crates/moa-orchestrator/src/turn/`
 - Session VO: `crates/moa-orchestrator/src/objects/session.rs`
 - Sub-agent VO: `crates/moa-orchestrator/src/objects/sub_agent.rs`
+- CronJob VO: `crates/moa-orchestrator/src/objects/cron_job.rs`
 - Pipeline assembly: `crates/moa-brain/src/pipeline/mod.rs`
 
 ## Cloud Runtime
@@ -28,7 +29,7 @@ Bound surfaces:
 
 | Restate primitive | Handlers |
 |---|---|
-| Virtual Object | `Session`, `SubAgent`, `Workspace` |
+| Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob` |
 | Service | `Health`, `SessionStore`, `IntentManager`, `LLMGateway`, `ToolExecutor`, `WorkspaceStore` |
 | Workflow | `Consolidate`, `IntentDiscovery` |
 
@@ -60,6 +61,15 @@ client sends message
 9. Score idle, cancelled, or completed segments and append `learning_log` entries.
 
 The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries.
+
+### Lineage Sink Selection
+
+`MOA_LINEAGE_SINK` controls how the cloud orchestrator emits lineage events:
+
+- unset / `null` / `otel`: drops events at the sink boundary; lineage attributes are still attached to OpenTelemetry spans by the `restate_observability` helpers and are exported by the configured OTel exporter. This is the production default.
+- `postgres`: writes events to the `analytics.turn_lineage` and related lineage tables in the same Postgres database the orchestrator already uses. This is recommended for local development so lineage can be queried with `psql`.
+
+The Postgres sink runs an in-memory queue (`MpscSink`) and a background writer that drains on shutdown. Maximum queue depth and batch size come from `config.observability.lineage` in `MoaConfig`.
 
 ## Approvals
 
@@ -98,6 +108,10 @@ Only one-shot background jobs use workflows:
 - `IntentDiscovery`: one tenant intent-discovery pass over recent undefined task segments.
 
 These are workflow-shaped because rerunning the same logical job should be explicit and observable.
+
+Reusable scheduled work is anchored by the `CronJob` virtual object. Each job
+key stores its cron expression, timezone, target service handler, and a version
+counter that invalidates stale delayed ticks after reconfiguration.
 
 ## Local Runtime
 
