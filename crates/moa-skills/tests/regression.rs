@@ -1,5 +1,7 @@
 //! Integration tests for skill regression decisions and rollback behavior.
 
+#![recursion_limit = "256"]
+
 mod support;
 
 use moa_skills::improver::{ImprovementResult, improve_skill_with_learning};

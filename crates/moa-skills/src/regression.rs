@@ -327,6 +327,7 @@ fn build_generated_suite(skill: &SkillDocument, events: &[EventRecord]) -> TestS
             timeout_seconds: Some(DEFAULT_SUITE_TIMEOUT_SECONDS),
             tags: vec!["skill".to_string(), "auto-generated".to_string()],
             metadata: std::collections::HashMap::new(),
+            ..TestCase::default()
         }],
         default_timeout_seconds: DEFAULT_SUITE_TIMEOUT_SECONDS,
         tags: vec!["skill".to_string(), skill.frontmatter.name.clone()],

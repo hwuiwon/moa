@@ -1,5 +1,7 @@
 //! Integration tests for successful-session skill distillation.
 
+#![recursion_limit = "256"]
+
 mod support;
 
 use moa_core::MoaConfig;

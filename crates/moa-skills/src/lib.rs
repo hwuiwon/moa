@@ -1,5 +1,7 @@
 //! Skill parsing, registry, distillation, and improvement support.
 
+#![recursion_limit = "256"]
+
 pub mod distiller;
 pub mod format;
 pub mod improver;

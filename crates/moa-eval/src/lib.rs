@@ -7,6 +7,7 @@ pub mod evaluator;
 pub mod evaluators;
 pub mod golden;
 pub mod loader;
+pub mod long_conversation;
 pub mod pentest;
 pub mod plan;
 pub mod replay;
@@ -38,6 +39,7 @@ pub use reporters::{ReporterOptions, TerminalReporter, build_reporters};
 pub use results::{EvalMetrics, EvalResult, EvalScore, EvalStatus, ScoreValue, TrajectoryStep};
 pub use setup::{AgentEnvironment, build_agent_environment};
 pub use types::{
-    AgentConfig, ExpectedOutput, InstructionOverride, MemoryOverride, PermissionOverride,
-    SkillOverride, TestCase, TestSuite, ToolOverride,
+    AgentConfig, ExpectedOutput, InstructionOverride, LongConversationMode, LongTestCase,
+    MemoryOverride, PermissionOverride, SkillOverride, TestCase, TestCaseKind, TestSuite,
+    ToolOverride,
 };
