@@ -9,6 +9,11 @@ pub mod restate_register;
 pub mod services;
 mod sub_agent_dispatch;
 pub mod turn;
+pub mod types {
+    //! Shared wire DTOs re-exported by the orchestrator crate.
+
+    pub use moa_core::wire::*;
+}
 pub mod vo;
 pub mod workflows;
 

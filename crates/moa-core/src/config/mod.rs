@@ -6,6 +6,7 @@ mod gateway;
 mod lineage;
 mod loader;
 mod memory;
+mod orchestrator;
 mod providers;
 mod sandbox;
 mod security;
@@ -24,6 +25,7 @@ pub use memory::{
     CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryVectorConfig,
     VectorEmbedderConfig,
 };
+pub use orchestrator::OrchestratorConfig;
 pub use providers::{GeneralConfig, ModelsConfig, ProviderCredentialConfig, ProvidersConfig};
 pub use sandbox::{
     CloudConfig, CloudFlyioConfig, CloudHandsConfig, LocalConfig, McpCredentialConfig,
@@ -66,6 +68,8 @@ pub struct MoaConfig {
     pub compaction: CompactionConfig,
     /// Local daemon settings.
     pub daemon: DaemonConfig,
+    /// Restate-backed orchestrator endpoint settings.
+    pub orchestrator: OrchestratorConfig,
     /// Observability and OTLP export settings.
     pub observability: ObservabilityConfig,
     /// Prometheus metrics export settings.
@@ -148,10 +152,13 @@ impl MoaConfig {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::sync::Mutex;
 
     use tempfile::NamedTempFile;
 
     use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn config_loads_from_toml_string() {
@@ -237,6 +244,26 @@ mod tests {
             config.mcp_servers[1].credentials,
             Some(McpCredentialConfig::Bearer { .. })
         ));
+    }
+
+    #[test]
+    fn orchestrator_endpoint_overridable_via_env() {
+        // Pins: MOA__ORCHESTRATOR__ENDPOINT maps onto the thin-client endpoint.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let file = NamedTempFile::new().expect("config temp file");
+        unsafe {
+            std::env::set_var("MOA__ORCHESTRATOR__ENDPOINT", "http://example:1234");
+        }
+
+        let config = MoaConfig::load_from_path(file.path()).expect("load config with env");
+
+        unsafe {
+            std::env::remove_var("MOA__ORCHESTRATOR__ENDPOINT");
+        }
+        assert_eq!(
+            config.orchestrator.endpoint.as_deref(),
+            Some("http://example:1234")
+        );
     }
 
     #[test]

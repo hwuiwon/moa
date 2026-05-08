@@ -1,0 +1,23 @@
+[package]
+name = "moa-orchestrator-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+integration = []
+
+[dependencies]
+chrono.workspace = true
+moa-core = { path = "../moa-core" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url = "2.5"
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
+
+[dev-dependencies]
+mockito = "1"

@@ -10,8 +10,7 @@ Clients
         |
         v
 Runtime boundary
-  Local: `moa-orchestrator-local` Tokio tasks
-  Cloud: `moa-orchestrator` Restate handler service
+  Runtime: `moa-orchestrator` Restate handler service
         |
         v
 Brain and execution
@@ -91,16 +90,18 @@ The local and cloud runtimes share these seams. They differ in how turns are sch
 
 `Session` is the durable actor for one session key. It queues messages, calls `run_turn`, tracks the active task segment, records tool/skill usage, scores resolution, and writes learning entries. `SubAgent` is the same actor pattern for delegated work with depth and budget limits.
 
-### Local
+### Thin Clients
 
-`moa-orchestrator-local` runs the same brain loop in Tokio tasks with broadcast channels for observation. It is used by `moa-cli` and `moa-runtime`. It still uses Postgres for session storage and the same graph memory and retrieval infrastructure.
+`moa-cli` and `moa-runtime` call the configured Restate ingress through
+`moa-orchestrator-client`. The legacy `moa-orchestrator-local` crate remains in
+the workspace for migration-only consumers, but new client paths do not embed it.
 
 ## Turn Data Flow
 
 ```text
 User message
   -> SessionStore emits `UserMessage`
-  -> Session VO or local task prepares a turn
+  -> Session VO prepares a turn
   -> Context pipeline runs
        1 identity
        2 instructions
@@ -206,7 +207,7 @@ and replay resistance on the verify path.
 | `moa-orchestrator-local` | Tokio-task local orchestrator |
 | `moa-gateway` | Messaging adapters and renderers |
 | `moa-runtime` | Shared runtime assembly |
-| `moa-cli` | CLI and daemon entrypoints |
+| `moa-cli` | Thin-client CLI and orchestrator diagnostics |
 | `moa-security` | Vault, policies, MCP credential proxy, injection controls |
 | `moa-skills` | Skill parsing, distillation, improvement, regression generation |
 | `moa-eval` | Evaluation harness |

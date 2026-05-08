@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use memory_ingest::{execute_memory_tool, is_fast_memory_tool};
+pub use moa_core::wire::ToolDescriptor;
+use moa_core::wire::tool_descriptor;
 use moa_core::{
     Event, EventRange, EventRecord, EventType, IdempotencyClass, MoaError, SessionId, SessionMeta,
     SessionStatus, ToolCallId, ToolCallRequest, ToolDefinition, ToolFailureClass, ToolInvocation,
@@ -29,21 +31,6 @@ pub trait ToolExecutor {
     async fn list_tools(
         workspace_id: Json<moa_core::WorkspaceId>,
     ) -> Result<Json<Vec<ToolDescriptor>>, HandlerError>;
-}
-
-/// Public metadata returned by `ToolExecutor/list_tools`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ToolDescriptor {
-    /// Stable tool name.
-    pub name: String,
-    /// Human-readable tool description.
-    pub description: String,
-    /// JSON schema for the tool input.
-    pub schema: serde_json::Value,
-    /// Declared retry/idempotency contract for the tool.
-    pub idempotency_class: IdempotencyClass,
-    /// Whether the tool requires approval by default.
-    pub requires_approval: bool,
 }
 
 /// Derived `ctx.run()` plan for one tool execution.
@@ -245,17 +232,6 @@ fn has_prior_tool_call_event(events: &[EventRecord], tool_call_id: ToolCallId) -
             Event::ToolCall { tool_id, .. } if *tool_id == tool_call_id
         )
     })
-}
-
-fn tool_descriptor(definition: ToolDefinition) -> ToolDescriptor {
-    let requires_approval = definition.requires_approval();
-    ToolDescriptor {
-        name: definition.name,
-        description: definition.description,
-        schema: definition.schema,
-        idempotency_class: definition.idempotency_class,
-        requires_approval,
-    }
 }
 
 fn validate_request(

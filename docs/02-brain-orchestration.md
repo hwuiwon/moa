@@ -1,13 +1,13 @@
 # 02 — Brain Orchestration
 
-_Restate orchestration, local runtime mode, turn execution, and sub-agents._
+_Restate orchestration, thin-client runtime mode, turn execution, and sub-agents._
 
 ## Source Of Truth
 
 `docs/12-restate-architecture.md` is the detailed Restate architecture document. This file summarizes what the current code runs:
 
 - Cloud runtime: `moa-orchestrator`
-- Local runtime: `moa-orchestrator-local`
+- Thin clients: `moa-runtime` and `moa-cli` through `moa-orchestrator-client`
 - Shared turn helpers: `crates/moa-orchestrator/src/turn/`
 - Session VO: `crates/moa-orchestrator/src/objects/session.rs`
 - Sub-agent VO: `crates/moa-orchestrator/src/objects/sub_agent.rs`
@@ -145,11 +145,14 @@ curl -X POST http://localhost:18080/CronJob/graph_memory_compact/resume
 To install a custom schedule, post a new body to `/CronJob/{key}/configure`
 and bump the bootstrap idempotency-key version suffix in code.
 
-## Local Runtime
+## Thin Client Runtime
 
-`moa-orchestrator-local` implements `BrainOrchestrator` with Tokio tasks and broadcast channels. It is used by `moa-cli` and `moa-runtime`.
+`moa-cli` and `moa-runtime` call the Restate-backed orchestrator over the
+configured ingress endpoint. Local development starts that service through
+`make dev`; the legacy `moa-orchestrator-local` crate remains only for
+migration-only consumers until the follow-up deletion work lands.
 
-Local mode still uses:
+The local compose stack still uses:
 
 - `PostgresSessionStore`
 - graph memory store, ingestion, and hybrid retrieval stack
@@ -157,7 +160,8 @@ Local mode still uses:
 - the same tool router and permission store
 - the same skill distillation and learning-log paths when a learning store is present
 
-The main difference is scheduling and recovery. Local tasks are process-local; cloud sessions are Restate-managed.
+Scheduling and recovery are Restate-managed in both local development and cloud
+deployments.
 
 ## Segment And Learning Hooks
 

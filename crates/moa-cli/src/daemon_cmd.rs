@@ -1,16 +1,12 @@
-//! Daemon command status helper.
+//! Orchestrator endpoint status command helper.
 
 use super::*;
 
 pub(crate) async fn daemon_status_report(config: &MoaConfig) -> Result<String> {
-    let info = daemon::daemon_info(config).await?;
+    let endpoint = daemon::orchestrator_endpoint(config);
+    let health_url = daemon::orchestrator_health_url(config);
+    daemon::health_check(config).await?;
     Ok(format!(
-        "daemon: running\npid: {}\nsocket: {}\nlog: {}\nstarted_at: {}\nsessions: {}\nactive_sessions: {}\n",
-        info.pid,
-        info.socket_path,
-        info.log_path,
-        info.started_at,
-        info.session_count,
-        info.active_session_count
+        "orchestrator endpoint: {endpoint}\nstatus: healthy ({health_url})\n"
     ))
 }

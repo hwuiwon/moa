@@ -26,8 +26,18 @@ fn config_updates_known_keys() {
     apply_config_update(&mut config, "metrics.enabled", "true").expect("enable metrics");
     apply_config_update(&mut config, "metrics.listen", "127.0.0.1:19090")
         .expect("set metrics listen");
+    apply_config_update(
+        &mut config,
+        "orchestrator.endpoint",
+        "http://localhost:18080",
+    )
+    .expect("set orchestrator endpoint");
     assert!(config.metrics.enabled);
     assert_eq!(config.metrics.listen, "127.0.0.1:19090");
+    assert_eq!(
+        config.orchestrator.endpoint.as_deref(),
+        Some("http://localhost:18080")
+    );
 }
 
 #[test]

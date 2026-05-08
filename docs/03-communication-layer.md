@@ -8,7 +8,7 @@ MOA has several front doors over the same session model:
 
 | Surface | Primary crate | Use |
 |---|---|---|
-| CLI and daemon | `moa-cli`, `moa-runtime`, `moa-orchestrator-local` | Local automation, diagnostics, one-shot prompts |
+| CLI | `moa-cli`, `moa-runtime`, `moa-orchestrator-client` | Local automation, diagnostics, one-shot prompts |
 | REST/gateway | `moa-orchestrator`, `moa-gateway` | Cloud and integration entrypoints |
 | Messaging adapters | `moa-gateway` | Telegram, Slack, Discord conversations and approvals |
 
@@ -32,7 +32,7 @@ Outbound rendering is platform-specific, but the payload model is shared: text, 
 
 | Surface | Session mapping |
 |---|---|
-| CLI | `moa exec` creates or resumes work through the local runtime; daemon commands keep sessions running in the background |
+| CLI | `moa exec` creates or resumes work through the configured Restate ingress endpoint |
 | REST/gateway | HTTP or gateway request maps to a durable session and calls the cloud orchestrator |
 | Telegram | Reply chains or threads map to sessions |
 | Slack | Slack threads map to sessions |
@@ -76,7 +76,7 @@ This avoids losing information when a client disconnects or a gateway process re
 - approval requests and decisions
 - segment start/completion events
 - memory and checkpoint events
-- runtime events from the local orchestrator
+- status snapshots from the Restate-backed orchestrator
 
 Clients choose their own verbosity, but durable events are the source of truth.
 
@@ -91,7 +91,12 @@ cargo run -p moa-cli -- memory search "deployment"
 cargo run -p moa-cli -- doctor
 ```
 
-The daemon mode keeps the local runtime alive for background work and reconnecting clients.
+The CLI no longer embeds or serves an in-process daemon. `make dev` starts the
+long-running `moa-orchestrator` service with Restate and Postgres; the CLI reads
+`MOA__ORCHESTRATOR__ENDPOINT` or `[orchestrator].endpoint` and calls that
+endpoint over HTTP. `moa daemon status` is retained as an endpoint health probe.
+The legacy `moa daemon serve`, `start`, `stop`, and `logs` commands were
+removed.
 
 ## Messaging Gateway
 

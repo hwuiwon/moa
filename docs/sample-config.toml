@@ -43,6 +43,10 @@ default_role = "search_query"
 blob_threshold_bytes = 65536
 blob_dir = "~/.moa/blobs"
 
+[orchestrator]
+endpoint = "http://localhost:18080"
+# health_url = "http://localhost:9081/_health/live"
+
 [observability]
 enabled = false
 service_name = "moa"

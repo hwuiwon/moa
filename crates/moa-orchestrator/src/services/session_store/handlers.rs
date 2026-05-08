@@ -106,6 +106,40 @@ impl RestateSessionStore for SessionStoreImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
+    async fn list_sessions(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ListSessionsRequest>,
+    ) -> Result<Json<Vec<SessionSummary>>, HandlerError> {
+        annotate_restate_handler_span("SessionStore", "list_sessions");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move { service.list_sessions_inner(request).await.map(Json::from) })
+            .name("list_sessions")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn workspace_cost_since(
+        &self,
+        ctx: Context<'_>,
+        request: Json<WorkspaceCostSinceRequest>,
+    ) -> Result<u32, HandlerError> {
+        annotate_restate_handler_span("SessionStore", "workspace_cost_since");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move { service.workspace_cost_since_inner(request).await })
+            .name("workspace_cost_since")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
     async fn init_session_vo(
         &self,
         ctx: Context<'_>,

@@ -24,10 +24,10 @@ The root workspace currently contains:
 | `moa-hands` | Tool router, local/Docker hands, Daytona, E2B, MCP |
 | `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring |
 | `moa-orchestrator` | Restate services, virtual objects, workflows, `moa-orchestrator-bin` cloud binary |
-| `moa-orchestrator-local` | Tokio-task local orchestrator |
+| `moa-orchestrator-local` | Legacy Tokio-task local orchestrator retained for migration-only consumers |
 | `moa-gateway` | Telegram, Slack, Discord adapters and renderers |
-| `moa-runtime` | Shared runtime assembly |
-| `moa-cli` | CLI and daemon |
+| `moa-runtime` | Thin runtime facade over `moa-orchestrator-client` |
+| `moa-cli` | Thin-client CLI and orchestrator diagnostics |
 | `moa-security` | Credential vault, policies, MCP proxy, prompt-injection controls |
 | `moa-skills` | Skill parser, registry, distillation, improvement, regression generation |
 | `moa-eval` | Evaluation harness |
@@ -110,6 +110,7 @@ Config loads from `~/.moa/config.toml` plus `MOA__...` environment overrides. Ke
 | `[intents]` | discovery window, min segments, cluster size, classification thresholds |
 | `[skill_budget]` | skill manifest budget controls |
 | `[cloud]` | cloud mode and hand provider settings |
+| `[orchestrator]` | Restate ingress endpoint and optional health URL for thin clients |
 | `[gateway]` | messaging adapter tokens |
 | `[permissions]` | default approval posture |
 | `[compaction]` | history compaction thresholds |
@@ -119,14 +120,14 @@ Config loads from `~/.moa/config.toml` plus `MOA__...` environment overrides. Ke
 Implemented architectural pillars:
 
 - Restate cloud orchestration with session, sub-agent, workspace, service, and workflow handlers.
-- Local orchestrator for CLI and daemon execution.
+- Restate orchestrator for local development and cloud execution.
 - Postgres session store with event log, analytics, task segments, intent tables, and learning log.
 - Graph memory with Postgres sidecar search, AGE projection helpers, pgvector semantic search, and privacy filtering.
 - Query rewriting, segment creation, automated resolution scoring, and skill resolution-rate ranking.
 - Intent discovery workflow and intent manager service.
 - Skill distillation/improvement with learning-log emission.
 - Lineage, eval score storage, cold export support, and opt-in compliance audit tables.
-- CLI/daemon surfaces.
+- Thin-client CLI surfaces.
 
 Areas still evolving:
 

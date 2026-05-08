@@ -18,6 +18,7 @@ pub mod traits;
 pub mod truncation;
 pub mod turn_latency;
 pub mod types;
+pub mod wire;
 pub mod workspace;
 
 pub use analytics::{
@@ -31,9 +32,10 @@ pub use config::{
     ContextSnapshotConfig, DaemonConfig, DatabaseConfig, DatabaseNeonConfig, GatewayConfig,
     GeminiEmbedderConfig, GeneralConfig, LineageConfig, LocalConfig, McpCredentialConfig,
     McpServerConfig, McpTransportConfig, MemoryConfig, MemoryVectorConfig, MetricsConfig,
-    MoaConfig, ModelsConfig, ObservabilityConfig, OtlpProtocol, PermissionsConfig,
-    ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig, ResolutionConfig,
-    ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig, VectorEmbedderConfig,
+    MoaConfig, ModelsConfig, ObservabilityConfig, OrchestratorConfig, OtlpProtocol,
+    PermissionsConfig, ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig,
+    ResolutionConfig, ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig,
+    VectorEmbedderConfig,
 };
 pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
 pub use db::ScopedConn;

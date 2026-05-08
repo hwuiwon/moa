@@ -142,6 +142,10 @@ pub(crate) fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str
         "local.memory_dir" => config.local.memory_dir = value.to_string(),
         "daemon.auto_connect" => config.daemon.auto_connect = parse_bool(value)?,
         "daemon.socket_path" => config.daemon.socket_path = value.to_string(),
+        "orchestrator.endpoint" => config.orchestrator.endpoint = Some(value.to_string()),
+        "orchestrator.health_url" => {
+            config.orchestrator.health_url = (!value.trim().is_empty()).then(|| value.to_string());
+        }
         "observability.enabled" => config.observability.enabled = parse_bool(value)?,
         "observability.service_name" => config.observability.service_name = value.to_string(),
         "observability.otlp_endpoint" => {
