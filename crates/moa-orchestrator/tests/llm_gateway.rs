@@ -152,17 +152,17 @@ fn llm_gateway_resolve_provider_for_prefixed_google_model() {
         None,
         Some(Arc::new(MockProvider::success(
             "google",
-            "gemini-2.5-flash",
-            token_pricing_from_fixture("gemini", "gemini-2.5-flash"),
+            "gemini-3-flash-preview",
+            token_pricing_from_fixture("gemini", "gemini-3-flash-preview"),
         ))),
     );
 
     let (provider_kind, model_id) = registry
-        .resolve_provider_kind(Some("google:gemini-2.5-flash"))
+        .resolve_provider_kind(Some("google:gemini-3-flash-preview"))
         .expect("prefixed google model should resolve");
 
     assert_eq!(provider_kind, ProviderKind::Google);
-    assert_eq!(model_id.as_str(), "gemini-2.5-flash");
+    assert_eq!(model_id.as_str(), "gemini-3-flash-preview");
 }
 
 #[test]
@@ -241,20 +241,22 @@ async fn llm_gateway_complete_propagates_provider_error() {
 async fn llm_gateway_complete_normalizes_explicit_provider_prefix() {
     let provider = MockProvider::success(
         "google",
-        "gemini-2.5-flash",
-        token_pricing_from_fixture("gemini", "gemini-2.5-flash"),
+        "gemini-3-flash-preview",
+        token_pricing_from_fixture("gemini", "gemini-3-flash-preview"),
     );
     let registry =
         ProviderRegistry::with_static_providers(None, None, Some(Arc::new(provider.clone())));
     let gateway = LLMGatewayImpl::new(Arc::new(registry));
 
     let response = gateway
-        .complete_buffered(CompletionRequest::simple("hello").with_model("google:gemini-2.5-flash"))
+        .complete_buffered(
+            CompletionRequest::simple("hello").with_model("google:gemini-3-flash-preview"),
+        )
         .await
         .expect("prefixed provider request should complete");
 
     let recorded = provider.recorded_requests();
-    assert_eq!(response.model.as_str(), "gemini-2.5-flash");
+    assert_eq!(response.model.as_str(), "gemini-3-flash-preview");
     assert_eq!(recorded.len(), 1);
     assert_eq!(
         recorded[0]
@@ -262,7 +264,7 @@ async fn llm_gateway_complete_normalizes_explicit_provider_prefix() {
             .as_ref()
             .expect("gateway should normalize an explicit provider prefix")
             .as_str(),
-        "gemini-2.5-flash"
+        "gemini-3-flash-preview"
     );
 }
 

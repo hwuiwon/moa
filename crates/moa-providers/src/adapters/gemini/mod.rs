@@ -65,7 +65,7 @@ pub fn debug_build_gemini_request_body(
         .model
         .as_ref()
         .map(ModelId::as_str)
-        .unwrap_or("gemini-2.5-flash");
+        .unwrap_or("gemini-3-flash-preview");
     let resolved_model = canonical_model_id(requested_model)?;
     let capabilities = capabilities_for_model(&resolved_model);
     request::build_request_body(

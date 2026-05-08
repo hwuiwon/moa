@@ -53,7 +53,7 @@ fn available_live_providers() -> Vec<LiveProvider> {
 }
 
 fn google_live_model() -> String {
-    std::env::var("GOOGLE_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_string())
+    std::env::var("GOOGLE_MODEL").unwrap_or_else(|_| "gemini-3-flash-preview".to_string())
 }
 
 fn emit_token_tool() -> serde_json::Value {

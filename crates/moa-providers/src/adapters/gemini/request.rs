@@ -6,7 +6,7 @@ use super::response::GeminiCachedContent;
 use super::tools::{
     content_message, flush_pending_parts, flush_tool_responses, function_call_part,
     function_response_part, gemini_function_declaration, is_standard_user_message, text_part,
-    thinking_config_for_model,
+    thinking_config_for_request,
 };
 use super::*;
 
@@ -333,7 +333,9 @@ fn build_generation_config(
         );
         generation_config.insert("responseSchema".to_string(), response_format.schema.clone());
     }
-    if let Some(thinking_config) = thinking_config_for_model(model, default_reasoning_effort)? {
+    if let Some(thinking_config) =
+        thinking_config_for_request(model, default_reasoning_effort, max_output_tokens)?
+    {
         generation_config.insert("thinkingConfig".to_string(), thinking_config);
     }
 
@@ -498,7 +500,7 @@ fn estimate_prefix_tokens(request: &CompletionRequest, message_count: usize) -> 
 }
 
 fn minimum_cacheable_tokens(model: &str) -> usize {
-    if model.starts_with("gemini-2.5-pro") || model.starts_with("gemini-3.1-pro") {
+    if model.starts_with("gemini-3-pro-preview") || model.starts_with("gemini-3.1-pro") {
         return 4_096;
     }
     1_024

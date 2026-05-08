@@ -40,7 +40,7 @@ fn gemini_request_sets_structured_output_schema() {
         }),
     ));
 
-    let body = build_request_body(&request, "gemini-2.5-flash", "medium", &[])
+    let body = build_request_body(&request, "gemini-3-flash-preview", "medium", &[])
         .expect("request should build");
 
     assert_eq!(
@@ -64,7 +64,9 @@ async fn gemini_provider_serializes_system_messages_and_tools() {
         let request = String::from_utf8_lossy(&buffer[..read]).to_string();
 
         assert!(
-            request.contains("POST /v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse")
+            request.contains(
+                "POST /v1beta/models/gemini-3-flash-preview:streamGenerateContent?alt=sse"
+            )
         );
         assert!(
             request
@@ -77,7 +79,7 @@ async fn gemini_provider_serializes_system_messages_and_tools() {
         assert!(request.contains("\"description\":\"Read a file\""));
         assert!(!request.contains("\"additionalProperties\":false"));
         assert!(!request.contains("\"google_search\":{}"));
-        assert!(request.contains("\"thinkingBudget\":4096"));
+        assert!(request.contains("\"thinkingLevel\":\"medium\""));
 
         let body = sse_stream(&[json!({
             "candidates": [{
@@ -91,7 +93,7 @@ async fn gemini_provider_serializes_system_messages_and_tools() {
                 "candidatesTokenCount": 2,
                 "cachedContentTokenCount": 1
             },
-            "modelVersion": "gemini-2.5-flash"
+            "modelVersion": "gemini-3-flash-preview"
         })]);
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
@@ -101,7 +103,7 @@ async fn gemini_provider_serializes_system_messages_and_tools() {
         socket.write_all(response.as_bytes()).await.unwrap();
     });
 
-    let provider = GeminiProvider::new("test-key", "gemini-2.5-flash")
+    let provider = GeminiProvider::new("test-key", "gemini-3-flash-preview")
         .unwrap()
         .with_api_base(format!("http://{address}/v1beta"))
         .with_max_retries(0);
@@ -138,7 +140,7 @@ async fn gemini_provider_serializes_system_messages_and_tools() {
         .unwrap();
 
     assert_eq!(response.text, "ok");
-    assert_eq!(response.model, ModelId::new("gemini-2.5-flash"));
+    assert_eq!(response.model, ModelId::new("gemini-3-flash-preview"));
     server.abort();
 }
 
@@ -164,6 +166,10 @@ fn gemini_preview_model_ids_pass_through_unchanged() {
         "gemini-3.1-pro-preview"
     );
     assert_eq!(
+        canonical_model_id("gemini-3-pro-preview").unwrap(),
+        "gemini-3-pro-preview"
+    );
+    assert_eq!(
         canonical_model_id("gemini-3-flash-preview").unwrap(),
         "gemini-3-flash-preview"
     );
@@ -174,9 +180,25 @@ fn gemini_preview_model_ids_pass_through_unchanged() {
 }
 
 #[test]
-fn gemini_flash_lite_preview_uses_documented_price_envelope() {
+fn legacy_gemini_models_are_rejected() {
+    let legacy = format!("gemini-{}.{}-flash", 2, 5);
+    let error = canonical_model_id(&legacy).expect_err("legacy model should be rejected");
+    assert!(error.to_string().contains("legacy Gemini 2 models"));
+}
+
+#[test]
+fn gemini_3_flash_preview_uses_documented_price_envelope() {
+    let capabilities = capabilities_for_model("gemini-3-flash-preview");
+    assert_eq!(capabilities.context_window, 1_048_576);
+    assert_eq!(capabilities.max_output, 64_000);
+    assert_eq!(capabilities.pricing.input_per_mtok, 0.5);
+    assert_eq!(capabilities.pricing.output_per_mtok, 3.0);
+}
+
+#[test]
+fn gemini_3_1_flash_lite_preview_uses_documented_price_envelope() {
     let capabilities = capabilities_for_model("gemini-3.1-flash-lite-preview");
-    assert_eq!(capabilities.context_window, 1_000_000);
+    assert_eq!(capabilities.context_window, 1_048_576);
     assert_eq!(capabilities.max_output, 64_000);
     assert_eq!(capabilities.pricing.input_per_mtok, 0.25);
     assert_eq!(capabilities.pricing.output_per_mtok, 1.5);
@@ -188,6 +210,21 @@ fn gemini_3_pro_maps_medium_reasoning_to_medium_thinking_level() {
         .unwrap()
         .expect("thinking config");
     assert_eq!(thinking["thinkingLevel"], "medium");
+}
+
+#[test]
+fn gemini_3_flash_uses_minimal_thinking_for_tiny_output_caps() {
+    let mut request = CompletionRequest::simple("Describe Rome briefly.");
+    request.max_output_tokens = Some(16);
+
+    let body = build_request_body(&request, "gemini-3-flash-preview", "medium", &[])
+        .expect("request body");
+
+    assert_eq!(
+        body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+        "minimal"
+    );
+    assert_eq!(body["generationConfig"]["maxOutputTokens"], 16);
 }
 
 #[test]
@@ -220,7 +257,8 @@ fn gemini_explicit_cache_plan_skips_tail_system_instruction() {
         metadata: Default::default(),
     };
 
-    let plan = build_explicit_cache_plan(&request, "gemini-2.5-flash", "medium", &[]).unwrap();
+    let plan =
+        build_explicit_cache_plan(&request, "gemini-3-flash-preview", "medium", &[]).unwrap();
     assert!(
         plan.is_none(),
         "tail requests with a system instruction must not use cachedContent"
@@ -258,7 +296,7 @@ async fn gemini_provider_groups_tool_history_and_preserves_thought_signatures() 
                 "promptTokenCount": 8,
                 "candidatesTokenCount": 2
             },
-            "modelVersion": "gemini-2.5-flash"
+            "modelVersion": "gemini-3-flash-preview"
         })]);
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
@@ -268,7 +306,7 @@ async fn gemini_provider_groups_tool_history_and_preserves_thought_signatures() 
         socket.write_all(response.as_bytes()).await.unwrap();
     });
 
-    let provider = GeminiProvider::new("test-key", "gemini-2.5-flash")
+    let provider = GeminiProvider::new("test-key", "gemini-3-flash-preview")
         .unwrap()
         .with_api_base(format!("http://{address}/v1beta"))
         .with_max_retries(0);
@@ -336,7 +374,7 @@ async fn gemini_provider_serializes_google_search_without_functions() {
                 "promptTokenCount": 8,
                 "candidatesTokenCount": 2
             },
-            "modelVersion": "gemini-2.5-flash"
+            "modelVersion": "gemini-3-flash-preview"
         })]);
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
@@ -346,7 +384,7 @@ async fn gemini_provider_serializes_google_search_without_functions() {
         socket.write_all(response.as_bytes()).await.unwrap();
     });
 
-    let provider = GeminiProvider::new("test-key", "gemini-2.5-flash")
+    let provider = GeminiProvider::new("test-key", "gemini-3-flash-preview")
         .unwrap()
         .with_api_base(format!("http://{address}/v1beta"))
         .with_max_retries(0);
@@ -400,7 +438,7 @@ async fn gemini_provider_streams_tool_calls_and_google_search_updates() {
                     "promptTokenCount": 11,
                     "candidatesTokenCount": 3
                 },
-                "modelVersion": "gemini-2.5-flash"
+                "modelVersion": "gemini-3-flash-preview"
             }),
         ]);
         let response = format!(
@@ -411,7 +449,7 @@ async fn gemini_provider_streams_tool_calls_and_google_search_updates() {
         socket.write_all(response.as_bytes()).await.unwrap();
     });
 
-    let provider = GeminiProvider::new("test-key", "gemini-2.5-flash")
+    let provider = GeminiProvider::new("test-key", "gemini-3-flash-preview")
         .unwrap()
         .with_api_base(format!("http://{address}/v1beta"))
         .with_max_retries(0);

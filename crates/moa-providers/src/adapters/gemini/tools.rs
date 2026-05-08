@@ -122,19 +122,32 @@ pub(super) fn gemini_function_declaration(schema: &Value) -> Result<Value> {
     }))
 }
 
+#[cfg(test)]
 pub(super) fn thinking_config_for_model(
     model: &str,
     reasoning_effort: &str,
+) -> Result<Option<Value>> {
+    thinking_config_for_request(model, reasoning_effort, None)
+}
+
+pub(super) fn thinking_config_for_request(
+    model: &str,
+    reasoning_effort: &str,
+    max_output_tokens: Option<usize>,
 ) -> Result<Option<Value>> {
     let effort = normalize_reasoning_effort(reasoning_effort)?;
 
     if model.starts_with("gemini-3") {
         let level = if model.contains("flash") {
-            match effort {
-                ReasoningEffort::None | ReasoningEffort::Minimal => "minimal",
-                ReasoningEffort::Low => "low",
-                ReasoningEffort::Medium => "medium",
-                ReasoningEffort::High | ReasoningEffort::Xhigh => "high",
+            if max_output_tokens.is_some_and(|cap| cap <= 128) {
+                "minimal"
+            } else {
+                match effort {
+                    ReasoningEffort::None | ReasoningEffort::Minimal => "minimal",
+                    ReasoningEffort::Low => "low",
+                    ReasoningEffort::Medium => "medium",
+                    ReasoningEffort::High | ReasoningEffort::Xhigh => "high",
+                }
             }
         } else {
             match effort {
@@ -144,26 +157,6 @@ pub(super) fn thinking_config_for_model(
             }
         };
         return Ok(Some(json!({ "thinkingLevel": level })));
-    }
-
-    if model.starts_with("gemini-2.5") {
-        let budget = if model.contains("flash") {
-            match effort {
-                ReasoningEffort::None | ReasoningEffort::Minimal => 0,
-                ReasoningEffort::Low => 1_024,
-                ReasoningEffort::Medium => 4_096,
-                ReasoningEffort::High => 8_192,
-                ReasoningEffort::Xhigh => 16_384,
-            }
-        } else {
-            match effort {
-                ReasoningEffort::None | ReasoningEffort::Minimal | ReasoningEffort::Low => 128,
-                ReasoningEffort::Medium => 4_096,
-                ReasoningEffort::High => 16_384,
-                ReasoningEffort::Xhigh => 32_768,
-            }
-        };
-        return Ok(Some(json!({ "thinkingBudget": budget })));
     }
 
     Ok(None)

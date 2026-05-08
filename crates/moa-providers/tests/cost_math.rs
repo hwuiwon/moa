@@ -65,9 +65,9 @@ fn cost_cents_for_openai_gpt41_matches_pricing_table_v1_for_known_token_counts()
 #[test]
 fn cost_cents_for_gemini_pro_matches_pricing_table_v1_for_known_token_counts() {
     let table = PricingTable::load_v1();
-    let row = pricing_row(&table, "gemini", "gemini-2.5-pro");
+    let row = pricing_row(&table, "gemini", "gemini-3-pro-preview");
     let expected = expected_from_row(row, GEMINI_PRO_COUNTS);
-    let actual = table_cost(&table, "gemini", "gemini-2.5-pro", GEMINI_PRO_COUNTS);
+    let actual = table_cost(&table, "gemini", "gemini-3-pro-preview", GEMINI_PRO_COUNTS);
 
     assert_eq!(actual, expected);
 }
@@ -98,7 +98,7 @@ fn cost_cents_with_cached_input_tokens_uses_discounted_rate() {
 #[test]
 fn cost_cents_rounds_up_to_nearest_cent_at_final_step_only() {
     let table = PricingTable::load_v1();
-    let row = pricing_row(&table, "gemini", "gemini-2.5-flash");
+    let row = pricing_row(&table, "gemini", "gemini-3-flash-preview");
     let combined = row
         .cost_cents(
             ROUNDING_COUNTS.input,

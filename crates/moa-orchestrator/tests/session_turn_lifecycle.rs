@@ -73,7 +73,7 @@ fn live_model() -> &'static str {
         return "gpt-5.4-mini";
     }
     if std::env::var("GOOGLE_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
-        return "gemini-2.5-flash";
+        return "gemini-3-flash-preview";
     }
     "gpt-5.4-mini"
 }
@@ -245,6 +245,7 @@ where
 }
 
 #[tokio::test]
+#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
 async fn start_turn_returns_turn_id_immediately() -> Result<()> {
     // Pins: Session/start_turn persists active turn state and returns before turn execution.
     let client = reqwest::Client::new();
@@ -272,6 +273,7 @@ async fn start_turn_returns_turn_id_immediately() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
 async fn queue_message_during_active_turn_drains_after_completion() -> Result<()> {
     // Pins: a queued message is retained while a turn runs, then starts as the next workflow.
     let client = reqwest::Client::new();
@@ -320,6 +322,7 @@ async fn queue_message_during_active_turn_drains_after_completion() -> Result<()
 }
 
 #[tokio::test]
+#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
 async fn request_cancel_forwards_to_turn_execution() -> Result<()> {
     // Pins: Session/request_cancel resolves the active TurnExecution workflow cancellation path.
     let client = reqwest::Client::new();

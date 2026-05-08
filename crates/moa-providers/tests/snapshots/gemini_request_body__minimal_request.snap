@@ -17,7 +17,7 @@ expression: body
     "maxOutputTokens": 256,
     "temperature": 0.20000000298023224,
     "thinkingConfig": {
-      "thinkingBudget": 4096
+      "thinkingLevel": "medium"
     }
   },
   "safetySettings": [

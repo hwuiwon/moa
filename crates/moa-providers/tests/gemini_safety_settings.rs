@@ -6,7 +6,7 @@ use moa_core::{CompletionRequest, ContextMessage, JsonResponseFormat, ModelId};
 use moa_providers::debug_build_gemini_request_body;
 use serde_json::{Value, json};
 
-const MODEL: &str = "gemini-2.5-flash";
+const MODEL: &str = "gemini-3-flash-preview";
 const SAFETY_THRESHOLD_METADATA_KEY: &str = "_moa.gemini.safety_threshold";
 
 #[test]

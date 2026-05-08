@@ -84,7 +84,7 @@ fn live_model() -> Option<&'static str> {
         return Some("gpt-5.4-mini");
     }
     if configured_env("GOOGLE_API_KEY") {
-        return Some("gemini-2.5-flash");
+        return Some("gemini-3-flash-preview");
     }
 
     None
@@ -193,9 +193,13 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
             .error_for_status()
             .context("post_message after cancel should succeed")?;
 
-        let cancelled_status =
-            wait_for_status(&client, ingress, session_id, SessionStatus::Cancelled).await?;
-        assert_eq!(cancelled_status, SessionStatus::Cancelled);
+        let resumed_status =
+            wait_for_status(&client, ingress, session_id, SessionStatus::Paused).await?;
+        assert_eq!(
+            resumed_status,
+            SessionStatus::Paused,
+            "a stale cancel without an active turn must not prevent a later message from completing"
+        );
 
         client
             .post(object_url(ingress, session_id, "destroy"))
