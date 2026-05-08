@@ -30,7 +30,7 @@ Bound surfaces:
 | Restate primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob` |
-| Service | `Health`, `SessionStore`, `IntentManager`, `LLMGateway`, `ToolExecutor`, `WorkspaceStore` |
+| Service | `Health`, `SessionStore`, `IntentManager`, `LLMGateway`, `ToolExecutor`, `WorkspaceStore`, `GraphMemoryMaint`, `NeonMaint` |
 | Workflow | `Consolidate`, `IntentDiscovery` |
 
 Restate state is used for hot orchestration state: queued messages, status, pending approvals, child refs, active segment, cancellation flags, and child budgets. Product-visible history is written to Postgres.
@@ -112,6 +112,29 @@ These are workflow-shaped because rerunning the same logical job should be expli
 Reusable scheduled work is anchored by the `CronJob` virtual object. Each job
 key stores its cron expression, timezone, target service handler, and a version
 counter that invalidates stale delayed ticks after reconfiguration.
+
+### Background Maintenance Jobs
+
+On boot, the orchestrator installs two periodic jobs via the `CronJob` virtual object:
+
+- `graph_memory_compact`: fires at HH:00 UTC every hour and invokes `GraphMemoryMaint/compact`. It is currently a no-op shell.
+- `neon_prune_branches`: fires at 00:00, 06:00, 12:00, and 18:00 UTC and invokes `NeonMaint/prune_branches`. It is a no-op when `MOA_NEON_API_KEY` is unset.
+
+To inspect the schedule:
+
+```bash
+curl http://localhost:18080/CronJob/graph_memory_compact/status
+```
+
+To pause or resume a job without clearing its config:
+
+```bash
+curl -X POST http://localhost:18080/CronJob/graph_memory_compact/pause
+curl -X POST http://localhost:18080/CronJob/graph_memory_compact/resume
+```
+
+To install a custom schedule, post a new body to `/CronJob/{key}/configure`
+and bump the bootstrap idempotency-key version suffix in code.
 
 ## Local Runtime
 
