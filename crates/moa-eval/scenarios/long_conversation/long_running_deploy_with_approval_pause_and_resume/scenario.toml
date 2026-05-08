@@ -1,0 +1,16 @@
+[suite]
+name = "long_running_deploy_with_approval_pause_and_resume"
+description = "Recorded deploy workflow covering approval pause/resume, queued follow-up processing, and final health verification."
+default_timeout_seconds = 60
+tags = ["long_conversation", "recorded", "deploy", "approval"]
+
+[[cases]]
+kind = "long"
+name = "long_running_deploy_with_approval_pause_and_resume"
+goal_card = "scenarios/long_conversation/long_running_deploy_with_approval_pause_and_resume/goal_card.md"
+transcript = "scenarios/long_conversation/long_running_deploy_with_approval_pause_and_resume/transcript.jsonl"
+expectations = "scenarios/long_conversation/long_running_deploy_with_approval_pause_and_resume/expectations.toml"
+mode = "recorded"
+
+[cases.metadata]
+approval_turn = "deploy turn 04: run mocked fly deploy."

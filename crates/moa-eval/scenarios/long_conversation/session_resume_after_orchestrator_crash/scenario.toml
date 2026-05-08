@@ -1,0 +1,13 @@
+[suite]
+name = "session_resume_after_orchestrator_crash"
+description = "Recorded crash-recovery workflow covering event-log replay and duplicate-event prevention after resume."
+default_timeout_seconds = 60
+tags = ["long_conversation", "recorded", "recovery", "event_log"]
+
+[[cases]]
+kind = "long"
+name = "session_resume_after_orchestrator_crash"
+goal_card = "scenarios/long_conversation/session_resume_after_orchestrator_crash/goal_card.md"
+transcript = "scenarios/long_conversation/session_resume_after_orchestrator_crash/transcript.jsonl"
+expectations = "scenarios/long_conversation/session_resume_after_orchestrator_crash/expectations.toml"
+mode = "recorded"

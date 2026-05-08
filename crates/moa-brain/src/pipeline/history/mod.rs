@@ -194,8 +194,11 @@ impl ContextProcessor for HistoryCompiler {
         let history_start_index = ctx.messages.len();
         let remaining_budget = ctx.token_budget.saturating_sub(ctx.token_count);
         let stage_inputs_hash = snapshot_stage_inputs_hash(ctx);
+        let checkpoint_emitted = self.maybe_emit_checkpoint(ctx).await?;
 
-        let compiled = if let Some(snapshot) = self.load_snapshot(ctx, stage_inputs_hash).await? {
+        let compiled = if !checkpoint_emitted
+            && let Some(snapshot) = self.load_snapshot(ctx, stage_inputs_hash).await?
+        {
             let delta_events = self
                 .session_store
                 .get_events(

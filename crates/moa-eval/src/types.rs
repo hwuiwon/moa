@@ -76,6 +76,16 @@ impl TestCase {
                 self.name
             )));
         }
+        if long
+            .secondary_session
+            .as_ref()
+            .is_some_and(|secondary| secondary.transcript.as_os_str().is_empty())
+        {
+            return Err(crate::EvalError::InvalidConfig(format!(
+                "long test case '{}' secondary_session must set transcript",
+                self.name
+            )));
+        }
 
         Ok(long)
     }
@@ -129,10 +139,44 @@ pub struct LongTestCase {
     pub goal_card: Option<PathBuf>,
     /// JSONL transcript used by recorded mode.
     pub transcript: PathBuf,
+    /// Optional secondary session for multi-session long-conversation scenarios.
+    pub secondary_session: Option<SecondaryLongSession>,
     /// Scenario expectations file.
     pub expectations: PathBuf,
     /// Long-conversation execution mode.
     pub mode: LongConversationMode,
+}
+
+/// Secondary session configuration for a long-conversation test case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SecondaryLongSession {
+    /// JSONL transcript used by the secondary recorded session.
+    pub transcript: PathBuf,
+    /// Deterministic interleaving strategy used to drive both sessions.
+    pub interleaving: LongSessionInterleaving,
+}
+
+impl Default for SecondaryLongSession {
+    fn default() -> Self {
+        Self {
+            transcript: PathBuf::new(),
+            interleaving: LongSessionInterleaving::Sequential,
+        }
+    }
+}
+
+/// Deterministic multi-session execution strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LongSessionInterleaving {
+    /// Finish the primary session before starting the secondary session.
+    #[default]
+    Sequential,
+    /// Alternate primary and secondary user turns.
+    RoundRobin,
+    /// Run phase one to completion, then phase two with shared workspace state.
+    Phased,
 }
 
 /// Flexible expected-output rules for an agent response.

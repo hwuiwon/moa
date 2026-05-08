@@ -7,6 +7,40 @@ use crate::compaction::maybe_compact_events;
 use super::{CompiledHistory, HistoryCompiler};
 
 impl HistoryCompiler {
+    pub(super) async fn maybe_emit_checkpoint(&self, ctx: &WorkingContext) -> Result<bool> {
+        if self.llm_provider.is_none() {
+            return Ok(false);
+        }
+
+        let events = self
+            .session_store
+            .get_events(ctx.session_id, EventRange::all())
+            .await?;
+
+        self.maybe_emit_checkpoint_for_events(ctx, &events).await
+    }
+
+    async fn maybe_emit_checkpoint_for_events(
+        &self,
+        ctx: &WorkingContext,
+        events: &[moa_core::EventRecord],
+    ) -> Result<bool> {
+        let Some(llm_provider) = &self.llm_provider else {
+            return Ok(false);
+        };
+
+        maybe_compact_events(
+            &self.compaction,
+            &*self.session_store,
+            &**llm_provider,
+            ModelTask::Summarization.tier(),
+            ctx.session_id,
+            ctx.token_budget,
+            events,
+        )
+        .await
+    }
+
     pub(super) async fn compile_full_messages(
         &self,
         ctx: &WorkingContext,
@@ -17,18 +51,7 @@ impl HistoryCompiler {
             .get_events(ctx.session_id, EventRange::all())
             .await?;
 
-        if let Some(llm_provider) = &self.llm_provider
-            && maybe_compact_events(
-                &self.compaction,
-                &*self.session_store,
-                &**llm_provider,
-                ModelTask::Summarization.tier(),
-                ctx.session_id,
-                ctx.token_budget,
-                &events,
-            )
-            .await?
-        {
+        if self.maybe_emit_checkpoint_for_events(ctx, &events).await? {
             events = self
                 .session_store
                 .get_events(ctx.session_id, EventRange::all())
@@ -42,6 +65,17 @@ impl HistoryCompiler {
 #[cfg(test)]
 mod tests {
     use crate::pipeline::history::test_support::prelude::*;
+
+    fn stage_inputs_hash(ctx: &WorkingContext) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        serde_json::to_string(&ctx.messages)
+            .expect("working context messages serialize")
+            .hash(&mut hasher);
+        hasher.finish()
+    }
 
     #[tokio::test]
     async fn compaction_triggers_at_threshold_and_keeps_full_log() {
@@ -178,5 +212,52 @@ mod tests {
                 .iter()
                 .any(|record| matches!(record.event, Event::Checkpoint { .. }))
         );
+    }
+
+    #[tokio::test]
+    async fn compaction_triggers_even_when_incremental_snapshot_is_current() {
+        let session = session();
+        let mut events = Vec::new();
+        for index in 0..7 {
+            events.push(event_record(
+                &session.id,
+                index,
+                Event::UserMessage {
+                    text: format!("event {index}"),
+                    attachments: Vec::new(),
+                },
+            ));
+        }
+        let store = Arc::new(MockSessionStore::new(session.clone(), events.clone()));
+        let compiler = HistoryCompiler::with_compaction(
+            store.clone(),
+            Arc::new(MockLlmProvider),
+            CompactionConfig {
+                event_threshold: 4,
+                recent_turns_verbatim: 1,
+                ..CompactionConfig::default()
+            },
+        );
+        let mut ctx = WorkingContext::new(&session, capabilities());
+        let prefix = compiler
+            .compile_messages_with_stats(&events[..2], 100_000)
+            .expect("compile snapshot prefix");
+        let mut snapshot = compiled_snapshot(&session, &prefix).expect("prefix yields snapshot");
+        snapshot.stage_inputs_hash = stage_inputs_hash(&ctx);
+        store
+            .put_snapshot(session.id, snapshot)
+            .await
+            .expect("store current snapshot");
+
+        compiler.process(&mut ctx).await.expect("compile history");
+        let stored_events = store
+            .get_events(session.id, EventRange::all())
+            .await
+            .expect("load stored events");
+
+        assert!(matches!(
+            stored_events.last().map(|record| &record.event),
+            Some(Event::Checkpoint { events_summarized, .. }) if *events_summarized == 6
+        ));
     }
 }

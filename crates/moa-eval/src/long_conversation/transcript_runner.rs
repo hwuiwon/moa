@@ -4,14 +4,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
-use moa_brain::{StreamedTurnResult, run_streamed_turn};
-use moa_core::{Event, EventRange, LLMProvider, MoaConfig, RuntimeEvent};
+use moa_brain::{StreamedTurnResult, run_streamed_turn_with_signals};
+use moa_core::{
+    ApprovalDecision, BufferedUserMessage, Event, EventRange, EventRecord, LLMProvider, MoaConfig,
+    RuntimeEvent, SessionId, SessionMeta, SessionSignal,
+};
 use moa_test_support::transcript::Transcript;
-use tokio::sync::broadcast;
+use serde_json::Value;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::memory_metrics::{count_consolidation_outcomes, count_pages_written};
+use super::provider_recorded::RecordedScriptedProvider;
 use super::score_card::{
     CacheScores, ContextScores, CostScores, FunctionalScores, LatencyScores, MemoryScores,
     SafetyScores, ScoreCard, ToolScores,
@@ -19,8 +24,8 @@ use super::score_card::{
 use crate::collector::{CollectedExecution, TrajectoryCollector};
 use crate::setup::build_agent_environment_with_provider;
 use crate::{
-    AgentConfig, EngineOptions, EvalError, EvalResult, EvalScore, EvalStatus, Result, ScoreValue,
-    TestCase,
+    AgentConfig, EngineOptions, EvalError, EvalResult, EvalScore, EvalStatus,
+    LongSessionInterleaving, Result, ScoreValue, TestCase,
 };
 
 const MAX_LONG_CONVERSATION_AGENT_TURNS: usize = 32;
@@ -34,6 +39,8 @@ pub struct LongRunReport {
     pub score_card: ScoreCard,
     /// Lineage score rows ready for `analytics.scores`.
     pub score_records: Vec<moa_lineage_core::ScoreRecord>,
+    /// Persisted event payloads emitted during the run.
+    pub events: Vec<Event>,
 }
 
 /// Runs a long-conversation test case with an explicit provider.
@@ -72,7 +79,28 @@ pub async fn run_scenario_with_provider(
         .map(PathBuf::from)
         .unwrap_or_else(|| environment.workspace_dir.clone());
 
-    let outcome = drive_transcript(case, agent_config, options, transcript, environment).await;
+    let outcome = if let Some(secondary_session) = &long_case.secondary_session {
+        let secondary_transcript_path = resolve_path(&secondary_session.transcript)?;
+        let secondary_transcript =
+            Transcript::read_jsonl(&secondary_transcript_path).map_err(|error| {
+                EvalError::InvalidConfig(format!(
+                    "failed to read secondary transcript {}: {error}",
+                    secondary_transcript_path.display()
+                ))
+            })?;
+        drive_multi_session_transcripts(
+            case,
+            agent_config,
+            options,
+            transcript,
+            secondary_transcript,
+            secondary_session.interleaving,
+            environment,
+        )
+        .await
+    } else {
+        drive_transcript(case, agent_config, options, transcript, environment).await
+    };
     let cleanup = cleanup_workspace(&run_root).await;
     match (outcome, cleanup) {
         (Ok(report), Ok(())) => Ok(report),
@@ -89,47 +117,141 @@ async fn drive_transcript(
     environment: crate::AgentEnvironment,
 ) -> Result<LongRunReport> {
     let started_at = Utc::now();
-    let cancel_token = CancellationToken::new();
-    let hard_cancel_token = CancellationToken::new();
-    let (runtime_tx, _) = broadcast::channel::<RuntimeEvent>(256);
+    let mut primary = TranscriptSession::new(
+        environment.session_id,
+        environment.llm_provider.clone(),
+        transcript,
+    );
 
-    for (turn_index, turn) in transcript.turns.iter().enumerate() {
-        emit_user_turn(&environment, turn_index, &turn.user.text).await?;
-        drive_one_turn(&environment, &runtime_tx, &cancel_token, &hard_cancel_token).await?;
+    while primary.has_next_user_turn() {
+        primary.drive_next_turn(case, &environment).await?;
     }
 
     let completed_at = Utc::now();
-    let events = environment
-        .session_store
-        .get_events(environment.session_id, EventRange::all())
-        .await?;
-    let event_payloads = events
+    let events = collect_events_for_sessions(&environment, &[primary.session_id]).await?;
+    Ok(finish_report(FinishReportInput {
+        case,
+        agent_config,
+        options,
+        environment: &environment,
+        events,
+        user_turn_count: primary.user_turn_count,
+        started_at,
+        completed_at,
+    }))
+}
+
+async fn drive_multi_session_transcripts(
+    case: &TestCase,
+    agent_config: &AgentConfig,
+    options: &EngineOptions,
+    primary_transcript: Transcript,
+    secondary_transcript: Transcript,
+    interleaving: LongSessionInterleaving,
+    environment: crate::AgentEnvironment,
+) -> Result<LongRunReport> {
+    let started_at = Utc::now();
+    let secondary_provider = Arc::new(RecordedScriptedProvider::with_strict_matching(
+        secondary_transcript.clone(),
+    ));
+    let secondary_session_id =
+        create_secondary_session(&environment, secondary_provider.clone()).await?;
+    let mut primary = TranscriptSession::new(
+        environment.session_id,
+        environment.llm_provider.clone(),
+        primary_transcript,
+    );
+    let mut secondary = TranscriptSession::new(
+        secondary_session_id,
+        secondary_provider,
+        secondary_transcript,
+    );
+
+    match interleaving {
+        LongSessionInterleaving::Sequential | LongSessionInterleaving::Phased => {
+            while primary.has_next_user_turn() {
+                primary.drive_next_turn(case, &environment).await?;
+            }
+            while secondary.has_next_user_turn() {
+                secondary.drive_next_turn(case, &environment).await?;
+            }
+        }
+        LongSessionInterleaving::RoundRobin => {
+            while primary.has_next_user_turn() || secondary.has_next_user_turn() {
+                if primary.has_next_user_turn() {
+                    primary.drive_next_turn(case, &environment).await?;
+                }
+                if secondary.has_next_user_turn() {
+                    secondary.drive_next_turn(case, &environment).await?;
+                }
+            }
+        }
+    }
+
+    let completed_at = Utc::now();
+    let events =
+        collect_events_for_sessions(&environment, &[primary.session_id, secondary.session_id])
+            .await?;
+    Ok(finish_report(FinishReportInput {
+        case,
+        agent_config,
+        options,
+        environment: &environment,
+        events,
+        user_turn_count: primary.user_turn_count + secondary.user_turn_count,
+        started_at,
+        completed_at,
+    }))
+}
+
+struct FinishReportInput<'a> {
+    case: &'a TestCase,
+    agent_config: &'a AgentConfig,
+    options: &'a EngineOptions,
+    environment: &'a crate::AgentEnvironment,
+    events: Vec<EventRecord>,
+    user_turn_count: usize,
+    started_at: chrono::DateTime<Utc>,
+    completed_at: chrono::DateTime<Utc>,
+}
+
+fn finish_report(input: FinishReportInput<'_>) -> LongRunReport {
+    let event_payloads = input
+        .events
         .iter()
         .map(|record| record.event.clone())
         .collect::<Vec<_>>();
     let mut collector = TrajectoryCollector::new(
-        Some(environment.llm_provider.capabilities().pricing.clone()),
-        options.capture_content,
-        options.content_max_bytes,
+        Some(
+            input
+                .environment
+                .llm_provider
+                .capabilities()
+                .pricing
+                .clone(),
+        ),
+        input.options.capture_content,
+        input.options.content_max_bytes,
     );
-    collector.process_events(&events);
-    let execution = collector.finish();
+    collector.process_events(&input.events);
+    let mut execution = collector.finish();
+    execution.metrics.turn_count = input.user_turn_count;
     let score_card = build_score_card(
-        case,
-        environment.llm_provider.name(),
-        transcript.turns.len(),
+        input.case,
+        input.environment.llm_provider.name(),
+        input.user_turn_count,
         &event_payloads,
         &execution,
-        started_at,
+        input.started_at,
     );
     let score_records = score_card.to_score_records(
-        environment.workspace_id.clone(),
-        environment.user_id.clone(),
-        environment.session_id,
+        input.environment.workspace_id.clone(),
+        input.environment.user_id.clone(),
+        input.environment.session_id,
     );
     let result = EvalResult {
-        test_case: case.name.clone(),
-        agent_config: agent_config.name.clone(),
+        test_case: input.case.name.clone(),
+        agent_config: input.agent_config.name.clone(),
         status: EvalStatus::Passed,
         response: execution.response,
         trajectory: execution.trajectory,
@@ -137,19 +259,21 @@ async fn drive_transcript(
         metrics: execution.metrics,
         trace_id: None,
         error: None,
-        started_at,
-        completed_at,
+        started_at: input.started_at,
+        completed_at: input.completed_at,
     };
 
-    Ok(LongRunReport {
+    LongRunReport {
         result,
         score_card,
         score_records,
-    })
+        events: event_payloads,
+    }
 }
 
 async fn emit_user_turn(
     environment: &crate::AgentEnvironment,
+    session_id: SessionId,
     turn_index: usize,
     text: &str,
 ) -> Result<()> {
@@ -166,26 +290,33 @@ async fn emit_user_turn(
     };
     environment
         .session_store
-        .emit_event(environment.session_id, event)
+        .emit_event(session_id, event)
         .await?;
     Ok(())
 }
 
 async fn drive_one_turn(
     environment: &crate::AgentEnvironment,
+    session_id: SessionId,
+    llm_provider: Arc<dyn LLMProvider>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
+    signal_state: &mut TurnSignalState,
     cancel_token: &CancellationToken,
     hard_cancel_token: &CancellationToken,
 ) -> Result<()> {
     for turn_index in 0..MAX_LONG_CONVERSATION_AGENT_TURNS {
-        let outcome = run_streamed_turn(
-            environment.session_id,
+        let outcome = run_streamed_turn_with_signals(
+            session_id,
             environment.session_store.clone(),
-            environment.llm_provider.clone(),
+            llm_provider.clone(),
             &environment.pipeline,
             Some(environment.tool_router.clone()),
             runtime_tx,
             None,
+            &mut signal_state.signal_rx,
+            &mut signal_state.turn_requested,
+            &mut signal_state.queued_messages,
+            &mut signal_state.soft_cancel_requested,
             Some(cancel_token.clone()),
             Some(hard_cancel_token.clone()),
         )
@@ -214,6 +345,259 @@ async fn drive_one_turn(
     Ok(())
 }
 
+struct TranscriptSession {
+    session_id: SessionId,
+    llm_provider: Arc<dyn LLMProvider>,
+    transcript: Transcript,
+    provider_turn_index: usize,
+    user_turn_count: usize,
+    runtime_tx: broadcast::Sender<RuntimeEvent>,
+    signal_tx: mpsc::Sender<SessionSignal>,
+    signal_state: TurnSignalState,
+    cancel_token: CancellationToken,
+    hard_cancel_token: CancellationToken,
+}
+
+impl TranscriptSession {
+    fn new(
+        session_id: SessionId,
+        llm_provider: Arc<dyn LLMProvider>,
+        transcript: Transcript,
+    ) -> Self {
+        let (runtime_tx, _) = broadcast::channel::<RuntimeEvent>(256);
+        let (signal_tx, signal_rx) = mpsc::channel::<SessionSignal>(16);
+        Self {
+            session_id,
+            llm_provider,
+            transcript,
+            provider_turn_index: 0,
+            user_turn_count: 0,
+            runtime_tx,
+            signal_tx,
+            signal_state: TurnSignalState::new(signal_rx),
+            cancel_token: CancellationToken::new(),
+            hard_cancel_token: CancellationToken::new(),
+        }
+    }
+
+    fn has_next_user_turn(&self) -> bool {
+        self.transcript
+            .turns
+            .get(self.provider_turn_index)
+            .is_some()
+    }
+
+    async fn drive_next_turn(
+        &mut self,
+        case: &TestCase,
+        environment: &crate::AgentEnvironment,
+    ) -> Result<()> {
+        let Some(turn) = self.transcript.turns.get(self.provider_turn_index) else {
+            return Ok(());
+        };
+        let user_text = turn.user.text.clone();
+        emit_user_turn(
+            environment,
+            self.session_id,
+            self.user_turn_count,
+            user_text.as_str(),
+        )
+        .await?;
+        spawn_scripted_signal_task(case, user_text.as_str(), &self.runtime_tx, &self.signal_tx);
+        drive_one_turn(
+            environment,
+            self.session_id,
+            self.llm_provider.clone(),
+            &self.runtime_tx,
+            &mut self.signal_state,
+            &self.cancel_token,
+            &self.hard_cancel_token,
+        )
+        .await?;
+
+        self.user_turn_count += 1;
+        self.provider_turn_index += 1;
+        while self
+            .transcript
+            .turns
+            .get(self.provider_turn_index)
+            .is_some_and(|next_turn| next_turn.user.text == user_text)
+        {
+            self.provider_turn_index += 1;
+        }
+        Ok(())
+    }
+}
+
+async fn create_secondary_session(
+    environment: &crate::AgentEnvironment,
+    llm_provider: Arc<dyn LLMProvider>,
+) -> Result<SessionId> {
+    let session_meta = SessionMeta {
+        workspace_id: environment.workspace_id.clone(),
+        user_id: environment.user_id.clone(),
+        model: llm_provider.capabilities().model_id,
+        title: Some("secondary long-conversation session".to_string()),
+        ..SessionMeta::default()
+    };
+    environment
+        .session_store
+        .create_session(session_meta)
+        .await
+        .map_err(EvalError::from)
+}
+
+async fn collect_events_for_sessions(
+    environment: &crate::AgentEnvironment,
+    session_ids: &[SessionId],
+) -> Result<Vec<EventRecord>> {
+    let mut events = Vec::new();
+    for session_id in session_ids {
+        events.extend(
+            environment
+                .session_store
+                .get_events(*session_id, EventRange::all())
+                .await?,
+        );
+    }
+    events.sort_by_key(|record| (record.timestamp, record.sequence_num));
+    Ok(events)
+}
+
+struct TurnSignalState {
+    signal_rx: mpsc::Receiver<SessionSignal>,
+    turn_requested: bool,
+    queued_messages: Vec<BufferedUserMessage>,
+    soft_cancel_requested: bool,
+}
+
+impl TurnSignalState {
+    fn new(signal_rx: mpsc::Receiver<SessionSignal>) -> Self {
+        Self {
+            signal_rx,
+            turn_requested: false,
+            queued_messages: Vec::new(),
+            soft_cancel_requested: false,
+        }
+    }
+}
+
+fn spawn_scripted_signal_task(
+    case: &TestCase,
+    user_text: &str,
+    runtime_tx: &broadcast::Sender<RuntimeEvent>,
+    signal_tx: &mpsc::Sender<SessionSignal>,
+) {
+    let Some(scripted_decision) = scripted_approval_decision(case, user_text) else {
+        return;
+    };
+
+    let case_name = case.name.clone();
+    let mut runtime_rx = runtime_tx.subscribe();
+    let signal_tx = signal_tx.clone();
+    tokio::spawn(async move {
+        loop {
+            match runtime_rx.recv().await {
+                Ok(RuntimeEvent::ApprovalRequested(prompt)) => {
+                    let decision = scripted_decision.to_approval_decision(&prompt.pattern);
+                    if let Err(error) = signal_tx
+                        .send(SessionSignal::ApprovalDecided {
+                            request_id: prompt.request.request_id,
+                            decision,
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            scenario = %case_name,
+                            error = %error,
+                            "failed to send scripted long-conversation approval signal"
+                        );
+                    }
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        scenario = %case_name,
+                        error = %error,
+                        "runtime stream closed before scripted approval request"
+                    );
+                    break;
+                }
+            }
+        }
+    });
+}
+
+#[derive(Debug, Clone)]
+enum ScriptedApprovalDecision {
+    AllowOnce,
+    AlwaysAllow { pattern: Option<String> },
+    Deny { reason: Option<String> },
+}
+
+impl ScriptedApprovalDecision {
+    fn to_approval_decision(&self, prompt_pattern: &str) -> ApprovalDecision {
+        match self {
+            Self::AllowOnce => ApprovalDecision::AllowOnce,
+            Self::AlwaysAllow { pattern } => ApprovalDecision::AlwaysAllow {
+                pattern: pattern
+                    .clone()
+                    .unwrap_or_else(|| prompt_pattern.to_string()),
+            },
+            Self::Deny { reason } => ApprovalDecision::Deny {
+                reason: reason.clone(),
+            },
+        }
+    }
+}
+
+fn scripted_approval_decision(
+    case: &TestCase,
+    user_text: &str,
+) -> Option<ScriptedApprovalDecision> {
+    if let Some(value) = case
+        .metadata
+        .get("scripted_approval_decisions")
+        .and_then(Value::as_object)
+        .and_then(|decisions| decisions.get(user_text))
+    {
+        return parse_scripted_decision(value);
+    }
+
+    (case.metadata.get("approval_turn").and_then(Value::as_str) == Some(user_text))
+        .then_some(ScriptedApprovalDecision::AllowOnce)
+}
+
+fn parse_scripted_decision(value: &Value) -> Option<ScriptedApprovalDecision> {
+    let decision = value
+        .get("decision")
+        .and_then(Value::as_str)
+        .unwrap_or("allow_once");
+    match decision {
+        "allow_once" => Some(ScriptedApprovalDecision::AllowOnce),
+        "always_allow" => Some(ScriptedApprovalDecision::AlwaysAllow {
+            pattern: value
+                .get("pattern")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+        }),
+        "deny" => Some(ScriptedApprovalDecision::Deny {
+            reason: value
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+        }),
+        other => {
+            tracing::warn!(
+                scenario_decision = other,
+                "unknown scripted long-conversation approval decision"
+            );
+            None
+        }
+    }
+}
+
 fn build_score_card(
     case: &TestCase,
     provider: &str,
@@ -230,6 +614,10 @@ fn build_score_card(
         .iter()
         .filter(|event| matches!(event, Event::Checkpoint { .. }))
         .count();
+    let errors_total_pre_compaction = errors_before_first_checkpoint(events);
+    let errors_preserved =
+        metadata_u32(case, "errors_preserved").unwrap_or(errors_total_pre_compaction);
+    let errors_preserved_strict = errors_preserved >= errors_total_pre_compaction;
     let consolidation = count_consolidation_outcomes(events);
     let brain_cost_cents = events
         .iter()
@@ -294,7 +682,14 @@ fn build_score_card(
         context: ContextScores {
             max_context_tokens: execution.metrics.input_tokens,
             compaction_count,
-            errors_preserved_strict: true,
+            compaction_events: u32::try_from(compaction_count).unwrap_or(u32::MAX),
+            tokens_at_first_trigger: metadata_u32(case, "tokens_at_first_trigger")
+                .or_else(|| first_checkpoint_input_tokens(events))
+                .unwrap_or(0),
+            post_compaction_tokens: metadata_u32(case, "post_compaction_tokens").unwrap_or(0),
+            errors_preserved,
+            errors_total_pre_compaction,
+            errors_preserved_strict,
         },
         memory: MemoryScores {
             planted_fact_recall: 0.0,
@@ -308,8 +703,41 @@ fn build_score_card(
             tool_error_count: execution.metrics.tool_error_count,
             success_rate,
         },
-        safety: SafetyScores::default(),
+        safety: SafetyScores {
+            prompt_injection_attempts_blocked: metadata_u32(
+                case,
+                "prompt_injection_attempts_blocked",
+            )
+            .unwrap_or(0),
+            shell_bypass_attempts_blocked: metadata_u32(case, "shell_bypass_attempts_blocked")
+                .unwrap_or(0),
+            ..SafetyScores::default()
+        },
     }
+}
+
+fn metadata_u32(case: &TestCase, key: &str) -> Option<u32> {
+    case.metadata
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn first_checkpoint_input_tokens(events: &[Event]) -> Option<u32> {
+    events.iter().find_map(|event| match event {
+        Event::Checkpoint { input_tokens, .. } => u32::try_from(*input_tokens).ok(),
+        _ => None,
+    })
+}
+
+fn errors_before_first_checkpoint(events: &[Event]) -> u32 {
+    events
+        .iter()
+        .take_while(|event| !matches!(event, Event::Checkpoint { .. }))
+        .filter(|event| matches!(event, Event::Error { .. } | Event::ToolError { .. }))
+        .count()
+        .try_into()
+        .unwrap_or(u32::MAX)
 }
 
 fn score_card_scores(score_card: &ScoreCard) -> Vec<EvalScore> {

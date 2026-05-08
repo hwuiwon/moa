@@ -214,6 +214,16 @@ pub struct ContextScores {
     pub max_context_tokens: usize,
     /// Number of compaction events observed.
     pub compaction_count: usize,
+    /// Number of compaction events observed, using the dashboard's stable metric name.
+    pub compaction_events: u32,
+    /// Context token count at the first compaction trigger.
+    pub tokens_at_first_trigger: u32,
+    /// Context token count after compaction.
+    pub post_compaction_tokens: u32,
+    /// Number of pre-compaction errors preserved after compaction.
+    pub errors_preserved: u32,
+    /// Number of errors present before the first compaction.
+    pub errors_total_pre_compaction: u32,
     /// Whether strict error-preservation checks passed.
     pub errors_preserved_strict: bool,
 }
@@ -223,6 +233,11 @@ impl Default for ContextScores {
         Self {
             max_context_tokens: 0,
             compaction_count: 0,
+            compaction_events: 0,
+            tokens_at_first_trigger: 0,
+            post_compaction_tokens: 0,
+            errors_preserved: 0,
+            errors_total_pre_compaction: 0,
             errors_preserved_strict: true,
         }
     }
@@ -266,6 +281,10 @@ pub struct SafetyScores {
     pub canary_leaks: u32,
     /// Non-redacted credential exposures.
     pub credential_exposures: u32,
+    /// Prompt-injection attempts detected in tool results and blocked.
+    pub prompt_injection_attempts_blocked: u32,
+    /// Shell chaining attempts blocked from matching an unsafe persisted allow rule.
+    pub shell_bypass_attempts_blocked: u32,
 }
 
 fn push_row(rows: &mut Vec<MetricRow>, name: impl Into<String>, value: Value) {
@@ -375,6 +394,31 @@ fn push_context_rows(rows: &mut Vec<MetricRow>, scores: &ContextScores) {
     );
     push_row(
         rows,
+        "context.compaction_events",
+        number(u64::from(scores.compaction_events)),
+    );
+    push_row(
+        rows,
+        "context.tokens_at_first_trigger",
+        number(u64::from(scores.tokens_at_first_trigger)),
+    );
+    push_row(
+        rows,
+        "context.post_compaction_tokens",
+        number(u64::from(scores.post_compaction_tokens)),
+    );
+    push_row(
+        rows,
+        "context.errors_preserved",
+        number(u64::from(scores.errors_preserved)),
+    );
+    push_row(
+        rows,
+        "context.errors_total_pre_compaction",
+        number(u64::from(scores.errors_total_pre_compaction)),
+    );
+    push_row(
+        rows,
         "context.errors_preserved_strict",
         Value::Bool(scores.errors_preserved_strict),
     );
@@ -441,6 +485,16 @@ fn push_safety_rows(rows: &mut Vec<MetricRow>, scores: &SafetyScores) {
         rows,
         "safety.credential_exposures",
         number(u64::from(scores.credential_exposures)),
+    );
+    push_row(
+        rows,
+        "safety.prompt_injection_attempts_blocked",
+        number(u64::from(scores.prompt_injection_attempts_blocked)),
+    );
+    push_row(
+        rows,
+        "safety.shell_bypass_attempts_blocked",
+        number(u64::from(scores.shell_bypass_attempts_blocked)),
     );
 }
 
