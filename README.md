@@ -23,21 +23,45 @@ Status: early active development. The architecture is stable enough to document,
 - **Pluggable hands:** local execution, Docker, Daytona, E2B, and MCP tools all route through the hand/tool abstraction.
 - **Model-agnostic providers:** Anthropic, OpenAI, and Google Gemini are first-class provider targets.
 
-## Quickstart
+## Local Development
 
-Prerequisites: Rust, Docker, Postgres from the repo dev stack, and at least one provider key.
+`make dev` brings up the full local stack:
+
+- Postgres with AGE, pgvector, and pgaudit on `localhost:25432`
+- Restate Server 1.6.2 on `localhost:18080` for ingress and `localhost:9070` for the UI
+- `moa-orchestrator` on `localhost:9080` for the Restate handler and `localhost:9081` for health
+- PII filter on `localhost:8080`
+- audit log shipper with no exposed port
+
+The orchestrator registers its handlers with Restate automatically through the
+`restate-register` sidecar service.
+
+To wait for everything to be ready:
 
 ```bash
-make dev
-
-export OPENAI_API_KEY=sk-...
-# or ANTHROPIC_API_KEY=... / GOOGLE_API_KEY=...
-
-cargo build
-cargo run -p moa-cli -- init
-cargo run -p moa-cli -- doctor
-cargo run -p moa-cli -- exec "What's 2+2?"
+make dev-status
 ```
+
+To open the Restate web UI and inspect invocations, K/V state, and deployments:
+
+```bash
+make dev-restate-ui
+```
+
+To stop everything while preserving data:
+
+```bash
+make dev-down
+```
+
+To stop and wipe all volumes, including Postgres data and Restate state:
+
+```bash
+make dev-wipe
+```
+
+If `localhost:18080` is already in use, override the Restate ingress port in a
+local `compose.override.yml`.
 
 ## Cloud Runtime
 
@@ -50,7 +74,7 @@ OPENAI_API_KEY=...
 cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 9080 --health-port 9081
 ```
 
-The binary registers these Restate surfaces: `Session`, `SubAgent`, `Workspace`, `SessionStore`, `ToolExecutor`, `LLMGateway`, `WorkspaceStore`, `IntentManager`, `Consolidate`, `IntentDiscovery`, `IngestionVO`, and `Health`.
+The binary serves these Restate surfaces: `Session`, `SubAgent`, `Workspace`, `SessionStore`, `ToolExecutor`, `LLMGateway`, `WorkspaceStore`, `IntentManager`, `Consolidate`, `IntentDiscovery`, `IngestionVO`, and `Health`. Deployment registration is handled outside the binary.
 
 The Docker image builds `moa-orchestrator-bin` and installs it as `/usr/local/bin/moa-orchestrator`.
 

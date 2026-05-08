@@ -63,6 +63,87 @@ services:
       retries: 10
       start_period: 10s
 
+  restate:
+    image: docker.restate.dev/restatedev/restate:1.6.2
+    container_name: moa-restate
+    restart: unless-stopped
+    command: ["--node-name=restate-dev"]
+    environment:
+      RESTATE_LOG_FILTER: "warn,restate=info"
+      RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE: "1 GiB"
+      RESTATE_ADMIN__QUERY_ENGINE__MEMORY_SIZE: "256 MiB"
+      RESTATE_BIFROST__RECORD_CACHE_MEMORY_SIZE: "128 MiB"
+      DO_NOT_TRACK: "1"
+    ports:
+      - "18080:8080"
+      - "9070:9070"
+      - "5122:5122"
+    volumes:
+      - moa-restate-data:/restate-data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9070/health >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  moa-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: moa/orchestrator:dev
+    container_name: moa-orchestrator
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      restate:
+        condition: service_healthy
+    environment:
+      POSTGRES_URL: postgres://moa_owner:dev@postgres:5432/moa
+      RESTATE_ADMIN_URL: http://restate:9070
+      MOA_LINEAGE_SINK: postgres
+      MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS: "false"
+      MOA_DEREGISTER_ON_SHUTDOWN: "false"
+      RUST_LOG: "info,moa_orchestrator=debug"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "9080:9080"
+      - "9081:9081"
+
+  restate-register:
+    image: docker.restate.dev/restatedev/restate-cli:1.6.2
+    container_name: moa-restate-register
+    restart: "no"
+    depends_on:
+      restate:
+        condition: service_healthy
+      moa-orchestrator:
+        condition: service_started
+    environment:
+      RESTATE_ADMIN_URL: http://restate:9070
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        echo "registering moa-orchestrator with Restate admin..."
+        attempt=1
+        while [ "$$attempt" -le 30 ]; do
+          if restate \
+            --connect-timeout 10000 \
+            --request-timeout 30000 \
+            deployments register --force http://moa-orchestrator:9080 --yes; then
+            echo "registration complete"
+            exit 0
+          fi
+          echo "registration attempt $${attempt} failed; retrying..."
+          attempt=$$((attempt + 1))
+          sleep 2
+        done
+        echo "registration failed"
+        exit 1
+
   moa-pii-service:
     build:
       context: .
@@ -112,3 +193,4 @@ volumes:
   moa-pg-audit:
   moa-audit-shipper-state:
   moa-pii-hf-cache:
+  moa-restate-data:
