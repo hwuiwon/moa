@@ -99,6 +99,7 @@ eventsource-stream = "0.2"
 futures-util = "0.3"
 globset = "0.4"
 hex = "0.4"
+hmac = "0.12"
 insta = { version = "1", features = ["json", "redactions"] }
 jsonwebtoken = "9.3"
 metrics = "0.24"
@@ -127,6 +128,7 @@ serde_json = "1"
 sha2 = "0.10"
 shell-words = "1.1"
 similar = "2"
+subtle = "2"
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "postgres",

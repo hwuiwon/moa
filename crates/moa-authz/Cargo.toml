@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+async-trait.workspace = true
 moa-authz-schema.workspace = true
 moa-core.workspace = true
 reqwest.workspace = true

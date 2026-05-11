@@ -12,6 +12,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Router, serve};
 use clap::Parser;
+use moa_authz::AwakeableResolver;
 use moa_core::config::AsyncAuthzKind;
 use moa_core::{MoaConfig, TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_hands::ToolRouter;
@@ -27,6 +28,8 @@ use moa_orchestrator::{
     restate_register::{IngestionVO, IngestionVOImpl},
     services::{
         agent_registry::{AgentRegistry, AgentRegistryImpl},
+        agent_templates::{AgentTemplates, AgentTemplatesImpl},
+        agents::{Agents, AgentsImpl},
         api_keys::{ApiKeys, ApiKeysImpl},
         approvals::{Approvals, ApprovalsImpl},
         approvals_reaper::{ApprovalReaper, ApprovalReaperHandle, HttpAwakeableResolver},
@@ -65,6 +68,8 @@ const CRON_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
 const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "AgentRegistry",
+    "AgentTemplates",
+    "Agents",
     "Approvals",
     "ApiKeys",
     "Consolidate",
@@ -130,9 +135,15 @@ async fn main() -> anyhow::Result<()> {
     let session_store = Arc::new(
         PostgresSessionStore::from_existing_pool(&config.postgres_url, pool.clone()).await?,
     );
-    let auth_providers =
-        moa_auth_providers::build_providers(moa_config.as_ref(), Arc::new(pool.clone()))
-            .context("build providers bundle")?;
+    let awakeable_resolver: Arc<dyn AwakeableResolver> = Arc::new(HttpAwakeableResolver::new(
+        cron_bootstrap_ingress_url(&config.restate_admin_url),
+    )?);
+    let auth_providers = moa_auth_providers::build_providers_with_resolver(
+        moa_config.as_ref(),
+        Arc::new(pool.clone()),
+        Some(awakeable_resolver.clone()),
+    )
+    .context("build providers bundle")?;
 
     let llm_providers = Arc::new(match providers_override {
         ProvidersOverride::None => ProviderRegistry::from_env(),
@@ -185,6 +196,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .bind(LLMGatewayImpl::new(llm_providers).serve())
         .bind(AgentRegistryImpl.serve())
+        .bind(AgentTemplatesImpl.serve())
+        .bind(AgentsImpl.serve())
         .bind(ApprovalsImpl.serve())
         .bind(ApiKeysImpl.serve())
         .bind(IngestionVOImpl.serve())
@@ -205,11 +218,8 @@ async fn main() -> anyhow::Result<()> {
     let readiness = Arc::new(AtomicBool::new(false));
     let probe_state = ProbeState::new(readiness.clone(), pool.clone(), config.restate_admin_url)?;
     let shutdown = CancellationToken::new();
-    let approval_reaper_handle = start_approval_reaper_if_configured(
-        &pool,
-        moa_config.as_ref(),
-        probe_state.admin_base_url(),
-    )?;
+    let approval_reaper_handle =
+        start_approval_reaper_if_configured(&pool, moa_config.as_ref(), awakeable_resolver)?;
 
     let restate_listener = bind_listener(args.port).await?;
     let health_listener = bind_listener(args.health_port).await?;
@@ -354,14 +364,11 @@ fn start_authz_outbox_poller(
 fn start_approval_reaper_if_configured(
     pool: &PgPool,
     config: &MoaConfig,
-    restate_admin_url: &str,
+    resolver: Arc<dyn AwakeableResolver>,
 ) -> anyhow::Result<Option<ApprovalReaperHandle>> {
     if config.async_authz.provider != AsyncAuthzKind::Builtin {
         return Ok(None);
     }
-    let resolver = Arc::new(HttpAwakeableResolver::new(cron_bootstrap_ingress_url(
-        restate_admin_url,
-    ))?);
     let handle = ApprovalReaper::new(pool.clone()).spawn(resolver);
     tracing::info!("approval reaper started");
     Ok(Some(handle))

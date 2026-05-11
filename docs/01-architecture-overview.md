@@ -166,6 +166,10 @@ Auth0 setup is documented in
 [`docs/operations/auth0-setup.md`](operations/auth0-setup.md), and optional
 OIDC group-to-FGA tuple naming is documented in
 [`docs/operations/oidc-group-mapping.md`](operations/oidc-group-mapping.md).
+Agent lifecycle operations are documented in
+[`docs/operations/agent-lifecycle.md`](operations/agent-lifecycle.md), and the
+Auth0 Token Vault setup is documented in
+[`docs/operations/token-vault-setup.md`](operations/token-vault-setup.md).
 
 ### Authorization
 

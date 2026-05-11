@@ -8,14 +8,26 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::IntoResponse;
 use axum::routing::{any, get, post};
 use moa_core::traits::{AuthProvider, Credential};
+#[cfg(feature = "auth0")]
+use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
+
+#[cfg(feature = "auth0")]
+use hmac::{Hmac, Mac};
+#[cfg(feature = "auth0")]
+use sha2::Sha256;
+#[cfg(feature = "auth0")]
+use subtle::ConstantTimeEq;
 
 /// Shared edge application state.
 #[derive(Clone)]
 pub struct AppState {
     /// Credential resolver used for incoming requests.
     pub auth: Arc<dyn AuthProvider>,
+    /// Postgres pool used by unauthenticated webhooks that update auth metadata.
+    #[cfg(feature = "auth0")]
+    pub pool: Arc<sqlx::PgPool>,
     /// Internal orchestrator proxy.
     pub proxy: Arc<OrchestratorProxy>,
 }
@@ -27,6 +39,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/security/secret-scanning/github",
             post(handle_github_secret_scan),
+        )
+        .route(
+            "/v1/webhooks/auth0/connection-linked",
+            post(handle_auth0_connection_webhook),
         )
         .route("/v1/{*rest}", any(handle_proxy))
         .with_state(state)
@@ -92,6 +108,140 @@ async fn handle_github_secret_scan() -> axum::response::Response {
         "GitHub secret scanning partner endpoint is not implemented until registration is complete",
     )
         .into_response()
+}
+
+#[cfg(feature = "auth0")]
+async fn handle_auth0_connection_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let secret = match std::env::var("MOA__AUTH__AUTH0__WEBHOOK_SECRET") {
+        Ok(secret) if !secret.trim().is_empty() => secret,
+        _ => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "webhook secret not configured",
+            )
+                .into_response();
+        }
+    };
+    if !verify_auth0_signature(&headers, &body, &secret) {
+        return (StatusCode::UNAUTHORIZED, "invalid signature").into_response();
+    }
+    let payload: Auth0ConnectionLinkedWebhook = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(_) => return (StatusCode::BAD_REQUEST, "bad webhook body").into_response(),
+    };
+    let user_id = match payload.user_id {
+        Some(user_id) => user_id,
+        None => {
+            let Some(auth0_sub) = payload.auth0_sub.as_deref() else {
+                return (StatusCode::BAD_REQUEST, "user_id or auth0_sub required").into_response();
+            };
+            match lookup_auth0_user_id(&state.pool, auth0_sub).await {
+                Ok(Some(user_id)) => user_id,
+                Ok(None) => {
+                    return (StatusCode::NOT_FOUND, "auth0 user mapping not found").into_response();
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "lookup auth0 user for connection webhook failed");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+                }
+            }
+        }
+    };
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO linked_connections
+            (user_id, connection_name, scopes_granted, external_sub)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (user_id, connection_name)
+        DO UPDATE SET
+            scopes_granted = EXCLUDED.scopes_granted,
+            external_sub = EXCLUDED.external_sub,
+            linked_at = NOW()
+        "#,
+    )
+    .bind(user_id)
+    .bind(&payload.connection_name)
+    .bind(&payload.scopes_granted)
+    .bind(payload.external_sub.as_deref())
+    .execute(&*state.pool)
+    .await;
+    match result {
+        Ok(_) => (StatusCode::OK, "ok").into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "upsert linked connection failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response()
+        }
+    }
+}
+
+#[cfg(not(feature = "auth0"))]
+async fn handle_auth0_connection_webhook() -> axum::response::Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        "Auth0 connection webhooks require the auth0 feature",
+    )
+        .into_response()
+}
+
+#[cfg(feature = "auth0")]
+#[derive(Debug, Deserialize)]
+struct Auth0ConnectionLinkedWebhook {
+    #[serde(default)]
+    user_id: Option<Uuid>,
+    #[serde(default)]
+    auth0_sub: Option<String>,
+    connection_name: String,
+    #[serde(default)]
+    scopes_granted: Vec<String>,
+    #[serde(default)]
+    external_sub: Option<String>,
+}
+
+#[cfg(feature = "auth0")]
+async fn lookup_auth0_user_id(
+    pool: &sqlx::PgPool,
+    auth0_sub: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let row: Option<(Uuid,)> =
+        sqlx::query_as("SELECT user_id FROM auth0_user_map WHERE sub = $1 LIMIT 1")
+            .bind(auth0_sub)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|(user_id,)| user_id))
+}
+
+#[cfg(feature = "auth0")]
+fn verify_auth0_signature(headers: &HeaderMap, body: &[u8], secret: &str) -> bool {
+    type HmacSha256 = Hmac<Sha256>;
+    let signature = headers
+        .get("auth0-signature")
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            headers
+                .get("Auth0-Signature")
+                .and_then(|value| value.to_str().ok())
+        });
+    let Some(signature) = signature else {
+        return false;
+    };
+    let signature = signature
+        .strip_prefix("sha256=")
+        .unwrap_or(signature)
+        .trim();
+    let Ok(provided) = hex::decode(signature) else {
+        return false;
+    };
+    let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(body);
+    let expected = mac.finalize().into_bytes();
+    expected.as_slice().ct_eq(provided.as_slice()).into()
 }
 
 async fn response_to_axum(response: reqwest::Response) -> axum::response::Response {
@@ -194,5 +344,109 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
             body: bytes,
         };
     }
+    if *method == Method::POST && uri.path() == "/v1/agent-templates" {
+        return RouteTranslation::Forward {
+            method: Method::POST,
+            path: "/AgentTemplates/create".to_string(),
+            body: body.to_vec(),
+        };
+    }
+    if *method == Method::GET && uri.path() == "/v1/agent-templates" {
+        return RouteTranslation::Forward {
+            method: Method::POST,
+            path: "/AgentTemplates/list".to_string(),
+            body: Vec::new(),
+        };
+    }
+    if let Some(rest) = uri.path().strip_prefix("/v1/agent-templates/") {
+        if *method == Method::GET {
+            return translate_uuid_path(rest, "/AgentTemplates/get");
+        }
+        if *method == Method::POST
+            && let Some(id) = rest.strip_suffix("/deactivate")
+        {
+            return translate_uuid_path(id, "/AgentTemplates/deactivate");
+        }
+    }
+    if *method == Method::POST && uri.path() == "/v1/agents" {
+        return RouteTranslation::Forward {
+            method: Method::POST,
+            path: "/Agents/register".to_string(),
+            body: body.to_vec(),
+        };
+    }
+    if *method == Method::GET && uri.path() == "/v1/agents" {
+        return RouteTranslation::Forward {
+            method: Method::POST,
+            path: "/Agents/list".to_string(),
+            body: Vec::new(),
+        };
+    }
+    if let Some(rest) = uri.path().strip_prefix("/v1/agents/") {
+        if *method == Method::GET {
+            return translate_uuid_path(rest, "/Agents/get");
+        }
+        if *method == Method::POST
+            && let Some(id) = rest.strip_suffix("/deactivate")
+        {
+            return translate_uuid_path(id, "/Agents/deactivate");
+        }
+        if *method == Method::POST
+            && let Some(id) = rest.strip_suffix("/can-act-as")
+        {
+            return translate_agent_act_as(id, body, "/Agents/grant_can_act_as");
+        }
+        if *method == Method::POST
+            && let Some(id) = rest.strip_suffix("/revoke-can-act-as")
+        {
+            return translate_agent_act_as(id, body, "/Agents/revoke_can_act_as");
+        }
+    }
     RouteTranslation::NoChange
+}
+
+fn translate_uuid_path(id: &str, target: &str) -> RouteTranslation {
+    let value = match Uuid::parse_str(id) {
+        Ok(value) => value,
+        Err(_) => return RouteTranslation::BadRequest("bad id"),
+    };
+    let body = match serde_json::to_vec(&value) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::error!(error = %error, "serialize UUID body failed");
+            return RouteTranslation::BadRequest("bad id");
+        }
+    };
+    RouteTranslation::Forward {
+        method: Method::POST,
+        path: target.to_string(),
+        body,
+    }
+}
+
+fn translate_agent_act_as(agent_id: &str, body: &Bytes, target: &str) -> RouteTranslation {
+    let agent_id = match Uuid::parse_str(agent_id) {
+        Ok(value) => value,
+        Err(_) => return RouteTranslation::BadRequest("bad agent id"),
+    };
+    let mut value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return RouteTranslation::BadRequest("bad agent act-as body"),
+    };
+    let Some(object) = value.as_object_mut() else {
+        return RouteTranslation::BadRequest("agent act-as body must be object");
+    };
+    object.insert("agent_id".to_string(), serde_json::json!(agent_id));
+    let bytes = match serde_json::to_vec(&value) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::error!(error = %error, "serialize agent act-as body failed");
+            return RouteTranslation::BadRequest("bad agent act-as body");
+        }
+    };
+    RouteTranslation::Forward {
+        method: Method::POST,
+        path: target.to_string(),
+        body: bytes,
+    }
 }

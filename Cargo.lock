@@ -3874,6 +3874,7 @@ dependencies = [
  "moa-core",
  "reqwest 0.13.2",
  "rsa",
+ "secrecy 0.10.3",
  "serde",
  "serde_json",
  "sqlx",
@@ -3888,6 +3889,7 @@ dependencies = [
 name = "moa-authz"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "httpmock",
  "moa-authz-schema",
  "moa-core",
@@ -4032,12 +4034,16 @@ dependencies = [
  "async-trait",
  "axum",
  "clap",
+ "hex",
+ "hmac",
  "moa-auth-providers",
  "moa-core",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
+ "subtle",
  "tokio",
  "tower-http",
  "tracing",

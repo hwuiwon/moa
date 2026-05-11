@@ -1,5 +1,6 @@
 //! OpenFGA client and transactional outbox support for MOA authorization.
 
+pub mod awakeable;
 pub mod client;
 pub mod error;
 pub mod outbox;
@@ -7,6 +8,7 @@ pub mod poller;
 pub mod require;
 pub mod schema;
 
+pub use awakeable::{AwakeableResolveError, AwakeableResolver};
 pub use client::{FgaClient, FgaConfig, FgaTuple};
 pub use error::AuthzError;
 pub use outbox::{enqueue, enqueue_raw};

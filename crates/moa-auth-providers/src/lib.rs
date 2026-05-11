@@ -15,6 +15,6 @@ pub use api_keys::{
     NewApiKey, ResolvedKey, create, generate, parse_parts, prefix_of, revoke, validate,
 };
 pub use builtin_authz::BuiltinAsyncAuthzProvider;
-pub use bundle::{BuildError, Providers, build_providers};
+pub use bundle::{BuildError, Providers, build_providers, build_providers_with_resolver};
 pub use local::LocalAuthProvider;
 pub use null_vault::NullTokenVaultProvider;

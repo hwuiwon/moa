@@ -284,6 +284,117 @@ impl OrchestratorClient {
         }
     }
 
+    /// Create an agent template.
+    pub async fn agent_templates_create(
+        &self,
+        request: CreateAgentTemplateRequest,
+    ) -> Result<AgentTemplateSummary> {
+        if self.bearer.is_some() {
+            self.post_call("/v1/agent-templates", &request).await
+        } else {
+            self.post_call("/AgentTemplates/create", &request).await
+        }
+    }
+
+    /// List active agent templates visible to the caller.
+    pub async fn agent_templates_list(&self) -> Result<Vec<AgentTemplateSummary>> {
+        if self.bearer.is_some() {
+            self.get_call("/v1/agent-templates").await
+        } else {
+            self.post_empty_call("/AgentTemplates/list").await
+        }
+    }
+
+    /// Load one agent template.
+    pub async fn agent_templates_get(&self, id: Uuid) -> Result<AgentTemplateSummary> {
+        if self.bearer.is_some() {
+            self.get_call(&format!("/v1/agent-templates/{id}")).await
+        } else {
+            self.post_call("/AgentTemplates/get", &id).await
+        }
+    }
+
+    /// Deactivate one agent template.
+    pub async fn agent_templates_deactivate(&self, id: Uuid) -> Result<()> {
+        if self.bearer.is_some() {
+            self.post_void(
+                &format!("/v1/agent-templates/{id}/deactivate"),
+                &serde_json::json!({}),
+            )
+            .await
+        } else {
+            self.post_void("/AgentTemplates/deactivate", &id).await
+        }
+    }
+
+    /// Register an agent from a template.
+    pub async fn agents_register(&self, request: RegisterAgentRequest) -> Result<AgentSummary> {
+        if self.bearer.is_some() {
+            self.post_call("/v1/agents", &request).await
+        } else {
+            self.post_call("/Agents/register", &request).await
+        }
+    }
+
+    /// List active agents operated by the caller.
+    pub async fn agents_list(&self) -> Result<Vec<AgentSummary>> {
+        if self.bearer.is_some() {
+            self.get_call("/v1/agents").await
+        } else {
+            self.post_empty_call("/Agents/list").await
+        }
+    }
+
+    /// Load one agent.
+    pub async fn agents_get(&self, id: Uuid) -> Result<AgentSummary> {
+        if self.bearer.is_some() {
+            self.get_call(&format!("/v1/agents/{id}")).await
+        } else {
+            self.post_call("/Agents/get", &id).await
+        }
+    }
+
+    /// Deactivate one agent.
+    pub async fn agents_deactivate(&self, id: Uuid) -> Result<()> {
+        if self.bearer.is_some() {
+            self.post_void(
+                &format!("/v1/agents/{id}/deactivate"),
+                &serde_json::json!({}),
+            )
+            .await
+        } else {
+            self.post_void("/Agents/deactivate", &id).await
+        }
+    }
+
+    /// Grant an agent the right to act as a user.
+    pub async fn agents_grant_can_act_as(&self, agent_id: Uuid, user_id: Uuid) -> Result<()> {
+        let request = AgentActAsRequest { agent_id, user_id };
+        if self.bearer.is_some() {
+            self.post_void(
+                &format!("/v1/agents/{agent_id}/can-act-as"),
+                &PublicAgentActAsRequest { user_id },
+            )
+            .await
+        } else {
+            self.post_void("/Agents/grant_can_act_as", &request).await
+        }
+    }
+
+    /// Revoke an agent's right to act as a user.
+    pub async fn agents_revoke_can_act_as(&self, agent_id: Uuid, user_id: Uuid) -> Result<()> {
+        let request = AgentActAsRequest { agent_id, user_id };
+        if self.bearer.is_some() {
+            self.post_void(
+                &format!("/v1/agents/{agent_id}/revoke-can-act-as"),
+                &PublicAgentActAsRequest { user_id },
+            )
+            .await
+        } else {
+            self.post_void("/Agents/revoke_can_act_as", &request).await
+        }
+    }
+
     /// Probes an orchestrator health URL and succeeds only on a 2xx status.
     #[instrument(skip(self))]
     pub async fn health_check(&self, health_url: &str) -> Result<()> {
@@ -453,6 +564,85 @@ struct DecisionRequest {
 struct PublicDecisionRequest {
     outcome: String,
     reason: Option<String>,
+}
+
+/// Request body for creating an agent template.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateAgentTemplateRequest {
+    /// Tenant-unique template name.
+    pub name: String,
+    /// Optional human-readable description.
+    pub description: Option<String>,
+    /// System instructions used by agents instantiated from this template.
+    pub instructions: String,
+    /// Tool names this template is allowed to call.
+    pub allowed_tools: Vec<String>,
+}
+
+/// Agent template summary returned by orchestrator APIs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTemplateSummary {
+    /// Template UUID.
+    pub id: Uuid,
+    /// Tenant UUID.
+    pub tenant_id: Uuid,
+    /// Tenant-unique template name.
+    pub name: String,
+    /// Optional human-readable description.
+    pub description: Option<String>,
+    /// System instructions used by agents instantiated from this template.
+    pub instructions: String,
+    /// Tool names this template is allowed to call.
+    pub allowed_tools: Vec<String>,
+    /// User who created the template.
+    pub created_by_user_id: Uuid,
+    /// Template creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Template deactivation timestamp.
+    pub deactivated_at: Option<DateTime<Utc>>,
+}
+
+/// Request body for registering an agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterAgentRequest {
+    /// Template to instantiate.
+    pub template_id: Uuid,
+    /// Human-readable agent display name.
+    pub display_name: String,
+}
+
+/// Agent summary returned by orchestrator APIs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSummary {
+    /// Agent UUID.
+    pub id: Uuid,
+    /// Tenant UUID.
+    pub tenant_id: Uuid,
+    /// Optional template UUID.
+    pub template_id: Option<Uuid>,
+    /// User who operates the agent.
+    pub operator_user_id: Uuid,
+    /// Human-readable agent display name.
+    pub display_name: String,
+    /// Lifecycle status.
+    pub status: String,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Deactivation timestamp.
+    pub deactivated_at: Option<DateTime<Utc>>,
+    /// Optional deactivation reason.
+    pub deactivated_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AgentActAsRequest {
+    agent_id: Uuid,
+    user_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PublicAgentActAsRequest {
+    user_id: Uuid,
 }
 
 fn identity_type_str(identity_type: IdentityType) -> &'static str {

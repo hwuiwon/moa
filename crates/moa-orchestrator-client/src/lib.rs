@@ -5,7 +5,10 @@ pub mod error;
 pub mod session;
 pub mod types;
 
-pub use client::{ClientConfig, OrchestratorClient};
+pub use client::{
+    AgentSummary, AgentTemplateSummary, ClientConfig, CreateAgentTemplateRequest,
+    OrchestratorClient, RegisterAgentRequest,
+};
 pub use error::{Error, Result};
 pub use session::{SessionHandle, SnapshotPoller};
 pub use types::*;

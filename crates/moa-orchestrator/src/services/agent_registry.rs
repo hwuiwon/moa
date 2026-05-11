@@ -19,6 +19,9 @@ pub struct RegisterAgentRequest {
     pub tenant_id: Uuid,
     /// Optional template used to instantiate this agent.
     pub template_id: Option<Uuid>,
+    /// Optional display name for the new agent.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 /// Agent registration response.
@@ -87,16 +90,25 @@ async fn register_agent_inner(
         .await
         .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
 
+    let display_name = request
+        .display_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("agent-{agent_id}"));
+
     sqlx::query(
         r#"
-        INSERT INTO agents (id, tenant_id, template_id, operator_user_id)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO agents (id, tenant_id, template_id, operator_user_id, display_name)
+        VALUES ($1, $2, $3, $4, $5)
         "#,
     )
     .bind(agent_id)
     .bind(request.tenant_id)
     .bind(request.template_id)
     .bind(operator_user_id)
+    .bind(display_name)
     .execute(&mut *transaction)
     .await
     .map_err(|error| TerminalError::new(format!("insert agent: {error}")))?;
@@ -122,6 +134,21 @@ async fn register_agent_inner(
     )
     .await
     .map_err(|error| TerminalError::new(format!("authz outbox agent operator tuple: {error}")))?;
+
+    if let Some(template_id) = request.template_id {
+        enqueue_raw(
+            &mut *transaction,
+            TupleOp::Write,
+            &format!("tenant:{}", request.tenant_id),
+            "tenant",
+            &format!("agent_template:{template_id}"),
+            Some(request.tenant_id),
+        )
+        .await
+        .map_err(|error| {
+            TerminalError::new(format!("authz outbox agent template tenant tuple: {error}"))
+        })?;
+    }
 
     transaction
         .commit()

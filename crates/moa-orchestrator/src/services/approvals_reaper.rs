@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
+use moa_authz::{AwakeableResolveError, AwakeableResolver};
 use moa_core::traits::ApprovalDecision;
 use sqlx::PgPool;
 use thiserror::Error;
@@ -34,6 +34,9 @@ pub enum ReaperError {
         /// Response body returned by Restate.
         body: String,
     },
+    /// Awakeable resolution through the shared resolver trait failed.
+    #[error("resolve awakeable: {0}")]
+    Resolve(#[from] AwakeableResolveError),
 }
 
 /// Background worker that marks expired approvals as timed out.
@@ -123,17 +126,6 @@ impl ApprovalReaperHandle {
     }
 }
 
-/// Resolve a Restate awakeable from outside the waiting handler context.
-#[async_trait]
-pub trait AwakeableResolver: Send + Sync {
-    /// Resolve `awakeable_id` with `payload`.
-    async fn resolve(
-        &self,
-        awakeable_id: &str,
-        payload: &serde_json::Value,
-    ) -> Result<(), ReaperError>;
-}
-
 /// HTTP implementation that calls Restate's awakeable resolve API.
 pub struct HttpAwakeableResolver {
     base_url: String,
@@ -154,13 +146,13 @@ impl HttpAwakeableResolver {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl AwakeableResolver for HttpAwakeableResolver {
     async fn resolve(
         &self,
         awakeable_id: &str,
         payload: &serde_json::Value,
-    ) -> Result<(), ReaperError> {
+    ) -> Result<(), AwakeableResolveError> {
         let response = self
             .client
             .post(format!(
@@ -170,14 +162,16 @@ impl AwakeableResolver for HttpAwakeableResolver {
             .json(payload)
             .send()
             .await
-            .map_err(ReaperError::Transport)?;
+            .map_err(|error| AwakeableResolveError::message(format!("transport: {error}")))?;
         if !response.status().is_success() {
             let status = response.status();
             let body = match response.text().await {
                 Ok(body) => body,
                 Err(error) => format!("<failed to read body: {error}>"),
             };
-            return Err(ReaperError::ResolveHttp { status, body });
+            return Err(AwakeableResolveError::message(format!(
+                "HTTP {status}: {body}"
+            )));
         }
         Ok(())
     }
