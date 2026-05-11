@@ -2,7 +2,7 @@
 //!
 //! The edge terminates incoming credentials, resolves identity, strips any
 //! caller-supplied `X-Moa-*` headers, and forwards trusted identity headers to
-//! the internal orchestrator handler port.
+//! the internal Restate ingress.
 
 mod headers;
 mod proxy;
@@ -19,12 +19,8 @@ struct Args {
     /// Socket address to bind.
     #[arg(long, env = "MOA_EDGE_BIND", default_value = "0.0.0.0:10000")]
     bind: String,
-    /// Internal orchestrator Restate handler base URL.
-    #[arg(
-        long,
-        env = "MOA_EDGE_UPSTREAM",
-        default_value = "http://moa-orchestrator:9080"
-    )]
+    /// Internal Restate ingress base URL.
+    #[arg(long, env = "MOA_EDGE_UPSTREAM", default_value = "http://restate:8080")]
     upstream: String,
     /// Postgres URL for local API-key authentication.
     #[arg(

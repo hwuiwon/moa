@@ -26,5 +26,5 @@ bound on the developer machine.
   host debugging is needed, use a local override that binds
   `127.0.0.1:10020:9080`.
 - Keep service-to-service compose URLs on internal container ports. For
-  example, `moa-edge` talks to `http://moa-orchestrator:9080`, not
-  `http://localhost:10020`.
+  example, `moa-edge` talks to `http://restate:8080`, not
+  `http://localhost:10010`.
