@@ -162,6 +162,10 @@ Local deployments use the zero-dependency provider bundle by default:
 `LocalAuthProvider`, `NullTokenVaultProvider`, and
 `BuiltinAsyncAuthzProvider`. Builtin approvals are documented in
 [`docs/operations/builtin-approvals.md`](operations/builtin-approvals.md).
+Auth0 setup is documented in
+[`docs/operations/auth0-setup.md`](operations/auth0-setup.md), and optional
+OIDC group-to-FGA tuple naming is documented in
+[`docs/operations/oidc-group-mapping.md`](operations/oidc-group-mapping.md).
 
 ### Authorization
 
@@ -243,7 +247,7 @@ and replay resistance on the verify path.
 | `moa-fga-bootstrap` | Planned, Phase 1: idempotent OpenFGA store and model bootstrap binary |
 | `moa-authz` | Planned, Phase 1: FGA client, transactional outbox, and outbox poller |
 | `moa-edge` | Planned, Phase 1: public HTTP edge for token validation and identity header injection |
-| `moa-auth-providers-auth0` | Planned, Phase 1: optional Auth0 implementations gated by the `auth0` Cargo feature |
+| `moa-auth-providers-auth0` | Optional Auth0 and generic OIDC implementations gated by the `auth0` Cargo feature |
 | `moa-ocsf` | Planned, Phase 1: OCSF v1.3 security-event types, emission helpers, and signing |
 | `moa-hands` | Tool routing and hand providers |
 | `moa-providers` | LLM and embedding providers |

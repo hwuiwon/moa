@@ -86,6 +86,11 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      - name: Build Auth0 feature targets
+        run: |
+          cargo build --locked -p moa-orchestrator --features auth0
+          cargo build --locked -p moa-edge --features auth0
+
       - name: Run cross-tenant pentest
         if: github.event_name != 'schedule'
         run: cargo test --locked -p moa-eval --test cross_tenant_pentest -- --nocapture

@@ -1,5 +1,5 @@
 [package]
-name = "moa-auth-providers"
+name = "moa-auth-providers-auth0"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,29 +7,26 @@ publish = false
 
 [features]
 default = []
-auth0 = ["dep:moa-auth-providers-auth0"]
+auth0 = []
 
 [dependencies]
-argon2.workspace = true
 async-trait.workspace = true
 chrono = { workspace = true, features = ["serde"] }
-crc32fast.workspace = true
-hex.workspace = true
+jsonwebtoken.workspace = true
 moa-authz.workspace = true
 moa-authz-schema.workspace = true
-moa-auth-providers-auth0 = { path = "../moa-auth-providers-auth0", optional = true }
 moa-core.workspace = true
-rand.workspace = true
-secrecy.workspace = true
+reqwest = { workspace = true, features = ["json", "rustls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "migrate"] }
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 tracing.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
-reqwest.workspace = true
-serde_json.workspace = true
+base64.workspace = true
+httpmock = "0.7"
+rsa = { version = "0.9", features = ["pem"] }

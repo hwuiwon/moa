@@ -1,12 +1,16 @@
 //! Authentication and local API-key CLI commands.
 
+use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use moa_auth_providers::Env;
 use moa_core::traits::Identity;
 use moa_orchestrator_client::OrchestratorClient;
+use serde::Deserialize;
+use tokio::time::{Instant, sleep};
 use uuid::Uuid;
 
 /// Top-level auth command.
@@ -30,6 +34,15 @@ pub(crate) enum AuthAction {
     UseKey {
         /// Full API key value.
         key: String,
+    },
+    /// Authenticate via an Auth0/OIDC device-code flow.
+    Login {
+        /// OIDC issuer URL; defaults to MOA_OIDC_ISSUER or MOA_EDGE_URL.
+        #[arg(long)]
+        issuer: Option<String>,
+        /// OAuth client id; defaults to MOA_AUTH_CLIENT_ID, MOA_AUTH0_CLIENT_ID, or MOA_OIDC_CLIENT_ID.
+        #[arg(long)]
+        client_id: Option<String>,
     },
 }
 
@@ -70,6 +83,7 @@ pub(crate) async fn handle_auth_command(command: AuthCommand) -> Result<String> 
     match command.action {
         AuthAction::Keys { action } => handle_keys_action(action).await,
         AuthAction::UseKey { key } => run_use_key(&key).await,
+        AuthAction::Login { issuer, client_id } => run_login(issuer, client_id).await,
     }
 }
 
@@ -136,41 +150,188 @@ fn cli_identity_path() -> Result<PathBuf> {
 async fn run_use_key(key: &str) -> Result<String> {
     moa_auth_providers::parse_parts(key)
         .map_err(|error| anyhow::anyhow!("invalid API key format: {error}"))?;
+    let credentials = crate::client::StoredCredentials {
+        api_key: Some(key.to_string()),
+        ..Default::default()
+    };
+    crate::client::write_credentials(&credentials).await?;
     let path = crate::client::credentials_path()?;
-    let parent = path
-        .parent()
-        .context("credentials path must have parent directory")?;
-    tokio::fs::create_dir_all(parent)
-        .await
-        .with_context(|| format!("create {}", parent.display()))?;
-    let payload = serde_json::json!({ "api_key": key });
-    tokio::fs::write(&path, serde_json::to_vec_pretty(&payload)?)
-        .await
-        .with_context(|| format!("write {}", path.display()))?;
-    set_owner_only_permissions(&path).await?;
     Ok(format!(
         "Stored API key at {}.\nCLI will present this key on subsequent edge requests.\n",
         path.display()
     ))
 }
 
-async fn set_owner_only_permissions(path: &std::path::Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
+async fn run_login(issuer: Option<String>, client_id: Option<String>) -> Result<String> {
+    let issuer = issuer
+        .or_else(|| std::env::var("MOA_OIDC_ISSUER").ok())
+        .or_else(|| std::env::var("MOA_AUTH0_ISSUER").ok())
+        .or_else(|| std::env::var("MOA_EDGE_URL").ok())
+        .context("issuer required; pass --issuer or set MOA_OIDC_ISSUER")?;
+    let client_id = client_id
+        .or_else(|| std::env::var("MOA_AUTH_CLIENT_ID").ok())
+        .or_else(|| std::env::var("MOA_AUTH0_CLIENT_ID").ok())
+        .or_else(|| std::env::var("MOA_OIDC_CLIENT_ID").ok())
+        .context("client id required; pass --client-id or set MOA_AUTH_CLIENT_ID")?;
+    let discovery_url = discovery_url(&issuer);
+    let http = reqwest::Client::new();
+    let discovery: OidcDiscovery = http
+        .get(&discovery_url)
+        .send()
+        .await
+        .with_context(|| format!("fetch OIDC discovery {discovery_url}"))?
+        .error_for_status()
+        .with_context(|| format!("OIDC discovery {discovery_url}"))?
+        .json()
+        .await
+        .context("parse OIDC discovery")?;
 
-        let mut permissions = tokio::fs::metadata(path)
-            .await
-            .with_context(|| format!("stat {}", path.display()))?
-            .permissions();
-        permissions.set_mode(0o600);
-        tokio::fs::set_permissions(path, permissions)
-            .await
-            .with_context(|| format!("chmod 0600 {}", path.display()))?;
+    let device: DeviceAuthorizationResponse = http
+        .post(&discovery.device_authorization_endpoint)
+        .form(&[
+            ("client_id", client_id.as_str()),
+            ("scope", "openid offline_access"),
+        ])
+        .send()
+        .await
+        .context("start device authorization")?
+        .error_for_status()
+        .context("device authorization rejected")?
+        .json()
+        .await
+        .context("parse device authorization response")?;
+
+    let verification = device
+        .verification_uri_complete
+        .as_deref()
+        .unwrap_or(&device.verification_uri);
+    let mut stdout = std::io::stdout();
+    writeln!(
+        stdout,
+        "Open this URL to authorize MOA CLI:\n\n  {verification}\n"
+    )?;
+    writeln!(stdout, "User code: {}\n", device.user_code)?;
+    stdout.flush()?;
+    try_open_browser(verification).await;
+
+    let token = poll_device_token(&http, &discovery.token_endpoint, &client_id, &device).await?;
+    let expires_at = token.expires_at();
+    let credentials = crate::client::StoredCredentials {
+        access_token: Some(token.access_token),
+        refresh_token: token.refresh_token,
+        token_endpoint: Some(discovery.token_endpoint),
+        client_id: Some(client_id),
+        issuer: Some(issuer),
+        expires_at,
+        ..Default::default()
+    };
+    crate::client::write_credentials(&credentials).await?;
+    let path = crate::client::credentials_path()?;
+    Ok(format!(
+        "Stored OIDC credentials at {}.\nCLI will present the access token on subsequent edge requests.\n",
+        path.display()
+    ))
+}
+
+fn discovery_url(issuer: &str) -> String {
+    if issuer.contains("/.well-known/") {
+        return issuer.to_string();
     }
+    format!(
+        "{}/.well-known/openid-configuration",
+        issuer.trim_end_matches('/')
+    )
+}
+
+async fn poll_device_token(
+    http: &reqwest::Client,
+    token_endpoint: &str,
+    client_id: &str,
+    device: &DeviceAuthorizationResponse,
+) -> Result<crate::client::OAuthTokenResponse> {
+    let mut interval = device.interval.unwrap_or(5).max(1);
+    let deadline = Instant::now() + Duration::from_secs(device.expires_in);
+
+    loop {
+        if Instant::now() >= deadline {
+            bail!("device authorization expired before approval");
+        }
+        sleep(Duration::from_secs(interval)).await;
+        let response = http
+            .post(token_endpoint)
+            .form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", device.device_code.as_str()),
+                ("client_id", client_id),
+            ])
+            .send()
+            .await
+            .context("poll device token")?;
+
+        let status = response.status();
+        let body = response.text().await.context("read token response")?;
+        if status.is_success() {
+            return serde_json::from_str(&body).context("parse token response");
+        }
+
+        let error: OAuthErrorResponse =
+            serde_json::from_str(&body).with_context(|| format!("parse token error {status}"))?;
+        match error.error.as_str() {
+            "authorization_pending" => {}
+            "slow_down" => interval += 5,
+            "access_denied" => bail!("device authorization denied"),
+            "expired_token" => bail!("device authorization expired"),
+            other => bail!(
+                "device authorization failed: {}{}",
+                other,
+                error
+                    .error_description
+                    .as_deref()
+                    .map(|description| format!(": {description}"))
+                    .unwrap_or_default()
+            ),
+        }
+    }
+}
+
+async fn try_open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xdg-open";
     #[cfg(not(unix))]
-    {
-        let _ = path;
+    let program = "";
+
+    if program.is_empty() {
+        return;
     }
-    Ok(())
+
+    if let Err(error) = tokio::process::Command::new(program).arg(url).spawn() {
+        tracing::debug!(%error, "failed to open browser for device authorization");
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct OidcDiscovery {
+    device_authorization_endpoint: String,
+    token_endpoint: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceAuthorizationResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    #[serde(default)]
+    verification_uri_complete: Option<String>,
+    expires_in: u64,
+    #[serde(default)]
+    interval: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthErrorResponse {
+    error: String,
+    #[serde(default)]
+    error_description: Option<String>,
 }

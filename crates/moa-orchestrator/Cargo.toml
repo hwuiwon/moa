@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+default = []
 integration = []
+auth0 = ["moa-auth-providers/auth0"]
 
 [[bin]]
 name = "moa-orchestrator-bin"

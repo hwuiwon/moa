@@ -314,6 +314,10 @@ async fn apply_database_migrations(pool: &PgPool) -> anyhow::Result<()> {
     moa_auth_providers::schema::migrate(pool)
         .await
         .context("apply moa-auth-providers migrations")?;
+    #[cfg(feature = "auth0")]
+    moa_auth_providers::auth0::schema::migrate(pool)
+        .await
+        .context("apply moa-auth-providers-auth0 migrations")?;
     moa_orchestrator::schema::migrate(pool)
         .await
         .context("apply moa-orchestrator migrations")?;

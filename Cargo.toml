@@ -17,6 +17,7 @@ members = [
     "crates/moa-authz-schema",
     "crates/moa-authz",
     "crates/moa-auth-providers",
+    "crates/moa-auth-providers-auth0",
     "crates/moa-fga-bootstrap",
     "crates/moa-edge",
     "crates/moa-hands",
@@ -99,6 +100,7 @@ futures-util = "0.3"
 globset = "0.4"
 hex = "0.4"
 insta = { version = "1", features = ["json", "redactions"] }
+jsonwebtoken = "9.3"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", features = ["http-listener"] }
 moka = { version = "0.12", features = ["future"] }
