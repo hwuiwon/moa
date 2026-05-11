@@ -3,11 +3,12 @@
 dev:
 ifeq ($(MOA_SKIP_FGA),1)
 	@echo ">> MOA_SKIP_FGA=1 set; bringing up stack WITHOUT OpenFGA"
-	docker compose up -d postgres restate restate-register moa-orchestrator moa-pii-service moa-audit-shipper
+	docker compose up -d --build postgres restate restate-register moa-orchestrator moa-pii-service moa-audit-shipper
 else
 	@echo ">> bringing up full stack with OpenFGA (default)"
-	docker compose up -d
+	docker compose up -d --build postgres restate openfga moa-pii-service moa-audit-shipper
 	@$(MAKE) fga-bootstrap
+	@set -a; . ./.env.fga; set +a; docker compose up -d --build moa-orchestrator restate-register
 endif
 
 fga-bootstrap:

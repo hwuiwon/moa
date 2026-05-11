@@ -1,5 +1,6 @@
 //! Configuration for MOA, organized by sub-domain.
 
+mod authz;
 mod context;
 mod database;
 mod gateway;
@@ -13,6 +14,7 @@ mod security;
 mod session;
 mod telemetry;
 
+pub use authz::{AuthzConfig, AuthzEngine, OpenFgaConfig};
 pub use context::{
     BudgetConfig, CompactionConfig, ContextSnapshotConfig, IntentConfig, QueryRewriteConfig,
     ResolutionConfig, ResolutionWeights, SessionLimitsConfig, SkillBudgetConfig, ToolBudgetConfig,
@@ -52,6 +54,8 @@ pub struct MoaConfig {
     pub providers: ProvidersConfig,
     /// Session database settings.
     pub database: DatabaseConfig,
+    /// Authorization engine settings.
+    pub authz: AuthzConfig,
     /// Local runtime settings.
     pub local: LocalConfig,
     /// Memory bootstrap and maintenance settings.
@@ -264,6 +268,40 @@ mod tests {
             config.orchestrator.endpoint.as_deref(),
             Some("http://example:1234")
         );
+    }
+
+    #[test]
+    fn authz_openfga_config_loads_from_env() {
+        // Pins: MOA__AUTHZ__OPENFGA__* maps onto the authz config section.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let file = NamedTempFile::new().expect("config temp file");
+        unsafe {
+            std::env::set_var("MOA__AUTHZ__OPENFGA__URL", "http://openfga:8080");
+            std::env::set_var("MOA__AUTHZ__OPENFGA__PRESHARED_KEY", "dev-key");
+            std::env::set_var("MOA__AUTHZ__OPENFGA__STORE_ID", "store-1");
+            std::env::set_var("MOA__AUTHZ__OPENFGA__MODEL_ID", "model-1");
+            std::env::set_var("MOA__AUTHZ__OPENFGA__TIMEOUT_MS", "1234");
+        }
+
+        let config = MoaConfig::load_from_path(file.path()).expect("load config with env");
+
+        unsafe {
+            std::env::remove_var("MOA__AUTHZ__OPENFGA__URL");
+            std::env::remove_var("MOA__AUTHZ__OPENFGA__PRESHARED_KEY");
+            std::env::remove_var("MOA__AUTHZ__OPENFGA__STORE_ID");
+            std::env::remove_var("MOA__AUTHZ__OPENFGA__MODEL_ID");
+            std::env::remove_var("MOA__AUTHZ__OPENFGA__TIMEOUT_MS");
+        }
+        assert_eq!(config.authz.engine, AuthzEngine::Openfga);
+        let openfga = config
+            .authz
+            .openfga
+            .expect("openfga env should create config section");
+        assert_eq!(openfga.url, "http://openfga:8080");
+        assert_eq!(openfga.preshared_key, "dev-key");
+        assert_eq!(openfga.store_id, "store-1");
+        assert_eq!(openfga.model_id, "model-1");
+        assert_eq!(openfga.timeout_ms, 1234);
     }
 
     #[test]

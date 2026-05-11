@@ -158,6 +158,11 @@ services:
       POSTGRES_URL: postgres://moa_owner:dev@postgres:5432/moa
       RESTATE_ADMIN_URL: http://restate:9070
       MOA_LINEAGE_SINK: postgres
+      MOA_SKIP_FGA: ${MOA_SKIP_FGA:-}
+      MOA__AUTHZ__OPENFGA__URL: http://openfga:8080
+      MOA__AUTHZ__OPENFGA__PRESHARED_KEY: ${MOA_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod}
+      MOA__AUTHZ__OPENFGA__STORE_ID: ${MOA_OPENFGA_STORE_ID:-}
+      MOA__AUTHZ__OPENFGA__MODEL_ID: ${MOA_OPENFGA_MODEL_ID:-}
       MOA_PROVIDERS_OVERRIDE: ${MOA_PROVIDERS_OVERRIDE:-}
       MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS: "false"
       MOA_DEREGISTER_ON_SHUTDOWN: "false"

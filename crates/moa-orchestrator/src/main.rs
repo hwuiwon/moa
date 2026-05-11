@@ -12,7 +12,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Router, serve};
 use clap::Parser;
-use moa_core::{TelemetryConfig, init_observability, metrics_endpoint_url};
+use moa_core::{MoaConfig, TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_hands::ToolRouter;
 use moa_orchestrator::{
     OrchestratorCtx,
@@ -44,7 +44,7 @@ use moa_session::PostgresSessionStore;
 use reqwest::Client;
 use restate_sdk::prelude::*;
 use serde::Deserialize;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -104,7 +104,13 @@ async fn main() -> anyhow::Result<()> {
         .max_connections(25)
         .connect(&config.postgres_url)
         .await?;
-    moa_session::schema::migrate(&pool, None).await?;
+    apply_database_migrations(&pool).await?;
+    let poller_handle = if config.skip_fga {
+        tracing::warn!("MOA_SKIP_FGA set; authz outbox poller disabled");
+        None
+    } else {
+        Some(start_authz_outbox_poller(&pool, moa_config.as_ref())?)
+    };
     let session_store = Arc::new(
         PostgresSessionStore::from_existing_pool(&config.postgres_url, pool.clone()).await?,
     );
@@ -214,6 +220,10 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("shutdown signal received, draining");
             readiness.store(false, Ordering::Release);
 
+            if let Some(poller_handle) = poller_handle {
+                poller_handle.shutdown().await;
+            }
+
             if let Some(writer) = OrchestratorCtx::current().lineage_writer.clone() {
                 tracing::info!("draining lineage writer");
                 match writer.shutdown().await {
@@ -243,6 +253,39 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn apply_database_migrations(pool: &PgPool) -> anyhow::Result<()> {
+    moa_session::schema::migrate(pool, None)
+        .await
+        .context("apply moa-session migrations")?;
+    moa_authz::schema::migrate(pool)
+        .await
+        .context("apply moa-authz migrations")?;
+    Ok(())
+}
+
+fn start_authz_outbox_poller(
+    pool: &PgPool,
+    config: &MoaConfig,
+) -> anyhow::Result<moa_authz::PollerHandle> {
+    let openfga = config
+        .authz
+        .openfga
+        .as_ref()
+        .context("authz.openfga config missing")?;
+    let fga_client = moa_authz::FgaClient::new(moa_authz::FgaConfig {
+        url: openfga.url.clone(),
+        preshared_key: openfga.preshared_key.clone(),
+        store_id: openfga.store_id.clone(),
+        model_id: openfga.model_id.clone(),
+        timeout_ms: openfga.timeout_ms,
+    })?;
+    let outbox_poller =
+        moa_authz::OutboxPoller::new(pool.clone(), fga_client, moa_authz::PollerConfig::default());
+    let poller_handle = outbox_poller.spawn();
+    tracing::info!("authz outbox poller started");
+    Ok(poller_handle)
 }
 
 #[derive(Clone)]

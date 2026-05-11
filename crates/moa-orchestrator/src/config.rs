@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
-use moa_core::{MoaConfig, OtlpProtocol};
+use moa_core::{MoaConfig, OpenFgaConfig, OtlpProtocol};
 use serde::Deserialize;
 
 /// Runtime configuration for the Restate-backed orchestrator.
@@ -34,6 +34,10 @@ pub struct OrchestratorConfig {
     pub metrics_enabled: bool,
     /// Optional override for the Prometheus listener address.
     pub metrics_listen: Option<String>,
+    /// Whether OpenFGA-backed authz is disabled for local non-auth work.
+    pub skip_fga: bool,
+    /// OpenFGA config for the authz outbox poller.
+    pub authz_openfga: Option<OpenFgaConfig>,
 }
 
 impl OrchestratorConfig {
@@ -65,12 +69,60 @@ impl OrchestratorConfig {
         if let Some(memory_dir) = &self.memory_dir {
             config.local.memory_dir = memory_dir.clone();
         }
+        config.authz.openfga = self.authz_openfga.clone();
         config
     }
 
     fn from_reader(mut read_var: impl FnMut(&str) -> Option<String>) -> Result<Self> {
         let postgres_url =
             read_var("POSTGRES_URL").ok_or_else(|| anyhow!("POSTGRES_URL required"))?;
+        let skip_fga = read_var("MOA_SKIP_FGA")
+            .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
+            .unwrap_or(false);
+        let openfga_url = read_first(
+            &mut read_var,
+            &["MOA__AUTHZ__OPENFGA__URL", "MOA_OPENFGA_URL"],
+        );
+        let openfga_preshared_key = read_first(
+            &mut read_var,
+            &[
+                "MOA__AUTHZ__OPENFGA__PRESHARED_KEY",
+                "MOA_OPENFGA_PRESHARED_KEY",
+            ],
+        );
+        let openfga_store_id = read_first(
+            &mut read_var,
+            &["MOA__AUTHZ__OPENFGA__STORE_ID", "MOA_OPENFGA_STORE_ID"],
+        );
+        let openfga_model_id = read_first(
+            &mut read_var,
+            &["MOA__AUTHZ__OPENFGA__MODEL_ID", "MOA_OPENFGA_MODEL_ID"],
+        );
+        let openfga_timeout_ms = read_first(&mut read_var, &["MOA__AUTHZ__OPENFGA__TIMEOUT_MS"])
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(5000);
+        let authz_openfga = match (
+            openfga_url,
+            openfga_preshared_key,
+            openfga_store_id,
+            openfga_model_id,
+        ) {
+            (Some(url), Some(preshared_key), Some(store_id), Some(model_id)) => {
+                Some(OpenFgaConfig {
+                    url,
+                    preshared_key,
+                    store_id,
+                    model_id,
+                    timeout_ms: openfga_timeout_ms,
+                })
+            }
+            (None, None, None, None) => None,
+            _ => {
+                return Err(anyhow!(
+                    "OpenFGA authz config must include url, preshared key, store id, and model id"
+                ));
+            }
+        };
 
         Ok(Self {
             restate_admin_url: read_var("RESTATE_ADMIN_URL")
@@ -90,8 +142,14 @@ impl OrchestratorConfig {
                 .and_then(|value| value.parse::<bool>().ok())
                 .unwrap_or_else(|| MoaConfig::default().metrics.enabled),
             metrics_listen: read_var("MOA_METRICS_LISTEN"),
+            skip_fga,
+            authz_openfga,
         })
     }
+}
+
+fn read_first(read_var: &mut impl FnMut(&str) -> Option<String>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| read_var(key))
 }
 
 /// Provider override mode selected by `MOA_PROVIDERS_OVERRIDE`.
@@ -238,6 +296,32 @@ mod tests {
         assert_eq!(moa_config.local.sandbox_dir, "/tmp/moa-sandbox");
         assert_eq!(moa_config.local.memory_dir, "/tmp/moa-memory");
         assert!(!moa_config.local.docker_enabled);
+    }
+
+    #[test]
+    fn authz_openfga_env_maps_into_moa_config() {
+        let config = OrchestratorConfig::from_reader(|key| match key {
+            "POSTGRES_URL" => Some("postgres://example".to_string()),
+            "MOA__AUTHZ__OPENFGA__URL" => Some("http://openfga:8080".to_string()),
+            "MOA__AUTHZ__OPENFGA__PRESHARED_KEY" => Some("dev-key".to_string()),
+            "MOA__AUTHZ__OPENFGA__STORE_ID" => Some("store-1".to_string()),
+            "MOA__AUTHZ__OPENFGA__MODEL_ID" => Some("model-1".to_string()),
+            "MOA__AUTHZ__OPENFGA__TIMEOUT_MS" => Some("2500".to_string()),
+            _ => None,
+        })
+        .expect("config should load");
+
+        assert!(!config.skip_fga);
+        let moa_config = config.to_moa_config();
+        let openfga = moa_config
+            .authz
+            .openfga
+            .expect("openfga config should map into MoaConfig");
+        assert_eq!(openfga.url, "http://openfga:8080");
+        assert_eq!(openfga.preshared_key, "dev-key");
+        assert_eq!(openfga.store_id, "store-1");
+        assert_eq!(openfga.model_id, "model-1");
+        assert_eq!(openfga.timeout_ms, 2500);
     }
 
     #[test]

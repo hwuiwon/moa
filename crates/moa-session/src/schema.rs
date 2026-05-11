@@ -130,12 +130,15 @@ pub async fn migrate(pool: &PgPool, schema_name: Option<&str>) -> Result<()> {
     match schema_name {
         Some(schema_name) => migrate_in_schema(pool, schema_name).await,
         None => {
-            sqlx::migrate!("./migrations/postgres")
-                .run(pool)
-                .await
-                .map_err(|error| {
-                    MoaError::StorageError(format!("postgres migration failed: {error}"))
-                })?;
+            // SQLx uses one `_sqlx_migrations` table per database. MOA keeps
+            // migration files next to their owning crate, so this migrator must
+            // ignore versions owned by other per-crate migrators such as
+            // `moa-authz`.
+            let mut migrator = sqlx::migrate!("./migrations/postgres");
+            migrator.set_ignore_missing(true);
+            migrator.run(pool).await.map_err(|error| {
+                MoaError::StorageError(format!("postgres migration failed: {error}"))
+            })?;
             Ok(())
         }
     }

@@ -3400,6 +3400,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-authz"
+version = "0.1.0"
+dependencies = [
+ "moa-authz-schema",
+ "moa-core",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "moa-authz-schema"
 version = "0.1.0"
 dependencies = [
@@ -3499,6 +3516,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "reqwest 0.13.2",
+ "secrecy 0.10.3",
  "serde",
  "serde_json",
  "shell-words",
@@ -3867,6 +3885,7 @@ dependencies = [
  "chrono-tz",
  "clap",
  "croner",
+ "moa-authz",
  "moa-brain",
  "moa-core",
  "moa-hands",

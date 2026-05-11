@@ -15,6 +15,7 @@ members = [
     "crates/moa-lineage/cold",
     "crates/moa-lineage/audit",
     "crates/moa-authz-schema",
+    "crates/moa-authz",
     "crates/moa-fga-bootstrap",
     "crates/moa-hands",
     "crates/moa-providers",
@@ -46,6 +47,7 @@ default-members = [
     "crates/moa-lineage/cold",
     "crates/moa-lineage/audit",
     "crates/moa-authz-schema",
+    "crates/moa-authz",
     "crates/moa-fga-bootstrap",
     "crates/moa-hands",
     "crates/moa-providers",
@@ -66,7 +68,9 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+moa-authz = { path = "crates/moa-authz" }
 moa-authz-schema = { path = "crates/moa-authz-schema" }
+moa-core = { path = "crates/moa-core" }
 moa-test-support = { path = "crates/moa-test-support" }
 anyhow = "1"
 arrow = "53"
