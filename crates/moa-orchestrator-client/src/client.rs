@@ -1,5 +1,6 @@
 //! Top-level orchestrator HTTP client and configuration.
 
+use std::fmt;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -13,7 +14,7 @@ use moa_core::{
     Event, EventRange, EventRecord, SessionFilter, SessionId, SessionMeta, SessionSummary,
     WorkspaceId,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::instrument;
 use uuid::Uuid;
 
@@ -47,11 +48,23 @@ impl Default for ClientConfig {
 }
 
 /// Thin HTTP client for Restate ingress calls into `moa-orchestrator`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OrchestratorClient {
     pub(crate) http: reqwest::Client,
     pub(crate) config: ClientConfig,
     identity: Option<Identity>,
+    bearer: Option<String>,
+}
+
+impl fmt::Debug for OrchestratorClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OrchestratorClient")
+            .field("config", &self.config)
+            .field("identity", &self.identity)
+            .field("bearer", &self.bearer.as_ref().map(|_| "<redacted>"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl OrchestratorClient {
@@ -86,6 +99,7 @@ impl OrchestratorClient {
             http,
             config,
             identity: None,
+            bearer: None,
         })
     }
 
@@ -98,6 +112,13 @@ impl OrchestratorClient {
     #[must_use]
     pub fn with_identity(mut self, identity: Identity) -> Self {
         self.identity = Some(identity);
+        self
+    }
+
+    /// Attaches an authorization bearer token to every subsequent client request.
+    #[must_use]
+    pub fn with_bearer(mut self, bearer: impl Into<String>) -> Self {
+        self.bearer = Some(bearer.into());
         self
     }
 
@@ -221,15 +242,58 @@ impl OrchestratorClient {
 
     /// Return the identity seen by the orchestrator through `Whoami/whoami`.
     pub async fn whoami(&self) -> Result<Identity> {
-        self.post_empty_call("/Whoami/whoami").await
+        if self.bearer.is_some() {
+            self.get_call("/v1/whoami").await
+        } else {
+            self.post_empty_call("/Whoami/whoami").await
+        }
+    }
+
+    /// List pending approvals for the current user.
+    pub async fn approvals_list_mine(&self) -> Result<Vec<ApprovalSummary>> {
+        if self.bearer.is_some() {
+            self.get_call("/v1/approvals").await
+        } else {
+            self.post_empty_call("/Approvals/list_mine").await
+        }
+    }
+
+    /// Resolve one pending approval.
+    pub async fn approvals_decide(
+        &self,
+        id: Uuid,
+        outcome: String,
+        reason: Option<String>,
+    ) -> Result<()> {
+        let request = DecisionRequest {
+            id,
+            outcome,
+            reason,
+        };
+        if self.bearer.is_some() {
+            self.post_void(
+                &format!("/v1/approvals/{id}/decision"),
+                &PublicDecisionRequest {
+                    outcome: request.outcome,
+                    reason: request.reason,
+                },
+            )
+            .await
+        } else {
+            self.post_void("/Approvals/decide", &request).await
+        }
     }
 
     /// Probes an orchestrator health URL and succeeds only on a 2xx status.
     #[instrument(skip(self))]
     pub async fn health_check(&self, health_url: &str) -> Result<()> {
-        let resp = apply_identity_headers(self.http.get(health_url), self.identity.as_ref())
-            .send()
-            .await?;
+        let resp = apply_auth_headers(
+            self.http.get(health_url),
+            self.identity.as_ref(),
+            self.bearer.as_deref(),
+        )
+        .send()
+        .await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -251,9 +315,28 @@ impl OrchestratorClient {
         Resp: serde::de::DeserializeOwned,
     {
         let url = format!("{}{path}", self.config.endpoint);
-        let resp = apply_identity_headers(self.http.post(url), self.identity.as_ref())
-            .send()
-            .await?;
+        let resp = apply_auth_headers(
+            self.http.post(url),
+            self.identity.as_ref(),
+            self.bearer.as_deref(),
+        )
+        .send()
+        .await?;
+        decode_response(resp).await
+    }
+
+    async fn get_call<Resp>(&self, path: &str) -> Result<Resp>
+    where
+        Resp: serde::de::DeserializeOwned,
+    {
+        let url = format!("{}{path}", self.config.endpoint);
+        let resp = apply_auth_headers(
+            self.http.get(url),
+            self.identity.as_ref(),
+            self.bearer.as_deref(),
+        )
+        .send()
+        .await?;
         decode_response(resp).await
     }
 
@@ -262,9 +345,13 @@ impl OrchestratorClient {
         Req: Serialize + ?Sized,
     {
         let url = format!("{}{path}", self.config.endpoint);
-        let resp = apply_identity_headers(self.http.post(url).json(body), self.identity.as_ref())
-            .send()
-            .await?;
+        let resp = apply_auth_headers(
+            self.http.post(url).json(body),
+            self.identity.as_ref(),
+            self.bearer.as_deref(),
+        )
+        .send()
+        .await?;
         let status = resp.status();
         let body = resp.text().await?;
         if !status.is_success() {
@@ -284,8 +371,11 @@ impl OrchestratorClient {
         Resp: serde::de::DeserializeOwned,
     {
         let url = format!("{}{path}", self.config.endpoint);
-        let mut request =
-            apply_identity_headers(self.http.post(url).json(body), self.identity.as_ref());
+        let mut request = apply_auth_headers(
+            self.http.post(url).json(body),
+            self.identity.as_ref(),
+            self.bearer.as_deref(),
+        );
         if let Some(key) = idempotency_key {
             request = request.header("idempotency-key", key);
         }
@@ -306,10 +396,16 @@ where
     Ok(serde_json::from_str(&body)?)
 }
 
-fn apply_identity_headers(
+fn apply_auth_headers(
     request: reqwest::RequestBuilder,
     identity: Option<&Identity>,
+    bearer: Option<&str>,
 ) -> reqwest::RequestBuilder {
+    let request = if let Some(bearer) = bearer {
+        request.bearer_auth(bearer)
+    } else {
+        request
+    };
     let Some(identity) = identity else {
         return request;
     };
@@ -327,6 +423,36 @@ fn apply_identity_headers(
         request = request.header("x-moa-acting-on-behalf-of", user_id.to_string());
     }
     request
+}
+
+/// Pending approval summary returned by the orchestrator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalSummary {
+    /// Approval row id.
+    pub id: Uuid,
+    /// Session waiting on the decision.
+    pub session_id: Uuid,
+    /// One-line action summary.
+    pub action_summary: String,
+    /// Full action details.
+    pub action_details: serde_json::Value,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Expiration timestamp.
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DecisionRequest {
+    id: Uuid,
+    outcome: String,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PublicDecisionRequest {
+    outcome: String,
+    reason: Option<String>,
 }
 
 fn identity_type_str(identity_type: IdentityType) -> &'static str {

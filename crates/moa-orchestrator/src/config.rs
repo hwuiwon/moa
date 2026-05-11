@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
+use moa_core::config::{AsyncAuthzKind, AuthProviderKind, TokenVaultKind};
 use moa_core::{MoaConfig, OpenFgaConfig, OtlpProtocol};
 use serde::Deserialize;
 
@@ -38,6 +39,14 @@ pub struct OrchestratorConfig {
     pub skip_fga: bool,
     /// OpenFGA config for the authz outbox poller.
     pub authz_openfga: Option<OpenFgaConfig>,
+    /// Credential authentication provider.
+    pub auth_provider: AuthProviderKind,
+    /// Token vault provider.
+    pub token_vault_provider: TokenVaultKind,
+    /// Async authorization provider.
+    pub async_authz_provider: AsyncAuthzKind,
+    /// Default async approval timeout in seconds.
+    pub async_authz_default_timeout_secs: u64,
 }
 
 impl OrchestratorConfig {
@@ -70,6 +79,10 @@ impl OrchestratorConfig {
             config.local.memory_dir = memory_dir.clone();
         }
         config.authz.openfga = self.authz_openfga.clone();
+        config.auth.provider = self.auth_provider;
+        config.token_vault.provider = self.token_vault_provider;
+        config.async_authz.provider = self.async_authz_provider;
+        config.async_authz.default_timeout_secs = self.async_authz_default_timeout_secs;
         config
     }
 
@@ -144,12 +157,58 @@ impl OrchestratorConfig {
             metrics_listen: read_var("MOA_METRICS_LISTEN"),
             skip_fga,
             authz_openfga,
+            auth_provider: read_first(&mut read_var, &["MOA__AUTH__PROVIDER"])
+                .as_deref()
+                .map(parse_auth_provider)
+                .transpose()?
+                .unwrap_or_default(),
+            token_vault_provider: read_first(&mut read_var, &["MOA__TOKEN_VAULT__PROVIDER"])
+                .as_deref()
+                .map(parse_token_vault_provider)
+                .transpose()?
+                .unwrap_or_default(),
+            async_authz_provider: read_first(&mut read_var, &["MOA__ASYNC_AUTHZ__PROVIDER"])
+                .as_deref()
+                .map(parse_async_authz_provider)
+                .transpose()?
+                .unwrap_or_default(),
+            async_authz_default_timeout_secs: read_first(
+                &mut read_var,
+                &["MOA__ASYNC_AUTHZ__DEFAULT_TIMEOUT_SECS"],
+            )
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_else(|| MoaConfig::default().async_authz.default_timeout_secs),
         })
     }
 }
 
 fn read_first(read_var: &mut impl FnMut(&str) -> Option<String>, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| read_var(key))
+}
+
+fn parse_auth_provider(value: &str) -> Result<AuthProviderKind> {
+    match value {
+        "local" => Ok(AuthProviderKind::Local),
+        "auth0" => Ok(AuthProviderKind::Auth0),
+        "oidc" => Ok(AuthProviderKind::Oidc),
+        other => Err(anyhow!("unknown auth provider: {other}")),
+    }
+}
+
+fn parse_token_vault_provider(value: &str) -> Result<TokenVaultKind> {
+    match value {
+        "none" => Ok(TokenVaultKind::None),
+        "auth0" => Ok(TokenVaultKind::Auth0),
+        other => Err(anyhow!("unknown token vault provider: {other}")),
+    }
+}
+
+fn parse_async_authz_provider(value: &str) -> Result<AsyncAuthzKind> {
+    match value {
+        "builtin" => Ok(AsyncAuthzKind::Builtin),
+        "auth0" => Ok(AsyncAuthzKind::Auth0),
+        other => Err(anyhow!("unknown async authz provider: {other}")),
+    }
 }
 
 /// Provider override mode selected by `MOA_PROVIDERS_OVERRIDE`.

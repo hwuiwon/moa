@@ -104,6 +104,9 @@ pub(crate) async fn dispatch(cli: Cli, config: MoaConfig) -> Result<()> {
         Some(CommandKind::Auth(command)) => {
             print!("{}", handle_auth_command(command).await?);
         }
+        Some(CommandKind::Approvals(command)) => {
+            print!("{}", handle_approvals_command(command).await?);
+        }
         Some(CommandKind::PromoteWorkspace(args)) => {
             print!(
                 "{}",

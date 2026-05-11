@@ -2,6 +2,8 @@
 
 pub mod agent_registry;
 pub mod api_keys;
+pub mod approvals;
+pub mod approvals_reaper;
 pub mod graph_memory_maint;
 pub mod health;
 pub mod intent_manager;

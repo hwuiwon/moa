@@ -54,9 +54,12 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("connect edge api-key database")?;
     let pool = Arc::new(pool);
+    let moa_config = moa_core::MoaConfig::load().context("load MOA config")?;
+    let providers =
+        moa_auth_providers::build_providers(&moa_config, pool).context("build providers bundle")?;
 
     let state = routes::AppState {
-        auth: Arc::new(moa_auth_providers::LocalAuthProvider::new(pool)),
+        auth: providers.auth.clone(),
         proxy: Arc::new(
             proxy::OrchestratorProxy::new(&args.upstream).context("build orchestrator proxy")?,
         ),

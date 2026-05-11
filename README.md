@@ -84,9 +84,15 @@ API key:
 ```sh
 ./scripts/bootstrap-cli-identity.sh
 cargo run -p moa-cli -- auth keys create --name local --env dev
+cargo run -p moa-cli -- auth use-key <returned-key>
 ```
 
 Present the returned key to the edge with `Authorization: Bearer <key>`.
+After `auth use-key`, CLI approval commands use the stored key:
+
+```sh
+cargo run -p moa-cli -- approvals list
+```
 
 To stop everything while preserving data:
 

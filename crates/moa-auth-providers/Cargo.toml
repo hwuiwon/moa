@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = []
+auth0 = []
+
 [dependencies]
 argon2.workspace = true
 async-trait.workspace = true
@@ -17,6 +21,7 @@ moa-core.workspace = true
 rand.workspace = true
 secrecy.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "migrate"] }
 thiserror.workspace = true
 tokio.workspace = true

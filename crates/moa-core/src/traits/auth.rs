@@ -134,7 +134,9 @@ pub struct ApprovalRequest {
     pub deciding_user_id: Uuid,
     /// One-line action summary for approval surfaces.
     pub action_summary: String,
-    /// Full action payload.
+    /// Full action payload. Builtin local approvals require callers to include
+    /// the request tenant under `_tenant_id` until the trait grows a first-class
+    /// tenant field.
     pub action_details: serde_json::Value,
     /// Restate awakeable ID to resolve when the decision arrives.
     pub awakeable_id: String,

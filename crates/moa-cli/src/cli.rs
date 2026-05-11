@@ -80,6 +80,8 @@ pub(crate) enum CommandKind {
     },
     /// Authentication and API-key operations.
     Auth(AuthCommand),
+    /// Builtin approval operations.
+    Approvals(ApprovalsCommand),
     /// Promotes a workspace from pgvector to Turbopuffer.
     PromoteWorkspace(PromoteWorkspaceArgs),
     /// Rolls a workspace vector promotion back to pgvector.

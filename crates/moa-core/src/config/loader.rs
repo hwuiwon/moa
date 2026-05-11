@@ -51,6 +51,19 @@ impl MoaConfig {
             .set_default("database.url", Self::default().database.url)?
             .set_default("database.admin_url", Self::default().database.admin_url)?
             .set_default("authz.engine", Self::default().authz.engine.as_str())?
+            .set_default("auth.provider", Self::default().auth.provider.as_str())?
+            .set_default(
+                "token_vault.provider",
+                Self::default().token_vault.provider.as_str(),
+            )?
+            .set_default(
+                "async_authz.provider",
+                Self::default().async_authz.provider.as_str(),
+            )?
+            .set_default(
+                "async_authz.default_timeout_secs",
+                Self::default().async_authz.default_timeout_secs as i64,
+            )?
             .set_default(
                 "database.max_connections",
                 Self::default().database.max_connections as i64,

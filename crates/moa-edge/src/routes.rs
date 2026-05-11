@@ -9,6 +9,7 @@ use axum::response::IntoResponse;
 use axum::routing::{any, get, post};
 use moa_core::traits::{AuthProvider, Credential};
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Shared edge application state.
 #[derive(Clone)]
@@ -54,15 +55,17 @@ async fn handle_proxy(
         }
     };
 
-    let path = uri
+    let original_path = uri
         .path_and_query()
         .map(|path| path.as_str())
         .unwrap_or(uri.path())
         .to_string();
-    let (method, path, body) = if uri.path() == "/v1/whoami" {
-        (Method::POST, "/Whoami/whoami".to_string(), Vec::new())
-    } else {
-        (method, path, body.to_vec())
+    let (method, path, body) = match translate_public_route(&method, &uri, &body) {
+        RouteTranslation::Forward { method, path, body } => (method, path, body),
+        RouteTranslation::NoChange => (method, original_path, body.to_vec()),
+        RouteTranslation::BadRequest(message) => {
+            return (StatusCode::BAD_REQUEST, message).into_response();
+        }
     };
     let response = match state
         .proxy
@@ -133,4 +136,63 @@ fn extract_credential(headers: &HeaderMap) -> Option<Credential> {
         return Some(Credential::ApiKey(token.to_string()));
     }
     Some(Credential::BearerJwt(token.to_string()))
+}
+
+enum RouteTranslation {
+    NoChange,
+    Forward {
+        method: Method,
+        path: String,
+        body: Vec<u8>,
+    },
+    BadRequest(&'static str),
+}
+
+fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTranslation {
+    if *method == Method::GET && uri.path() == "/v1/whoami" {
+        return RouteTranslation::Forward {
+            method: Method::POST,
+            path: "/Whoami/whoami".to_string(),
+            body: Vec::new(),
+        };
+    }
+    if *method == Method::GET && uri.path() == "/v1/approvals" {
+        return RouteTranslation::Forward {
+            method: Method::POST,
+            path: "/Approvals/list_mine".to_string(),
+            body: Vec::new(),
+        };
+    }
+    if *method == Method::POST
+        && let Some(id) = uri
+            .path()
+            .strip_prefix("/v1/approvals/")
+            .and_then(|rest| rest.strip_suffix("/decision"))
+    {
+        let approval_id = match Uuid::parse_str(id) {
+            Ok(value) => value,
+            Err(_) => return RouteTranslation::BadRequest("bad approval id"),
+        };
+        let mut value: serde_json::Value = match serde_json::from_slice(body) {
+            Ok(value) => value,
+            Err(_) => return RouteTranslation::BadRequest("bad decision body"),
+        };
+        let Some(object) = value.as_object_mut() else {
+            return RouteTranslation::BadRequest("decision body must be object");
+        };
+        object.insert("id".to_string(), serde_json::json!(approval_id));
+        let bytes = match serde_json::to_vec(&value) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::error!(error = %error, "serialize approval decision body failed");
+                return RouteTranslation::BadRequest("bad decision body");
+            }
+        };
+        return RouteTranslation::Forward {
+            method: Method::POST,
+            path: "/Approvals/decide".to_string(),
+            body: bytes,
+        };
+    }
+    RouteTranslation::NoChange
 }

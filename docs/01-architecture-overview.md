@@ -158,6 +158,11 @@ orchestrator trusts these headers, so the Restate handler port (`9080`) must be
 network-isolated in production; see
 [`docs/operations/edge-network-isolation.md`](operations/edge-network-isolation.md).
 
+Local deployments use the zero-dependency provider bundle by default:
+`LocalAuthProvider`, `NullTokenVaultProvider`, and
+`BuiltinAsyncAuthzProvider`. Builtin approvals are documented in
+[`docs/operations/builtin-approvals.md`](operations/builtin-approvals.md).
+
 ### Authorization
 
 OpenFGA, backed by Postgres, is the default authorization engine. The v1

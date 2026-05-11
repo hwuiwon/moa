@@ -12,6 +12,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Router, serve};
 use clap::Parser;
+use moa_core::config::AsyncAuthzKind;
 use moa_core::{MoaConfig, TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_hands::ToolRouter;
 use moa_orchestrator::{
@@ -27,6 +28,8 @@ use moa_orchestrator::{
     services::{
         agent_registry::{AgentRegistry, AgentRegistryImpl},
         api_keys::{ApiKeys, ApiKeysImpl},
+        approvals::{Approvals, ApprovalsImpl},
+        approvals_reaper::{ApprovalReaper, ApprovalReaperHandle, HttpAwakeableResolver},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
         intent_manager::{IntentManager, IntentManagerImpl},
@@ -62,6 +65,7 @@ const CRON_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
 const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "AgentRegistry",
+    "Approvals",
     "ApiKeys",
     "Consolidate",
     "CronJob",
@@ -126,8 +130,11 @@ async fn main() -> anyhow::Result<()> {
     let session_store = Arc::new(
         PostgresSessionStore::from_existing_pool(&config.postgres_url, pool.clone()).await?,
     );
+    let auth_providers =
+        moa_auth_providers::build_providers(moa_config.as_ref(), Arc::new(pool.clone()))
+            .context("build providers bundle")?;
 
-    let providers = Arc::new(match providers_override {
+    let llm_providers = Arc::new(match providers_override {
         ProvidersOverride::None => ProviderRegistry::from_env(),
         ProvidersOverride::Scripted { path } => {
             tracing::warn!(
@@ -154,7 +161,8 @@ async fn main() -> anyhow::Result<()> {
         session_store: session_store.clone(),
         graph_pool: session_store.pool().clone(),
         fga_client,
-        providers: providers.clone(),
+        auth_providers: auth_providers.clone(),
+        providers: llm_providers.clone(),
         embedding_provider: embedding_provider.clone(),
         tool_router: tool_router.clone(),
         tool_schemas: Arc::new(tool_router.tool_schemas()),
@@ -175,8 +183,9 @@ async fn main() -> anyhow::Result<()> {
             )
             .serve(),
         )
-        .bind(LLMGatewayImpl::new(providers).serve())
+        .bind(LLMGatewayImpl::new(llm_providers).serve())
         .bind(AgentRegistryImpl.serve())
+        .bind(ApprovalsImpl.serve())
         .bind(ApiKeysImpl.serve())
         .bind(IngestionVOImpl.serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
@@ -196,6 +205,11 @@ async fn main() -> anyhow::Result<()> {
     let readiness = Arc::new(AtomicBool::new(false));
     let probe_state = ProbeState::new(readiness.clone(), pool.clone(), config.restate_admin_url)?;
     let shutdown = CancellationToken::new();
+    let approval_reaper_handle = start_approval_reaper_if_configured(
+        &pool,
+        moa_config.as_ref(),
+        probe_state.admin_base_url(),
+    )?;
 
     let restate_listener = bind_listener(args.port).await?;
     let health_listener = bind_listener(args.health_port).await?;
@@ -239,6 +253,9 @@ async fn main() -> anyhow::Result<()> {
 
             if let Some(poller_handle) = poller_handle {
                 poller_handle.shutdown().await;
+            }
+            if let Some(reaper_handle) = approval_reaper_handle {
+                reaper_handle.shutdown().await;
             }
 
             if let Some(writer) = OrchestratorCtx::current().lineage_writer.clone() {
@@ -328,6 +345,22 @@ fn start_authz_outbox_poller(
     let poller_handle = outbox_poller.spawn();
     tracing::info!("authz outbox poller started");
     poller_handle
+}
+
+fn start_approval_reaper_if_configured(
+    pool: &PgPool,
+    config: &MoaConfig,
+    restate_admin_url: &str,
+) -> anyhow::Result<Option<ApprovalReaperHandle>> {
+    if config.async_authz.provider != AsyncAuthzKind::Builtin {
+        return Ok(None);
+    }
+    let resolver = Arc::new(HttpAwakeableResolver::new(cron_bootstrap_ingress_url(
+        restate_admin_url,
+    ))?);
+    let handle = ApprovalReaper::new(pool.clone()).spawn(resolver);
+    tracing::info!("approval reaper started");
+    Ok(Some(handle))
 }
 
 #[derive(Clone)]

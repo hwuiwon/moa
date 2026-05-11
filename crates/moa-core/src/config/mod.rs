@@ -1,5 +1,7 @@
 //! Configuration for MOA, organized by sub-domain.
 
+mod async_authz;
+mod auth;
 mod authz;
 mod context;
 mod database;
@@ -13,7 +15,10 @@ mod sandbox;
 mod security;
 mod session;
 mod telemetry;
+mod token_vault;
 
+pub use async_authz::{AsyncAuthzConfig, AsyncAuthzKind};
+pub use auth::{Auth0AuthConfig, AuthConfig, AuthProviderKind, LocalAuthConfig, OidcAuthConfig};
 pub use authz::{AuthzConfig, AuthzEngine, OpenFgaConfig};
 pub use context::{
     BudgetConfig, CompactionConfig, ContextSnapshotConfig, IntentConfig, QueryRewriteConfig,
@@ -36,6 +41,7 @@ pub use sandbox::{
 pub use security::PermissionsConfig;
 pub use session::{DaemonConfig, SessionConfig};
 pub use telemetry::{MetricsConfig, ObservabilityConfig, OtlpProtocol};
+pub use token_vault::{TokenVaultConfig, TokenVaultKind};
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -56,6 +62,12 @@ pub struct MoaConfig {
     pub database: DatabaseConfig,
     /// Authorization engine settings.
     pub authz: AuthzConfig,
+    /// Authentication provider settings.
+    pub auth: AuthConfig,
+    /// Token vault provider settings.
+    pub token_vault: TokenVaultConfig,
+    /// Async authorization provider settings.
+    pub async_authz: AsyncAuthzConfig,
     /// Local runtime settings.
     pub local: LocalConfig,
     /// Memory bootstrap and maintenance settings.

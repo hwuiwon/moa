@@ -30,6 +30,8 @@ pub struct OrchestratorCtx {
     pub graph_pool: sqlx::PgPool,
     /// OpenFGA client used by handler authorization checks.
     pub fga_client: Option<FgaClient>,
+    /// Authentication, token-vault, and async-approval providers.
+    pub auth_providers: moa_auth_providers::Providers,
     /// Registry of configured LLM providers.
     pub providers: Arc<ProviderRegistry>,
     /// Optional embedding provider shared by intent classification.
