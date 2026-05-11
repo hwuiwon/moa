@@ -3,6 +3,7 @@
 mod analytics;
 mod checkpoint;
 mod cli;
+mod client;
 mod commands;
 mod daemon;
 mod daemon_cmd;
@@ -59,8 +60,14 @@ use uuid::Uuid;
 use commands::admin::{
     AdminCommand, PromoteWorkspaceArgs, WorkspacePromotionArgs, handle_admin_command,
 };
+use commands::agents::{AgentsCommand, handle_agents_command};
+use commands::approvals::{ApprovalsCommand, handle_approvals_command};
+use commands::audit::{AuditCommand, handle_audit_command};
+use commands::auth::{AuthCommand, handle_auth_command};
+use commands::authz::{AuthzCommand, handle_authz_command};
 use commands::privacy::{PrivacyCommand, handle_privacy_command};
 use commands::skills::{SkillsCommand, handle_skills_command};
+use commands::tenants::{TenantsCommand, handle_tenants_command};
 
 pub(crate) use analytics::*;
 pub(crate) use checkpoint::*;

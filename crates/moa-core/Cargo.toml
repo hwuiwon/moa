@@ -16,6 +16,7 @@ opentelemetry_sdk.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+secrecy.workspace = true
 shell-words.workspace = true
 similar.workspace = true
 sqlx = { workspace = true, features = ["chrono", "uuid"] }

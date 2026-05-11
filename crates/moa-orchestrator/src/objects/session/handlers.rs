@@ -1,6 +1,9 @@
 //! Restate handlers for the Session VO.
 
 use super::*;
+use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use moa_authz::require_authz_with_delegation;
+use moa_authz_schema::{ObjectType, Relation};
 
 impl Session for SessionImpl {
     #[tracing::instrument(skip(self, ctx, meta))]
@@ -200,6 +203,7 @@ impl Session for SessionImpl {
     ) -> Result<Json<QueueMessageResponse>, HandlerError> {
         annotate_restate_handler_span("Session", "queue_message");
         let request = request.into_inner();
+        require_session_participant(&ctx).await?;
         let mut pending_state = load_pending_state(&ctx).await?;
 
         if pending_state.active_turn_id.is_none() {
@@ -259,6 +263,7 @@ async fn start_turn_inner(
     ctx: &mut ObjectContext<'_>,
     request: StartTurnRequest,
 ) -> Result<StartTurnResponse, HandlerError> {
+    require_session_participant(ctx).await?;
     let session_id = parse_session_key(ctx.key())?;
     let mut state = SessionVoState::load_from(ctx).await?;
     state.ensure_initialized().map_err(to_handler_error)?;
@@ -296,6 +301,21 @@ async fn start_turn_inner(
         turn_id: Some(turn_id),
         queued: false,
     })
+}
+
+async fn require_session_participant(ctx: &ObjectContext<'_>) -> Result<(), HandlerError> {
+    let identity = require_identity(ctx)?;
+    let fga = require_fga_client()?;
+    let session_id = parse_session_key(ctx.key())?;
+    require_authz_with_delegation(
+        &fga,
+        &identity,
+        ObjectType::Session,
+        session_id,
+        Relation::Participant,
+    )
+    .await
+    .map_err(translate_authz_error)
 }
 
 async fn pending_approval_awakeable(ctx: &SharedObjectContext<'_>) -> Result<String, HandlerError> {

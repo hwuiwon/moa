@@ -8,13 +8,13 @@ small FastAPI HTTP API so Rust crates do not link Python, transformers, or torch
 
 ```bash
 docker compose up -d moa-pii-service
-curl -s http://localhost:8080/healthz
+curl -s http://localhost:10050/healthz
 ```
 
 Classify text:
 
 ```bash
-curl -s http://localhost:8080/classify \
+curl -s http://localhost:10050/classify \
   -H 'content-type: application/json' \
   -d '{"text":"My SSN is 123-45-6789","return_spans":true}'
 ```
@@ -48,7 +48,7 @@ Use `moa_memory_pii::OpenAiPrivacyFilterClassifier`:
 ```rust
 use moa_memory_pii::{OpenAiPrivacyFilterClassifier, PiiClassifier};
 
-let classifier = OpenAiPrivacyFilterClassifier::new("http://localhost:8080")?;
+let classifier = OpenAiPrivacyFilterClassifier::new("http://localhost:10050")?;
 let result = classifier.classify("the auth service uses JWT").await?;
 ```
 

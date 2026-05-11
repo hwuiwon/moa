@@ -159,7 +159,7 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 CLI / daemon
   -> moa-orchestrator-local
   -> moa-brain
-  -> Postgres dev stack on localhost:25432
+  -> Postgres dev stack on localhost:10040
   -> local/Docker hands and configured providers
 ```
 
@@ -183,9 +183,9 @@ The orchestrator binary reads cloud process settings from environment variables:
 
 ```bash
 POSTGRES_URL=postgres://...
-RESTATE_ADMIN_URL=http://localhost:9070
+RESTATE_ADMIN_URL=http://localhost:10011
 OPENAI_API_KEY=... # or ANTHROPIC_API_KEY / GOOGLE_API_KEY
-cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 9080 --health-port 9081
+cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
 ```
 
 The Docker image builds `moa-orchestrator-bin` and installs it as

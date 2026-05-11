@@ -1,5 +1,9 @@
 //! Configuration for MOA, organized by sub-domain.
 
+mod async_authz;
+mod audit_security;
+mod auth;
+mod authz;
 mod context;
 mod database;
 mod gateway;
@@ -12,7 +16,12 @@ mod sandbox;
 mod security;
 mod session;
 mod telemetry;
+mod token_vault;
 
+pub use async_authz::{AsyncAuthzConfig, AsyncAuthzKind};
+pub use audit_security::AuditSecurityConfig;
+pub use auth::{Auth0AuthConfig, AuthConfig, AuthProviderKind, LocalAuthConfig, OidcAuthConfig};
+pub use authz::{AuthzConfig, AuthzEngine, OpenFgaConfig};
 pub use context::{
     BudgetConfig, CompactionConfig, ContextSnapshotConfig, IntentConfig, QueryRewriteConfig,
     ResolutionConfig, ResolutionWeights, SessionLimitsConfig, SkillBudgetConfig, ToolBudgetConfig,
@@ -34,6 +43,7 @@ pub use sandbox::{
 pub use security::PermissionsConfig;
 pub use session::{DaemonConfig, SessionConfig};
 pub use telemetry::{MetricsConfig, ObservabilityConfig, OtlpProtocol};
+pub use token_vault::{TokenVaultConfig, TokenVaultKind};
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -52,6 +62,16 @@ pub struct MoaConfig {
     pub providers: ProvidersConfig,
     /// Session database settings.
     pub database: DatabaseConfig,
+    /// Authorization engine settings.
+    pub authz: AuthzConfig,
+    /// Authentication provider settings.
+    pub auth: AuthConfig,
+    /// Token vault provider settings.
+    pub token_vault: TokenVaultConfig,
+    /// Async authorization provider settings.
+    pub async_authz: AsyncAuthzConfig,
+    /// OCSF security-event audit settings.
+    pub audit_security: AuditSecurityConfig,
     /// Local runtime settings.
     pub local: LocalConfig,
     /// Memory bootstrap and maintenance settings.
@@ -264,6 +284,40 @@ mod tests {
             config.orchestrator.endpoint.as_deref(),
             Some("http://example:1234")
         );
+    }
+
+    #[test]
+    fn authz_openfga_config_loads_from_env() {
+        // Pins: MOA__AUTHZ__OPENFGA__* maps onto the authz config section.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let file = NamedTempFile::new().expect("config temp file");
+        unsafe {
+            std::env::set_var("MOA__AUTHZ__OPENFGA__URL", "http://openfga:8080");
+            std::env::set_var("MOA__AUTHZ__OPENFGA__PRESHARED_KEY", "dev-key");
+            std::env::set_var("MOA__AUTHZ__OPENFGA__STORE_ID", "store-1");
+            std::env::set_var("MOA__AUTHZ__OPENFGA__MODEL_ID", "model-1");
+            std::env::set_var("MOA__AUTHZ__OPENFGA__TIMEOUT_MS", "1234");
+        }
+
+        let config = MoaConfig::load_from_path(file.path()).expect("load config with env");
+
+        unsafe {
+            std::env::remove_var("MOA__AUTHZ__OPENFGA__URL");
+            std::env::remove_var("MOA__AUTHZ__OPENFGA__PRESHARED_KEY");
+            std::env::remove_var("MOA__AUTHZ__OPENFGA__STORE_ID");
+            std::env::remove_var("MOA__AUTHZ__OPENFGA__MODEL_ID");
+            std::env::remove_var("MOA__AUTHZ__OPENFGA__TIMEOUT_MS");
+        }
+        assert_eq!(config.authz.engine, AuthzEngine::Openfga);
+        let openfga = config
+            .authz
+            .openfga
+            .expect("openfga env should create config section");
+        assert_eq!(openfga.url, "http://openfga:8080");
+        assert_eq!(openfga.preshared_key, "dev-key");
+        assert_eq!(openfga.store_id, "store-1");
+        assert_eq!(openfga.model_id, "model-1");
+        assert_eq!(openfga.timeout_ms, 1234);
     }
 
     #[test]

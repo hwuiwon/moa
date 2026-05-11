@@ -36,7 +36,7 @@ Start the local Postgres test stack or use an existing temporary Postgres URL.
 
 ```bash
 docker compose up -d postgres
-export MOA_TEST_POSTGRES_URL=postgres://moa_owner:dev@127.0.0.1:25432/moa
+export MOA_TEST_POSTGRES_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa
 ```
 
 Run one failing scenario first:

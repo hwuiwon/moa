@@ -12,11 +12,14 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Router, serve};
 use clap::Parser;
-use moa_core::{TelemetryConfig, init_observability, metrics_endpoint_url};
+use moa_authz::AwakeableResolver;
+use moa_core::config::AsyncAuthzKind;
+use moa_core::{MoaConfig, TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_hands::ToolRouter;
 use moa_orchestrator::{
     OrchestratorCtx,
     config::{OrchestratorConfig, ProvidersOverride},
+    ctx::{self, HeaderTrustMode},
     lineage::build_lineage_sink,
     objects::cron_job::{CronJob, CronJobImpl},
     objects::session::{Session, SessionImpl},
@@ -24,13 +27,24 @@ use moa_orchestrator::{
     objects::workspace::{WorkspaceImpl, WorkspaceObject},
     restate_register::{IngestionVO, IngestionVOImpl},
     services::{
+        agent_registry::{AgentRegistry, AgentRegistryImpl},
+        agent_templates::{AgentTemplates, AgentTemplatesImpl},
+        agents::{Agents, AgentsImpl},
+        api_keys::{ApiKeys, ApiKeysImpl},
+        approvals::{Approvals, ApprovalsImpl},
+        approvals_reaper::{ApprovalReaper, ApprovalReaperHandle, HttpAwakeableResolver},
+        audit::{Audit, AuditImpl},
+        authz_admin::{Authz, AuthzImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
         intent_manager::{IntentManager, IntentManagerImpl},
         llm_gateway::{LLMGateway, LLMGatewayImpl, ProviderRegistry},
         neon_maint::{NeonMaint, NeonMaintImpl},
+        scim::{self, ScimState},
         session_store::{RestateSessionStore, SessionStoreImpl},
+        tenants::{Tenants, TenantsImpl},
         tool_executor::{ToolExecutor, ToolExecutorImpl},
+        whoami::{Whoami, WhoamiImpl},
         workspace_store::{WorkspaceStore, WorkspaceStoreImpl},
     },
     workflows::{
@@ -44,19 +58,27 @@ use moa_session::PostgresSessionStore;
 use reqwest::Client;
 use restate_sdk::prelude::*;
 use serde::Deserialize;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-const DEFAULT_RESTATE_PORT: u16 = 9080;
+const DEFAULT_RESTATE_PORT: u16 = 10020;
 const DEFAULT_RESTATE_INGRESS_PORT: u16 = 8080;
-const DEFAULT_HEALTH_PORT: u16 = 9081;
+const DEFAULT_HEALTH_PORT: u16 = 10021;
+const DEFAULT_SCIM_PORT: u16 = 10022;
 const ADMIN_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const CRON_BOOTSTRAP_ATTEMPTS: u32 = 60;
 const CRON_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
 const EXPECTED_SERVICE_NAMES: &[&str] = &[
+    "AgentRegistry",
+    "AgentTemplates",
+    "Agents",
+    "Approvals",
+    "ApiKeys",
+    "Audit",
+    "Authz",
     "Consolidate",
     "CronJob",
     "GraphMemoryMaint",
@@ -69,10 +91,12 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Session",
     "SessionStore",
     "SubAgent",
+    "Tenants",
     "ToolExecutor",
     "TurnExecution",
     "Workspace",
     "WorkspaceStore",
+    "Whoami",
 ];
 
 /// Command line arguments for the orchestrator process.
@@ -84,6 +108,9 @@ struct Args {
     /// HTTP port for Kubernetes liveness/readiness probes.
     #[arg(long, default_value_t = DEFAULT_HEALTH_PORT)]
     health_port: u16,
+    /// HTTP port for SCIM v2 provisioning endpoints.
+    #[arg(long, default_value_t = DEFAULT_SCIM_PORT)]
+    scim_port: u16,
 }
 
 #[tokio::main]
@@ -91,6 +118,8 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let config = OrchestratorConfig::from_env()?;
     let moa_config = Arc::new(config.to_moa_config());
+    let header_trust_mode = header_trust_mode_from_env();
+    let _ = ctx::HEADER_TRUST_MODE.set(header_trust_mode);
     let _telemetry = init_observability(
         moa_config.as_ref(),
         &TelemetryConfig {
@@ -104,12 +133,31 @@ async fn main() -> anyhow::Result<()> {
         .max_connections(25)
         .connect(&config.postgres_url)
         .await?;
-    moa_session::schema::migrate(&pool, None).await?;
+    apply_database_migrations(&pool).await?;
+    moa_authz::configure_security_audit(pool.clone(), moa_config.audit_security.emit_authz_allows);
+    let fga_client = if config.skip_fga {
+        tracing::warn!("MOA_SKIP_FGA set; authz outbox poller disabled");
+        None
+    } else {
+        Some(build_fga_client(moa_config.as_ref())?)
+    };
+    let poller_handle = fga_client
+        .clone()
+        .map(|fga_client| start_authz_outbox_poller(&pool, fga_client));
     let session_store = Arc::new(
         PostgresSessionStore::from_existing_pool(&config.postgres_url, pool.clone()).await?,
     );
+    let awakeable_resolver: Arc<dyn AwakeableResolver> = Arc::new(HttpAwakeableResolver::new(
+        cron_bootstrap_ingress_url(&config.restate_admin_url),
+    )?);
+    let auth_providers = moa_auth_providers::build_providers_with_resolver(
+        moa_config.as_ref(),
+        Arc::new(pool.clone()),
+        Some(awakeable_resolver.clone()),
+    )
+    .context("build providers bundle")?;
 
-    let providers = Arc::new(match providers_override {
+    let llm_providers = Arc::new(match providers_override {
         ProvidersOverride::None => ProviderRegistry::from_env(),
         ProvidersOverride::Scripted { path } => {
             tracing::warn!(
@@ -135,7 +183,9 @@ async fn main() -> anyhow::Result<()> {
         config: moa_config.clone(),
         session_store: session_store.clone(),
         graph_pool: session_store.pool().clone(),
-        providers: providers.clone(),
+        fga_client,
+        auth_providers: auth_providers.clone(),
+        providers: llm_providers.clone(),
         embedding_provider: embedding_provider.clone(),
         tool_router: tool_router.clone(),
         tool_schemas: Arc::new(tool_router.tool_schemas()),
@@ -144,6 +194,16 @@ async fn main() -> anyhow::Result<()> {
     });
     OrchestratorCtx::install(ctx).expect("install orchestrator ctx");
     let _ = memory_ingest::install_runtime_with_pool(pool.clone());
+    let scim_base_url = std::env::var("MOA_SCIM_BASE_URL")
+        .unwrap_or_else(|_| format!("http://localhost:{}/scim/v2", args.scim_port));
+    let scim_state = ScimState::new(
+        pool.clone(),
+        Arc::new(moa_auth_providers::LocalAuthProvider::new(Arc::new(
+            pool.clone(),
+        ))),
+        OrchestratorCtx::current().fga_client.clone(),
+        scim_base_url,
+    );
 
     let endpoint = Endpoint::builder()
         .bind(HealthImpl.serve())
@@ -156,7 +216,14 @@ async fn main() -> anyhow::Result<()> {
             )
             .serve(),
         )
-        .bind(LLMGatewayImpl::new(providers).serve())
+        .bind(LLMGatewayImpl::new(llm_providers).serve())
+        .bind(AgentRegistryImpl.serve())
+        .bind(AgentTemplatesImpl.serve())
+        .bind(AgentsImpl.serve())
+        .bind(ApprovalsImpl.serve())
+        .bind(ApiKeysImpl.serve())
+        .bind(AuditImpl.serve())
+        .bind(AuthzImpl.serve())
         .bind(IngestionVOImpl.serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
         .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
@@ -165,7 +232,9 @@ async fn main() -> anyhow::Result<()> {
         .bind(CronJobImpl.serve())
         .bind(SessionImpl.serve())
         .bind(SubAgentImpl.serve())
+        .bind(TenantsImpl.serve())
         .bind(WorkspaceImpl.serve())
+        .bind(WhoamiImpl.serve())
         .bind(ConsolidateImpl.serve())
         .bind(IntentDiscoveryImpl.serve())
         .bind(TurnExecutionImpl.serve())
@@ -174,16 +243,22 @@ async fn main() -> anyhow::Result<()> {
     let readiness = Arc::new(AtomicBool::new(false));
     let probe_state = ProbeState::new(readiness.clone(), pool.clone(), config.restate_admin_url)?;
     let shutdown = CancellationToken::new();
+    let approval_reaper_handle =
+        start_approval_reaper_if_configured(&pool, moa_config.as_ref(), awakeable_resolver)?;
 
     let restate_listener = bind_listener(args.port).await?;
     let health_listener = bind_listener(args.health_port).await?;
+    let scim_listener = bind_listener(args.scim_port).await?;
     let mut restate_server = spawn_restate_server(endpoint, restate_listener, shutdown.clone());
     let mut health_server =
         spawn_health_server(health_listener, probe_state.clone(), shutdown.clone());
+    let mut scim_server = spawn_scim_server(scim_listener, scim_state, shutdown.clone());
 
     tracing::info!(
         port = args.port,
         health_port = args.health_port,
+        scim_port = args.scim_port,
+        header_trust_mode = ?header_trust_mode,
         restate_admin_url = %probe_state.admin_base_url(),
         metrics_url = metrics_endpoint_url(&moa_config.metrics).unwrap_or_else(|| "disabled".to_string()),
         "starting moa-orchestrator"
@@ -199,6 +274,7 @@ async fn main() -> anyhow::Result<()> {
             readiness.store(false, Ordering::Release);
             shutdown.cancel();
             health_server.abort();
+            scim_server.abort();
             result.context("join Restate handler server")?;
             bail!("Restate handler server exited unexpectedly");
         }
@@ -206,13 +282,29 @@ async fn main() -> anyhow::Result<()> {
             readiness.store(false, Ordering::Release);
             shutdown.cancel();
             restate_server.abort();
+            scim_server.abort();
             result.context("join health probe server")??;
             bail!("health probe server exited unexpectedly");
+        }
+        result = &mut scim_server => {
+            readiness.store(false, Ordering::Release);
+            shutdown.cancel();
+            restate_server.abort();
+            health_server.abort();
+            result.context("join SCIM server")??;
+            bail!("SCIM server exited unexpectedly");
         }
         signal = shutdown_signal() => {
             signal?;
             tracing::info!("shutdown signal received, draining");
             readiness.store(false, Ordering::Release);
+
+            if let Some(poller_handle) = poller_handle {
+                poller_handle.shutdown().await;
+            }
+            if let Some(reaper_handle) = approval_reaper_handle {
+                reaper_handle.shutdown().await;
+            }
 
             if let Some(writer) = OrchestratorCtx::current().lineage_writer.clone() {
                 tracing::info!("draining lineage writer");
@@ -239,10 +331,91 @@ async fn main() -> anyhow::Result<()> {
             health_server
                 .await
                 .context("join health probe server during shutdown")??;
+            scim_server
+                .await
+                .context("join SCIM server during shutdown")??;
         }
     }
 
     Ok(())
+}
+
+fn header_trust_mode_from_env() -> HeaderTrustMode {
+    match std::env::var("MOA__AUTH__HEADER_TRUST").ok().as_deref() {
+        Some("strict") => HeaderTrustMode::Strict,
+        Some("lenient") => HeaderTrustMode::Lenient,
+        Some(other) => {
+            tracing::warn!(
+                value = other,
+                "unknown MOA__AUTH__HEADER_TRUST value; using lenient mode"
+            );
+            HeaderTrustMode::Lenient
+        }
+        None => HeaderTrustMode::Lenient,
+    }
+}
+
+async fn apply_database_migrations(pool: &PgPool) -> anyhow::Result<()> {
+    moa_session::schema::migrate(pool, None)
+        .await
+        .context("apply moa-session migrations")?;
+    moa_authz::schema::migrate(pool)
+        .await
+        .context("apply moa-authz migrations")?;
+    moa_auth_providers::schema::migrate(pool)
+        .await
+        .context("apply moa-auth-providers migrations")?;
+    #[cfg(feature = "auth0")]
+    moa_auth_providers::auth0::schema::migrate(pool)
+        .await
+        .context("apply moa-auth-providers-auth0 migrations")?;
+    moa_orchestrator::schema::migrate(pool)
+        .await
+        .context("apply moa-orchestrator migrations")?;
+    moa_ocsf::schema::migrate(pool)
+        .await
+        .context("apply moa-ocsf migrations")?;
+    Ok(())
+}
+
+fn build_fga_client(config: &MoaConfig) -> anyhow::Result<moa_authz::FgaClient> {
+    let openfga = config
+        .authz
+        .openfga
+        .as_ref()
+        .context("authz.openfga config missing")?;
+    moa_authz::FgaClient::new(moa_authz::FgaConfig {
+        url: openfga.url.clone(),
+        preshared_key: openfga.preshared_key.clone(),
+        store_id: openfga.store_id.clone(),
+        model_id: openfga.model_id.clone(),
+        timeout_ms: openfga.timeout_ms,
+    })
+    .context("build OpenFGA client")
+}
+
+fn start_authz_outbox_poller(
+    pool: &PgPool,
+    fga_client: moa_authz::FgaClient,
+) -> moa_authz::PollerHandle {
+    let outbox_poller =
+        moa_authz::OutboxPoller::new(pool.clone(), fga_client, moa_authz::PollerConfig::default());
+    let poller_handle = outbox_poller.spawn();
+    tracing::info!("authz outbox poller started");
+    poller_handle
+}
+
+fn start_approval_reaper_if_configured(
+    pool: &PgPool,
+    config: &MoaConfig,
+    resolver: Arc<dyn AwakeableResolver>,
+) -> anyhow::Result<Option<ApprovalReaperHandle>> {
+    if config.async_authz.provider != AsyncAuthzKind::Builtin {
+        return Ok(None);
+    }
+    let handle = ApprovalReaper::new(pool.clone()).spawn(resolver);
+    tracing::info!("approval reaper started");
+    Ok(Some(handle))
 }
 
 #[derive(Clone)]
@@ -367,6 +540,28 @@ async fn serve_health_server(
         .context("serve health probe HTTP server")
 }
 
+async fn serve_scim_server(
+    listener: TcpListener,
+    state: ScimState,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()> {
+    let router = Router::new()
+        .nest("/scim/v2", scim::router(state))
+        .route("/scim/v2", get(meta_scim_root));
+
+    serve(listener, router)
+        .with_graceful_shutdown(shutdown.cancelled_owned())
+        .await
+        .context("serve SCIM HTTP server")
+}
+
+async fn meta_scim_root() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        "MOA SCIM v2 endpoint. Use /scim/v2/ServiceProviderConfig.",
+    )
+}
+
 fn spawn_restate_server(
     endpoint: Endpoint,
     listener: TcpListener,
@@ -385,6 +580,14 @@ fn spawn_health_server(
     shutdown: CancellationToken,
 ) -> JoinHandle<anyhow::Result<()>> {
     tokio::spawn(async move { serve_health_server(listener, state, shutdown).await })
+}
+
+fn spawn_scim_server(
+    listener: TcpListener,
+    state: ScimState,
+    shutdown: CancellationToken,
+) -> JoinHandle<anyhow::Result<()>> {
+    tokio::spawn(async move { serve_scim_server(listener, state, shutdown).await })
 }
 
 fn spawn_default_cron_bootstrap(state: ProbeState, ingress_url: String) -> JoinHandle<()> {
@@ -611,7 +814,7 @@ mod tests {
     fn deployment_with_services(services: &[&str]) -> RegisteredDeployment {
         RegisteredDeployment {
             id: "dp_test".to_string(),
-            uri: Some("http://localhost:9080".to_string()),
+            uri: Some("http://localhost:10020".to_string()),
             services: services
                 .iter()
                 .map(|name| RegisteredService {

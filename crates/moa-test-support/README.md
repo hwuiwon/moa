@@ -26,7 +26,7 @@ transcript.validate()?;
 
 ## Postgres Helpers
 
-`moa_test_support::postgres` supports `MOA_TEST_POSTGRES_URL` for an explicit database, or the Docker Compose default `postgres://moa_owner:dev@127.0.0.1:25432/moa` after `docker compose up -d postgres`. `bootstrap_test_db` creates a fresh `test_<uuid>` schema and drops it when the returned `TestDb` is dropped.
+`moa_test_support::postgres` supports `MOA_TEST_POSTGRES_URL` for an explicit database, or the Docker Compose default `postgres://moa_owner:dev@127.0.0.1:10040/moa` after `docker compose up -d postgres`. `bootstrap_test_db` creates a fresh `test_<uuid>` schema and drops it when the returned `TestDb` is dropped.
 
 ```rust
 use moa_test_support::postgres::bootstrap_test_db;

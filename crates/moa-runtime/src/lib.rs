@@ -476,7 +476,7 @@ fn orchestrator_client_from_config(config: &MoaConfig) -> Result<OrchestratorCli
         .orchestrator
         .endpoint
         .as_deref()
-        .unwrap_or("http://localhost:18080");
+        .unwrap_or("http://localhost:10010");
     OrchestratorClient::new(endpoint).map_err(client_error)
 }
 

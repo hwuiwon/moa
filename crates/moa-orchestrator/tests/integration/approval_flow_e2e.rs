@@ -10,7 +10,9 @@ use tokio::time::sleep;
 
 use crate::support::graph_ingest::{test_database_url, wait_for_ingested_brain_responses};
 use crate::support::restate_runtime::{
-    OrchestratorPorts, RESTATE_E2E_LOCK, reserve_orchestrator_ports,
+    OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
+    grant_workspace_member, reserve_orchestrator_ports, restate_ingress_url, test_user_identity,
+    with_identity,
 };
 use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, test_session_meta, user_message,
@@ -52,6 +54,8 @@ fn spawn_orchestrator(
         .arg(ports.restate.to_string())
         .arg("--health-port")
         .arg(ports.health.to_string())
+        .arg("--scim-port")
+        .arg(ports.scim.to_string())
         .env("POSTGRES_URL", test_database_url())
         .env("MOA_MEMORY_DIR", memory_dir.path())
         .env("MOA_SANDBOX_DIR", sandbox_dir.path())
@@ -86,7 +90,10 @@ fn live_model() -> Option<&'static str> {
 }
 
 fn object_url(ingress: &str, session_id: SessionId, handler: &str) -> String {
-    format!("{ingress}/Session/{session_id}/{handler}")
+    format!(
+        "{}/Session/{session_id}/{handler}",
+        ingress.trim_end_matches('/')
+    )
 }
 
 #[tokio::test]
@@ -100,11 +107,14 @@ async fn approval_allow_once_round_trip_through_restate() -> Result<()> {
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
     let ports = reserve_orchestrator_ports()?;
-    let endpoint_url = format!("http://127.0.0.1:{}", ports.restate);
-    let ingress = "http://127.0.0.1:8080";
+    let endpoint_url = deployment_endpoint_url(ports.restate);
+    let ingress = restate_ingress_url();
+    let ingress = ingress.as_str();
     let client = reqwest::Client::new();
     let mut meta = test_session_meta("session-approval-e2e");
     meta.model = ModelId::new(model);
+    let identity = test_user_identity();
+    grant_workspace_member(&identity, &meta.workspace_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
     let pool = PgPool::connect(&test_database_url())
         .await
@@ -114,8 +124,11 @@ async fn approval_allow_once_round_trip_through_restate() -> Result<()> {
     let result = async {
         register_deployment(endpoint_url.as_str()).await?;
 
-        let session_id = client
-            .post(format!("{ingress}/SessionStore/create_session"))
+        let create_request = client.post(format!(
+            "{}/SessionStore/create_session",
+            ingress.trim_end_matches('/')
+        ));
+        let session_id = with_identity(create_request, &identity)
             .json(&meta)
             .send()
             .await
@@ -123,9 +136,10 @@ async fn approval_allow_once_round_trip_through_restate() -> Result<()> {
             .json::<SessionId>()
             .await
             .context("deserialize create_session response")?;
+        grant_session_participant(&identity, session_id).await?;
 
         client
-            .post(format!("{ingress}/SessionStore/init_session_vo"))
+            .post(format!("{}/SessionStore/init_session_vo", ingress.trim_end_matches('/')))
             .json(&init_session_vo_request(session_id, meta.clone()))
             .send()
             .await
@@ -137,8 +151,8 @@ async fn approval_allow_once_round_trip_through_restate() -> Result<()> {
             "Use the bash tool exactly once to run `printf '{approval_token}\\n'`. \
              Do not answer from memory. After the tool succeeds, answer with exactly {approval_token}."
         );
-        client
-            .post(object_url(ingress, session_id, "post_message"))
+        let post_message = client.post(object_url(ingress, session_id, "post_message"));
+        with_identity(post_message, &identity)
             .json(&user_message(prompt))
             .send()
             .await
@@ -239,7 +253,10 @@ async fn wait_for_approval_request(
 ) -> Result<Vec<moa_core::EventRecord>> {
     for _attempt in 0..60 {
         let response = client
-            .post(format!("{ingress}/SessionStore/get_events"))
+            .post(format!(
+                "{}/SessionStore/get_events",
+                ingress.trim_end_matches('/')
+            ))
             .json(&get_events_request(session_id, EventRange::all()))
             .send()
             .await
@@ -269,7 +286,10 @@ async fn wait_for_brain_response_count(
 ) -> Result<Vec<moa_core::EventRecord>> {
     for _attempt in 0..60 {
         let response = client
-            .post(format!("{ingress}/SessionStore/get_events"))
+            .post(format!(
+                "{}/SessionStore/get_events",
+                ingress.trim_end_matches('/')
+            ))
             .json(&get_events_request(session_id, EventRange::all()))
             .send()
             .await

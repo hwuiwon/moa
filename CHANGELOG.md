@@ -10,7 +10,7 @@
   `[orchestrator].endpoint` in `~/.moa/config.toml`.
 - Removed `moa daemon start`, `moa daemon stop`, and `moa daemon logs`. Use
   `docker compose logs moa-orchestrator` for local logs and the Restate UI at
-  `http://localhost:9070` for invocation visibility.
+  `http://localhost:10011` for invocation visibility.
 - `moa daemon status` now health-probes the configured orchestrator endpoint
   instead of inspecting an in-process daemon socket.
 

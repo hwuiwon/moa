@@ -633,10 +633,10 @@ fn derive_admin_url(ingress_url: &str) -> String {
     url::Url::parse(ingress_url)
         .ok()
         .and_then(|mut url| {
-            url.set_port(Some(9070)).ok()?;
+            url.set_port(Some(10011)).ok()?;
             Some(url.to_string().trim_end_matches('/').to_string())
         })
-        .unwrap_or_else(|| "http://127.0.0.1:9070".to_string())
+        .unwrap_or_else(|| "http://127.0.0.1:10011".to_string())
 }
 
 fn default_script() -> Vec<u8> {

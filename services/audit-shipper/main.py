@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import io
 import logging
 import os
 import shutil
@@ -13,12 +14,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import boto3
+import psycopg
+from psycopg.rows import dict_row
 from boto3.s3.transfer import TransferConfig
 
 
 LOGGER = logging.getLogger("moa.audit_shipper")
 MULTIPART_THRESHOLD_BYTES = 100 * 1024 * 1024
 ACTIVE_LOG_WINDOW_SECONDS = 5
+SECURITY_BATCH_SIZE = 500
+ASSUME_ROLE_CACHE: dict[str, tuple[object, datetime]] = {}
 
 
 @dataclass(frozen=True)
@@ -27,21 +32,37 @@ class Settings:
 
     log_dir: Path
     state_dir: Path
-    bucket: str
+    bucket: str | None
     region: str
     object_lock_days: int
     poll_interval_seconds: int
     quiet_seconds: int
     log_globs: tuple[str, ...]
     kms_key_id: str | None
+    postgres_url: str | None
+    security_batch_size: int
+
+
+@dataclass(frozen=True)
+class AuditDestination:
+    """Per-tenant security-event S3 destination."""
+
+    tenant_id: str
+    bucket_name: str
+    region: str
+    assume_role_arn: str | None
+    key_prefix: str
+    object_lock_days: int
+    encryption_kms_key_arn: str | None
 
 
 def load_settings() -> Settings:
     """Loads shipper settings from environment variables."""
 
     bucket = os.environ.get("BUCKET")
-    if not bucket:
-        raise SystemExit("BUCKET is required")
+    postgres_url = os.environ.get("POSTGRES_URL")
+    if not bucket and not postgres_url:
+        raise SystemExit("BUCKET or POSTGRES_URL is required")
 
     globs = tuple(
         item.strip()
@@ -58,6 +79,8 @@ def load_settings() -> Settings:
         quiet_seconds=int(os.environ.get("QUIET_SECONDS", "120")),
         log_globs=globs,
         kms_key_id=os.environ.get("SSE_KMS_KEY_ID"),
+        postgres_url=postgres_url,
+        security_batch_size=int(os.environ.get("SECURITY_BATCH_SIZE", str(SECURITY_BATCH_SIZE))),
     )
 
 
@@ -134,6 +157,8 @@ def upload_args(settings: Settings, now: datetime) -> dict[str, object]:
 def upload_file(settings: Settings, source: Path, compressed: Path, now: datetime) -> None:
     """Uploads one compressed audit log to S3 with Object Lock retention."""
 
+    if not settings.bucket:
+        return
     client = boto3.client("s3", region_name=settings.region)
     client.upload_file(
         str(compressed),
@@ -153,7 +178,11 @@ def ship_once(settings: Settings) -> int:
     now_seconds = time.time()
     now_datetime = datetime.now(UTC)
     shipped = 0
-    for source in completed_logs(settings, now_seconds):
+    if settings.bucket:
+        sources = completed_logs(settings, now_seconds)
+    else:
+        sources = []
+    for source in sources:
         marker = shipped_marker(settings, source)
         compressed = compressed_copy(source, settings.state_dir)
         upload_file(settings, source, compressed, now_datetime)
@@ -162,7 +191,179 @@ def ship_once(settings: Settings) -> int:
         compressed.unlink(missing_ok=True)
         shipped += 1
         LOGGER.info("shipped audit log", extra={"path": str(source)})
+    shipped += ship_security_events_once(settings)
     return shipped
+
+
+def ship_security_events_once(settings: Settings) -> int:
+    """Ships unshipped OCSF security events to tenant audit buckets."""
+
+    if not settings.postgres_url:
+        return 0
+    with psycopg.connect(settings.postgres_url, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, tenant_id, class_uid, event_jcs, occurred_at
+                FROM security_events
+                WHERE shipped_at IS NULL
+                ORDER BY tenant_id, id
+                LIMIT %s
+                """,
+                (settings.security_batch_size,),
+            )
+            events = list(cur.fetchall())
+            if not events:
+                return 0
+            tenant_ids = sorted({str(event["tenant_id"]) for event in events})
+            destinations = load_destinations(cur, tenant_ids)
+            shipped = 0
+            for tenant_id in tenant_ids:
+                tenant_events = [event for event in events if str(event["tenant_id"]) == tenant_id]
+                destination = destinations.get(tenant_id)
+                if destination is None:
+                    mark_security_ship_failure(
+                        cur,
+                        [event["id"] for event in tenant_events],
+                        "tenant audit destination is not configured",
+                    )
+                    continue
+                try:
+                    upload_security_batch(destination, tenant_events)
+                except Exception as exc:
+                    LOGGER.exception(
+                        "security event batch upload failed",
+                        extra={"tenant_id": tenant_id},
+                    )
+                    mark_security_ship_failure(
+                        cur,
+                        [event["id"] for event in tenant_events],
+                        str(exc),
+                    )
+                    continue
+                cur.execute(
+                    "UPDATE security_events SET shipped_at = NOW(), last_ship_error = NULL WHERE id = ANY(%s::uuid[])",
+                    ([event["id"] for event in tenant_events],),
+                )
+                shipped += len(tenant_events)
+                LOGGER.info(
+                    "shipped security events",
+                    extra={"tenant_id": tenant_id, "count": len(tenant_events)},
+                )
+            conn.commit()
+            return shipped
+
+
+def load_destinations(cur: psycopg.Cursor, tenant_ids: list[str]) -> dict[str, AuditDestination]:
+    """Loads configured audit destinations for tenant ids."""
+
+    cur.execute(
+        """
+        SELECT tenant_id, bucket_name, region, assume_role_arn, key_prefix,
+               object_lock_days, encryption_kms_key_arn
+        FROM tenant_audit_destinations
+        WHERE tenant_id = ANY(%s::uuid[])
+        """,
+        (tenant_ids,),
+    )
+    destinations = {}
+    for row in cur.fetchall():
+        tenant_id = str(row["tenant_id"])
+        destinations[tenant_id] = AuditDestination(
+            tenant_id=tenant_id,
+            bucket_name=row["bucket_name"],
+            region=row["region"],
+            assume_role_arn=row["assume_role_arn"],
+            key_prefix=row["key_prefix"],
+            object_lock_days=row["object_lock_days"],
+            encryption_kms_key_arn=row["encryption_kms_key_arn"],
+        )
+    return destinations
+
+
+def upload_security_batch(destination: AuditDestination, events: list[dict[str, object]]) -> None:
+    """Uploads one tenant's security event batch as gzipped NDJSON."""
+
+    if not events:
+        return
+    first = events[0]
+    occurred_at = first["occurred_at"]
+    if not isinstance(occurred_at, datetime):
+        occurred_at = datetime.now(UTC)
+    body = io.BytesIO()
+    with gzip.GzipFile(fileobj=body, mode="wb") as gzip_file:
+        for event in events:
+            payload = bytes(event["event_jcs"])
+            gzip_file.write(payload)
+            gzip_file.write(b"\n")
+    key = security_object_key(destination, occurred_at, str(first["id"]))
+    client = s3_client_for_destination(destination)
+    retain_until = datetime.now(UTC) + timedelta(days=destination.object_lock_days)
+    put_args: dict[str, object] = {
+        "Bucket": destination.bucket_name,
+        "Key": key,
+        "Body": body.getvalue(),
+        "ObjectLockMode": "COMPLIANCE",
+        "ObjectLockRetainUntilDate": retain_until,
+    }
+    if destination.encryption_kms_key_arn:
+        put_args["ServerSideEncryption"] = "aws:kms"
+        put_args["SSEKMSKeyId"] = destination.encryption_kms_key_arn
+    client.put_object(**put_args)
+
+
+def security_object_key(destination: AuditDestination, occurred_at: datetime, first_id: str) -> str:
+    """Builds the S3 object key for one OCSF batch."""
+
+    prefix = destination.key_prefix.strip("/")
+    return (
+        f"{prefix}/"
+        f"{occurred_at.year:04d}/"
+        f"{occurred_at.month:02d}/"
+        f"{occurred_at.day:02d}/"
+        f"{occurred_at.hour:02d}/"
+        f"{first_id}.jsonl.gz"
+    )
+
+
+def s3_client_for_destination(destination: AuditDestination):
+    """Builds or reuses an S3 client for a tenant destination."""
+
+    if not destination.assume_role_arn:
+        return boto3.client("s3", region_name=destination.region)
+    cache_key = f"{destination.assume_role_arn}:{destination.region}"
+    cached = ASSUME_ROLE_CACHE.get(cache_key)
+    if cached and cached[1] > datetime.now(UTC) + timedelta(minutes=5):
+        return cached[0]
+    sts = boto3.client("sts", region_name=destination.region)
+    assumed = sts.assume_role(
+        RoleArn=destination.assume_role_arn,
+        RoleSessionName=f"moa-audit-{destination.tenant_id[:8]}",
+    )
+    credentials = assumed["Credentials"]
+    client = boto3.client(
+        "s3",
+        region_name=destination.region,
+        aws_access_key_id=credentials["AccessKeyId"],
+        aws_secret_access_key=credentials["SecretAccessKey"],
+        aws_session_token=credentials["SessionToken"],
+    )
+    ASSUME_ROLE_CACHE[cache_key] = (client, credentials["Expiration"])
+    return client
+
+
+def mark_security_ship_failure(cur: psycopg.Cursor, event_ids: list[object], error: str) -> None:
+    """Records security-event shipping failures for retry."""
+
+    cur.execute(
+        """
+        UPDATE security_events
+        SET ship_attempts = ship_attempts + 1,
+            last_ship_error = %s
+        WHERE id = ANY(%s::uuid[])
+        """,
+        (error[:2000], event_ids),
+    )
 
 
 def main() -> None:
@@ -170,7 +371,10 @@ def main() -> None:
 
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
     settings = load_settings()
-    LOGGER.info("starting audit shipper", extra={"bucket": settings.bucket})
+    LOGGER.info(
+        "starting audit shipper",
+        extra={"bucket": settings.bucket, "security_events": bool(settings.postgres_url)},
+    )
     while True:
         try:
             ship_once(settings)

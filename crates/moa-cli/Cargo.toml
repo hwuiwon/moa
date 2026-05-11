@@ -14,9 +14,11 @@ base64.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 clap.workspace = true
+dirs.workspace = true
 ed25519-dalek.workspace = true
 flate2 = "1"
 hex.workspace = true
+moa-auth-providers.workspace = true
 moa-core = { path = "../moa-core" }
 moa-eval = { path = "../moa-eval" }
 moa-brain = { path = "../moa-brain" }
@@ -30,7 +32,7 @@ moa-orchestrator-client = { path = "../moa-orchestrator-client" }
 moa-runtime = { path = "../moa-runtime" }
 moa-session = { path = "../moa-session" }
 moa-skills = { path = "../moa-skills" }
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["form"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

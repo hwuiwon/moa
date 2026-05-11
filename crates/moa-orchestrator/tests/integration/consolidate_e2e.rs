@@ -14,10 +14,11 @@ use tempfile::TempDir;
 use tokio::time::sleep;
 
 use crate::support::restate_runtime::{
-    OrchestratorPorts, RESTATE_E2E_LOCK, reserve_orchestrator_ports,
+    OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, reserve_orchestrator_ports,
+    restate_ingress_url,
 };
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:25432/moa";
+const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
 
 async fn register_deployment(endpoint_url: &str) -> Result<()> {
     for _attempt in 0..15 {
@@ -59,6 +60,8 @@ fn spawn_orchestrator(
         .arg(ports.restate.to_string())
         .arg("--health-port")
         .arg(ports.health.to_string())
+        .arg("--scim-port")
+        .arg(ports.scim.to_string())
         .env("POSTGRES_URL", postgres_url)
         .env("MOA_MEMORY_DIR", memory_dir.path())
         .env("MOA_SANDBOX_DIR", sandbox_dir.path())
@@ -71,11 +74,17 @@ fn spawn_orchestrator(
 }
 
 fn object_url(ingress: &str, workspace_id: &WorkspaceId, handler: &str) -> String {
-    format!("{ingress}/Workspace/{workspace_id}/{handler}")
+    format!(
+        "{}/Workspace/{workspace_id}/{handler}",
+        ingress.trim_end_matches('/')
+    )
 }
 
 fn workflow_url(ingress: &str, workflow_id: &str) -> String {
-    format!("{ingress}/Consolidate/{workflow_id}/run")
+    format!(
+        "{}/Consolidate/{workflow_id}/run",
+        ingress.trim_end_matches('/')
+    )
 }
 
 #[tokio::test]
@@ -85,8 +94,9 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
     let ports = reserve_orchestrator_ports()?;
-    let endpoint_url = format!("http://127.0.0.1:{}", ports.restate);
-    let ingress = "http://127.0.0.1:8080";
+    let endpoint_url = deployment_endpoint_url(ports.restate);
+    let ingress = restate_ingress_url();
+    let ingress = ingress.as_str();
     let client = reqwest::Client::new();
     let workspace_id = WorkspaceId::new(format!(
         "workspace-consolidate-e2e-{}",

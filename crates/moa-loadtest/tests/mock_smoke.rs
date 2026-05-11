@@ -10,7 +10,7 @@ fn mock_short_profile_completes_within_budget_with_zero_errors() {
         panic!("set MOA_RUN_LOADTEST_REMOTE_SMOKE=1 and RESTATE_INGRESS_URL to run this test");
     }
     let endpoint =
-        std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://localhost:18080".into());
+        std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://localhost:10010".into());
     let prom_out = repo_root().join(format!(
         "target/perf-gate/mock-short-{}.prom",
         uuid::Uuid::now_v7()
@@ -24,8 +24,10 @@ fn mock_short_profile_completes_within_budget_with_zero_errors() {
             &endpoint,
             "--duration",
             "5s",
+            // The Restate path now includes live FGA checks on session creation
+            // and turn start; keep the smoke budget above cold local authz cost.
             "--max-p95-ms",
-            "1000",
+            "2000",
             "--max-error-rate",
             "0",
             "--prom-out",

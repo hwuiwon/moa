@@ -1,8 +1,12 @@
 //! Backend calls used by Restate session-store handlers.
 
 use super::*;
+use moa_authz::{enqueue, enqueue_raw};
+use moa_authz_schema::{ObjectType, Relation, TupleKey, TupleOp, UserType};
+use moa_core::traits::{Identity, IdentityType};
 
 impl SessionStoreImpl {
+    #[cfg(test)]
     pub(super) async fn create_session_inner(
         &self,
         meta: SessionMeta,
@@ -11,6 +15,66 @@ impl SessionStoreImpl {
             .create_session(meta)
             .await
             .map_err(HandlerError::from)
+    }
+
+    pub(super) async fn create_session_authorized_inner(
+        &self,
+        meta: SessionMeta,
+        identity: Identity,
+    ) -> Result<SessionId, HandlerError> {
+        let (owner_user_type, owner_id) = owner_tuple_subject(&identity)?;
+        let tenant_id = identity.tenant_id;
+        let workspace_id = meta.workspace_id.clone();
+        let mut transaction = self
+            .store
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
+
+        let session_id = self
+            .store
+            .create_session_in_tx(&mut transaction, meta)
+            .await
+            .map_err(HandlerError::from)?;
+
+        let owner_tuple = TupleKey::new(
+            owner_user_type,
+            owner_id,
+            Relation::Owner,
+            ObjectType::Session,
+            session_id.0,
+        );
+        enqueue(
+            &mut *transaction,
+            TupleOp::Write,
+            &owner_tuple,
+            Some(tenant_id),
+        )
+        .await
+        .map_err(|error| TerminalError::new(format!("authz outbox owner tuple: {error}")))?;
+
+        enqueue_raw(
+            &mut *transaction,
+            TupleOp::Write,
+            &format!("workspace:{workspace_id}"),
+            "workspace",
+            &format!("session:{session_id}"),
+            Some(tenant_id),
+        )
+        .await
+        .map_err(|error| TerminalError::new(format!("authz outbox parent tuple: {error}")))?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
+        self.store
+            .refresh_active_session_metric()
+            .await
+            .map_err(HandlerError::from)?;
+
+        Ok(session_id)
     }
 
     pub(super) async fn append_event_inner(
@@ -203,5 +267,19 @@ impl SessionStoreImpl {
             .record_active_segment_turn_usage(request.session_id, request.token_cost)
             .await
             .map_err(HandlerError::from)
+    }
+}
+
+fn owner_tuple_subject(identity: &Identity) -> Result<(UserType, uuid::Uuid), HandlerError> {
+    if let Some(api_key_id) = identity.api_key_id {
+        return Ok((UserType::ApiKey, api_key_id));
+    }
+
+    match identity.identity_type {
+        IdentityType::User => Ok((UserType::User, identity.id)),
+        IdentityType::Agent => Ok((UserType::Agent, identity.id)),
+        IdentityType::Service => {
+            Err(TerminalError::new_with_code(403, "service identities cannot own sessions").into())
+        }
     }
 }

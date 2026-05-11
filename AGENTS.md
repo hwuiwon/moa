@@ -53,6 +53,37 @@ The full architecture specification is in `docs/`. Read the relevant section bef
   - `cargo build --workspace` when public types, shared crates, or workspace wiring changed
   - `git diff --check`
 
+## Authorization review rule
+
+Every handler that touches data on behalf of a caller MUST either:
+
+1. Call `moa_authz::require_authz` or `require_authz_with_delegation` with
+   the appropriate `(ObjectType, object_id, Relation)`. The check happens
+   before any reads of the protected resource. OR
+2. Carry a one-line `// SAFETY: ...` justification immediately above the
+   handler signature explaining why no check is needed. Acceptable
+   justifications: "purely informational; no resource-specific data",
+   "health/observability endpoint", "called only from another handler that
+   has already checked".
+
+PRs that violate this rule are returned for revision. The reviewer is
+explicitly responsible for verifying the justification is correct; this is
+not a CI-enforceable rule because it depends on judgment about the data the
+handler returns.
+
+Common mistakes:
+
+- Reading the resource first to determine the workspace_id, then checking
+  authz. Wrong order: an unauthorized caller has already exfiltrated the
+  resource's existence and any read-able fields. Always check first.
+- Using `require_authz` for a write that should use
+  `require_authz_with_delegation`. If the handler accepts requests from
+  agents, use the delegation variant.
+- Forgetting to enqueue the inverse outbox tuple on resource deletion. If
+  create-handlers enqueue write tuples, delete-handlers must enqueue delete
+  tuples in the same transaction. Stale tuples in OpenFGA grant phantom
+  access after a resource is deleted.
+
 ## Live And Billed Tests
 
 - Live provider tests must never run by default.

@@ -59,6 +59,7 @@ The root workspace currently contains:
 | Service | Purpose |
 |---|---|
 | Postgres 17.6+ with Apache AGE, pgvector, and pgaudit | Session store, graph memory, event search, sidecar indexes, embeddings, learning tables |
+| OpenFGA v1.8 | Authorization engine. Postgres-backed. Self-hosted by default; Auth0 FGA is a future managed swap-in. |
 | `moa-pii-service` | Out-of-process `openai/privacy-filter` inference for memory privacy classification |
 | LLM provider | Anthropic, OpenAI, or Google Gemini |
 
@@ -92,7 +93,7 @@ cargo test --workspace --no-run
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p moa-cli -- doctor
-POSTGRES_URL=postgres://... cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 9080 --health-port 9081
+POSTGRES_URL=postgres://... cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
 ```
 
 ## Configuration
@@ -110,6 +111,7 @@ Config loads from `~/.moa/config.toml` plus `MOA__...` environment overrides. Ke
 | `[skill_budget]` | skill manifest budget controls |
 | `[cloud]` | cloud mode and hand provider settings |
 | `[orchestrator]` | Restate ingress endpoint and optional health URL for thin clients |
+| `[auth]`, `[authz]`, `[token_vault]`, `[async_authz]`, `[audit_security]` | identity, authorization, token vault, async approvals, and OCSF security-event audit |
 | `[gateway]` | messaging adapter tokens |
 | `[permissions]` | default approval posture |
 | `[compaction]` | history compaction thresholds |

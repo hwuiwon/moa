@@ -7,7 +7,7 @@ use std::time::Duration;
 use moa_memory_pii::{OpenAiPrivacyFilterClassifier, PiiClass, PiiClassifier};
 
 fn live_service_url() -> String {
-    std::env::var("MOA_PII_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
+    std::env::var("MOA_PII_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:10050".to_string())
 }
 
 #[tokio::test]

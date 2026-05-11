@@ -2,10 +2,18 @@
 
 use super::*;
 
-#[async_trait]
-impl SessionStore for PostgresSessionStore {
-    /// Creates a new session record.
-    async fn create_session(&self, meta: SessionMeta) -> Result<moa_core::SessionId> {
+impl PostgresSessionStore {
+    /// Insert a session metadata row using a caller-owned transaction.
+    ///
+    /// This lets higher-level handlers atomically persist the session and its
+    /// authorization outbox tuples. The caller owns commit/rollback and should
+    /// call [`PostgresSessionStore::refresh_active_session_metric`] after a
+    /// successful commit.
+    pub async fn create_session_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        meta: SessionMeta,
+    ) -> Result<moa_core::SessionId> {
         let session_id = meta.id;
         let sessions = self.table_name("sessions");
         sqlx::query(&format!(
@@ -32,10 +40,22 @@ impl SessionStore for PostgresSessionStore {
         .bind(meta.event_count as i64)
         .bind(0_i64)
         .bind(meta.last_checkpoint_seq.map(|value| value as i64))
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
         record_session_created(&meta.workspace_id, &meta.status);
+
+        Ok(session_id)
+    }
+}
+
+#[async_trait]
+impl SessionStore for PostgresSessionStore {
+    /// Creates a new session record.
+    async fn create_session(&self, meta: SessionMeta) -> Result<moa_core::SessionId> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let session_id = self.create_session_in_tx(&mut transaction, meta).await?;
+        transaction.commit().await.map_err(map_sqlx_error)?;
         self.refresh_active_session_metric().await?;
 
         Ok(session_id)

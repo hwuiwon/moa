@@ -101,6 +101,24 @@ pub(crate) async fn dispatch(cli: Cli, config: MoaConfig) -> Result<()> {
         Some(CommandKind::Privacy { command }) => {
             print!("{}", handle_privacy_command(&config, command).await?);
         }
+        Some(CommandKind::Auth(command)) => {
+            print!("{}", handle_auth_command(command).await?);
+        }
+        Some(CommandKind::Approvals(command)) => {
+            print!("{}", handle_approvals_command(command).await?);
+        }
+        Some(CommandKind::Agents(command)) => {
+            print!("{}", handle_agents_command(command).await?);
+        }
+        Some(CommandKind::Authz(command)) => {
+            print!("{}", handle_authz_command(command).await?);
+        }
+        Some(CommandKind::Tenants(command)) => {
+            print!("{}", handle_tenants_command(command).await?);
+        }
+        Some(CommandKind::Audit(command)) => {
+            print!("{}", handle_audit_command(command).await?);
+        }
         Some(CommandKind::PromoteWorkspace(args)) => {
             print!(
                 "{}",

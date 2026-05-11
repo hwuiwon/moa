@@ -78,6 +78,18 @@ pub(crate) enum CommandKind {
         #[command(subcommand)]
         command: PrivacyCommand,
     },
+    /// Authentication and API-key operations.
+    Auth(AuthCommand),
+    /// Builtin approval operations.
+    Approvals(ApprovalsCommand),
+    /// Agent template and agent principal operations.
+    Agents(AgentsCommand),
+    /// Authorization tuple administration.
+    Authz(AuthzCommand),
+    /// Tenant audit administration.
+    Tenants(TenantsCommand),
+    /// OCSF security-audit operations.
+    Audit(AuditCommand),
     /// Promotes a workspace from pgvector to Turbopuffer.
     PromoteWorkspace(PromoteWorkspaceArgs),
     /// Rolls a workspace vector promotion back to pgvector.

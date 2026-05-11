@@ -9,6 +9,10 @@ use moa_core::{ModelId, SessionId, SessionMeta};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::support::restate_runtime::{grant_workspace_member, test_user_identity, with_identity};
+
+mod support;
+
 #[derive(Debug, Deserialize)]
 struct ProgressResponse {
     turn_id: String,
@@ -18,7 +22,7 @@ struct ProgressResponse {
 }
 
 fn ingress_url() -> String {
-    std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://localhost:18080".to_string())
+    std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://localhost:10010".to_string())
 }
 
 fn workflow_url(turn_id: &str, handler: &str) -> String {
@@ -49,9 +53,11 @@ async fn create_initialized_session(client: &reqwest::Client, label: &str) -> Re
         model: ModelId::new(live_model()),
         ..SessionMeta::default()
     };
+    let identity = test_user_identity();
+    grant_workspace_member(&identity, &meta.workspace_id).await?;
 
-    let session_id = client
-        .post(session_store_url("create_session"))
+    let create_request = client.post(session_store_url("create_session"));
+    let session_id = with_identity(create_request, &identity)
         .json(&meta)
         .send()
         .await

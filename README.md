@@ -27,11 +27,15 @@ Status: early active development. The architecture is stable enough to document,
 
 `make dev` brings up the full local stack:
 
-- Postgres with AGE, pgvector, and pgaudit on `localhost:25432`
-- Restate Server 1.6.2 on `localhost:18080` for ingress and `localhost:9070` for the UI
-- `moa-orchestrator` on `localhost:9080` for the Restate handler and `localhost:9081` for health
-- PII filter on `localhost:8080`
+- Postgres with AGE, pgvector, and pgaudit on `localhost:10040`
+- `moa-edge` on `localhost:10000`
+- Restate Server 1.6.2 on `localhost:10010` for ingress and `localhost:10011` for the UI
+- `moa-orchestrator` with an internal-only Restate handler port and `localhost:10021` for health
+- PII filter on `localhost:10050`
 - audit log shipper with no exposed port
+
+The full local port map lives in
+[`docs/operations/local-ports.md`](docs/operations/local-ports.md).
 
 The orchestrator registers its handlers with Restate automatically through the
 `restate-register` sidecar service.
@@ -48,6 +52,48 @@ To open the Restate web UI and inspect invocations, K/V state, and deployments:
 make dev-restate-ui
 ```
 
+### Authorization (OpenFGA)
+
+`make dev` brings up OpenFGA at <http://localhost:10030> and bootstraps the
+schema. Store / model IDs are written to `.env.fga`; source it before running
+the orchestrator manually:
+
+```sh
+source .env.fga
+```
+
+Skip OpenFGA for non-auth work:
+
+```sh
+MOA_SKIP_FGA=1 make dev
+```
+
+Install the `fga` CLI for schema iteration:
+
+```sh
+make fga-install
+```
+
+OpenFGA Playground: <http://localhost:10032>.
+
+### API keys
+
+For local development, bootstrap a direct CLI identity once, then create a dev
+API key:
+
+```sh
+./scripts/bootstrap-cli-identity.sh
+cargo run -p moa-cli -- auth keys create --name local --env dev
+cargo run -p moa-cli -- auth use-key <returned-key>
+```
+
+Present the returned key to the edge with `Authorization: Bearer <key>`.
+After `auth use-key`, CLI approval commands use the stored key:
+
+```sh
+cargo run -p moa-cli -- approvals list
+```
+
 To stop everything while preserving data:
 
 ```bash
@@ -60,13 +106,13 @@ To stop and wipe all volumes, including Postgres data and Restate state:
 make dev-wipe
 ```
 
-If `localhost:18080` is already in use, override the Restate ingress port in a
+If `localhost:10010` is already in use, override the Restate ingress port in a
 local `compose.override.yml`.
 
 Use the CLI against the local stack:
 
 ```bash
-MOA__ORCHESTRATOR__ENDPOINT=http://localhost:18080 cargo run -p moa-cli -- exec "What is 2+2?"
+MOA__ORCHESTRATOR__ENDPOINT=http://localhost:10010 cargo run -p moa-cli -- exec "What is 2+2?"
 ```
 
 For a remote orchestrator, set `MOA__ORCHESTRATOR__ENDPOINT` to that Restate
@@ -93,9 +139,9 @@ Cloud mode runs the `moa-orchestrator-bin` Restate handler service plus Postgres
 
 ```bash
 POSTGRES_URL=postgres://...
-RESTATE_ADMIN_URL=http://localhost:9070
+RESTATE_ADMIN_URL=http://localhost:10011
 OPENAI_API_KEY=...
-cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 9080 --health-port 9081
+cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
 ```
 
 The binary serves these Restate surfaces: `Session`, `SubAgent`, `Workspace`, `SessionStore`, `ToolExecutor`, `LLMGateway`, `WorkspaceStore`, `IntentManager`, `Consolidate`, `IntentDiscovery`, `IngestionVO`, and `Health`. Deployment registration is handled outside the binary.
@@ -106,7 +152,7 @@ Required cloud process configuration includes:
 
 ```bash
 POSTGRES_URL=postgres://...
-RESTATE_ADMIN_URL=http://localhost:9070
+RESTATE_ADMIN_URL=http://localhost:10011
 OPENAI_API_KEY=...
 DAYTONA_API_KEY=... # optional, depending on hand provider
 ```

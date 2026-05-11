@@ -13,11 +13,13 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 use uuid::Uuid;
 
-use crate::support::restate_runtime::{OrchestratorPorts, reserve_orchestrator_ports};
+use crate::support::restate_runtime::{
+    OrchestratorPorts, deployment_endpoint_url, reserve_orchestrator_ports,
+};
 
 mod support;
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:25432/moa";
+const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
 
 static LIVE_E2E_LOCK: Mutex<()> = Mutex::const_new(());
 
@@ -35,7 +37,7 @@ impl LiveIngestionHarness {
         let admin_url = restate_admin_url();
         let ingress = restate_ingress_url();
         let ports = reserve_orchestrator_ports()?;
-        let endpoint_url = format!("http://127.0.0.1:{}", ports.restate);
+        let endpoint_url = deployment_endpoint_url(ports.restate);
         let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
         let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
         let pool = PgPool::connect(&test_database_url())
@@ -128,6 +130,8 @@ fn spawn_orchestrator(
         .arg(ports.restate.to_string())
         .arg("--health-port")
         .arg(ports.health.to_string())
+        .arg("--scim-port")
+        .arg(ports.scim.to_string())
         .env("POSTGRES_URL", postgres_url)
         .env("RESTATE_ADMIN_URL", admin_url)
         .env("MOA_MEMORY_DIR", memory_dir.path())
@@ -157,11 +161,11 @@ fn test_database_url() -> String {
 }
 
 fn restate_admin_url() -> String {
-    std::env::var("RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:9070".to_string())
+    std::env::var("RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:10011".to_string())
 }
 
 fn restate_ingress_url() -> String {
-    std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
+    std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://127.0.0.1:10010".to_string())
 }
 
 fn object_url(ingress: &str, turn: &SessionTurn) -> String {

@@ -1,5 +1,6 @@
 //! Stable trait interfaces shared across MOA crates.
 
+pub mod auth;
 pub mod embedding;
 
 use async_trait::async_trait;
@@ -12,15 +13,16 @@ use crate::error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 use crate::events::Event;
 use crate::types::{
     CheckpointHandle, CheckpointInfo, ClaimCheck, CompletionRequest, CompletionStream,
-    ContextSnapshot, Credential, CronHandle, CronSpec, EventFilter, EventRange, EventRecord,
-    EventStream, HandHandle, HandSpec, HandStatus, InboundMessage, MessageId, ModelCapabilities,
-    ObserveLevel, OutboundMessage, PendingSignal, PendingSignalId, Platform, PlatformCapabilities,
-    ProcessorOutput, ResolutionScore, RuntimeEvent, SegmentBaseline, SegmentCompletion, SegmentId,
-    SequenceNum, SessionFilter, SessionHandle, SessionId, SessionMeta, SessionSignal,
-    SessionStatus, SessionSummary, SkillResolutionRate, StartSessionRequest, TaskSegment,
-    ToolOutput, WorkingContext, WorkspaceId,
+    ContextSnapshot, Credential as StoredCredential, CronHandle, CronSpec, EventFilter, EventRange,
+    EventRecord, EventStream, HandHandle, HandSpec, HandStatus, InboundMessage, MessageId,
+    ModelCapabilities, ObserveLevel, OutboundMessage, PendingSignal, PendingSignalId, Platform,
+    PlatformCapabilities, ProcessorOutput, ResolutionScore, RuntimeEvent, SegmentBaseline,
+    SegmentCompletion, SegmentId, SequenceNum, SessionFilter, SessionHandle, SessionId,
+    SessionMeta, SessionSignal, SessionStatus, SessionSummary, SkillResolutionRate,
+    StartSessionRequest, TaskSegment, ToolOutput, WorkingContext, WorkspaceId,
 };
 
+pub use auth::*;
 pub use embedding::EmbeddingProvider;
 
 /// Orchestrates session lifecycle and observation.
@@ -513,10 +515,10 @@ pub trait ContextProcessor: Send + Sync {
 #[async_trait]
 pub trait CredentialVault: Send + Sync {
     /// Retrieves credentials for a service and scope.
-    async fn get(&self, service: &str, scope: &str) -> Result<Credential>;
+    async fn get(&self, service: &str, scope: &str) -> Result<StoredCredential>;
 
     /// Stores credentials for a service and scope.
-    async fn set(&self, service: &str, scope: &str, cred: Credential) -> Result<()>;
+    async fn set(&self, service: &str, scope: &str, cred: StoredCredential) -> Result<()>;
 
     /// Deletes credentials for a service and scope.
     async fn delete(&self, service: &str, scope: &str) -> Result<()>;

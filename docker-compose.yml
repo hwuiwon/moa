@@ -51,7 +51,7 @@ services:
       - -c
       - pgaudit.log_statement_once=on
     ports:
-      - "25432:5432"
+      - "10040:5432"
     volumes:
       - moa-pg-data:/var/lib/postgresql/data
       - moa-pg-audit:/var/log/postgresql
@@ -62,6 +62,61 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s
+
+  openfga-db-init:
+    image: postgres:17-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-dev}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        psql -h postgres -U moa_owner -d postgres -tAc \
+          "SELECT 1 FROM pg_database WHERE datname='openfga'" \
+        | grep -q 1 || \
+          psql -h postgres -U moa_owner -d postgres \
+          -c "CREATE DATABASE openfga OWNER moa_owner"
+        echo "openfga db ready"
+    restart: "no"
+
+  openfga-migrate:
+    image: openfga/openfga:v1.8.16
+    depends_on:
+      openfga-db-init:
+        condition: service_completed_successfully
+    command: ["migrate"]
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://moa_owner:${POSTGRES_PASSWORD:-dev}@postgres:5432/openfga?sslmode=disable
+    restart: "no"
+
+  openfga:
+    image: openfga/openfga:v1.8.16
+    depends_on:
+      openfga-migrate:
+        condition: service_completed_successfully
+    command: ["run"]
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://moa_owner:${POSTGRES_PASSWORD:-dev}@postgres:5432/openfga?sslmode=disable
+      OPENFGA_AUTHN_METHOD: preshared
+      OPENFGA_AUTHN_PRESHARED_KEYS: ${MOA_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod}
+      OPENFGA_LOG_FORMAT: json
+      OPENFGA_PLAYGROUND_ENABLED: "true"
+    ports:
+      - "10030:8080"
+      - "10031:8081"
+      - "10032:3000"
+    healthcheck:
+      test: ["CMD", "/openfga", "version"]
+      interval: 5s
+      timeout: 2s
+      retries: 20
+    restart: unless-stopped
 
   restate:
     image: docker.restate.dev/restatedev/restate:1.6.2
@@ -75,9 +130,9 @@ services:
       RESTATE_BIFROST__RECORD_CACHE_MEMORY_SIZE: "128 MiB"
       DO_NOT_TRACK: "1"
     ports:
-      - "18080:8080"
-      - "9070:9070"
-      - "5122:5122"
+      - "10010:8080"
+      - "10011:9070"
+      - "10012:5122"
     volumes:
       - moa-restate-data:/restate-data
     healthcheck:
@@ -102,7 +157,13 @@ services:
     environment:
       POSTGRES_URL: postgres://moa_owner:dev@postgres:5432/moa
       RESTATE_ADMIN_URL: http://restate:9070
+      MOA__AUTH__HEADER_TRUST: ${MOA__AUTH__HEADER_TRUST:-lenient}
       MOA_LINEAGE_SINK: postgres
+      MOA_SKIP_FGA: ${MOA_SKIP_FGA:-}
+      MOA__AUTHZ__OPENFGA__URL: http://openfga:8080
+      MOA__AUTHZ__OPENFGA__PRESHARED_KEY: ${MOA_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod}
+      MOA__AUTHZ__OPENFGA__STORE_ID: ${MOA_OPENFGA_STORE_ID:-}
+      MOA__AUTHZ__OPENFGA__MODEL_ID: ${MOA_OPENFGA_MODEL_ID:-}
       MOA_PROVIDERS_OVERRIDE: ${MOA_PROVIDERS_OVERRIDE:-}
       MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS: "false"
       MOA_DEREGISTER_ON_SHUTDOWN: "false"
@@ -110,10 +171,35 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
-      - "9080:9080"
-      - "9081:9081"
+      # Restate handler port 9080 is internal-only. Use moa-edge on 8080.
+      - "10021:9081"
+      # SCIM v2 provisioning endpoint.
+      - "10022:10022"
     volumes:
       - ./crates/moa-loadtest/scripts:/loadtest-scripts:ro
+
+  moa-edge:
+    build:
+      context: .
+      dockerfile: crates/moa-edge/Dockerfile
+    image: moa/edge:dev
+    container_name: moa-edge
+    restart: unless-stopped
+    depends_on:
+      moa-orchestrator:
+        condition: service_started
+    environment:
+      MOA_EDGE_BIND: 0.0.0.0:8080
+      MOA_EDGE_UPSTREAM: http://restate:8080
+      MOA_EDGE_DATABASE_URL: postgres://moa_owner:${POSTGRES_PASSWORD:-dev}@postgres:5432/moa?sslmode=disable
+      RUST_LOG: info,moa_edge=debug
+    ports:
+      - "10000:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
 
   restate-register:
     image: docker.restate.dev/restatedev/restate-cli:1.6.2
@@ -159,7 +245,7 @@ services:
       DEVICE: cpu
       HF_HUB_DISABLE_XET: "1"
     ports:
-      - "8080:8080"
+      - "10050:8080"
     volumes:
       - moa-pii-hf-cache:/root/.cache/huggingface
     healthcheck:

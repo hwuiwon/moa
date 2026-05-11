@@ -2,16 +2,43 @@
 
 //! Live eval-engine integration coverage that exercises the real provider path.
 
+use std::time::Duration;
+
 use moa_core::MoaConfig;
-use moa_eval::{AgentConfig, EngineOptions, EvalEngine, EvalStatus, TestCase};
+use moa_eval::{AgentConfig, EngineOptions, EvalEngine, EvalStatus, TestCase, ToolOverride};
 use tempfile::tempdir;
+
+fn live_model() -> Option<&'static str> {
+    if std::env::var("ANTHROPIC_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+        return Some("claude-sonnet-4-6");
+    }
+    if std::env::var("OPENAI_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+        return Some("gpt-5.4-mini");
+    }
+    if std::env::var("GOOGLE_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+        return Some("gemini-3-flash-preview");
+    }
+    None
+}
+
+fn test_database_url() -> String {
+    std::env::var("MOA_TEST_POSTGRES_URL")
+        .or_else(|_| std::env::var("TEST_DATABASE_URL"))
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .unwrap_or_else(|_| "postgres://moa_owner:dev@127.0.0.1:10040/moa".to_string())
+}
 
 #[tokio::test]
 #[ignore = "requires provider API key env"]
 async fn live_run_single_produces_eval_result() {
+    let Some(model) = live_model() else {
+        return;
+    };
     let temp = tempdir().unwrap();
+    let mut config = MoaConfig::default();
+    config.database.url = test_database_url();
     let engine = EvalEngine::new(
-        MoaConfig::default(),
+        config,
         EngineOptions {
             temp_dir: temp.path().to_path_buf(),
             ..EngineOptions::default()
@@ -19,21 +46,29 @@ async fn live_run_single_produces_eval_result() {
     )
     .unwrap();
 
-    let result = engine
-        .run_single(
+    let result = tokio::time::timeout(
+        Duration::from_secs(90),
+        engine.run_single(
             &TestCase {
                 name: "hello".to_string(),
                 input: "Say hello in one short sentence.".to_string(),
-                timeout_seconds: Some(30),
+                timeout_seconds: Some(45),
                 ..TestCase::default()
             },
             &AgentConfig {
                 name: "baseline".to_string(),
+                model: Some(model.to_string()),
+                tools: ToolOverride {
+                    enabled: Some(Vec::new()),
+                    ..ToolOverride::default()
+                },
                 ..AgentConfig::default()
             },
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .expect("live eval smoke should not hang past the outer timeout")
+    .unwrap();
 
     assert!(matches!(
         result.status,

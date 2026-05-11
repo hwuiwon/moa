@@ -3,9 +3,11 @@
 mod brain_bridge;
 pub mod config;
 pub mod ctx;
+pub mod handlers;
 pub mod lineage;
 pub mod objects;
 pub mod restate_register;
+pub mod schema;
 pub mod services;
 mod sub_agent_dispatch;
 pub mod turn;

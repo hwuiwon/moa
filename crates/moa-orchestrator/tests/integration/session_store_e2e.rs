@@ -7,13 +7,14 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::support::restate_runtime::{
-    OrchestratorPorts, RESTATE_E2E_LOCK, reserve_orchestrator_ports,
+    OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_workspace_member,
+    reserve_orchestrator_ports, restate_ingress_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
     append_event_request, get_events_request, test_session_meta, user_message_event,
 };
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:25432/moa";
+const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
 
 async fn register_deployment(endpoint_url: &str) -> Result<()> {
     for _attempt in 0..15 {
@@ -51,6 +52,8 @@ fn spawn_orchestrator(ports: OrchestratorPorts) -> Result<Child> {
         .arg(ports.restate.to_string())
         .arg("--health-port")
         .arg(ports.health.to_string())
+        .arg("--scim-port")
+        .arg(ports.scim.to_string())
         .env("POSTGRES_URL", postgres_url)
         .env("RUST_LOG", "info")
         .stdout(Stdio::null())
@@ -65,16 +68,22 @@ async fn session_store_round_trip_through_restate() -> Result<()> {
     let _guard = RESTATE_E2E_LOCK.lock().await;
     let ports = reserve_orchestrator_ports()?;
     let mut orchestrator = spawn_orchestrator(ports)?;
-    let endpoint_url = format!("http://127.0.0.1:{}", ports.restate);
+    let endpoint_url = deployment_endpoint_url(ports.restate);
     let result = async {
         register_deployment(endpoint_url.as_str()).await?;
 
         let client = reqwest::Client::new();
-        let ingress = "http://127.0.0.1:8080";
+        let ingress = restate_ingress_url();
+        let ingress = ingress.as_str();
         let meta = test_session_meta("restate-e2e");
+        let identity = test_user_identity();
+        grant_workspace_member(&identity, &meta.workspace_id).await?;
 
-        let create_response = client
-            .post(format!("{ingress}/SessionStore/create_session"))
+        let create_request = client.post(format!(
+            "{}/SessionStore/create_session",
+            ingress.trim_end_matches('/')
+        ));
+        let create_response = with_identity(create_request, &identity)
             .json(&meta)
             .send()
             .await
@@ -86,7 +95,10 @@ async fn session_store_round_trip_through_restate() -> Result<()> {
 
         for message in ["first", "second", "third"] {
             let append_response = client
-                .post(format!("{ingress}/SessionStore/append_event"))
+                .post(format!(
+                    "{}/SessionStore/append_event",
+                    ingress.trim_end_matches('/')
+                ))
                 .json(&append_event_request(
                     session_id,
                     user_message_event(message),
@@ -105,7 +117,10 @@ async fn session_store_round_trip_through_restate() -> Result<()> {
         }
 
         let get_events_response = client
-            .post(format!("{ingress}/SessionStore/get_events"))
+            .post(format!(
+                "{}/SessionStore/get_events",
+                ingress.trim_end_matches('/')
+            ))
             .json(&get_events_request(session_id, EventRange::all()))
             .send()
             .await

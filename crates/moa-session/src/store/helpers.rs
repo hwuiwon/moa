@@ -53,7 +53,8 @@ pub(super) fn vector_literal(values: &[f32]) -> String {
 }
 
 impl PostgresSessionStore {
-    pub(super) async fn refresh_active_session_metric(&self) -> Result<()> {
+    /// Refresh the process metric that tracks currently active sessions.
+    pub async fn refresh_active_session_metric(&self) -> Result<()> {
         let sessions = self.table_name("sessions");
         let active = sqlx::query_scalar::<_, i64>(&format!(
             "SELECT COUNT(*)::BIGINT FROM {sessions} WHERE status IN ($1, $2)"
