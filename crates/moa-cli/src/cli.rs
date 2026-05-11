@@ -78,6 +78,8 @@ pub(crate) enum CommandKind {
         #[command(subcommand)]
         command: PrivacyCommand,
     },
+    /// Authentication and API-key operations.
+    Auth(AuthCommand),
     /// Promotes a workspace from pgvector to Turbopuffer.
     PromoteWorkspace(PromoteWorkspaceArgs),
     /// Rolls a workspace vector promotion back to pgvector.

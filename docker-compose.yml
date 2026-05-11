@@ -189,6 +189,7 @@ services:
     environment:
       MOA_EDGE_BIND: 0.0.0.0:8080
       MOA_EDGE_UPSTREAM: http://moa-orchestrator:9080
+      MOA_EDGE_DATABASE_URL: postgres://moa_owner:${POSTGRES_PASSWORD:-dev}@postgres:5432/moa?sslmode=disable
       RUST_LOG: info,moa_edge=debug
     ports:
       - "10000:8080"

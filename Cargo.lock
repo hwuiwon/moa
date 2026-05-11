@@ -243,6 +243,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures 0.2.17",
+ "password-hash",
+]
+
+[[package]]
 name = "arraydeque"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -948,6 +960,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -3793,6 +3814,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-auth-providers"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "async-trait",
+ "chrono",
+ "crc32fast",
+ "hex",
+ "moa-authz",
+ "moa-authz-schema",
+ "moa-core",
+ "rand 0.8.5",
+ "reqwest 0.13.2",
+ "secrecy 0.10.3",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "moa-authz"
 version = "0.1.0"
 dependencies = [
@@ -3870,6 +3916,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "hex",
+ "moa-auth-providers",
  "moa-brain",
  "moa-core",
  "moa-eval",
@@ -3938,10 +3985,12 @@ dependencies = [
  "async-trait",
  "axum",
  "clap",
+ "moa-auth-providers",
  "moa-core",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "tower-http",
  "tracing",
@@ -4299,6 +4348,7 @@ dependencies = [
  "chrono-tz",
  "clap",
  "croner",
+ "moa-auth-providers",
  "moa-authz",
  "moa-authz-schema",
  "moa-brain",
@@ -4313,6 +4363,7 @@ dependencies = [
  "opentelemetry",
  "reqwest 0.13.2",
  "restate-sdk",
+ "secrecy 0.10.3",
  "serde",
  "serde_canonical_json",
  "serde_json",
@@ -4332,6 +4383,7 @@ name = "moa-orchestrator-client"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "moa-auth-providers",
  "moa-core",
  "mockito",
  "reqwest 0.13.2",
@@ -4938,6 +4990,17 @@ dependencies = [
  "regex-syntax",
  "structmeta",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
 ]
 
 [[package]]

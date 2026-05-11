@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use moa_auth_providers::api_keys::{CreateApiKeyRequest, CreateApiKeyResponse, Env, KeyListItem};
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{
     AppendEventRequest, GetEventsRequest, InitSessionVoRequest, ListSessionsRequest,
@@ -14,6 +15,7 @@ use moa_core::{
 };
 use serde::Serialize;
 use tracing::instrument;
+use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::session::SessionHandle;
@@ -180,6 +182,46 @@ impl OrchestratorClient {
             .post_call("/ToolExecutor/list_tools", &workspace_id)
             .await?;
         Ok(descriptors.into_iter().map(|tool| tool.name).collect())
+    }
+
+    /// Create a local API key through `ApiKeys/create`.
+    pub async fn api_keys_create(
+        &self,
+        name: String,
+        env: Env,
+        description: Option<String>,
+        for_agent_id: Option<Uuid>,
+    ) -> Result<CreateApiKeyResponse> {
+        self.post_call(
+            "/ApiKeys/create",
+            &CreateApiKeyRequest {
+                name,
+                description,
+                env,
+                for_agent_id,
+            },
+        )
+        .await
+    }
+
+    /// List active local API keys owned by the caller through `ApiKeys/list`.
+    pub async fn api_keys_list(&self) -> Result<Vec<KeyListItem>> {
+        self.post_empty_call("/ApiKeys/list").await
+    }
+
+    /// Rotate a local API key through `ApiKeys/rotate`.
+    pub async fn api_keys_rotate(&self, id: Uuid) -> Result<CreateApiKeyResponse> {
+        self.post_call("/ApiKeys/rotate", &id).await
+    }
+
+    /// Revoke a local API key through `ApiKeys/revoke`.
+    pub async fn api_keys_revoke(&self, id: Uuid) -> Result<()> {
+        self.post_void("/ApiKeys/revoke", &id).await
+    }
+
+    /// Return the identity seen by the orchestrator through `Whoami/whoami`.
+    pub async fn whoami(&self) -> Result<Identity> {
+        self.post_empty_call("/Whoami/whoami").await
     }
 
     /// Probes an orchestrator health URL and succeeds only on a 2xx status.

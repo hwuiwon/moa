@@ -6,7 +6,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::IntoResponse;
-use axum::routing::{any, get};
+use axum::routing::{any, get, post};
 use moa_core::traits::{AuthProvider, Credential};
 use std::sync::Arc;
 
@@ -23,6 +23,10 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route(
+            "/v1/security/secret-scanning/github",
+            post(handle_github_secret_scan),
+        )
         .route("/v1/{*rest}", any(handle_proxy))
         .with_state(state)
 }
@@ -55,9 +59,14 @@ async fn handle_proxy(
         .map(|path| path.as_str())
         .unwrap_or(uri.path())
         .to_string();
+    let (method, path, body) = if uri.path() == "/v1/whoami" {
+        (Method::POST, "/Whoami/whoami".to_string(), Vec::new())
+    } else {
+        (method, path, body.to_vec())
+    };
     let response = match state
         .proxy
-        .forward(&identity, method, &path, body.to_vec(), &headers)
+        .forward(&identity, method, &path, body, &headers)
         .await
     {
         Ok(response) => response,
@@ -68,6 +77,18 @@ async fn handle_proxy(
     };
 
     response_to_axum(response).await
+}
+
+async fn handle_github_secret_scan() -> axum::response::Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        [(
+            "x-moa-reason",
+            "not-yet-implemented-pending-github-partner-registration",
+        )],
+        "GitHub secret scanning partner endpoint is not implemented until registration is complete",
+    )
+        .into_response()
 }
 
 async fn response_to_axum(response: reqwest::Response) -> axum::response::Response {

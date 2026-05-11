@@ -4,7 +4,6 @@
 //! caller-supplied `X-Moa-*` headers, and forwards trusted identity headers to
 //! the internal orchestrator handler port.
 
-mod auth;
 mod headers;
 mod proxy;
 mod routes;
@@ -27,6 +26,13 @@ struct Args {
         default_value = "http://moa-orchestrator:9080"
     )]
     upstream: String,
+    /// Postgres URL for local API-key authentication.
+    #[arg(
+        long,
+        env = "MOA_EDGE_DATABASE_URL",
+        default_value = "postgres://moa_owner:dev@postgres:5432/moa"
+    )]
+    database_url: String,
 }
 
 #[tokio::main]
@@ -42,8 +48,15 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     tracing::info!(bind = %args.bind, upstream = %args.upstream, "starting moa-edge");
 
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(10)
+        .connect(&args.database_url)
+        .await
+        .context("connect edge api-key database")?;
+    let pool = Arc::new(pool);
+
     let state = routes::AppState {
-        auth: Arc::new(auth::RejectAllAuthProvider),
+        auth: Arc::new(moa_auth_providers::LocalAuthProvider::new(pool)),
         proxy: Arc::new(
             proxy::OrchestratorProxy::new(&args.upstream).context("build orchestrator proxy")?,
         ),

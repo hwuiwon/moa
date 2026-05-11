@@ -26,6 +26,7 @@ use moa_orchestrator::{
     restate_register::{IngestionVO, IngestionVOImpl},
     services::{
         agent_registry::{AgentRegistry, AgentRegistryImpl},
+        api_keys::{ApiKeys, ApiKeysImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
         intent_manager::{IntentManager, IntentManagerImpl},
@@ -33,6 +34,7 @@ use moa_orchestrator::{
         neon_maint::{NeonMaint, NeonMaintImpl},
         session_store::{RestateSessionStore, SessionStoreImpl},
         tool_executor::{ToolExecutor, ToolExecutorImpl},
+        whoami::{Whoami, WhoamiImpl},
         workspace_store::{WorkspaceStore, WorkspaceStoreImpl},
     },
     workflows::{
@@ -60,6 +62,7 @@ const CRON_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
 const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "AgentRegistry",
+    "ApiKeys",
     "Consolidate",
     "CronJob",
     "GraphMemoryMaint",
@@ -76,6 +79,7 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "TurnExecution",
     "Workspace",
     "WorkspaceStore",
+    "Whoami",
 ];
 
 /// Command line arguments for the orchestrator process.
@@ -173,6 +177,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .bind(LLMGatewayImpl::new(providers).serve())
         .bind(AgentRegistryImpl.serve())
+        .bind(ApiKeysImpl.serve())
         .bind(IngestionVOImpl.serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
         .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
@@ -182,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(SessionImpl.serve())
         .bind(SubAgentImpl.serve())
         .bind(WorkspaceImpl.serve())
+        .bind(WhoamiImpl.serve())
         .bind(ConsolidateImpl.serve())
         .bind(IntentDiscoveryImpl.serve())
         .bind(TurnExecutionImpl.serve())
@@ -288,6 +294,9 @@ async fn apply_database_migrations(pool: &PgPool) -> anyhow::Result<()> {
     moa_authz::schema::migrate(pool)
         .await
         .context("apply moa-authz migrations")?;
+    moa_auth_providers::schema::migrate(pool)
+        .await
+        .context("apply moa-auth-providers migrations")?;
     moa_orchestrator::schema::migrate(pool)
         .await
         .context("apply moa-orchestrator migrations")?;

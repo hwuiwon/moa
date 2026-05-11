@@ -76,6 +76,18 @@ make fga-install
 
 OpenFGA Playground: <http://localhost:10032>.
 
+### API keys
+
+For local development, bootstrap a direct CLI identity once, then create a dev
+API key:
+
+```sh
+./scripts/bootstrap-cli-identity.sh
+cargo run -p moa-cli -- auth keys create --name local --env dev
+```
+
+Present the returned key to the edge with `Authorization: Bearer <key>`.
+
 To stop everything while preserving data:
 
 ```bash

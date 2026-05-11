@@ -21,6 +21,7 @@ clap.workspace = true
 croner = "2.2"
 moa-authz.workspace = true
 moa-authz-schema.workspace = true
+moa-auth-providers.workspace = true
 moa-brain = { path = "../moa-brain" }
 moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
@@ -34,6 +35,7 @@ restate-sdk.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+secrecy.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "migrate", "json", "uuid", "chrono"] }
 thiserror.workspace = true
 tokio.workspace = true

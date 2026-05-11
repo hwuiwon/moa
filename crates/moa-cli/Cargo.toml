@@ -17,6 +17,7 @@ clap.workspace = true
 ed25519-dalek.workspace = true
 flate2 = "1"
 hex.workspace = true
+moa-auth-providers.workspace = true
 moa-core = { path = "../moa-core" }
 moa-eval = { path = "../moa-eval" }
 moa-brain = { path = "../moa-brain" }
