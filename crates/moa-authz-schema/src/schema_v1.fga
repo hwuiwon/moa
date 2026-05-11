@@ -21,6 +21,7 @@ type tenant
     define admin: [user, api_key]
     define billing_admin: [user] or admin
     define member: [user, api_key] or admin
+    define scim_admin: [api_key]
 
 type workspace
   relations

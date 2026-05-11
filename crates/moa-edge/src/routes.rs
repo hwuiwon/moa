@@ -402,6 +402,13 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
             return translate_agent_act_as(id, body, "/Agents/revoke_can_act_as");
         }
     }
+    if *method == Method::POST && uri.path() == "/v1/authz/tuple-write" {
+        return RouteTranslation::Forward {
+            method: Method::POST,
+            path: "/Authz/write_tuple".to_string(),
+            body: body.to_vec(),
+        };
+    }
     RouteTranslation::NoChange
 }
 

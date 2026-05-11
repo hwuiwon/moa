@@ -33,11 +33,13 @@ use moa_orchestrator::{
         api_keys::{ApiKeys, ApiKeysImpl},
         approvals::{Approvals, ApprovalsImpl},
         approvals_reaper::{ApprovalReaper, ApprovalReaperHandle, HttpAwakeableResolver},
+        authz_admin::{Authz, AuthzImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
         intent_manager::{IntentManager, IntentManagerImpl},
         llm_gateway::{LLMGateway, LLMGatewayImpl, ProviderRegistry},
         neon_maint::{NeonMaint, NeonMaintImpl},
+        scim::{self, ScimState},
         session_store::{RestateSessionStore, SessionStoreImpl},
         tool_executor::{ToolExecutor, ToolExecutorImpl},
         whoami::{Whoami, WhoamiImpl},
@@ -62,6 +64,7 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_RESTATE_PORT: u16 = 10020;
 const DEFAULT_RESTATE_INGRESS_PORT: u16 = 8080;
 const DEFAULT_HEALTH_PORT: u16 = 10021;
+const DEFAULT_SCIM_PORT: u16 = 10022;
 const ADMIN_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const CRON_BOOTSTRAP_ATTEMPTS: u32 = 60;
 const CRON_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
@@ -72,6 +75,7 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Agents",
     "Approvals",
     "ApiKeys",
+    "Authz",
     "Consolidate",
     "CronJob",
     "GraphMemoryMaint",
@@ -100,6 +104,9 @@ struct Args {
     /// HTTP port for Kubernetes liveness/readiness probes.
     #[arg(long, default_value_t = DEFAULT_HEALTH_PORT)]
     health_port: u16,
+    /// HTTP port for SCIM v2 provisioning endpoints.
+    #[arg(long, default_value_t = DEFAULT_SCIM_PORT)]
+    scim_port: u16,
 }
 
 #[tokio::main]
@@ -182,6 +189,16 @@ async fn main() -> anyhow::Result<()> {
     });
     OrchestratorCtx::install(ctx).expect("install orchestrator ctx");
     let _ = memory_ingest::install_runtime_with_pool(pool.clone());
+    let scim_base_url = std::env::var("MOA_SCIM_BASE_URL")
+        .unwrap_or_else(|_| format!("http://localhost:{}/scim/v2", args.scim_port));
+    let scim_state = ScimState::new(
+        pool.clone(),
+        Arc::new(moa_auth_providers::LocalAuthProvider::new(Arc::new(
+            pool.clone(),
+        ))),
+        OrchestratorCtx::current().fga_client.clone(),
+        scim_base_url,
+    );
 
     let endpoint = Endpoint::builder()
         .bind(HealthImpl.serve())
@@ -200,6 +217,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(AgentsImpl.serve())
         .bind(ApprovalsImpl.serve())
         .bind(ApiKeysImpl.serve())
+        .bind(AuthzImpl.serve())
         .bind(IngestionVOImpl.serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
         .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
@@ -223,13 +241,16 @@ async fn main() -> anyhow::Result<()> {
 
     let restate_listener = bind_listener(args.port).await?;
     let health_listener = bind_listener(args.health_port).await?;
+    let scim_listener = bind_listener(args.scim_port).await?;
     let mut restate_server = spawn_restate_server(endpoint, restate_listener, shutdown.clone());
     let mut health_server =
         spawn_health_server(health_listener, probe_state.clone(), shutdown.clone());
+    let mut scim_server = spawn_scim_server(scim_listener, scim_state, shutdown.clone());
 
     tracing::info!(
         port = args.port,
         health_port = args.health_port,
+        scim_port = args.scim_port,
         header_trust_mode = ?header_trust_mode,
         restate_admin_url = %probe_state.admin_base_url(),
         metrics_url = metrics_endpoint_url(&moa_config.metrics).unwrap_or_else(|| "disabled".to_string()),
@@ -246,6 +267,7 @@ async fn main() -> anyhow::Result<()> {
             readiness.store(false, Ordering::Release);
             shutdown.cancel();
             health_server.abort();
+            scim_server.abort();
             result.context("join Restate handler server")?;
             bail!("Restate handler server exited unexpectedly");
         }
@@ -253,8 +275,17 @@ async fn main() -> anyhow::Result<()> {
             readiness.store(false, Ordering::Release);
             shutdown.cancel();
             restate_server.abort();
+            scim_server.abort();
             result.context("join health probe server")??;
             bail!("health probe server exited unexpectedly");
+        }
+        result = &mut scim_server => {
+            readiness.store(false, Ordering::Release);
+            shutdown.cancel();
+            restate_server.abort();
+            health_server.abort();
+            result.context("join SCIM server")??;
+            bail!("SCIM server exited unexpectedly");
         }
         signal = shutdown_signal() => {
             signal?;
@@ -293,6 +324,9 @@ async fn main() -> anyhow::Result<()> {
             health_server
                 .await
                 .context("join health probe server during shutdown")??;
+            scim_server
+                .await
+                .context("join SCIM server during shutdown")??;
         }
     }
 
@@ -496,6 +530,28 @@ async fn serve_health_server(
         .context("serve health probe HTTP server")
 }
 
+async fn serve_scim_server(
+    listener: TcpListener,
+    state: ScimState,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()> {
+    let router = Router::new()
+        .nest("/scim/v2", scim::router(state))
+        .route("/scim/v2", get(meta_scim_root));
+
+    serve(listener, router)
+        .with_graceful_shutdown(shutdown.cancelled_owned())
+        .await
+        .context("serve SCIM HTTP server")
+}
+
+async fn meta_scim_root() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        "MOA SCIM v2 endpoint. Use /scim/v2/ServiceProviderConfig.",
+    )
+}
+
 fn spawn_restate_server(
     endpoint: Endpoint,
     listener: TcpListener,
@@ -514,6 +570,14 @@ fn spawn_health_server(
     shutdown: CancellationToken,
 ) -> JoinHandle<anyhow::Result<()>> {
     tokio::spawn(async move { serve_health_server(listener, state, shutdown).await })
+}
+
+fn spawn_scim_server(
+    listener: TcpListener,
+    state: ScimState,
+    shutdown: CancellationToken,
+) -> JoinHandle<anyhow::Result<()>> {
+    tokio::spawn(async move { serve_scim_server(listener, state, shutdown).await })
 }
 
 fn spawn_default_cron_bootstrap(state: ProbeState, ingress_url: String) -> JoinHandle<()> {

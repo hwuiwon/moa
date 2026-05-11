@@ -395,6 +395,27 @@ impl OrchestratorClient {
         }
     }
 
+    /// Enqueue one authorization tuple write through the admin helper.
+    pub async fn authz_write_tuple(
+        &self,
+        user: String,
+        relation: String,
+        object: String,
+        tenant_id: Option<Uuid>,
+    ) -> Result<()> {
+        let request = WriteTupleRequest {
+            user,
+            relation,
+            object,
+            tenant_id,
+        };
+        if self.bearer.is_some() {
+            self.post_void("/v1/authz/tuple-write", &request).await
+        } else {
+            self.post_void("/Authz/write_tuple", &request).await
+        }
+    }
+
     /// Probes an orchestrator health URL and succeeds only on a 2xx status.
     #[instrument(skip(self))]
     pub async fn health_check(&self, health_url: &str) -> Result<()> {
@@ -620,8 +641,8 @@ pub struct AgentSummary {
     pub tenant_id: Uuid,
     /// Optional template UUID.
     pub template_id: Option<Uuid>,
-    /// User who operates the agent.
-    pub operator_user_id: Uuid,
+    /// User who operates the agent. Deactivation cascades can orphan agents.
+    pub operator_user_id: Option<Uuid>,
     /// Human-readable agent display name.
     pub display_name: String,
     /// Lifecycle status.
@@ -643,6 +664,14 @@ struct AgentActAsRequest {
 #[derive(Debug, Clone, Serialize)]
 struct PublicAgentActAsRequest {
     user_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WriteTupleRequest {
+    user: String,
+    relation: String,
+    object: String,
+    tenant_id: Option<Uuid>,
 }
 
 fn identity_type_str(identity_type: IdentityType) -> &'static str {

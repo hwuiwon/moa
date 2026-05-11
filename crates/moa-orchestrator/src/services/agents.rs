@@ -41,8 +41,8 @@ pub struct AgentSummary {
     pub tenant_id: Uuid,
     /// Optional template UUID.
     pub template_id: Option<Uuid>,
-    /// User who operates the agent.
-    pub operator_user_id: Uuid,
+    /// User who operates the agent. Deactivation cascades can orphan agents.
+    pub operator_user_id: Option<Uuid>,
     /// Human-readable agent display name.
     pub display_name: String,
     /// Lifecycle status.
@@ -439,16 +439,18 @@ async fn enqueue_agent_tuples(
     )
     .await
     .map_err(|error| TerminalError::new(format!("agent tenant outbox: {error}")))?;
-    enqueue_raw(
-        &mut **transaction,
-        op,
-        &format!("user:{}", agent.operator_user_id),
-        "operator",
-        &format!("agent:{}", agent.id),
-        Some(agent.tenant_id),
-    )
-    .await
-    .map_err(|error| TerminalError::new(format!("agent operator outbox: {error}")))?;
+    if let Some(operator_user_id) = agent.operator_user_id {
+        enqueue_raw(
+            &mut **transaction,
+            op,
+            &format!("user:{operator_user_id}"),
+            "operator",
+            &format!("agent:{}", agent.id),
+            Some(agent.tenant_id),
+        )
+        .await
+        .map_err(|error| TerminalError::new(format!("agent operator outbox: {error}")))?;
+    }
     Ok(())
 }
 

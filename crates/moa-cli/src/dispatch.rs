@@ -110,6 +110,9 @@ pub(crate) async fn dispatch(cli: Cli, config: MoaConfig) -> Result<()> {
         Some(CommandKind::Agents(command)) => {
             print!("{}", handle_agents_command(command).await?);
         }
+        Some(CommandKind::Authz(command)) => {
+            print!("{}", handle_authz_command(command).await?);
+        }
         Some(CommandKind::PromoteWorkspace(args)) => {
             print!(
                 "{}",

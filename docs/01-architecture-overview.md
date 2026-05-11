@@ -170,6 +170,8 @@ Agent lifecycle operations are documented in
 [`docs/operations/agent-lifecycle.md`](operations/agent-lifecycle.md), and the
 Auth0 Token Vault setup is documented in
 [`docs/operations/token-vault-setup.md`](operations/token-vault-setup.md).
+SCIM v2 provisioning is documented in
+[`docs/auth/scim.md`](auth/scim.md).
 
 ### Authorization
 

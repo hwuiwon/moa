@@ -84,6 +84,8 @@ pub(crate) enum CommandKind {
     Approvals(ApprovalsCommand),
     /// Agent template and agent principal operations.
     Agents(AgentsCommand),
+    /// Authorization tuple administration.
+    Authz(AuthzCommand),
     /// Promotes a workspace from pgvector to Turbopuffer.
     PromoteWorkspace(PromoteWorkspaceArgs),
     /// Rolls a workspace vector promotion back to pgvector.

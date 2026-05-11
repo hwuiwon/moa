@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS agents (
     id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id           UUID        NOT NULL,
     template_id         UUID        REFERENCES agent_templates(id),
-    operator_user_id    UUID        NOT NULL,
+    operator_user_id    UUID,
     display_name        TEXT        NOT NULL,
     status              TEXT        NOT NULL DEFAULT 'active',
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -39,7 +39,7 @@ WHERE display_name IS NULL;
 
 ALTER TABLE agents
     ALTER COLUMN display_name SET NOT NULL,
-    ALTER COLUMN operator_user_id SET NOT NULL;
+    ALTER COLUMN operator_user_id DROP NOT NULL;
 
 DO $$
 BEGIN

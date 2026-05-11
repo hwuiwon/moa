@@ -83,6 +83,8 @@ pub enum Relation {
     Admin,
     /// Billing administration.
     BillingAdmin,
+    /// SCIM provisioning administration.
+    ScimAdmin,
     /// Workspace editing.
     Editor,
     /// Direct ownership.
@@ -115,6 +117,7 @@ impl fmt::Display for Relation {
             Self::Member => "member",
             Self::Admin => "admin",
             Self::BillingAdmin => "billing_admin",
+            Self::ScimAdmin => "scim_admin",
             Self::Editor => "editor",
             Self::Owner => "owner",
             Self::Participant => "participant",

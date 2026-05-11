@@ -23,4 +23,4 @@ pub const SCHEMA_V1_DSL: &str = include_str!("schema_v1.fga");
 /// Increment this on any change that adds, removes, or restructures relations.
 /// Outbox idempotency keys include this version so a tuple written under v1
 /// cannot be silently re-applied under v2.
-pub const MODEL_VERSION: u32 = 1;
+pub const MODEL_VERSION: u32 = 2;
