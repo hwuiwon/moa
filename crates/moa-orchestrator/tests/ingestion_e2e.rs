@@ -17,7 +17,7 @@ use crate::support::restate_runtime::{OrchestratorPorts, reserve_orchestrator_po
 
 mod support;
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:25432/moa";
+const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
 
 static LIVE_E2E_LOCK: Mutex<()> = Mutex::const_new(());
 
@@ -157,11 +157,11 @@ fn test_database_url() -> String {
 }
 
 fn restate_admin_url() -> String {
-    std::env::var("RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:9070".to_string())
+    std::env::var("RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:10011".to_string())
 }
 
 fn restate_ingress_url() -> String {
-    std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
+    std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://127.0.0.1:10010".to_string())
 }
 
 fn object_url(ingress: &str, turn: &SessionTurn) -> String {

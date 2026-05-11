@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::PostgresSessionStore;
 use crate::schema::SCHEMA_MIGRATION_LOCK_ID;
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:25432/moa";
+const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
 static TEST_SCHEMA_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// Returns the Postgres URL used by workspace tests.

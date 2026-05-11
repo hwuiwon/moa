@@ -14,7 +14,7 @@ const DEFAULT_MAX_P95_MS: u64 = 5_000;
 const DEFAULT_MAX_ERROR_RATE: f64 = 0.01;
 const DEFAULT_TTFT: Duration = Duration::from_millis(50);
 const DEFAULT_TURN_DURATION: Duration = Duration::from_millis(200);
-const DEFAULT_ENDPOINT: &str = "http://localhost:18080";
+const DEFAULT_ENDPOINT: &str = "http://localhost:10010";
 
 /// Mock smoke performance gate configuration.
 #[derive(Debug, Clone)]

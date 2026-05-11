@@ -12,7 +12,7 @@ fn inspection_files() -> InspectionFiles {
 fn test_options() -> LoadTestOptions {
     LoadTestOptions {
         mode: LoadMode::Mock,
-        endpoint: "http://localhost:18080".to_string(),
+        endpoint: "http://localhost:10010".to_string(),
         sessions: 4,
         profile: SessionProfileKind::Short,
         inter_message_delay: Duration::from_millis(1),
@@ -87,7 +87,7 @@ fn human_report_renders_remote_endpoint() {
     // Pins: reports expose the remote Restate ingress endpoint instead of local/daemon target names.
     let report = LoadTestReport {
         mode: LoadMode::Mock,
-        endpoint: "http://localhost:18080".to_string(),
+        endpoint: "http://localhost:10010".to_string(),
         profile: SessionProfileKind::Short,
         sessions_requested: 1,
         sessions_completed: 1,
@@ -105,6 +105,6 @@ fn human_report_renders_remote_endpoint() {
 
     let rendered = render_human_report(&report);
 
-    assert!(rendered.contains("Endpoint: http://localhost:18080"));
+    assert!(rendered.contains("Endpoint: http://localhost:10010"));
     assert!(!rendered.contains("Target:"));
 }

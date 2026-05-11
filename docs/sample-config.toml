@@ -17,7 +17,7 @@ api_key_env = "OPENAI_API_KEY"
 api_key_env = "GOOGLE_API_KEY"
 
 [database]
-url = "postgres://moa_owner:dev@localhost:25432/moa"
+url = "postgres://moa_owner:dev@localhost:10040/moa"
 # admin_url = "postgresql://..." # direct/non-pooled URL for migrations and admin flows
 max_connections = 20
 connect_timeout_seconds = 10
@@ -44,8 +44,8 @@ blob_threshold_bytes = 65536
 blob_dir = "~/.moa/blobs"
 
 [orchestrator]
-endpoint = "http://localhost:18080"
-# health_url = "http://localhost:9081/_health/live"
+endpoint = "http://localhost:10010"
+# health_url = "http://localhost:10021/_health/live"
 
 [observability]
 enabled = false
@@ -162,7 +162,7 @@ max_input_tokens_per_turn = 160000
 # engine = "openfga"
 
 [authz.openfga]
-# url = "http://localhost:8081"
+# url = "http://localhost:10030"
 # preshared_key_env = "MOA_OPENFGA_PRESHARED_KEY"
 # store_id_env = "MOA_OPENFGA_STORE_ID"
 # model_id_env = "MOA_OPENFGA_MODEL_ID"

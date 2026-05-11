@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{
     AppendEventRequest, GetEventsRequest, InitSessionVoRequest, ListSessionsRequest,
     ToolDescriptor, WorkspaceCostSinceRequest,
@@ -17,7 +18,7 @@ use tracing::instrument;
 use crate::error::{Error, Result};
 use crate::session::SessionHandle;
 
-const DEFAULT_ENDPOINT: &str = "http://localhost:18080";
+const DEFAULT_ENDPOINT: &str = "http://localhost:10010";
 
 /// Configuration for the thin orchestrator HTTP client.
 #[derive(Clone, Debug)]
@@ -48,6 +49,7 @@ impl Default for ClientConfig {
 pub struct OrchestratorClient {
     pub(crate) http: reqwest::Client,
     pub(crate) config: ClientConfig,
+    identity: Option<Identity>,
 }
 
 impl OrchestratorClient {
@@ -78,12 +80,23 @@ impl OrchestratorClient {
             .connect_timeout(config.connect_timeout)
             .pool_max_idle_per_host(config.max_idle_per_host)
             .build()?;
-        Ok(Self { http, config })
+        Ok(Self {
+            http,
+            config,
+            identity: None,
+        })
     }
 
     /// Returns the configured Restate ingress endpoint.
     pub fn endpoint(&self) -> &str {
         &self.config.endpoint
+    }
+
+    /// Attaches identity headers to every subsequent client request.
+    #[must_use]
+    pub fn with_identity(mut self, identity: Identity) -> Self {
+        self.identity = Some(identity);
+        self
     }
 
     /// Returns a handle scoped to one Session virtual object key.
@@ -172,7 +185,9 @@ impl OrchestratorClient {
     /// Probes an orchestrator health URL and succeeds only on a 2xx status.
     #[instrument(skip(self))]
     pub async fn health_check(&self, health_url: &str) -> Result<()> {
-        let resp = self.http.get(health_url).send().await?;
+        let resp = apply_identity_headers(self.http.get(health_url), self.identity.as_ref())
+            .send()
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -194,7 +209,9 @@ impl OrchestratorClient {
         Resp: serde::de::DeserializeOwned,
     {
         let url = format!("{}{path}", self.config.endpoint);
-        let resp = self.http.post(url).send().await?;
+        let resp = apply_identity_headers(self.http.post(url), self.identity.as_ref())
+            .send()
+            .await?;
         decode_response(resp).await
     }
 
@@ -203,7 +220,9 @@ impl OrchestratorClient {
         Req: Serialize + ?Sized,
     {
         let url = format!("{}{path}", self.config.endpoint);
-        let resp = self.http.post(url).json(body).send().await?;
+        let resp = apply_identity_headers(self.http.post(url).json(body), self.identity.as_ref())
+            .send()
+            .await?;
         let status = resp.status();
         let body = resp.text().await?;
         if !status.is_success() {
@@ -223,7 +242,8 @@ impl OrchestratorClient {
         Resp: serde::de::DeserializeOwned,
     {
         let url = format!("{}{path}", self.config.endpoint);
-        let mut request = self.http.post(url).json(body);
+        let mut request =
+            apply_identity_headers(self.http.post(url).json(body), self.identity.as_ref());
         if let Some(key) = idempotency_key {
             request = request.header("idempotency-key", key);
         }
@@ -242,4 +262,35 @@ where
         return Err(Error::BadStatus { status, body });
     }
     Ok(serde_json::from_str(&body)?)
+}
+
+fn apply_identity_headers(
+    request: reqwest::RequestBuilder,
+    identity: Option<&Identity>,
+) -> reqwest::RequestBuilder {
+    let Some(identity) = identity else {
+        return request;
+    };
+    let mut request = request
+        .header(
+            "x-moa-identity-type",
+            identity_type_str(identity.identity_type),
+        )
+        .header("x-moa-identity-id", identity.id.to_string())
+        .header("x-moa-tenant-id", identity.tenant_id.to_string());
+    if let Some(api_key_id) = identity.api_key_id {
+        request = request.header("x-moa-api-key-id", api_key_id.to_string());
+    }
+    if let Some(user_id) = identity.acting_on_behalf_of {
+        request = request.header("x-moa-acting-on-behalf-of", user_id.to_string());
+    }
+    request
+}
+
+fn identity_type_str(identity_type: IdentityType) -> &'static str {
+    match identity_type {
+        IdentityType::User => "user",
+        IdentityType::Agent => "agent",
+        IdentityType::Service => "service",
+    }
 }

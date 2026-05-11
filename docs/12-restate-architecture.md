@@ -566,10 +566,10 @@ repo dev database plus the orchestrator handler binary:
 
 ```bash
 restate-server --node-name local --data-dir .restate-dev &
-POSTGRES_URL=postgres://moa_owner:dev@localhost:25432/moa \
-RESTATE_ADMIN_URL=http://localhost:9070 \
-cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 9080 --health-port 9081
-restate deployments register http://localhost:9080
+POSTGRES_URL=postgres://moa_owner:dev@localhost:10040/moa \
+RESTATE_ADMIN_URL=http://localhost:10011 \
+cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
+restate deployments register http://localhost:10020
 ```
 
 Integration tests use an in-process test server with tmpdir state. Full session tests complete in seconds locally.

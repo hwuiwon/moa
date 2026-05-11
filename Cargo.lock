@@ -3537,6 +3537,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-edge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "clap",
+ "moa-core",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "moa-eval"
 version = "0.1.0"
 dependencies = [
@@ -3903,6 +3923,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
@@ -3925,6 +3946,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
  "workspace-hack",
 ]
 
@@ -7143,6 +7165,8 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

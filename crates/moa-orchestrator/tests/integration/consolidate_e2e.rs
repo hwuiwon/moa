@@ -17,7 +17,7 @@ use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, reserve_orchestrator_ports,
 };
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:25432/moa";
+const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
 
 async fn register_deployment(endpoint_url: &str) -> Result<()> {
     for _attempt in 0..15 {
@@ -86,7 +86,7 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
     let ports = reserve_orchestrator_ports()?;
     let endpoint_url = format!("http://127.0.0.1:{}", ports.restate);
-    let ingress = "http://127.0.0.1:8080";
+    let ingress = "http://127.0.0.1:10010";
     let client = reqwest::Client::new();
     let workspace_id = WorkspaceId::new(format!(
         "workspace-consolidate-e2e-{}",

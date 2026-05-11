@@ -155,7 +155,8 @@ then injects `X-Moa-Identity-Type`, `X-Moa-Identity-Id`,
 `X-Moa-Tenant-Id`, `X-Moa-Acting-On-Behalf-Of`, and
 `X-Moa-Api-Key-Id` headers before forwarding to the orchestrator. The
 orchestrator trusts these headers, so the Restate handler port (`9080`) must be
-network-isolated in production.
+network-isolated in production; see
+[`docs/operations/edge-network-isolation.md`](operations/edge-network-isolation.md).
 
 ### Authorization
 

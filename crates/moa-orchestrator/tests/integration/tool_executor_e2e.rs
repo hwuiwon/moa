@@ -16,7 +16,7 @@ use crate::support::session_store_service::{
     append_event_request, get_events_request, test_session_meta,
 };
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:25432/moa";
+const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
 
 async fn register_deployment(endpoint_url: &str) -> Result<()> {
     for _attempt in 0..15 {
@@ -122,7 +122,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
         register_deployment(endpoint_url.as_str()).await?;
 
         let client = reqwest::Client::new();
-        let ingress = "http://127.0.0.1:8080";
+        let ingress = "http://127.0.0.1:10010";
         let meta = test_session_meta("tool-executor-e2e");
 
         let create_response = client
@@ -269,7 +269,7 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
         register_deployment(endpoint_url.as_str()).await?;
 
         let client = reqwest::Client::new();
-        let ingress = "http://127.0.0.1:8080";
+        let ingress = "http://127.0.0.1:10010";
         let meta = test_session_meta("tool-executor-preexisting-call");
 
         let create_response = client

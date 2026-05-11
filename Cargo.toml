@@ -17,6 +17,7 @@ members = [
     "crates/moa-authz-schema",
     "crates/moa-authz",
     "crates/moa-fga-bootstrap",
+    "crates/moa-edge",
     "crates/moa-hands",
     "crates/moa-providers",
     "crates/moa-orchestrator",
@@ -49,6 +50,7 @@ default-members = [
     "crates/moa-authz-schema",
     "crates/moa-authz",
     "crates/moa-fga-bootstrap",
+    "crates/moa-edge",
     "crates/moa-hands",
     "crates/moa-providers",
     "crates/moa-orchestrator",
@@ -130,6 +132,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower-http = "0.6"
 uuid = { version = "1", features = ["serde", "v7"] }
 
 [workspace.metadata.hakari]

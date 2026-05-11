@@ -97,7 +97,7 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
         register_deployment(endpoint_url.as_str()).await?;
 
         let client = reqwest::Client::new();
-        let ingress = "http://127.0.0.1:8080";
+        let ingress = "http://127.0.0.1:10010";
         let meta = test_session_meta("llm-gateway-e2e");
 
         let create_response = client

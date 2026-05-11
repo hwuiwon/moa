@@ -93,7 +93,7 @@ cargo test --workspace --no-run
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p moa-cli -- doctor
-POSTGRES_URL=postgres://... cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 9080 --health-port 9081
+POSTGRES_URL=postgres://... cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
 ```
 
 ## Configuration

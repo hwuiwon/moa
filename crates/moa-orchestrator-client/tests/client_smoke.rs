@@ -42,12 +42,12 @@ async fn from_env_reads_restate_ingress_fallback() {
     clear_endpoint_env();
     // SAFETY: this test holds `env_guard` while mutating process environment.
     unsafe {
-        std::env::set_var("RESTATE_INGRESS_URL", "http://restate.example:18080");
+        std::env::set_var("RESTATE_INGRESS_URL", "http://restate.example:10010");
     }
 
     let client = OrchestratorClient::from_env().expect("restate env should build client");
 
-    assert_eq!(client.endpoint(), "http://restate.example:18080");
+    assert_eq!(client.endpoint(), "http://restate.example:10010");
     clear_endpoint_env();
 }
 
@@ -59,7 +59,7 @@ async fn from_env_defaults_to_compose_ingress_when_unset() {
 
     let client = OrchestratorClient::from_env().expect("default endpoint should build client");
 
-    assert_eq!(client.endpoint(), "http://localhost:18080");
+    assert_eq!(client.endpoint(), "http://localhost:10010");
 }
 
 #[tokio::test]

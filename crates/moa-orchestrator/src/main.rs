@@ -17,6 +17,7 @@ use moa_hands::ToolRouter;
 use moa_orchestrator::{
     OrchestratorCtx,
     config::{OrchestratorConfig, ProvidersOverride},
+    ctx::{self, HeaderTrustMode},
     lineage::build_lineage_sink,
     objects::cron_job::{CronJob, CronJobImpl},
     objects::session::{Session, SessionImpl},
@@ -49,9 +50,9 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-const DEFAULT_RESTATE_PORT: u16 = 9080;
+const DEFAULT_RESTATE_PORT: u16 = 10020;
 const DEFAULT_RESTATE_INGRESS_PORT: u16 = 8080;
-const DEFAULT_HEALTH_PORT: u16 = 9081;
+const DEFAULT_HEALTH_PORT: u16 = 10021;
 const ADMIN_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const CRON_BOOTSTRAP_ATTEMPTS: u32 = 60;
 const CRON_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
@@ -91,6 +92,8 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let config = OrchestratorConfig::from_env()?;
     let moa_config = Arc::new(config.to_moa_config());
+    let header_trust_mode = header_trust_mode_from_env();
+    let _ = ctx::HEADER_TRUST_MODE.set(header_trust_mode);
     let _telemetry = init_observability(
         moa_config.as_ref(),
         &TelemetryConfig {
@@ -190,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         port = args.port,
         health_port = args.health_port,
+        header_trust_mode = ?header_trust_mode,
         restate_admin_url = %probe_state.admin_base_url(),
         metrics_url = metrics_endpoint_url(&moa_config.metrics).unwrap_or_else(|| "disabled".to_string()),
         "starting moa-orchestrator"
@@ -253,6 +257,21 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn header_trust_mode_from_env() -> HeaderTrustMode {
+    match std::env::var("MOA__AUTH__HEADER_TRUST").ok().as_deref() {
+        Some("strict") => HeaderTrustMode::Strict,
+        Some("lenient") => HeaderTrustMode::Lenient,
+        Some(other) => {
+            tracing::warn!(
+                value = other,
+                "unknown MOA__AUTH__HEADER_TRUST value; using lenient mode"
+            );
+            HeaderTrustMode::Lenient
+        }
+        None => HeaderTrustMode::Lenient,
+    }
 }
 
 async fn apply_database_migrations(pool: &PgPool) -> anyhow::Result<()> {
@@ -654,7 +673,7 @@ mod tests {
     fn deployment_with_services(services: &[&str]) -> RegisteredDeployment {
         RegisteredDeployment {
             id: "dp_test".to_string(),
-            uri: Some("http://localhost:9080".to_string()),
+            uri: Some("http://localhost:10020".to_string()),
             services: services
                 .iter()
                 .map(|name| RegisteredService {

@@ -50,7 +50,7 @@ struct TurnProgress {
 }
 
 fn ingress_url() -> String {
-    std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://localhost:18080".to_string())
+    std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://localhost:10010".to_string())
 }
 
 fn session_url(session_id: &str, handler: &str) -> String {

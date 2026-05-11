@@ -19,7 +19,7 @@ struct Cli {
     mode: LoadMode,
 
     /// Restate ingress endpoint fronting `moa-orchestrator`.
-    #[arg(long, default_value = "http://localhost:18080")]
+    #[arg(long, default_value = "http://localhost:10010")]
     endpoint: String,
 
     /// Number of concurrent sessions to simulate.

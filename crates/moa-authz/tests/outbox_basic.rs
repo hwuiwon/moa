@@ -9,7 +9,7 @@ use uuid::Uuid;
 async fn test_pool() -> PgPool {
     let database_url = std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("POSTGRES_URL"))
-        .unwrap_or_else(|_| "postgres://moa_owner:dev@localhost:25432/moa".to_string());
+        .unwrap_or_else(|_| "postgres://moa_owner:dev@localhost:10040/moa".to_string());
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .acquire_timeout(Duration::from_secs(5))

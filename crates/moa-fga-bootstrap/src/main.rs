@@ -15,7 +15,11 @@ mod http;
 #[derive(Parser, Debug)]
 struct Args {
     /// OpenFGA HTTP base URL.
-    #[arg(long, env = "MOA_OPENFGA_URL", default_value = "http://localhost:8081")]
+    #[arg(
+        long,
+        env = "MOA_OPENFGA_URL",
+        default_value = "http://localhost:10030"
+    )]
     url: String,
 
     /// Preshared key for local OpenFGA.

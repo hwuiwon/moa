@@ -126,7 +126,7 @@ impl OrchestratorConfig {
 
         Ok(Self {
             restate_admin_url: read_var("RESTATE_ADMIN_URL")
-                .unwrap_or_else(|| "http://localhost:9070".to_string()),
+                .unwrap_or_else(|| "http://localhost:10011".to_string()),
             postgres_url,
             llm_gateway_url: read_var("LLM_GATEWAY_URL"),
             sandbox_dir: read_var("MOA_SANDBOX_DIR"),
@@ -264,7 +264,7 @@ mod tests {
         })
         .expect("config should load");
 
-        assert_eq!(config.restate_admin_url, "http://localhost:9070");
+        assert_eq!(config.restate_admin_url, "http://localhost:10011");
         assert_eq!(config.postgres_url, "postgres://example");
         assert_eq!(config.llm_gateway_url, None);
         assert_eq!(config.sandbox_dir, None);

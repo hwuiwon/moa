@@ -1,0 +1,66 @@
+//! Public HTTP edge for MOA.
+//!
+//! The edge terminates incoming credentials, resolves identity, strips any
+//! caller-supplied `X-Moa-*` headers, and forwards trusted identity headers to
+//! the internal orchestrator handler port.
+
+mod auth;
+mod headers;
+mod proxy;
+mod routes;
+
+use std::sync::Arc;
+
+use anyhow::Context;
+use clap::Parser;
+
+/// Command line arguments for `moa-edge`.
+#[derive(Debug, Parser)]
+struct Args {
+    /// Socket address to bind.
+    #[arg(long, env = "MOA_EDGE_BIND", default_value = "0.0.0.0:10000")]
+    bind: String,
+    /// Internal orchestrator Restate handler base URL.
+    #[arg(
+        long,
+        env = "MOA_EDGE_UPSTREAM",
+        default_value = "http://moa-orchestrator:9080"
+    )]
+    upstream: String,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,moa_edge=debug")),
+        )
+        .json()
+        .init();
+
+    let args = Args::parse();
+    tracing::info!(bind = %args.bind, upstream = %args.upstream, "starting moa-edge");
+
+    let state = routes::AppState {
+        auth: Arc::new(auth::RejectAllAuthProvider),
+        proxy: Arc::new(
+            proxy::OrchestratorProxy::new(&args.upstream).context("build orchestrator proxy")?,
+        ),
+    };
+    let listener = tokio::net::TcpListener::bind(&args.bind)
+        .await
+        .with_context(|| format!("bind {}", args.bind))?;
+
+    axum::serve(listener, routes::router(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("serve moa-edge")?;
+
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("moa-edge shutdown signal received");
+}

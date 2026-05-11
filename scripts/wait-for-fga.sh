@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-URL="${MOA_OPENFGA_URL:-http://localhost:8081}"
+URL="${MOA_OPENFGA_URL:-http://localhost:10030}"
 DEADLINE=$((SECONDS + 60))
 
 echo "waiting for ${URL}/healthz ..."

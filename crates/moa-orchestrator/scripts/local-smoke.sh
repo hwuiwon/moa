@@ -33,17 +33,17 @@ sleep 2
 echo "Starting moa-orchestrator..."
 POSTGRES_URL="${POSTGRES_URL:-postgres://unused}" \
 RUST_LOG="${RUST_LOG:-info}" \
-cargo run -p moa-orchestrator -- --port 9080 &
+cargo run -p moa-orchestrator -- --port 10020 --health-port 10021 &
 ORCH_PID=$!
 sleep 3
 
 echo "Registering deployment..."
-restate deployments register http://localhost:9080 --yes
+restate deployments register http://localhost:10020 --yes
 
 echo "Calling Health/ping..."
-curl --fail --silent --show-error -X POST http://localhost:8080/Health/ping
+curl --fail --silent --show-error -X POST http://localhost:10010/Health/ping
 echo
 
 echo "Calling Health/version..."
-curl --fail --silent --show-error -X POST http://localhost:8080/Health/version
+curl --fail --silent --show-error -X POST http://localhost:10010/Health/version
 echo

@@ -15,7 +15,7 @@ pub struct OrchestratorConfig {
 impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
-            endpoint: Some("http://localhost:18080".to_string()),
+            endpoint: Some("http://localhost:10010".to_string()),
             health_url: None,
         }
     }

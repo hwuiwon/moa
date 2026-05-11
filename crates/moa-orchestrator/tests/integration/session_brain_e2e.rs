@@ -102,7 +102,7 @@ async fn session_brain_round_trip_through_restate() -> Result<()> {
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
     let ports = reserve_orchestrator_ports()?;
     let endpoint_url = format!("http://127.0.0.1:{}", ports.restate);
-    let ingress = "http://127.0.0.1:8080";
+    let ingress = "http://127.0.0.1:10010";
     let client = reqwest::Client::new();
     let mut meta = test_session_meta("session-brain-e2e");
     meta.model = ModelId::new(model);

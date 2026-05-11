@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use moa_core::MoaConfig;
 use moa_orchestrator_client::OrchestratorClient;
 
-const DEFAULT_ORCHESTRATOR_ENDPOINT: &str = "http://localhost:18080";
+const DEFAULT_ORCHESTRATOR_ENDPOINT: &str = "http://localhost:10010";
 
 /// Returns the configured Restate ingress endpoint for CLI traffic.
 pub(crate) fn orchestrator_endpoint(config: &MoaConfig) -> &str {
@@ -30,9 +30,9 @@ pub(crate) fn orchestrator_health_url(config: &MoaConfig) -> String {
 pub(crate) fn derive_health_url(endpoint: &str) -> String {
     if let Ok(url) = reqwest::Url::parse(endpoint)
         && let (Some(host), Some(port)) = (url.host_str(), url.port())
-        && port == 18080
+        && port == 10010
     {
-        return format!("http://{host}:9081/_health/live");
+        return format!("http://{host}:10021/_health/live");
     }
     format!("{}/_health/live", endpoint.trim_end_matches('/'))
 }
@@ -64,7 +64,7 @@ pub(crate) fn build_client(config: &MoaConfig) -> Result<OrchestratorClient> {
         format!(
             "orchestrator endpoint not usable: {}.\n\
              Set MOA__ORCHESTRATOR__ENDPOINT or [orchestrator].endpoint.\n\
-             For local dev, run `make dev` and use http://localhost:18080.",
+             For local dev, run `make dev` and use http://localhost:10010.",
             orchestrator_endpoint(config)
         )
     })
@@ -87,8 +87,8 @@ mod tests {
     fn compose_ingress_derives_health_port() {
         // Pins: default compose Restate ingress maps to the orchestrator health port.
         assert_eq!(
-            derive_health_url("http://localhost:18080"),
-            "http://localhost:9081/_health/live"
+            derive_health_url("http://localhost:10010"),
+            "http://localhost:10021/_health/live"
         );
     }
 

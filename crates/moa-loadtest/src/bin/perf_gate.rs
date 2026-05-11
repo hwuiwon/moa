@@ -57,7 +57,7 @@ struct Args {
     #[arg(long, default_value = "target/perf-gate/snapshot.prom")]
     prom_out: PathBuf,
     /// Restate ingress endpoint fronting `moa-orchestrator`.
-    #[arg(long, default_value = "http://localhost:18080")]
+    #[arg(long, default_value = "http://localhost:10010")]
     endpoint: String,
 }
 
