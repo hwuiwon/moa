@@ -6,6 +6,7 @@ use moa_authz::{AuthzCheckError, FgaTuple, enqueue_raw, require_authz_with_deleg
 use moa_authz_schema::{ObjectType, Relation, TupleOp};
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{Identity, IdentityType};
+use moa_ocsf::ActorInput;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -253,6 +254,9 @@ async fn register_agent_inner(
     )
     .await
     .map_err(|error| TerminalError::new(format!("agent template tenant outbox: {error}")))?;
+    moa_ocsf::emit_agent_registered_tx(&mut transaction, identity.tenant_id, &identity, agent.id)
+        .await
+        .map_err(|error| TerminalError::new(format!("audit agent register: {error}")))?;
     transaction
         .commit()
         .await
@@ -291,6 +295,7 @@ async fn deactivate_agent_inner(
 ) -> Result<(), HandlerError> {
     let agent = ensure_same_tenant(load_agent(&pool, agent_id).await?, identity.tenant_id)?;
     let actor_user_id = actor_user_id(&identity);
+    let actor = ActorInput::from_identity(&identity);
     let mut transaction = pool
         .begin()
         .await
@@ -322,7 +327,10 @@ async fn deactivate_agent_inner(
         .map_err(|error| TerminalError::new(format!("agent delegation outbox: {error}")))?;
     }
     enqueue_agent_tuples(&mut transaction, TupleOp::Delete, &agent).await?;
-    revoke_agent_api_keys(&mut transaction, agent.id, actor_user_id).await?;
+    revoke_agent_api_keys(&mut transaction, agent.id, actor_user_id, actor.clone()).await?;
+    moa_ocsf::emit_agent_deactivated_tx(&mut transaction, agent.tenant_id, &identity, agent.id)
+        .await
+        .map_err(|error| TerminalError::new(format!("audit agent deactivate: {error}")))?;
     transaction
         .commit()
         .await
@@ -357,6 +365,29 @@ async fn mutate_can_act_as_inner(
     )
     .await
     .map_err(|error| TerminalError::new(format!("agent can_act_as outbox: {error}")))?;
+    match op {
+        TupleOp::Write => {
+            moa_ocsf::emit_delegation_granted_tx(
+                &mut transaction,
+                identity.tenant_id,
+                &identity,
+                request.agent_id,
+                request.user_id,
+            )
+            .await
+        }
+        TupleOp::Delete => {
+            moa_ocsf::emit_delegation_revoked_tx(
+                &mut transaction,
+                identity.tenant_id,
+                &identity,
+                request.agent_id,
+                request.user_id,
+            )
+            .await
+        }
+    }
+    .map_err(|error| TerminalError::new(format!("audit agent delegation: {error}")))?;
     transaction
         .commit()
         .await
@@ -368,6 +399,7 @@ async fn revoke_agent_api_keys(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     agent_id: Uuid,
     actor_user_id: Option<Uuid>,
+    actor: ActorInput,
 ) -> Result<(), HandlerError> {
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
         r#"
@@ -420,6 +452,15 @@ async fn revoke_agent_api_keys(
         )
         .await
         .map_err(|error| TerminalError::new(format!("api key member outbox: {error}")))?;
+        moa_ocsf::emit_api_key_revoked_tx(
+            transaction,
+            tenant_id,
+            actor.clone(),
+            key_id,
+            Some("agent_deactivation_cascade"),
+        )
+        .await
+        .map_err(|error| TerminalError::new(format!("audit agent api key revoke: {error}")))?;
     }
     Ok(())
 }

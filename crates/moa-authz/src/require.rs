@@ -6,11 +6,29 @@
 //! error that handler shims can translate into a wire response.
 
 use std::fmt;
+use std::sync::OnceLock;
 
 use crate::{AuthzError, FgaClient};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{Identity, IdentityType};
+use sqlx::PgPool;
 use thiserror::Error;
+
+static AUDIT: OnceLock<SecurityAuditConfig> = OnceLock::new();
+
+#[derive(Clone)]
+struct SecurityAuditConfig {
+    pool: PgPool,
+    emit_allows: bool,
+}
+
+/// Configure security-audit emission for authorization decisions.
+///
+/// Denied checks are always emitted. Allowed checks are emitted only when
+/// `emit_allows` is true because allow decisions are high-volume.
+pub fn configure_security_audit(pool: PgPool, emit_allows: bool) {
+    let _ = AUDIT.set(SecurityAuditConfig { pool, emit_allows });
+}
 
 /// Failure returned by a required authorization check.
 #[derive(Debug, Error)]
@@ -47,6 +65,7 @@ pub async fn require_authz(
     let subject = fga_subject(identity);
     let object = format!("{object_type}:{object_id}");
     let allowed = fga.check(&subject, &relation.to_string(), &object).await?;
+    emit_authz_audit(identity, &object, object_type, &relation, allowed).await?;
     if !allowed {
         return Err(AuthzCheckError::Forbidden {
             subject,
@@ -56,6 +75,33 @@ pub async fn require_authz(
         });
     }
     Ok(())
+}
+
+async fn emit_authz_audit(
+    identity: &Identity,
+    object: &str,
+    object_type: ObjectType,
+    relation: &Relation,
+    allowed: bool,
+) -> Result<(), AuthzCheckError> {
+    let Some(config) = AUDIT.get() else {
+        return Ok(());
+    };
+    if allowed && !config.emit_allows {
+        return Ok(());
+    }
+    moa_ocsf::emit_authz_decision(
+        &config.pool,
+        identity.tenant_id,
+        identity,
+        object,
+        &object_type.to_string(),
+        &relation.to_string(),
+        allowed,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| AuthzCheckError::Engine(AuthzError::Audit(error.to_string())))
 }
 
 /// Verify authorization and, for delegated agent calls, verify `can_act_as`.

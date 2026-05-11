@@ -3,6 +3,7 @@
 use moa_auth_providers::api_keys;
 use moa_authz::enqueue_raw;
 use moa_authz_schema::TupleOp;
+use moa_ocsf::ActorInput;
 use sqlx::{Postgres, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
@@ -39,6 +40,7 @@ pub async fn cascade_deactivate_user(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
     user_id: Uuid,
+    actor: ActorInput,
 ) -> Result<CascadeSummary, CascadeError> {
     let result = sqlx::query(
         r#"
@@ -106,7 +108,7 @@ pub async fn cascade_deactivate_user(
         }
     }
 
-    revoke_user_api_keys(tx, tenant_id, user_id)
+    revoke_user_api_keys(tx, tenant_id, user_id, actor.clone())
         .await
         .map(|count| {
             summary.api_keys_revoked = count;
@@ -115,7 +117,9 @@ pub async fn cascade_deactivate_user(
     summary.agents_orphaned = orphan_user_agents(tx, tenant_id, user_id).await?;
     delete_group_memberships(tx, user_id).await?;
 
-    // TODO P1.10: emit OCSF iam.user.disable with `summary`.
+    moa_ocsf::emit_user_deactivated_tx(tx, tenant_id, actor, user_id)
+        .await
+        .map_err(|error| sqlx::Error::Protocol(format!("audit user deactivate: {error}")))?;
 
     Ok(summary)
 }
@@ -124,6 +128,7 @@ async fn revoke_user_api_keys(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
     user_id: Uuid,
+    actor: ActorInput,
 ) -> Result<usize, CascadeError> {
     let rows: Vec<(Uuid,)> =
         sqlx::query_as("SELECT id FROM api_keys WHERE owner_user_id = $1 AND revoked_at IS NULL")
@@ -162,6 +167,15 @@ async fn revoke_user_api_keys(
             )
             .await?;
         }
+        moa_ocsf::emit_api_key_revoked_tx(
+            tx,
+            tenant_id,
+            actor.clone(),
+            *key_id,
+            Some("deactivation_cascade"),
+        )
+        .await
+        .map_err(|error| sqlx::Error::Protocol(format!("audit api key revoke: {error}")))?;
     }
 
     Ok(rows.len())

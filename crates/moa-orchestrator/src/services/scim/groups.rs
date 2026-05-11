@@ -6,6 +6,7 @@ use axum::http::{HeaderMap, StatusCode};
 use chrono::{DateTime, Utc};
 use moa_authz::enqueue_raw;
 use moa_authz_schema::TupleOp;
+use moa_ocsf::ActorInput;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -74,11 +75,19 @@ pub async fn create_group(
             group_id,
             request.display_name.trim(),
             user_id,
+            ActorInput::from_identity(&identity),
         )
         .await?;
     }
 
-    // TODO P1.10: emit OCSF iam.group.create here.
+    moa_ocsf::emit_scim_group_created_tx(
+        &mut tx,
+        identity.tenant_id,
+        ActorInput::from_identity(&identity),
+        group_id,
+    )
+    .await
+    .map_err(map_audit)?;
 
     tx.commit().await.map_err(map_db)?;
     let body = fetch_group_by_id(&state, identity.tenant_id, group_id)
@@ -122,6 +131,15 @@ pub async fn put_group(
             *user_id,
         )
         .await?;
+        moa_ocsf::emit_group_membership_removed_tx(
+            &mut tx,
+            identity.tenant_id,
+            ActorInput::from_identity(&identity),
+            id,
+            *user_id,
+        )
+        .await
+        .map_err(map_audit)?;
     }
     sqlx::query("DELETE FROM scim_group_members WHERE group_id = $1")
         .bind(id)
@@ -155,11 +173,19 @@ pub async fn put_group(
             id,
             request.display_name.trim(),
             user_id,
+            ActorInput::from_identity(&identity),
         )
         .await?;
     }
 
-    // TODO P1.10: emit OCSF iam.group.update here.
+    moa_ocsf::emit_scim_group_updated_tx(
+        &mut tx,
+        identity.tenant_id,
+        ActorInput::from_identity(&identity),
+        id,
+    )
+    .await
+    .map_err(map_audit)?;
 
     tx.commit().await.map_err(map_db)?;
     let body = fetch_group_by_id(&state, identity.tenant_id, id)
@@ -198,6 +224,15 @@ pub async fn patch_group(
                 *user_id,
             )
             .await?;
+            moa_ocsf::emit_group_membership_removed_tx(
+                &mut tx,
+                identity.tenant_id,
+                ActorInput::from_identity(&identity),
+                id,
+                *user_id,
+            )
+            .await
+            .map_err(map_audit)?;
             enqueue_group_mapping(
                 &mut tx,
                 TupleOp::Write,
@@ -206,6 +241,15 @@ pub async fn patch_group(
                 *user_id,
             )
             .await?;
+            moa_ocsf::emit_group_membership_added_tx(
+                &mut tx,
+                identity.tenant_id,
+                ActorInput::from_identity(&identity),
+                id,
+                *user_id,
+            )
+            .await
+            .map_err(map_audit)?;
         }
         sqlx::query(
             "UPDATE scim_groups SET display_name = $3, updated_at = NOW(), version = version + 1 WHERE id = $1 AND tenant_id = $2",
@@ -220,14 +264,37 @@ pub async fn patch_group(
 
     for member in mutation.add_members {
         let user_id = parse_member_id(&member)?;
-        add_group_member(&mut tx, identity.tenant_id, id, &display_name, user_id).await?;
+        add_group_member(
+            &mut tx,
+            identity.tenant_id,
+            id,
+            &display_name,
+            user_id,
+            ActorInput::from_identity(&identity),
+        )
+        .await?;
     }
     for member in mutation.remove_members {
         let user_id = parse_member_id(&member)?;
-        remove_group_member(&mut tx, identity.tenant_id, id, &display_name, user_id).await?;
+        remove_group_member(
+            &mut tx,
+            identity.tenant_id,
+            id,
+            &display_name,
+            user_id,
+            ActorInput::from_identity(&identity),
+        )
+        .await?;
     }
 
-    // TODO P1.10: emit OCSF iam.group.update here.
+    moa_ocsf::emit_scim_group_updated_tx(
+        &mut tx,
+        identity.tenant_id,
+        ActorInput::from_identity(&identity),
+        id,
+    )
+    .await
+    .map_err(map_audit)?;
 
     tx.commit().await.map_err(map_db)?;
     let body = fetch_group_by_id(&state, identity.tenant_id, id)
@@ -255,6 +322,15 @@ pub async fn delete_group(
             user_id,
         )
         .await?;
+        moa_ocsf::emit_group_membership_removed_tx(
+            &mut tx,
+            identity.tenant_id,
+            ActorInput::from_identity(&identity),
+            id,
+            user_id,
+        )
+        .await
+        .map_err(map_audit)?;
     }
     sqlx::query("DELETE FROM scim_groups WHERE id = $1 AND tenant_id = $2")
         .bind(id)
@@ -263,7 +339,14 @@ pub async fn delete_group(
         .await
         .map_err(map_db)?;
 
-    // TODO P1.10: emit OCSF iam.group.delete here.
+    moa_ocsf::emit_scim_group_deleted_tx(
+        &mut tx,
+        identity.tenant_id,
+        ActorInput::from_identity(&identity),
+        id,
+    )
+    .await
+    .map_err(map_audit)?;
 
     tx.commit().await.map_err(map_db)?;
     Ok(StatusCode::NO_CONTENT)
@@ -480,6 +563,7 @@ async fn add_group_member(
     group_id: Uuid,
     display_name: &str,
     user_id: Uuid,
+    actor: ActorInput,
 ) -> Result<(), ScimResponseError> {
     ensure_user_in_tenant(tx, tenant_id, user_id).await?;
     sqlx::query(
@@ -490,7 +574,11 @@ async fn add_group_member(
     .execute(&mut **tx)
     .await
     .map_err(map_db)?;
-    enqueue_group_mapping(tx, TupleOp::Write, tenant_id, display_name, user_id).await
+    enqueue_group_mapping(tx, TupleOp::Write, tenant_id, display_name, user_id).await?;
+    moa_ocsf::emit_group_membership_added_tx(tx, tenant_id, actor, group_id, user_id)
+        .await
+        .map_err(map_audit)?;
+    Ok(())
 }
 
 async fn remove_group_member(
@@ -499,6 +587,7 @@ async fn remove_group_member(
     group_id: Uuid,
     display_name: &str,
     user_id: Uuid,
+    actor: ActorInput,
 ) -> Result<(), ScimResponseError> {
     sqlx::query("DELETE FROM scim_group_members WHERE group_id = $1 AND user_id = $2")
         .bind(group_id)
@@ -506,7 +595,11 @@ async fn remove_group_member(
         .execute(&mut **tx)
         .await
         .map_err(map_db)?;
-    enqueue_group_mapping(tx, TupleOp::Delete, tenant_id, display_name, user_id).await
+    enqueue_group_mapping(tx, TupleOp::Delete, tenant_id, display_name, user_id).await?;
+    moa_ocsf::emit_group_membership_removed_tx(tx, tenant_id, actor, group_id, user_id)
+        .await
+        .map_err(map_audit)?;
+    Ok(())
 }
 
 async fn ensure_user_in_tenant(
@@ -639,4 +732,9 @@ fn parse_eq_filter(filter: &str) -> Result<(&str, &str), &'static str> {
         return Err("filter value must be quoted");
     }
     Ok((attribute, &value[1..value.len() - 1]))
+}
+
+fn map_audit(error: moa_ocsf::EmitError) -> ScimResponseError {
+    tracing::error!(error = %error, "SCIM group security audit failed");
+    ScimResponseError::internal("security audit failed")
 }

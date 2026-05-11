@@ -6,8 +6,9 @@ pub mod session;
 pub mod types;
 
 pub use client::{
-    AgentSummary, AgentTemplateSummary, ClientConfig, CreateAgentTemplateRequest,
-    OrchestratorClient, RegisterAgentRequest,
+    AgentSummary, AgentTemplateSummary, AuditVerifyResponse, ClientConfig,
+    CreateAgentTemplateRequest, OrchestratorClient, RegisterAgentRequest,
+    SetAuditDestinationRequest,
 };
 pub use error::{Error, Result};
 pub use session::{SessionHandle, SnapshotPoller};

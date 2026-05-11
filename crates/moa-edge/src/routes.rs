@@ -26,7 +26,6 @@ pub struct AppState {
     /// Credential resolver used for incoming requests.
     pub auth: Arc<dyn AuthProvider>,
     /// Postgres pool used by unauthenticated webhooks that update auth metadata.
-    #[cfg(feature = "auth0")]
     pub pool: Arc<sqlx::PgPool>,
     /// Internal orchestrator proxy.
     pub proxy: Arc<OrchestratorProxy>,
@@ -60,16 +59,58 @@ async fn handle_proxy(
     body: Bytes,
 ) -> axum::response::Response {
     let Some(credential) = extract_credential(&headers) else {
+        if let Err(error) = moa_ocsf::emit_authn_failure(
+            &state.pool,
+            Uuid::nil(),
+            None,
+            "unknown",
+            source_ip(&headers),
+            "missing credential",
+        )
+        .await
+        {
+            tracing::error!(error = %error, "security audit write failed for missing credential");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response();
+        }
         return (StatusCode::UNAUTHORIZED, "missing credential").into_response();
     };
 
     let identity = match state.auth.authenticate(&credential).await {
         Ok(identity) => identity,
         Err(error) => {
+            if let Err(audit_error) = moa_ocsf::emit_authn_failure(
+                &state.pool,
+                Uuid::nil(),
+                None,
+                state.auth.name(),
+                source_ip(&headers),
+                &error.to_string(),
+            )
+            .await
+            {
+                tracing::error!(
+                    error = %audit_error,
+                    auth_error = %error,
+                    "security audit write failed for rejected credential"
+                );
+                return (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response();
+            }
             tracing::info!(error = %error, provider = state.auth.name(), "authentication rejected");
             return (StatusCode::UNAUTHORIZED, "invalid credential").into_response();
         }
     };
+    if let Err(error) = moa_ocsf::emit_authn_success(
+        &state.pool,
+        identity.tenant_id,
+        &identity,
+        state.auth.name(),
+        source_ip(&headers),
+    )
+    .await
+    {
+        tracing::error!(error = %error, "security audit write failed for authenticated request");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response();
+    }
 
     let original_path = uri
         .path_and_query()
@@ -242,6 +283,20 @@ fn verify_auth0_signature(headers: &HeaderMap, body: &[u8], secret: &str) -> boo
     mac.update(body);
     let expected = mac.finalize().into_bytes();
     expected.as_slice().ct_eq(provided.as_slice()).into()
+}
+
+fn source_ip(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|value| value.to_str().ok())
+        })
 }
 
 async fn response_to_axum(response: reqwest::Response) -> axum::response::Response {

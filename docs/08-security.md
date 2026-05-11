@@ -24,9 +24,8 @@ authentication mechanism for zero-dependency self-hosted deployments, while
 Auth0 SSO plus SCIM is the recommended multi-tenant production posture when an
 operator wants managed identity. Authorization uses OpenFGA by default. See
 [ADR-0002](architecture/decisions/0002-auth-architecture.md) for the
-architectural rationale and crate naming. Operational auth details will live in
-`docs/auth/` as the Phase 1 auth prompts land. TODO(P1.5-P1.10): add auth
-operations docs.
+architectural rationale and crate naming. OCSF security-event audit operations
+are documented in [OCSF Security Audit](operations/ocsf-audit.md).
 
 ---
 

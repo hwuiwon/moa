@@ -33,6 +33,7 @@ use moa_orchestrator::{
         api_keys::{ApiKeys, ApiKeysImpl},
         approvals::{Approvals, ApprovalsImpl},
         approvals_reaper::{ApprovalReaper, ApprovalReaperHandle, HttpAwakeableResolver},
+        audit::{Audit, AuditImpl},
         authz_admin::{Authz, AuthzImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
@@ -41,6 +42,7 @@ use moa_orchestrator::{
         neon_maint::{NeonMaint, NeonMaintImpl},
         scim::{self, ScimState},
         session_store::{RestateSessionStore, SessionStoreImpl},
+        tenants::{Tenants, TenantsImpl},
         tool_executor::{ToolExecutor, ToolExecutorImpl},
         whoami::{Whoami, WhoamiImpl},
         workspace_store::{WorkspaceStore, WorkspaceStoreImpl},
@@ -75,6 +77,7 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Agents",
     "Approvals",
     "ApiKeys",
+    "Audit",
     "Authz",
     "Consolidate",
     "CronJob",
@@ -88,6 +91,7 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Session",
     "SessionStore",
     "SubAgent",
+    "Tenants",
     "ToolExecutor",
     "TurnExecution",
     "Workspace",
@@ -130,6 +134,7 @@ async fn main() -> anyhow::Result<()> {
         .connect(&config.postgres_url)
         .await?;
     apply_database_migrations(&pool).await?;
+    moa_authz::configure_security_audit(pool.clone(), moa_config.audit_security.emit_authz_allows);
     let fga_client = if config.skip_fga {
         tracing::warn!("MOA_SKIP_FGA set; authz outbox poller disabled");
         None
@@ -217,6 +222,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(AgentsImpl.serve())
         .bind(ApprovalsImpl.serve())
         .bind(ApiKeysImpl.serve())
+        .bind(AuditImpl.serve())
         .bind(AuthzImpl.serve())
         .bind(IngestionVOImpl.serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
@@ -226,6 +232,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(CronJobImpl.serve())
         .bind(SessionImpl.serve())
         .bind(SubAgentImpl.serve())
+        .bind(TenantsImpl.serve())
         .bind(WorkspaceImpl.serve())
         .bind(WhoamiImpl.serve())
         .bind(ConsolidateImpl.serve())
@@ -365,6 +372,9 @@ async fn apply_database_migrations(pool: &PgPool) -> anyhow::Result<()> {
     moa_orchestrator::schema::migrate(pool)
         .await
         .context("apply moa-orchestrator migrations")?;
+    moa_ocsf::schema::migrate(pool)
+        .await
+        .context("apply moa-ocsf migrations")?;
     Ok(())
 }
 

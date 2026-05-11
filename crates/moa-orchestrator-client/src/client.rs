@@ -416,6 +416,32 @@ impl OrchestratorClient {
         }
     }
 
+    /// Ensure a tenant has a signing key.
+    pub async fn tenants_ensure_signing_key(&self, tenant_id: Uuid) -> Result<Uuid> {
+        self.post_call("/Tenants/ensure_signing_key", &tenant_id)
+            .await
+    }
+
+    /// Rotate a tenant signing key.
+    pub async fn tenants_rotate_signing_key(&self, tenant_id: Uuid) -> Result<Uuid> {
+        self.post_call("/Tenants/rotate_signing_key", &tenant_id)
+            .await
+    }
+
+    /// Set the S3 audit destination for a tenant.
+    pub async fn tenants_set_audit_destination(
+        &self,
+        request: SetAuditDestinationRequest,
+    ) -> Result<()> {
+        self.post_void("/Tenants/set_audit_destination", &request)
+            .await
+    }
+
+    /// Verify one OCSF security event signature.
+    pub async fn audit_verify(&self, event_id: Uuid) -> Result<AuditVerifyResponse> {
+        self.post_call("/Audit/verify", &event_id).await
+    }
+
     /// Probes an orchestrator health URL and succeeds only on a 2xx status.
     #[instrument(skip(self))]
     pub async fn health_check(&self, health_url: &str) -> Result<()> {
@@ -672,6 +698,36 @@ struct WriteTupleRequest {
     relation: String,
     object: String,
     tenant_id: Option<Uuid>,
+}
+
+/// Request body for configuring a tenant audit destination.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetAuditDestinationRequest {
+    /// Tenant id.
+    pub tenant_id: Uuid,
+    /// Destination S3 bucket.
+    pub bucket_name: String,
+    /// AWS region for the bucket.
+    pub region: String,
+    /// Optional role to assume before writing.
+    pub assume_role_arn: Option<String>,
+    /// Object key prefix.
+    pub key_prefix: Option<String>,
+    /// Object Lock retention in days.
+    pub object_lock_days: Option<i32>,
+    /// Optional KMS key ARN.
+    pub encryption_kms_key_arn: Option<String>,
+}
+
+/// Response for audit event signature verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditVerifyResponse {
+    /// Event id.
+    pub event_id: Uuid,
+    /// Tenant id.
+    pub tenant_id: Uuid,
+    /// Whether the stored event signature is valid.
+    pub valid: bool,
 }
 
 fn identity_type_str(identity_type: IdentityType) -> &'static str {

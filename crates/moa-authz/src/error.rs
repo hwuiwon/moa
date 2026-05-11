@@ -37,4 +37,8 @@ pub enum AuthzError {
     /// OpenFGA returned a response that could not be interpreted safely.
     #[error("FGA returned ambiguous response: {0}")]
     Ambiguous(String),
+
+    /// Security audit emission failed.
+    #[error("audit error: {0}")]
+    Audit(String),
 }

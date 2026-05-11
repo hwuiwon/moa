@@ -171,7 +171,8 @@ Agent lifecycle operations are documented in
 Auth0 Token Vault setup is documented in
 [`docs/operations/token-vault-setup.md`](operations/token-vault-setup.md).
 SCIM v2 provisioning is documented in
-[`docs/auth/scim.md`](auth/scim.md).
+[`docs/auth/scim.md`](auth/scim.md). OCSF security-event audit setup is
+documented in [`docs/operations/ocsf-audit.md`](operations/ocsf-audit.md).
 
 ### Authorization
 
@@ -185,7 +186,8 @@ behavior boundary; there are no procedural macros or implicit handler guards.
 OCSF v1.3 security events are written synchronously to a Postgres
 `security_events` table. The existing `services/audit-shipper` service is
 extended in P1.10 to ship those events to S3 with per-tenant bucket routing and
-Object Lock compliance mode.
+Object Lock compliance mode. Operational setup is documented in
+[`docs/operations/ocsf-audit.md`](operations/ocsf-audit.md).
 
 ## Eval And Dashboards
 
@@ -254,7 +256,7 @@ and replay resistance on the verify path.
 | `moa-authz` | Planned, Phase 1: FGA client, transactional outbox, and outbox poller |
 | `moa-edge` | Planned, Phase 1: public HTTP edge for token validation and identity header injection |
 | `moa-auth-providers-auth0` | Optional Auth0 and generic OIDC implementations gated by the `auth0` Cargo feature |
-| `moa-ocsf` | Planned, Phase 1: OCSF v1.3 security-event types, emission helpers, and signing |
+| `moa-ocsf` | OCSF v1.3 security-event types, emission helpers, and per-tenant signing |
 | `moa-hands` | Tool routing and hand providers |
 | `moa-providers` | LLM and embedding providers |
 | `moa-orchestrator` | Restate handlers and cloud orchestration binary |

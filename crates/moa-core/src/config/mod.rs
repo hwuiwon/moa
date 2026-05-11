@@ -1,6 +1,7 @@
 //! Configuration for MOA, organized by sub-domain.
 
 mod async_authz;
+mod audit_security;
 mod auth;
 mod authz;
 mod context;
@@ -18,6 +19,7 @@ mod telemetry;
 mod token_vault;
 
 pub use async_authz::{AsyncAuthzConfig, AsyncAuthzKind};
+pub use audit_security::AuditSecurityConfig;
 pub use auth::{Auth0AuthConfig, AuthConfig, AuthProviderKind, LocalAuthConfig, OidcAuthConfig};
 pub use authz::{AuthzConfig, AuthzEngine, OpenFgaConfig};
 pub use context::{
@@ -68,6 +70,8 @@ pub struct MoaConfig {
     pub token_vault: TokenVaultConfig,
     /// Async authorization provider settings.
     pub async_authz: AsyncAuthzConfig,
+    /// OCSF security-event audit settings.
+    pub audit_security: AuditSecurityConfig,
     /// Local runtime settings.
     pub local: LocalConfig,
     /// Memory bootstrap and maintenance settings.

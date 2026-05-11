@@ -86,6 +86,10 @@ pub(crate) enum CommandKind {
     Agents(AgentsCommand),
     /// Authorization tuple administration.
     Authz(AuthzCommand),
+    /// Tenant audit administration.
+    Tenants(TenantsCommand),
+    /// OCSF security-audit operations.
+    Audit(AuditCommand),
     /// Promotes a workspace from pgvector to Turbopuffer.
     PromoteWorkspace(PromoteWorkspaceArgs),
     /// Rolls a workspace vector promotion back to pgvector.

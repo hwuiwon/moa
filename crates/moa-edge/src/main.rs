@@ -56,7 +56,6 @@ async fn main() -> anyhow::Result<()> {
 
     let state = routes::AppState {
         auth: providers.auth.clone(),
-        #[cfg(feature = "auth0")]
         pool: pool.clone(),
         proxy: Arc::new(
             proxy::OrchestratorProxy::new(&args.upstream).context("build orchestrator proxy")?,

@@ -29,6 +29,7 @@ moa-core = { path = "../moa-core" }
 moa-hands = { path = "../moa-hands" }
 moa-lineage-core = { path = "../moa-lineage/core" }
 moa-lineage-sink = { path = "../moa-lineage/sink" }
+moa-ocsf.workspace = true
 memory-ingest = { package = "moa-memory-ingest", path = "../moa-memory/ingest" }
 moa-providers = { path = "../moa-providers", features = ["test-util"] }
 moa-session = { path = "../moa-session" }

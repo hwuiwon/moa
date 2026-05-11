@@ -47,6 +47,8 @@ pub struct OrchestratorConfig {
     pub async_authz_provider: AsyncAuthzKind,
     /// Default async approval timeout in seconds.
     pub async_authz_default_timeout_secs: u64,
+    /// Whether to emit allowed authorization checks as OCSF events.
+    pub audit_security_emit_authz_allows: bool,
 }
 
 impl OrchestratorConfig {
@@ -83,6 +85,7 @@ impl OrchestratorConfig {
         config.token_vault.provider = self.token_vault_provider;
         config.async_authz.provider = self.async_authz_provider;
         config.async_authz.default_timeout_secs = self.async_authz_default_timeout_secs;
+        config.audit_security.emit_authz_allows = self.audit_security_emit_authz_allows;
         config
     }
 
@@ -178,6 +181,12 @@ impl OrchestratorConfig {
             )
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or_else(|| MoaConfig::default().async_authz.default_timeout_secs),
+            audit_security_emit_authz_allows: read_first(
+                &mut read_var,
+                &["MOA__AUDIT_SECURITY__EMIT_AUTHZ_ALLOWS"],
+            )
+            .and_then(|value| value.parse::<bool>().ok())
+            .unwrap_or(false),
         })
     }
 }

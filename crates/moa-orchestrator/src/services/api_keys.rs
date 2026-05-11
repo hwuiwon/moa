@@ -8,6 +8,7 @@ use moa_authz::{AuthzCheckError, enqueue_raw, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation, TupleOp};
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{Identity, IdentityType};
+use moa_ocsf::ActorInput;
 use restate_sdk::prelude::*;
 use secrecy::ExposeSecret;
 use sqlx::PgPool;
@@ -115,9 +116,7 @@ impl ApiKeys for ApiKeysImpl {
         authorize_key_management(&identity, &row).await?;
 
         Ok(ctx
-            .run(|| async move {
-                revoke_key_inner(pool, row, "user_requested", actor_user_id(&identity)).await
-            })
+            .run(|| async move { revoke_key_inner(pool, identity, row, "user_requested").await })
             .name("api_keys_revoke")
             .await?)
     }
@@ -157,6 +156,9 @@ async fn create_key_inner(
         owner,
     )
     .await?;
+    moa_ocsf::emit_api_key_created_tx(&mut transaction, identity.tenant_id, &identity, issued.id)
+        .await
+        .map_err(|error| TerminalError::new(format!("audit api key create: {error}")))?;
     transaction
         .commit()
         .await
@@ -245,6 +247,15 @@ async fn rotate_key_inner(
         owner,
     )
     .await?;
+    moa_ocsf::emit_api_key_revoked_tx(
+        &mut transaction,
+        old.tenant_id,
+        ActorInput::from_identity(&identity),
+        old.id,
+        Some("rotation"),
+    )
+    .await
+    .map_err(|error| TerminalError::new(format!("audit api key rotate revoke: {error}")))?;
 
     let issued = api_keys::create(
         &mut *transaction,
@@ -266,6 +277,9 @@ async fn rotate_key_inner(
         owner,
     )
     .await?;
+    moa_ocsf::emit_api_key_created_tx(&mut transaction, old.tenant_id, &identity, issued.id)
+        .await
+        .map_err(|error| TerminalError::new(format!("audit api key rotate create: {error}")))?;
 
     transaction
         .commit()
@@ -281,16 +295,16 @@ async fn rotate_key_inner(
 
 async fn revoke_key_inner(
     pool: PgPool,
+    identity: Identity,
     row: ApiKeyRow,
     reason: &str,
-    actor_user_id: Option<Uuid>,
 ) -> Result<(), HandlerError> {
     let owner = row.owner()?;
     let mut transaction = pool
         .begin()
         .await
         .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
-    api_keys::revoke(&mut *transaction, row.id, reason, actor_user_id)
+    api_keys::revoke(&mut *transaction, row.id, reason, actor_user_id(&identity))
         .await
         .map_err(|error| TerminalError::new(format!("revoke api key: {error}")))?;
     enqueue_key_scope_tuples(
@@ -301,6 +315,15 @@ async fn revoke_key_inner(
         owner,
     )
     .await?;
+    moa_ocsf::emit_api_key_revoked_tx(
+        &mut transaction,
+        row.tenant_id,
+        ActorInput::from_identity(&identity),
+        row.id,
+        Some(reason),
+    )
+    .await
+    .map_err(|error| TerminalError::new(format!("audit api key revoke: {error}")))?;
     transaction
         .commit()
         .await

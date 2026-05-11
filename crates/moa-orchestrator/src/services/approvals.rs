@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use moa_auth_providers::builtin_authz::BuiltinApprovalRow;
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{ApprovalDecision, IdentityType};
+use moa_ocsf::ActorInput;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -221,6 +222,16 @@ async fn decide_inner(
     .fetch_one(&mut *transaction)
     .await
     .map_err(|error| TerminalError::new(format!("update approval: {error}")))?;
+
+    moa_ocsf::emit_approval_decided_tx(
+        &mut transaction,
+        updated.tenant_id,
+        ActorInput::user(deciding_user_id),
+        updated.id,
+        updated.status == "approved",
+    )
+    .await
+    .map_err(|error| TerminalError::new(format!("audit approval decision: {error}")))?;
 
     transaction
         .commit()

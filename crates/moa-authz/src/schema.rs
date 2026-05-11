@@ -10,8 +10,12 @@ use sqlx::PgPool;
 
 /// Apply the embedded authorization migrations to `pool`.
 pub async fn migrate(pool: &PgPool) -> Result<(), AuthzError> {
+    let mut conn = pool.acquire().await?;
+    sqlx::query("SELECT pg_catalog.set_config('search_path', '\"$user\", public', false)")
+        .execute(&mut *conn)
+        .await?;
     let mut migrator = sqlx::migrate!("./migrations");
     migrator.set_ignore_missing(true);
-    migrator.run(pool).await?;
+    migrator.run(&mut *conn).await?;
     Ok(())
 }

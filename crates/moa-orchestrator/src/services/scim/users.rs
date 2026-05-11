@@ -6,6 +6,7 @@ use axum::http::{HeaderMap, StatusCode};
 use chrono::{DateTime, Utc};
 use moa_authz::enqueue_raw;
 use moa_authz_schema::TupleOp;
+use moa_ocsf::ActorInput;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -87,7 +88,14 @@ pub async fn create_user(
         enqueue_tenant_member(&mut tx, identity.tenant_id, user_id, TupleOp::Write).await?;
     }
 
-    // TODO P1.10: emit OCSF iam.user.create here.
+    moa_ocsf::emit_scim_user_created_tx(
+        &mut tx,
+        identity.tenant_id,
+        ActorInput::from_identity(&identity),
+        user_id,
+    )
+    .await
+    .map_err(map_audit)?;
 
     tx.commit().await.map_err(map_db)?;
     let body = fetch_user_by_id(&state, identity.tenant_id, user_id)
@@ -159,9 +167,14 @@ pub async fn put_user(
         .map_err(map_db)?;
         enqueue_tenant_member(&mut tx, identity.tenant_id, id, TupleOp::Write).await?;
     } else {
-        cascade_deactivate_user(&mut tx, identity.tenant_id, id)
-            .await
-            .map_err(map_cascade)?;
+        cascade_deactivate_user(
+            &mut tx,
+            identity.tenant_id,
+            id,
+            ActorInput::from_identity(&identity),
+        )
+        .await
+        .map_err(map_cascade)?;
         apply_user_mutation(
             &mut tx,
             identity.tenant_id,
@@ -183,7 +196,14 @@ pub async fn put_user(
         .await?;
     }
 
-    // TODO P1.10: emit OCSF iam.user.update here.
+    moa_ocsf::emit_scim_user_updated_tx(
+        &mut tx,
+        identity.tenant_id,
+        ActorInput::from_identity(&identity),
+        id,
+    )
+    .await
+    .map_err(map_audit)?;
 
     tx.commit().await.map_err(map_db)?;
     let body = fetch_user_by_id(&state, identity.tenant_id, id)
@@ -207,9 +227,14 @@ pub async fn patch_user(
 
     match mutation.active {
         Some(false) => {
-            cascade_deactivate_user(&mut tx, identity.tenant_id, id)
-                .await
-                .map_err(map_cascade)?;
+            cascade_deactivate_user(
+                &mut tx,
+                identity.tenant_id,
+                id,
+                ActorInput::from_identity(&identity),
+            )
+            .await
+            .map_err(map_cascade)?;
         }
         Some(true) => {
             sqlx::query(
@@ -233,7 +258,14 @@ pub async fn patch_user(
     }
     apply_user_mutation(&mut tx, identity.tenant_id, id, mutation).await?;
 
-    // TODO P1.10: emit OCSF iam.user.update here.
+    moa_ocsf::emit_scim_user_updated_tx(
+        &mut tx,
+        identity.tenant_id,
+        ActorInput::from_identity(&identity),
+        id,
+    )
+    .await
+    .map_err(map_audit)?;
 
     tx.commit().await.map_err(map_db)?;
     let body = fetch_user_by_id(&state, identity.tenant_id, id)
@@ -251,9 +283,14 @@ pub async fn delete_user(
     let identity = authenticate_scim(&state, &headers).await?;
     let mut tx = state.pool.begin().await.map_err(map_db)?;
     ensure_user_exists(&mut tx, identity.tenant_id, id).await?;
-    cascade_deactivate_user(&mut tx, identity.tenant_id, id)
-        .await
-        .map_err(map_cascade)?;
+    cascade_deactivate_user(
+        &mut tx,
+        identity.tenant_id,
+        id,
+        ActorInput::from_identity(&identity),
+    )
+    .await
+    .map_err(map_cascade)?;
     sqlx::query("DELETE FROM users WHERE id = $1 AND tenant_id = $2")
         .bind(id)
         .bind(identity.tenant_id)
@@ -261,7 +298,14 @@ pub async fn delete_user(
         .await
         .map_err(map_db)?;
 
-    // TODO P1.10: emit OCSF iam.user.delete here.
+    moa_ocsf::emit_scim_user_deleted_tx(
+        &mut tx,
+        identity.tenant_id,
+        ActorInput::from_identity(&identity),
+        id,
+    )
+    .await
+    .map_err(map_audit)?;
 
     tx.commit().await.map_err(map_db)?;
     Ok(StatusCode::NO_CONTENT)
@@ -565,6 +609,11 @@ fn parse_eq_filter(filter: &str) -> Result<(&str, &str), &'static str> {
 fn map_cascade(error: CascadeError) -> ScimResponseError {
     tracing::error!(error = %error, "SCIM deactivation cascade failed");
     ScimResponseError::internal("deactivation cascade failed")
+}
+
+fn map_audit(error: moa_ocsf::EmitError) -> ScimResponseError {
+    tracing::error!(error = %error, "SCIM security audit failed");
+    ScimResponseError::internal("security audit failed")
 }
 
 #[cfg(test)]
