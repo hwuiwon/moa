@@ -63,6 +63,61 @@ services:
       retries: 10
       start_period: 10s
 
+  openfga-db-init:
+    image: postgres:17-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-dev}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        psql -h postgres -U moa_owner -d postgres -tAc \
+          "SELECT 1 FROM pg_database WHERE datname='openfga'" \
+        | grep -q 1 || \
+          psql -h postgres -U moa_owner -d postgres \
+          -c "CREATE DATABASE openfga OWNER moa_owner"
+        echo "openfga db ready"
+    restart: "no"
+
+  openfga-migrate:
+    image: openfga/openfga:v1.8.16
+    depends_on:
+      openfga-db-init:
+        condition: service_completed_successfully
+    command: ["migrate"]
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://moa_owner:${POSTGRES_PASSWORD:-dev}@postgres:5432/openfga?sslmode=disable
+    restart: "no"
+
+  openfga:
+    image: openfga/openfga:v1.8.16
+    depends_on:
+      openfga-migrate:
+        condition: service_completed_successfully
+    command: ["run"]
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://moa_owner:${POSTGRES_PASSWORD:-dev}@postgres:5432/openfga?sslmode=disable
+      OPENFGA_AUTHN_METHOD: preshared
+      OPENFGA_AUTHN_PRESHARED_KEYS: ${MOA_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod}
+      OPENFGA_LOG_FORMAT: json
+      OPENFGA_PLAYGROUND_ENABLED: "true"
+    ports:
+      - "8081:8080"
+      - "8082:8081"
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "/openfga", "version"]
+      interval: 5s
+      timeout: 2s
+      retries: 20
+    restart: unless-stopped
+
   restate:
     image: docker.restate.dev/restatedev/restate:1.6.2
     container_name: moa-restate

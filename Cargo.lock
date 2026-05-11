@@ -3400,6 +3400,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-authz-schema"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "moa-brain"
 version = "0.1.0"
 dependencies = [
@@ -3539,6 +3550,24 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-opentelemetry",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moa-fga-bootstrap"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "moa-authz-schema",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
  "workspace-hack",
 ]
@@ -8261,6 +8290,8 @@ dependencies = [
  "byteorder",
  "chrono",
  "cipher",
+ "clap",
+ "clap_builder",
  "crossbeam-epoch",
  "crossbeam-utils",
  "crypto-common 0.1.7",
@@ -8272,6 +8303,7 @@ dependencies = [
  "flate2",
  "form_urlencoded",
  "futures-channel",
+ "futures-core",
  "futures-executor",
  "futures-sink",
  "futures-task",
@@ -8294,6 +8326,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "once_cell",
+ "percent-encoding",
  "proc-macro-error2",
  "proc-macro2",
  "quote",
@@ -8334,7 +8367,9 @@ dependencies = [
  "tokio-util",
  "tower",
  "tower-http",
+ "tracing",
  "tracing-core",
+ "tracing-subscriber",
  "typenum",
  "unic-langid",
  "unic-langid-impl",

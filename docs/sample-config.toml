@@ -132,3 +132,57 @@ preserve_errors = true
 tier2_trigger_blocks_past_bp4 = 14
 tier3_trigger_fraction = 0.9
 max_input_tokens_per_turn = 160000
+
+[auth]
+# Identity provider selection.
+# Values: local | auth0 | oidc
+# Default: local (API keys only, zero external dependencies)
+# provider = "local"
+
+[auth.local]
+# Local provider has no configuration. API keys are issued via `moa-cli auth keys create`.
+
+# [auth.auth0]
+# Required when provider = "auth0". Loaded only when the `auth0` Cargo feature is enabled.
+# domain = "your-tenant.auth0.com"
+# audience = "https://api.moa.example.com"
+# client_id_env = "MOA_AUTH0_CLIENT_ID"
+# client_secret_env = "MOA_AUTH0_CLIENT_SECRET"
+
+# [auth.oidc]
+# Required when provider = "oidc".
+# issuer = "https://idp.example.com/"
+# audience = "moa-api"
+# jwks_url = "https://idp.example.com/.well-known/jwks.json"
+
+[authz]
+# Authorization engine selection.
+# Values: openfga (self-hosted) | auth0_fga (managed, future)
+# Default: openfga
+# engine = "openfga"
+
+[authz.openfga]
+# url = "http://localhost:8081"
+# preshared_key_env = "MOA_OPENFGA_PRESHARED_KEY"
+# store_id_env = "MOA_OPENFGA_STORE_ID"
+# model_id_env = "MOA_OPENFGA_MODEL_ID"
+
+[token_vault]
+# Provider for storing user OAuth tokens for third-party APIs.
+# Values: none | auth0
+# Default: none (returns NotConfigured; agents cannot act on third-party APIs without consent flows)
+# provider = "none"
+
+[async_authz]
+# Provider for async / out-of-band approvals (human-in-the-loop).
+# Values: builtin | auth0
+# Default: builtin (in-app approval workflow exposed at /v1/approvals)
+# provider = "builtin"
+
+[audit_security]
+# OCSF v1.3 security-event audit. See P1.10.
+# enabled = true
+# per_tenant_buckets = false  # set true to use customer-owned S3 with STS AssumeRole
+# default_bucket = "moa-security-audit"
+# default_region = "us-east-1"
+# object_lock_retention_days = 2190  # 6 years; matches `audit-shipper` default

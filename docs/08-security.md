@@ -17,6 +17,19 @@ _Credential vault, sandbox tiers, prompt injection mitigation, approval policies
 
 ---
 
+## Identity and authorization
+
+API keys are default; Auth0 SSO is opt-in. Local API keys are the default
+authentication mechanism for zero-dependency self-hosted deployments, while
+Auth0 SSO plus SCIM is the recommended multi-tenant production posture when an
+operator wants managed identity. Authorization uses OpenFGA by default. See
+[ADR-0002](architecture/decisions/0002-auth-architecture.md) for the
+architectural rationale and crate naming. Operational auth details will live in
+`docs/auth/` as the Phase 1 auth prompts land. TODO(P1.5-P1.10): add auth
+operations docs.
+
+---
+
 ## Credential isolation
 
 ### Core principle

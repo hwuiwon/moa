@@ -25,6 +25,7 @@ Product data in Postgres / Neon
   graph nodes, graph edges, sidecar indexes, pgvector embeddings
   tenant_intents, global_intent_catalog, learning_log
   analytics.turn_lineage, analytics.scores, compliance audit tables
+  security_events
         |
         v
 Learning loop
@@ -77,6 +78,8 @@ Current trait definitions live under `crates/moa-core/src/traits/` and
 | `LineageHandle` | Transport-neutral lineage capture | null handle, async sink, OTel bridge |
 
 Runtime entrypoints share these seams through the Restate-backed orchestrator.
+Phase 1 auth work adds `AuthProvider`, `TokenVaultProvider`, and
+`AsyncAuthzProvider` to `moa-core::traits`; see ADR-0002.
 
 ## Runtime Modes
 
@@ -94,6 +97,7 @@ Runtime entrypoints share these seams through the Restate-backed orchestrator.
 
 `moa-cli` and `moa-runtime` call the configured Restate ingress through
 `moa-orchestrator-client`. Client paths do not embed an orchestrator process.
+Local development uses the same Restate-backed cloud runtime through `make dev`.
 
 ## Turn Data Flow
 
@@ -137,6 +141,35 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 | Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity |
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
 | Optional checkpoints | Neon | branch manager for database checkpoints |
+| Security events | Postgres and S3 | OCSF v1.3 events in `security_events`, shipped to tenant audit buckets |
+
+## Auth Layer
+
+ADR-0002 is the canonical decision record for MOA's identity,
+authorization, naming, and security-event audit posture.
+
+### Identity
+
+`moa-edge` validates API keys by default, or OIDC tokens in Auth0/OIDC modes,
+then injects `X-Moa-Identity-Type`, `X-Moa-Identity-Id`,
+`X-Moa-Tenant-Id`, `X-Moa-Acting-On-Behalf-Of`, and
+`X-Moa-Api-Key-Id` headers before forwarding to the orchestrator. The
+orchestrator trusts these headers, so the Restate handler port (`9080`) must be
+network-isolated in production.
+
+### Authorization
+
+OpenFGA, backed by Postgres, is the default authorization engine. The v1
+authorization schema lives in `moa-authz-schema` as Rust constants. Handlers
+call `require_authz(authz, identity, object_type, object_id, relation)` at the
+behavior boundary; there are no procedural macros or implicit handler guards.
+
+### Audit
+
+OCSF v1.3 security events are written synchronously to a Postgres
+`security_events` table. The existing `services/audit-shipper` service is
+extended in P1.10 to ship those events to S3 with per-tenant bucket routing and
+Object Lock compliance mode.
 
 ## Eval And Dashboards
 
@@ -200,6 +233,12 @@ and replay resistance on the verify path.
 | `moa-lineage/citation` (`moa-lineage-citation`) | Citation/provenance adapters |
 | `moa-lineage/cold` (`moa-lineage-cold`) | Cold lineage export and partition support |
 | `moa-lineage/audit` (`moa-lineage-audit`) | Compliance audit hashes, Merkle roots, signing, DSAR support |
+| `moa-authz-schema` | Planned, Phase 1: typed FGA tuple keys and schema v1 constants |
+| `moa-fga-bootstrap` | Planned, Phase 1: idempotent OpenFGA store and model bootstrap binary |
+| `moa-authz` | Planned, Phase 1: FGA client, transactional outbox, and outbox poller |
+| `moa-edge` | Planned, Phase 1: public HTTP edge for token validation and identity header injection |
+| `moa-auth-providers-auth0` | Planned, Phase 1: optional Auth0 implementations gated by the `auth0` Cargo feature |
+| `moa-ocsf` | Planned, Phase 1: OCSF v1.3 security-event types, emission helpers, and signing |
 | `moa-hands` | Tool routing and hand providers |
 | `moa-providers` | LLM and embedding providers |
 | `moa-orchestrator` | Restate handlers and cloud orchestration binary |

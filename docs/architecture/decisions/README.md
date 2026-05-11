@@ -8,3 +8,4 @@ explicitly.
 | # | Title | Status |
 |---|---|---|
 | 0001 | Envelope encryption deferred to v1.1 | Accepted |
+| 0002 | Auth architecture | Accepted |

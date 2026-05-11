@@ -48,6 +48,30 @@ To open the Restate web UI and inspect invocations, K/V state, and deployments:
 make dev-restate-ui
 ```
 
+### Authorization (OpenFGA)
+
+`make dev` brings up OpenFGA at <http://localhost:8081> and bootstraps the
+schema. Store / model IDs are written to `.env.fga`; source it before running
+the orchestrator manually:
+
+```sh
+source .env.fga
+```
+
+Skip OpenFGA for non-auth work:
+
+```sh
+MOA_SKIP_FGA=1 make dev
+```
+
+Install the `fga` CLI for schema iteration:
+
+```sh
+make fga-install
+```
+
+OpenFGA Playground: <http://localhost:3000>.
+
 To stop everything while preserving data:
 
 ```bash

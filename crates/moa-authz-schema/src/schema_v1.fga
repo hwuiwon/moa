@@ -1,0 +1,55 @@
+model
+  schema 1.2
+
+type user
+
+type agent
+  relations
+    define tenant: [tenant]
+    define operator: [user]
+    define can_act_as: [user]
+
+type api_key
+  relations
+    define tenant: [tenant]
+    define owner: [user, agent]
+    # `principal` lets authz checks substitute an api_key for its owner.
+    define principal: owner
+
+type tenant
+  relations
+    define admin: [user]
+    define billing_admin: [user] or admin
+    define member: [user] or admin
+
+type workspace
+  relations
+    define tenant: [tenant]
+    define admin: [user] or admin from tenant
+    define editor: [user] or admin
+    define member: [user] or editor or member from tenant
+
+type session
+  relations
+    define workspace: [workspace]
+    define owner: [user, agent]
+    define participant: [user, agent] or owner or member from workspace
+
+type knowledge_base
+  relations
+    define workspace: [workspace]
+    define admin: [user] or admin from workspace
+    define writer: [user, agent] or admin
+    define reader: [user, agent] or writer or member from workspace
+
+type document
+  relations
+    define knowledge_base: [knowledge_base]
+    define owner: [user, agent]
+    define reader: [user, agent] or owner or reader from knowledge_base
+    define writer: [user, agent] or owner or writer from knowledge_base
+
+type agent_template
+  relations
+    define tenant: [tenant]
+    define creator: [user]

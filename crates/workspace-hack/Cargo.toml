@@ -23,6 +23,8 @@ bitflags = { version = "2", default-features = false, features = ["serde"] }
 byteorder = { version = "1" }
 chrono = { version = "0.4", features = ["serde"] }
 cipher = { version = "0.4", default-features = false, features = ["zeroize"] }
+clap = { version = "4", features = ["derive", "env"] }
+clap_builder = { version = "4", default-features = false, features = ["color", "env", "help", "std", "suggestions", "usage"] }
 crossbeam-epoch = { version = "0.9" }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["getrandom", "std"] }
@@ -34,6 +36,7 @@ fastrand = { version = "2" }
 flate2 = { version = "1" }
 form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
+futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-task = { version = "0.3" }
@@ -55,6 +58,7 @@ num-bigint = { version = "0.4", default-features = false, features = ["std"] }
 num-integer = { version = "0.1", default-features = false, features = ["i128", "std"] }
 num-traits = { version = "0.2", default-features = false, features = ["i128", "libm", "std"] }
 once_cell = { version = "1" }
+percent-encoding = { version = "2" }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
 regex = { version = "1" }
@@ -84,7 +88,9 @@ tinystr = { version = "0.8", features = ["zerovec"] }
 tokio = { version = "1", features = ["full", "test-util", "tracing"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 tower = { version = "0.5", default-features = false, features = ["balance", "buffer", "limit", "load-shed", "log"] }
+tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 typenum = { version = "1", default-features = false, features = ["const-generics"] }
 unic-langid = { version = "0.9", features = ["serde"] }
 unic-langid-impl = { version = "0.9", default-features = false, features = ["serde"] }
@@ -106,6 +112,7 @@ digest = { version = "0.10", features = ["mac", "std"] }
 either = { version = "1", features = ["serde", "use_std"] }
 form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
+futures-core = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-task = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
@@ -116,6 +123,7 @@ log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2", default-features = false, features = ["i128", "libm", "std"] }
 once_cell = { version = "1" }
+percent-encoding = { version = "2" }
 proc-macro-error2 = { version = "2" }
 proc-macro2 = { version = "1" }
 quote = { version = "1" }
@@ -142,6 +150,7 @@ syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "vis
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing", "serde"] }
 tinystr = { version = "0.8", features = ["zerovec"] }
 tokio = { version = "1", features = ["full", "test-util", "tracing"] }
+tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 typenum = { version = "1", default-features = false, features = ["const-generics"] }
 unic-langid = { version = "0.9", features = ["serde"] }
