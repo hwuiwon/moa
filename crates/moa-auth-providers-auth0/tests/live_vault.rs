@@ -1,8 +1,7 @@
 //! Live Auth0 Token Vault tests.
 //!
 //! Requires `MOA_RUN_LIVE_AUTH0_TESTS=1` plus:
-//! `MOA_TEST_DATABASE_URL`, `MOA_TEST_AUTH0_DOMAIN`,
-//! `MOA_TEST_AUTH0_CLIENT_ID`, `MOA_TEST_AUTH0_CLIENT_SECRET`,
+//! `MOA_TEST_AUTH0_DOMAIN`, `MOA_TEST_AUTH0_CLIENT_ID`, `MOA_TEST_AUTH0_CLIENT_SECRET`,
 //! `MOA_TEST_AUTH0_USER_ID`, `MOA_TEST_AUTH0_TENANT_ID`,
 //! `MOA_TEST_AUTH0_SUB`, and `MOA_TEST_AUTH0_CONNECTION`.
 
@@ -11,17 +10,15 @@ use std::sync::Arc;
 use moa_auth_providers_auth0::Auth0TokenVaultProvider;
 use moa_core::traits::TokenVaultProvider;
 use secrecy::{ExposeSecret, SecretString};
-use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
-#[tokio::test]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires MOA_RUN_LIVE_AUTH0_TESTS=1 and a real Auth0 linked user"]
-async fn live_auth0_token_vault_returns_third_party_token() {
+async fn live_auth0_token_vault_returns_third_party_token(pool: sqlx::PgPool) {
     // Pins: a real Auth0-linked user can exchange linked connection metadata for a provider token.
     if std::env::var("MOA_RUN_LIVE_AUTH0_TESTS").as_deref() != Ok("1") {
         return;
     }
-    let database_url = required_env("MOA_TEST_DATABASE_URL");
     let domain = required_env("MOA_TEST_AUTH0_DOMAIN");
     let client_id = required_env("MOA_TEST_AUTH0_CLIENT_ID");
     let client_secret = required_env("MOA_TEST_AUTH0_CLIENT_SECRET");
@@ -32,14 +29,6 @@ async fn live_auth0_token_vault_returns_third_party_token() {
     let management_audience = std::env::var("MOA_TEST_AUTH0_MANAGEMENT_AUDIENCE")
         .unwrap_or_else(|_| format!("https://{}/api/v2/", domain.trim_end_matches('/')));
 
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&database_url)
-        .await
-        .expect("connect live test Postgres");
-    moa_auth_providers_auth0::schema::migrate(&pool)
-        .await
-        .expect("apply auth0 provider migrations");
     upsert_linked_user(&pool, user_id, tenant_id, &sub, &connection).await;
 
     let provider = Auth0TokenVaultProvider::new(

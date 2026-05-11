@@ -4282,6 +4282,7 @@ dependencies = [
  "humantime",
  "metrics",
  "metrics-exporter-prometheus",
+ "moa-authz",
  "moa-brain",
  "moa-core",
  "moa-memory-graph",

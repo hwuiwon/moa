@@ -107,6 +107,21 @@ async fn wait_for_workspace_session_count(
         .expect("final list sessions")
 }
 
+async fn wait_for_checkpoint_visible(manager: &NeonBranchManager, checkpoint_id: &str) {
+    for _attempt in 0..20 {
+        let checkpoints = manager.list_checkpoints().await.expect("list checkpoints");
+        if checkpoints
+            .iter()
+            .any(|entry| entry.handle.id == checkpoint_id)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    panic!("checkpoint {checkpoint_id} was not visible in Neon list before timeout");
+}
+
 async fn live_session_store(database_url: &str) -> PostgresSessionStore {
     let pool = PgPoolOptions::new()
         .max_connections(5)
@@ -261,6 +276,7 @@ async fn neon_checkpoint_capacity_limit_rejects_extra_branch() {
         .create_checkpoint("capacity-one", None)
         .await
         .expect("create first checkpoint");
+    wait_for_checkpoint_visible(&manager, &first.id).await;
     let second = manager.create_checkpoint("capacity-two", None).await;
     assert!(
         second.is_err(),

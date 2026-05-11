@@ -13,7 +13,9 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 use uuid::Uuid;
 
-use crate::support::restate_runtime::{OrchestratorPorts, reserve_orchestrator_ports};
+use crate::support::restate_runtime::{
+    OrchestratorPorts, deployment_endpoint_url, reserve_orchestrator_ports,
+};
 
 mod support;
 
@@ -35,7 +37,7 @@ impl LiveIngestionHarness {
         let admin_url = restate_admin_url();
         let ingress = restate_ingress_url();
         let ports = reserve_orchestrator_ports()?;
-        let endpoint_url = format!("http://127.0.0.1:{}", ports.restate);
+        let endpoint_url = deployment_endpoint_url(ports.restate);
         let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
         let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
         let pool = PgPool::connect(&test_database_url())
@@ -128,6 +130,8 @@ fn spawn_orchestrator(
         .arg(ports.restate.to_string())
         .arg("--health-port")
         .arg(ports.health.to_string())
+        .arg("--scim-port")
+        .arg(ports.scim.to_string())
         .env("POSTGRES_URL", postgres_url)
         .env("RESTATE_ADMIN_URL", admin_url)
         .env("MOA_MEMORY_DIR", memory_dir.path())

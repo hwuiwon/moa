@@ -10,7 +10,7 @@ use uuid::Uuid;
 #[ignore = "requires MOA_RUN_LIVE_AUTH0_TESTS=1 and an Auth0 tenant"]
 async fn auth0_authenticate_valid_token_returns_identity(pool: sqlx::PgPool) {
     // Pins: a real Auth0 access token with MOA namespaced claims resolves to a MOA user identity.
-    let Some(env) = live_env() else {
+    let Some(env) = live_valid_env() else {
         return;
     };
     let provider = Auth0AuthProvider::new(&env.domain, &env.audience, Arc::new(pool));
@@ -27,7 +27,7 @@ async fn auth0_authenticate_valid_token_returns_identity(pool: sqlx::PgPool) {
 #[ignore = "requires MOA_RUN_LIVE_AUTH0_TESTS=1 and an expired Auth0 token"]
 async fn auth0_expired_token_returns_expired(pool: sqlx::PgPool) {
     // Pins: a real expired Auth0 token maps to AuthError::Expired rather than generic rejection.
-    let Some(env) = live_env() else {
+    let Some(env) = live_config() else {
         return;
     };
     let expired_token = required_env("MOA_TEST_AUTH0_EXPIRED_TOKEN");
@@ -43,7 +43,7 @@ async fn auth0_expired_token_returns_expired(pool: sqlx::PgPool) {
 #[ignore = "requires MOA_RUN_LIVE_AUTH0_TESTS=1 and a wrong-audience Auth0 token"]
 async fn auth0_wrong_audience_returns_rejected(pool: sqlx::PgPool) {
     // Pins: a real Auth0 token for a different audience maps to AuthError::Rejected.
-    let Some(env) = live_env() else {
+    let Some(env) = live_config() else {
         return;
     };
     let wrong_audience_token = required_env("MOA_TEST_AUTH0_WRONG_AUDIENCE_TOKEN");
@@ -62,13 +62,26 @@ struct LiveEnv {
     valid_token: String,
 }
 
-fn live_env() -> Option<LiveEnv> {
+struct LiveConfig {
+    domain: String,
+    audience: String,
+}
+
+fn live_config() -> Option<LiveConfig> {
     if std::env::var("MOA_RUN_LIVE_AUTH0_TESTS").as_deref() != Ok("1") {
         return None;
     }
-    Some(LiveEnv {
+    Some(LiveConfig {
         domain: required_env("MOA_TEST_AUTH0_DOMAIN"),
         audience: required_env("MOA_TEST_AUTH0_AUDIENCE"),
+    })
+}
+
+fn live_valid_env() -> Option<LiveEnv> {
+    let config = live_config()?;
+    Some(LiveEnv {
+        domain: config.domain,
+        audience: config.audience,
         tenant_id: Uuid::parse_str(&required_env("MOA_TEST_AUTH0_TENANT_ID"))
             .expect("MOA_TEST_AUTH0_TENANT_ID must be a UUID"),
         valid_token: required_env("MOA_TEST_AUTH0_TOKEN"),

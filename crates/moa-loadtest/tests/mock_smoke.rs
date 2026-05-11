@@ -24,8 +24,10 @@ fn mock_short_profile_completes_within_budget_with_zero_errors() {
             &endpoint,
             "--duration",
             "5s",
+            // The Restate path now includes live FGA checks on session creation
+            // and turn start; keep the smoke budget above cold local authz cost.
             "--max-p95-ms",
-            "1000",
+            "2000",
             "--max-error-rate",
             "0",
             "--prom-out",

@@ -13,7 +13,10 @@ use sqlx::PgPool;
 use tokio::time::sleep;
 
 use crate::support::graph_ingest::{test_database_url, wait_for_ingested_brain_responses};
-use crate::support::restate_runtime::{OrchestratorPorts, reserve_orchestrator_ports};
+use crate::support::restate_runtime::{
+    OrchestratorPorts, deployment_endpoint_url, grant_workspace_member, reserve_orchestrator_ports,
+    restate_ingress_url, test_user_identity, with_identity,
+};
 use crate::support::session_store_service::{get_events_request, test_session_meta};
 
 mod support;
@@ -50,6 +53,8 @@ fn spawn_orchestrator(ports: OrchestratorPorts) -> Result<Child> {
         .arg(ports.restate.to_string())
         .arg("--health-port")
         .arg(ports.health.to_string())
+        .arg("--scim-port")
+        .arg(ports.scim.to_string())
         .env("POSTGRES_URL", test_database_url())
         .env("RUST_LOG", "info")
         .env_remove("COHERE_API_KEY")
@@ -89,7 +94,7 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
 
     let ports = reserve_orchestrator_ports()?;
     let mut orchestrator = spawn_orchestrator(ports)?;
-    let endpoint_url = format!("http://127.0.0.1:{}", ports.restate);
+    let endpoint_url = deployment_endpoint_url(ports.restate);
     let pool = PgPool::connect(&test_database_url())
         .await
         .context("connect to test Postgres")?;
@@ -97,11 +102,17 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
         register_deployment(endpoint_url.as_str()).await?;
 
         let client = reqwest::Client::new();
-        let ingress = "http://127.0.0.1:10010";
+        let ingress = restate_ingress_url();
+        let ingress = ingress.as_str();
         let meta = test_session_meta("llm-gateway-e2e");
+        let identity = test_user_identity();
+        grant_workspace_member(&identity, &meta.workspace_id).await?;
 
-        let create_response = client
-            .post(format!("{ingress}/SessionStore/create_session"))
+        let create_request = client.post(format!(
+            "{}/SessionStore/create_session",
+            ingress.trim_end_matches('/')
+        ));
+        let create_response = with_identity(create_request, &identity)
             .json(&meta)
             .send()
             .await
@@ -133,7 +144,10 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
         };
 
         let response = client
-            .post(format!("{ingress}/LLMGateway/complete"))
+            .post(format!(
+                "{}/LLMGateway/complete",
+                ingress.trim_end_matches('/')
+            ))
             .json(&request)
             .send()
             .await
@@ -180,7 +194,10 @@ async fn wait_for_brain_response(
 ) -> Result<Vec<moa_core::EventRecord>> {
     for _attempt in 0..30 {
         let response = client
-            .post(format!("{ingress}/SessionStore/get_events"))
+            .post(format!(
+                "{}/SessionStore/get_events",
+                ingress.trim_end_matches('/')
+            ))
             .json(&get_events_request(session_id, EventRange::all()))
             .send()
             .await

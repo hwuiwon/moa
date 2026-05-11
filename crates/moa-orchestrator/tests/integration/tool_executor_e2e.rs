@@ -10,7 +10,8 @@ use tempfile::TempDir;
 use tokio::time::sleep;
 
 use crate::support::restate_runtime::{
-    OrchestratorPorts, RESTATE_E2E_LOCK, reserve_orchestrator_ports,
+    OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_workspace_member,
+    reserve_orchestrator_ports, restate_ingress_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
     append_event_request, get_events_request, test_session_meta,
@@ -58,6 +59,8 @@ fn spawn_orchestrator(
         .arg(ports.restate.to_string())
         .arg("--health-port")
         .arg(ports.health.to_string())
+        .arg("--scim-port")
+        .arg(ports.scim.to_string())
         .env("POSTGRES_URL", postgres_url)
         .env("MOA_MEMORY_DIR", memory_dir.path())
         .env("MOA_SANDBOX_DIR", sandbox_dir.path())
@@ -116,17 +119,23 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
     let ports = reserve_orchestrator_ports()?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
-    let endpoint_url = format!("http://127.0.0.1:{}", ports.restate);
+    let endpoint_url = deployment_endpoint_url(ports.restate);
 
     let result = async {
         register_deployment(endpoint_url.as_str()).await?;
 
         let client = reqwest::Client::new();
-        let ingress = "http://127.0.0.1:10010";
+        let ingress = restate_ingress_url();
+        let ingress = ingress.as_str();
         let meta = test_session_meta("tool-executor-e2e");
+        let identity = test_user_identity();
+        grant_workspace_member(&identity, &meta.workspace_id).await?;
 
-        let create_response = client
-            .post(format!("{ingress}/SessionStore/create_session"))
+        let create_request = client.post(format!(
+            "{}/SessionStore/create_session",
+            ingress.trim_end_matches('/')
+        ));
+        let create_response = with_identity(create_request, &identity)
             .json(&meta)
             .send()
             .await
@@ -147,7 +156,10 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             &meta,
         );
         let write_output = client
-            .post(format!("{ingress}/ToolExecutor/execute"))
+            .post(format!(
+                "{}/ToolExecutor/execute",
+                ingress.trim_end_matches('/')
+            ))
             .json(&write_request)
             .send()
             .await
@@ -167,7 +179,10 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             &meta,
         );
         let read_output = client
-            .post(format!("{ingress}/ToolExecutor/execute"))
+            .post(format!(
+                "{}/ToolExecutor/execute",
+                ingress.trim_end_matches('/')
+            ))
             .json(&read_request)
             .send()
             .await
@@ -188,7 +203,10 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             &meta,
         );
         let bash_output = client
-            .post(format!("{ingress}/ToolExecutor/execute"))
+            .post(format!(
+                "{}/ToolExecutor/execute",
+                ingress.trim_end_matches('/')
+            ))
             .json(&bash_request)
             .send()
             .await
@@ -201,7 +219,10 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
         assert!(bash_output.to_text().contains("hello-from-bash"));
 
         let duplicate_response = client
-            .post(format!("{ingress}/ToolExecutor/execute"))
+            .post(format!(
+                "{}/ToolExecutor/execute",
+                ingress.trim_end_matches('/')
+            ))
             .json(&bash_request)
             .send()
             .await
@@ -215,7 +236,10 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
         assert!(duplicate_body.contains("prior result already exists"));
 
         let list_response = client
-            .post(format!("{ingress}/ToolExecutor/list_tools"))
+            .post(format!(
+                "{}/ToolExecutor/list_tools",
+                ingress.trim_end_matches('/')
+            ))
             .json(&meta.workspace_id)
             .send()
             .await
@@ -263,17 +287,23 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
     let ports = reserve_orchestrator_ports()?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
-    let endpoint_url = format!("http://127.0.0.1:{}", ports.restate);
+    let endpoint_url = deployment_endpoint_url(ports.restate);
 
     let result = async {
         register_deployment(endpoint_url.as_str()).await?;
 
         let client = reqwest::Client::new();
-        let ingress = "http://127.0.0.1:10010";
+        let ingress = restate_ingress_url();
+        let ingress = ingress.as_str();
         let meta = test_session_meta("tool-executor-preexisting-call");
+        let identity = test_user_identity();
+        grant_workspace_member(&identity, &meta.workspace_id).await?;
 
-        let create_response = client
-            .post(format!("{ingress}/SessionStore/create_session"))
+        let create_request = client.post(format!(
+            "{}/SessionStore/create_session",
+            ingress.trim_end_matches('/')
+        ));
+        let create_response = with_identity(create_request, &identity)
             .json(&meta)
             .send()
             .await
@@ -296,7 +326,7 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
         );
 
         client
-            .post(format!("{ingress}/SessionStore/append_event"))
+            .post(format!("{}/SessionStore/append_event", ingress.trim_end_matches('/')))
             .json(&append_event_request(
                 session_id,
                 Event::ToolCall {
@@ -315,7 +345,7 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
             .context("append_event should succeed")?;
 
         let output = client
-            .post(format!("{ingress}/ToolExecutor/execute"))
+            .post(format!("{}/ToolExecutor/execute", ingress.trim_end_matches('/')))
             .json(&request)
             .send()
             .await
@@ -364,7 +394,10 @@ async fn wait_for_tool_result_events(
 ) -> Result<Vec<moa_core::EventRecord>> {
     for _attempt in 0..30 {
         let response = client
-            .post(format!("{ingress}/SessionStore/get_events"))
+            .post(format!(
+                "{}/SessionStore/get_events",
+                ingress.trim_end_matches('/')
+            ))
             .json(&get_events_request(session_id, EventRange::all()))
             .send()
             .await

@@ -19,6 +19,64 @@ fn clear_endpoint_env() {
     }
 }
 
+#[cfg(feature = "integration")]
+async fn grant_tuple(user: String, relation: &str, object: String) {
+    let url =
+        std::env::var("MOA_OPENFGA_URL").unwrap_or_else(|_| "http://127.0.0.1:10030".to_string());
+    let store_id = std::env::var("MOA_OPENFGA_STORE_ID")
+        .expect("MOA_OPENFGA_STORE_ID is required for live client smoke");
+    let model_id = std::env::var("MOA_OPENFGA_MODEL_ID")
+        .expect("MOA_OPENFGA_MODEL_ID is required for live client smoke");
+    let preshared_key = std::env::var("MOA_OPENFGA_PRESHARED_KEY")
+        .unwrap_or_else(|_| "localdev-preshared-key-do-not-use-in-prod".to_string());
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/stores/{store_id}/write",
+            url.trim_end_matches('/')
+        ))
+        .bearer_auth(preshared_key)
+        .json(&serde_json::json!({
+            "authorization_model_id": model_id,
+            "writes": {
+                "tuple_keys": [{
+                    "user": user,
+                    "relation": relation,
+                    "object": object,
+                }],
+            },
+        }))
+        .send()
+        .await
+        .expect("write OpenFGA workspace membership tuple");
+    response
+        .error_for_status()
+        .expect("OpenFGA workspace membership write should succeed");
+}
+
+#[cfg(feature = "integration")]
+async fn grant_workspace_member(identity: &moa_core::traits::Identity, workspace_id: &str) {
+    grant_tuple(
+        format!("user:{}", identity.id),
+        "member",
+        format!("workspace:{workspace_id}"),
+    )
+    .await;
+}
+
+#[cfg(feature = "integration")]
+async fn grant_session_participant(
+    identity: &moa_core::traits::Identity,
+    session_id: moa_core::SessionId,
+) {
+    grant_tuple(
+        format!("user:{}", identity.id),
+        "participant",
+        format!("session:{session_id}"),
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn from_env_reads_endpoint() {
     // Pins: MOA__ORCHESTRATOR__ENDPOINT takes precedence over defaults.
@@ -269,13 +327,24 @@ async fn bad_status_preserves_status_and_body() {
 #[ignore = "requires make dev, MOA_RUN_LIVE_ORCHESTRATOR_CLIENT_TESTS=1, and configured providers"]
 async fn live_start_turn_returns_fast_with_initialized_session() {
     use chrono::Utc;
+    use moa_core::traits::{Identity, IdentityType};
     use moa_core::{ModelId, Platform, SessionId, SessionMeta, SessionStatus, UserId, WorkspaceId};
+    use uuid::Uuid;
 
     if std::env::var("MOA_RUN_LIVE_ORCHESTRATOR_CLIENT_TESTS").as_deref() != Ok("1") {
         return;
     }
 
-    let client = OrchestratorClient::from_env().expect("live endpoint should build client");
+    let identity = Identity {
+        identity_type: IdentityType::User,
+        id: Uuid::new_v4(),
+        tenant_id: Uuid::new_v4(),
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    };
+    let client = OrchestratorClient::from_env()
+        .expect("live endpoint should build client")
+        .with_identity(identity.clone());
     let session_id = SessionId::new();
     let now = Utc::now();
     let meta = SessionMeta {
@@ -300,25 +369,18 @@ async fn live_start_turn_returns_fast_with_initialized_session() {
         event_count: 0,
         last_checkpoint_seq: None,
     };
+    grant_workspace_member(&identity, meta.workspace_id.as_str()).await;
 
-    let http = reqwest::Client::new();
-    http.post(format!("{}/SessionStore/create_session", client.endpoint()))
-        .json(&meta)
-        .send()
+    let created = client
+        .create_session(meta.clone())
         .await
-        .expect("create_session request should complete")
-        .error_for_status()
         .expect("create_session should succeed");
-    http.post(format!(
-        "{}/Session/{session_id}/set_meta",
-        client.endpoint()
-    ))
-    .json(&meta)
-    .send()
-    .await
-    .expect("set_meta request should complete")
-    .error_for_status()
-    .expect("set_meta should succeed");
+    assert_eq!(created, session_id);
+    grant_session_participant(&identity, session_id).await;
+    client
+        .init_session_vo(session_id, meta)
+        .await
+        .expect("init_session_vo should succeed");
 
     let started_at = std::time::Instant::now();
     let response = client
