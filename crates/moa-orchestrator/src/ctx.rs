@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
+use moa_authz::FgaClient;
 use moa_core::{
     LineageHandle, MoaConfig,
     traits::{EmbeddingProvider, Identity, IdentityType},
@@ -27,6 +28,8 @@ pub struct OrchestratorCtx {
     pub session_store: Arc<PostgresSessionStore>,
     /// Postgres pool used by graph-memory retrieval and ingestion paths.
     pub graph_pool: sqlx::PgPool,
+    /// OpenFGA client used by handler authorization checks.
+    pub fga_client: Option<FgaClient>,
     /// Registry of configured LLM providers.
     pub providers: Arc<ProviderRegistry>,
     /// Optional embedding provider shared by intent classification.

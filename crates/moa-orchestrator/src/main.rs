@@ -25,6 +25,7 @@ use moa_orchestrator::{
     objects::workspace::{WorkspaceImpl, WorkspaceObject},
     restate_register::{IngestionVO, IngestionVOImpl},
     services::{
+        agent_registry::{AgentRegistry, AgentRegistryImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
         intent_manager::{IntentManager, IntentManagerImpl},
@@ -58,6 +59,7 @@ const CRON_BOOTSTRAP_ATTEMPTS: u32 = 60;
 const CRON_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
 const EXPECTED_SERVICE_NAMES: &[&str] = &[
+    "AgentRegistry",
     "Consolidate",
     "CronJob",
     "GraphMemoryMaint",
@@ -108,12 +110,15 @@ async fn main() -> anyhow::Result<()> {
         .connect(&config.postgres_url)
         .await?;
     apply_database_migrations(&pool).await?;
-    let poller_handle = if config.skip_fga {
+    let fga_client = if config.skip_fga {
         tracing::warn!("MOA_SKIP_FGA set; authz outbox poller disabled");
         None
     } else {
-        Some(start_authz_outbox_poller(&pool, moa_config.as_ref())?)
+        Some(build_fga_client(moa_config.as_ref())?)
     };
+    let poller_handle = fga_client
+        .clone()
+        .map(|fga_client| start_authz_outbox_poller(&pool, fga_client));
     let session_store = Arc::new(
         PostgresSessionStore::from_existing_pool(&config.postgres_url, pool.clone()).await?,
     );
@@ -144,6 +149,7 @@ async fn main() -> anyhow::Result<()> {
         config: moa_config.clone(),
         session_store: session_store.clone(),
         graph_pool: session_store.pool().clone(),
+        fga_client,
         providers: providers.clone(),
         embedding_provider: embedding_provider.clone(),
         tool_router: tool_router.clone(),
@@ -166,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
             .serve(),
         )
         .bind(LLMGatewayImpl::new(providers).serve())
+        .bind(AgentRegistryImpl.serve())
         .bind(IngestionVOImpl.serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
         .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
@@ -281,30 +288,37 @@ async fn apply_database_migrations(pool: &PgPool) -> anyhow::Result<()> {
     moa_authz::schema::migrate(pool)
         .await
         .context("apply moa-authz migrations")?;
+    moa_orchestrator::schema::migrate(pool)
+        .await
+        .context("apply moa-orchestrator migrations")?;
     Ok(())
 }
 
-fn start_authz_outbox_poller(
-    pool: &PgPool,
-    config: &MoaConfig,
-) -> anyhow::Result<moa_authz::PollerHandle> {
+fn build_fga_client(config: &MoaConfig) -> anyhow::Result<moa_authz::FgaClient> {
     let openfga = config
         .authz
         .openfga
         .as_ref()
         .context("authz.openfga config missing")?;
-    let fga_client = moa_authz::FgaClient::new(moa_authz::FgaConfig {
+    moa_authz::FgaClient::new(moa_authz::FgaConfig {
         url: openfga.url.clone(),
         preshared_key: openfga.preshared_key.clone(),
         store_id: openfga.store_id.clone(),
         model_id: openfga.model_id.clone(),
         timeout_ms: openfga.timeout_ms,
-    })?;
+    })
+    .context("build OpenFGA client")
+}
+
+fn start_authz_outbox_poller(
+    pool: &PgPool,
+    fga_client: moa_authz::FgaClient,
+) -> moa_authz::PollerHandle {
     let outbox_poller =
         moa_authz::OutboxPoller::new(pool.clone(), fga_client, moa_authz::PollerConfig::default());
     let poller_handle = outbox_poller.spawn();
     tracing::info!("authz outbox poller started");
-    Ok(poller_handle)
+    poller_handle
 }
 
 #[derive(Clone)]
