@@ -147,6 +147,8 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 
 ADR-0002 is the canonical decision record for MOA's identity,
 authorization, naming, and security-event audit posture.
+The implementation crates are grouped under `crates/moa-auth/` as a namespace
+folder while preserving package names and Rust imports.
 
 ### Identity
 
@@ -251,11 +253,12 @@ and replay resistance on the verify path.
 | `moa-lineage/citation` (`moa-lineage-citation`) | Citation/provenance adapters |
 | `moa-lineage/cold` (`moa-lineage-cold`) | Cold lineage export and partition support |
 | `moa-lineage/audit` (`moa-lineage-audit`) | Compliance audit hashes, Merkle roots, signing, DSAR support |
-| `moa-authz-schema` | Planned, Phase 1: typed FGA tuple keys and schema v1 constants |
-| `moa-fga-bootstrap` | Planned, Phase 1: idempotent OpenFGA store and model bootstrap binary |
-| `moa-authz` | Planned, Phase 1: FGA client, transactional outbox, and outbox poller |
-| `moa-edge` | Planned, Phase 1: public HTTP edge for token validation and identity header injection |
-| `moa-auth-providers-auth0` | Optional Auth0 and generic OIDC implementations gated by the `auth0` Cargo feature |
+| `moa-auth/authz-schema` (`moa-authz-schema`) | Typed FGA tuple keys and schema constants |
+| `moa-auth/fga-bootstrap` (`moa-fga-bootstrap`) | Idempotent OpenFGA store and model bootstrap binary |
+| `moa-auth/authz` (`moa-authz`) | FGA client, transactional outbox, and outbox poller |
+| `moa-edge` | Public HTTP edge for token validation and identity header injection |
+| `moa-auth/providers` (`moa-auth-providers`) | Local API keys, builtin approvals, null token vault, and provider bundle construction |
+| `moa-auth/auth0` (`moa-auth-providers-auth0`) | Optional Auth0 and generic OIDC implementations gated by the `auth0` Cargo feature |
 | `moa-ocsf` | OCSF v1.3 security-event types, emission helpers, and per-tenant signing |
 | `moa-hands` | Tool routing and hand providers |
 | `moa-providers` | LLM and embedding providers |

@@ -14,12 +14,12 @@ members = [
     "crates/moa-lineage/citation",
     "crates/moa-lineage/cold",
     "crates/moa-lineage/audit",
-    "crates/moa-authz-schema",
-    "crates/moa-authz",
+    "crates/moa-auth/authz-schema",
+    "crates/moa-auth/authz",
     "crates/moa-ocsf",
-    "crates/moa-auth-providers",
-    "crates/moa-auth-providers-auth0",
-    "crates/moa-fga-bootstrap",
+    "crates/moa-auth/providers",
+    "crates/moa-auth/auth0",
+    "crates/moa-auth/fga-bootstrap",
     "crates/moa-edge",
     "crates/moa-hands",
     "crates/moa-providers",
@@ -50,11 +50,11 @@ default-members = [
     "crates/moa-lineage/citation",
     "crates/moa-lineage/cold",
     "crates/moa-lineage/audit",
-    "crates/moa-authz-schema",
-    "crates/moa-authz",
+    "crates/moa-auth/authz-schema",
+    "crates/moa-auth/authz",
     "crates/moa-ocsf",
-    "crates/moa-auth-providers",
-    "crates/moa-fga-bootstrap",
+    "crates/moa-auth/providers",
+    "crates/moa-auth/fga-bootstrap",
     "crates/moa-edge",
     "crates/moa-hands",
     "crates/moa-providers",
@@ -75,10 +75,10 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-moa-authz = { path = "crates/moa-authz" }
-moa-authz-schema = { path = "crates/moa-authz-schema" }
+moa-authz = { path = "crates/moa-auth/authz" }
+moa-authz-schema = { path = "crates/moa-auth/authz-schema" }
 moa-ocsf = { path = "crates/moa-ocsf" }
-moa-auth-providers = { path = "crates/moa-auth-providers" }
+moa-auth-providers = { path = "crates/moa-auth/providers" }
 moa-core = { path = "crates/moa-core" }
 moa-test-support = { path = "crates/moa-test-support" }
 anyhow = "1"
