@@ -30,42 +30,54 @@ auditability.
 
 ---
 
-## 2. System Diagram
+## 2. System Sequence Diagram
 
-```text
-Clients
-  CLI / daemon
-  REST and gateway surfaces
-  Telegram / Slack / Discord adapters
-        |
-        v
-Runtime boundary
-  Public edge: moa-edge
-  Cloud/dev runtime: moa-orchestrator-bin Restate handler service
-        |
-        v
-Durable orchestration
-  Session VO       -> user session actor
-  SubAgent VO      -> delegated worker actor
-  Workspace VO     -> workspace coordination
-  IngestionVO      -> durable graph-memory ingestion
-  Services         -> SessionStore, LLMGateway, ToolExecutor,
-                      IntentManager, WorkspaceStore, Health
-  Workflows        -> Consolidate, IntentDiscovery
-        |
-        v
-Brain and execution
-  context pipeline -> provider router -> Anthropic / OpenAI / Gemini
-  ToolRouter       -> built-ins / local / Docker / Daytona / E2B / MCP
-        |
-        v
-Postgres / Neon
-  sessions, events, pending_signals, context_snapshots
-  task_segments, analytics views, skill_resolution_rates
-  graph nodes, graph edges, sidecar indexes, changelog, pgvector
-  tenant_intents, global_intent_catalog, learning_log
-  analytics.turn_lineage, analytics.scores, compliance audit tables
-  authz_outbox, api_keys, users, agents, security_events
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as CLI / REST / Gateway / Adapters
+    participant Edge as moa-edge
+    participant Auth as moa-auth/providers
+    participant Restate as Restate ingress
+    participant Session as Session VO
+    participant Authz as moa-auth/authz
+    participant FGA as OpenFGA
+    participant Brain as moa-brain
+    participant LLM as Model providers
+    participant Tools as ToolRouter / moa-hands / MCP
+    participant DB as Postgres / Neon
+    participant Audit as moa-ocsf / audit-shipper
+    participant S3 as Tenant S3 buckets
+
+    Client->>Edge: Request with API key or Auth0/OIDC bearer
+    Edge->>Auth: authenticate(credential)
+    Auth->>DB: Read api_keys, auth0_user_map, users, linked_connections
+    Auth-->>Edge: Identity
+    Edge->>Audit: emit authn security event
+    Edge->>Restate: Forward with X-Moa-* identity headers
+    Restate->>Session: Invoke durable handler
+    Session->>DB: Append session event / load state
+    Session->>Authz: require_authz(identity, object, relation)
+    Authz->>FGA: Check subject relation object
+    Authz->>Audit: emit deny or configured allow decision
+    Authz-->>Session: Allowed or forbidden
+
+    alt allowed request
+        Session->>Brain: Prepare turn
+        Brain->>DB: Load context, memory, skills, history
+        Brain->>LLM: Completion / stream
+        LLM-->>Brain: Model events
+        Brain->>Tools: Execute approved tool calls
+        Tools->>DB: Persist tool/session/memory effects
+        Tools-->>Brain: Tool results
+        Brain->>DB: Persist response, lineage, analytics
+        Session-->>Client: Stream or return response
+    else forbidden request
+        Session-->>Client: Forbidden
+    end
+
+    Audit->>DB: Insert signed security_events rows
+    Audit-->>S3: Ship gzipped OCSF batches asynchronously
 ```
 
 ---
@@ -206,27 +218,46 @@ The Docker image builds `moa-orchestrator-bin` and installs it as
 
 ## 7. Turn Flow
 
-```text
-User message
-  -> gateway or CLI normalizes input
-  -> Session VO appends UserMessage
-  -> context pipeline runs
-       1 identity
-       2 instructions
-       3 tools
-       4 skills
-       5 query_rewrite
-       6 memory
-       7 history
-       8 runtime_context
-       9 compactor
-      10 cache
-  -> provider router selects model for the task
-  -> LLM response streams through the harness
-  -> tool calls route through ToolExecutor / ToolRouter
-  -> approvals pause durably until a user/admin decision arrives
-  -> events, tool outputs, lineage, metrics, and segment counters persist
-  -> resolution scoring and learning entries update tenant signals
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Client as Gateway / CLI
+    participant Session as Session VO
+    participant Store as moa-session / Postgres
+    participant Pipeline as Context pipeline
+    participant Brain as moa-brain
+    participant LLM as Provider router / LLM
+    participant Approval as AsyncAuthzProvider
+    participant Tools as ToolExecutor / ToolRouter
+    participant Learning as Segments / scoring / learning
+
+    User->>Client: User message
+    Client->>Session: Normalized turn input
+    Session->>Store: Append UserMessage
+    Session->>Pipeline: Build turn context
+    Pipeline->>Store: Load identity, tools, skills, memory, history
+    Pipeline-->>Session: Compiled request with cache hints
+    Session->>Brain: Run turn
+    Brain->>Learning: Open or continue task segment
+    Brain->>LLM: Select model and stream completion
+    LLM-->>Brain: Text deltas and tool calls
+
+    loop for each tool call
+        Brain->>Approval: Request approval when policy requires it
+        Approval-->>Brain: Approved, denied, or timeout
+        alt approved
+            Brain->>Tools: Execute tool call
+            Tools->>Store: Persist tool effects and observations
+            Tools-->>Brain: Tool result
+        else denied or timeout
+            Brain->>Store: Persist approval outcome
+        end
+    end
+
+    Brain->>Store: Persist assistant response, events, lineage, metrics
+    Brain->>Learning: Score resolution and update tenant signals
+    Session-->>Client: Stream or return response
 ```
 
 Replay is the recovery model. If the runtime restarts, durable state is rebuilt
