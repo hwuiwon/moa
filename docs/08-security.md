@@ -27,6 +27,12 @@ operator wants managed identity. Authorization uses OpenFGA by default. See
 architectural rationale and crate naming. OCSF security-event audit operations
 are documented in [OCSF Security Audit](operations/ocsf-audit.md).
 
+The auth implementation crates are grouped under `crates/moa-auth/` as a
+namespace folder: `authz-schema`, `authz`, `providers`, `auth0`, and
+`fga-bootstrap`. Package names remain stable (`moa-authz-schema`, `moa-authz`,
+`moa-auth-providers`, `moa-auth-providers-auth0`, and
+`moa-fga-bootstrap`), so downstream imports do not change.
+
 ---
 
 ## Credential isolation

@@ -1,1 +1,0 @@
-{"nodes": [{"id": "lib", "label": "lib.rs", "file_type": "code", "source_file": "crates/moa-authz-schema/src/lib.rs", "source_location": "L1"}], "edges": [{"source": "lib", "target": "tuple", "relation": "imports_from", "confidence": "EXTRACTED", "source_file": "crates/moa-authz-schema/src/lib.rs", "source_location": "L12", "weight": 1.0}]}

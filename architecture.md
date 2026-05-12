@@ -15,8 +15,8 @@ from the CLI, not as a separate consumer product.
 
 MOA has four durable boundaries:
 
-1. **Runtime boundary:** clients talk to either the local Tokio orchestrator or
-   the cloud Restate handler service.
+1. **Runtime boundary:** clients talk through the public edge or thin clients
+   into the Restate handler service.
 2. **Brain boundary:** `moa-brain` compiles context, calls model providers, runs
    approval/tool loops, scores task resolution, and emits lineage.
 3. **Execution boundary:** `moa-hands` routes built-in tools, local/Docker
@@ -30,41 +30,54 @@ auditability.
 
 ---
 
-## 2. System Diagram
+## 2. System Sequence Diagram
 
-```text
-Clients
-  CLI / daemon
-  REST and gateway surfaces
-  Telegram / Slack / Discord adapters
-        |
-        v
-Runtime boundary
-  Local: moa-orchestrator-local
-  Cloud: moa-orchestrator-bin Restate handler service
-        |
-        v
-Durable orchestration
-  Session VO       -> user session actor
-  SubAgent VO      -> delegated worker actor
-  Workspace VO     -> workspace coordination
-  IngestionVO      -> durable graph-memory ingestion
-  Services         -> SessionStore, LLMGateway, ToolExecutor,
-                      IntentManager, WorkspaceStore, Health
-  Workflows        -> Consolidate, IntentDiscovery
-        |
-        v
-Brain and execution
-  context pipeline -> provider router -> Anthropic / OpenAI / Gemini
-  ToolRouter       -> built-ins / local / Docker / Daytona / E2B / MCP
-        |
-        v
-Postgres / Neon
-  sessions, events, pending_signals, context_snapshots
-  task_segments, analytics views, skill_resolution_rates
-  graph nodes, graph edges, sidecar indexes, changelog, pgvector
-  tenant_intents, global_intent_catalog, learning_log
-  analytics.turn_lineage, analytics.scores, compliance audit tables
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as CLI / REST / Gateway / Adapters
+    participant Edge as moa-edge
+    participant Auth as moa-auth/providers
+    participant Restate as Restate ingress
+    participant Session as Session VO
+    participant Authz as moa-auth/authz
+    participant FGA as OpenFGA
+    participant Brain as moa-brain
+    participant LLM as Model providers
+    participant Tools as ToolRouter / moa-hands / MCP
+    participant DB as Postgres / Neon
+    participant Audit as moa-ocsf / audit-shipper
+    participant S3 as Tenant S3 buckets
+
+    Client->>Edge: Request with API key or Auth0/OIDC bearer
+    Edge->>Auth: authenticate(credential)
+    Auth->>DB: Read api_keys, auth0_user_map, users, linked_connections
+    Auth-->>Edge: Identity
+    Edge->>Audit: emit authn security event
+    Edge->>Restate: Forward with X-Moa-* identity headers
+    Restate->>Session: Invoke durable handler
+    Session->>DB: Append session event / load state
+    Session->>Authz: require_authz(identity, object, relation)
+    Authz->>FGA: Check subject relation object
+    Authz->>Audit: emit deny or configured allow decision
+    Authz-->>Session: Allowed or forbidden
+
+    alt allowed request
+        Session->>Brain: Prepare turn
+        Brain->>DB: Load context, memory, skills, history
+        Brain->>LLM: Completion / stream
+        LLM-->>Brain: Model events
+        Brain->>Tools: Execute approved tool calls
+        Tools->>DB: Persist tool/session/memory effects
+        Tools-->>Brain: Tool results
+        Brain->>DB: Persist response, lineage, analytics
+        Session-->>Client: Stream or return response
+    else forbidden request
+        Session-->>Client: Forbidden
+    end
+
+    Audit->>DB: Insert signed security_events rows
+    Audit-->>S3: Ship gzipped OCSF batches asynchronously
 ```
 
 ---
@@ -103,7 +116,7 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 
 | Trait | Responsibility | Current implementations |
 |---|---|---|
-| `BrainOrchestrator` | Start, resume, signal, list, and observe sessions | `LocalOrchestrator`; Restate objects/services |
+| `BrainOrchestrator` | Start, resume, signal, list, and observe sessions | Restate objects/services |
 | `SessionStore` | Append-only event log, sessions, signals, snapshots, task segments, analytics, learning | `PostgresSessionStore` |
 | `BlobStore` | Claim-check storage for large session artifacts | `FileBlobStore` |
 | `BranchManager` | Optional database checkpoint branches | `NeonBranchManager` |
@@ -114,6 +127,9 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 | `PlatformAdapter` | Gateway normalization/rendering | Telegram, Slack, Discord |
 | `ContextProcessor` | Ordered context-pipeline stage | identity, instructions, tools, skills, query rewrite, memory, history, runtime context, compactor, cache |
 | `CredentialVault` | Secret storage abstraction | encrypted local file vault, environment-backed MCP vault |
+| `AuthProvider` | Resolve API keys or bearer JWTs to MOA identities | local API keys, optional Auth0/OIDC |
+| `TokenVaultProvider` | Retrieve third-party OAuth tokens for linked user connections | null provider, optional Auth0 Token Vault |
+| `AsyncAuthzProvider` | Request durable human approvals | builtin approvals, optional Auth0 CIBA |
 | `LineageHandle` | Transport-neutral lineage capture | null handle, async sink/OTel bridge |
 
 ---
@@ -125,20 +141,26 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 | `moa-core` | Shared types, traits, config, events, telemetry, analytics DTOs |
 | `moa-brain` | Context pipeline, retrieval, turn harness, approvals, resolution scoring, lineage emission |
 | `moa-session` | Postgres session store, event log, snapshots, task segments, intents, learning log, analytics |
-| `moa-memory-graph` | Graph memory, AGE projection helpers, sidecars, RLS, changelog |
-| `moa-memory-ingest` | Slow-path ingestion and fast memory write APIs |
-| `moa-memory-pii` | PII classification and memory privacy helpers |
-| `moa-memory-vector` | pgvector and Turbopuffer vector stores |
+| `moa-memory/graph` (`moa-memory-graph`) | Graph memory, AGE projection helpers, sidecars, RLS, changelog |
+| `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path ingestion and fast memory write APIs |
+| `moa-memory/pii` (`moa-memory-pii`) | PII classification and memory privacy helpers |
+| `moa-memory/vector` (`moa-memory-vector`) | pgvector and Turbopuffer vector stores |
 | `moa-lineage-core` | Lineage record types and score records |
 | `moa-lineage-sink` | Async lineage sink writers |
 | `moa-lineage-otel` | OTel/OpenInference bridge |
 | `moa-lineage-citation` | Citation/provenance adapters |
 | `moa-lineage-cold` | Cold storage partition/export support |
 | `moa-lineage-audit` | Compliance audit hashes, roots, signing, and DSAR support |
+| `moa-auth/authz-schema` (`moa-authz-schema`) | Typed OpenFGA tuple keys and model constants |
+| `moa-auth/authz` (`moa-authz`) | OpenFGA client, authz checks, transactional outbox, and poller |
+| `moa-auth/providers` (`moa-auth-providers`) | Local API keys, builtin approvals, null token vault, and provider bundle |
+| `moa-auth/auth0` (`moa-auth-providers-auth0`) | Optional Auth0/OIDC, Token Vault, CIBA, JWKS, and group sync |
+| `moa-auth/fga-bootstrap` (`moa-fga-bootstrap`) | OpenFGA store and model bootstrap binary |
+| `moa-edge` | Public HTTP edge for authn, identity headers, and Auth0 webhooks |
+| `moa-ocsf` | OCSF v1.3 security-event types, signing, and persistence |
 | `moa-hands` | Tool router and execution adapters |
 | `moa-providers` | Provider core and vendor adapters |
 | `moa-orchestrator` | Restate objects, services, workflows, and `moa-orchestrator-bin` |
-| `moa-orchestrator-local` | Local Tokio-task orchestrator |
 | `moa-gateway` | Messaging adapters and platform renderers |
 | `moa-runtime` | Shared runtime assembly |
 | `moa-cli` | `moa` CLI and local daemon |
@@ -156,17 +178,18 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 ### Local Development And Operator Mode
 
 ```text
-CLI / daemon
-  -> moa-orchestrator-local
+CLI / daemon / moa-edge
+  -> Restate dev stack
+  -> moa-orchestrator-bin
   -> moa-brain
-  -> Postgres dev stack on localhost:10040
+  -> Postgres + OpenFGA dev stack
   -> local/Docker hands and configured providers
 ```
 
-Local development uses `docker-compose.yml` for Postgres 17 with AGE, pgvector,
-pgaudit, the PII service, and the audit shipper. `~/.moa/config.toml` plus
-`MOA__...` overrides configure the CLI/runtime. This is the fastest way to test
-the enterprise runtime without Restate.
+Local development uses `make dev` for Postgres 17 with AGE, pgvector, pgaudit,
+OpenFGA, Restate, the PII service, and the audit shipper. `~/.moa/config.toml`
+plus `MOA__...` overrides configure the CLI/runtime. This is the fastest way to
+test the enterprise runtime without a managed cloud control plane.
 
 ### Cloud Runtime
 
@@ -195,27 +218,46 @@ The Docker image builds `moa-orchestrator-bin` and installs it as
 
 ## 7. Turn Flow
 
-```text
-User message
-  -> gateway or CLI normalizes input
-  -> Session VO / LocalOrchestrator appends UserMessage
-  -> context pipeline runs
-       1 identity
-       2 instructions
-       3 tools
-       4 skills
-       5 query_rewrite
-       6 memory
-       7 history
-       8 runtime_context
-       9 compactor
-      10 cache
-  -> provider router selects model for the task
-  -> LLM response streams through the harness
-  -> tool calls route through ToolExecutor / ToolRouter
-  -> approvals pause durably until a user/admin decision arrives
-  -> events, tool outputs, lineage, metrics, and segment counters persist
-  -> resolution scoring and learning entries update tenant signals
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Client as Gateway / CLI
+    participant Session as Session VO
+    participant Store as moa-session / Postgres
+    participant Pipeline as Context pipeline
+    participant Brain as moa-brain
+    participant LLM as Provider router / LLM
+    participant Approval as AsyncAuthzProvider
+    participant Tools as ToolExecutor / ToolRouter
+    participant Learning as Segments / scoring / learning
+
+    User->>Client: User message
+    Client->>Session: Normalized turn input
+    Session->>Store: Append UserMessage
+    Session->>Pipeline: Build turn context
+    Pipeline->>Store: Load identity, tools, skills, memory, history
+    Pipeline-->>Session: Compiled request with cache hints
+    Session->>Brain: Run turn
+    Brain->>Learning: Open or continue task segment
+    Brain->>LLM: Select model and stream completion
+    LLM-->>Brain: Text deltas and tool calls
+
+    loop for each tool call
+        Brain->>Approval: Request approval when policy requires it
+        Approval-->>Brain: Approved, denied, or timeout
+        alt approved
+            Brain->>Tools: Execute tool call
+            Tools->>Store: Persist tool effects and observations
+            Tools-->>Brain: Tool result
+        else denied or timeout
+            Brain->>Store: Persist approval outcome
+        end
+    end
+
+    Brain->>Store: Persist assistant response, events, lineage, metrics
+    Brain->>Learning: Score resolution and update tenant signals
+    Session-->>Client: Stream or return response
 ```
 
 Replay is the recovery model. If the runtime restarts, durable state is rebuilt
@@ -233,6 +275,9 @@ from Postgres events plus Restate journals.
 | Vector retrieval | `moa-memory-vector` | pgvector default; Turbopuffer promotion path |
 | Memory ingestion | `moa-memory-ingest` | Slow-path ingestion and deterministic fast writes |
 | Privacy | `moa-memory-pii` | PII classification before memory writes |
+| Identity | `moa-auth/providers`, optional `moa-auth/auth0`, `moa-edge` | API keys by default; Auth0/OIDC behind the `auth0` feature |
+| Authorization | `moa-auth/authz`, `moa-auth/authz-schema` | OpenFGA checks and transactional tuple outbox |
+| Security events | `moa-ocsf` | OCSF v1.3 events in Postgres, shipped to tenant audit buckets |
 | Lineage | `moa-lineage-*` | Hot lineage, scores, OTel bridge, cold export, audit tier |
 | Orchestration | Restate | VO/workflow state and invocation journals only |
 
@@ -243,6 +288,13 @@ from Postgres events plus Restate journals.
 Default enterprise posture:
 
 - Product-visible state is tenant/workspace scoped in Postgres.
+- API keys are the default identity mechanism; Auth0/OIDC is opt-in.
+- `moa-edge` is the public trust boundary and injects `X-Moa-*` identity
+  headers for the orchestrator.
+- OpenFGA is the default authorization engine; handlers call explicit
+  `require_authz` helpers.
+- OCSF security events are signed per tenant and written synchronously before
+  shipping to tenant audit buckets.
 - Tools are routed through explicit schemas and policies.
 - Risky write/execute operations request approval.
 - MCP credentials are proxied; secrets do not enter LLM-generated code.
@@ -263,6 +315,7 @@ See [`docs/08-security.md`](docs/08-security.md) and
 | Event replay mismatch | [`docs/11-event-replay-runbook.md`](docs/11-event-replay-runbook.md) |
 | Tool approval or sandbox issue | [`docs/06-hands-and-mcp.md`](docs/06-hands-and-mcp.md), [`docs/08-security.md`](docs/08-security.md) |
 | Context cost/cache regression | [`docs/07-context-pipeline.md`](docs/07-context-pipeline.md), [`docs/prompt-caching-architecture.md`](docs/prompt-caching-architecture.md) |
+| Authn/authz, SSO, SCIM, or audit issue | [`docs/01-architecture-overview.md`](docs/01-architecture-overview.md), [`docs/08-security.md`](docs/08-security.md), [`docs/operations/ocsf-audit.md`](docs/operations/ocsf-audit.md) |
 | Memory retrieval or ingestion issue | [`docs/04-memory-architecture.md`](docs/04-memory-architecture.md) |
 | Tenant learning or intent issue | [`docs/14-multi-tenancy-and-learning.md`](docs/14-multi-tenancy-and-learning.md) |
 | Lineage/audit issue | [`docs/ops/audit-runbook.md`](docs/ops/audit-runbook.md), [`docs/operations/subject-access-runbook.md`](docs/operations/subject-access-runbook.md) |

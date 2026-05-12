@@ -34,6 +34,11 @@ managed FGA) so that self-hosted single-tenant deployments work cleanly.
 | P1.9 | SCIM v2 endpoints + deactivation cascade | SCIM in orchestrator, cascading cleanup |
 | P1.10 | OCSF v1.3 audit + per-tenant buckets + Object Lock | New `moa-ocsf` crate, extends `services/audit-shipper` |
 
+Auth implementation crates now live under the `crates/moa-auth/` namespace
+folder while keeping their package names unchanged. For example,
+`moa-authz-schema` lives at `crates/moa-auth/authz-schema`, and
+`moa-auth-providers-auth0` lives at `crates/moa-auth/auth0`.
+
 ## Key decisions locked in for all prompts
 
 These are the architectural invariants. They do not get re-litigated inside

@@ -68,6 +68,21 @@ does not define its own privacy class enum.
 Connector stubs are intentionally absent. External connectors are deferred and
 should not be reintroduced as placeholders.
 
+## `moa-auth`
+
+`moa-auth` is a namespace folder, not a parent crate. Package names and import
+paths remain stable while the auth implementation crates live together:
+
+- `moa-auth/authz-schema` owns typed OpenFGA object, relation, tuple, and
+  model-version constants.
+- `moa-auth/authz` owns the OpenFGA client, authorization checks,
+  transactional outbox, and outbox poller.
+- `moa-auth/providers` owns local API-key auth, builtin approvals, null token
+  vault, and provider bundle construction.
+- `moa-auth/auth0` owns optional Auth0 and generic OIDC provider
+  implementations behind the `auth0` feature.
+- `moa-auth/fga-bootstrap` owns the OpenFGA bootstrap binary.
+
 ## `moa-brain`
 
 `moa-brain` owns retrieval and context compilation.
