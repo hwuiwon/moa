@@ -610,7 +610,7 @@ mod tests {
             Ok(0)
         }
 
-        async fn delete_session(&self, _session_id: SessionId) -> Result<()> {
+        async fn delete_empty_session(&self, _session_id: SessionId) -> Result<()> {
             Ok(())
         }
     }

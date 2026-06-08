@@ -334,11 +334,11 @@ fn header_trust_mode_from_env() -> HeaderTrustMode {
         Some(other) => {
             tracing::warn!(
                 value = other,
-                "unknown MOA__AUTH__HEADER_TRUST value; using lenient mode"
+                "unknown MOA__AUTH__HEADER_TRUST value; using strict mode"
             );
-            HeaderTrustMode::Lenient
+            HeaderTrustMode::Strict
         }
-        None => HeaderTrustMode::Lenient,
+        None => HeaderTrustMode::Strict,
     }
 }
 

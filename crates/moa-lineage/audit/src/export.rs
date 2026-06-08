@@ -22,6 +22,9 @@ use crate::error::{AuditError, Result};
 use crate::signing::SigningKey;
 
 const PHI_REDACTION_TOKEN: &str = "[redacted:phi]";
+const CLASSIFIED_PHI_VALUE_KEYS: &[&str] = &["field_value", "raw", "text", "value"];
+const LINEAGE_PHI_FIELD_KEYS: &[&str] =
+    &["answer_text", "cited_text", "query_original", "raw_text"];
 
 /// One Merkle root window included in a DSAR bundle.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -242,15 +245,12 @@ fn redact_phi_fields(value: &mut Value) {
                         .and_then(Value::as_str)
                         .is_some_and(|value| value.eq_ignore_ascii_case("phi"))
                 });
-            if classified_phi {
-                for key in ["value", "text", "raw", "field_value"] {
-                    if let Some(field) = map.get_mut(key) {
-                        *field = Value::String(PHI_REDACTION_TOKEN.to_string());
-                    }
+            for (key, child) in map.iter_mut() {
+                if should_redact_phi_field(key, classified_phi) {
+                    *child = Value::String(PHI_REDACTION_TOKEN.to_string());
+                } else {
+                    redact_phi_fields(child);
                 }
-            }
-            for child in map.values_mut() {
-                redact_phi_fields(child);
             }
         }
         Value::Array(items) => {
@@ -262,11 +262,17 @@ fn redact_phi_fields(value: &mut Value) {
     }
 }
 
+fn should_redact_phi_field(key: &str, classified_phi: bool) -> bool {
+    let key = key.to_ascii_lowercase();
+    LINEAGE_PHI_FIELD_KEYS.contains(&key.as_str())
+        || (classified_phi && CLASSIFIED_PHI_VALUE_KEYS.contains(&key.as_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::NamedTempFile;
 
-    use crate::export::DsarExporter;
+    use crate::export::{DsarExporter, ExportOptions};
     use crate::signing::SigningKey;
 
     #[tokio::test]
@@ -287,5 +293,49 @@ mod tests {
 
         assert_eq!(bundle.record_count, 1);
         assert!(std::fs::metadata(file.path()).expect("zip metadata").len() > 0);
+    }
+
+    #[tokio::test]
+    async fn jsonl_export_redacts_lineage_phi_fields_without_class_marker() {
+        let file = NamedTempFile::new().expect("temp file");
+        let key = SigningKey::from_seed("dev", [3_u8; 32]);
+        let exporter = DsarExporter::new(key);
+
+        let export = exporter
+            .export_jsonl_records(
+                "workspace",
+                "user-1",
+                vec![serde_json::json!({
+                    "user_id": "user-1",
+                    "query_original": "patient alice@example.com asked about SSN 123-45-6789",
+                    "answer_text": "diagnosis details",
+                    "citations": [
+                        {
+                            "cited_text": "lab result with PHI",
+                            "source": "chart"
+                        }
+                    ],
+                    "metadata": {
+                        "privacy_class": "none",
+                        "text": "non-PHI metadata text"
+                    }
+                })],
+                file.path(),
+                ExportOptions {
+                    redact_phi: true,
+                    exported_at: None,
+                },
+            )
+            .await
+            .expect("jsonl export");
+
+        let exported =
+            std::fs::read_to_string(&export.jsonl_path).expect("exported jsonl should be readable");
+        assert!(exported.contains("\"query_original\":\"[redacted:phi]\""));
+        assert!(exported.contains("\"answer_text\":\"[redacted:phi]\""));
+        assert!(exported.contains("\"cited_text\":\"[redacted:phi]\""));
+        assert!(exported.contains("non-PHI metadata text"));
+        assert!(!exported.contains("alice@example.com"));
+        assert!(!exported.contains("123-45-6789"));
     }
 }

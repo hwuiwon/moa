@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use moa_core::{
     ApprovalDecision, ApprovalPrompt, Event, PolicyAction, SessionId, SessionMeta, ToolCallId,
     ToolInvocation, ToolOutput, record_approval_wait, record_turn_event_persist_duration,
@@ -114,6 +114,7 @@ pub(crate) async fn handle_approval_gate<A: AgentAdapter>(
         _ => meta.user_id.to_string(),
     };
 
+    let decided_at = durable_utc_now(ctx).await?;
     append_session_event(
         ctx,
         session_id,
@@ -122,7 +123,7 @@ pub(crate) async fn handle_approval_gate<A: AgentAdapter>(
             sub_agent_id,
             decision: decision.clone(),
             decided_by,
-            decided_at: Utc::now(),
+            decided_at,
         },
     )
     .await?;
@@ -212,6 +213,13 @@ fn parse_awakeable_decision(raw: &str) -> Result<ApprovalDecision, TerminalError
             "failed to deserialize approval decision from awakeable: {error}"
         ))
     })
+}
+
+async fn durable_utc_now(ctx: &ObjectContext<'_>) -> Result<DateTime<Utc>, HandlerError> {
+    Ok(ctx
+        .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
+        .await?
+        .into_inner())
 }
 
 #[cfg(test)]

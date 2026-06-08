@@ -13,6 +13,7 @@ use ed25519_dalek::{Signature, Signer as DalekSigner, SigningKey, Verifier, Veri
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use moa_core::{MoaConfig, ScopeContext, ScopedConn, UserId, WorkspaceId};
+use moa_lineage_audit::PiiVault;
 use moa_memory_graph::{
     AgeGraphStore, ChangelogRecord, write::hard_purge_with_audit, write_and_bump,
 };
@@ -32,6 +33,8 @@ pub(super) const APPROVAL_PUBLIC_KEY_FALLBACK_ENV: &str = "MOA_PRIVACY_APPROVAL_
 pub(super) const EXPORT_SIGNING_KEY_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX";
 pub(super) const EXPORT_SIGNING_KEY_FALLBACK_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY";
 pub(super) const EXPORT_SIGNING_KEY_ID_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_ID";
+pub(super) const PII_VAULT_SECRET_ENV: &str = "MOA_PII_VAULT_WORKSPACE_SECRET";
+pub(super) const PII_VAULT_SECRET_HEX_ENV: &str = "MOA_PII_VAULT_WORKSPACE_SECRET_HEX";
 pub(super) const ERASE_CHUNK_SIZE: usize = 1000;
 pub(super) const ERASE_SAMPLE_LIMIT: usize = 20;
 

@@ -1,6 +1,7 @@
 //! Restate handlers for the session-store facade.
 
 use super::*;
+use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
@@ -65,6 +66,7 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "get_events");
         let store = self.store.clone();
         let request = request.into_inner();
+        authorize_session_read(&ctx, request.session_id).await?;
         let service = Self { store };
 
         Ok(ctx
@@ -82,6 +84,7 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "get_session");
         let store = self.store.clone();
         let session_id = session_id.into_inner();
+        authorize_session_read(&ctx, session_id).await?;
         let service = Self { store };
 
         Ok(ctx
@@ -394,4 +397,21 @@ impl RestateSessionStore for SessionStoreImpl {
             .name("record_segment_turn_usage")
             .await?)
     }
+}
+
+async fn authorize_session_read(
+    ctx: &impl RequestHeaders,
+    session_id: SessionId,
+) -> Result<(), HandlerError> {
+    let identity = require_identity(ctx)?;
+    let fga = require_fga_client()?;
+    require_authz_with_delegation(
+        &fga,
+        &identity,
+        ObjectType::Session,
+        session_id,
+        Relation::Participant,
+    )
+    .await
+    .map_err(translate_authz_error)
 }

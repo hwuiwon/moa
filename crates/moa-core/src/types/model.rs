@@ -28,7 +28,29 @@ pub struct TokenPricing {
     /// Output token price per million tokens.
     pub output_per_mtok: f64,
     /// Cached input token price per million tokens.
+    #[serde(default)]
     pub cached_input_per_mtok: Option<f64>,
+    /// Five-minute prompt cache creation price per million tokens.
+    #[serde(default)]
+    pub cache_write_5m_per_mtok: Option<f64>,
+    /// One-hour prompt cache creation price per million tokens.
+    #[serde(default)]
+    pub cache_write_1h_per_mtok: Option<f64>,
+}
+
+impl TokenPricing {
+    /// Returns the default prompt cache creation rate per million tokens.
+    #[must_use]
+    pub fn cache_write_per_mtok(&self) -> f64 {
+        self.cache_write_5m_per_mtok.unwrap_or(self.input_per_mtok)
+    }
+
+    /// Returns the one-hour prompt cache creation rate per million tokens.
+    #[must_use]
+    pub fn cache_write_one_hour_per_mtok(&self) -> f64 {
+        self.cache_write_1h_per_mtok
+            .unwrap_or_else(|| self.cache_write_per_mtok())
+    }
 }
 
 /// One tool implemented natively by the model provider instead of MOA.
@@ -84,6 +106,8 @@ impl Default for ModelCapabilities {
                 input_per_mtok: 0.0,
                 output_per_mtok: 0.0,
                 cached_input_per_mtok: None,
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
             },
             native_tools: Vec::new(),
         }

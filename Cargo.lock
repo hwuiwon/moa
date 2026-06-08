@@ -4174,6 +4174,7 @@ dependencies = [
  "hmac",
  "moa-lineage-core",
  "object_store",
+ "rand 0.8.5",
  "serde",
  "serde_canonical_json",
  "serde_json",

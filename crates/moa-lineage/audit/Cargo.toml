@@ -12,6 +12,7 @@ ed25519-dalek = { workspace = true, features = ["pem", "pkcs8"] }
 async-trait = { workspace = true }
 aes-gcm = "0.10"
 hmac = "0.12"
+rand.workspace = true
 sha2.workspace = true
 zip = "2"
 tokio = { workspace = true, features = ["fs", "rt", "macros", "sync", "time"] }

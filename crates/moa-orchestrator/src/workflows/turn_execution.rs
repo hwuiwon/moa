@@ -34,11 +34,11 @@ use moa_core::{
     ActiveSegment, ApprovalDecision, ApprovalPrompt, CompletionRequest, CompletionResponse,
     DispatchSubAgentInput, Event, EventRange, EventRecord, LearningEntry, MoaError, PolicyAction,
     QueryRewriteResult, ScoringPhase, SegmentId, SessionId, SessionMeta, SessionStatus,
-    SubAgentChildRef, ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput,
-    TurnLatencyCounters, TurnOutcome as CoreTurnOutcome, TurnReplayCounters, record_approval_wait,
-    record_session_error, record_turn_event_persist_duration, record_turn_latency,
-    record_turn_llm_call_duration, record_turn_tool_dispatch_duration, scope_turn_latency_counters,
-    scope_turn_replay_counters,
+    SessionStore as _, SubAgentChildRef, ToolCallContent, ToolCallId, ToolCallRequest,
+    ToolInvocation, ToolOutput, TurnLatencyCounters, TurnOutcome as CoreTurnOutcome,
+    TurnReplayCounters, record_approval_wait, record_session_error,
+    record_turn_event_persist_duration, record_turn_latency, record_turn_llm_call_duration,
+    record_turn_tool_dispatch_duration, scope_turn_latency_counters, scope_turn_replay_counters,
 };
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -50,7 +50,7 @@ use crate::objects::sub_agent::SubAgentClient;
 use crate::services::{
     llm_gateway::LLMGatewayClient,
     session_store::{
-        AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest,
+        AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest,
         GetSegmentBaselineRequest, RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest,
         RestateSessionStoreClient, UpdateSegmentResolutionScoreRequest, UpdateStatusRequest,
     },
@@ -972,13 +972,16 @@ async fn load_session_events(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
 ) -> Result<Vec<EventRecord>, HandlerError> {
+    let store = OrchestratorCtx::current().session_store.clone();
     Ok(ctx
-        .service_client::<RestateSessionStoreClient>()
-        .get_events(Json(GetEventsRequest {
-            session_id,
-            range: EventRange::all(),
-        }))
-        .call()
+        .run(|| async move {
+            store
+                .get_events(session_id, EventRange::all())
+                .await
+                .map(Json::from)
+                .map_err(HandlerError::from)
+        })
+        .name("turn_execution_load_session_events")
         .await?
         .into_inner())
 }
@@ -1227,10 +1230,16 @@ async fn load_session_meta(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
 ) -> Result<SessionMeta, HandlerError> {
+    let store = OrchestratorCtx::current().session_store.clone();
     Ok(ctx
-        .service_client::<RestateSessionStoreClient>()
-        .get_session(Json(session_id))
-        .call()
+        .run(|| async move {
+            store
+                .get_session(session_id)
+                .await
+                .map(Json::from)
+                .map_err(HandlerError::from)
+        })
+        .name("turn_execution_load_session_meta")
         .await?
         .into_inner())
 }

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use moa_core::{ContextProcessor, LLMProvider, LineageHandle, MoaConfig, SessionStore};
+use moa_memory_vector::{EmbedderConstructionRole, build_embedder_from_config};
 
 use super::cache::CacheOptimizer;
 use super::compactor::Compactor;
@@ -128,6 +129,19 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
     } else {
         None
     };
+    let retrieval_embedder = match build_embedder_from_config(
+        config,
+        EmbedderConstructionRole::Retrieval,
+    ) {
+        Ok(embedder) => Some(embedder),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "graph memory vector retrieval disabled because the retrieval embedder could not be constructed"
+            );
+            None
+        }
+    };
 
     let mut stages: Vec<Box<dyn ContextProcessor>> = vec![
         Box::new(IdentityProcessor::default()),
@@ -147,7 +161,7 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
         stages.push(query_rewriter);
     }
     stages.extend([
-        Box::new(GraphMemoryRetriever::new(graph_pool).with_lineage(lineage))
+        Box::new(GraphMemoryRetriever::new(graph_pool, retrieval_embedder).with_lineage(lineage))
             as Box<dyn ContextProcessor>,
         history,
         Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,

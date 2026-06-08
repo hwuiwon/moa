@@ -291,7 +291,7 @@ impl SessionStore for PostgresSessionStore {
     ) -> Result<()> {
         let context_snapshots = self.table_name("context_snapshots");
         let sessions = self.table_name("sessions");
-        sqlx::query(&format!(
+        let affected = sqlx::query(&format!(
             "INSERT INTO {context_snapshots} \
              (session_id, workspace_id, user_id, format_version, last_sequence_num, payload, created_at) \
              SELECT $1, s.workspace_id, s.user_id, $2, $3, $4, $5 \
@@ -311,8 +311,12 @@ impl SessionStore for PostgresSessionStore {
         .bind(Utc::now())
         .execute(&self.pool)
         .await
-        .map_err(map_sqlx_error)?;
+        .map_err(map_sqlx_error)?
+        .rows_affected();
 
+        if affected == 0 {
+            return Err(MoaError::SessionNotFound(session_id));
+        }
         Ok(())
     }
 
@@ -366,7 +370,7 @@ impl SessionStore for PostgresSessionStore {
 
         let pending_signals = self.table_name("pending_signals");
         let sessions = self.table_name("sessions");
-        sqlx::query(&format!(
+        let affected = sqlx::query(&format!(
             "INSERT INTO {pending_signals} \
              (id, session_id, workspace_id, user_id, signal_type, payload, created_at, resolved_at) \
              SELECT $1, $2, s.workspace_id, s.user_id, $3, $4, $5, NULL \
@@ -379,8 +383,12 @@ impl SessionStore for PostgresSessionStore {
         .bind(signal.created_at)
         .execute(&self.pool)
         .await
-        .map_err(map_sqlx_error)?;
+        .map_err(map_sqlx_error)?
+        .rows_affected();
 
+        if affected == 0 {
+            return Err(MoaError::SessionNotFound(session_id));
+        }
         Ok(signal.id)
     }
 
@@ -572,8 +580,8 @@ impl SessionStore for PostgresSessionStore {
             .map_err(|_| MoaError::StorageError("workspace spend exceeded u32 range".to_string()))
     }
 
-    /// Permanently removes a session and its dependent rows.
-    async fn delete_session(&self, session_id: moa_core::SessionId) -> Result<()> {
+    /// Deletes a session only when it has no append-only events.
+    async fn delete_empty_session(&self, session_id: moa_core::SessionId) -> Result<()> {
         let events = self.table_name("events");
         let pending_signals = self.table_name("pending_signals");
         let context_snapshots = self.table_name("context_snapshots");
@@ -581,12 +589,24 @@ impl SessionStore for PostgresSessionStore {
         let sessions = self.table_name("sessions");
 
         let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let event_count = sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT COUNT(*) FROM {events} WHERE session_id = $1"
+        ))
+        .bind(session_id.0)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        if event_count > 0 {
+            return Err(MoaError::Unsupported(format!(
+                "session `{session_id}` has {event_count} append-only event(s); use privacy erase or tombstoning instead"
+            )));
+        }
+
         for sql in [
-            format!("DELETE FROM {events} WHERE session_id = $1"),
             format!("DELETE FROM {pending_signals} WHERE session_id = $1"),
             format!("DELETE FROM {context_snapshots} WHERE session_id = $1"),
             format!("DELETE FROM {task_segments} WHERE session_id = $1"),
-            format!("DELETE FROM {sessions} WHERE id = $1"),
         ] {
             sqlx::query(&sql)
                 .bind(session_id.0)
@@ -594,11 +614,21 @@ impl SessionStore for PostgresSessionStore {
                 .await
                 .map_err(map_sqlx_error)?;
         }
+        let deleted = sqlx::query(&format!("DELETE FROM {sessions} WHERE id = $1"))
+            .bind(session_id.0)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?
+            .rows_affected();
+        if deleted == 0 {
+            return Err(MoaError::SessionNotFound(session_id));
+        }
+
         transaction.commit().await.map_err(map_sqlx_error)?;
         self.refresh_active_session_metric().await?;
 
         if let Err(err) = self.blob_store.delete_session(&session_id).await {
-            tracing::warn!(%err, session_id = %session_id, "blob cleanup failed after session delete");
+            tracing::warn!(%err, session_id = %session_id, "blob cleanup failed after empty session delete");
         }
 
         Ok(())

@@ -7,7 +7,7 @@ use arrow::array::{
     ArrayRef, FixedSizeBinaryBuilder, Int16Array, RecordBatch, StringArray,
     TimestampMicrosecondArray,
 };
-use chrono::{Datelike, Utc};
+use chrono::{Datelike, NaiveDate, Utc};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutPayload};
 use parquet::arrow::ArrowWriter;
@@ -27,11 +27,17 @@ CREATE TABLE IF NOT EXISTS analytics.lineage_export_progress (
     workspace_id  TEXT        NOT NULL,
     day           DATE        NOT NULL,
     last_ts       TIMESTAMPTZ NOT NULL,
+    last_turn_id  UUID,
     rows_exported BIGINT      NOT NULL,
     parquet_uri   TEXT        NOT NULL,
     PRIMARY KEY (workspace_id, day)
 );
+
+ALTER TABLE analytics.lineage_export_progress
+    ADD COLUMN IF NOT EXISTS last_turn_id UUID;
 "#;
+
+const EXPORT_BATCH_LIMIT: i64 = 10_000;
 
 /// Cold-tier exporter configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +91,11 @@ pub struct ColdTierExporter {
     config: ColdTierConfig,
 }
 
+struct ExportPartition {
+    workspace_id: String,
+    day: NaiveDate,
+}
+
 impl ColdTierExporter {
     /// Creates a cold-tier exporter.
     pub fn new(pool: PgPool, store: Arc<dyn ObjectStore>, config: ColdTierConfig) -> Result<Self> {
@@ -127,26 +138,48 @@ impl ColdTierExporter {
     /// Flushes one export window and returns export statistics.
     pub async fn flush_one_window(&self) -> Result<ExporterStats> {
         self.ensure_progress_table().await?;
+        let source_age = format!("{} hours", self.config.source_age_threshold_hours);
+        let Some(partition) = self.next_export_partition(&source_age).await? else {
+            return Ok(ExporterStats::default());
+        };
+
         let rows = sqlx::query(
             r#"
-            SELECT turn_id,
-                   session_id,
-                   user_id,
-                   workspace_id,
-                   ts,
-                   tier,
-                   record_kind,
-                   payload::text AS payload,
-                   answer_text,
-                   integrity_hash,
-                   prev_hash
+            SELECT turn_lineage.turn_id,
+                   turn_lineage.session_id,
+                   turn_lineage.user_id,
+                   turn_lineage.workspace_id,
+                   turn_lineage.ts,
+                   turn_lineage.tier,
+                   turn_lineage.record_kind,
+                   turn_lineage.payload::text AS payload,
+                   turn_lineage.answer_text,
+                   turn_lineage.integrity_hash,
+                   turn_lineage.prev_hash
               FROM analytics.turn_lineage
-             WHERE ts < now() - ($1::text)::interval
-             ORDER BY workspace_id ASC, ts ASC
-             LIMIT 10000
+              LEFT JOIN analytics.lineage_export_progress progress
+                ON progress.workspace_id = turn_lineage.workspace_id
+               AND progress.day = (turn_lineage.ts AT TIME ZONE 'UTC')::date
+             WHERE turn_lineage.workspace_id = $2
+               AND (turn_lineage.ts AT TIME ZONE 'UTC')::date = $3
+               AND turn_lineage.ts < now() - ($1::text)::interval
+               AND (
+                    progress.workspace_id IS NULL
+                    OR turn_lineage.ts > progress.last_ts
+                    OR (
+                        progress.last_turn_id IS NOT NULL
+                        AND turn_lineage.ts = progress.last_ts
+                        AND turn_lineage.turn_id > progress.last_turn_id
+                    )
+               )
+             ORDER BY turn_lineage.ts ASC, turn_lineage.turn_id ASC
+             LIMIT $4
             "#,
         )
-        .bind(format!("{} hours", self.config.source_age_threshold_hours))
+        .bind(&source_age)
+        .bind(&partition.workspace_id)
+        .bind(partition.day)
+        .bind(EXPORT_BATCH_LIMIT)
         .fetch_all(&self.pool)
         .await?;
 
@@ -155,12 +188,11 @@ impl ColdTierExporter {
         }
 
         let first = &rows[0];
-        let workspace_id: String = first.get("workspace_id");
         let ts: chrono::DateTime<Utc> = first.get("ts");
         let key = partition_key(
             &self.config.prefix,
             self.config.partition_by_workspace,
-            &workspace_id,
+            &partition.workspace_id,
             ts,
         );
         let body = render_parquet_rows(&rows, self.config.zstd_level)?;
@@ -172,22 +204,24 @@ impl ColdTierExporter {
             return Ok(ExporterStats::default());
         };
         let last_ts: chrono::DateTime<Utc> = last.get("ts");
-        let day = last_ts.date_naive();
+        let last_turn_id: Uuid = last.get("turn_id");
         sqlx::query(
             r#"
             INSERT INTO analytics.lineage_export_progress (
-                workspace_id, day, last_ts, rows_exported, parquet_uri
+                workspace_id, day, last_ts, last_turn_id, rows_exported, parquet_uri
             )
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (workspace_id, day) DO UPDATE
             SET last_ts = EXCLUDED.last_ts,
+                last_turn_id = EXCLUDED.last_turn_id,
                 rows_exported = analytics.lineage_export_progress.rows_exported + EXCLUDED.rows_exported,
                 parquet_uri = EXCLUDED.parquet_uri
             "#,
         )
-        .bind(&workspace_id)
-        .bind(day)
+        .bind(&partition.workspace_id)
+        .bind(partition.day)
         .bind(last_ts)
+        .bind(last_turn_id)
         .bind(rows.len() as i64)
         .bind(format!("s3://{}/{}", self.config.bucket, key))
         .execute(&self.pool)
@@ -200,6 +234,45 @@ impl ColdTierExporter {
             rows_exported: rows.len() as u64,
             files_written: 1,
         })
+    }
+
+    async fn next_export_partition(&self, source_age: &str) -> Result<Option<ExportPartition>> {
+        let row = sqlx::query(
+            r#"
+            WITH eligible AS (
+                SELECT turn_lineage.workspace_id,
+                       (turn_lineage.ts AT TIME ZONE 'UTC')::date AS day,
+                       turn_lineage.ts
+                  FROM analytics.turn_lineage
+                  LEFT JOIN analytics.lineage_export_progress progress
+                    ON progress.workspace_id = turn_lineage.workspace_id
+                   AND progress.day = (turn_lineage.ts AT TIME ZONE 'UTC')::date
+                 WHERE turn_lineage.ts < now() - ($1::text)::interval
+                   AND (
+                        progress.workspace_id IS NULL
+                        OR turn_lineage.ts > progress.last_ts
+                        OR (
+                            progress.last_turn_id IS NOT NULL
+                            AND turn_lineage.ts = progress.last_ts
+                            AND turn_lineage.turn_id > progress.last_turn_id
+                        )
+                   )
+            )
+            SELECT workspace_id, day
+              FROM eligible
+             GROUP BY workspace_id, day
+             ORDER BY min(ts) ASC, workspace_id ASC, day ASC
+             LIMIT 1
+            "#,
+        )
+        .bind(source_age)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|row| ExportPartition {
+            workspace_id: row.get("workspace_id"),
+            day: row.get("day"),
+        }))
     }
 }
 

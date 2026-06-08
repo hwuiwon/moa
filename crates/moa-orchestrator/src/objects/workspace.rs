@@ -202,7 +202,7 @@ impl WorkspaceObject for WorkspaceImpl {
         state.persist_into(&ctx);
 
         persist_policy_rules(config.id.clone(), &state.approval_policy.rules).await?;
-        schedule_consolidation_inner(&ctx, &mut state)?;
+        schedule_consolidation_inner(&ctx, &mut state).await?;
         state.persist_into(&ctx);
         Ok(())
     }
@@ -260,7 +260,7 @@ impl WorkspaceObject for WorkspaceImpl {
     async fn schedule_consolidation(&self, ctx: ObjectContext<'_>) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Workspace", "schedule_consolidation");
         let mut state = WorkspaceVoState::load_from(&ctx).await?;
-        schedule_consolidation_inner(&ctx, &mut state)?;
+        schedule_consolidation_inner(&ctx, &mut state).await?;
         state.persist_into(&ctx);
         Ok(())
     }
@@ -302,7 +302,7 @@ impl WorkspaceObject for WorkspaceImpl {
             errors = ?report.errors,
             "workspace consolidation completed"
         );
-        schedule_consolidation_inner(&ctx, &mut state)?;
+        schedule_consolidation_inner(&ctx, &mut state).await?;
         state.persist_into(&ctx);
         Ok(())
     }
@@ -343,12 +343,12 @@ async fn count_graph_nodes(workspace_id: &WorkspaceId) -> Result<u64, HandlerErr
     Ok(count.max(0) as u64)
 }
 
-fn schedule_consolidation_inner(
+async fn schedule_consolidation_inner(
     ctx: &ObjectContext<'_>,
     state: &mut WorkspaceVoState,
 ) -> Result<(), HandlerError> {
     let config = state.ensure_initialized()?.clone();
-    let now = Utc::now();
+    let now = durable_utc_now(ctx).await?;
     let next = compute_next_consolidation_utc(now, config.consolidation_hour_utc);
     let jitter_secs = deterministic_consolidation_jitter_secs(&config.id);
     let scheduled_at = next + chrono::Duration::seconds(jitter_secs as i64);
@@ -370,6 +370,13 @@ fn schedule_consolidation_inner(
         "scheduled next workspace consolidation"
     );
     Ok(())
+}
+
+async fn durable_utc_now(ctx: &ObjectContext<'_>) -> Result<DateTime<Utc>, HandlerError> {
+    Ok(ctx
+        .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
+        .await?
+        .into_inner())
 }
 
 async fn persist_policy_rules(

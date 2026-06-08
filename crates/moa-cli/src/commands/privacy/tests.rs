@@ -49,6 +49,10 @@ fn basis_vector() -> Vec<f32> {
     vector
 }
 
+fn pii_vault_secret() -> Vec<u8> {
+    b"privacy-erase-test-secret".to_vec()
+}
+
 fn erase_test_graph(pool: &PgPool, workspace_id: &str, user_id: &str) -> AgeGraphStore {
     let scope = ScopeContext::user(WorkspaceId::new(workspace_id), UserId::new(user_id));
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
@@ -117,6 +121,51 @@ async fn erase_changelog_count(pool: &PgPool, workspace_id: &str, subject: Uuid)
     .fetch_one(pool)
     .await
     .expect("count erase changelog rows")
+}
+
+async fn seed_pii_vault_subject(pool: &PgPool, workspace_id: &str, subject_user_id: &str) {
+    let vault = PiiVault::new_dev(pii_vault_secret());
+    let subject_pseudonym = vault
+        .subject_pseudonym(subject_user_id)
+        .expect("subject pseudonym should compute");
+    sqlx::query(
+        r#"
+        INSERT INTO pii_vault.subject_keys (
+            subject_pseudonym, workspace_id, hmac_key_handle
+        )
+        VALUES ($1, $2, 'test-key')
+        "#,
+    )
+    .bind(subject_pseudonym)
+    .bind(workspace_id)
+    .execute(pool)
+    .await
+    .expect("seed PII vault subject");
+}
+
+async fn erased_pii_vault_subject_count(
+    pool: &PgPool,
+    workspace_id: &str,
+    subject_user_id: &str,
+) -> i64 {
+    let vault = PiiVault::new_dev(pii_vault_secret());
+    let subject_pseudonym = vault
+        .subject_pseudonym(subject_user_id)
+        .expect("subject pseudonym should compute");
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM pii_vault.subject_keys
+        WHERE workspace_id = $1
+          AND subject_pseudonym = $2
+          AND erased_at IS NOT NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(subject_pseudonym)
+    .fetch_one(pool)
+    .await
+    .expect("count erased PII vault subject")
 }
 
 async fn total_erase_changelog_count(pool: &PgPool, workspace_id: &str) -> i64 {
@@ -220,6 +269,7 @@ async fn privacy_erase_dry_run() {
         subject_user_id: subject.to_string(),
         reason: "dry run".to_string(),
         claims: valid_claims_for(subject, &workspace_id, "erase"),
+        pii_vault_secret: None,
     };
 
     let report = execute_privacy_erase(ctx, true)
@@ -256,6 +306,7 @@ async fn privacy_erase_basic() {
         "basic erasure fact",
     )
     .await;
+    seed_pii_vault_subject(store.pool(), &workspace_id, &subject.to_string()).await;
     assert_eq!(embedding_count(store.pool(), uid).await, 1);
     let ctx = EraseContext {
         pool: store.pool().clone(),
@@ -264,6 +315,7 @@ async fn privacy_erase_basic() {
         subject_user_id: subject.to_string(),
         reason: "GDPR Art.17 request".to_string(),
         claims: valid_claims_for(subject, &workspace_id, "erase"),
+        pii_vault_secret: Some(pii_vault_secret()),
     };
 
     let report = execute_privacy_erase(ctx, false)
@@ -271,8 +323,13 @@ async fn privacy_erase_basic() {
         .expect("run erasure");
 
     assert!(report.contains("erased_count: 1"));
+    assert!(report.contains("pii_vault_erased: 1"));
     assert_eq!(node_count(store.pool(), uid).await, 0);
     assert_eq!(embedding_count(store.pool(), uid).await, 0);
+    assert_eq!(
+        erased_pii_vault_subject_count(store.pool(), &workspace_id, &subject.to_string()).await,
+        1
+    );
     assert_eq!(
         erase_changelog_count(store.pool(), &workspace_id, uid).await,
         1
@@ -310,6 +367,7 @@ async fn privacy_erase_idempotent() {
         subject_user_id: subject.to_string(),
         reason: "first erase".to_string(),
         claims: valid_claims_for(subject, &workspace_id, "erase"),
+        pii_vault_secret: None,
     };
     execute_privacy_erase(first, false)
         .await
@@ -322,6 +380,7 @@ async fn privacy_erase_idempotent() {
         subject_user_id: subject.to_string(),
         reason: "second erase".to_string(),
         claims: valid_claims_for(subject, &workspace_id, "erase"),
+        pii_vault_secret: None,
     };
 
     let report = execute_privacy_erase(second, false)
@@ -364,6 +423,7 @@ async fn privacy_erase_cross_tenant_denied() {
         subject_user_id: subject.to_string(),
         reason: "wrong workspace erase".to_string(),
         claims: valid_claims_for(subject, &workspace_a, "erase"),
+        pii_vault_secret: None,
     };
 
     let report = execute_privacy_erase(ctx, false)

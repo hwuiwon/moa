@@ -196,6 +196,7 @@ impl LLMSpanRecorder {
         let cost = calculate_cost_with_cached(
             usage.total_input_tokens(),
             usage.input_tokens_cache_read,
+            usage.input_tokens_cache_write,
             usage.output_tokens,
             &self.pricing,
         );
@@ -385,17 +386,24 @@ pub(crate) fn calculate_cost(
 pub(crate) fn calculate_cost_with_cached(
     input_tokens: usize,
     cached_input_tokens: usize,
+    cache_write_tokens: usize,
     output_tokens: usize,
     pricing: &TokenPricing,
 ) -> f64 {
     let cached_input_tokens = cached_input_tokens.min(input_tokens);
-    let uncached_input_tokens = input_tokens.saturating_sub(cached_input_tokens);
+    let cache_write_tokens =
+        cache_write_tokens.min(input_tokens.saturating_sub(cached_input_tokens));
+    let uncached_input_tokens = input_tokens
+        .saturating_sub(cached_input_tokens)
+        .saturating_sub(cache_write_tokens);
     let cached_input_rate = pricing
         .cached_input_per_mtok
         .unwrap_or(pricing.input_per_mtok);
+    let cache_write_rate = pricing.cache_write_per_mtok();
 
     calculate_cost(uncached_input_tokens, output_tokens, pricing)
         + ((cached_input_tokens as f64 * cached_input_rate) / 1_000_000.0)
+        + ((cache_write_tokens as f64 * cache_write_rate) / 1_000_000.0)
 }
 
 fn has_meaningful_output(block: &CompletionContent) -> bool {
@@ -471,7 +479,9 @@ mod tests {
 
     use moa_core::TokenPricing;
 
-    use super::{calculate_cost, llm_span_name, serialize_provider_debug_payload};
+    use super::{
+        calculate_cost, calculate_cost_with_cached, llm_span_name, serialize_provider_debug_payload,
+    };
 
     #[test]
     fn llm_span_name_format() {
@@ -487,10 +497,28 @@ mod tests {
             input_per_mtok: 3.0,
             output_per_mtok: 15.0,
             cached_input_per_mtok: Some(0.30),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
         };
 
         let cost = calculate_cost(1_000, 500, &pricing);
         assert!((cost - 0.0105).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cached_cost_calculation_uses_cache_write_rate() {
+        // Pins: Anthropic-style cache creation is charged above the base input rate.
+        let pricing = TokenPricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+            cached_input_per_mtok: Some(0.30),
+            cache_write_5m_per_mtok: Some(3.75),
+            cache_write_1h_per_mtok: Some(6.0),
+        };
+
+        let cost = calculate_cost_with_cached(1_000, 200, 300, 100, &pricing);
+
+        assert!((cost - 0.004185).abs() < 1e-10);
     }
 
     #[test]

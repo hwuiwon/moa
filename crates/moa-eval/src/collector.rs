@@ -233,6 +233,8 @@ mod tests {
                 input_per_mtok: 3.0,
                 output_per_mtok: 15.0,
                 cached_input_per_mtok: None,
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
             }),
             true,
             1_024,

@@ -14,8 +14,8 @@ use tokio::time::sleep;
 
 use crate::support::graph_ingest::{test_database_url, wait_for_ingested_brain_responses};
 use crate::support::restate_runtime::{
-    OrchestratorPorts, deployment_endpoint_url, grant_workspace_member, reserve_orchestrator_ports,
-    restate_ingress_url, test_user_identity, with_identity,
+    OrchestratorPorts, deployment_endpoint_url, grant_session_participant, grant_workspace_member,
+    reserve_orchestrator_ports, restate_ingress_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{get_events_request, test_session_meta};
 
@@ -121,6 +121,7 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
             .json::<SessionId>()
             .await
             .context("deserialize create_session response")?;
+        grant_session_participant(&identity, session_id).await?;
 
         let mut metadata = HashMap::new();
         metadata.insert("_moa.session_id".to_string(), json!(session_id.to_string()));
@@ -167,7 +168,7 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
         );
         assert!(usage.output_tokens > 0, "expected non-zero output tokens");
 
-        let events = wait_for_brain_response(&client, ingress, session_id).await?;
+        let events = wait_for_brain_response(&client, ingress, &identity, session_id).await?;
         assert!(
             events
                 .iter()
@@ -190,14 +191,15 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
 async fn wait_for_brain_response(
     client: &reqwest::Client,
     ingress: &str,
+    identity: &moa_core::traits::Identity,
     session_id: SessionId,
 ) -> Result<Vec<moa_core::EventRecord>> {
     for _attempt in 0..30 {
-        let response = client
-            .post(format!(
-                "{}/SessionStore/get_events",
-                ingress.trim_end_matches('/')
-            ))
+        let request = client.post(format!(
+            "{}/SessionStore/get_events",
+            ingress.trim_end_matches('/')
+        ));
+        let response = with_identity(request, identity)
             .json(&get_events_request(session_id, EventRange::all()))
             .send()
             .await

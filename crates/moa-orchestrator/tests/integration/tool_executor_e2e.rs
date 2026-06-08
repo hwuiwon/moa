@@ -10,8 +10,9 @@ use tempfile::TempDir;
 use tokio::time::sleep;
 
 use crate::support::restate_runtime::{
-    OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_workspace_member,
-    reserve_orchestrator_ports, restate_ingress_url, test_user_identity, with_identity,
+    OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
+    grant_workspace_member, reserve_orchestrator_ports, restate_ingress_url, test_user_identity,
+    with_identity,
 };
 use crate::support::session_store_service::{
     append_event_request, get_events_request, test_session_meta,
@@ -144,6 +145,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             .json::<moa_core::SessionId>()
             .await
             .context("deserialize create_session response")?;
+        grant_session_participant(&identity, session_id).await?;
 
         let write_request = tool_request(
             ToolCallId::new(),
@@ -259,7 +261,8 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             );
         }
 
-        let events = wait_for_tool_result_events(&client, ingress, session_id, 3).await?;
+        let events =
+            wait_for_tool_result_events(&client, ingress, &identity, session_id, 3).await?;
         assert!(
             events
                 .iter()
@@ -312,6 +315,7 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
             .json::<moa_core::SessionId>()
             .await
             .context("deserialize create_session response")?;
+        grant_session_participant(&identity, session_id).await?;
 
         let tool_call_id = ToolCallId::new();
         let provider_tool_use_id = "toolu_preexisting_restate_call";
@@ -357,7 +361,7 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
             .context("deserialize bash output")?;
         assert!(output.to_text().contains("duplicate-check"));
 
-        let events = wait_for_tool_result_events(&client, ingress, session_id, 1).await?;
+        let events = wait_for_tool_result_events(&client, ingress, &identity, session_id, 1).await?;
         let matching_tool_calls = events
             .iter()
             .filter(|record| {
@@ -389,15 +393,16 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
 async fn wait_for_tool_result_events(
     client: &reqwest::Client,
     ingress: &str,
+    identity: &moa_core::traits::Identity,
     session_id: moa_core::SessionId,
     expected_results: usize,
 ) -> Result<Vec<moa_core::EventRecord>> {
     for _attempt in 0..30 {
-        let response = client
-            .post(format!(
-                "{}/SessionStore/get_events",
-                ingress.trim_end_matches('/')
-            ))
+        let request = client.post(format!(
+            "{}/SessionStore/get_events",
+            ingress.trim_end_matches('/')
+        ));
+        let response = with_identity(request, identity)
             .json(&get_events_request(session_id, EventRange::all()))
             .send()
             .await

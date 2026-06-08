@@ -256,6 +256,8 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
                 input_per_mtok: 0.75,
                 output_per_mtok: 4.50,
                 cached_input_per_mtok: Some(0.075),
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
             },
             native_tools: native_web_search_tools(),
         });
@@ -275,6 +277,8 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
                 input_per_mtok: 0.20,
                 output_per_mtok: 1.25,
                 cached_input_per_mtok: Some(0.02),
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
             },
             native_tools: native_web_search_tools(),
         });
@@ -294,6 +298,8 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
                 input_per_mtok: 2.50,
                 output_per_mtok: 15.0,
                 cached_input_per_mtok: Some(0.25),
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
             },
             native_tools: native_web_search_tools(),
         });
@@ -313,6 +319,8 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
                 input_per_mtok: 0.25,
                 output_per_mtok: 2.0,
                 cached_input_per_mtok: Some(0.025),
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
             },
             native_tools: native_web_search_tools(),
         });
@@ -332,6 +340,8 @@ pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
                 input_per_mtok: 0.05,
                 output_per_mtok: 0.40,
                 cached_input_per_mtok: Some(0.005),
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
             },
             native_tools: native_web_search_tools(),
         });

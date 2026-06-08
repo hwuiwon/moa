@@ -6,6 +6,12 @@ use restate_sdk::prelude::HeaderMap;
 use uuid::Uuid;
 
 #[test]
+fn header_trust_mode_defaults_to_strict() {
+    // Pins: missing identity headers fail closed unless lenient mode is explicitly selected.
+    assert_eq!(HeaderTrustMode::default(), HeaderTrustMode::Strict);
+}
+
+#[test]
 fn missing_headers_in_lenient_mode_returns_none() {
     // Pins: lenient mode accepts pre-auth-pack calls without identity headers.
     let headers = HeaderMap::with_capacity(0);

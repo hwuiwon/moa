@@ -167,7 +167,7 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
             "idle Session::run_turn eventually maps to Paused in the existing MOA status model"
         );
 
-        let events = wait_for_brain_response(&client, ingress, session_id).await?;
+        let events = wait_for_brain_response(&client, ingress, &identity, session_id).await?;
         assert!(
             events
                 .iter()
@@ -252,14 +252,15 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
 async fn wait_for_brain_response(
     client: &reqwest::Client,
     ingress: &str,
+    identity: &moa_core::traits::Identity,
     session_id: SessionId,
 ) -> Result<Vec<moa_core::EventRecord>> {
     for _attempt in 0..30 {
-        let response = client
-            .post(format!(
-                "{}/SessionStore/get_events",
-                ingress.trim_end_matches('/')
-            ))
+        let request = client.post(format!(
+            "{}/SessionStore/get_events",
+            ingress.trim_end_matches('/')
+        ));
+        let response = with_identity(request, identity)
             .json(&get_events_request(session_id, EventRange::all()))
             .send()
             .await

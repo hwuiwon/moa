@@ -339,7 +339,7 @@ async fn memory_stage_includes_top_k_hits_with_lineage_uids_and_excludes_invalid
 
     // GraphMemoryRetriever injects the top three active lexical hits, excludes invalidated nodes,
     // and does not retrieve vector-only global rows when no real query embedding exists.
-    let output = GraphMemoryRetriever::new(store.pool().clone())
+    let output = GraphMemoryRetriever::new(store.pool().clone(), None)
         .with_assume_app_role(true)
         .with_result_limit(3)
         .process(&mut ctx)

@@ -129,7 +129,7 @@ impl SessionStore for MockSessionStore {
         Ok(0)
     }
 
-    async fn delete_session(&self, _session_id: SessionId) -> Result<()> {
+    async fn delete_empty_session(&self, _session_id: SessionId) -> Result<()> {
         Ok(())
     }
 }
@@ -181,6 +181,8 @@ pub(super) fn capabilities() -> ModelCapabilities {
             input_per_mtok: 3.0,
             output_per_mtok: 15.0,
             cached_input_per_mtok: Some(0.3),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
         },
         native_tools: Vec::new(),
     }

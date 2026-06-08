@@ -160,7 +160,7 @@ async fn approval_allow_once_round_trip_through_restate() -> Result<()> {
             .error_for_status()
             .context("post_message should succeed")?;
 
-        let approval_events = wait_for_approval_request(&client, ingress, session_id).await?;
+        let approval_events = wait_for_approval_request(&client, ingress, &identity, session_id).await?;
         let approval_event = approval_events
             .iter()
             .find(|record| matches!(record.event, Event::ApprovalRequested { .. }))
@@ -185,7 +185,7 @@ async fn approval_allow_once_round_trip_through_restate() -> Result<()> {
             .context("approve should succeed")?;
 
         wait_for_status(&client, ingress, session_id, SessionStatus::Paused).await?;
-        let events = wait_for_brain_response_count(&client, ingress, session_id, 2).await?;
+        let events = wait_for_brain_response_count(&client, ingress, &identity, session_id, 2).await?;
         assert!(
             events
                 .iter()
@@ -249,14 +249,15 @@ async fn wait_for_status(
 async fn wait_for_approval_request(
     client: &reqwest::Client,
     ingress: &str,
+    identity: &moa_core::traits::Identity,
     session_id: SessionId,
 ) -> Result<Vec<moa_core::EventRecord>> {
     for _attempt in 0..60 {
-        let response = client
-            .post(format!(
-                "{}/SessionStore/get_events",
-                ingress.trim_end_matches('/')
-            ))
+        let request = client.post(format!(
+            "{}/SessionStore/get_events",
+            ingress.trim_end_matches('/')
+        ));
+        let response = with_identity(request, identity)
             .json(&get_events_request(session_id, EventRange::all()))
             .send()
             .await
@@ -281,15 +282,16 @@ async fn wait_for_approval_request(
 async fn wait_for_brain_response_count(
     client: &reqwest::Client,
     ingress: &str,
+    identity: &moa_core::traits::Identity,
     session_id: SessionId,
     expected: usize,
 ) -> Result<Vec<moa_core::EventRecord>> {
     for _attempt in 0..60 {
-        let response = client
-            .post(format!(
-                "{}/SessionStore/get_events",
-                ingress.trim_end_matches('/')
-            ))
+        let request = client.post(format!(
+            "{}/SessionStore/get_events",
+            ingress.trim_end_matches('/')
+        ));
+        let response = with_identity(request, identity)
             .json(&get_events_request(session_id, EventRange::all()))
             .send()
             .await

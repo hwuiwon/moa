@@ -55,24 +55,28 @@ impl SessionVoState {
     }
 
     /// Queues one user message and transitions the session into `Running`.
-    pub fn enqueue_message(&mut self, msg: UserMessage) -> MoaResult<()> {
+    pub fn enqueue_message(&mut self, msg: UserMessage, now: DateTime<Utc>) -> MoaResult<()> {
         self.ensure_initialized()?;
         self.pending.push(msg);
-        self.set_status(SessionStatus::Running);
+        self.set_status(SessionStatus::Running, now);
         Ok(())
     }
 
     /// Applies a turn outcome to the lifecycle state.
     ///
     /// In the existing MOA status model, an idle turn parks the session in `Paused`.
-    pub fn apply_turn_outcome(&mut self, outcome: TurnOutcome) -> SessionStatus {
+    pub fn apply_turn_outcome(
+        &mut self,
+        outcome: TurnOutcome,
+        now: DateTime<Utc>,
+    ) -> SessionStatus {
         let next_status = match outcome {
             TurnOutcome::Continue => SessionStatus::Running,
             TurnOutcome::Idle => SessionStatus::Paused,
             TurnOutcome::WaitingApproval => SessionStatus::WaitingApproval,
             TurnOutcome::Cancelled => SessionStatus::Cancelled,
         };
-        self.set_status(next_status.clone());
+        self.set_status(next_status.clone(), now);
         next_status
     }
 
@@ -129,17 +133,17 @@ impl SessionVoState {
         segment.token_cost = segment.token_cost.saturating_add(token_cost);
     }
 
-    pub(super) fn set_status(&mut self, status: SessionStatus) {
+    pub(super) fn set_status(&mut self, status: SessionStatus, now: DateTime<Utc>) {
         self.status = Some(status.clone());
         if let Some(meta) = self.meta.as_mut() {
             meta.status = status.clone();
-            meta.updated_at = Utc::now();
+            meta.updated_at = now;
             if matches!(
                 status,
                 SessionStatus::Completed | SessionStatus::Cancelled | SessionStatus::Failed
             ) && meta.completed_at.is_none()
             {
-                meta.completed_at = Some(Utc::now());
+                meta.completed_at = Some(now);
             }
         }
     }
@@ -173,6 +177,7 @@ impl VoState for SessionVoState {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use moa_core::{Attachment, ModelId, Platform, UserId, WorkspaceId};
 
     use super::SessionVoState;
@@ -205,7 +210,7 @@ mod tests {
     fn session_vo_requires_meta_before_enqueue() {
         let mut state = SessionVoState::default();
         let error = state
-            .enqueue_message(test_message("hello"))
+            .enqueue_message(test_message("hello"), Utc::now())
             .expect_err("enqueue should fail without metadata");
 
         assert!(error.to_string().contains("Session metadata missing"));
@@ -216,7 +221,7 @@ mod tests {
         let mut state = SessionVoState::default();
         state.set_meta(test_meta());
         state
-            .enqueue_message(test_message("hello"))
+            .enqueue_message(test_message("hello"), Utc::now())
             .expect("enqueue should succeed");
 
         assert_eq!(state.pending.len(), 1);
@@ -227,7 +232,7 @@ mod tests {
     fn session_vo_idle_turn_maps_to_paused_status() {
         let mut state = SessionVoState::default();
         state.set_meta(test_meta());
-        let status = state.apply_turn_outcome(TurnOutcome::Idle);
+        let status = state.apply_turn_outcome(TurnOutcome::Idle, Utc::now());
 
         assert_eq!(status, moa_core::SessionStatus::Paused);
         assert_eq!(state.current_status(), moa_core::SessionStatus::Paused);
@@ -247,7 +252,7 @@ mod tests {
         let mut state = SessionVoState::default();
         state.set_meta(test_meta());
         state
-            .enqueue_message(test_message("hello"))
+            .enqueue_message(test_message("hello"), Utc::now())
             .expect("enqueue should succeed");
         state.pending_approval = Some("approval-1".to_string());
         state.children.push(moa_core::SubAgentChildRef {

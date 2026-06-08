@@ -48,6 +48,7 @@ pub struct ApprovalClickOutcome {
 #[derive(Debug, Clone)]
 struct ApprovalRecord {
     request: ApprovalRequest,
+    authorized_actor: String,
     state: ApprovalLifecycleState,
 }
 
@@ -63,12 +64,18 @@ impl ApprovalStateTracker {
         Self::default()
     }
 
-    /// Inserts a pending approval request.
-    pub async fn insert_pending(&self, request: ApprovalRequest, expires_at: DateTime<Utc>) {
+    /// Inserts a pending approval request bound to one authorized platform actor.
+    pub async fn insert_pending(
+        &self,
+        request: ApprovalRequest,
+        expires_at: DateTime<Utc>,
+        authorized_actor: impl Into<String>,
+    ) {
         self.records.lock().await.insert(
             request.request_id,
             ApprovalRecord {
                 request,
+                authorized_actor: authorized_actor.into(),
                 state: ApprovalLifecycleState::Pending { expires_at },
             },
         );
@@ -111,6 +118,15 @@ impl ApprovalStateTracker {
                 }
             }
             ApprovalLifecycleState::Pending { .. } => {
+                if record.authorized_actor != actor {
+                    return ApprovalClickOutcome {
+                        signal: None,
+                        acknowledgement: text_ack(
+                            "You are not authorized to decide this approval.",
+                        ),
+                        state: record.state.clone(),
+                    };
+                }
                 record.state = ApprovalLifecycleState::Decided {
                     decision: decision.clone(),
                     actor: actor.to_string(),

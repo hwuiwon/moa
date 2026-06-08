@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use chrono::Utc;
 use moa_core::{
-    Event, LearningEntry, ModelId, ResolutionLabel, ResolutionScore, ScoringPhase,
-    SegmentCompletion, SessionMeta, SessionStore, TaskSegment, ToolCallId, ToolOutput, UserId,
-    WorkspaceId, deterministic_segment_id,
+    ContextSnapshot, Event, FileReadDedupState, LearningEntry, MoaError, ModelId, PendingSignal,
+    ResolutionLabel, ResolutionScore, ScoringPhase, SegmentCompletion, SessionId, SessionMeta,
+    SessionStore, TaskSegment, ToolCallId, ToolOutput, UserId, UserMessage, WorkspaceId,
+    deterministic_segment_id,
 };
 use moa_session::{PostgresSessionStore, testing};
 use sqlx::PgPool;
@@ -303,6 +304,81 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
     assert!(segments[0].ended_at.is_some());
     assert_eq!(segments[1].previous_segment_id, Some(first_id));
     assert_eq!(segments[1].resolution, None);
+
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_session_owned_writes_fail_when_session_is_missing() {
+    let (store, database_url, schema_name) = create_test_store().await;
+    let missing_session = SessionId::new();
+    let now = Utc::now();
+
+    let snapshot_error = store
+        .put_snapshot(
+            missing_session,
+            ContextSnapshot {
+                format_version: moa_core::CONTEXT_SNAPSHOT_FORMAT_VERSION,
+                session_id: missing_session,
+                last_sequence_num: 0,
+                created_at: now,
+                messages: Vec::new(),
+                file_read_dedup_state: FileReadDedupState::default(),
+                token_count: 0,
+                cache_controls: Vec::new(),
+                stage_inputs_hash: 0,
+            },
+        )
+        .await
+        .expect_err("snapshot write must reject a missing session");
+    assert!(
+        matches!(snapshot_error, MoaError::SessionNotFound(id) if id == missing_session),
+        "unexpected snapshot error: {snapshot_error:?}"
+    );
+
+    let pending_signal = PendingSignal::queue_message(
+        missing_session,
+        UserMessage {
+            text: "queued message".to_string(),
+            attachments: Vec::new(),
+        },
+    )
+    .expect("build pending signal");
+    let signal_error = store
+        .store_pending_signal(missing_session, pending_signal)
+        .await
+        .expect_err("pending signal write must reject a missing session");
+    assert!(
+        matches!(signal_error, MoaError::SessionNotFound(id) if id == missing_session),
+        "unexpected pending signal error: {signal_error:?}"
+    );
+
+    let segment_error = store
+        .create_segment(&TaskSegment {
+            id: deterministic_segment_id(missing_session, 0),
+            session_id: missing_session,
+            tenant_id: "missing-session".to_string(),
+            segment_index: 0,
+            task_summary: Some("missing parent".to_string()),
+            started_at: now,
+            ended_at: None,
+            turn_count: 0,
+            tools_used: Vec::new(),
+            skills_activated: Vec::new(),
+            token_cost: 0,
+            previous_segment_id: None,
+            resolution: None,
+            resolution_signal: None,
+            resolution_confidence: None,
+        })
+        .await
+        .expect_err("segment write must reject a missing session");
+    assert!(
+        matches!(segment_error, MoaError::SessionNotFound(id) if id == missing_session),
+        "unexpected segment error: {segment_error:?}"
+    );
 
     drop(store);
     cleanup_schema(&database_url, &schema_name).await;

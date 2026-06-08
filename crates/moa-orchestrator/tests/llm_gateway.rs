@@ -176,6 +176,8 @@ fn llm_gateway_resolve_provider_for_configured_static_default_model() {
                 input_per_mtok: 0.0,
                 output_per_mtok: 0.0,
                 cached_input_per_mtok: Some(0.0),
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
             },
         ))),
         None,
@@ -190,7 +192,8 @@ fn llm_gateway_resolve_provider_for_configured_static_default_model() {
 }
 
 #[test]
-fn llm_gateway_compute_cost_cents_matches_pricing_table_v1_for_sonnet() {
+fn llm_gateway_compute_cost_cents_prices_sonnet_cache_writes_at_creation_rate() {
+    // Pins: Anthropic cache-write tokens are not billed at the base input rate.
     let model = "claude-sonnet-4-6";
     let usage = TokenUsage {
         input_tokens_uncached: 100_000,
@@ -198,18 +201,8 @@ fn llm_gateway_compute_cost_cents_matches_pricing_table_v1_for_sonnet() {
         input_tokens_cache_read: 50_000,
         output_tokens: 20_000,
     };
-    let table = PricingTable::load_v1();
-    let expected = table
-        .cost_cents(
-            "anthropic",
-            model,
-            (usage.input_tokens_uncached + usage.input_tokens_cache_write) as u64,
-            usage.output_tokens as u64,
-            usage.input_tokens_cache_read as u64,
-        )
-        .expect("sonnet pricing fixture");
 
-    assert_eq!(compute_cost_cents(model, usage), expected);
+    assert_eq!(compute_cost_cents(model, usage), 71);
 }
 
 #[tokio::test]
@@ -279,6 +272,8 @@ fn token_pricing_from_fixture(provider: &str, model: &str) -> TokenPricing {
         cached_input_per_mtok: pricing
             .cached_input_per_mtok_cents
             .map(|cents| f64::from(cents) / CENTS_PER_DOLLAR),
+        cache_write_5m_per_mtok: None,
+        cache_write_1h_per_mtok: None,
     }
 }
 
