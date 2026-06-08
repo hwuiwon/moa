@@ -192,6 +192,8 @@ mod tests {
                 input_per_mtok: 1.0,
                 output_per_mtok: 1.0,
                 cached_input_per_mtok: None,
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
             },
             native_tools: Vec::new(),
         }

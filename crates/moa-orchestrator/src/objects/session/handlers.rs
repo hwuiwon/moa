@@ -4,6 +4,7 @@ use super::*;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
+use moa_core::SessionStore as _;
 
 impl Session for SessionImpl {
     #[tracing::instrument(skip(self, ctx, meta))]
@@ -143,7 +144,8 @@ impl Session for SessionImpl {
         {
             let next_turn_id = generate_turn_id(&mut ctx);
             pending_state.active_turn_id = Some(next_turn_id.clone());
-            state.set_status(SessionStatus::Running);
+            let now = durable_utc_now(&ctx).await?;
+            state.set_status(SessionStatus::Running, now);
             state.persist_into(&ctx);
             persist_pending_state(&ctx, &pending_state);
             sync_status(&ctx, session_id, &state).await?;
@@ -158,10 +160,13 @@ impl Session for SessionImpl {
         }
 
         if matches_active {
+            let now = durable_utc_now(&ctx).await?;
             match outcome.kind {
-                ExecutionTurnOutcomeKind::Completed => state.set_status(SessionStatus::Paused),
-                ExecutionTurnOutcomeKind::Cancelled => state.set_status(SessionStatus::Cancelled),
-                ExecutionTurnOutcomeKind::Failed => state.set_status(SessionStatus::Failed),
+                ExecutionTurnOutcomeKind::Completed => state.set_status(SessionStatus::Paused, now),
+                ExecutionTurnOutcomeKind::Cancelled => {
+                    state.set_status(SessionStatus::Cancelled, now)
+                }
+                ExecutionTurnOutcomeKind::Failed => state.set_status(SessionStatus::Failed, now),
             }
             state.persist_into(&ctx);
             sync_status(&ctx, session_id, &state).await?;
@@ -285,7 +290,8 @@ async fn start_turn_inner(
 
     let turn_id = generate_turn_id(ctx);
     pending_state.active_turn_id = Some(turn_id.clone());
-    state.set_status(SessionStatus::Running);
+    let now = durable_utc_now(ctx).await?;
+    state.set_status(SessionStatus::Running, now);
     state.persist_into(ctx);
     persist_pending_state(ctx, &pending_state);
     sync_status(ctx, session_id, &state).await?;
@@ -328,13 +334,16 @@ async fn pending_approval_awakeable(ctx: &SharedObjectContext<'_>) -> Result<Str
     }
 
     let session_id = parse_session_key(ctx.key())?;
+    let store = crate::OrchestratorCtx::current().session_store.clone();
     let events = ctx
-        .service_client::<RestateSessionStoreClient>()
-        .get_events(Json(GetEventsRequest {
-            session_id,
-            range: EventRange::all(),
-        }))
-        .call()
+        .run(|| async move {
+            store
+                .get_events(session_id, EventRange::all())
+                .await
+                .map(Json::from)
+                .map_err(HandlerError::from)
+        })
+        .name("session_pending_approval_events")
         .await?
         .into_inner();
     let mut decided = std::collections::HashSet::new();

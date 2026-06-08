@@ -1,6 +1,8 @@
 //! Stage 6: graph memory retrieval and prompt injection.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -8,13 +10,14 @@ use chrono::Utc;
 use moa_core::{
     ContextMessage, ContextProcessor, LineageHandle, MemoryScope, NullLineageHandle,
     ProcessorOutput, QueryRewriteResult, Result, RewriteSource, ScopeContext, WorkingContext,
+    traits::EmbeddingProvider,
 };
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
     ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, StageTimings, TurnId, VecHit,
 };
-use moa_memory_graph::{AgeGraphStore, PiiClass};
-use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
+use moa_memory_graph::{AgeGraphStore, GraphStore, PiiClass};
+use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorStore};
 use sqlx::PgPool;
 use tracing::Span;
 use uuid::Uuid;
@@ -27,20 +30,31 @@ pub(crate) const MEMORY_REMINDER_PREFIX: &str = "<memory-reminder>";
 /// Injects graph-memory retrieval hits into the active turn context.
 pub struct GraphMemoryRetriever {
     pool: PgPool,
+    embedder: Option<Arc<dyn EmbeddingProvider>>,
     assume_app_role: bool,
     lineage: Arc<dyn LineageHandle>,
     result_limit: usize,
+    planner: crate::planning::QueryPlanner,
+    scoped_runtimes: Mutex<HashMap<MemoryScope, Arc<ScopedRetrievalRuntime>>>,
+}
+
+struct ScopedRetrievalRuntime {
+    graph: Arc<dyn GraphStore>,
+    hybrid: Arc<crate::retrieval::CachedHybridRetriever>,
 }
 
 impl GraphMemoryRetriever {
     /// Creates a graph-memory retriever backed by the shared Postgres pool.
     #[must_use]
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: PgPool, embedder: Option<Arc<dyn EmbeddingProvider>>) -> Self {
         Self {
             pool,
+            embedder,
             assume_app_role: false,
             lineage: Arc::new(NullLineageHandle),
             result_limit: GRAPH_MEMORY_RESULTS,
+            planner: crate::planning::QueryPlanner::new(),
+            scoped_runtimes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -70,35 +84,97 @@ impl GraphMemoryRetriever {
         ctx: &WorkingContext,
         query: String,
     ) -> Result<Vec<crate::retrieval::RetrievalHit>> {
-        let scope = MemoryScope::Workspace {
-            workspace_id: ctx.workspace_id.clone(),
-        };
-        let scope_context = ScopeContext::workspace(ctx.workspace_id.clone());
-        let vector = Arc::new(PgvectorStore::new(self.pool.clone(), scope_context.clone()));
-        let graph = Arc::new(
-            AgeGraphStore::scoped(self.pool.clone(), scope_context)
-                .with_vector_store(vector.clone()),
-        );
-        let retriever =
-            crate::retrieval::HybridRetriever::from_env(self.pool.clone(), graph, vector)
-                .with_assume_app_role(self.assume_app_role);
+        let scope = memory_scope_from_context(ctx);
+        let runtime = self.runtime_for_scope(&scope)?;
+        let planning = crate::planning::PlanningCtx::new(scope.clone(), runtime.graph.clone());
 
-        retriever
-            .retrieve(crate::retrieval::RetrievalRequest {
-                seeds: Vec::new(),
-                query_text: query,
-                query_embedding: Vec::new(),
-                scope,
-                label_filter: None,
-                max_pii_class: PiiClass::Restricted,
-                k_final: self.result_limit,
-                use_reranker: false,
-                strategy: None,
-            })
-            .await
-            .map_err(|error| {
-                moa_core::MoaError::StorageError(format!("graph memory retrieval failed: {error}"))
-            })
+        let hits = if let Some(embedder) = self.embedder.as_deref() {
+            let query_ctx = crate::planning::QueryRetrievalCtx::new(
+                &self.planner,
+                &planning,
+                embedder,
+                &runtime.hybrid,
+                PiiClass::Restricted,
+            )
+            .with_k_final(self.result_limit)
+            .with_reranker(false);
+            crate::planning::retrieve_for_query(&query, &query_ctx)
+                .await
+                .map_err(|error| {
+                    moa_core::MoaError::StorageError(format!(
+                        "graph memory retrieval failed: {error}"
+                    ))
+                })?
+        } else {
+            let planned = self
+                .planner
+                .plan(&query, &planning)
+                .await
+                .map_err(|error| {
+                    moa_core::MoaError::StorageError(format!(
+                        "graph memory planning failed: {error}"
+                    ))
+                })?;
+            let request = planned.clone().into_retrieval_request(
+                query,
+                Vec::new(),
+                PiiClass::Restricted,
+                self.result_limit,
+                false,
+            );
+            runtime
+                .hybrid
+                .retrieve(&planned, request)
+                .await
+                .map_err(|error| {
+                    moa_core::MoaError::StorageError(format!(
+                        "graph memory retrieval failed: {error}"
+                    ))
+                })?
+        };
+
+        Ok(hits)
+    }
+
+    fn runtime_for_scope(&self, scope: &MemoryScope) -> Result<Arc<ScopedRetrievalRuntime>> {
+        let mut runtimes = self.scoped_runtimes.lock().map_err(|_| {
+            moa_core::MoaError::StorageError("graph memory runtime cache lock poisoned".to_string())
+        })?;
+        if let Some(runtime) = runtimes.get(scope) {
+            return Ok(runtime.clone());
+        }
+
+        let scope_context = ScopeContext::from(scope.clone());
+        let vector: Arc<dyn VectorStore> = if self.assume_app_role {
+            Arc::new(PgvectorStore::new_for_app_role(
+                self.pool.clone(),
+                scope_context.clone(),
+            ))
+        } else {
+            Arc::new(PgvectorStore::new(self.pool.clone(), scope_context.clone()))
+        };
+        let graph_store = if self.assume_app_role {
+            AgeGraphStore::scoped_for_app_role(self.pool.clone(), scope_context)
+        } else {
+            AgeGraphStore::scoped(self.pool.clone(), scope_context)
+        }
+        .with_vector_store(vector.clone());
+        let graph: Arc<dyn GraphStore> = Arc::new(graph_store);
+        let hybrid = Arc::new(
+            crate::retrieval::HybridRetriever::from_env(self.pool.clone(), graph.clone(), vector)
+                .with_assume_app_role(self.assume_app_role),
+        );
+        let cached = if self.assume_app_role {
+            crate::retrieval::CachedHybridRetriever::new_for_app_role(hybrid, self.pool.clone())
+        } else {
+            crate::retrieval::CachedHybridRetriever::new(hybrid, self.pool.clone())
+        };
+        let runtime = Arc::new(ScopedRetrievalRuntime {
+            graph,
+            hybrid: Arc::new(cached),
+        });
+        runtimes.insert(scope.clone(), runtime.clone());
+        Ok(runtime)
     }
 }
 
@@ -168,9 +244,7 @@ impl GraphMemoryRetriever {
             session_id: ctx.session_id,
             workspace_id: ctx.workspace_id.clone(),
             user_id: ctx.user_id.clone(),
-            scope: MemoryScope::Workspace {
-                workspace_id: ctx.workspace_id.clone(),
-            },
+            scope: memory_scope_from_context(ctx),
             ts: Utc::now(),
             query_original: query.to_string(),
             query_expansions: query_expansions_from_context(ctx),
@@ -263,6 +337,13 @@ fn contribution(enabled: bool) -> f32 {
 
 fn duration_ms_u32(duration: std::time::Duration) -> u32 {
     duration.as_millis().min(u128::from(u32::MAX)) as u32
+}
+
+fn memory_scope_from_context(ctx: &WorkingContext) -> MemoryScope {
+    MemoryScope::User {
+        workspace_id: ctx.workspace_id.clone(),
+        user_id: ctx.user_id.clone(),
+    }
 }
 
 fn turn_id_from_context(ctx: &WorkingContext) -> Option<TurnId> {

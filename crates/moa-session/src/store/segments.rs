@@ -7,7 +7,7 @@ impl PostgresSessionStore {
     pub async fn create_segment(&self, segment: &TaskSegment) -> Result<()> {
         let task_segments = self.table_name("task_segments");
         let sessions = self.table_name("sessions");
-        sqlx::query(&format!(
+        let affected = sqlx::query(&format!(
             "INSERT INTO {task_segments} \
              (id, session_id, workspace_id, user_id, tenant_id, segment_index, task_summary, \
               started_at, ended_at, resolution, resolution_signal, resolution_confidence, \
@@ -48,8 +48,12 @@ impl PostgresSessionStore {
         .bind(segment.previous_segment_id.map(|id| id.0))
         .execute(&self.pool)
         .await
-        .map_err(map_sqlx_error)?;
+        .map_err(map_sqlx_error)?
+        .rows_affected();
 
+        if affected == 0 {
+            return Err(MoaError::SessionNotFound(segment.session_id));
+        }
         Ok(())
     }
 

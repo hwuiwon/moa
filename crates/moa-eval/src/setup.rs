@@ -200,7 +200,7 @@ async fn build_pipeline(
         ));
     }
     stages.extend([
-        Box::new(GraphMemoryRetriever::new(graph_pool)) as Box<dyn ContextProcessor>,
+        Box::new(GraphMemoryRetriever::new(graph_pool, None)) as Box<dyn ContextProcessor>,
         Box::new(HistoryCompiler::with_compaction(
             session_store.clone(),
             llm_provider,
@@ -420,6 +420,8 @@ mod tests {
                     input_per_mtok: 1.0,
                     output_per_mtok: 2.0,
                     cached_input_per_mtok: None,
+                    cache_write_5m_per_mtok: None,
+                    cache_write_1h_per_mtok: None,
                 },
                 native_tools: Vec::new(),
             }

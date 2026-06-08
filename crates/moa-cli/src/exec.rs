@@ -27,6 +27,7 @@ pub async fn run_exec(config: MoaConfig, prompt: String) -> Result<()> {
     });
 
     let mut final_output = String::new();
+    let mut turn_error = None;
     let mut interrupt_state = InterruptState::Idle;
     let mut terminated_after_interrupt = false;
     loop {
@@ -36,7 +37,7 @@ pub async fn run_exec(config: MoaConfig, prompt: String) -> Result<()> {
                     let Some(event) = event else {
                         break;
                     };
-                    if handle_exec_event(event, &runtime, &mut final_output, &mut interrupt_state).await? {
+                    if handle_exec_event(event, &runtime, &mut final_output, &mut turn_error, &mut interrupt_state).await? {
                         break;
                     }
                 }
@@ -57,7 +58,7 @@ pub async fn run_exec(config: MoaConfig, prompt: String) -> Result<()> {
                     let Some(event) = event else {
                         break;
                     };
-                    if handle_exec_event(event, &runtime, &mut final_output, &mut interrupt_state).await? {
+                    if handle_exec_event(event, &runtime, &mut final_output, &mut turn_error, &mut interrupt_state).await? {
                         break;
                     }
                 }
@@ -88,6 +89,10 @@ pub async fn run_exec(config: MoaConfig, prompt: String) -> Result<()> {
         io::stdout().flush()?;
     }
 
+    if let Some(error) = turn_error {
+        bail!("turn failed: {error}");
+    }
+
     Ok(())
 }
 
@@ -95,6 +100,7 @@ async fn handle_exec_event(
     event: RuntimeEvent,
     runtime: &ChatRuntime,
     final_output: &mut String,
+    turn_error: &mut Option<String>,
     interrupt_state: &mut InterruptState,
 ) -> Result<bool> {
     match event {
@@ -111,11 +117,20 @@ async fn handle_exec_event(
             eprintln!("tokens: {total_tokens}");
         }
         RuntimeEvent::Notice(text) => eprintln!("{text}"),
-        RuntimeEvent::Error(text) => eprintln!("error: {text}"),
+        RuntimeEvent::Error(text) => {
+            eprintln!("error: {text}");
+            record_exec_error(turn_error, text);
+        }
         RuntimeEvent::TurnCompleted => return Ok(true),
     }
 
     Ok(false)
+}
+
+fn record_exec_error(turn_error: &mut Option<String>, text: String) {
+    if turn_error.is_none() {
+        *turn_error = Some(text);
+    }
 }
 
 async fn resolve_exec_approval(
@@ -257,6 +272,7 @@ mod tests {
 
     use super::{
         InterruptState, format_tool_update, is_terminal_session_status, parse_approval_decision,
+        record_exec_error,
     };
 
     #[test]
@@ -301,6 +317,16 @@ mod tests {
         assert!(!InterruptState::Idle.awaiting_shutdown());
         assert!(InterruptState::SoftCancelRequested.awaiting_shutdown());
         assert!(InterruptState::HardCancelRequested.awaiting_shutdown());
+    }
+
+    #[test]
+    fn exec_error_recorder_preserves_first_turn_error() {
+        // Pins: moa exec returns non-zero when the runtime emits an error event.
+        let mut turn_error = None;
+        record_exec_error(&mut turn_error, "first failure".to_string());
+        record_exec_error(&mut turn_error, "second failure".to_string());
+
+        assert_eq!(turn_error.as_deref(), Some("first failure"));
     }
 
     #[test]

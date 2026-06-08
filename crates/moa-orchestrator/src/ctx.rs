@@ -82,9 +82,9 @@ pub enum IdentityHeaderError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HeaderTrustMode {
     /// Reject requests that do not include the required identity header set.
+    #[default]
     Strict,
     /// Accept requests without identity headers while Phase 1 handlers are wired.
-    #[default]
     Lenient,
 }
 

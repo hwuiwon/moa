@@ -1,5 +1,6 @@
 //! Unit coverage for the Session virtual object's state projection helpers.
 
+use chrono::Utc;
 use moa_core::{CancelMode, ModelId, Platform, SessionMeta, SessionStatus, UserId, WorkspaceId};
 use moa_orchestrator::objects::session::SessionVoState;
 
@@ -24,7 +25,7 @@ fn test_message(text: &str) -> moa_core::UserMessage {
 fn session_vo_post_message_without_meta_errors() {
     let mut state = SessionVoState::default();
     let error = state
-        .enqueue_message(test_message("hello"))
+        .enqueue_message(test_message("hello"), Utc::now())
         .expect_err("enqueue should fail without metadata");
 
     assert!(error.to_string().contains("Session metadata missing"));
@@ -35,7 +36,7 @@ fn session_vo_post_message_queues_in_state() {
     let mut state = SessionVoState::default();
     state.set_meta(test_meta());
     state
-        .enqueue_message(test_message("hello"))
+        .enqueue_message(test_message("hello"), Utc::now())
         .expect("enqueue should succeed");
 
     assert_eq!(state.pending.len(), 1);
@@ -47,12 +48,12 @@ fn session_vo_post_message_updates_status_to_running_then_idle_parks_paused() {
     let mut state = SessionVoState::default();
     state.set_meta(test_meta());
     state
-        .enqueue_message(test_message("hello"))
+        .enqueue_message(test_message("hello"), Utc::now())
         .expect("enqueue should succeed");
     assert_eq!(state.current_status(), SessionStatus::Running);
 
     state.drain_pending_messages();
-    let status = state.apply_turn_outcome(moa_core::TurnOutcome::Idle);
+    let status = state.apply_turn_outcome(moa_core::TurnOutcome::Idle, Utc::now());
 
     assert_eq!(status, SessionStatus::Paused);
     assert_eq!(state.current_status(), SessionStatus::Paused);
@@ -72,7 +73,7 @@ fn session_vo_destroy_clears_state() {
     let mut state = SessionVoState::default();
     state.set_meta(test_meta());
     state
-        .enqueue_message(test_message("hello"))
+        .enqueue_message(test_message("hello"), Utc::now())
         .expect("enqueue should succeed");
     state.pending_approval = Some("approval-1".to_string());
     state.last_turn_summary = Some("summary".to_string());

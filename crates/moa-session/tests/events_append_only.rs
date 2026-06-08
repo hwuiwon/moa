@@ -2,7 +2,9 @@
 
 mod shared;
 
-use moa_core::{Event, EventRange, ModelId, SessionMeta, SessionStore, UserId, WorkspaceId};
+use moa_core::{
+    Event, EventRange, MoaError, ModelId, SessionMeta, SessionStore, UserId, WorkspaceId,
+};
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use uuid::Uuid;
 
@@ -51,6 +53,80 @@ async fn seeded_event(test_db: &TestDb) -> Uuid {
         .next()
         .expect("expected one emitted event")
         .id
+}
+
+#[tokio::test]
+async fn delete_empty_session_removes_session_without_touching_events_table() {
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let session_id = test_db
+        .store()
+        .create_session(SessionMeta {
+            workspace_id: WorkspaceId::new(WORKSPACE_ID),
+            user_id: UserId::new(USER_ID),
+            model: ModelId::new("test-model"),
+            ..SessionMeta::default()
+        })
+        .await
+        .expect("create empty session");
+
+    test_db
+        .store()
+        .delete_empty_session(session_id)
+        .await
+        .expect("delete empty session");
+
+    let error = test_db
+        .store()
+        .get_session(session_id)
+        .await
+        .expect_err("empty session should be deleted");
+    assert!(matches!(error, MoaError::SessionNotFound(id) if id == session_id));
+}
+
+#[tokio::test]
+async fn delete_empty_session_rejects_session_with_append_only_events() {
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let session_id = test_db
+        .store()
+        .create_session(SessionMeta {
+            workspace_id: WorkspaceId::new(WORKSPACE_ID),
+            user_id: UserId::new(USER_ID),
+            model: ModelId::new("test-model"),
+            ..SessionMeta::default()
+        })
+        .await
+        .expect("create session");
+    test_db
+        .store()
+        .emit_event(
+            session_id,
+            Event::UserMessage {
+                text: "keep me immutable".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .expect("emit event");
+
+    let error = test_db
+        .store()
+        .delete_empty_session(session_id)
+        .await
+        .expect_err("non-empty session must not be destructively deleted");
+    assert!(
+        matches!(error, MoaError::Unsupported(ref message) if message.contains("append-only event")),
+        "unexpected delete error: {error:?}"
+    );
+    let events = test_db
+        .store()
+        .get_events(session_id, EventRange::all())
+        .await
+        .expect("read events after rejected delete");
+    assert_eq!(events.len(), 1);
 }
 
 #[tokio::test]

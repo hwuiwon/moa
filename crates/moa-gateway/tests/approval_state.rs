@@ -68,7 +68,11 @@ async fn approval_button_click_with_valid_callback_data_emits_decision_signal() 
     for platform in [Platform::Telegram, Platform::Slack, Platform::Discord] {
         let tracker = ApprovalStateTracker::new();
         tracker
-            .insert_pending(request.clone(), now + chrono::Duration::minutes(5))
+            .insert_pending(
+                request.clone(),
+                now + chrono::Duration::minutes(5),
+                "@test-user",
+            )
             .await;
         let callback_data = approval_buttons(platform.clone(), request_id)[0]
             .callback_data
@@ -188,7 +192,7 @@ async fn concurrent_clicks_on_same_approval_request_only_first_wins() {
         let request_id = request.request_id;
         let now = fixed_now();
         tracker
-            .insert_pending(request, now + chrono::Duration::minutes(5))
+            .insert_pending(request, now + chrono::Duration::minutes(5), "@first-user")
             .await;
         let allow_callback = format!("ap:o:{request_id}");
         let deny_callback = format!("ap:d:{request_id}");
@@ -234,7 +238,9 @@ async fn approval_request_after_orchestrator_timeout_marks_buttons_as_expired() 
     let request_id = request.request_id;
     let now = fixed_now();
     let expires_at = now - chrono::Duration::seconds(1);
-    tracker.insert_pending(request, expires_at).await;
+    tracker
+        .insert_pending(request, expires_at, "@test-user")
+        .await;
 
     let outcome = tracker
         .handle_callback(&format!("ap:o:{request_id}"), "@test-user", now)
@@ -290,6 +296,45 @@ async fn approval_request_after_orchestrator_timeout_marks_buttons_as_expired() 
     {
         assert_eq!(component["disabled"], true);
     }
+}
+
+#[tokio::test]
+async fn approval_button_click_from_wrong_actor_is_rejected_without_deciding() {
+    let tracker = ApprovalStateTracker::new();
+    let request = approval_request();
+    let request_id = request.request_id;
+    let now = fixed_now();
+    tracker
+        .insert_pending(request, now + chrono::Duration::minutes(5), "@owner")
+        .await;
+
+    let outcome = tracker
+        .handle_callback(&format!("ap:o:{request_id}"), "@other-user", now)
+        .await;
+
+    assert_eq!(outcome.signal, None);
+    assert_eq!(
+        outbound_text(&outcome.acknowledgement),
+        "You are not authorized to decide this approval."
+    );
+    assert_eq!(
+        tracker.state(request_id).await,
+        Some(ApprovalLifecycleState::Pending {
+            expires_at: now + chrono::Duration::minutes(5),
+        }),
+        "wrong actor must not mutate approval state"
+    );
+
+    let owner_outcome = tracker
+        .handle_callback(&format!("ap:o:{request_id}"), "@owner", now)
+        .await;
+    assert_eq!(
+        owner_outcome.signal,
+        Some(SessionSignal::ApprovalDecided {
+            request_id,
+            decision: ApprovalDecision::AllowOnce,
+        })
+    );
 }
 
 fn fixed_now() -> chrono::DateTime<Utc> {

@@ -516,6 +516,8 @@ fn scripted_capabilities(model_id: &str) -> ModelCapabilities {
             input_per_mtok: 0.0,
             output_per_mtok: 0.0,
             cached_input_per_mtok: Some(0.0),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
         },
         native_tools: Vec::new(),
     }
@@ -676,7 +678,7 @@ pub fn compute_cost_cents(model: &str, usage: TokenUsage) -> u32 {
     let pricing = pricing_for_model(model);
     let input_cost = usage.input_tokens_uncached as f64 / 1_000_000.0 * pricing.input_per_mtok;
     let cache_write_cost =
-        usage.input_tokens_cache_write as f64 / 1_000_000.0 * pricing.input_per_mtok;
+        usage.input_tokens_cache_write as f64 / 1_000_000.0 * pricing.cache_write_per_mtok();
     let cache_read_cost = usage.input_tokens_cache_read as f64 / 1_000_000.0
         * pricing
             .cached_input_per_mtok
@@ -746,6 +748,8 @@ fn pricing_for_model(model: &str) -> TokenPricing {
             input_per_mtok: 0.8,
             output_per_mtok: 4.0,
             cached_input_per_mtok: Some(0.08),
+            cache_write_5m_per_mtok: Some(1.0),
+            cache_write_1h_per_mtok: Some(1.6),
         };
     }
     if model.starts_with("claude-opus-4-6") {
@@ -753,6 +757,8 @@ fn pricing_for_model(model: &str) -> TokenPricing {
             input_per_mtok: 5.0,
             output_per_mtok: 25.0,
             cached_input_per_mtok: Some(0.5),
+            cache_write_5m_per_mtok: Some(6.25),
+            cache_write_1h_per_mtok: Some(10.0),
         };
     }
     if model.starts_with("claude-sonnet-4-6") {
@@ -760,6 +766,8 @@ fn pricing_for_model(model: &str) -> TokenPricing {
             input_per_mtok: 3.0,
             output_per_mtok: 15.0,
             cached_input_per_mtok: Some(0.3),
+            cache_write_5m_per_mtok: Some(3.75),
+            cache_write_1h_per_mtok: Some(6.0),
         };
     }
     if model.starts_with("gpt-5.4-mini") {
@@ -767,6 +775,8 @@ fn pricing_for_model(model: &str) -> TokenPricing {
             input_per_mtok: 0.75,
             output_per_mtok: 4.50,
             cached_input_per_mtok: Some(0.075),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
         };
     }
     if model.starts_with("gpt-5.4-nano") {
@@ -774,6 +784,8 @@ fn pricing_for_model(model: &str) -> TokenPricing {
             input_per_mtok: 0.20,
             output_per_mtok: 1.25,
             cached_input_per_mtok: Some(0.02),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
         };
     }
     if model.starts_with("gpt-5.4") {
@@ -781,6 +793,8 @@ fn pricing_for_model(model: &str) -> TokenPricing {
             input_per_mtok: 2.50,
             output_per_mtok: 15.0,
             cached_input_per_mtok: Some(0.25),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
         };
     }
     if model.starts_with("gpt-5-mini") {
@@ -788,6 +802,8 @@ fn pricing_for_model(model: &str) -> TokenPricing {
             input_per_mtok: 0.25,
             output_per_mtok: 2.0,
             cached_input_per_mtok: Some(0.025),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
         };
     }
     if model.starts_with("gpt-5-nano") {
@@ -795,6 +811,8 @@ fn pricing_for_model(model: &str) -> TokenPricing {
             input_per_mtok: 0.05,
             output_per_mtok: 0.40,
             cached_input_per_mtok: Some(0.005),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
         };
     }
     if model.starts_with("gemini-3-pro-preview") || model.starts_with("gemini-3.1-pro") {
@@ -802,6 +820,8 @@ fn pricing_for_model(model: &str) -> TokenPricing {
             input_per_mtok: 2.0,
             output_per_mtok: 12.0,
             cached_input_per_mtok: Some(0.2),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
         };
     }
     if model.starts_with("gemini-3.1-flash-lite") {
@@ -809,6 +829,8 @@ fn pricing_for_model(model: &str) -> TokenPricing {
             input_per_mtok: 0.25,
             output_per_mtok: 1.5,
             cached_input_per_mtok: Some(0.025),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
         };
     }
     if model.starts_with("gemini-3-flash-preview") {
@@ -816,6 +838,8 @@ fn pricing_for_model(model: &str) -> TokenPricing {
             input_per_mtok: 0.5,
             output_per_mtok: 3.0,
             cached_input_per_mtok: Some(0.05),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
         };
     }
 
@@ -823,6 +847,8 @@ fn pricing_for_model(model: &str) -> TokenPricing {
         input_per_mtok: 0.0,
         output_per_mtok: 0.0,
         cached_input_per_mtok: None,
+        cache_write_5m_per_mtok: None,
+        cache_write_1h_per_mtok: None,
     }
 }
 

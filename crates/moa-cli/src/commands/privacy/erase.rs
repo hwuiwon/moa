@@ -30,6 +30,7 @@ pub(super) struct EraseContext {
     pub(super) subject_user_id: String,
     pub(super) reason: String,
     pub(super) claims: ApprovalClaims,
+    pub(super) pii_vault_secret: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -65,6 +66,7 @@ pub(super) async fn run(config: &MoaConfig, args: Args) -> Result<String> {
         subject_user_id,
         reason: args.reason.clone(),
         claims,
+        pii_vault_secret: pii_vault_secret_from_env()?,
     };
 
     execute_privacy_erase(ctx, args.dry_run).await
@@ -74,13 +76,20 @@ pub(super) async fn execute_privacy_erase(ctx: EraseContext, dry_run: bool) -> R
     let candidates = enumerate_erase_candidates(&ctx).await?;
 
     if dry_run {
-        return Ok(format_erase_report(&ctx, &candidates, 0, true));
+        return Ok(format_erase_report(&ctx, &candidates, 0, 0, true));
     }
 
     consume_approval_jti(&ctx.pool, &ctx.claims).await?;
+    let pii_vault_erased = erase_pii_vault_subject(&ctx).await?;
 
     if candidates.is_empty() {
-        return Ok(format_erase_report(&ctx, &candidates, 0, false));
+        return Ok(format_erase_report(
+            &ctx,
+            &candidates,
+            0,
+            pii_vault_erased,
+            false,
+        ));
     }
 
     let graph = erase_graph_store(&ctx.pool, &ctx.workspace_id, &ctx.subject_user_id);
@@ -101,7 +110,44 @@ pub(super) async fn execute_privacy_erase(ctx: EraseContext, dry_run: bool) -> R
     }
     emit_erase_summary(&ctx, erased_count).await?;
 
-    Ok(format_erase_report(&ctx, &candidates, erased_count, false))
+    Ok(format_erase_report(
+        &ctx,
+        &candidates,
+        erased_count,
+        pii_vault_erased,
+        false,
+    ))
+}
+
+fn pii_vault_secret_from_env() -> Result<Option<Vec<u8>>> {
+    if let Ok(secret_hex) = env::var(PII_VAULT_SECRET_HEX_ENV) {
+        return hex::decode(secret_hex.trim())
+            .with_context(|| format!("{PII_VAULT_SECRET_HEX_ENV} must be hex-encoded"))
+            .map(Some);
+    }
+    Ok(env::var(PII_VAULT_SECRET_ENV)
+        .ok()
+        .map(|secret| secret.into_bytes()))
+}
+
+async fn erase_pii_vault_subject(ctx: &EraseContext) -> Result<u64> {
+    let Some(secret) = ctx.pii_vault_secret.clone() else {
+        tracing::warn!(
+            workspace_id = %ctx.workspace_id,
+            subject_user_id = %ctx.subject_user_id,
+            "skipping PII vault erase because no PII vault secret is configured"
+        );
+        return Ok(0);
+    };
+
+    let vault = PiiVault::with_pool(ctx.pool.clone(), secret, "privacy-erase");
+    let subject_pseudonym = vault
+        .subject_pseudonym(&ctx.subject_user_id)
+        .context("computing PII vault subject pseudonym")?;
+    vault
+        .erase_subject(&ctx.workspace_id, &subject_pseudonym)
+        .await
+        .context("erasing PII vault subject")
 }
 
 fn erase_graph_store(pool: &PgPool, workspace_id: &str, subject_user_id: &str) -> AgeGraphStore {
@@ -205,6 +251,7 @@ fn format_erase_report(
     ctx: &EraseContext,
     candidates: &[EraseCandidate],
     erased_count: usize,
+    pii_vault_erased: u64,
     dry_run: bool,
 ) -> String {
     let mut report = String::new();
@@ -217,6 +264,7 @@ fn format_erase_report(
     report.push_str(&format!("subject_user_id: {}\n", ctx.subject_user_id));
     report.push_str(&format!("candidate_count: {}\n", candidates.len()));
     report.push_str(&format!("erased_count: {erased_count}\n"));
+    report.push_str(&format!("pii_vault_erased: {pii_vault_erased}\n"));
 
     if dry_run && !candidates.is_empty() {
         report.push_str("sample:\n");

@@ -10,7 +10,9 @@ pub const SCHEMA_DDL: &str = concat!(
     "\n",
     include_str!("../../../moa-session/migrations/postgres/025_lineage_scores.sql"),
     "\n",
-    include_str!("../../../moa-session/migrations/postgres/026_lineage_audit.sql")
+    include_str!("../../../moa-session/migrations/postgres/026_lineage_audit.sql"),
+    "\n",
+    include_str!("../../../moa-session/migrations/postgres/028_lineage_dead_letters.sql")
 );
 
 /// Ensures the lineage schema exists.

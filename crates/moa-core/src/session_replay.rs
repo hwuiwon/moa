@@ -226,8 +226,8 @@ impl SessionStore for CountedSessionStore {
         self.inner.workspace_cost_since(workspace_id, since).await
     }
 
-    async fn delete_session(&self, session_id: SessionId) -> Result<()> {
-        self.inner.delete_session(session_id).await
+    async fn delete_empty_session(&self, session_id: SessionId) -> Result<()> {
+        self.inner.delete_empty_session(session_id).await
     }
 
     async fn create_segment(&self, segment: &TaskSegment) -> Result<()> {
@@ -597,7 +597,7 @@ mod tests {
             Ok(0)
         }
 
-        async fn delete_session(&self, _session_id: SessionId) -> Result<()> {
+        async fn delete_empty_session(&self, _session_id: SessionId) -> Result<()> {
             Ok(())
         }
     }

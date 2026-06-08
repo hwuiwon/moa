@@ -7,8 +7,9 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::support::restate_runtime::{
-    OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_workspace_member,
-    reserve_orchestrator_ports, restate_ingress_url, test_user_identity, with_identity,
+    OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
+    grant_workspace_member, reserve_orchestrator_ports, restate_ingress_url, test_user_identity,
+    with_identity,
 };
 use crate::support::session_store_service::{
     append_event_request, get_events_request, test_session_meta, user_message_event,
@@ -92,6 +93,7 @@ async fn session_store_round_trip_through_restate() -> Result<()> {
             .json::<SessionId>()
             .await
             .context("deserialize create_session ingress response")?;
+        grant_session_participant(&identity, session_id).await?;
 
         for message in ["first", "second", "third"] {
             let append_response = client
@@ -116,11 +118,11 @@ async fn session_store_round_trip_through_restate() -> Result<()> {
             );
         }
 
-        let get_events_response = client
-            .post(format!(
-                "{}/SessionStore/get_events",
-                ingress.trim_end_matches('/')
-            ))
+        let get_events_request_builder = client.post(format!(
+            "{}/SessionStore/get_events",
+            ingress.trim_end_matches('/')
+        ));
+        let get_events_response = with_identity(get_events_request_builder, &identity)
             .json(&get_events_request(session_id, EventRange::all()))
             .send()
             .await

@@ -179,11 +179,12 @@ pub trait SessionStore: Send + Sync {
         since: DateTime<Utc>,
     ) -> Result<u32>;
 
-    /// Permanently deletes a session along with its events and any
-    /// dependent rows (pending signals, FTS index entries). Used by the
-    /// orchestrator to sweep empty sessions at startup so clicking
-    /// `+ New Session` without sending a prompt doesn't persist a row.
-    async fn delete_session(&self, session_id: SessionId) -> Result<()>;
+    /// Deletes a session only when it has no append-only events.
+    ///
+    /// This is intended for startup cleanup of unused `Created` sessions. Sessions with events
+    /// must be removed through privacy erasure or tombstoning flows, not destructive event-log
+    /// deletes.
+    async fn delete_empty_session(&self, session_id: SessionId) -> Result<()>;
 
     /// Persists a task segment metadata row.
     async fn create_segment(&self, _segment: &TaskSegment) -> Result<()> {

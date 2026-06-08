@@ -9,16 +9,15 @@ pub use moa_core::wire::ToolDescriptor;
 use moa_core::wire::tool_descriptor;
 use moa_core::{
     Event, EventRange, EventRecord, EventType, IdempotencyClass, MoaError, SessionId, SessionMeta,
-    SessionStatus, ToolCallId, ToolCallRequest, ToolDefinition, ToolFailureClass, ToolInvocation,
-    ToolOutput, classify_tool_error,
+    SessionStatus, SessionStore as _, ToolCallId, ToolCallRequest, ToolDefinition,
+    ToolFailureClass, ToolInvocation, ToolOutput, classify_tool_error,
 };
 use moa_hands::ToolRouter;
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
-use crate::services::session_store::{
-    AppendEventRequest, GetEventsRequest, RestateSessionStoreClient,
-};
+use crate::OrchestratorCtx;
+use crate::services::session_store::{AppendEventRequest, RestateSessionStoreClient};
 use moa_core::restate_observability::annotate_restate_handler_span;
 
 /// Restate service surface for durable tool execution.
@@ -273,12 +272,18 @@ async fn resolve_session(
     request: &ToolCallRequest,
 ) -> Result<SessionMeta, HandlerError> {
     if let Some(session_id) = request.session_id {
+        let store = OrchestratorCtx::current().session_store.clone();
         return Ok(ctx
-            .service_client::<RestateSessionStoreClient>()
-            .get_session(Json(session_id))
-            .call()
-            .await
-            .map(|session| session.into_inner())?);
+            .run(|| async move {
+                store
+                    .get_session(session_id)
+                    .await
+                    .map(Json::from)
+                    .map_err(HandlerError::from)
+            })
+            .name("tool_executor_get_session")
+            .await?
+            .into_inner());
     }
 
     Ok(SessionMeta {
@@ -320,18 +325,24 @@ async fn prior_non_idempotent_result_exists(
             request.tool_name
         )))
     })?;
+    let store = OrchestratorCtx::current().session_store.clone();
     let events = ctx
-        .service_client::<RestateSessionStoreClient>()
-        .get_events(Json(GetEventsRequest {
-            session_id,
-            range: EventRange {
-                from_seq: None,
-                to_seq: None,
-                event_types: Some(vec![EventType::ToolResult]),
-                limit: None,
-            },
-        }))
-        .call()
+        .run(|| async move {
+            store
+                .get_events(
+                    session_id,
+                    EventRange {
+                        from_seq: None,
+                        to_seq: None,
+                        event_types: Some(vec![EventType::ToolResult]),
+                        limit: None,
+                    },
+                )
+                .await
+                .map(Json::from)
+                .map_err(HandlerError::from)
+        })
+        .name("tool_executor_get_prior_tool_results")
         .await?
         .into_inner();
     Ok(has_prior_non_idempotent_result(
@@ -348,18 +359,24 @@ async fn prior_tool_call_event_exists(
         return Ok(false);
     };
 
+    let store = OrchestratorCtx::current().session_store.clone();
     let events = ctx
-        .service_client::<RestateSessionStoreClient>()
-        .get_events(Json(GetEventsRequest {
-            session_id,
-            range: EventRange {
-                from_seq: None,
-                to_seq: None,
-                event_types: Some(vec![EventType::ToolCall]),
-                limit: None,
-            },
-        }))
-        .call()
+        .run(|| async move {
+            store
+                .get_events(
+                    session_id,
+                    EventRange {
+                        from_seq: None,
+                        to_seq: None,
+                        event_types: Some(vec![EventType::ToolCall]),
+                        limit: None,
+                    },
+                )
+                .await
+                .map(Json::from)
+                .map_err(HandlerError::from)
+        })
+        .name("tool_executor_get_prior_tool_calls")
         .await?
         .into_inner();
     Ok(has_prior_tool_call_event(&events, request.tool_call_id))

@@ -175,6 +175,8 @@ impl LLMProvider for RecordedScriptedProvider {
                 input_per_mtok: 0.0,
                 output_per_mtok: 0.0,
                 cached_input_per_mtok: Some(0.0),
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
             },
             native_tools: Vec::new(),
         }

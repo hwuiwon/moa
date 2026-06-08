@@ -18,6 +18,28 @@ use crate::fjall_journal::Journal;
 use crate::mpsc_sink::MpscSinkConfig;
 use crate::{Error, Result, ensure_schema};
 
+const WRITE_RETRY_MAX_ATTEMPTS: u32 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteDisposition {
+    Written,
+    DeadLettered,
+}
+
+#[derive(Debug)]
+struct WriteFailure {
+    error: Error,
+    attempts: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeadLetterSummary {
+    row_count: usize,
+    first_workspace_id: Option<String>,
+    first_session_id: Option<Uuid>,
+    first_turn_id: Option<Uuid>,
+}
+
 /// Writer runtime statistics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WriterStats {
@@ -175,11 +197,13 @@ async fn replay_pending(
         .iter()
         .map(|(_, payload)| decode_pending_row(payload))
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    write_pending_rows_with_retry(pool, &rows).await?;
+    let disposition = write_pending_rows_or_dead_letter(pool, &rows).await?;
     if let (Some((lo, _)), Some((hi, _))) = (pending.first(), pending.last()) {
         journal.ack_range(*lo, *hi)?;
     }
-    record_flush(stats, rows.len());
+    if disposition == WriteDisposition::Written {
+        record_flush(stats, rows.len());
+    }
     record_journal_depth(stats, journal.approximate_len() as u64);
     Ok(())
 }
@@ -209,25 +233,174 @@ async fn flush_events(
     }
     record_journal_depth(stats, journal.approximate_len() as u64);
 
-    write_pending_rows_with_retry(pool, &rows).await?;
+    let disposition = write_pending_rows_or_dead_letter(pool, &rows).await?;
     journal.ack_range(start_seq, end_seq)?;
-    record_flush(stats, rows.len());
+    if disposition == WriteDisposition::Written {
+        record_flush(stats, rows.len());
+    }
     record_journal_depth(stats, journal.approximate_len() as u64);
     Ok(())
 }
 
-async fn write_pending_rows_with_retry(pool: &sqlx::PgPool, rows: &[PendingRow]) -> Result<()> {
+async fn write_pending_rows_or_dead_letter(
+    pool: &sqlx::PgPool,
+    rows: &[PendingRow],
+) -> Result<WriteDisposition> {
+    match write_pending_rows_with_retry(pool, rows).await {
+        Ok(()) => Ok(WriteDisposition::Written),
+        Err(failure) => {
+            let dead_letter_id = write_dead_letter_batch(pool, rows, &failure).await?;
+            tracing::error!(
+                dead_letter_id = %dead_letter_id,
+                error = %failure.error,
+                attempts = failure.attempts,
+                row_count = rows.len(),
+                "lineage batch moved to dead letter storage"
+            );
+            Ok(WriteDisposition::DeadLettered)
+        }
+    }
+}
+
+async fn write_pending_rows_with_retry(
+    pool: &sqlx::PgPool,
+    rows: &[PendingRow],
+) -> std::result::Result<(), WriteFailure> {
     let mut delay = Duration::from_millis(100);
-    loop {
+    for attempt in 1..=WRITE_RETRY_MAX_ATTEMPTS {
         match write_pending_rows(pool, rows).await {
             Ok(()) => return Ok(()),
             Err(error) => {
-                tracing::warn!(%error, retry_after_ms = delay.as_millis(), "lineage write failed");
+                if !should_retry_write(&error, attempt) {
+                    tracing::error!(
+                        %error,
+                        attempt,
+                        max_attempts = WRITE_RETRY_MAX_ATTEMPTS,
+                        "lineage write failed permanently"
+                    );
+                    return Err(WriteFailure {
+                        error,
+                        attempts: attempt,
+                    });
+                }
+                tracing::warn!(
+                    %error,
+                    attempt,
+                    max_attempts = WRITE_RETRY_MAX_ATTEMPTS,
+                    retry_after_ms = delay.as_millis(),
+                    "lineage write failed"
+                );
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_secs(5));
             }
         }
     }
+
+    Err(WriteFailure {
+        error: Error::Invalid("lineage write retry loop exhausted unexpectedly".to_string()),
+        attempts: WRITE_RETRY_MAX_ATTEMPTS,
+    })
+}
+
+async fn write_dead_letter_batch(
+    pool: &sqlx::PgPool,
+    rows: &[PendingRow],
+    failure: &WriteFailure,
+) -> Result<Uuid> {
+    let dead_letter_id = Uuid::now_v7();
+    let summary = dead_letter_summary(rows);
+    let attempts = i32::try_from(failure.attempts)
+        .map_err(|_| Error::Invalid("dead-letter attempt count overflow".to_string()))?;
+    let row_count = i32::try_from(summary.row_count)
+        .map_err(|_| Error::Invalid("dead-letter row count overflow".to_string()))?;
+    let rows_json = serde_json::to_value(rows)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO analytics.lineage_dead_letters (
+            dead_letter_id,
+            error,
+            attempts,
+            row_count,
+            first_workspace_id,
+            first_session_id,
+            first_turn_id,
+            rows
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "#,
+    )
+    .bind(dead_letter_id)
+    .bind(failure.error.to_string())
+    .bind(attempts)
+    .bind(row_count)
+    .bind(summary.first_workspace_id)
+    .bind(summary.first_session_id)
+    .bind(summary.first_turn_id)
+    .bind(rows_json)
+    .execute(pool)
+    .await?;
+
+    metrics::counter!("moa_lineage_dead_lettered_total").increment(summary.row_count as u64);
+    Ok(dead_letter_id)
+}
+
+fn dead_letter_summary(rows: &[PendingRow]) -> DeadLetterSummary {
+    let first = rows.first();
+    DeadLetterSummary {
+        row_count: rows.len(),
+        first_workspace_id: first.map(row_workspace_id),
+        first_session_id: first.and_then(row_session_id),
+        first_turn_id: first.and_then(row_turn_id),
+    }
+}
+
+fn row_workspace_id(row: &PendingRow) -> String {
+    match row {
+        PendingRow::Lineage(row) => row.workspace_id.clone(),
+        PendingRow::Score(row) => row.workspace_id.clone(),
+    }
+}
+
+fn row_session_id(row: &PendingRow) -> Option<Uuid> {
+    match row {
+        PendingRow::Lineage(row) => Some(row.session_id),
+        PendingRow::Score(row) => row.session_id,
+    }
+}
+
+fn row_turn_id(row: &PendingRow) -> Option<Uuid> {
+    match row {
+        PendingRow::Lineage(row) => Some(row.turn_id),
+        PendingRow::Score(row) => row.turn_id,
+    }
+}
+
+fn should_retry_write(error: &Error, attempt: u32) -> bool {
+    attempt < WRITE_RETRY_MAX_ATTEMPTS && is_retryable_write_error(error)
+}
+
+fn is_retryable_write_error(error: &Error) -> bool {
+    match error {
+        Error::Sqlx(sqlx::Error::Io(_))
+        | Error::Sqlx(sqlx::Error::Tls(_))
+        | Error::Sqlx(sqlx::Error::PoolTimedOut)
+        | Error::Sqlx(sqlx::Error::PoolClosed)
+        | Error::Sqlx(sqlx::Error::Protocol(_)) => true,
+        Error::Sqlx(sqlx::Error::Database(db_error)) => db_error
+            .code()
+            .as_deref()
+            .is_some_and(is_retryable_postgres_sqlstate),
+        _ => false,
+    }
+}
+
+fn is_retryable_postgres_sqlstate(code: &str) -> bool {
+    code.starts_with("08")
+        || matches!(
+            code,
+            "40001" | "40P01" | "53300" | "53400" | "57P01" | "57P02" | "57P03"
+        )
 }
 
 async fn write_pending_rows(pool: &sqlx::PgPool, rows: &[PendingRow]) -> Result<()> {
@@ -966,5 +1139,49 @@ mod tests {
             }
             super::PendingRow::Lineage(_) => panic!("eval events must not enter turn_lineage"),
         }
+    }
+
+    #[test]
+    fn write_retry_policy_is_bounded_and_sqlstate_aware() {
+        // Pins: lineage writer retries transient database failures but never loops forever.
+        assert!(super::is_retryable_postgres_sqlstate("08006"));
+        assert!(super::is_retryable_postgres_sqlstate("40001"));
+        assert!(!super::is_retryable_postgres_sqlstate("23505"));
+
+        let permanent = super::Error::Invalid("poison row".to_string());
+        assert!(!super::should_retry_write(&permanent, 1));
+
+        let transient = super::Error::Sqlx(sqlx::Error::PoolTimedOut);
+        assert!(super::should_retry_write(&transient, 1));
+        assert!(!super::should_retry_write(
+            &transient,
+            super::WRITE_RETRY_MAX_ATTEMPTS
+        ));
+    }
+
+    #[test]
+    fn dead_letter_summary_uses_first_row_metadata() {
+        // Pins: dead-letter records carry searchable metadata from the batch head.
+        let turn_id = Uuid::now_v7();
+        let session_id = Uuid::now_v7();
+        let row = super::PendingRow::Lineage(super::LineageRow {
+            turn_id,
+            session_id,
+            user_id: "user-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            ts: Utc::now(),
+            tier: 1,
+            record_kind: 1,
+            payload: serde_json::json!({"kind": "test"}),
+            integrity_hash: vec![7; 32],
+            prev_hash: None,
+        });
+
+        let summary = super::dead_letter_summary(&[row]);
+
+        assert_eq!(summary.row_count, 1);
+        assert_eq!(summary.first_workspace_id.as_deref(), Some("workspace-1"));
+        assert_eq!(summary.first_session_id, Some(session_id));
+        assert_eq!(summary.first_turn_id, Some(turn_id));
     }
 }

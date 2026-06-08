@@ -8,6 +8,7 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use hmac::{Hmac, Mac};
+use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use uuid::Uuid;
@@ -15,6 +16,8 @@ use uuid::Uuid;
 use crate::error::{AuditError, Result};
 
 type HmacSha256 = Hmac<Sha256>;
+const CIPHERTEXT_VERSION_V2: u8 = 2;
+const AES_GCM_NONCE_LEN: usize = 12;
 
 /// PII vault facade.
 #[derive(Clone)]
@@ -93,11 +96,13 @@ impl PiiVault {
         })
     }
 
-    /// Marks a subject as erased. Production KMS key destruction happens behind
-    /// the key handle represented by the `erased_at` marker.
-    pub async fn erase_subject(&self, workspace_id: &str, subject_pseudonym: &[u8]) -> Result<()> {
+    /// Marks a subject as erased and returns the number of subject-key rows touched.
+    ///
+    /// Production KMS key destruction happens behind the key handle represented
+    /// by the `erased_at` marker.
+    pub async fn erase_subject(&self, workspace_id: &str, subject_pseudonym: &[u8]) -> Result<u64> {
         if let Some(pool) = &self.pool {
-            sqlx::query(
+            let affected = sqlx::query(
                 r#"
                 UPDATE pii_vault.subject_keys
                 SET erased_at = now()
@@ -107,9 +112,11 @@ impl PiiVault {
             .bind(workspace_id)
             .bind(subject_pseudonym)
             .execute(pool)
-            .await?;
+            .await?
+            .rows_affected();
+            return Ok(affected);
         }
-        Ok(())
+        Ok(0)
     }
 
     /// Computes the deterministic subject pseudonym.
@@ -146,7 +153,7 @@ impl PiiVault {
         .await?;
 
         for (field_name, plaintext) in plaintexts {
-            let ciphertext = self.encrypt_plaintext(subject_pseudonym, plaintext.as_bytes())?;
+            let ciphertext = self.encrypt_plaintext(plaintext.as_bytes())?;
             sqlx::query(
                 r#"
                 INSERT INTO pii_vault.plaintext_side (
@@ -169,6 +176,8 @@ impl PiiVault {
             .bind(serde_json::json!({
                 "key_handle": self.key_handle,
                 "algorithm": "AES-256-GCM",
+                "version": 2,
+                "nonce": "ciphertext_prefix",
             }))
             .execute(pool)
             .await?;
@@ -176,14 +185,20 @@ impl PiiVault {
         Ok(())
     }
 
-    fn encrypt_plaintext(&self, subject_pseudonym: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    fn encrypt_plaintext(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let key_hash = blake3::derive_key("moa-lineage-audit-pii-vault-v1", &self.workspace_secret);
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_hash));
-        let nonce_hash = blake3::hash(subject_pseudonym);
-        let nonce = Nonce::from_slice(&nonce_hash.as_bytes()[..12]);
-        cipher
+        let mut nonce_bytes = [0_u8; AES_GCM_NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let encrypted = cipher
             .encrypt(nonce, plaintext)
-            .map_err(|_| AuditError::Invalid("PII encryption failed".to_string()))
+            .map_err(|_| AuditError::Invalid("PII encryption failed".to_string()))?;
+        let mut framed = Vec::with_capacity(1 + AES_GCM_NONCE_LEN + encrypted.len());
+        framed.push(CIPHERTEXT_VERSION_V2);
+        framed.extend_from_slice(&nonce_bytes);
+        framed.extend_from_slice(&encrypted);
+        Ok(framed)
     }
 }
 
@@ -237,7 +252,7 @@ fn classify_token(token: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::PiiVault;
+    use super::{AES_GCM_NONCE_LEN, CIPHERTEXT_VERSION_V2, PiiVault};
 
     #[tokio::test]
     async fn pseudonym_is_deterministic_and_redacts_email() {
@@ -262,5 +277,25 @@ mod tests {
         assert_eq!(first.subject_pseudonym, second.subject_pseudonym);
         assert!(first.redacted_text.contains("PII:email:"));
         assert_eq!(first.redactions.len(), 1);
+    }
+
+    #[test]
+    fn pii_encryption_uses_fresh_nonce_per_field() {
+        let vault = PiiVault::new_dev(b"workspace-secret".to_vec());
+
+        let first = vault
+            .encrypt_plaintext(b"alice@example.com")
+            .expect("first encryption should succeed");
+        let second = vault
+            .encrypt_plaintext(b"+15551234567")
+            .expect("second encryption should succeed");
+
+        assert_eq!(first[0], CIPHERTEXT_VERSION_V2);
+        assert_eq!(second[0], CIPHERTEXT_VERSION_V2);
+        assert_ne!(
+            &first[1..1 + AES_GCM_NONCE_LEN],
+            &second[1..1 + AES_GCM_NONCE_LEN],
+            "AES-GCM nonce must be unique for each encrypted PII field"
+        );
     }
 }
