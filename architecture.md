@@ -22,7 +22,7 @@ MOA has four durable boundaries:
 3. **Execution boundary:** `moa-hands` routes built-in tools, local/Docker
    execution, Daytona, E2B, and MCP through one tool router.
 4. **Data boundary:** Postgres/Neon owns the product record: sessions, events,
-   graph memory, vectors, task segments, tenant intents, learning log, lineage,
+   graph memory, vectors, task segments, learning log, lineage,
    analytics, and audit rows.
 
 Restate owns durable cloud orchestration. Postgres owns enterprise state and
@@ -91,7 +91,6 @@ Platform
        -> Workspaces
        -> Sessions
        -> Task segments
-       -> Intent taxonomy
        -> Learning log
        -> Workspace memory
        -> Workspace skills
@@ -100,8 +99,6 @@ Platform
 
 Enterprise behavior is tenant-controlled:
 
-- New tenants start with an empty intent taxonomy.
-- Platform catalog intents are opt-in.
 - Learning is append-only and invalidated by `valid_to`, not silently rewritten.
 - Workspace memory and skills remain scoped; ranking signals aggregate at tenant
   level where the work pattern is team-level.
@@ -127,7 +124,7 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 | `PlatformAdapter` | Gateway normalization/rendering | Telegram, Slack, Discord |
 | `ContextProcessor` | Ordered context-pipeline stage | identity, instructions, tools, skills, query rewrite, memory, history, runtime context, compactor, cache |
 | `CredentialVault` | Secret storage abstraction | encrypted local file vault, environment-backed MCP vault |
-| `AuthProvider` | Resolve API keys or bearer JWTs to MOA identities | local API keys, optional Auth0/OIDC |
+| `AuthProvider` | Resolve API keys or bearer JWTs to MOA identities | local API keys, disabled local/test mode, optional Auth0/OIDC |
 | `TokenVaultProvider` | Retrieve third-party OAuth tokens for linked user connections | null provider, optional Auth0 Token Vault |
 | `AsyncAuthzProvider` | Request durable human approvals | builtin approvals, optional Auth0 CIBA |
 | `LineageHandle` | Transport-neutral lineage capture | null handle, async sink/OTel bridge |
@@ -140,7 +137,7 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 |---|---|
 | `moa-core` | Shared types, traits, config, events, telemetry, analytics DTOs |
 | `moa-brain` | Context pipeline, retrieval, turn harness, approvals, resolution scoring, lineage emission |
-| `moa-session` | Postgres session store, event log, snapshots, task segments, intents, learning log, analytics |
+| `moa-session` | Postgres session store, event log, snapshots, task segments, learning log, analytics |
 | `moa-memory/graph` (`moa-memory-graph`) | Graph memory, AGE projection helpers, sidecars, RLS, changelog |
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path ingestion and fast memory write APIs |
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification and memory privacy helpers |
@@ -153,7 +150,7 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 | `moa-lineage-audit` | Compliance audit hashes, roots, signing, and DSAR support |
 | `moa-auth/authz-schema` (`moa-authz-schema`) | Typed OpenFGA tuple keys and model constants |
 | `moa-auth/authz` (`moa-authz`) | OpenFGA client, authz checks, transactional outbox, and poller |
-| `moa-auth/providers` (`moa-auth-providers`) | Local API keys, builtin approvals, null token vault, and provider bundle |
+| `moa-auth/providers` (`moa-auth-providers`) | Local API keys, disabled auth, builtin approvals, null token vault, and provider bundle |
 | `moa-auth/auth0` (`moa-auth-providers-auth0`) | Optional Auth0/OIDC, Token Vault, CIBA, JWKS, and group sync |
 | `moa-auth/fga-bootstrap` (`moa-fga-bootstrap`) | OpenFGA store and model bootstrap binary |
 | `moa-edge` | Public HTTP edge for authn, identity headers, and Auth0 webhooks |
@@ -270,12 +267,12 @@ from Postgres events plus Restate journals.
 | Plane | Primary owner | Notes |
 |---|---|---|
 | Session/event log | `moa-session` | Append-only event history and queryable session state |
-| Task analytics | `moa-session` | Segments, skill rates, intent transitions, materialized views |
+| Task analytics | `moa-session` | Segments, skill rates, segment baselines, materialized views |
 | Memory graph | `moa-memory-graph` | Bitemporal graph records, sidecars, changelog, RLS scope |
 | Vector retrieval | `moa-memory-vector` | pgvector default; Turbopuffer promotion path |
 | Memory ingestion | `moa-memory-ingest` | Slow-path ingestion and deterministic fast writes |
 | Privacy | `moa-memory-pii` | PII classification before memory writes |
-| Identity | `moa-auth/providers`, optional `moa-auth/auth0`, `moa-edge` | API keys by default; Auth0/OIDC behind the `auth0` feature |
+| Identity | `moa-auth/providers`, optional `moa-auth/auth0`, `moa-edge` | API keys by default; disabled mode for local/isolated tests; Auth0/OIDC behind the `auth0` feature |
 | Authorization | `moa-auth/authz`, `moa-auth/authz-schema` | OpenFGA checks and transactional tuple outbox |
 | Security events | `moa-ocsf` | OCSF v1.3 events in Postgres, shipped to tenant audit buckets |
 | Lineage | `moa-lineage-*` | Hot lineage, scores, OTel bridge, cold export, audit tier |
@@ -317,7 +314,7 @@ See [`docs/08-security.md`](docs/08-security.md) and
 | Context cost/cache regression | [`docs/07-context-pipeline.md`](docs/07-context-pipeline.md), [`docs/prompt-caching-architecture.md`](docs/prompt-caching-architecture.md) |
 | Authn/authz, SSO, SCIM, or audit issue | [`docs/01-architecture-overview.md`](docs/01-architecture-overview.md), [`docs/08-security.md`](docs/08-security.md), [`docs/operations/ocsf-audit.md`](docs/operations/ocsf-audit.md) |
 | Memory retrieval or ingestion issue | [`docs/04-memory-architecture.md`](docs/04-memory-architecture.md) |
-| Tenant learning or intent issue | [`docs/14-multi-tenancy-and-learning.md`](docs/14-multi-tenancy-and-learning.md) |
+| Tenant learning issue | [`docs/14-multi-tenancy-and-learning.md`](docs/14-multi-tenancy-and-learning.md) |
 | Lineage/audit issue | [`docs/ops/audit-runbook.md`](docs/ops/audit-runbook.md), [`docs/operations/subject-access-runbook.md`](docs/operations/subject-access-runbook.md) |
 
 ---

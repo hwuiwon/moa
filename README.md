@@ -144,7 +144,13 @@ OPENAI_API_KEY=...
 cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
 ```
 
-The binary serves these Restate surfaces: `Session`, `SubAgent`, `Workspace`, `SessionStore`, `ToolExecutor`, `LLMGateway`, `WorkspaceStore`, `Consolidate`, `IngestionVO`, and `Health`. Deployment registration is handled outside the binary.
+The binary serves these Restate surfaces: virtual objects `Session`, `SubAgent`,
+`Workspace`, `CronJob`, and `IngestionVO`; services `AgentRegistry`,
+`AgentTemplates`, `Agents`, `Approvals`, `ApiKeys`, `Audit`, `Authz`,
+`GraphMemoryMaint`, `Health`, `LLMGateway`, `NeonMaint`, `SessionStore`,
+`Tenants`, `ToolExecutor`, `WorkspaceStore`, and `Whoami`; and workflows
+`Consolidate` and `TurnExecution`. Deployment registration is handled outside
+the binary.
 
 The Docker image builds `moa-orchestrator-bin` and installs it as `/usr/local/bin/moa-orchestrator`.
 

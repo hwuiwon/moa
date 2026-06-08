@@ -23,7 +23,7 @@ The root workspace currently contains:
 | `moa-lineage/audit` (`moa-lineage-audit`) | Compliance audit hash chain, Merkle root, signing, and DSAR support |
 | `moa-auth/authz-schema` (`moa-authz-schema`) | Typed OpenFGA tuple keys and model constants |
 | `moa-auth/authz` (`moa-authz`) | OpenFGA client, authorization checks, transactional outbox, and outbox poller |
-| `moa-auth/providers` (`moa-auth-providers`) | Local API keys, builtin approvals, null token vault, and provider bundle construction |
+| `moa-auth/providers` (`moa-auth-providers`) | Local API keys, disabled auth, builtin approvals, null token vault, and provider bundle construction |
 | `moa-auth/auth0` (`moa-auth-providers-auth0`) | Optional Auth0 and generic OIDC providers gated by the `auth0` feature |
 | `moa-auth/fga-bootstrap` (`moa-fga-bootstrap`) | OpenFGA store and authorization-model bootstrap binary |
 | `moa-ocsf` | OCSF v1.3 security-event types, emit helpers, signing, and persistence |

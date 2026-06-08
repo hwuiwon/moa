@@ -87,7 +87,9 @@ Phase 1 auth work adds `AuthProvider`, `TokenVaultProvider`, and
 `moa-orchestrator` exposes Restate handlers:
 
 - Virtual objects: `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO`
-- Services: `Health`, `SessionStore`, `LLMGateway`, `ToolExecutor`, `WorkspaceStore`
+- Services: `AgentRegistry`, `AgentTemplates`, `Agents`, `Approvals`, `ApiKeys`,
+  `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LLMGateway`, `NeonMaint`,
+  `SessionStore`, `Tenants`, `ToolExecutor`, `WorkspaceStore`, `Whoami`
 - Workflows: `Consolidate`, `TurnExecution`
 
 `Session` is the durable actor for one session key. It queues messages, calls `run_turn`, tracks the active task segment, records tool/skill usage, scores resolution, and writes learning entries. `SubAgent` is the same actor pattern for delegated work with depth and budget limits.

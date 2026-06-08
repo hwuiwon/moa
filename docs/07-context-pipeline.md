@@ -23,7 +23,7 @@ The code reports fixed stage numbers through each `ContextProcessor`. With query
 | 2 | `InstructionProcessor` | Stable prefix | user/workspace instructions |
 | 3 | `ToolDefinitionProcessor` | Stable prefix | deterministic tool schema list, capped at 30 |
 | 4 | `SkillInjector` | Stable prefix breakpoint | budgeted skill manifest ranked for the task |
-| 5 | `QueryRewriter` | Dynamic metadata | rewritten query, high-level intent, clarification flag, task transition flag |
+| 5 | `QueryRewriter` | Dynamic metadata | rewritten query, high-level task kind, clarification flag, task transition flag |
 | 6 | `MemoryRetriever` | Dynamic tail | user/workspace indexes and relevant memory pages |
 | 7 | `HistoryCompiler` | Dynamic/history prefix | replayed events, checkpoints, recent turns, errors |
 | 8 | `RuntimeContextProcessor` | Dynamic tail | current date, workspace, working directory, branch, user |
@@ -45,7 +45,7 @@ The stable prefix is produced by stages 1-4. These stages avoid per-turn values 
 The rewriter produces:
 
 - `rewritten_query`
-- high-level `intent`
+- high-level `task_kind`
 - `sub_queries`
 - `suggested_tools`
 - `needs_clarification`

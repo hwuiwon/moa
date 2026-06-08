@@ -34,4 +34,5 @@ own separate migration directories.
 
 L01 shipped core + sink + otel; L02 shipped citation + cold; L03 wired eval and
 dashboards; L04 ships the compliance audit tier behind a per-workspace opt-in.
-See `sequence/lineage/L*-*.md` for prompts.
+Current architecture details live in `docs/01-architecture-overview.md` and
+`docs/10-technology-stack.md`.
