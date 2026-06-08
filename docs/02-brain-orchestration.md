@@ -29,8 +29,8 @@ Bound surfaces:
 
 | Restate primitive | Handlers |
 |---|---|
-| Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob` |
-| Service | `Health`, `SessionStore`, `LLMGateway`, `ToolExecutor`, `WorkspaceStore`, `GraphMemoryMaint`, `NeonMaint` |
+| Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` |
+| Service | `AgentRegistry`, `AgentTemplates`, `Agents`, `Approvals`, `ApiKeys`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LLMGateway`, `NeonMaint`, `SessionStore`, `Tenants`, `ToolExecutor`, `WorkspaceStore`, `Whoami` |
 | Workflow | `Consolidate`, `TurnExecution` |
 
 Restate state is used for hot orchestration state: queued messages, status, pending approvals, child refs, active segment, cancellation flags, and child budgets. Product-visible history is written to Postgres.

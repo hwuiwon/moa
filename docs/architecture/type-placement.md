@@ -77,8 +77,8 @@ paths remain stable while the auth implementation crates live together:
   model-version constants.
 - `moa-auth/authz` owns the OpenFGA client, authorization checks,
   transactional outbox, and outbox poller.
-- `moa-auth/providers` owns local API-key auth, builtin approvals, null token
-  vault, and provider bundle construction.
+- `moa-auth/providers` owns local API-key auth, disabled auth, builtin
+  approvals, null token vault, and provider bundle construction.
 - `moa-auth/auth0` owns optional Auth0 and generic OIDC provider
   implementations behind the `auth0` feature.
 - `moa-auth/fga-bootstrap` owns the OpenFGA bootstrap binary.
