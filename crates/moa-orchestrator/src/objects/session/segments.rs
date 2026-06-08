@@ -24,7 +24,7 @@ pub(super) async fn ensure_current_segment(
         state.current_segment = Some(segment.active_view());
     }
 
-    if let Some(mut transition) = SegmentTracker::transition_from_metadata(
+    if let Some(transition) = SegmentTracker::transition_from_metadata(
         &request.metadata,
         session_id,
         meta.workspace_id.as_str(),
@@ -54,8 +54,6 @@ pub(super) async fn ensure_current_segment(
             .await?;
         }
 
-        classify_started_segment(ctx, meta.workspace_id.as_str(), request, &mut transition).await?;
-
         ctx.service_client::<RestateSessionStoreClient>()
             .create_segment(Json(CreateSegmentRequest {
                 segment: transition.task_segment.clone(),
@@ -84,102 +82,4 @@ pub(super) async fn ensure_current_segment(
     }
 
     Ok(())
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct IntentClassification {
-    label: String,
-    confidence: f64,
-}
-
-async fn classify_started_segment(
-    ctx: &ObjectContext<'_>,
-    tenant_id: &str,
-    request: &CompletionRequest,
-    transition: &mut moa_brain::pipeline::segments::SegmentTransition,
-) -> Result<(), HandlerError> {
-    let runtime = OrchestratorCtx::current();
-    if !runtime.config.intents.enabled {
-        return Ok(());
-    }
-    let Some(embedding_provider) = runtime.embedding_provider.clone() else {
-        return Ok(());
-    };
-
-    let session_store = runtime.session_store.clone();
-    let threshold = runtime.config.intents.classification_threshold;
-    let tenant_id = tenant_id.to_string();
-    let task_summary = transition
-        .task_segment
-        .task_summary
-        .clone()
-        .unwrap_or_default();
-    let first_user_message = user_message_for_intent(request).unwrap_or_default();
-    let segment_id = transition.task_segment.id.0;
-
-    let classification = ctx
-        .run(|| async move {
-            let classifier = IntentClassifier::with_threshold(
-                session_store.clone(),
-                embedding_provider,
-                threshold,
-            );
-            let Some((intent, confidence)) = classifier
-                .classify(&tenant_id, &task_summary, &first_user_message)
-                .await
-                .map_err(HandlerError::from)?
-            else {
-                return Ok(Json::from(None::<IntentClassification>));
-            };
-
-            session_store
-                .append_learning(&LearningEntry {
-                    id: uuid::Uuid::now_v7(),
-                    tenant_id: tenant_id.clone(),
-                    learning_type: "intent_classified".to_string(),
-                    target_id: segment_id.to_string(),
-                    target_label: Some(intent.label.clone()),
-                    payload: serde_json::json!({
-                        "intent_id": intent.id,
-                        "task_summary": task_summary,
-                        "first_user_message": first_user_message,
-                    }),
-                    confidence: Some(confidence),
-                    source_refs: vec![segment_id],
-                    actor: "system".to_string(),
-                    valid_from: Utc::now(),
-                    valid_to: None,
-                    batch_id: None,
-                    version: 1,
-                })
-                .await
-                .map_err(HandlerError::from)?;
-
-            Ok(Json::from(Some(IntentClassification {
-                label: intent.label,
-                confidence,
-            })))
-        })
-        .name("classify_started_segment")
-        .await?
-        .into_inner();
-
-    if let Some(classification) = classification {
-        transition.task_segment.intent_label = Some(classification.label.clone());
-        transition.task_segment.intent_confidence = Some(classification.confidence);
-        transition.started.intent_label = Some(classification.label.clone());
-        transition.started.intent_confidence = Some(classification.confidence);
-        transition.active_segment.intent_label = Some(classification.label);
-    }
-
-    Ok(())
-}
-
-fn user_message_for_intent(request: &CompletionRequest) -> Option<String> {
-    request
-        .messages
-        .iter()
-        .find(|message| message.role == MessageRole::User)
-        .map(|message| message.content.trim().to_string())
-        .filter(|message| !message.is_empty())
 }

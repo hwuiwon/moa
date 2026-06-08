@@ -8,7 +8,7 @@ _Durable execution on Restate Virtual Objects and Workflows._
 
 This document specifies how MOA uses Restate as its sole durable execution engine. It defines the mapping of MOA's session/brain/hand model onto Restate's primitives (Services, Virtual Objects, Workflows), handler signatures in Rust, state and journal strategy, and Kubernetes deployment.
 
-Scope: all session orchestration, sub-agent dispatch, tool execution, approval flows, memory consolidation, intent discovery, and scheduled work. Out of scope: data plane primitives such as the Postgres event log, Daytona sandboxes, and provider APIs; those remain specified in the adjacent storage, hands, and provider docs.
+Scope: all session orchestration, sub-agent dispatch, tool execution, approval flows, memory consolidation, and scheduled work. Out of scope: data plane primitives such as the Postgres event log, Daytona sandboxes, and provider APIs; those remain specified in the adjacent storage, hands, and provider docs.
 
 ---
 
@@ -64,7 +64,7 @@ trait Consolidate {
 }
 ```
 
-**Use for**: one-shot tasks with a well-defined start and end where re-invocation must be structurally impossible. Memory consolidation and intent discovery runs fit this shape. Never use for agents — agents are conversational by nature.
+**Use for**: one-shot tasks with a well-defined start and end where re-invocation must be structurally impossible. Memory consolidation runs fit this shape. Never use for agents — agents are conversational by nature.
 
 ### Primitives inside handlers
 
@@ -119,11 +119,10 @@ One-shot tasks that happen to be LLM-driven — research-and-summarize, classify
 
 Tool calls are ephemeral and called from within `TurnExecution` workflows or SubAgent VO turns via typed clients. Service semantics (no keyed state, durable per-invocation) are correct. Wrapping them in Workflows adds no value and pollutes the journal with extra workflow starts.
 
-### Why Consolidate and intent discovery are Workflows
+### Why Consolidate Is A Workflow
 
-These are genuine one-shot operations where re-invocation must be structurally impossible:
+This is a genuine one-shot operation where re-invocation must be structurally impossible:
 - **Consolidate**: running it twice on the same workspace for the same date would double-apply graph maintenance. Workflow's runs-once-per-ID guarantee is the correctness property we want.
-- **IntentDiscovery**: one tenant discovery pass over a bounded segment window should have a stable run identity and audit trail.
 
 Slow-path graph-memory turn ingestion is a Virtual Object (`IngestionVO`) because
 the implementation tracks per-turn completion keys and uses Restate journaled

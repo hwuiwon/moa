@@ -20,7 +20,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use moa_brain::intents::IntentClassifier;
 use moa_brain::pipeline::segments::SegmentTracker;
 use moa_brain::resolution::{
     ResolutionOverride, ResolutionScorer, continuation_signal, self_assessment_signal,
@@ -33,13 +32,13 @@ use moa_core::restate_observability::{
 use moa_core::wire::{RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress};
 use moa_core::{
     ActiveSegment, ApprovalDecision, ApprovalPrompt, CompletionRequest, CompletionResponse,
-    DispatchSubAgentInput, Event, EventRange, EventRecord, LearningEntry, MessageRole, MoaError,
-    PolicyAction, QueryRewriteResult, ScoringPhase, SegmentId, SessionId, SessionMeta,
-    SessionStatus, SubAgentChildRef, ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation,
-    ToolOutput, TurnLatencyCounters, TurnOutcome as CoreTurnOutcome, TurnReplayCounters,
-    record_approval_wait, record_session_error, record_turn_event_persist_duration,
-    record_turn_latency, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
-    scope_turn_latency_counters, scope_turn_replay_counters,
+    DispatchSubAgentInput, Event, EventRange, EventRecord, LearningEntry, MoaError, PolicyAction,
+    QueryRewriteResult, ScoringPhase, SegmentId, SessionId, SessionMeta, SessionStatus,
+    SubAgentChildRef, ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput,
+    TurnLatencyCounters, TurnOutcome as CoreTurnOutcome, TurnReplayCounters, record_approval_wait,
+    record_session_error, record_turn_event_persist_duration, record_turn_latency,
+    record_turn_llm_call_duration, record_turn_tool_dispatch_duration, scope_turn_latency_counters,
+    scope_turn_replay_counters,
 };
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -785,7 +784,7 @@ async fn ensure_current_segment(
 
     let now = durable_utc_now(ctx).await?;
     let mut active_segment = active_segment;
-    if let Some(mut transition) = SegmentTracker::transition_from_metadata(
+    if let Some(transition) = SegmentTracker::transition_from_metadata(
         &request.metadata,
         session_id,
         meta.workspace_id.as_str(),
@@ -814,8 +813,6 @@ async fn ensure_current_segment(
             )
             .await?;
         }
-
-        classify_started_segment(ctx, meta.workspace_id.as_str(), request, &mut transition).await?;
 
         ctx.service_client::<RestateSessionStoreClient>()
             .create_segment(Json(CreateSegmentRequest {
@@ -852,7 +849,7 @@ async fn score_completed_segment_at_transition(
         .unwrap_or((None, None));
     let segment_events = segment_events_for_scoring(&events, completed.segment_id, next_user_seq);
     let rewrite = query_rewrite_from_metadata(metadata);
-    let baseline = load_segment_baseline(ctx, tenant_id, completed.intent_label.as_deref()).await?;
+    let baseline = load_segment_baseline(ctx, tenant_id).await?;
     let phase = if next_user_message.is_some() {
         ScoringPhase::Deferred
     } else {
@@ -905,12 +902,7 @@ async fn score_current_active_segment(
 
     let events = load_session_events(ctx, session_id).await?;
     let segment_events = segment_events_for_scoring(&events, segment.id, None);
-    let baseline = load_segment_baseline(
-        ctx,
-        meta.workspace_id.as_str(),
-        segment.intent_label.as_deref(),
-    )
-    .await?;
+    let baseline = load_segment_baseline(ctx, meta.workspace_id.as_str()).await?;
     let duration_ms = durable_utc_now(ctx)
         .await?
         .signed_duration_since(segment.started_at)
@@ -994,13 +986,11 @@ async fn load_session_events(
 async fn load_segment_baseline(
     ctx: &WorkflowContext<'_>,
     tenant_id: &str,
-    intent_label: Option<&str>,
 ) -> Result<Option<moa_core::SegmentBaseline>, HandlerError> {
     Ok(ctx
         .service_client::<RestateSessionStoreClient>()
         .get_segment_baseline(Json(GetSegmentBaselineRequest {
             tenant_id: tenant_id.to_string(),
-            intent_label: intent_label.map(ToOwned::to_owned),
         }))
         .call()
         .await?
@@ -1116,104 +1106,6 @@ fn query_rewrite_from_metadata(
     metadata
         .get("query_rewrite")
         .and_then(|value| serde_json::from_value(value.clone()).ok())
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct IntentClassification {
-    label: String,
-    confidence: f64,
-}
-
-async fn classify_started_segment(
-    ctx: &WorkflowContext<'_>,
-    tenant_id: &str,
-    request: &CompletionRequest,
-    transition: &mut moa_brain::pipeline::segments::SegmentTransition,
-) -> Result<(), HandlerError> {
-    let runtime = OrchestratorCtx::current();
-    if !runtime.config.intents.enabled {
-        return Ok(());
-    }
-    let Some(embedding_provider) = runtime.embedding_provider.clone() else {
-        return Ok(());
-    };
-
-    let session_store = runtime.session_store.clone();
-    let threshold = runtime.config.intents.classification_threshold;
-    let tenant_id = tenant_id.to_string();
-    let task_summary = transition
-        .task_segment
-        .task_summary
-        .clone()
-        .unwrap_or_default();
-    let first_user_message = user_message_for_intent(request).unwrap_or_default();
-    let segment_id = transition.task_segment.id.0;
-
-    let classification = ctx
-        .run(|| async move {
-            let classifier = IntentClassifier::with_threshold(
-                session_store.clone(),
-                embedding_provider,
-                threshold,
-            );
-            let Some((intent, confidence)) = classifier
-                .classify(&tenant_id, &task_summary, &first_user_message)
-                .await
-                .map_err(HandlerError::from)?
-            else {
-                return Ok(Json::from(None::<IntentClassification>));
-            };
-
-            session_store
-                .append_learning(&LearningEntry {
-                    id: uuid::Uuid::now_v7(),
-                    tenant_id: tenant_id.clone(),
-                    learning_type: "intent_classified".to_string(),
-                    target_id: segment_id.to_string(),
-                    target_label: Some(intent.label.clone()),
-                    payload: serde_json::json!({
-                        "intent_id": intent.id,
-                        "task_summary": task_summary,
-                        "first_user_message": first_user_message,
-                    }),
-                    confidence: Some(confidence),
-                    source_refs: vec![segment_id],
-                    actor: "system".to_string(),
-                    valid_from: Utc::now(),
-                    valid_to: None,
-                    batch_id: None,
-                    version: 1,
-                })
-                .await
-                .map_err(HandlerError::from)?;
-
-            Ok(Json::from(Some(IntentClassification {
-                label: intent.label,
-                confidence,
-            })))
-        })
-        .name("classify_started_segment")
-        .await?
-        .into_inner();
-
-    if let Some(classification) = classification {
-        transition.task_segment.intent_label = Some(classification.label.clone());
-        transition.task_segment.intent_confidence = Some(classification.confidence);
-        transition.started.intent_label = Some(classification.label.clone());
-        transition.started.intent_confidence = Some(classification.confidence);
-        transition.active_segment.intent_label = Some(classification.label);
-    }
-
-    Ok(())
-}
-
-fn user_message_for_intent(request: &CompletionRequest) -> Option<String> {
-    request
-        .messages
-        .iter()
-        .find(|message| message.role == MessageRole::User)
-        .map(|message| message.content.trim().to_string())
-        .filter(|message| !message.is_empty())
 }
 
 async fn record_response(

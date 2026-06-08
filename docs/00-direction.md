@@ -15,7 +15,6 @@ Platform
        -> Workspaces
        -> Admin controls
        -> Task segments
-       -> Intent taxonomy
        -> Learning log
        -> Lineage and audit evidence
        -> Workspace memory and skills
@@ -28,8 +27,8 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 - **Durable work:** sessions and sub-agents survive process restarts because Restate owns orchestration and Postgres owns product data.
 - **Task segmentation:** conversations are split into discrete task segments so one long session can contain many independently tracked outcomes.
 - **Resolution detection:** MOA scores whether each task segment resolved, partially resolved, failed, was abandoned, or remains unknown without requiring explicit user feedback.
-- **Per-tenant intent learning:** tenants start with no intents; MOA proposes intents from conversation clusters and only uses active, tenant-approved intents for classification.
-- **Learning log:** every learned pattern, resolution score, intent decision, memory update, and skill change can be audited and invalidated by version or batch.
+- **Per-tenant learning:** task outcomes, skill changes, and memory updates are recorded at tenant scope without requiring a fixed session intent taxonomy.
+- **Learning log:** every learned pattern, resolution score, memory update, and skill change can be audited and invalidated by version or batch.
 - **Lineage and audit:** retrieval, context, generation, scores, DSAR exports, and optional compliance audit records are first-class operational artifacts.
 - **Workspace memory:** graph memory stores facts, decisions, lessons, sources, and provenance while Postgres sidecars and pgvector provide retrieval.
 - **Skills:** successful workflows can become reusable Agent Skills; ranking improves as segment outcomes accumulate.
@@ -54,15 +53,14 @@ MOA's differentiators are architectural, not cosmetic:
 - **Restate-native agents:** sessions and sub-agents map to virtual objects with single-writer semantics and durable waits.
 - **Segment-level analytics:** learning is based on task outcomes, not whole-session guesses.
 - **Resolution-weighted improvement:** skills and future retrieval decisions can use measured success rates.
-- **Tenant-owned taxonomies:** intent labels reflect a team's work patterns and admin review.
+- **Skills-first adaptation:** reusable skills and memory updates are promoted from measured outcomes, not from static routing labels.
 - **Auditable learning:** the learning log gives provenance, confidence, versions, and rollback hooks.
 - **Operational evidence:** lineage, scores, analytics, and compliance audit tiers let operators explain what happened without scraping logs.
 - **Graph memory plus database retrieval:** learned knowledge keeps provenance and bitemporal history while retrieval gets production-grade indexes and embeddings.
 
 ## Non-Goals
 
-- MOA does not train a per-tenant model for intent classification. It uses embedding nearest-centroid classification over tenant intent centroids.
-- MOA does not force a global intent catalog onto tenants. Catalog entries are opt-in.
+- MOA does not require a durable session intent taxonomy for routing or learning. The agent loop and skills decide dynamically from context.
 - MOA does not keep durable product state only in Restate. Restate is orchestration state; Postgres is the product record.
 - MOA does not bind agent work to a single front door. CLI, REST/gateway, and messaging adapters are peers over the same runtime model.
 - MOA does not optimize for a single-user personal desktop workflow. Local mode is a development and operator path over the same enterprise runtime model.

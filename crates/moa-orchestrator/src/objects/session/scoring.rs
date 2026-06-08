@@ -19,7 +19,7 @@ pub(super) async fn score_completed_segment_at_transition(
         .unwrap_or((None, None));
     let segment_events = segment_events_for_scoring(&events, completed.segment_id, next_user_seq);
     let rewrite = query_rewrite_from_metadata(metadata);
-    let baseline = load_segment_baseline(ctx, tenant_id, completed.intent_label.as_deref()).await?;
+    let baseline = load_segment_baseline(ctx, tenant_id).await?;
     let phase = if next_user_message.is_some() {
         ScoringPhase::Deferred
     } else {
@@ -66,7 +66,7 @@ pub(super) async fn score_active_segment(
         .ok_or_else(|| TerminalError::new("session meta missing"))?;
     let events = load_session_events(ctx, session_id).await?;
     let segment_events = segment_events_for_scoring(&events, segment.id, None);
-    let baseline = load_segment_baseline(ctx, tenant_id, segment.intent_label.as_deref()).await?;
+    let baseline = load_segment_baseline(ctx, tenant_id).await?;
     let duration_ms = Utc::now()
         .signed_duration_since(segment.started_at)
         .num_milliseconds()
@@ -149,13 +149,11 @@ async fn load_session_events(
 async fn load_segment_baseline(
     ctx: &ObjectContext<'_>,
     tenant_id: &str,
-    intent_label: Option<&str>,
 ) -> Result<Option<moa_core::SegmentBaseline>, HandlerError> {
     Ok(ctx
         .service_client::<RestateSessionStoreClient>()
         .get_segment_baseline(Json(GetSegmentBaselineRequest {
             tenant_id: tenant_id.to_string(),
-            intent_label: intent_label.map(ToOwned::to_owned),
         }))
         .call()
         .await?

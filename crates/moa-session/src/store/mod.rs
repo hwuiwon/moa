@@ -5,12 +5,12 @@ use std::{path::Path, sync::Arc};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ApprovalRule, BlobStore, CacheDailyMetric, CatalogIntent, ClaimCheck, ContextSnapshot, Event,
-    EventFilter, EventRange, EventRecord, IntentStatus, LearningEntry, MoaConfig, MoaError,
-    PendingSignal, PendingSignalId, ResolutionScore, Result, SegmentBaseline, SegmentCompletion,
-    SegmentId, SessionAnalyticsSummary, SessionFilter, SessionMeta, SessionStatus, SessionStore,
-    SessionSummary, SessionTurnMetric, SkillResolutionRate, TaskSegment, TenantIntent,
-    ToolCallSummary, WakeContext, WorkspaceAnalyticsSummary, WorkspaceId, record_session_created,
+    ApprovalRule, BlobStore, CacheDailyMetric, ClaimCheck, ContextSnapshot, Event, EventFilter,
+    EventRange, EventRecord, LearningEntry, MoaConfig, MoaError, PendingSignal, PendingSignalId,
+    ResolutionScore, Result, SegmentBaseline, SegmentCompletion, SegmentId,
+    SessionAnalyticsSummary, SessionFilter, SessionMeta, SessionStatus, SessionStore,
+    SessionSummary, SessionTurnMetric, SkillResolutionRate, TaskSegment, ToolCallSummary,
+    WakeContext, WorkspaceAnalyticsSummary, WorkspaceId, record_session_created,
     record_sessions_active, record_turn_completed,
 };
 use moa_security::ApprovalRuleStore;
@@ -23,19 +23,17 @@ use crate::blob::{
 };
 use crate::listener::{GLOBAL_EVENTS_CHANNEL, session_channel_name};
 use crate::queries::{
-    CATALOG_INTENT_COLUMNS, EVENT_COLUMNS, LEARNING_ENTRY_COLUMNS, SESSION_INSERT_COLUMNS,
-    SESSION_SELECT_COLUMNS, SESSION_SUMMARY_COLUMNS, TASK_SEGMENT_COLUMNS, TENANT_INTENT_COLUMNS,
-    approval_rule_from_row, catalog_intent_from_row, event_type_from_db, event_type_to_db,
-    intent_source_to_db, intent_status_to_db, learning_entry_from_row, map_sqlx_error,
-    pending_signal_from_row, pending_signal_type_to_db, platform_to_db, policy_action_to_db,
-    policy_scope_to_db, session_meta_from_row, session_status_to_db, session_summary_from_row,
-    task_segment_from_row, tenant_intent_from_row,
+    EVENT_COLUMNS, LEARNING_ENTRY_COLUMNS, SESSION_INSERT_COLUMNS, SESSION_SELECT_COLUMNS,
+    SESSION_SUMMARY_COLUMNS, TASK_SEGMENT_COLUMNS, approval_rule_from_row, event_type_from_db,
+    event_type_to_db, learning_entry_from_row, map_sqlx_error, pending_signal_from_row,
+    pending_signal_type_to_db, platform_to_db, policy_action_to_db, policy_scope_to_db,
+    session_meta_from_row, session_status_to_db, session_summary_from_row, task_segment_from_row,
 };
 use crate::schema;
 
 mod approval;
 mod helpers;
-mod intents;
+mod learning;
 mod segments;
 mod session_store;
 

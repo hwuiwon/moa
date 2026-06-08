@@ -133,48 +133,6 @@ pub(crate) fn pending_signal_type_from_db(value: &str) -> Result<PendingSignalTy
     }
 }
 
-/// Converts an intent status to its stored representation.
-pub(crate) fn intent_status_to_db(status: IntentStatus) -> &'static str {
-    match status {
-        IntentStatus::Proposed => "proposed",
-        IntentStatus::Active => "active",
-        IntentStatus::Deprecated => "deprecated",
-    }
-}
-
-/// Parses an intent status from its stored representation.
-pub(crate) fn intent_status_from_db(value: &str) -> Result<IntentStatus> {
-    match value {
-        "proposed" => Ok(IntentStatus::Proposed),
-        "active" => Ok(IntentStatus::Active),
-        "deprecated" => Ok(IntentStatus::Deprecated),
-        other => Err(MoaError::StorageError(format!(
-            "unknown intent status `{other}`"
-        ))),
-    }
-}
-
-/// Converts an intent source to its stored representation.
-pub(crate) fn intent_source_to_db(source: IntentSource) -> &'static str {
-    match source {
-        IntentSource::Discovered => "discovered",
-        IntentSource::Manual => "manual",
-        IntentSource::Catalog => "catalog",
-    }
-}
-
-/// Parses an intent source from its stored representation.
-pub(crate) fn intent_source_from_db(value: &str) -> Result<IntentSource> {
-    match value {
-        "discovered" => Ok(IntentSource::Discovered),
-        "manual" => Ok(IntentSource::Manual),
-        "catalog" => Ok(IntentSource::Catalog),
-        other => Err(MoaError::StorageError(format!(
-            "unknown intent source `{other}`"
-        ))),
-    }
-}
-
 /// Converts a policy action to its stored representation.
 pub(crate) fn policy_action_to_db(action: &PolicyAction) -> &'static str {
     match action {

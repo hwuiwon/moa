@@ -61,6 +61,7 @@ pub fn build_providers_with_resolver(
 ) -> Result<Providers, BuildError> {
     let auth: Arc<dyn AuthProvider> = match cfg.auth.provider {
         AuthProviderKind::Local => Arc::new(crate::LocalAuthProvider::new(pool.clone())),
+        AuthProviderKind::Disabled => Arc::new(crate::DisabledAuthProvider),
         AuthProviderKind::Auth0 => {
             #[cfg(feature = "auth0")]
             {
@@ -219,6 +220,7 @@ impl AuthProvider for HybridAuthProvider {
 mod tests {
     use super::*;
     use moa_core::config::AuthProviderKind;
+    use moa_core::traits::{Credential, IdentityType};
 
     #[tokio::test]
     async fn auth0_without_feature_returns_feature_missing() {
@@ -236,5 +238,29 @@ mod tests {
             error,
             BuildError::AuthFeatureMissing(AuthProviderKind::Auth0)
         ));
+    }
+
+    #[tokio::test]
+    async fn disabled_auth_provider_accepts_any_credential_as_service_identity() {
+        // Pins: auth.provider=disabled constructs a provider that bypasses credential checks.
+        let mut config = MoaConfig::default();
+        config.auth.provider = AuthProviderKind::Disabled;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://moa_owner:dev@127.0.0.1:1/moa")
+            .expect("lazy pool should not connect");
+        let providers =
+            build_providers(&config, Arc::new(pool)).expect("disabled auth should build");
+
+        assert_eq!(providers.auth.name(), "disabled");
+        assert!(!providers.auth.requires_credentials());
+        let identity = providers
+            .auth
+            .authenticate(&Credential::ApiKey("ignored".to_string()))
+            .await
+            .expect("disabled auth accepts any credential");
+        assert_eq!(identity.identity_type, IdentityType::Service);
+        assert_eq!(identity.id, uuid::Uuid::nil());
+        assert_eq!(identity.tenant_id, uuid::Uuid::nil());
+        assert_eq!(identity.api_key_id, None);
     }
 }

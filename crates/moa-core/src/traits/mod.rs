@@ -235,12 +235,8 @@ pub trait SessionStore: Send + Sync {
             .await
     }
 
-    /// Loads the structural baseline for one tenant and optional intent label.
-    async fn get_segment_baseline(
-        &self,
-        _tenant_id: &str,
-        _intent_label: Option<&str>,
-    ) -> Result<Option<SegmentBaseline>> {
+    /// Loads the structural baseline for one tenant.
+    async fn get_segment_baseline(&self, _tenant_id: &str) -> Result<Option<SegmentBaseline>> {
         Ok(None)
     }
 
@@ -248,7 +244,6 @@ pub trait SessionStore: Send + Sync {
     async fn list_skill_resolution_rates(
         &self,
         _tenant_id: &str,
-        _intent_label: Option<&str>,
     ) -> Result<Vec<SkillResolutionRate>> {
         Ok(Vec::new())
     }

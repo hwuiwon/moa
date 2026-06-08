@@ -6,8 +6,6 @@ CREATE TABLE IF NOT EXISTS task_segments (
     scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
     tenant_id TEXT NOT NULL,
     segment_index INT NOT NULL,
-    intent_label TEXT,
-    intent_confidence NUMERIC(4,3),
     task_summary TEXT,
     started_at TIMESTAMPTZ NOT NULL,
     ended_at TIMESTAMPTZ,
@@ -22,8 +20,8 @@ CREATE TABLE IF NOT EXISTS task_segments (
     UNIQUE(session_id, segment_index)
 );
 
-CREATE INDEX IF NOT EXISTS idx_task_segments_tenant_intent
-    ON task_segments (tenant_id, intent_label, resolution);
+CREATE INDEX IF NOT EXISTS idx_task_segments_tenant_resolution
+    ON task_segments (tenant_id, resolution);
 CREATE INDEX IF NOT EXISTS idx_task_segments_session
     ON task_segments (session_id, segment_index);
 CREATE INDEX IF NOT EXISTS idx_task_segments_tenant_time

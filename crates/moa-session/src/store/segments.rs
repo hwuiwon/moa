@@ -9,17 +9,15 @@ impl PostgresSessionStore {
         let sessions = self.table_name("sessions");
         sqlx::query(&format!(
             "INSERT INTO {task_segments} \
-             (id, session_id, workspace_id, user_id, tenant_id, segment_index, intent_label, intent_confidence, \
-              task_summary, started_at, ended_at, resolution, resolution_signal, resolution_confidence, \
+             (id, session_id, workspace_id, user_id, tenant_id, segment_index, task_summary, \
+              started_at, ended_at, resolution, resolution_signal, resolution_confidence, \
               tools_used, skills_activated, turn_count, token_cost, previous_segment_id) \
-             SELECT $1, $2, s.workspace_id, s.user_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17 \
+             SELECT $1, $2, s.workspace_id, s.user_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15 \
              FROM {sessions} s WHERE s.id = $2 \
              ON CONFLICT (id) DO UPDATE SET \
                  workspace_id = EXCLUDED.workspace_id, \
                  user_id = EXCLUDED.user_id, \
                  tenant_id = EXCLUDED.tenant_id, \
-                 intent_label = EXCLUDED.intent_label, \
-                 intent_confidence = EXCLUDED.intent_confidence, \
                  task_summary = EXCLUDED.task_summary, \
                  ended_at = EXCLUDED.ended_at, \
                  resolution = EXCLUDED.resolution, \
@@ -35,8 +33,6 @@ impl PostgresSessionStore {
         .bind(segment.session_id.0)
         .bind(&segment.tenant_id)
         .bind(segment.segment_index as i32)
-        .bind(segment.intent_label.as_deref())
-        .bind(segment.intent_confidence)
         .bind(segment.task_summary.as_deref())
         .bind(segment.started_at)
         .bind(segment.ended_at)
@@ -189,25 +185,17 @@ impl PostgresSessionStore {
         Ok(())
     }
 
-    /// Loads the historical structural baseline for one tenant and intent label.
-    pub async fn get_segment_baseline(
-        &self,
-        tenant_id: &str,
-        intent_label: Option<&str>,
-    ) -> Result<Option<SegmentBaseline>> {
-        let Some(intent_label) = intent_label else {
-            return Ok(None);
-        };
+    /// Loads the historical structural baseline for one tenant.
+    pub async fn get_segment_baseline(&self, tenant_id: &str) -> Result<Option<SegmentBaseline>> {
         let segment_baselines = self.table_name("segment_baselines");
         let row = sqlx::query(&format!(
             "SELECT sample_count, avg_turns, stddev_turns, avg_cost, stddev_cost, \
                     avg_duration_secs, stddev_duration_secs \
              FROM {segment_baselines} \
-             WHERE tenant_id = $1 AND intent_label = $2 \
+             WHERE tenant_id = $1 \
              LIMIT 1"
         ))
         .bind(tenant_id)
-        .bind(intent_label)
         .fetch_optional(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
@@ -240,17 +228,15 @@ impl PostgresSessionStore {
     pub async fn list_skill_resolution_rates(
         &self,
         tenant_id: &str,
-        intent_label: Option<&str>,
     ) -> Result<Vec<SkillResolutionRate>> {
         let skill_resolution_rates = self.table_name("skill_resolution_rates");
         let rows = sqlx::query(&format!(
             "SELECT skill_name, uses, resolution_rate, avg_token_cost, avg_turn_count \
              FROM {skill_resolution_rates} \
-             WHERE tenant_id = $1 AND ($2::TEXT IS NULL OR intent_label = $2) \
+             WHERE tenant_id = $1 \
              ORDER BY resolution_rate DESC, uses DESC, skill_name ASC"
         ))
         .bind(tenant_id)
-        .bind(intent_label)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
@@ -278,11 +264,7 @@ impl PostgresSessionStore {
 
     /// Refreshes task-segment derived materialized views.
     pub async fn refresh_segment_materialized_views(&self) -> Result<()> {
-        for view_name in [
-            "skill_resolution_rates",
-            "intent_transitions",
-            "segment_baselines",
-        ] {
+        for view_name in ["skill_resolution_rates", "segment_baselines"] {
             let qualified = self.table_name(view_name);
             sqlx::query(&format!(
                 "REFRESH MATERIALIZED VIEW CONCURRENTLY {qualified}"

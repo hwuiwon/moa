@@ -23,9 +23,8 @@ pub use audit_security::AuditSecurityConfig;
 pub use auth::{Auth0AuthConfig, AuthConfig, AuthProviderKind, LocalAuthConfig, OidcAuthConfig};
 pub use authz::{AuthzConfig, AuthzEngine, OpenFgaConfig};
 pub use context::{
-    BudgetConfig, CompactionConfig, ContextSnapshotConfig, IntentConfig, QueryRewriteConfig,
-    ResolutionConfig, ResolutionWeights, SessionLimitsConfig, SkillBudgetConfig, ToolBudgetConfig,
-    ToolOutputConfig,
+    BudgetConfig, CompactionConfig, ContextSnapshotConfig, QueryRewriteConfig, ResolutionConfig,
+    ResolutionWeights, SessionLimitsConfig, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig,
 };
 pub use database::{DatabaseConfig, DatabaseNeonConfig};
 pub use gateway::GatewayConfig;
@@ -108,8 +107,6 @@ pub struct MoaConfig {
     pub query_rewrite: QueryRewriteConfig,
     /// Automated task-segment resolution scoring controls.
     pub resolution: ResolutionConfig,
-    /// Tenant intent discovery and classification controls.
-    pub intents: IntentConfig,
     /// Incremental context snapshot settings.
     pub context_snapshot: ContextSnapshotConfig,
     /// External MCP server connections.
@@ -267,6 +264,18 @@ mod tests {
     }
 
     #[test]
+    fn auth_provider_disabled_deserializes_from_toml() {
+        let toml = r#"
+            [auth]
+            provider = "disabled"
+        "#;
+
+        let config: MoaConfig = toml::from_str(toml).expect("config should deserialize");
+
+        assert_eq!(config.auth.provider, AuthProviderKind::Disabled);
+    }
+
+    #[test]
     fn orchestrator_endpoint_overridable_via_env() {
         // Pins: MOA__ORCHESTRATOR__ENDPOINT maps onto the thin-client endpoint.
         let _guard = ENV_LOCK.lock().expect("env test lock");
@@ -284,6 +293,23 @@ mod tests {
             config.orchestrator.endpoint.as_deref(),
             Some("http://example:1234")
         );
+    }
+
+    #[test]
+    fn auth_provider_disabled_loads_from_env() {
+        // Pins: MOA__AUTH__PROVIDER can disable credential authentication explicitly.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let file = NamedTempFile::new().expect("config temp file");
+        unsafe {
+            std::env::set_var("MOA__AUTH__PROVIDER", "disabled");
+        }
+
+        let config = MoaConfig::load_from_path(file.path()).expect("load config with env");
+
+        unsafe {
+            std::env::remove_var("MOA__AUTH__PROVIDER");
+        }
+        assert_eq!(config.auth.provider, AuthProviderKind::Disabled);
     }
 
     #[test]

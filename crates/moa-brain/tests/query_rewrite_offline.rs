@@ -22,7 +22,7 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
         &server,
         json!({
             "rewritten_query": "Fix the OAuth refresh token race condition in auth/refresh.rs and add regression tests.",
-            "intent": "coding",
+            "task_kind": "coding",
             "sub_queries": ["patch auth/refresh.rs", "add regression tests"],
             "suggested_tools": ["file_read", "file_write"],
             "needs_clarification": false,

@@ -63,8 +63,6 @@ impl SegmentTracker {
             session_id,
             tenant_id: tenant_id.to_string(),
             segment_index: next_index,
-            intent_label: None,
-            intent_confidence: None,
             task_summary: task_summary.clone(),
             started_at: now,
             ended_at: None,
@@ -81,8 +79,6 @@ impl SegmentTracker {
             segment_id,
             segment_index: next_index,
             task_summary,
-            intent_label: None,
-            intent_confidence: None,
             previous_segment_id,
         };
         let completed = current_segment
@@ -120,10 +116,6 @@ pub struct SegmentStarted {
     pub segment_index: u32,
     /// Optional task summary.
     pub task_summary: Option<String>,
-    /// Optional intent label.
-    pub intent_label: Option<String>,
-    /// Optional intent confidence.
-    pub intent_confidence: Option<f64>,
     /// Previous segment identifier.
     pub previous_segment_id: Option<SegmentId>,
 }
@@ -136,8 +128,6 @@ impl SegmentStarted {
             segment_id: self.segment_id,
             segment_index: self.segment_index,
             task_summary: self.task_summary,
-            intent_label: self.intent_label,
-            intent_confidence: self.intent_confidence,
             previous_segment_id: self.previous_segment_id,
         }
     }
@@ -150,8 +140,6 @@ pub struct SegmentCompleted {
     pub segment_id: SegmentId,
     /// Zero-based segment index.
     pub segment_index: u32,
-    /// Optional intent label.
-    pub intent_label: Option<String>,
     /// Optional task summary.
     pub task_summary: Option<String>,
     /// Number of turns attributed to the segment.
@@ -175,7 +163,6 @@ impl SegmentCompleted {
         Event::SegmentCompleted {
             segment_id: self.segment_id,
             segment_index: self.segment_index,
-            intent_label: self.intent_label,
             task_summary: self.task_summary,
             turn_count: self.turn_count,
             tools_used: self.tools_used,
@@ -201,7 +188,6 @@ fn completed_from_active(segment: &ActiveSegment, now: DateTime<Utc>) -> Segment
     SegmentCompleted {
         segment_id: segment.id,
         segment_index: segment.segment_index,
-        intent_label: segment.intent_label.clone(),
         task_summary: segment.task_summary.clone(),
         turn_count: segment.turn_count,
         tools_used: segment.tools_used.clone(),
@@ -216,7 +202,7 @@ fn completed_from_active(segment: &ActiveSegment, now: DateTime<Utc>) -> Segment
 mod tests {
     use chrono::{Duration, TimeZone};
     use moa_core::{
-        ActiveSegment, QueryIntent, QueryRewriteResult, RewriteSource, SessionId,
+        ActiveSegment, QueryRewriteResult, RewriteSource, SessionId, TaskKind,
         deterministic_segment_id,
     };
     use serde_json::json;
@@ -226,7 +212,7 @@ mod tests {
     fn rewrite(is_new_task: bool) -> serde_json::Value {
         serde_json::to_value(QueryRewriteResult {
             rewritten_query: "Update the README".to_string(),
-            intent: QueryIntent::FileOperation,
+            task_kind: TaskKind::FileOperation,
             sub_queries: Vec::new(),
             suggested_tools: Vec::new(),
             needs_clarification: false,
@@ -261,7 +247,6 @@ mod tests {
         let current = Some(ActiveSegment {
             id: deterministic_segment_id(session_id, 0),
             segment_index: 0,
-            intent_label: Some("coding".to_string()),
             task_summary: Some("Fix failing tests".to_string()),
             started_at,
             tools_used: Vec::new(),
@@ -291,7 +276,6 @@ mod tests {
         let current = Some(ActiveSegment {
             id: current_id,
             segment_index: 0,
-            intent_label: Some("coding".to_string()),
             task_summary: Some("Fix failing tests".to_string()),
             started_at,
             tools_used: vec!["bash".to_string()],

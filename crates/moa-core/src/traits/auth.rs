@@ -76,6 +76,11 @@ pub trait AuthProvider: Send + Sync {
     /// Resolve a credential to an identity.
     async fn authenticate(&self, credential: &Credential) -> Result<Identity, AuthError>;
 
+    /// Return whether callers must provide a credential before authentication runs.
+    fn requires_credentials(&self) -> bool {
+        true
+    }
+
     /// Return a short stable provider name for logs and metrics.
     fn name(&self) -> &'static str;
 }

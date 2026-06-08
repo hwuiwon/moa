@@ -92,7 +92,7 @@ impl ContextProcessor for QueryRewriter {
                 self.circuit_breaker.record_success();
                 let metadata = HashMap::from([
                     ("rewrite_source".to_string(), json!("rewritten")),
-                    ("intent".to_string(), json!(result.intent.clone())),
+                    ("task_kind".to_string(), json!(result.task_kind.clone())),
                 ]);
                 store_rewrite_result(ctx, result)?;
                 Ok(ProcessorOutput {
@@ -216,7 +216,7 @@ mod tests {
     fn response_json(rewritten_query: &str, sub_queries: Vec<&str>) -> String {
         json!({
             "rewritten_query": rewritten_query,
-            "intent": "coding",
+            "task_kind": "coding",
             "sub_queries": sub_queries,
             "suggested_tools": [],
             "needs_clarification": false,
@@ -299,7 +299,7 @@ mod tests {
             response: Arc::new(std::sync::Mutex::new(
                 json!({
                     "rewritten_query": "Write a five-word project status headline about database migrations.",
-                    "intent": "creative",
+                    "task_kind": "creative",
                     "sub_queries": [],
                     "suggested_tools": [],
                     "needs_clarification": false,
@@ -413,10 +413,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_intent_falls_back_to_passthrough() {
+    async fn invalid_task_kind_falls_open_to_unknown() {
         let invalid_response = json!({
             "rewritten_query": "Fix the OAuth refresh token race condition in auth/refresh.rs",
-            "intent": "software engineering task",
+            "task_kind": "software engineering task",
             "sub_queries": [],
             "suggested_tools": [],
             "needs_clarification": false,
@@ -435,11 +435,15 @@ mod tests {
         rewriter
             .process(&mut ctx)
             .await
-            .expect("invalid intent should fail open");
+            .expect("invalid task_kind should fail open");
 
         let result = metadata_result(&ctx);
-        assert_eq!(result.source, RewriteSource::Passthrough);
-        assert_eq!(result.rewritten_query, "fix that");
+        assert_eq!(result.source, RewriteSource::Rewritten);
+        assert_eq!(
+            result.rewritten_query,
+            "Fix the OAuth refresh token race condition in auth/refresh.rs"
+        );
+        assert_eq!(result.task_kind, moa_core::TaskKind::Unknown);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 

@@ -215,7 +215,7 @@ impl SessionStoreImpl {
         request: GetSegmentBaselineRequest,
     ) -> Result<Option<SegmentBaseline>, HandlerError> {
         self.store
-            .get_segment_baseline(&request.tenant_id, request.intent_label.as_deref())
+            .get_segment_baseline(&request.tenant_id)
             .await
             .map_err(HandlerError::from)
     }
@@ -225,7 +225,7 @@ impl SessionStoreImpl {
         request: ListSkillResolutionRatesRequest,
     ) -> Result<Vec<SkillResolutionRate>, HandlerError> {
         self.store
-            .list_skill_resolution_rates(&request.tenant_id, request.intent_label.as_deref())
+            .list_skill_resolution_rates(&request.tenant_id)
             .await
             .map_err(HandlerError::from)
     }

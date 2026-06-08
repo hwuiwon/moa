@@ -51,8 +51,9 @@ update it.
 2. **Local API keys are the default identity mechanism.** A self-hosted MOA
    deployment must work end-to-end with API keys alone. No SSO requirement.
 3. **Auth0 is opt-in for identity.** `MOA__AUTH__PROVIDER=auth0` switches in
-   the Auth0 provider; default is `local`. The `auth0` Cargo feature gates
-   the dependency.
+   the Auth0 provider; default is `local`. `MOA__AUTH__PROVIDER=disabled`
+   disables credential checks for local development or isolated tests only.
+   The `auth0` Cargo feature gates the dependency.
 4. **AI agents are first-class principals**, not service accounts under
    users. Agents have FGA subject identity (`agent:<id>`) and can be granted
    permissions directly, including `can_act_as` for delegation.

@@ -271,24 +271,15 @@ impl SessionStore for CountedSessionStore {
             .await
     }
 
-    async fn get_segment_baseline(
-        &self,
-        tenant_id: &str,
-        intent_label: Option<&str>,
-    ) -> Result<Option<SegmentBaseline>> {
-        self.inner
-            .get_segment_baseline(tenant_id, intent_label)
-            .await
+    async fn get_segment_baseline(&self, tenant_id: &str) -> Result<Option<SegmentBaseline>> {
+        self.inner.get_segment_baseline(tenant_id).await
     }
 
     async fn list_skill_resolution_rates(
         &self,
         tenant_id: &str,
-        intent_label: Option<&str>,
     ) -> Result<Vec<SkillResolutionRate>> {
-        self.inner
-            .list_skill_resolution_rates(tenant_id, intent_label)
-            .await
+        self.inner.list_skill_resolution_rates(tenant_id).await
     }
 
     async fn refresh_segment_materialized_views(&self) -> Result<()> {
@@ -357,23 +348,14 @@ fn event_payload_size(event: &Event) -> usize {
         } => workspace_id.as_str().len() + user_id.as_str().len() + model.as_str().len(),
         Event::SessionStatusChanged { .. } => 32,
         Event::SessionCompleted { summary, .. } => summary.len(),
-        Event::SegmentStarted {
-            task_summary,
-            intent_label,
-            ..
-        } => {
-            task_summary.as_ref().map_or(0, String::len)
-                + intent_label.as_ref().map_or(0, String::len)
-        }
+        Event::SegmentStarted { task_summary, .. } => task_summary.as_ref().map_or(0, String::len),
         Event::SegmentCompleted {
-            intent_label,
             task_summary,
             tools_used,
             skills_activated,
             ..
         } => {
-            intent_label.as_ref().map_or(0, String::len)
-                + task_summary.as_ref().map_or(0, String::len)
+            task_summary.as_ref().map_or(0, String::len)
                 + tools_used.iter().map(String::len).sum::<usize>()
                 + skills_activated.iter().map(String::len).sum::<usize>()
         }

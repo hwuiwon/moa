@@ -17,13 +17,16 @@ use moa_brain::pipeline::tools::ToolDefinitionProcessor;
 use moa_core::{
     CacheBreakpoint, CacheBreakpointTarget, CacheTtl, CompletionContent, CompletionRequest,
     CompletionResponse, CompletionStream, ContextMessage, ContextProcessor, LLMProvider,
-    MessageRole, ModelCapabilities, ModelId, QueryIntent, QueryRewriteConfig, QueryRewriteResult,
-    Result, RewriteSource, StopReason, TokenUsage, WorkingContext, WorkspaceId,
+    MemoryScope, MessageRole, ModelCapabilities, ModelId, QueryRewriteConfig, QueryRewriteResult,
+    Result, RewriteSource, ScopeContext, StopReason, TaskKind, TokenUsage, WorkingContext,
+    WorkspaceId,
 };
 use moa_memory_graph::{NodeLabel, PiiClass};
+use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorItem, VectorStore};
 use moa_session::testing;
 use serde_json::json;
 use support::{MemoryHit, WorkingContextFixture, capabilities, mem_hit, tool_schema};
+use uuid::Uuid;
 
 const QUERY_REWRITE_METADATA_KEY: &str = "query_rewrite";
 const HISTORY_END_INDEX_METADATA_KEY: &str = "_moa.history.end_index";
@@ -251,7 +254,7 @@ async fn query_rewrite_stage_emits_one_leg_per_strategy_for_a_user_query() -> Re
     let provider = Arc::new(RewriteProvider {
         response: json!({
             "rewritten_query": "fix the auth refresh jwt bug in auth.rs and add a regression test",
-            "intent": "coding",
+            "task_kind": "coding",
             "sub_queries": [
                 "fix the auth refresh jwt bug in auth.rs",
                 "add a regression test"
@@ -278,9 +281,9 @@ async fn query_rewrite_stage_emits_one_leg_per_strategy_for_a_user_query() -> Re
     );
     let result = rewrite_result(&fixture.ctx);
     assert_eq!(
-        result.intent,
-        QueryIntent::Coding,
-        "QueryRewriter: intent changed"
+        result.task_kind,
+        TaskKind::Coding,
+        "QueryRewriter: task kind changed"
     );
     assert_eq!(
         result.source,
@@ -332,8 +335,10 @@ async fn memory_stage_includes_top_k_hits_with_lineage_uids_and_excludes_invalid
         fixture.clock_at,
     )
     .await?;
+    let vector_noise_uid = seed_global_vector_noise(store.pool(), fixture.clock_at).await?;
 
-    // GraphMemoryRetriever injects the top three active hits and excludes invalidated nodes.
+    // GraphMemoryRetriever injects the top three active lexical hits, excludes invalidated nodes,
+    // and does not retrieve vector-only global rows when no real query embedding exists.
     let output = GraphMemoryRetriever::new(store.pool().clone())
         .with_assume_app_role(true)
         .with_result_limit(3)
@@ -379,6 +384,13 @@ async fn memory_stage_includes_top_k_hits_with_lineage_uids_and_excludes_invalid
         Vec::<String>::new(),
         "GraphMemoryRetriever: invalidated memory nodes leaked into prompt"
     );
+    assert!(
+        !output
+            .items_included
+            .contains(&format!("graph:Fact:{vector_noise_uid}")),
+        "GraphMemoryRetriever: vector-only global noise leaked without a query embedding"
+    );
+    delete_global_vector_noise(store.pool(), vector_noise_uid).await?;
     delete_memory_rows(store.pool(), &ctx.workspace_id).await?;
     Ok(())
 }
@@ -544,9 +556,63 @@ async fn seed_memory_rows(
     Ok(())
 }
 
+async fn seed_global_vector_noise(pool: &sqlx::PgPool, clock_at: DateTime<Utc>) -> Result<Uuid> {
+    let uid = Uuid::from_u128(0x2_000);
+    sqlx::query("DELETE FROM moa.node_index WHERE uid = $1")
+        .bind(uid)
+        .execute(pool)
+        .await
+        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.node_index
+            (uid, label, workspace_id, user_id, name, pii_class, confidence,
+             properties_summary, last_accessed_at)
+        VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(uid)
+    .bind(NodeLabel::Fact.as_str())
+    .bind("unrelated global vector noise")
+    .bind(PiiClass::None.as_str())
+    .bind(0.99_f64)
+    .bind(json!({ "summary": "unrelated global vector noise" }))
+    .bind(clock_at + Duration::seconds(10_000))
+    .execute(pool)
+    .await
+    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+
+    let vector = PgvectorStore::new(pool.clone(), ScopeContext::new(MemoryScope::Global));
+    vector
+        .upsert(&[VectorItem {
+            uid,
+            workspace_id: None,
+            user_id: None,
+            label: NodeLabel::Fact.as_str().to_string(),
+            pii_class: PiiClass::None.as_str().to_string(),
+            embedding: vec![0.0; VECTOR_DIMENSION],
+            embedding_model: "pipeline-stage-test".to_string(),
+            embedding_model_version: 1,
+            valid_to: None,
+        }])
+        .await
+        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+
+    Ok(uid)
+}
+
 async fn delete_memory_rows(pool: &sqlx::PgPool, workspace_id: &WorkspaceId) -> Result<()> {
     sqlx::query("DELETE FROM moa.node_index WHERE workspace_id = $1")
         .bind(workspace_id.as_str())
+        .execute(pool)
+        .await
+        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    Ok(())
+}
+
+async fn delete_global_vector_noise(pool: &sqlx::PgPool, uid: Uuid) -> Result<()> {
+    sqlx::query("DELETE FROM moa.node_index WHERE uid = $1")
+        .bind(uid)
         .execute(pool)
         .await
         .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;

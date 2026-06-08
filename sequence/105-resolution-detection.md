@@ -4,7 +4,7 @@
 
 Implement automated task resolution scoring that determines whether the agent successfully completed each task segment — without any user-facing feedback buttons. Instead of thumbs up/down, resolution is inferred from five signal classes computed entirely from the event log: tool outcomes, verification results, conversational continuation, agent self-assessment, and async LLM-as-judge.
 
-End state: every completed task segment receives a `resolution` label (`resolved`, `failed`, `abandoned`, `partial`, `unknown`) and a `resolution_confidence` score between 0.0 and 1.0, computed automatically. The resolution signal feeds into skill ranking (prompt 100's `resolution_rate`) and intent learning (prompt 106). No user action is ever required.
+End state: every completed task segment receives a `resolution` label (`resolved`, `failed`, `abandoned`, `partial`, `unknown`) and a `resolution_confidence` score between 0.0 and 1.0, computed automatically. The resolution signal feeds into skill ranking (prompt 100's `resolution_rate`) and skills-first learning (prompt 106). No user action is ever required.
 
 ## Prerequisites
 
@@ -88,18 +88,18 @@ Examines the agent's final response in the segment for completion indicators.
 Detection: Use keyword/regex matching for high-confidence patterns. For ambiguous cases, use the same fast model as the QueryRewriter (Haiku-class) with a short prompt: "Did the agent complete the task or not? Respond with: completed, failed, partial, or unclear."
 
 **Signal 5: Structural anomaly detection (`structural_signal`)**
-Compares segment metrics against tenant/intent historical baselines.
+Compares segment metrics against tenant-level historical baselines.
 
 | Pattern | Score |
 |---|---|
-| Turn count within 1σ of historical mean for this intent | 0.6 |
+| Turn count within 1σ of historical tenant mean | 0.6 |
 | Turn count >2σ above historical mean (agent struggled) | 0.3 |
 | Token cost >2σ above historical mean | 0.3 |
 | Agent hit turn budget limit (MAX_TURNS) | 0.1 |
 | Agent was cancelled by user | 0.0 (→ `abandoned`) |
 | Duration within normal range | 0.6 |
 
-This signal is weak in cold-start (no historical data). Weight it at 0.0 until ≥20 segments exist for this tenant+intent pair.
+This signal is weak in cold-start (no historical data). Weight it at 0.0 until at least 20 segments exist for this tenant.
 
 ### Composite scoring
 
@@ -200,9 +200,9 @@ Create `moa-brain/src/resolution/` module with one file per signal:
 - Output: `Option<f64>`
 
 **`moa-brain/src/resolution/structural_signal.rs`**
-- Input: segment metrics (turn_count, token_cost, duration) + historical baselines for this tenant+intent
+- Input: segment metrics (turn_count, token_cost, duration) + historical baselines for this tenant
 - Logic: z-score against historical distribution, flag outliers
-- Output: `Option<f64>` (NULL if fewer than 20 historical segments for this tenant+intent)
+- Output: `Option<f64>` (NULL if fewer than 20 historical segments for this tenant)
 
 ### 3. Implement composite scorer
 
@@ -278,11 +278,10 @@ pub struct ResolutionConfig {
 ### 6. Add materialized views for skill effectiveness
 
 ```sql
--- Skill resolution rates per intent per tenant
+-- Skill resolution rates per tenant
 CREATE MATERIALIZED VIEW {schema}.skill_resolution_rates AS
 SELECT
     t.tenant_id,
-    t.intent_label,
     unnest(t.skills_activated) AS skill_name,
     COUNT(*) AS uses,
     AVG(CASE WHEN t.resolution = 'resolved' THEN 1.0
@@ -291,28 +290,13 @@ SELECT
     AVG(t.token_cost) AS avg_token_cost,
     AVG(t.turn_count) AS avg_turn_count
 FROM {schema}.task_segments t
-WHERE t.intent_label IS NOT NULL
-  AND t.resolution IS NOT NULL
-GROUP BY t.tenant_id, t.intent_label, skill_name;
+WHERE t.resolution IS NOT NULL
+GROUP BY t.tenant_id, skill_name;
 
--- Intent transition patterns per tenant
-CREATE MATERIALIZED VIEW {schema}.intent_transitions AS
-SELECT
-    curr.tenant_id,
-    prev.intent_label AS from_intent,
-    curr.intent_label AS to_intent,
-    COUNT(*) AS transition_count,
-    AVG(CASE WHEN prev.resolution = 'resolved' THEN 1.0 ELSE 0.0 END) AS from_resolution_rate
-FROM {schema}.task_segments curr
-JOIN {schema}.task_segments prev ON curr.previous_segment_id = prev.id
-WHERE curr.intent_label IS NOT NULL AND prev.intent_label IS NOT NULL
-GROUP BY curr.tenant_id, prev.intent_label, curr.intent_label;
-
--- Historical baselines per tenant+intent for structural signal
+-- Historical baselines per tenant for structural signal
 CREATE MATERIALIZED VIEW {schema}.segment_baselines AS
 SELECT
     tenant_id,
-    intent_label,
     COUNT(*) AS sample_count,
     AVG(turn_count) AS avg_turns,
     STDDEV(turn_count) AS stddev_turns,
@@ -321,8 +305,8 @@ SELECT
     AVG(EXTRACT(EPOCH FROM (ended_at - started_at))) AS avg_duration_secs,
     STDDEV(EXTRACT(EPOCH FROM (ended_at - started_at))) AS stddev_duration_secs
 FROM {schema}.task_segments
-WHERE intent_label IS NOT NULL AND ended_at IS NOT NULL
-GROUP BY tenant_id, intent_label;
+WHERE ended_at IS NOT NULL
+GROUP BY tenant_id;
 ```
 
 Add a Restate scheduled invocation (or cron) to `REFRESH MATERIALIZED VIEW CONCURRENTLY` every 15 minutes.
@@ -339,7 +323,7 @@ In `moa-brain/src/pipeline/skills.rs` (from prompt 100), update `rank_skills` to
 //       + 0.1 * recency
 ```
 
-If no resolution data exists for a skill+intent pair, fall back to the prompt-100 formula (without resolution_rate, renormalize remaining weights).
+If no resolution data exists for a skill, fall back to the prompt-100 formula without resolution rate and renormalize the remaining weights.
 
 ### 8. Tests
 
@@ -382,7 +366,7 @@ If no resolution data exists for a skill+intent pair, fall back to the prompt-10
 - [ ] Cancelled session → all open segments marked `abandoned`.
 - [ ] Agent hits turn budget → segment marked `failed`.
 - [ ] No user-facing feedback UI is required anywhere.
-- [ ] Materialized views contain resolution rate data per skill+intent+tenant.
+- [ ] Materialized views contain resolution rate data per skill and tenant.
 - [ ] SkillInjector uses resolution_rate in its ranking formula.
 
 ## Notes

@@ -4,7 +4,7 @@
 
 Introduce the **task segment** as a first-class unit of work within MOA sessions. A single session can contain multiple sequential tasks ("deploy to staging," then "why is this test failing," then "update the README"). Today, MOA treats the entire session as one undifferentiated conversation. This prompt adds in-session segment detection, per-segment state tracking, segment-boundary context refresh, and the Postgres schema to store segment metadata.
 
-End state: every session automatically segments into discrete tasks. Each segment has an intent label (or `undefined`), a start/end boundary, tool calls attributed to it, and is the unit against which resolution will be tracked (prompt 105). The `QueryRewriter` (prompt 101) signals segment transitions. The `SkillInjector` refreshes its manifest at segment boundaries. The `HistoryCompiler` can compact previous segments to avoid context pollution.
+End state: every session automatically segments into discrete tasks. Each segment has a start/end boundary, tool calls attributed to it, and is the unit against which resolution will be tracked (prompt 105). The `QueryRewriter` (prompt 101) signals segment transitions. The `SkillInjector` refreshes its manifest at segment boundaries. The `HistoryCompiler` can compact previous segments to avoid context pollution.
 
 ## Prerequisites
 
@@ -35,7 +35,6 @@ cat moa-session/src/schema.rs                        # Postgres migrations
 A task segment is a contiguous slice of turns within a session where the user and agent are working toward one goal. It has:
 
 - A start point (the turn where the user introduced the task)
-- An optional intent label (classified or `undefined`)
 - Tool calls attributed to it
 - A resolution outcome (tracked by prompt 105 — this prompt only creates the structure)
 - Duration and cost attributed to it
@@ -63,10 +62,10 @@ User message arrives
   → QueryRewriteResult.is_new_task = true?
     → YES: emit SegmentCompleted for current segment
            emit SegmentStarted for new segment
-           refresh SkillInjector manifest for new intent
+           refresh SkillInjector manifest for the new task
            optionally compact previous segment in history
     → NO:  continue with current segment, update segment metadata
-  → MemoryRetriever uses rewritten query (may use new segment's intent for search)
+  → MemoryRetriever uses rewritten query for search
   → rest of pipeline continues
 ```
 
@@ -85,8 +84,6 @@ pub struct TaskSegment {
     pub session_id: SessionId,
     pub tenant_id: String,
     pub segment_index: u32,              // 0-based within session
-    pub intent_label: Option<String>,    // None = undefined
-    pub intent_confidence: Option<f64>,
     pub task_summary: Option<String>,    // short description of the task
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -105,7 +102,6 @@ pub struct TaskSegment {
 pub struct ActiveSegment {
     pub id: SegmentId,
     pub segment_index: u32,
-    pub intent_label: Option<String>,
     pub task_summary: Option<String>,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub tools_used: Vec<String>,
@@ -125,8 +121,6 @@ SegmentStarted {
     segment_id: SegmentId,
     segment_index: u32,
     task_summary: Option<String>,
-    intent_label: Option<String>,
-    intent_confidence: Option<f64>,
     previous_segment_id: Option<SegmentId>,
 },
 
@@ -134,7 +128,6 @@ SegmentStarted {
 SegmentCompleted {
     segment_id: SegmentId,
     segment_index: u32,
-    intent_label: Option<String>,
     task_summary: Option<String>,
     turn_count: u32,
     tools_used: Vec<String>,
@@ -154,8 +147,6 @@ CREATE TABLE IF NOT EXISTS {schema}.task_segments (
     session_id      UUID NOT NULL REFERENCES {schema}.sessions(id),
     tenant_id       TEXT NOT NULL,
     segment_index   INT NOT NULL,
-    intent_label    TEXT,
-    intent_confidence NUMERIC(4,3),
     task_summary    TEXT,
     started_at      TIMESTAMPTZ NOT NULL,
     ended_at        TIMESTAMPTZ,
@@ -170,8 +161,8 @@ CREATE TABLE IF NOT EXISTS {schema}.task_segments (
     UNIQUE(session_id, segment_index)
 );
 
-CREATE INDEX IF NOT EXISTS idx_task_segments_tenant_intent
-    ON {schema}.task_segments (tenant_id, intent_label, resolution);
+CREATE INDEX IF NOT EXISTS idx_task_segments_tenant_resolution
+    ON {schema}.task_segments (tenant_id, resolution);
 CREATE INDEX IF NOT EXISTS idx_task_segments_session
     ON {schema}.task_segments (session_id, segment_index);
 CREATE INDEX IF NOT EXISTS idx_task_segments_tenant_time
@@ -333,5 +324,5 @@ This is an optimization — not required for correctness. Flag it with a config 
 
 - **The segment boundary is detected by the QueryRewriter, NOT by a separate classifier.** The rewriter already analyzes the query in the context of conversation history — adding `is_new_task` is a natural extension, not a new LLM call.
 - **Segments are sequential, not nested.** Sub-agents don't create sub-segments. They contribute to the parent session's current segment. If we need nesting later, it's additive.
-- **The `task_summary` field is optional and best-effort.** If the rewriter can't summarize, the segment still works — it just has a NULL summary. The intent classifier (prompt 106) fills intent labels later.
+- **The `task_summary` field is optional and best-effort.** If the rewriter can't summarize, the segment still works; it just has a NULL summary.
 - **Do NOT block on segment creation.** Segment writes to Postgres should be fire-and-forget from the hot path. The `TurnRunner` should not wait for segment persistence before continuing to the LLM call. Use Restate's side-effect mechanism for durability without blocking.

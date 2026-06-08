@@ -34,7 +34,7 @@ impl SkillInjector {
             return Ok(HashMap::new());
         };
         let rates = session_store
-            .list_skill_resolution_rates(ctx.workspace_id.as_str(), None)
+            .list_skill_resolution_rates(ctx.workspace_id.as_str())
             .await?;
         Ok(skill_resolution_rate_map(&rates))
     }

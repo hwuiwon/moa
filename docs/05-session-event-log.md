@@ -14,7 +14,6 @@ Postgres stores:
 - pending signals
 - context snapshots
 - task segments
-- tenant intents and global catalog intents
 - learning log entries
 - graph changelog outbox rows and per-workspace changelog versions
 - analytics views and materialized views
@@ -75,8 +74,6 @@ CREATE TABLE task_segments (
     session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     tenant_id TEXT NOT NULL,
     segment_index INT NOT NULL,
-    intent_label TEXT,
-    intent_confidence NUMERIC(4,3),
     task_summary TEXT,
     started_at TIMESTAMPTZ NOT NULL,
     ended_at TIMESTAMPTZ,
@@ -111,7 +108,7 @@ The event table uses a generated `tsvector` column and a GIN index for cross-ses
 | Compaction | `Checkpoint` |
 | Diagnostics | `Error`, `Warning` |
 
-`SegmentStarted` records segment ID, index, summary, intent label/confidence, and previous segment ID. `SegmentCompleted` records final counters and duration.
+`SegmentStarted` records segment ID, index, summary, and previous segment ID. `SegmentCompleted` records final counters and duration.
 
 ## Task Segment Rows
 
@@ -119,7 +116,6 @@ The event table uses a generated `tsvector` column and a GIN index for cross-ses
 
 - tenant and session scope
 - segment index and previous segment edge
-- optional intent classification
 - task summary
 - start/end timestamps
 - resolution label, confidence, and serialized signal breakdown
@@ -129,18 +125,13 @@ The event table uses a generated `tsvector` column and a GIN index for cross-ses
 Materialized views derived from `task_segments` include:
 
 - `skill_resolution_rates`
-- `intent_transitions`
 - `segment_baselines`
 
-These feed skill ranking, intent transition analysis, and structural resolution scoring.
+These feed skill ranking and structural resolution scoring.
 
 ## Learning Tables
 
-The session schema also owns:
-
-- `tenant_intents`
-- `global_intent_catalog`
-- `learning_log`
+The session schema also owns `learning_log`.
 
 Learning log rows are append-only records with tenant ID, learning type, target, payload, confidence, source refs, actor, validity interval, optional batch ID, and version. Rollback invalidates rows by setting `valid_to`; it does not delete history.
 
@@ -184,5 +175,4 @@ Session rollups come from generated columns and triggers. Views and materialized
 - `session_turn_metrics`
 - `daily_workspace_metrics`
 - `skill_resolution_rates`
-- `intent_transitions`
 - `segment_baselines`

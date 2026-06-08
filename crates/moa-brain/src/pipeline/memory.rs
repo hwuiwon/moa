@@ -87,7 +87,7 @@ impl GraphMemoryRetriever {
             .retrieve(crate::retrieval::RetrievalRequest {
                 seeds: Vec::new(),
                 query_text: query,
-                query_embedding: vec![0.0; VECTOR_DIMENSION],
+                query_embedding: Vec::new(),
                 scope,
                 label_filter: None,
                 max_pii_class: PiiClass::Restricted,

@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use moa_core::{
-    CatalogIntent, Event, IntentSource, IntentStatus, LearningEntry, ModelId, ResolutionLabel,
-    ResolutionScore, ScoringPhase, SegmentCompletion, SessionMeta, SessionStore, TaskSegment,
-    TenantIntent, ToolCallId, ToolOutput, UserId, WorkspaceId, deterministic_segment_id,
+    Event, LearningEntry, ModelId, ResolutionLabel, ResolutionScore, ScoringPhase,
+    SegmentCompletion, SessionMeta, SessionStore, TaskSegment, ToolCallId, ToolOutput, UserId,
+    WorkspaceId, deterministic_segment_id,
 };
 use moa_session::{PostgresSessionStore, testing};
 use sqlx::PgPool;
@@ -43,52 +43,16 @@ fn qualified(schema_name: &str, table_name: &str) -> String {
 
 #[tokio::test]
 #[ignore]
-async fn tenant_intents_start_blank_and_can_be_created() {
-    with_test_store(|store| async move {
-        let tenant_id = "tenant-intents";
-        let initial = store
-            .list_intents(tenant_id, None)
-            .await
-            .expect("list initial intents");
-        assert!(initial.is_empty());
-
-        let intent = TenantIntent {
-            id: Uuid::now_v7(),
-            tenant_id: tenant_id.to_string(),
-            label: "debugging".to_string(),
-            description: Some("Fix broken behavior".to_string()),
-            status: IntentStatus::Active,
-            source: IntentSource::Manual,
-            catalog_ref: None,
-            example_queries: vec!["fix failing tests".to_string()],
-            embedding: Some(vec![0.1; 1_536]),
-            segment_count: 0,
-            resolution_rate: None,
-        };
-        store.create_intent(&intent).await.expect("create intent");
-
-        let active = store
-            .list_intents(tenant_id, Some(IntentStatus::Active))
-            .await
-            .expect("list active intents");
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].label, "debugging");
-    })
-    .await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn learning_log_rollback_invalidates_batch() {
+async fn learning_log_round_trips_skill_entry_and_rollback_invalidates_batch() {
     with_test_store(|store| async move {
         let batch_id = Uuid::now_v7();
         let entry = LearningEntry {
             id: Uuid::now_v7(),
             tenant_id: "tenant-learning".to_string(),
-            learning_type: "intent_discovered".to_string(),
-            target_id: "target".to_string(),
-            target_label: Some("target".to_string()),
-            payload: serde_json::json!({ "ok": true }),
+            learning_type: "skill_created".to_string(),
+            target_id: "skill:moa-rust".to_string(),
+            target_label: Some("moa-rust".to_string()),
+            payload: serde_json::json!({ "version": 1, "source": "distillation" }),
             confidence: Some(0.8),
             source_refs: vec![Uuid::now_v7()],
             actor: "system".to_string(),
@@ -101,13 +65,17 @@ async fn learning_log_rollback_invalidates_batch() {
             .append_learning(&entry)
             .await
             .expect("append learning");
+        let learnings = store
+            .list_learnings("tenant-learning", Some("skill_created"), 10)
+            .await
+            .expect("list learnings");
+        assert_eq!(learnings.len(), 1);
+        assert_eq!(learnings[0].id, entry.id);
+        assert_eq!(learnings[0].target_id, "skill:moa-rust");
+        assert_eq!(learnings[0].target_label.as_deref(), Some("moa-rust"));
         assert_eq!(
-            store
-                .list_learnings("tenant-learning", Some("intent_discovered"), 10)
-                .await
-                .expect("list learnings")
-                .len(),
-            1
+            learnings[0].payload,
+            serde_json::json!({ "version": 1, "source": "distillation" })
         );
 
         let invalidated = store
@@ -117,42 +85,11 @@ async fn learning_log_rollback_invalidates_batch() {
         assert_eq!(invalidated, 1);
         assert!(
             store
-                .list_learnings("tenant-learning", Some("intent_discovered"), 10)
+                .list_learnings("tenant-learning", Some("skill_created"), 10)
                 .await
                 .expect("list current learnings")
                 .is_empty()
         );
-    })
-    .await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn catalog_adoption_creates_tenant_intent_with_catalog_ref() {
-    with_test_store(|store| async move {
-        let catalog_id = Uuid::now_v7();
-        let now = Utc::now();
-        store
-            .upsert_catalog_intent(&CatalogIntent {
-                id: catalog_id,
-                label: "deployment".to_string(),
-                description: "Deploy services".to_string(),
-                category: Some("devops".to_string()),
-                example_queries: vec!["deploy staging".to_string()],
-                embedding: Some(vec![0.2; 1_536]),
-                created_at: now,
-                updated_at: now,
-            })
-            .await
-            .expect("upsert catalog intent");
-
-        let adopted = store
-            .adopt_catalog_intent("tenant-catalog", catalog_id)
-            .await
-            .expect("adopt catalog intent");
-        assert_eq!(adopted.catalog_ref, Some(catalog_id));
-        assert_eq!(adopted.source, IntentSource::Catalog);
-        assert_eq!(adopted.status, IntentStatus::Active);
     })
     .await;
 }
@@ -287,8 +224,6 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
             session_id,
             tenant_id: "pg-segments".to_string(),
             segment_index: 0,
-            intent_label: Some("coding".to_string()),
-            intent_confidence: None,
             task_summary: Some("Fix tests".to_string()),
             started_at: now,
             ended_at: None,
@@ -345,8 +280,6 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
             session_id,
             tenant_id: "pg-segments".to_string(),
             segment_index: 1,
-            intent_label: Some("file_operation".to_string()),
-            intent_confidence: None,
             task_summary: Some("Update README".to_string()),
             started_at: Utc::now(),
             ended_at: None,
@@ -400,8 +333,6 @@ async fn postgres_task_resolution_scores_and_views_refresh() {
                 session_id,
                 tenant_id: "pg-resolution".to_string(),
                 segment_index: index,
-                intent_label: Some("coding".to_string()),
-                intent_confidence: None,
                 task_summary: Some(format!("Task {index}")),
                 started_at: now + chrono::Duration::seconds(i64::from(index)),
                 ended_at: None,
@@ -467,21 +398,24 @@ async fn postgres_task_resolution_scores_and_views_refresh() {
         .await
         .expect("refresh resolution views");
     let rates = store
-        .list_skill_resolution_rates("pg-resolution", Some("coding"))
+        .list_skill_resolution_rates("pg-resolution")
         .await
         .expect("list resolution rates");
     assert_eq!(rates.len(), 1);
     assert_eq!(rates[0].skill_name, "moa-rust");
     assert_eq!(rates[0].uses, 20);
     assert!((rates[0].resolution_rate - 1.0_f64).abs() < f64::EPSILON);
+    assert!((rates[0].avg_token_cost - 500.0_f64).abs() < f64::EPSILON);
+    assert!((rates[0].avg_turn_count - 2.0_f64).abs() < f64::EPSILON);
 
     let baseline = store
-        .get_segment_baseline("pg-resolution", Some("coding"))
+        .get_segment_baseline("pg-resolution")
         .await
         .expect("load baseline")
         .expect("baseline exists");
     assert_eq!(baseline.sample_count, 20);
     assert!((baseline.avg_turns - 2.0_f64).abs() < f64::EPSILON);
+    assert!((baseline.avg_cost - 500.0_f64).abs() < f64::EPSILON);
 
     drop(store);
     cleanup_schema(&database_url, &schema_name).await;

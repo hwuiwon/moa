@@ -43,7 +43,7 @@ impl QueryRewriter {
 fn query_rewrite_response_format() -> JsonResponseFormat {
     JsonResponseFormat::strict_json_schema(
         "query_rewrite_result",
-        "Self-contained query rewrite, intent classification, and retrieval hints.",
+        "Self-contained query rewrite, task kind, and retrieval hints.",
         QueryRewriteResult::response_schema(),
     )
 }

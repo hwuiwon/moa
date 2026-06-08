@@ -40,18 +40,6 @@ pub(super) fn redact_password(url: &str) -> String {
     url.to_string()
 }
 
-pub(super) fn vector_literal(values: &[f32]) -> String {
-    let mut literal = String::from("[");
-    for (index, value) in values.iter().enumerate() {
-        if index > 0 {
-            literal.push(',');
-        }
-        literal.push_str(&value.to_string());
-    }
-    literal.push(']');
-    literal
-}
-
 impl PostgresSessionStore {
     /// Refresh the process metric that tracks currently active sessions.
     pub async fn refresh_active_session_metric(&self) -> Result<()> {

@@ -28,10 +28,6 @@ pub struct TaskSegment {
     pub tenant_id: String,
     /// Zero-based segment index within the session.
     pub segment_index: u32,
-    /// Optional intent label. `None` means undefined.
-    pub intent_label: Option<String>,
-    /// Optional confidence for the intent label.
-    pub intent_confidence: Option<f64>,
     /// Short best-effort task summary.
     pub task_summary: Option<String>,
     /// Segment start timestamp.
@@ -63,7 +59,6 @@ impl TaskSegment {
         ActiveSegment {
             id: self.id,
             segment_index: self.segment_index,
-            intent_label: self.intent_label.clone(),
             task_summary: self.task_summary.clone(),
             started_at: self.started_at,
             tools_used: self.tools_used.clone(),
@@ -81,8 +76,6 @@ pub struct ActiveSegment {
     pub id: SegmentId,
     /// Zero-based segment index within the session.
     pub segment_index: u32,
-    /// Optional intent label. `None` means undefined.
-    pub intent_label: Option<String>,
     /// Short best-effort task summary.
     pub task_summary: Option<String>,
     /// Segment start timestamp.

@@ -249,8 +249,6 @@ pub struct UpdateSegmentResolutionScoreRequest {
 pub struct GetSegmentBaselineRequest {
     /// Tenant/workspace identifier.
     pub tenant_id: String,
-    /// Optional intent label.
-    pub intent_label: Option<String>,
 }
 
 /// Request payload for `SessionStore/list_skill_resolution_rates`.
@@ -258,8 +256,6 @@ pub struct GetSegmentBaselineRequest {
 pub struct ListSkillResolutionRatesRequest {
     /// Tenant/workspace identifier.
     pub tenant_id: String,
-    /// Optional intent label.
-    pub intent_label: Option<String>,
 }
 
 /// Request payload for recording active-segment tool usage.

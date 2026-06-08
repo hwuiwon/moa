@@ -26,6 +26,9 @@ pub enum AuthProviderKind {
     /// Local API-key authentication.
     #[default]
     Local,
+    /// Disable credential checks and assign a fixed service identity.
+    #[serde(alias = "none")]
+    Disabled,
     /// Auth0-backed authentication.
     Auth0,
     /// Generic OIDC authentication.
@@ -38,6 +41,7 @@ impl AuthProviderKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Local => "local",
+            Self::Disabled => "disabled",
             Self::Auth0 => "auth0",
             Self::Oidc => "oidc",
         }

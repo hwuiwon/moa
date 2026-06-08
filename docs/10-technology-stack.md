@@ -9,8 +9,8 @@ The root workspace currently contains:
 | Crate | Purpose |
 |---|---|
 | `moa-core` | Shared traits, DTOs, config, events, telemetry, analytics helpers |
-| `moa-brain` | Context pipeline, query rewriting, task segmentation helpers, intent classification, resolution scoring |
-| `moa-session` | Postgres session store, event log, task segments, intents, learning log, analytics |
+| `moa-brain` | Context pipeline, query rewriting, task segmentation helpers, resolution scoring |
+| `moa-session` | Postgres session store, event log, task segments, learning log, analytics |
 | `moa-memory/graph` (`moa-memory-graph`) | Graph-memory sidecar tables, RLS, changelog, and AGE projection helpers |
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph-memory ingestion DTOs and deterministic helpers |
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification client and privacy-class aggregation helpers |
@@ -113,7 +113,6 @@ Config loads from `~/.moa/config.toml` plus `MOA__...` environment overrides. Ke
 | `[memory]` | memory directory and embedding provider/model |
 | `[query_rewrite]` | fail-open query rewriter behavior |
 | `[resolution]` | automated resolution scoring weights and thresholds |
-| `[intents]` | discovery window, min segments, cluster size, classification thresholds |
 | `[skill_budget]` | skill manifest budget controls |
 | `[cloud]` | cloud mode and hand provider settings |
 | `[orchestrator]` | Restate ingress endpoint and optional health URL for thin clients |
@@ -128,10 +127,9 @@ Implemented architectural pillars:
 
 - Restate cloud orchestration with session, sub-agent, workspace, service, and workflow handlers.
 - Restate orchestrator for local development and cloud execution.
-- Postgres session store with event log, analytics, task segments, intent tables, and learning log.
+- Postgres session store with event log, analytics, task segments, and learning log.
 - Graph memory with Postgres sidecar search, AGE projection helpers, pgvector semantic search, and privacy filtering.
 - Query rewriting, segment creation, automated resolution scoring, and skill resolution-rate ranking.
-- Intent discovery workflow and intent manager service.
 - Skill distillation/improvement with learning-log emission.
 - Lineage, eval score storage, cold export support, and opt-in compliance audit tables.
 - Thin-client CLI surfaces.

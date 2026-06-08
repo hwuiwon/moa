@@ -198,6 +198,7 @@ fn read_first(read_var: &mut impl FnMut(&str) -> Option<String>, keys: &[&str]) 
 fn parse_auth_provider(value: &str) -> Result<AuthProviderKind> {
     match value {
         "local" => Ok(AuthProviderKind::Local),
+        "disabled" | "none" => Ok(AuthProviderKind::Disabled),
         "auth0" => Ok(AuthProviderKind::Auth0),
         "oidc" => Ok(AuthProviderKind::Oidc),
         other => Err(anyhow!("unknown auth provider: {other}")),
@@ -364,6 +365,25 @@ mod tests {
         assert_eq!(moa_config.local.sandbox_dir, "/tmp/moa-sandbox");
         assert_eq!(moa_config.local.memory_dir, "/tmp/moa-memory");
         assert!(!moa_config.local.docker_enabled);
+    }
+
+    #[test]
+    fn auth_provider_disabled_env_maps_into_moa_config() {
+        let config = OrchestratorConfig::from_reader(|key| match key {
+            "POSTGRES_URL" => Some("postgres://example".to_string()),
+            "MOA__AUTH__PROVIDER" => Some("disabled".to_string()),
+            _ => None,
+        })
+        .expect("config should load");
+
+        assert_eq!(
+            config.auth_provider,
+            moa_core::config::AuthProviderKind::Disabled
+        );
+        assert_eq!(
+            config.to_moa_config().auth.provider,
+            moa_core::config::AuthProviderKind::Disabled
+        );
     }
 
     #[test]

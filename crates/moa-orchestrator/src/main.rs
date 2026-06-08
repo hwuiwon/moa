@@ -37,7 +37,6 @@ use moa_orchestrator::{
         authz_admin::{Authz, AuthzImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
-        intent_manager::{IntentManager, IntentManagerImpl},
         llm_gateway::{LLMGateway, LLMGatewayImpl, ProviderRegistry},
         neon_maint::{NeonMaint, NeonMaintImpl},
         scim::{self, ScimState},
@@ -49,7 +48,6 @@ use moa_orchestrator::{
     },
     workflows::{
         consolidate::{Consolidate, ConsolidateImpl},
-        intent_discovery::{IntentDiscovery, IntentDiscoveryImpl},
         turn_execution::{TurnExecution, TurnExecutionImpl},
     },
 };
@@ -84,8 +82,6 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "GraphMemoryMaint",
     "Health",
     "IngestionVO",
-    "IntentDiscovery",
-    "IntentManager",
     "LLMGateway",
     "NeonMaint",
     "Session",
@@ -208,14 +204,6 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = Endpoint::builder()
         .bind(HealthImpl.serve())
         .bind(SessionStoreImpl::new(session_store.clone()).serve())
-        .bind(
-            IntentManagerImpl::new(
-                session_store.clone(),
-                embedding_provider.clone(),
-                moa_config.clone(),
-            )
-            .serve(),
-        )
         .bind(LLMGatewayImpl::new(llm_providers).serve())
         .bind(AgentRegistryImpl.serve())
         .bind(AgentTemplatesImpl.serve())
@@ -236,7 +224,6 @@ async fn main() -> anyhow::Result<()> {
         .bind(WorkspaceImpl.serve())
         .bind(WhoamiImpl.serve())
         .bind(ConsolidateImpl.serve())
-        .bind(IntentDiscoveryImpl.serve())
         .bind(TurnExecutionImpl.serve())
         .build();
 
@@ -808,7 +795,8 @@ fn services_registered(deployments: &[RegisteredDeployment]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        RegisteredDeployment, RegisteredService, env_flag_from_reader, services_registered,
+        EXPECTED_SERVICE_NAMES, RegisteredDeployment, RegisteredService, env_flag_from_reader,
+        services_registered,
     };
 
     fn deployment_with_services(services: &[&str]) -> RegisteredDeployment {
@@ -826,24 +814,7 @@ mod tests {
 
     #[test]
     fn registration_check_requires_all_expected_services() {
-        let deployments = vec![deployment_with_services(&[
-            "Consolidate",
-            "CronJob",
-            "GraphMemoryMaint",
-            "Health",
-            "IngestionVO",
-            "IntentDiscovery",
-            "IntentManager",
-            "LLMGateway",
-            "NeonMaint",
-            "Session",
-            "SessionStore",
-            "SubAgent",
-            "ToolExecutor",
-            "TurnExecution",
-            "Workspace",
-            "WorkspaceStore",
-        ])];
+        let deployments = vec![deployment_with_services(EXPECTED_SERVICE_NAMES)];
 
         assert!(services_registered(&deployments));
     }

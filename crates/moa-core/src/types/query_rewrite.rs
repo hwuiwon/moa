@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 pub struct QueryRewriteResult {
     /// The self-contained rewritten query. Never adds new entities.
     pub rewritten_query: String,
-    /// Extracted intent classification.
-    pub intent: QueryIntent,
+    /// Coarse task kind inferred for prompt planning.
+    pub task_kind: TaskKind,
     /// Optional sub-queries for compound tasks.
     pub sub_queries: Vec<String>,
     /// Tool names the rewriter thinks are relevant.
@@ -35,7 +35,7 @@ impl QueryRewriteResult {
     pub fn passthrough(query: impl Into<String>) -> Self {
         Self {
             rewritten_query: query.into(),
-            intent: QueryIntent::Unknown,
+            task_kind: TaskKind::Unknown,
             sub_queries: Vec::new(),
             suggested_tools: Vec::new(),
             needs_clarification: false,
@@ -54,7 +54,7 @@ impl QueryRewriteResult {
             "additionalProperties": false,
             "properties": {
                 "rewritten_query": { "type": "string" },
-                "intent": {
+                "task_kind": {
                     "type": "string",
                     "enum": [
                         "coding",
@@ -86,7 +86,7 @@ impl QueryRewriteResult {
             },
             "required": [
                 "rewritten_query",
-                "intent",
+                "task_kind",
                 "sub_queries",
                 "suggested_tools",
                 "needs_clarification",
@@ -98,10 +98,10 @@ impl QueryRewriteResult {
     }
 }
 
-/// High-level user intent classification inferred by query rewriting.
+/// Coarse task category inferred by query rewriting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum QueryIntent {
+pub enum TaskKind {
     /// Coding or software-engineering work.
     Coding,
     /// Research, lookup, or synthesis work.
@@ -116,7 +116,7 @@ pub enum QueryIntent {
     Question,
     /// Conversational or social exchange.
     Conversation,
-    /// Unknown or ambiguous intent.
+    /// Unknown or ambiguous task kind.
     Unknown,
 }
 
