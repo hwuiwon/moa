@@ -4,7 +4,12 @@ use super::*;
 
 /// Top-level MOA command line interface.
 #[derive(Debug, Parser)]
-#[command(name = "moa", about = "MOA terminal agent client", version)]
+#[command(
+    name = "moa",
+    about = "MOA terminal agent client",
+    version,
+    args_conflicts_with_subcommands = true
+)]
 pub(crate) struct Cli {
     /// Enable debug logging to a file instead of the terminal.
     #[arg(long)]
@@ -107,11 +112,6 @@ pub(crate) enum CommandKind {
     Version,
     /// Prints a local environment diagnostic report.
     Doctor,
-    /// Inspects the configured orchestrator endpoint.
-    Daemon {
-        #[command(subcommand)]
-        command: DaemonCommand,
-    },
     /// Manages Neon checkpoint branches.
     Checkpoint {
         #[command(subcommand)]
@@ -329,13 +329,6 @@ pub(crate) enum ConfigCommand {
         /// New value.
         value: String,
     },
-}
-
-/// Orchestrator endpoint diagnostic commands.
-#[derive(Debug, Subcommand)]
-pub(crate) enum DaemonCommand {
-    /// Shows orchestrator endpoint status.
-    Status,
 }
 
 /// Checkpoint CLI commands.

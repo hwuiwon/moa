@@ -155,7 +155,7 @@ fn openai_body(request: &CompletionRequest) -> Value {
 }
 
 fn snapshot_json(name: &str, value: &Value) {
-    insta::with_settings!({ prepend_module_to_snapshot => false }, {
+    insta::with_settings!({ prepend_module_to_snapshot => false, sort_maps => true }, {
         insta::assert_json_snapshot!(name, value);
     });
 }

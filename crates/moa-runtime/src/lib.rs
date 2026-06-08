@@ -62,33 +62,14 @@ impl ChatRuntime {
         .await
     }
 
-    /// Creates a runtime from config; retained for caller compatibility.
-    pub async fn from_local_config(config: MoaConfig, platform: Platform) -> Result<Self> {
-        Self::from_config(config, platform).await
-    }
-
-    /// Creates a runtime attached to an existing session; retained for caller compatibility.
-    pub async fn attach_to_daemon_session(
+    /// Creates a chat runtime attached to an existing orchestrator session.
+    pub async fn attach_to_session(
         config: MoaConfig,
         platform: Platform,
         session_id: SessionId,
     ) -> Result<Self> {
         let client = orchestrator_client_from_config(&config)?;
         Self::from_config_with_client(config, platform, client, Some(session_id)).await
-    }
-
-    /// Creates a runtime attached to an existing session; retained for caller compatibility.
-    pub async fn attach_to_local_session(
-        config: MoaConfig,
-        platform: Platform,
-        session_id: SessionId,
-    ) -> Result<Self> {
-        Self::attach_to_daemon_session(config, platform, session_id).await
-    }
-
-    /// Creates a runtime from config; retained for caller compatibility.
-    pub async fn from_daemon_config(config: MoaConfig, platform: Platform) -> Result<Self> {
-        Self::from_config(config, platform).await
     }
 
     async fn from_config_with_client(

@@ -4,8 +4,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use moa_core::{
-    DaemonSessionPreview, Event, EventRecord, LiveEvent, MoaError, Result, RuntimeEvent, SessionId,
-    SessionSummary, UserId, WorkspaceId,
+    Event, EventRecord, LiveEvent, MoaError, Result, RuntimeEvent, SessionId, SessionSummary,
+    UserId, WorkspaceId,
 };
 
 /// Lightweight session preview used by interactive MOA clients.
@@ -24,15 +24,6 @@ pub struct SessionRuntimeEvent {
     pub session_id: SessionId,
     /// Runtime event or typed lag marker.
     pub event: LiveEvent<RuntimeEvent>,
-}
-
-impl From<DaemonSessionPreview> for SessionPreview {
-    fn from(value: DaemonSessionPreview) -> Self {
-        Self {
-            summary: value.summary,
-            last_message: value.last_message,
-        }
-    }
 }
 
 pub(crate) fn expand_local_path(path: &str) -> PathBuf {

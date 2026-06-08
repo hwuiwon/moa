@@ -3,7 +3,6 @@
 pub mod analytics;
 pub mod broadcast_recv;
 pub mod config;
-pub mod daemon;
 pub mod db;
 pub mod diff;
 pub mod error;
@@ -29,7 +28,7 @@ pub use analytics::{
 pub use broadcast_recv::{RecvResult, recv_with_lag_handling};
 pub use config::{
     AuthzConfig, AuthzEngine, CloudConfig, CloudFlyioConfig, CloudHandsConfig,
-    CohereEmbedderConfig, CompactionConfig, ContextSnapshotConfig, DaemonConfig, DatabaseConfig,
+    CohereEmbedderConfig, CompactionConfig, ContextSnapshotConfig, DatabaseConfig,
     DatabaseNeonConfig, GatewayConfig, GeminiEmbedderConfig, GeneralConfig, LineageConfig,
     LocalConfig, McpCredentialConfig, McpServerConfig, McpTransportConfig, MemoryConfig,
     MemoryVectorConfig, MetricsConfig, MoaConfig, ModelsConfig, ObservabilityConfig, OpenFgaConfig,
@@ -37,7 +36,6 @@ pub use config::{
     QueryRewriteConfig, ResolutionConfig, ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig,
     ToolOutputConfig, VectorEmbedderConfig,
 };
-pub use daemon::{DaemonCommand, DaemonInfo, DaemonReply, DaemonSessionPreview, DaemonStreamEvent};
 pub use db::ScopedConn;
 pub use diff::compute_unified_diff;
 pub use error::{MoaError, Result, ToolFailureClass, classify_tool_error};

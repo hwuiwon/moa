@@ -1,6 +1,8 @@
 //! HTTP-backed runtime smoke tests.
 
-use moa_core::{MoaConfig, Platform, RuntimeEvent};
+use moa_core::{
+    MoaConfig, ModelId, Platform, RuntimeEvent, SessionId, SessionMeta, UserId, WorkspaceId,
+};
 use moa_runtime::ChatRuntime;
 use mockito::{Matcher, Server};
 use tokio::sync::mpsc;
@@ -52,6 +54,49 @@ async fn from_endpoint_creates_initial_session_and_caches_tool_names() {
         .expect("runtime should initialize through mocked orchestrator");
 
     assert_eq!(runtime.tool_names(), vec!["bash".to_string()]);
+}
+
+#[tokio::test]
+async fn attach_to_session_loads_existing_session_without_creating_one() {
+    // Pins: explicit attach loads existing session metadata through the orchestrator API.
+    let mut server = Server::new_async().await;
+    let session_id = SessionId::new();
+    let meta = SessionMeta {
+        id: session_id,
+        workspace_id: WorkspaceId::new("attached-workspace"),
+        user_id: UserId::new("attached-user"),
+        model: ModelId::new("attached-model"),
+        ..SessionMeta::default()
+    };
+    let get_session_mock = server
+        .mock("POST", "/SessionStore/get_session")
+        .match_body(Matcher::Exact(format!("\"{session_id}\"")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(serde_json::to_string(&meta).expect("serialize session meta"))
+        .create_async()
+        .await;
+    let tools_mock = server
+        .mock("POST", "/ToolExecutor/list_tools")
+        .match_body(Matcher::Exact(r#""attached-workspace""#.to_string()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(tool_descriptor_body())
+        .create_async()
+        .await;
+    let mut config = MoaConfig::default();
+    config.orchestrator.endpoint = Some(server.url());
+
+    let runtime = ChatRuntime::attach_to_session(config, Platform::Cli, session_id)
+        .await
+        .expect("runtime should attach through mocked orchestrator");
+
+    assert_eq!(runtime.session_id(), &session_id);
+    assert_eq!(runtime.workspace_id().as_str(), "attached-workspace");
+    assert_eq!(runtime.model(), "attached-model");
+    assert_eq!(runtime.tool_names(), vec!["bash".to_string()]);
+    get_session_mock.assert_async().await;
+    tools_mock.assert_async().await;
 }
 
 #[tokio::test]

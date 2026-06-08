@@ -136,10 +136,6 @@ impl MoaConfig {
                 "memory.vector.embedder.gemini.default_role",
                 Self::default().memory.vector.embedder.gemini.default_role,
             )?
-            .set_default("daemon.socket_path", Self::default().daemon.socket_path)?
-            .set_default("daemon.pid_file", Self::default().daemon.pid_file)?
-            .set_default("daemon.log_file", Self::default().daemon.log_file)?
-            .set_default("daemon.auto_connect", Self::default().daemon.auto_connect)?
             .set_default(
                 "orchestrator.endpoint",
                 Self::default().orchestrator.endpoint,

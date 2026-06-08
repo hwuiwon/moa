@@ -40,7 +40,7 @@ pub use sandbox::{
     McpServerConfig, McpTransportConfig,
 };
 pub use security::PermissionsConfig;
-pub use session::{DaemonConfig, SessionConfig};
+pub use session::SessionConfig;
 pub use telemetry::{MetricsConfig, ObservabilityConfig, OtlpProtocol};
 pub use token_vault::{TokenVaultConfig, TokenVaultKind};
 
@@ -85,8 +85,6 @@ pub struct MoaConfig {
     pub session: SessionConfig,
     /// Session-history compaction settings.
     pub compaction: CompactionConfig,
-    /// Local daemon settings.
-    pub daemon: DaemonConfig,
     /// Restate-backed orchestrator endpoint settings.
     pub orchestrator: OrchestratorConfig,
     /// Observability and OTLP export settings.
@@ -176,6 +174,50 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    const AUTH_ENV_KEYS: &[&str] = &[
+        "MOA__AUTH__PROVIDER",
+        "MOA__AUTH__AUTH0__DOMAIN",
+        "MOA__AUTH__AUTH0__AUDIENCE",
+        "MOA__AUTH__AUTH0__CLIENT_ID_ENV",
+        "MOA__AUTH__AUTH0__CLIENT_SECRET_ENV",
+        "MOA__AUTH__OIDC__ISSUER",
+        "MOA__AUTH__OIDC__AUDIENCE",
+        "MOA__AUTH__OIDC__JWKS_URL",
+    ];
+
+    struct EnvRestore {
+        values: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvRestore {
+        fn clear(keys: &'static [&'static str]) -> Self {
+            let values = keys
+                .iter()
+                .map(|&key| {
+                    let value = std::env::var(key).ok();
+                    unsafe {
+                        std::env::remove_var(key);
+                    }
+                    (key, value)
+                })
+                .collect();
+            Self { values }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (key, value) in &self.values {
+                unsafe {
+                    if let Some(value) = value {
+                        std::env::set_var(*key, value);
+                    } else {
+                        std::env::remove_var(*key);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn config_loads_from_toml_string() {
@@ -279,6 +321,7 @@ mod tests {
     fn orchestrator_endpoint_overridable_via_env() {
         // Pins: MOA__ORCHESTRATOR__ENDPOINT maps onto the thin-client endpoint.
         let _guard = ENV_LOCK.lock().expect("env test lock");
+        let _auth_env = EnvRestore::clear(AUTH_ENV_KEYS);
         let file = NamedTempFile::new().expect("config temp file");
         unsafe {
             std::env::set_var("MOA__ORCHESTRATOR__ENDPOINT", "http://example:1234");
@@ -299,6 +342,7 @@ mod tests {
     fn auth_provider_disabled_loads_from_env() {
         // Pins: MOA__AUTH__PROVIDER can disable credential authentication explicitly.
         let _guard = ENV_LOCK.lock().expect("env test lock");
+        let _auth_env = EnvRestore::clear(AUTH_ENV_KEYS);
         let file = NamedTempFile::new().expect("config temp file");
         unsafe {
             std::env::set_var("MOA__AUTH__PROVIDER", "disabled");
@@ -316,6 +360,7 @@ mod tests {
     fn authz_openfga_config_loads_from_env() {
         // Pins: MOA__AUTHZ__OPENFGA__* maps onto the authz config section.
         let _guard = ENV_LOCK.lock().expect("env test lock");
+        let _auth_env = EnvRestore::clear(AUTH_ENV_KEYS);
         let file = NamedTempFile::new().expect("config temp file");
         unsafe {
             std::env::set_var("MOA__AUTHZ__OPENFGA__URL", "http://openfga:8080");
@@ -348,6 +393,8 @@ mod tests {
 
     #[test]
     fn config_loads_from_file() {
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let _auth_env = EnvRestore::clear(AUTH_ENV_KEYS);
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(include_bytes!("../../../../docs/sample-config.toml"))
             .unwrap();
@@ -380,6 +427,8 @@ mod tests {
 
     #[test]
     fn config_rejects_zero_neon_checkpoint_limit_when_enabled() {
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let _auth_env = EnvRestore::clear(AUTH_ENV_KEYS);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(

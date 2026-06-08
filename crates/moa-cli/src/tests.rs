@@ -3,11 +3,12 @@
 use super::memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use super::memory_ingest::IngestApplyReport;
 use super::{
-    apply_config_update, default_log_path, doctor_report, eval_exit_code,
+    Cli, apply_config_update, default_log_path, doctor_report, eval_exit_code,
     format_cli_ingest_section, memory_ingest_report, memory_search_report, memory_show_report,
     parse_bool, synthesize_cli_ingest_turn,
 };
 use chrono::Utc;
+use clap::Parser;
 use moa_core::{MoaConfig, SessionId, WorkspaceId};
 use moa_eval::{EvalRun, EvalStatus, RunSummary};
 use serde_json::json;
@@ -46,6 +47,15 @@ fn parse_bool_accepts_common_values() {
     assert!(!parse_bool("0").expect("bool"));
 }
 
+#[test]
+fn daemon_status_is_not_accepted_as_prompt_plus_status_subcommand() {
+    // Pins: removed `moa daemon status` cannot be parsed as prompt `daemon` plus `status`.
+    let error = Cli::try_parse_from(["moa", "daemon", "status", "--help"])
+        .expect_err("daemon status should not parse after daemon command removal");
+
+    assert_ne!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+}
+
 #[tokio::test]
 async fn doctor_report_includes_log_file_path() {
     let dir = tempdir().expect("temp dir");
@@ -53,10 +63,6 @@ async fn doctor_report_includes_log_file_path() {
     let mut config = MoaConfig::default();
     config.local.memory_dir = base.join("memory").display().to_string();
     config.local.sandbox_dir = base.join("sandbox").display().to_string();
-    config.daemon.socket_path = base.join("daemon.sock").display().to_string();
-    config.daemon.pid_file = base.join("daemon.pid").display().to_string();
-    config.daemon.log_file = base.join("daemon.log").display().to_string();
-    config.daemon.auto_connect = false;
 
     let report = doctor_report(&config, &default_log_path())
         .await
@@ -76,10 +82,6 @@ async fn doctor_report_uses_custom_log_file_path() {
     let mut config = MoaConfig::default();
     config.local.memory_dir = base.join("memory").display().to_string();
     config.local.sandbox_dir = base.join("sandbox").display().to_string();
-    config.daemon.socket_path = base.join("daemon.sock").display().to_string();
-    config.daemon.pid_file = base.join("daemon.pid").display().to_string();
-    config.daemon.log_file = base.join("daemon.log").display().to_string();
-    config.daemon.auto_connect = false;
 
     let custom_log = base.join("custom.log");
     let report = doctor_report(&config, &custom_log)

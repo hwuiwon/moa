@@ -30,6 +30,7 @@ fn telegram_approval_buttons_render_with_three_choices_and_correct_callback_data
 
 #[test]
 fn slack_approval_buttons_render_as_block_kit_actions_with_primary_and_danger_styles() {
+    let request_id = fixed_request_id();
     let message = approval_outbound(Platform::Slack);
     let chunks = SlackRenderer::new().render(&message);
     let blocks = chunks[0]
@@ -37,22 +38,44 @@ fn slack_approval_buttons_render_as_block_kit_actions_with_primary_and_danger_st
         .as_ref()
         .expect("slack approval render should include Block Kit");
     let value = serde_json::to_value(blocks).expect("slack blocks should serialize");
-    let actions = value
+    let block_values = value
         .as_array()
-        .and_then(|blocks| blocks.iter().find(|block| block["type"] == "actions"))
+        .expect("slack Block Kit payload should serialize as an array");
+    assert_eq!(block_values.len(), 2);
+    assert_eq!(block_values[0]["type"], "section");
+    assert_eq!(block_values[0]["text"]["type"], "mrkdwn");
+    assert_eq!(
+        block_values[0]["text"]["text"],
+        format!("🔴 Approval required: bash\nnpm test\nRequest: {request_id}")
+    );
+
+    let actions = block_values
+        .iter()
+        .find(|block| block["type"] == "actions")
         .expect("slack blocks should include an actions block");
     let buttons = actions["elements"]
         .as_array()
         .expect("slack actions block should contain buttons");
 
     assert_eq!(buttons.len(), 3);
+    assert_eq!(buttons[0]["type"], "button");
+    assert_eq!(buttons[0]["action_id"], "allow");
     assert_eq!(buttons[0]["text"]["text"], "Allow");
+    assert_eq!(buttons[0]["text"]["type"], "plain_text");
+    assert_eq!(buttons[0]["value"], format!("ap:o:{request_id}"));
     assert_eq!(buttons[0]["style"], "primary");
+    assert_eq!(buttons[1]["type"], "button");
+    assert_eq!(buttons[1]["action_id"], "always");
     assert_eq!(buttons[1]["text"]["text"], "Always");
+    assert_eq!(buttons[1]["text"]["type"], "plain_text");
+    assert_eq!(buttons[1]["value"], format!("ap:a:{request_id}"));
     assert!(buttons[1].get("style").is_none());
+    assert_eq!(buttons[2]["type"], "button");
+    assert_eq!(buttons[2]["action_id"], "deny");
     assert_eq!(buttons[2]["text"]["text"], "Deny");
+    assert_eq!(buttons[2]["text"]["type"], "plain_text");
+    assert_eq!(buttons[2]["value"], format!("ap:d:{request_id}"));
     assert_eq!(buttons[2]["style"], "danger");
-    insta::assert_json_snapshot!("slack_approval_button_blocks", value);
 }
 
 #[test]
@@ -61,20 +84,32 @@ fn discord_approval_buttons_render_as_action_row_with_5_button_styles_constraint
     let buttons = approval_buttons(Platform::Discord, request_id);
     let rows = discord::render_action_rows(&buttons, false);
     let value = serde_json::to_value(&rows).expect("discord action rows should serialize");
-    let row = &value[0];
+    let row_values = value
+        .as_array()
+        .expect("discord action rows should serialize as an array");
+    assert_eq!(row_values.len(), 1);
+    let row = &row_values[0];
     let components = row["components"]
         .as_array()
         .expect("discord action row should contain components");
 
     assert_eq!(components.len(), 3);
     assert_eq!(row["type"], 1);
+    assert_eq!(components[0]["type"], 2);
     assert_eq!(components[0]["custom_id"], format!("ap:o:{request_id}"));
+    assert_eq!(components[0]["label"], "✅ Allow");
     assert_eq!(components[0]["style"], 1);
+    assert_eq!(components[0]["disabled"], false);
+    assert_eq!(components[1]["type"], 2);
     assert_eq!(components[1]["custom_id"], format!("ap:a:{request_id}"));
+    assert_eq!(components[1]["label"], "🔁 Always");
     assert_eq!(components[1]["style"], 2);
+    assert_eq!(components[1]["disabled"], false);
+    assert_eq!(components[2]["type"], 2);
     assert_eq!(components[2]["custom_id"], format!("ap:d:{request_id}"));
+    assert_eq!(components[2]["label"], "❌ Deny");
     assert_eq!(components[2]["style"], 4);
-    insta::assert_json_snapshot!("discord_approval_action_row", value);
+    assert_eq!(components[2]["disabled"], false);
 }
 
 #[test]

@@ -160,9 +160,6 @@ pub(crate) async fn dispatch(cli: Cli, config: MoaConfig) -> Result<()> {
             let log_path = cli.log_file.clone().unwrap_or_else(default_log_path);
             print!("{}", doctor_report(&config, &log_path).await?);
         }
-        Some(CommandKind::Daemon { command }) => match command {
-            DaemonCommand::Status => print!("{}", daemon_status_report(&config).await?),
-        },
         Some(CommandKind::Checkpoint { command }) => match command {
             CheckpointCommand::Create { label } => {
                 print!("{}", checkpoint_create_report(&config, &label).await?);

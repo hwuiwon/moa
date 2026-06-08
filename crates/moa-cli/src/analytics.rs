@@ -4,15 +4,15 @@ use super::*;
 
 pub(crate) async fn status_report(config: &MoaConfig) -> Result<String> {
     let mut report = String::new();
-    let endpoint = daemon::orchestrator_endpoint(config);
-    let health_url = daemon::orchestrator_health_url(config);
+    let endpoint = orchestrator::orchestrator_endpoint(config);
+    let health_url = orchestrator::orchestrator_health_url(config);
     report.push_str(&format!("orchestrator endpoint: {endpoint}\n"));
-    match daemon::health_check(config).await {
+    match orchestrator::health_check(config).await {
         Ok(()) => report.push_str(&format!("orchestrator: healthy ({health_url})\n")),
         Err(error) => report.push_str(&format!("orchestrator: unavailable ({error})\n")),
     }
 
-    let sessions = match daemon::build_client(config) {
+    let sessions = match orchestrator::build_client(config) {
         Ok(client) => client
             .list_sessions(SessionFilter::default())
             .await
@@ -52,7 +52,7 @@ pub(crate) async fn status_report(config: &MoaConfig) -> Result<String> {
 
 pub(crate) async fn sessions_report(config: &MoaConfig, workspace: Option<&str>) -> Result<String> {
     let workspace_id = workspace.map(resolve_workspace_arg);
-    let sessions = daemon::build_client(config)?
+    let sessions = orchestrator::build_client(config)?
         .list_sessions(SessionFilter {
             workspace_id,
             ..SessionFilter::default()

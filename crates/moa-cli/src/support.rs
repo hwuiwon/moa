@@ -140,8 +140,6 @@ pub(crate) fn apply_config_update(config: &mut MoaConfig, key: &str, value: &str
                 value.parse().context("expected integer suspend timeout")?;
         }
         "local.memory_dir" => config.local.memory_dir = value.to_string(),
-        "daemon.auto_connect" => config.daemon.auto_connect = parse_bool(value)?,
-        "daemon.socket_path" => config.daemon.socket_path = value.to_string(),
         "orchestrator.endpoint" => config.orchestrator.endpoint = Some(value.to_string()),
         "orchestrator.health_url" => {
             config.orchestrator.health_url = (!value.trim().is_empty()).then(|| value.to_string());

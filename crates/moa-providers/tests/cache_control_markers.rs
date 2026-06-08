@@ -1,4 +1,4 @@
-//! Snapshot coverage for Anthropic prompt-cache marker placement.
+//! Coverage for Anthropic prompt-cache marker placement.
 
 use std::collections::BTreeMap;
 
@@ -16,11 +16,7 @@ fn anthropic_request_with_4_segment_pipeline_places_cache_markers_at_each_bounda
     let body = anthropic_body(&request);
 
     assert_eq!(count_cache_control_markers(&body), 4);
-    // Snapshot review: cache_control positions, system/tools/messages ordering, TTL spelling, dynamic tail.
-    snapshot_json(
-        "cache_control_markers__anthropic_request_with_4_segment_pipeline_places_cache_markers_at_each_boundary",
-        &body,
-    );
+    assert_four_segment_marker_layout(&body, "5m", LATEST_USER_TURN_A, true);
 }
 
 #[test]
@@ -30,11 +26,7 @@ fn anthropic_request_with_long_messages_keeps_cache_markers_at_segment_boundarie
     let body = anthropic_body(&request);
 
     assert_eq!(count_cache_control_markers(&body), 4);
-    // Snapshot review: exactly four cache_control blocks, marker on final stable history message, no per-message markers.
-    snapshot_json(
-        "cache_control_markers__anthropic_request_with_long_messages_keeps_cache_markers_at_segment_boundaries_not_message_boundaries",
-        &body,
-    );
+    assert_long_messages_marker_layout(&body);
 }
 
 #[test]
@@ -43,11 +35,7 @@ fn anthropic_request_with_no_tools_omits_tools_segment_marker() {
     let body = anthropic_body(&request);
 
     assert_eq!(count_cache_control_markers(&body), 3);
-    // Snapshot review: no tools field, system markers remain, message-segment marker remains.
-    snapshot_json(
-        "cache_control_markers__anthropic_request_with_no_tools_omits_tools_segment_marker",
-        &body,
-    );
+    assert_four_segment_marker_layout(&body, "5m", LATEST_USER_TURN_A, false);
 }
 
 #[test]
@@ -57,11 +45,7 @@ fn anthropic_request_with_explicit_1h_ttl_includes_ttl_field_on_each_marker() {
 
     assert_eq!(count_cache_control_markers(&body), 4);
     assert_cache_ttls(&body, "1h");
-    // Snapshot review: ttl fields on every cache_control block, especially the final tool and message markers.
-    snapshot_json(
-        "cache_control_markers__anthropic_request_with_explicit_1h_ttl_includes_ttl_field_on_each_marker",
-        &body,
-    );
+    assert_four_segment_marker_layout(&body, "1h", LATEST_USER_TURN_A, true);
 }
 
 #[test]
@@ -103,26 +87,21 @@ fn anthropic_request_byte_layout_changes_only_in_messages_segment_when_only_mess
     let comparison = segment_comparison(&first, &second);
 
     assert_eq!(comparison.changed, vec!["messages"]);
-    assert!(comparison.unchanged.contains(&"system"));
-    assert!(comparison.unchanged.contains(&"tools"));
-    // Snapshot review: changed segment list must stay messages-only; stable prefix segments stay unchanged.
-    snapshot_json(
-        "cache_control_markers__anthropic_request_byte_layout_changes_only_in_messages_segment_when_only_messages_change",
-        &json!({
-            "unchanged": comparison.unchanged,
-            "changed": comparison.changed,
-        }),
+    assert_eq!(
+        comparison.unchanged,
+        vec![
+            "max_tokens",
+            "model",
+            "stream",
+            "system",
+            "temperature",
+            "tools"
+        ],
     );
 }
 
 fn anthropic_body(request: &CompletionRequest) -> Value {
     debug_build_anthropic_request_body(request, false).expect("Anthropic request body should build")
-}
-
-fn snapshot_json(name: &str, value: &Value) {
-    insta::with_settings!({ prepend_module_to_snapshot => false }, {
-        insta::assert_json_snapshot!(name, value);
-    });
 }
 
 fn four_segment_request(
@@ -232,6 +211,95 @@ fn count_cache_control_markers(value: &Value) -> usize {
         Value::Array(values) => values.iter().map(count_cache_control_markers).sum(),
         _ => 0,
     }
+}
+
+fn assert_four_segment_marker_layout(
+    body: &Value,
+    expected_ttl: &str,
+    expected_latest_turn: &str,
+    include_tools: bool,
+) {
+    assert_eq!(body["model"], MODEL);
+    assert_eq!(body["max_tokens"], json!(1024));
+    assert_eq!(body["stream"], json!(true));
+    assert_eq!(body["temperature"], json!(0.0));
+
+    let system = array_field(body, "system");
+    assert_eq!(system.len(), 2);
+    assert_cache_control(&system[0], expected_ttl);
+    assert_cache_control(&system[1], expected_ttl);
+
+    let messages = array_field(body, "messages");
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["role"], "user");
+    assert_no_cache_control(&messages[0]);
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(messages[2]["content"], expected_latest_turn);
+    assert_no_cache_control(&messages[2]);
+
+    let assistant_blocks = messages[1]["content"]
+        .as_array()
+        .expect("cache-marked assistant message should use content blocks");
+    assert_eq!(assistant_blocks.len(), 1);
+    assert_cache_control(&assistant_blocks[0], expected_ttl);
+
+    if include_tools {
+        let tools = array_field(body, "tools");
+        assert_eq!(tools.len(), 1);
+        assert_cache_control(&tools[0], expected_ttl);
+    } else {
+        assert!(body.get("tools").is_none());
+    }
+}
+
+fn assert_long_messages_marker_layout(body: &Value) {
+    assert_eq!(body["model"], MODEL);
+
+    let system = array_field(body, "system");
+    assert_eq!(system.len(), 2);
+    assert_cache_control(&system[0], "1h");
+    assert_cache_control(&system[1], "1h");
+
+    let messages = array_field(body, "messages");
+    assert_eq!(messages.len(), 21);
+    let marked_message_indexes = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| (count_cache_control_markers(message) > 0).then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(marked_message_indexes, vec![19]);
+
+    let marker_blocks = messages[19]["content"]
+        .as_array()
+        .expect("cache-marked history message should use content blocks");
+    assert_eq!(marker_blocks.len(), 1);
+    assert_cache_control(&marker_blocks[0], "1h");
+    assert_eq!(messages[20]["content"], LATEST_USER_TURN_A);
+    assert_no_cache_control(&messages[20]);
+
+    let tools = array_field(body, "tools");
+    assert_eq!(tools.len(), 1);
+    assert_cache_control(&tools[0], "1h");
+}
+
+fn array_field<'a>(value: &'a Value, field: &str) -> &'a Vec<Value> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("request body should contain array field {field}"))
+}
+
+fn assert_cache_control(value: &Value, expected_ttl: &str) {
+    let cache_control = value
+        .get("cache_control")
+        .unwrap_or_else(|| panic!("value should carry a cache_control marker: {value}"));
+    assert_eq!(cache_control["type"], "ephemeral");
+    assert_eq!(cache_control["ttl"], expected_ttl);
+}
+
+fn assert_no_cache_control(value: &Value) {
+    assert_eq!(count_cache_control_markers(value), 0);
 }
 
 fn assert_cache_ttls(value: &Value, expected_ttl: &str) {

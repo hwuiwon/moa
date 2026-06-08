@@ -29,7 +29,7 @@ pub(crate) async fn doctor_report(config: &MoaConfig, log_path: &Path) -> Result
         format!(
             "orchestrator: {} ({})",
             orchestrator_status(config).await,
-            daemon::orchestrator_endpoint(config)
+            orchestrator::orchestrator_endpoint(config)
         ),
         format!("graph_memory: {}", graph_memory_status(config).await),
         format!("lineage: {}", lineage_status(config).await),
@@ -49,7 +49,7 @@ pub(crate) async fn doctor_report(config: &MoaConfig, log_path: &Path) -> Result
 }
 
 pub(crate) async fn orchestrator_status(config: &MoaConfig) -> String {
-    match daemon::health_check(config).await {
+    match orchestrator::health_check(config).await {
         Ok(()) => "healthy".to_string(),
         Err(error) => format!("unavailable ({error})"),
     }

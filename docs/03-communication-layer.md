@@ -91,12 +91,11 @@ cargo run -p moa-cli -- memory search "deployment"
 cargo run -p moa-cli -- doctor
 ```
 
-The CLI no longer embeds or serves an in-process daemon. `make dev` starts the
+The CLI no longer embeds or serves an in-process runtime. `make dev` starts the
 long-running `moa-orchestrator` service with Restate and Postgres; the CLI reads
 `MOA__ORCHESTRATOR__ENDPOINT` or `[orchestrator].endpoint` and calls that
-endpoint over HTTP. `moa daemon status` is retained as an endpoint health probe.
-The legacy `moa daemon serve`, `start`, `stop`, and `logs` commands were
-removed.
+endpoint over HTTP. `moa status` is the supported endpoint health and session
+status command. The legacy `moa daemon` commands were removed.
 
 ## Messaging Gateway
 
