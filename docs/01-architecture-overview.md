@@ -23,14 +23,14 @@ Product data in Postgres / Neon
   sessions, events, pending_signals, context_snapshots
   task_segments, segment analytics materialized views
   graph nodes, graph edges, sidecar indexes, pgvector embeddings
-  tenant_intents, global_intent_catalog, learning_log
+  learning_log
   analytics.turn_lineage, analytics.scores, compliance audit tables
   security_events
         |
         v
 Learning loop
   segments -> resolution scores -> learning log
-  learning log -> intent proposals, skill ranking, memory consolidation
+  learning log -> skill ranking, memory consolidation
 ```
 
 Restate owns durable cloud execution. Postgres owns product-visible data. Graph memory is the canonical memory source, with sidecar and vector indexes maintained by graph writes.
@@ -47,14 +47,13 @@ Platform
   -> Tenant (team)
        -> Users
        -> Workspaces
-       -> Tenant intent taxonomy
        -> Tenant learning log
        -> Workspace memory
        -> Workspace skills ranked by tenant-level outcomes
        -> Lineage, analytics, and optional compliance evidence
 ```
 
-Intent taxonomies are tenant-scoped because teams tend to repeat work patterns across projects. Memory and skills remain workspace-scoped, but ranking signals aggregate at tenant level.
+Learning entries and outcome aggregates are tenant-scoped because teams tend to repeat work patterns across projects. Memory and skills remain workspace-scoped, but ranking signals aggregate at tenant level.
 
 ## Core Traits
 
@@ -88,8 +87,8 @@ Phase 1 auth work adds `AuthProvider`, `TokenVaultProvider`, and
 `moa-orchestrator` exposes Restate handlers:
 
 - Virtual objects: `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO`
-- Services: `Health`, `SessionStore`, `IntentManager`, `LLMGateway`, `ToolExecutor`, `WorkspaceStore`
-- Workflows: `Consolidate`, `IntentDiscovery`
+- Services: `Health`, `SessionStore`, `LLMGateway`, `ToolExecutor`, `WorkspaceStore`
+- Workflows: `Consolidate`, `TurnExecution`
 
 `Session` is the durable actor for one session key. It queues messages, calls `run_turn`, tracks the active task segment, records tool/skill usage, scores resolution, and writes learning entries. `SubAgent` is the same actor pattern for delegated work with depth and budget limits.
 
@@ -118,13 +117,12 @@ User message
        10 cache
   -> Query rewrite may mark `is_new_task`
   -> SegmentTracker opens or rolls a task segment
-  -> IntentClassifier compares segment text to active tenant intents
   -> LLM response is streamed/collected
   -> Tool calls route through ToolExecutor and ToolRouter
   -> BrainResponse and tool events are persisted
   -> Segment counters are updated
   -> ResolutionScorer scores completed or idle segments
-  -> LearningEntry rows record resolution, intent classification, skill, or memory learning
+  -> LearningEntry rows record resolution, skill, or memory learning
 ```
 
 If query rewriting is disabled, stage 5 is omitted and the remaining processors still report their configured stage numbers.
@@ -134,10 +132,9 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 | Area | Store | Notes |
 |---|---|---|
 | Session metadata and events | Postgres | `sessions`, `events`, `pending_signals`, `context_snapshots` |
-| Task segmentation | Postgres | `task_segments`, segment baselines, skill resolution rates, intent transitions |
+| Task segmentation | Postgres | `task_segments`, segment baselines, skill resolution rates |
 | Graph memory | Postgres | Nodes, edges, sidecar indexes, changelog, and RLS-protected scope state |
 | Memory vectors | Postgres | pgvector embeddings for graph retrieval |
-| Tenant intents | Postgres | `tenant_intents` and `global_intent_catalog` |
 | Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity |
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
 | Optional checkpoints | Neon | branch manager for database checkpoints |
@@ -152,8 +149,10 @@ folder while preserving package names and Rust imports.
 
 ### Identity
 
-`moa-edge` validates API keys by default, or OIDC tokens in Auth0/OIDC modes,
-then injects `X-Moa-Identity-Type`, `X-Moa-Identity-Id`,
+`moa-edge` validates API keys by default, or OIDC tokens in Auth0/OIDC modes.
+For local development and isolated tests, `auth.provider = "disabled"` accepts
+unauthenticated edge requests as a fixed service identity. After authentication,
+the edge injects `X-Moa-Identity-Type`, `X-Moa-Identity-Id`,
 `X-Moa-Tenant-Id`, `X-Moa-Acting-On-Behalf-Of`, and
 `X-Moa-Api-Key-Id` headers before forwarding to the orchestrator. The
 orchestrator trusts these headers, so the Restate handler port (`9080`) must be
@@ -241,8 +240,8 @@ and replay resistance on the verify path.
 | Crate | Role |
 |---|---|
 | `moa-core` | Shared types, traits, config, events, analytics helpers |
-| `moa-brain` | Context pipeline, query rewrite, segment helpers, intent classifier, resolution scoring |
-| `moa-session` | Postgres session store, event log, task segments, intents, learning log |
+| `moa-brain` | Context pipeline, query rewrite, segment helpers, resolution scoring |
+| `moa-session` | Postgres session store, event log, task segments, learning log |
 | `moa-memory/graph` (`moa-memory-graph`) | Graph-memory SQL sidecars, RLS, changelog, and AGE projection helpers |
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph ingestion and fast memory write APIs |
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification and privacy helpers |

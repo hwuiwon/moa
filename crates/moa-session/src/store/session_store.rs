@@ -645,20 +645,15 @@ impl SessionStore for PostgresSessionStore {
         PostgresSessionStore::update_segment_resolution_score(self, segment_id, score).await
     }
 
-    async fn get_segment_baseline(
-        &self,
-        tenant_id: &str,
-        intent_label: Option<&str>,
-    ) -> Result<Option<SegmentBaseline>> {
-        PostgresSessionStore::get_segment_baseline(self, tenant_id, intent_label).await
+    async fn get_segment_baseline(&self, tenant_id: &str) -> Result<Option<SegmentBaseline>> {
+        PostgresSessionStore::get_segment_baseline(self, tenant_id).await
     }
 
     async fn list_skill_resolution_rates(
         &self,
         tenant_id: &str,
-        intent_label: Option<&str>,
     ) -> Result<Vec<SkillResolutionRate>> {
-        PostgresSessionStore::list_skill_resolution_rates(self, tenant_id, intent_label).await
+        PostgresSessionStore::list_skill_resolution_rates(self, tenant_id).await
     }
 
     async fn refresh_segment_materialized_views(&self) -> Result<()> {

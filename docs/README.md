@@ -20,7 +20,7 @@ These docs describe the current MOA architecture as implemented in the Rust work
 | 11 | [Event Replay Runbook](11-event-replay-runbook.md) | Operational replay and recovery procedures |
 | 12 | [Restate Architecture](12-restate-architecture.md) | Restate primitives, handler mapping, deployment strategy |
 | 13 | [Task Segmentation](13-task-segmentation.md) | Segment lifecycle, resolution scoring, analytics views |
-| 14 | [Multi-Tenancy & Learning](14-multi-tenancy-and-learning.md) | Tenant model, adaptive intents, catalog, audit and rollback |
+| 14 | [Multi-Tenancy & Learning](14-multi-tenancy-and-learning.md) | Tenant model, skills-first learning, audit and rollback |
 
 Supporting notes:
 
@@ -41,16 +41,16 @@ before diving into the numbered specs.
 | # | Decision | Status |
 |---|---|---|
 | 1 | Rust workspace with explicit crate boundaries around core traits, brain, session storage, memory, hands, providers, orchestration, gateway, security, skills, eval, and CLI. | Implemented |
-| 2 | Restate is the durable cloud orchestration engine. Sessions and sub-agents are virtual objects; consolidation and intent discovery are workflows. | Implemented |
+| 2 | Restate is the durable cloud orchestration engine. Sessions and sub-agents are virtual objects; consolidation is a workflow. | Implemented |
 | 3 | Local development uses the same Restate-backed `moa-orchestrator` binary as cloud deployments, started through the compose stack. | Implemented |
 | 4 | Postgres is the single application database. Neon is the managed/cloud Postgres target and optional checkpoint branch provider. | Implemented |
 | 5 | Session events are append-only and replayable. Derived counters live in triggers, generated columns, views, and materialized views. | Implemented |
 | 6 | Graph memory is canonical; Postgres stores graph state, sidecar indexes, changelog rows, and pgvector embeddings. | Implemented |
-| 7 | Query rewriting is a fail-open context pipeline processor that normalizes the current task, extracts high-level intent, and detects new task segments. | Implemented |
-| 8 | Sessions are split into task segments with independent intent metadata, tool/skill usage, token cost, and resolution outcomes. | Implemented |
+| 7 | Query rewriting is a fail-open context pipeline processor that normalizes the current task, extracts task kind, and detects new task segments. | Implemented |
+| 8 | Sessions are split into task segments with independent tool/skill usage, token cost, and resolution outcomes. | Implemented |
 | 9 | Resolution detection is automated and signal-based: tool outcomes, verification commands, continuation signals, agent self-assessment, and structural baselines. | Implemented |
-| 10 | Tenants start with blank intent taxonomies. Intent discovery proposes labels from tenant conversations; admin confirmation activates them. | Implemented |
-| 11 | Global catalog intents are opt-in. No tenant receives platform-curated intents unless adopted or manually created. | Implemented |
+| 10 | Tenants accumulate learning entries and outcome aggregates without requiring durable session routing labels. | Implemented |
+| 11 | Skill ranking uses tenant-level resolution outcomes plus dynamic query relevance. | Implemented |
 | 12 | Learning is recorded in a bitemporal append-only `learning_log` with provenance, confidence, batch IDs, and invalidation via `valid_to`. | Implemented |
 | 13 | Skills are ranked with a mix of keyword relevance, resolution rate, use count, and recency, with prompt-budget controls. | Implemented |
 | 14 | CLI and REST/gateway surfaces are separate product interfaces over the same runtime model. | Implemented |

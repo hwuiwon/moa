@@ -10,7 +10,6 @@ pub mod audit;
 pub mod authz_admin;
 pub mod graph_memory_maint;
 pub mod health;
-pub mod intent_manager;
 pub mod llm_gateway;
 pub mod neon_maint;
 pub mod scim;

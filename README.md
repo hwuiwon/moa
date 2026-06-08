@@ -4,7 +4,7 @@
 
 **MOA is a cloud-first, Rust-based, multi-tenant AI agent operations platform for enterprises.**
 
-MOA runs durable agent sessions on Restate, stores product and audit data in Postgres/Neon with pgvector, segments conversations into discrete tasks, scores task resolution automatically, and feeds those outcomes into tenant-controlled learning. It is built for organizations that need governed agent execution: auditable event logs, isolated tool execution, tenant-owned intent taxonomies, approval flows, lineage, and rollbackable learning.
+MOA runs durable agent sessions on Restate, stores product and audit data in Postgres/Neon with pgvector, segments conversations into discrete tasks, scores task resolution automatically, and feeds those outcomes into tenant-controlled learning. It is built for organizations that need governed agent execution: auditable event logs, isolated tool execution, approval flows, lineage, and rollbackable learning.
 
 Local development uses the same Restate-backed orchestrator that production uses. The CLI is a thin client pointed at a Restate ingress endpoint.
 
@@ -12,11 +12,11 @@ Status: early active development. The architecture is stable enough to document,
 
 ## What Matters
 
-- **Enterprise tenancy:** teams own users, workspaces, sessions, memory, skills, intents, learning entries, lineage, and audit evidence.
-- **Durable orchestration:** Restate virtual objects own sessions and sub-agents; workflows own one-shot jobs such as memory consolidation and intent discovery.
-- **Postgres everywhere:** sessions, events, analytics, task segments, memory indexes, embeddings, intents, and the learning log live in Postgres/Neon.
-- **Task-aware sessions:** every session can contain multiple task segments, each with intent metadata, tool and skill usage, cost, and a resolution score.
-- **Per-tenant learning:** tenants own their intent taxonomy and learning log. Global catalog intents are opt-in only.
+- **Enterprise tenancy:** teams own users, workspaces, sessions, memory, skills, learning entries, lineage, and audit evidence.
+- **Durable orchestration:** Restate virtual objects own sessions and sub-agents; workflows own one-shot jobs such as memory consolidation.
+- **Postgres everywhere:** sessions, events, analytics, task segments, memory indexes, embeddings, and the learning log live in Postgres/Neon.
+- **Task-aware sessions:** every session can contain multiple task segments, each with tool and skill usage, cost, and a resolution score.
+- **Per-tenant learning:** tenants own learning entries and outcome aggregates that improve skill ranking and memory updates.
 - **Governed execution:** risky actions require approval, secrets stay outside generated code, and hands/MCP tools run through explicit policy.
 - **Resolution-weighted skills:** skill ranking uses tenant-level resolution data, not only recency or usage count.
 - **Inspectable operation:** every event, learning entry, tool call, approval, and materialized analytics view is queryable.
@@ -144,7 +144,7 @@ OPENAI_API_KEY=...
 cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
 ```
 
-The binary serves these Restate surfaces: `Session`, `SubAgent`, `Workspace`, `SessionStore`, `ToolExecutor`, `LLMGateway`, `WorkspaceStore`, `IntentManager`, `Consolidate`, `IntentDiscovery`, `IngestionVO`, and `Health`. Deployment registration is handled outside the binary.
+The binary serves these Restate surfaces: `Session`, `SubAgent`, `Workspace`, `SessionStore`, `ToolExecutor`, `LLMGateway`, `WorkspaceStore`, `Consolidate`, `IngestionVO`, and `Health`. Deployment registration is handled outside the binary.
 
 The Docker image builds `moa-orchestrator-bin` and installs it as `/usr/local/bin/moa-orchestrator`.
 
@@ -169,13 +169,13 @@ Restate handler service (`moa-orchestrator-bin`)
         +-- SubAgent VO -> bounded child agent execution
         +-- ToolExecutor -> ToolRouter -> hands / MCP / built-ins
         +-- Consolidate workflow -> memory compaction
-        +-- IntentDiscovery workflow -> tenant intent proposals
+        +-- IngestionVO -> graph memory updates
         |
         v
 Postgres / Neon
   sessions, events, task_segments, analytics views,
   graph memory, sidecar indexes, pgvector embeddings,
-  tenant_intents, global_intent_catalog, learning_log,
+  learning_log,
   lineage, scores, compliance audit tables
 ```
 
@@ -198,8 +198,8 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | Crate | Role |
 |---|---|
 | [`moa-core`](crates/moa-core/) | Shared types, traits, config, events, telemetry, analytics DTOs |
-| [`moa-brain`](crates/moa-brain/) | Context pipeline, query rewriting, segment helpers, intent classifier, resolution scoring, streamed turns |
-| [`moa-session`](crates/moa-session/) | Postgres session store, event log, task segments, intent tables, learning log, analytics views |
+| [`moa-brain`](crates/moa-brain/) | Context pipeline, query rewriting, segment helpers, resolution scoring, streamed turns |
+| [`moa-session`](crates/moa-session/) | Postgres session store, event log, task segments, learning log, analytics views |
 | [`moa-memory-graph`](crates/moa-memory/graph/) | Graph memory store, SQL sidecars, RLS, bitemporal state, and changelog |
 | [`moa-memory-ingest`](crates/moa-memory/ingest/) | Slow-path graph ingestion and fast memory write APIs |
 | [`moa-memory-vector`](crates/moa-memory/vector/) | pgvector-backed graph embeddings and vector lookup |
@@ -230,7 +230,7 @@ Start with [`docs/README.md`](docs/README.md), then read:
 - [`docs/01-architecture-overview.md`](docs/01-architecture-overview.md) for the system model and trait map.
 - [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md) for Restate session and sub-agent flow.
 - [`docs/13-task-segmentation.md`](docs/13-task-segmentation.md) for segments and resolution scoring.
-- [`docs/14-multi-tenancy-and-learning.md`](docs/14-multi-tenancy-and-learning.md) for tenants, intents, catalog adoption, and the learning log.
+- [`docs/14-multi-tenancy-and-learning.md`](docs/14-multi-tenancy-and-learning.md) for tenants, skills-first learning, rollback, and the learning log.
 - [`architecture.md`](architecture.md) for the current enterprise runtime map.
 
 ## Development

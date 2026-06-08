@@ -134,12 +134,6 @@ pub(crate) fn task_segment_from_row(row: &PgRow) -> Result<TaskSegment> {
         segment_index: row
             .try_get::<i32, _>("segment_index")
             .map_err(map_sqlx_error)? as u32,
-        intent_label: row
-            .try_get::<Option<String>, _>("intent_label")
-            .map_err(map_sqlx_error)?,
-        intent_confidence: row
-            .try_get::<Option<f64>, _>("intent_confidence")
-            .map_err(map_sqlx_error)?,
         task_summary: row
             .try_get::<Option<String>, _>("task_summary")
             .map_err(map_sqlx_error)?,
@@ -175,69 +169,6 @@ pub(crate) fn task_segment_from_row(row: &PgRow) -> Result<TaskSegment> {
             .try_get::<Option<Uuid>, _>("previous_segment_id")
             .map_err(map_sqlx_error)?
             .map(SegmentId),
-    })
-}
-
-/// Maps a `tenant_intents` row into a `TenantIntent`.
-pub(crate) fn tenant_intent_from_row(row: &PgRow) -> Result<TenantIntent> {
-    Ok(TenantIntent {
-        id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
-        tenant_id: row
-            .try_get::<String, _>("tenant_id")
-            .map_err(map_sqlx_error)?,
-        label: row.try_get::<String, _>("label").map_err(map_sqlx_error)?,
-        description: row
-            .try_get::<Option<String>, _>("description")
-            .map_err(map_sqlx_error)?,
-        status: intent_status_from_db(
-            &row.try_get::<String, _>("status").map_err(map_sqlx_error)?,
-        )?,
-        source: intent_source_from_db(
-            &row.try_get::<String, _>("source").map_err(map_sqlx_error)?,
-        )?,
-        catalog_ref: row
-            .try_get::<Option<Uuid>, _>("catalog_ref")
-            .map_err(map_sqlx_error)?,
-        example_queries: row
-            .try_get::<Vec<String>, _>("example_queries")
-            .map_err(map_sqlx_error)?,
-        embedding: parse_vector_text(
-            row.try_get::<Option<String>, _>("embedding")
-                .map_err(map_sqlx_error)?,
-        )?,
-        segment_count: row
-            .try_get::<i32, _>("segment_count")
-            .map_err(map_sqlx_error)? as u32,
-        resolution_rate: row
-            .try_get::<Option<f64>, _>("resolution_rate")
-            .map_err(map_sqlx_error)?,
-    })
-}
-
-/// Maps a `global_intent_catalog` row into a `CatalogIntent`.
-pub(crate) fn catalog_intent_from_row(row: &PgRow) -> Result<CatalogIntent> {
-    Ok(CatalogIntent {
-        id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
-        label: row.try_get::<String, _>("label").map_err(map_sqlx_error)?,
-        description: row
-            .try_get::<String, _>("description")
-            .map_err(map_sqlx_error)?,
-        category: row
-            .try_get::<Option<String>, _>("category")
-            .map_err(map_sqlx_error)?,
-        example_queries: row
-            .try_get::<Vec<String>, _>("example_queries")
-            .map_err(map_sqlx_error)?,
-        embedding: parse_vector_text(
-            row.try_get::<Option<String>, _>("embedding")
-                .map_err(map_sqlx_error)?,
-        )?,
-        created_at: row
-            .try_get::<DateTime<Utc>, _>("created_at")
-            .map_err(map_sqlx_error)?,
-        updated_at: row
-            .try_get::<DateTime<Utc>, _>("updated_at")
-            .map_err(map_sqlx_error)?,
     })
 }
 
@@ -286,28 +217,6 @@ fn parse_resolution_signal(value: Option<String>) -> Result<Option<ResolutionSco
             serde_json::from_str::<ResolutionScore>(&value).map_err(|error| {
                 MoaError::StorageError(format!("invalid resolution signal payload: {error}"))
             })
-        })
-        .transpose()
-}
-
-fn parse_vector_text(value: Option<String>) -> Result<Option<Vec<f32>>> {
-    value
-        .map(|value| {
-            let trimmed = value.trim().trim_start_matches('[').trim_end_matches(']');
-            if trimmed.is_empty() {
-                return Ok(Vec::new());
-            }
-            trimmed
-                .split(',')
-                .map(|part| {
-                    part.trim().parse::<f32>().map_err(|error| {
-                        MoaError::StorageError(format!(
-                            "invalid vector component `{}`: {error}",
-                            part.trim()
-                        ))
-                    })
-                })
-                .collect()
         })
         .transpose()
 }

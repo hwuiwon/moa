@@ -58,21 +58,24 @@ async fn handle_proxy(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let Some(credential) = extract_credential(&headers) else {
-        if let Err(error) = moa_ocsf::emit_authn_failure(
-            &state.pool,
-            Uuid::nil(),
-            None,
-            "unknown",
-            source_ip(&headers),
-            "missing credential",
-        )
-        .await
-        {
-            tracing::error!(error = %error, "security audit write failed for missing credential");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response();
+    let credential = match credential_for_request(state.auth.as_ref(), &headers) {
+        Some(credential) => credential,
+        None => {
+            if let Err(error) = moa_ocsf::emit_authn_failure(
+                &state.pool,
+                Uuid::nil(),
+                None,
+                "unknown",
+                source_ip(&headers),
+                "missing credential",
+            )
+            .await
+            {
+                tracing::error!(error = %error, "security audit write failed for missing credential");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response();
+            }
+            return (StatusCode::UNAUTHORIZED, "missing credential").into_response();
         }
-        return (StatusCode::UNAUTHORIZED, "missing credential").into_response();
     };
 
     let identity = match state.auth.authenticate(&credential).await {
@@ -137,6 +140,11 @@ async fn handle_proxy(
     };
 
     response_to_axum(response).await
+}
+
+fn credential_for_request(auth: &dyn AuthProvider, headers: &HeaderMap) -> Option<Credential> {
+    extract_credential(headers)
+        .or_else(|| (!auth.requires_credentials()).then(|| Credential::ApiKey(String::new())))
 }
 
 async fn handle_github_secret_scan() -> axum::response::Response {
@@ -510,5 +518,86 @@ fn translate_agent_act_as(agent_id: &str, body: &Bytes, target: &str) -> RouteTr
         method: Method::POST,
         path: target.to_string(),
         body: bytes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use axum::http::header::AUTHORIZATION;
+    use moa_core::traits::{AuthError, Identity, IdentityType};
+
+    use super::*;
+
+    struct StrictAuth;
+
+    #[async_trait]
+    impl AuthProvider for StrictAuth {
+        async fn authenticate(&self, _credential: &Credential) -> Result<Identity, AuthError> {
+            Err(AuthError::Rejected)
+        }
+
+        fn name(&self) -> &'static str {
+            "strict"
+        }
+    }
+
+    struct DisabledAuth;
+
+    #[async_trait]
+    impl AuthProvider for DisabledAuth {
+        async fn authenticate(&self, _credential: &Credential) -> Result<Identity, AuthError> {
+            Ok(Identity {
+                identity_type: IdentityType::Service,
+                id: Uuid::nil(),
+                tenant_id: Uuid::nil(),
+                api_key_id: None,
+                acting_on_behalf_of: None,
+            })
+        }
+
+        fn name(&self) -> &'static str {
+            "disabled"
+        }
+
+        fn requires_credentials(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn strict_auth_requires_authorization_header() {
+        // Pins: normal auth providers still reject requests before authentication when no credential is present.
+        let headers = HeaderMap::new();
+
+        assert!(credential_for_request(&StrictAuth, &headers).is_none());
+    }
+
+    #[test]
+    fn disabled_auth_allows_missing_authorization_header() {
+        // Pins: auth.provider=disabled can pass through edge requests with no Authorization header.
+        let headers = HeaderMap::new();
+
+        assert_eq!(
+            credential_for_request(&DisabledAuth, &headers),
+            Some(Credential::ApiKey(String::new()))
+        );
+    }
+
+    #[test]
+    fn authorization_header_wins_when_disabled_auth_is_configured() {
+        // Pins: disabled auth still forwards an explicitly supplied credential when present.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            "Bearer moa_dev_example"
+                .parse()
+                .expect("test auth header should parse"),
+        );
+
+        assert_eq!(
+            credential_for_request(&DisabledAuth, &headers),
+            Some(Credential::ApiKey("moa_dev_example".to_string()))
+        );
     }
 }

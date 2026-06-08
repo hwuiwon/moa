@@ -135,9 +135,11 @@ max_input_tokens_per_turn = 160000
 
 [auth]
 # Identity provider selection.
-# Values: local | auth0 | oidc
+# Values: local | disabled | auth0 | oidc
 # Default: local (API keys only, zero external dependencies)
 # provider = "local"
+# Set provider = "disabled" only for local development or isolated tests. It
+# accepts unauthenticated edge requests as a fixed service identity.
 
 [auth.local]
 # Local provider has no configuration. API keys are issued via `moa-cli auth keys create`.

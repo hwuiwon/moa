@@ -2,8 +2,9 @@
 
 use std::collections::HashSet;
 
-use moa_core::{MoaError, QueryRewriteResult, Result, RewriteSource, WorkingContext};
+use moa_core::{MoaError, QueryRewriteResult, Result, RewriteSource, TaskKind, WorkingContext};
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::METADATA_KEY;
 use super::input::RewriteInput;
@@ -33,7 +34,8 @@ pub(super) fn parse_rewrite_response(text: &str) -> Result<QueryRewriteResult> {
 #[derive(Debug, Deserialize)]
 struct RawQueryRewriteResult {
     rewritten_query: String,
-    intent: moa_core::QueryIntent,
+    #[serde(default)]
+    task_kind: Option<Value>,
     sub_queries: Vec<String>,
     suggested_tools: Vec<String>,
     needs_clarification: bool,
@@ -48,7 +50,7 @@ impl RawQueryRewriteResult {
     fn into_result(self) -> QueryRewriteResult {
         QueryRewriteResult {
             rewritten_query: self.rewritten_query,
-            intent: self.intent,
+            task_kind: parse_task_kind(self.task_kind),
             sub_queries: self.sub_queries,
             suggested_tools: self.suggested_tools,
             needs_clarification: self.needs_clarification,
@@ -58,6 +60,12 @@ impl RawQueryRewriteResult {
             source: RewriteSource::Rewritten,
         }
     }
+}
+
+fn parse_task_kind(value: Option<Value>) -> TaskKind {
+    value
+        .and_then(|value| serde_json::from_value::<TaskKind>(value).ok())
+        .unwrap_or(TaskKind::Unknown)
 }
 
 pub(super) fn validate_rewrite_result(

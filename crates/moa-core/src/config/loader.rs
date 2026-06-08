@@ -354,39 +354,6 @@ impl MoaConfig {
                 "resolution.idle_timeout_minutes",
                 Self::default().resolution.idle_timeout_minutes as i64,
             )?
-            .set_default("intents.enabled", Self::default().intents.enabled)?
-            .set_default(
-                "intents.discovery_interval_hours",
-                Self::default().intents.discovery_interval_hours as i64,
-            )?
-            .set_default(
-                "intents.discovery_window_days",
-                Self::default().intents.discovery_window_days as i64,
-            )?
-            .set_default(
-                "intents.min_segments_for_discovery",
-                Self::default().intents.min_segments_for_discovery as i64,
-            )?
-            .set_default(
-                "intents.min_cluster_size",
-                Self::default().intents.min_cluster_size as i64,
-            )?
-            .set_default(
-                "intents.classification_threshold",
-                Self::default().intents.classification_threshold,
-            )?
-            .set_default(
-                "intents.retroactive_threshold",
-                Self::default().intents.retroactive_threshold,
-            )?
-            .set_default(
-                "intents.medium_confidence_threshold",
-                Self::default().intents.medium_confidence_threshold,
-            )?
-            .set_default(
-                "intents.deprecation_after_days",
-                Self::default().intents.deprecation_after_days as i64,
-            )?
             .set_default(
                 "context_snapshot.enabled",
                 Self::default().context_snapshot.enabled,

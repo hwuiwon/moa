@@ -9,7 +9,7 @@ mod context;
 mod events_stream;
 mod hands;
 mod identifiers;
-mod intents;
+mod learning;
 mod memory;
 mod model;
 mod observability;
@@ -46,9 +46,7 @@ pub use hands::{HandHandle, HandResources, HandSpec, HandStatus, SandboxTier};
 pub use identifiers::{
     BrainId, ModelId, PendingSignalId, SegmentId, SessionId, ToolCallId, UserId, WorkspaceId,
 };
-pub use intents::{
-    CatalogIntent, IntentSource, IntentStatus, LearningEntry, TenantId, TenantIntent,
-};
+pub use learning::{LearningEntry, TenantId};
 pub use memory::{MemoryScope, ScopeContext, ScopeTier, SkillMetadata};
 pub use model::{
     Credential, ModelCapabilities, ModelCapabilitiesBuilder, ProviderNativeTool, TokenPricing,
@@ -64,7 +62,7 @@ pub use platform::{
     MessageId, OutboundMessage, Platform, PlatformCapabilities, PlatformUser, ToolStatus,
 };
 pub use provider::{ModelTask, ModelTier};
-pub use query_rewrite::{QueryIntent, QueryRewriteResult, RewriteSource};
+pub use query_rewrite::{QueryRewriteResult, RewriteSource, TaskKind};
 pub use resolution::{
     ResolutionLabel, ResolutionScore, ScoringPhase, SegmentBaseline, SkillResolutionRate,
 };

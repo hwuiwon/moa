@@ -225,46 +225,6 @@ impl Default for ResolutionConfig {
     }
 }
 
-/// Tenant intent discovery and nearest-centroid classification controls.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct IntentConfig {
-    /// Whether intent classification and discovery are enabled.
-    pub enabled: bool,
-    /// Minimum interval between scheduled discovery runs for a tenant.
-    pub discovery_interval_hours: u64,
-    /// Window of undefined segments considered during discovery.
-    pub discovery_window_days: u64,
-    /// Minimum undefined segment count before discovery runs.
-    pub min_segments_for_discovery: usize,
-    /// Minimum cluster size accepted as a proposed intent.
-    pub min_cluster_size: usize,
-    /// Cosine-distance threshold for active-intent auto-classification.
-    pub classification_threshold: f64,
-    /// Confidence threshold used for retroactive classification after confirmation.
-    pub retroactive_threshold: f64,
-    /// Confidence floor below which a classification is left undefined.
-    pub medium_confidence_threshold: f64,
-    /// Inactivity window after which active intents can be flagged for deprecation.
-    pub deprecation_after_days: u64,
-}
-
-impl Default for IntentConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            discovery_interval_hours: 24,
-            discovery_window_days: 30,
-            min_segments_for_discovery: 50,
-            min_cluster_size: 5,
-            classification_threshold: 0.35,
-            retroactive_threshold: 0.60,
-            medium_confidence_threshold: 0.50,
-            deprecation_after_days: 90,
-        }
-    }
-}
-
 /// Composite scorer weights for individual resolution signals.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

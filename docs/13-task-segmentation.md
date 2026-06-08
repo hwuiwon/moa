@@ -9,7 +9,6 @@ A session can contain multiple tasks. MOA tracks each task as a segment so learn
 Segments answer:
 
 - What task was being attempted?
-- Which intent was assigned, if any?
 - Which tools and skills were used?
 - How many turns and tokens did it cost?
 - Did it resolve?
@@ -25,8 +24,6 @@ Important fields:
 - `session_id`
 - `tenant_id`
 - `segment_index`
-- `intent_label`
-- `intent_confidence`
 - `task_summary`
 - `started_at`
 - `ended_at`
@@ -46,7 +43,7 @@ Important fields:
 Query rewriting produces `QueryRewriteResult`:
 
 - `rewritten_query`
-- high-level `intent`
+- coarse `task_kind`
 - `is_new_task`
 - `task_summary`
 - suggested tools and clarification metadata
@@ -58,19 +55,6 @@ When a turn is prepared, `SegmentTracker` uses the query rewrite metadata and se
 - close the previous segment and start a new one
 
 The event log records `SegmentStarted` and `SegmentCompleted` events.
-
-## Intent Classification
-
-New segments can be classified against active tenant intents:
-
-1. Build text from task summary and first user message.
-2. Embed the text with the configured embedding provider.
-3. Query active tenant intent centroids in Postgres.
-4. Accept the nearest match when cosine distance is below the configured threshold.
-5. Store the label and confidence on the segment.
-6. Append `intent_classified` to `learning_log`.
-
-If a tenant has no active intents, classification returns no match. New tenants therefore start blank.
 
 ## Segment Counters
 
@@ -93,7 +77,7 @@ Resolution scoring combines five signal classes:
 | Verification | Whether tests/checks/verification commands succeeded |
 | Continuation | Whether the next user message indicates success, rework, abandonment, or a new task |
 | Self-assessment | Whether the agent response claims completion or uncertainty |
-| Structural | Whether turns, cost, and duration are anomalous for the tenant/intent baseline |
+| Structural | Whether turns, cost, and duration are anomalous for the tenant baseline |
 
 The scorer outputs:
 
@@ -117,8 +101,7 @@ Segment rows drive learning views:
 
 | View | Use |
 |---|---|
-| `skill_resolution_rates` | Ranks skills by tenant/intent resolution outcomes |
-| `intent_transitions` | Tracks common task-to-task flows |
+| `skill_resolution_rates` | Ranks skills by tenant-level resolution outcomes |
 | `segment_baselines` | Provides structural baselines for resolution scoring |
 
 Refresh is handled through the session store's materialized-view refresh path.
@@ -136,7 +119,7 @@ User messages
   -> tool and skill counters
   -> resolution score
   -> learning_log
-  -> skill ranking and intent learning
+  -> skill ranking and memory learning
 ```
 
 Task segmentation is the measurement layer that makes the rest of MOA's learning pipeline reliable.

@@ -26,11 +26,11 @@ pub(super) fn build_rewriter_prompt(input: &RewriteInput, ctx: &WorkingContext) 
          - Set is_new_task=true only when the topic genuinely shifts, not for follow-up questions\n\
          - Treat coreferences like \"that file\", \"the error above\", and \"try again\" as continuations\n\
          - Respond ONLY with valid JSON matching the schema below. No preamble.\n\n\
-         Schema: {{\"rewritten_query\": string, \"intent\": string, \"sub_queries\": [string],\n\
+         Schema: {{\"rewritten_query\": string, \"task_kind\": string, \"sub_queries\": [string],\n\
          \"suggested_tools\": [string], \"needs_clarification\": bool,\n\
          \"clarification_question\": string|null, \"is_new_task\": bool,\n\
          \"task_summary\": string|null}}\n\
-         intent must be one of: coding, research, file_operation, system_admin,\n\
+         task_kind must be one of: coding, research, file_operation, system_admin,\n\
          creative, question, conversation, unknown.\n\n\
          Available tools: {tools}\n\n\
          Available skills:\n{skills}\n\n\

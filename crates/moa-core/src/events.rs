@@ -49,10 +49,6 @@ pub enum Event {
         segment_index: u32,
         /// Best-effort task summary for the segment.
         task_summary: Option<String>,
-        /// Optional intent label.
-        intent_label: Option<String>,
-        /// Optional intent confidence.
-        intent_confidence: Option<f64>,
         /// Previous segment identifier, when present.
         previous_segment_id: Option<SegmentId>,
     },
@@ -62,8 +58,6 @@ pub enum Event {
         segment_id: SegmentId,
         /// Zero-based segment index within the session.
         segment_index: u32,
-        /// Optional intent label.
-        intent_label: Option<String>,
         /// Best-effort task summary for the segment.
         task_summary: Option<String>,
         /// Number of turns attributed to the segment.

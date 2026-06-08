@@ -1,6 +1,6 @@
 # 09 — Skills & Learning
 
-_Agent Skills, resolution-weighted ranking, adaptive intents, and the unified learning log._
+_Agent Skills, resolution-weighted ranking, and the unified learning log._
 
 ## Skill Format
 
@@ -60,11 +60,8 @@ Conversations
   -> task_segments
   -> resolution scores
   -> learning_log
-       -> intent discovery
-       -> intent classification
        -> resolution-weighted skill ranking
        -> memory consolidation
-       -> intent transition analytics
 ```
 
 Learning is not a single subsystem. It is the record of all durable derived knowledge produced by MOA.
@@ -91,33 +88,10 @@ Rollback invalidates entries by setting `valid_to`. It does not delete rows.
 
 Current learning types include:
 
-- `intent_discovered`
-- `intent_confirmed`
-- `intent_classified`
 - `skill_created`
 - `skill_improved`
 - `memory_updated`
 - `resolution_scored`
-
-## Per-Tenant Intents
-
-Each tenant starts with an empty taxonomy. MOA classifies only against active tenant intents. It does not apply platform catalog intents by default.
-
-Intent lifecycle:
-
-1. **Undefined:** no tenant intent is assigned.
-2. **Discovery:** `IntentDiscovery` clusters recent undefined task segments and proposes labels.
-3. **Confirmation:** admins confirm, reject, rename, merge, or deprecate.
-4. **Classification:** `IntentClassifier` embeds task text and searches active tenant intent centroids.
-5. **Evolution:** new clusters become proposals; stale or low-resolution intents can be reviewed.
-
-Classification is embedding-based nearest-centroid matching, not tenant-specific model training.
-
-## Global Catalog
-
-`global_intent_catalog` is a curated library. A tenant can adopt an entry, which creates a tenant intent with `source = catalog` and `catalog_ref` set. The tenant can then rename, customize examples, or deprecate that adoption.
-
-No tenant receives catalog classifications unless it adopts or manually creates the matching intent.
 
 ## Memory Learning
 

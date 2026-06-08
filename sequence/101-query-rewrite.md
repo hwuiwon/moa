@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Add a `QueryRewriter` context processor that rewrites multi-turn user queries into self-contained, unambiguous prompts before the brain's main LLM call. This resolves coreference ("fix that bug" → "fix the OAuth refresh token race condition in auth/refresh.rs"), decomposes compound queries, and extracts intent signals that downstream stages (MemoryRetriever, SkillInjector) can use for better retrieval.
+Add a `QueryRewriter` context processor that rewrites multi-turn user queries into self-contained, unambiguous prompts before the brain's main LLM call. This resolves coreference ("fix that bug" → "fix the OAuth refresh token race condition in auth/refresh.rs"), decomposes compound queries, and extracts coarse task-kind metadata that downstream stages can use for planning and segment boundaries.
 
 The rewriter is a pipeline stage, not a separate Restate service. It runs as part of `prepare_turn_request` in `moa-brain`, using a fast small model (configurable, defaults to the cheapest available provider). It is **fail-open**: any failure falls back to the original query with zero user-visible impact.
 
@@ -51,8 +51,8 @@ Pipeline order becomes:
 pub struct QueryRewriteResult {
     /// The self-contained rewritten query. Never adds new entities.
     pub rewritten_query: String,
-    /// Extracted intent classification.
-    pub intent: QueryIntent,
+    /// Coarse task kind inferred for prompt planning.
+    pub task_kind: TaskKind,
     /// Optional sub-queries for compound tasks.
     pub sub_queries: Vec<String>,
     /// Tool names the rewriter thinks are relevant.
@@ -67,7 +67,7 @@ pub struct QueryRewriteResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum QueryIntent {
+pub enum TaskKind {
     Coding,
     Research,
     FileOperation,
@@ -188,7 +188,7 @@ impl ContextProcessor for QueryRewriter {
                     serde_json::to_value(&result)?);
                 Ok(ProcessorOutput {
                     tokens_added: 0,  // rewrite result goes to metadata, not messages
-                    metadata: json!({ "rewrite_source": "rewritten", "intent": result.intent }),
+                    metadata: json!({ "rewrite_source": "rewritten", "task_kind": result.task_kind }),
                     ..Default::default()
                 })
             }
@@ -260,7 +260,7 @@ Rules:
 - DO decompose compound requests into sub_queries
 - Respond ONLY with valid JSON matching the schema below. No preamble.
 
-Schema: {"rewritten_query": string, "intent": string, "sub_queries": [string],
+Schema: {"rewritten_query": string, "task_kind": string, "sub_queries": [string],
 "suggested_tools": [string], "needs_clarification": bool,
 "clarification_question": string|null}
 
@@ -291,7 +291,7 @@ The rewriter needs its own `LLMProvider` instance — ideally the cheapest model
 ## Files to create or modify
 
 - `moa-core/src/config.rs` — add `QueryRewriteConfig`
-- `moa-core/src/types.rs` — add `QueryRewriteResult`, `QueryIntent`, `RewriteSource`
+- `moa-core/src/types.rs` — add `QueryRewriteResult`, `TaskKind`, `RewriteSource`
 - `moa-brain/src/pipeline/query_rewrite.rs` — new file, the rewriter stage
 - `moa-brain/src/pipeline/mod.rs` — register stage, add `pub mod query_rewrite`
 - `moa-brain/src/pipeline/memory.rs` — use rewritten query for search

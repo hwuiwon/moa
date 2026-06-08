@@ -85,7 +85,7 @@ Memory is one output of the broader learning loop:
 Task segments
   -> resolution scores
   -> learning_log
-  -> skill ranking, intent discovery, graph memory consolidation
+  -> skill ranking and graph memory consolidation
 ```
 
 Graph memory describes current knowledge; `learning_log` explains how and when a learned update entered the system.
