@@ -2,18 +2,21 @@
 
 mod shared;
 
+use std::sync::Arc;
+
 use moa_core::{
-    Event, EventRange, ModelId, SequenceNum, SessionId, SessionMeta, SessionStore, UserId,
-    WorkspaceId,
+    Event, EventRange, MoaError, ModelId, Result, SequenceNum, SessionId, SessionMeta,
+    SessionStore, UserId, WorkspaceId,
 };
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use proptest::prelude::*;
 use proptest::test_runner::{
     Config as ProptestConfig, FileFailurePersistence, TestCaseError, TestRunner,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
+const MAX_IN_FLIGHT_EMITS: usize = 64;
 
 async fn configured_test_db() -> Option<TestDb> {
     if !shared::postgres_url_is_configured() {
@@ -26,7 +29,7 @@ async fn configured_test_db() -> Option<TestDb> {
     )
 }
 
-async fn create_session(test_db: &TestDb, index: usize) -> SessionId {
+async fn create_session(test_db: &TestDb, index: usize) -> Result<SessionId> {
     test_db
         .store()
         .create_session(SessionMeta {
@@ -36,14 +39,18 @@ async fn create_session(test_db: &TestDb, index: usize) -> SessionId {
             ..SessionMeta::default()
         })
         .await
-        .expect("create monotonicity test session")
 }
 
-async fn emit_in_parallel(test_db: &TestDb, operations: Vec<(SessionId, usize)>) {
+async fn emit_in_parallel(test_db: &TestDb, operations: Vec<(SessionId, usize)>) -> Result<()> {
+    let semaphore = Arc::new(Semaphore::new(MAX_IN_FLIGHT_EMITS));
     let mut tasks = Vec::with_capacity(operations.len());
     for (session_id, index) in operations {
         let store = test_db.store().clone();
+        let semaphore = Arc::clone(&semaphore);
         tasks.push(tokio::spawn(async move {
+            let _permit = semaphore.acquire_owned().await.map_err(|error| {
+                MoaError::StorageError(format!("emit concurrency semaphore closed: {error}"))
+            })?;
             store
                 .emit_event(
                     session_id,
@@ -53,22 +60,27 @@ async fn emit_in_parallel(test_db: &TestDb, operations: Vec<(SessionId, usize)>)
                     },
                 )
                 .await
-                .expect("emit concurrent event");
         }));
     }
 
     for task in tasks {
-        task.await.expect("event emit task should not panic");
+        task.await.map_err(|error| {
+            MoaError::StorageError(format!("event emit task failed to join: {error}"))
+        })??;
     }
+    Ok(())
 }
 
-async fn assert_dense_sequences(test_db: &TestDb, sessions: &[SessionId], expected_len: usize) {
+async fn assert_dense_sequences(
+    test_db: &TestDb,
+    sessions: &[SessionId],
+    expected_len: usize,
+) -> Result<()> {
     for session_id in sessions {
         let events = test_db
             .store()
             .get_events(*session_id, EventRange::all())
-            .await
-            .expect("read events for monotonicity assertion");
+            .await?;
         assert_eq!(
             events.len(),
             expected_len,
@@ -90,6 +102,7 @@ async fn assert_dense_sequences(test_db: &TestDb, sessions: &[SessionId], expect
             "sequence gap for session {session_id}"
         );
     }
+    Ok(())
 }
 
 fn shuffled_operations(
@@ -122,14 +135,14 @@ async fn run_dense_sequence_case(
     session_count: usize,
     emits_per_session: usize,
     seed: u64,
-) {
+) -> Result<()> {
     let mut sessions = Vec::with_capacity(session_count);
     for index in 0..session_count {
-        sessions.push(create_session(test_db, index).await);
+        sessions.push(create_session(test_db, index).await?);
     }
     let operations = shuffled_operations(&sessions, emits_per_session, seed);
-    emit_in_parallel(test_db, operations).await;
-    assert_dense_sequences(test_db, &sessions, emits_per_session).await;
+    emit_in_parallel(test_db, operations).await?;
+    assert_dense_sequences(test_db, &sessions, emits_per_session).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -138,7 +151,9 @@ async fn sequence_num_is_monotonic_under_500_concurrent_emits_in_one_session() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    run_dense_sequence_case(&test_db, 1, 500, 0).await;
+    run_dense_sequence_case(&test_db, 1, 500, 0)
+        .await
+        .expect("single-session sequence invariant should hold");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -147,7 +162,9 @@ async fn sequence_num_is_monotonic_per_session_across_10_concurrent_sessions_wit
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    run_dense_sequence_case(&test_db, 10, 50, 1).await;
+    run_dense_sequence_case(&test_db, 10, 50, 1)
+        .await
+        .expect("multi-session sequence invariant should hold");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -167,11 +184,13 @@ async fn proptest_arbitrary_emit_orderings_yield_dense_per_session_sequences() {
     runner
         .run(&strategy, |(session_count, emits_per_session, seed)| {
             tokio::task::block_in_place(|| {
-                handle.block_on(async {
-                    run_dense_sequence_case(&test_db, session_count, emits_per_session, seed).await;
-                });
-            });
-            Ok(())
+                handle
+                    .block_on(async {
+                        run_dense_sequence_case(&test_db, session_count, emits_per_session, seed)
+                            .await
+                    })
+                    .map_err(|error| TestCaseError::fail(error.to_string()))
+            })
         })
         .map_err(|error| TestCaseError::fail(error.to_string()))
         .expect("proptest dense per-session sequence invariant");
