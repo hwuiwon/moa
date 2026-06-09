@@ -8,9 +8,9 @@ use std::time::Instant;
 
 use moa_core::{
     BufferedUserMessage, CompletionContent, Event, EventRange, EventRecord, LLMProvider,
-    LineageHandle, MoaError, ModelTask, Result, RuntimeEvent, SessionId, SessionSignal,
-    SessionStatus, SessionStore, StopReason, TraceContext, record_turn_llm_call_duration,
-    record_turn_tool_dispatch_duration,
+    LineageHandle, MoaError, ModelTask, Result, RuntimeEvent, SessionId, SessionMeta,
+    SessionSignal, SessionStatus, SessionStore, StopReason, TraceContext, WorkingContext,
+    record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
 };
 use moa_hands::ToolRouter;
 use moa_lineage_core::TurnId;
@@ -243,7 +243,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 Some(router) => router.workspace_root(&session.workspace_id).await,
                 None => None,
             };
-            let (ctx, active_canary) = build_turn_context(BuildTurnContextOptions {
+            let (mut ctx, active_canary) = build_turn_context(BuildTurnContextOptions {
                 session_id: &session_id,
                 session: &session,
                 session_store: &session_store,
@@ -258,6 +258,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             .instrument(pipeline_compile_span.clone())
             .await?;
             pipeline_compile_span.record("moa.pipeline.total_tokens", ctx.token_count as i64);
+            register_selected_skill_files(tool_router.as_deref(), &session, &mut ctx).await;
             emit_context_lineage(lineage.as_ref(), turn_id, &session, &ctx, &pipeline_compile_span);
 
             let mut emit_runtime = |event| {
@@ -562,4 +563,23 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
         }
     }
     .await
+}
+
+async fn register_selected_skill_files(
+    tool_router: Option<&ToolRouter>,
+    session: &SessionMeta,
+    ctx: &mut WorkingContext,
+) {
+    let Some(router) = tool_router else {
+        return;
+    };
+    let files = ctx.take_trusted_sandbox_files();
+    let file_count = files.len();
+    router.set_trusted_sandbox_files(session, files).await;
+    tracing::info!(
+        session_id = %session.id,
+        workspace_id = %session.workspace_id,
+        file_count,
+        "registered selected skill package files for lazy sandbox installation"
+    );
 }

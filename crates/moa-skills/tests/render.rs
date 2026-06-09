@@ -5,8 +5,7 @@ mod support;
 use memory_graph::GraphStore;
 use moa_core::{MoaError, Result, WorkspaceId};
 use moa_skills::{
-    LessonContext, NewSkill, SkillRegistry, SkillRenderContext, learn_lesson, parse_skill_markdown,
-    render,
+    LessonContext, NewSkill, SkillRegistry, SkillRenderContext, learn_lesson, render,
 };
 use uuid::Uuid;
 
@@ -21,12 +20,10 @@ async fn render_with_addenda() -> Result<()> {
         moa_session::testing::create_isolated_test_store().await?;
     let workspace_name = format!("skills-render-{}", Uuid::now_v7());
     let scope = workspace_scope(&workspace_name);
-    let skill_doc = parse_skill_markdown(DISTILLED_SKILL)?;
     let registry = SkillRegistry::new(store.pool().clone());
     let skill_uid = registry
-        .upsert_by_name(NewSkill::from_document(
+        .upsert_by_name(NewSkill::from_skill_markdown(
             scope.clone(),
-            &skill_doc,
             DISTILLED_SKILL.to_string(),
         ))
         .await?;
@@ -46,8 +43,12 @@ async fn render_with_addenda() -> Result<()> {
         .load_by_name(&scope, "debug-oauth-refresh")
         .await?
         .ok_or_else(|| MoaError::StorageError("skill should exist".to_string()))?;
+    let skill_md = registry
+        .load_skill_markdown(&scope, skill.skill_uid)
+        .await?;
     let rendered = render(
         &skill,
+        &skill_md,
         &scope,
         &SkillRenderContext::for_app_role(store.pool().clone()),
     )

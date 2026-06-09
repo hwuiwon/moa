@@ -129,6 +129,10 @@ const SESSION_MIGRATIONS: &[SessionMigration] = &[
         name: "029_repair_resolution_views.sql",
         sql: include_str!("../migrations/postgres/029_repair_resolution_views.sql"),
     },
+    SessionMigration {
+        name: "030_skill_packages.sql",
+        sql: include_str!("../migrations/postgres/030_skill_packages.sql"),
+    },
 ];
 
 pub(crate) const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;

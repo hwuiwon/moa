@@ -153,9 +153,8 @@ pub async fn distill_skill_with_learning(
     if let Some(store) = learning_store {
         let registry = SkillRegistry::new(store.pool().clone());
         registry
-            .upsert_by_name(NewSkill::from_document(
+            .upsert_by_name(NewSkill::from_skill_markdown(
                 scope.clone(),
-                &skill,
                 markdown.clone(),
             ))
             .await?;

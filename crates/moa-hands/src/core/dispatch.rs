@@ -316,6 +316,8 @@ impl ToolRouter {
         if matches!(status, HandStatus::Paused) {
             provider_impl.resume(&hand).await?;
         }
+        self.install_trusted_files_for_hand(session, provider, &hand)
+            .await?;
 
         let serialized_input = serde_json::to_string(&invocation.input)?;
         let output = if provider == DEFAULT_PROVIDER_NAME {

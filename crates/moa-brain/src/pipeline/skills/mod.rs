@@ -28,6 +28,10 @@ const EXCLUDED_ITEMS_METADATA_KEY: &str = "excluded_items";
 const QUERY_KEYWORDS_METADATA_KEY: &str = "query_keywords";
 const MANIFEST_BUDGET_METADATA_KEY: &str = "manifest_budget_chars";
 const MANIFEST_CHARS_USED_METADATA_KEY: &str = "manifest_chars_used";
+/// Context metadata key containing selected skill names.
+pub const SELECTED_SKILL_NAMES_METADATA_KEY: &str = "selected_skill_names";
+/// Context metadata key containing the selected skill sandbox file count.
+pub const SELECTED_SKILL_FILE_COUNT_METADATA_KEY: &str = "selected_skill_sandbox_file_count";
 
 /// Injects workspace skill metadata into the stable prompt prefix.
 pub struct SkillInjector {
@@ -121,6 +125,19 @@ impl ContextProcessor for SkillInjector {
         let ranked = rank_skills(&skills, &query_keywords, &budget, &resolution_rates);
         let selection = select_skills_within_budget(&ranked, budget.max_manifest_chars);
         let manifest = format_skill_manifest(&selection.selected);
+        let selected_metadata = selection
+            .selected
+            .iter()
+            .map(|skill| skill.metadata.clone())
+            .collect::<Vec<_>>();
+        let selected_files = match &self.source {
+            SkillSource::Registry(pool) => {
+                registry::load_selected_skill_files(pool, ctx, &selected_metadata).await?
+            }
+            #[cfg(test)]
+            SkillSource::Static(_) => Vec::new(),
+        };
+        let selected_file_count = selected_files.len();
 
         if !manifest.is_empty() {
             ctx.append_system(manifest);
@@ -137,30 +154,48 @@ impl ContextProcessor for SkillInjector {
             .iter()
             .map(|item| item.item.clone())
             .collect::<Vec<_>>();
+        ctx.insert_metadata(
+            SELECTED_SKILL_NAMES_METADATA_KEY,
+            json!(items_included.clone()),
+        );
+        ctx.insert_metadata(
+            SELECTED_SKILL_FILE_COUNT_METADATA_KEY,
+            json!(selected_file_count),
+        );
+        ctx.extend_trusted_sandbox_files(selected_files);
+        let output_metadata = HashMap::from([
+            (
+                QUERY_KEYWORDS_METADATA_KEY.to_string(),
+                json!(query_keywords),
+            ),
+            (
+                MANIFEST_BUDGET_METADATA_KEY.to_string(),
+                json!(budget.max_manifest_chars),
+            ),
+            (
+                MANIFEST_CHARS_USED_METADATA_KEY.to_string(),
+                json!(selection.chars_used),
+            ),
+            (
+                EXCLUDED_ITEMS_METADATA_KEY.to_string(),
+                json!(selection.excluded.clone()),
+            ),
+            (
+                SELECTED_SKILL_NAMES_METADATA_KEY.to_string(),
+                json!(items_included.clone()),
+            ),
+            (
+                SELECTED_SKILL_FILE_COUNT_METADATA_KEY.to_string(),
+                json!(selected_file_count),
+            ),
+        ]);
 
         Ok(ProcessorOutput {
             tokens_added: ctx.token_count.saturating_sub(tokens_before),
             items_included,
             items_excluded,
             excluded_items: selection.excluded.clone(),
-            metadata: HashMap::from([
-                (
-                    QUERY_KEYWORDS_METADATA_KEY.to_string(),
-                    json!(query_keywords),
-                ),
-                (
-                    MANIFEST_BUDGET_METADATA_KEY.to_string(),
-                    json!(budget.max_manifest_chars),
-                ),
-                (
-                    MANIFEST_CHARS_USED_METADATA_KEY.to_string(),
-                    json!(selection.chars_used),
-                ),
-                (
-                    EXCLUDED_ITEMS_METADATA_KEY.to_string(),
-                    json!(selection.excluded),
-                ),
-            ]),
+            metadata: output_metadata,
             ..ProcessorOutput::default()
         })
     }

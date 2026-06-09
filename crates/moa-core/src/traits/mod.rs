@@ -16,9 +16,9 @@ use crate::types::{
     ContextSnapshot, Credential as StoredCredential, CronHandle, CronSpec, EventFilter, EventRange,
     EventRecord, EventStream, HandHandle, HandSpec, HandStatus, InboundMessage, MessageId,
     ModelCapabilities, ObserveLevel, OutboundMessage, PendingSignal, PendingSignalId, Platform,
-    PlatformCapabilities, ProcessorOutput, ResolutionScore, RuntimeEvent, SegmentBaseline,
-    SegmentCompletion, SegmentId, SequenceNum, SessionFilter, SessionHandle, SessionId,
-    SessionMeta, SessionSignal, SessionStatus, SessionSummary, SkillResolutionRate,
+    PlatformCapabilities, ProcessorOutput, ResolutionScore, RuntimeEvent, SandboxFile,
+    SegmentBaseline, SegmentCompletion, SegmentId, SequenceNum, SessionFilter, SessionHandle,
+    SessionId, SessionMeta, SessionSignal, SessionStatus, SessionSummary, SkillResolutionRate,
     StartSessionRequest, TaskSegment, ToolOutput, WorkingContext, WorkspaceId,
 };
 
@@ -334,6 +334,13 @@ pub trait HandProvider: Send + Sync {
 
     /// Executes a tool within a provisioned hand.
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput>;
+
+    /// Installs trusted files into a provisioned sandbox before tool execution.
+    async fn install_files(&self, _handle: &HandHandle, _files: &[SandboxFile]) -> Result<()> {
+        Err(MoaError::Unsupported(
+            "sandbox file installation is not supported by this hand provider".to_string(),
+        ))
+    }
 
     /// Classifies one provider execution error for retry and recovery decisions.
     async fn classify_error(

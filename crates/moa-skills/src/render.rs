@@ -47,9 +47,10 @@ impl SkillRenderContext {
     }
 }
 
-/// Renders a skill body with visible learned lesson addenda prepended.
+/// Renders skill markdown with visible learned lesson addenda prepended.
 pub async fn render(
     skill: &Skill,
+    skill_md: &str,
     scope: &MemoryScope,
     ctx: &SkillRenderContext,
 ) -> Result<String> {
@@ -61,10 +62,10 @@ pub async fn render(
     conn.commit().await?;
 
     if addenda.is_empty() {
-        return Ok(skill.body.clone());
+        return Ok(skill_md.to_string());
     }
 
-    let mut out = String::with_capacity(skill.body.len() + addenda.len() * 96);
+    let mut out = String::with_capacity(skill_md.len() + addenda.len() * 96);
     out.push_str("<!-- learned lessons -->\n");
     for addendum in addenda {
         out.push_str("- ");
@@ -74,7 +75,7 @@ pub async fn render(
         out.push_str(")\n");
     }
     out.push_str("\n---\n\n");
-    out.push_str(&skill.body);
+    out.push_str(skill_md);
     Ok(out)
 }
 

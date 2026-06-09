@@ -50,6 +50,35 @@ pub struct HandSpec {
     pub max_lifetime: Duration,
 }
 
+/// One trusted file to install into a provisioned sandbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxFile {
+    /// POSIX relative path inside the sandbox.
+    pub path: String,
+    /// Raw bytes to write at `path`.
+    pub content: Vec<u8>,
+    /// Whether the file should be executable after installation.
+    #[serde(default)]
+    pub executable: bool,
+}
+
+/// Validates a trusted sandbox file path as a POSIX relative path.
+pub fn validate_sandbox_file_path(path: &str) -> Result<()> {
+    if path.is_empty() || path.starts_with('/') || path.contains('\\') || path.contains('\0') {
+        return Err(MoaError::ValidationError(format!(
+            "sandbox file path `{path}` must be a POSIX relative path"
+        )));
+    }
+    for segment in path.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(MoaError::ValidationError(format!(
+                "sandbox file path `{path}` contains an invalid segment"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Opaque handle to a provisioned hand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

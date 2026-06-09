@@ -140,6 +140,7 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 | Task segmentation | Postgres | `task_segments`, segment baselines, skill resolution rates |
 | Graph memory | Postgres | Nodes, edges, sidecar indexes, changelog, and RLS-protected scope state |
 | Memory vectors | Postgres | pgvector embeddings for graph retrieval |
+| Skill packages | Postgres | `moa.skill` metadata and `moa.skill_file` package bytes materialized into hands on demand |
 | Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity |
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
 | Optional checkpoints | Neon | branch manager for database checkpoints |

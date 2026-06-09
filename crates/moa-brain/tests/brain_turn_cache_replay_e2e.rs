@@ -1,4 +1,4 @@
-//! End-to-end regression coverage for steps 72 through 77.
+//! End-to-end regression coverage for brain turn cache and replay behavior.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,7 +35,7 @@ const OLD_SNIPPET: &str = "    let refresh_token = issue_refresh_token(user_id);
 const NEW_SNIPPET: &str = "    let issued_refresh_token = issue_refresh_token(user_id);\n    format!(\"refresh:{issued_refresh_token}\")";
 
 #[tokio::test]
-async fn steps_72_77_e2e() -> Result<()> {
+async fn brain_turn_cache_replay_e2e() -> Result<()> {
     let span_recorder = SpanRecorder::default();
     let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
     let _subscriber_guard = tracing::subscriber::set_default(subscriber);
@@ -76,7 +76,7 @@ async fn steps_72_77_e2e() -> Result<()> {
     let session_store = Arc::new(session_store);
     let counted_session_store: Arc<dyn SessionStore> =
         Arc::new(CountedSessionStore::new(session_store.clone()));
-    let workspace_id = WorkspaceId::new("steps-72-77");
+    let workspace_id = WorkspaceId::new("brain-turn-cache-replay");
     let session = SessionMeta {
         workspace_id: workspace_id.clone(),
         user_id: UserId::new("integration-test"),

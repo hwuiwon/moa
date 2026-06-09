@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use moa_core::{
-    HandHandle, HandProvider, McpServerConfig, MemoryToolExecutor, SessionStore, ToolBudgetConfig,
-    ToolOutputConfig, WorkspaceId,
+    HandHandle, HandProvider, McpServerConfig, MemoryToolExecutor, SandboxFile, SessionId,
+    SessionStore, ToolBudgetConfig, ToolOutputConfig, WorkspaceId,
 };
 use moa_security::{ApprovalRuleStore, MCPCredentialProxy, ToolPolicies};
 use tokio::sync::RwLock;
@@ -40,6 +40,8 @@ pub struct ToolRouter {
     mcp_servers: HashMap<String, McpServerConfig>,
     mcp_proxy: Option<Arc<MCPCredentialProxy>>,
     active_hands: RwLock<HashMap<String, HandHandle>>,
+    trusted_sandbox_files: RwLock<HashMap<SessionId, Vec<SandboxFile>>>,
+    installed_files: RwLock<HashMap<String, Vec<SandboxFile>>>,
     workspace_roots: RwLock<HashMap<WorkspaceId, PathBuf>>,
     policies: ToolPolicies,
     rule_store: Option<Arc<dyn ApprovalRuleStore>>,

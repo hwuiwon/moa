@@ -6,6 +6,7 @@ pub mod distiller;
 pub mod format;
 pub mod improver;
 pub mod lessons;
+pub mod package;
 pub mod registry;
 pub mod regression;
 pub mod render;
@@ -20,7 +21,11 @@ pub use format::{
 };
 pub use improver::{ImprovementResult, maybe_improve_skill, maybe_improve_skill_with_learning};
 pub use lessons::{LessonContext, learn_lesson};
-pub use registry::{NewSkill, Skill, SkillRegistry};
+pub use package::{
+    MAX_SKILL_PACKAGE_FILES, SkillPackage, SkillPackageFile, SkillPackageManifest,
+    SkillPackageManifestFile, ValidatedSkillPackage, ValidatedSkillPackageFile,
+};
+pub use registry::{NewSkill, Skill, SkillRegistry, StoredSkillPackage};
 pub use regression::{
     SkillEvalRun, SkillRegressionDecision, SkillRegressionReport, SkillRegressionSummary,
     append_skill_regression_log, compare_scores, generate_skill_test_suite, run_skill_regression,

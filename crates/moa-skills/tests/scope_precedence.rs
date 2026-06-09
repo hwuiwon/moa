@@ -6,8 +6,8 @@ mod support;
 
 use moa_core::{MemoryScope, UserId, WorkspaceId};
 use support::{
-    configured_test_db, load_active_skill, purge_skill_name, seed_skill, skill_markdown,
-    user_scope, workspace_scope,
+    configured_test_db, load_active_skill, load_active_skill_markdown, purge_skill_name,
+    seed_skill, skill_markdown, user_scope, workspace_scope,
 };
 use tokio::sync::Mutex;
 
@@ -29,8 +29,9 @@ async fn load_visible_skill_resolves_user_scope_first_when_present() {
     seed_skill(&test_db, user.clone(), &scope_skill("user body")).await;
 
     let resolved = load_active_skill(&test_db, &user, "scope-skill").await;
+    let markdown = load_active_skill_markdown(&test_db, &user, "scope-skill").await;
 
-    assert!(resolved.body.contains("user body"));
+    assert!(markdown.contains("user body"));
     assert_eq!(resolved.scope, "user");
     purge_skill_name(&test_db, "scope-skill").await;
 }
@@ -50,8 +51,9 @@ async fn load_visible_skill_falls_through_to_workspace_when_user_scope_empty() {
     seed_skill(&test_db, workspace, &scope_skill("workspace body")).await;
 
     let resolved = load_active_skill(&test_db, &user, "scope-skill").await;
+    let markdown = load_active_skill_markdown(&test_db, &user, "scope-skill").await;
 
-    assert!(resolved.body.contains("workspace body"));
+    assert!(markdown.contains("workspace body"));
     assert_eq!(resolved.scope, "workspace");
     purge_skill_name(&test_db, "scope-skill").await;
 }
@@ -69,8 +71,9 @@ async fn load_visible_skill_falls_through_to_global_when_user_and_workspace_empt
     seed_skill(&test_db, MemoryScope::Global, &scope_skill("global body")).await;
 
     let resolved = load_active_skill(&test_db, &user, "scope-skill").await;
+    let markdown = load_active_skill_markdown(&test_db, &user, "scope-skill").await;
 
-    assert!(resolved.body.contains("global body"));
+    assert!(markdown.contains("global body"));
     assert_eq!(resolved.scope, "global");
     purge_skill_name(&test_db, "scope-skill").await;
 }

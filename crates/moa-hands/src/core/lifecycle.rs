@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use moa_core::{
-    HandHandle, HandResources, HandSpec, MoaError, Result, SandboxTier, SessionMeta, WorkspaceId,
-    record_sandbox_provision_duration,
+    HandHandle, HandResources, HandSpec, MoaError, Result, SandboxFile, SandboxTier, SessionMeta,
+    WorkspaceId, record_sandbox_provision_duration,
 };
 
 use super::{DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, ToolRouter};
@@ -29,6 +29,87 @@ impl ToolRouter {
         self.workspace_roots.read().await.get(workspace_id).cloned()
     }
 
+    /// Provisions a hand if needed and installs trusted files into its sandbox.
+    pub async fn install_files(
+        &self,
+        session: &SessionMeta,
+        provider: &str,
+        tier: SandboxTier,
+        files: &[SandboxFile],
+    ) -> Result<HandHandle> {
+        let handle = self.get_or_provision_hand(provider, tier, session).await?;
+        self.install_files_on_handle(session, provider, &handle, files)
+            .await?;
+        Ok(handle)
+    }
+
+    /// Stores trusted files that should be installed lazily before hand tool execution.
+    pub async fn set_trusted_sandbox_files(&self, session: &SessionMeta, files: Vec<SandboxFile>) {
+        if files.is_empty() {
+            self.trusted_sandbox_files.write().await.remove(&session.id);
+            let session_prefix = format!("{}:", session.id);
+            self.installed_files
+                .write()
+                .await
+                .retain(|key, _| !key.starts_with(&session_prefix));
+            return;
+        }
+
+        self.trusted_sandbox_files
+            .write()
+            .await
+            .insert(session.id, files);
+    }
+
+    pub(super) async fn install_trusted_files_for_hand(
+        &self,
+        session: &SessionMeta,
+        provider: &str,
+        handle: &HandHandle,
+    ) -> Result<()> {
+        let files = self
+            .trusted_sandbox_files
+            .read()
+            .await
+            .get(&session.id)
+            .cloned()
+            .unwrap_or_default();
+        if files.is_empty() {
+            return Ok(());
+        }
+        self.install_files_on_handle(session, provider, handle, &files)
+            .await
+    }
+
+    async fn install_files_on_handle(
+        &self,
+        session: &SessionMeta,
+        provider: &str,
+        handle: &HandHandle,
+        files: &[SandboxFile],
+    ) -> Result<()> {
+        let key = session_provider_key(session, provider);
+        let already_installed = self
+            .installed_files
+            .read()
+            .await
+            .get(&key)
+            .is_some_and(|installed| installed == files);
+        if already_installed {
+            return Ok(());
+        }
+        let provider_impl = self
+            .providers
+            .get(provider)
+            .ok_or_else(|| MoaError::ProviderError(format!("unknown hand provider: {provider}")))?;
+        provider_impl.install_files(handle, files).await?;
+        self.installed_files
+            .write()
+            .await
+            .insert(key, files.to_vec());
+        Ok(())
+    }
+
     /// Destroys and removes all cached hands associated with the provided session.
     pub async fn destroy_session_hands(&self, session_id: &moa_core::SessionId) {
         let session_prefix = format!("{session_id}:");
@@ -43,6 +124,11 @@ impl ToolRouter {
                 .filter_map(|key| active_hands.remove(&key).map(|handle| (key, handle)))
                 .collect::<Vec<_>>()
         };
+        self.installed_files
+            .write()
+            .await
+            .retain(|key, _| !key.starts_with(&session_prefix));
+        self.trusted_sandbox_files.write().await.remove(session_id);
 
         for (key, handle) in cached {
             let provider_name = key
@@ -174,6 +260,9 @@ impl ToolRouter {
             })
             .await?;
         record_sandbox_provision_duration(provider, sandbox_tier_label(tier), started_at.elapsed());
+        if let Some(files) = self.installed_files.read().await.get(&key).cloned() {
+            provider_impl.install_files(&handle, &files).await?;
+        }
         self.active_hands.write().await.insert(key, handle.clone());
         Ok(handle)
     }

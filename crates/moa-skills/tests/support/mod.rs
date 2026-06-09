@@ -226,7 +226,7 @@ pub async fn seed_skill(
     let rendered = render_skill_markdown(&document).expect("render seed skill");
     let registry = SkillRegistry::new(test_db.store().pool().clone());
     registry
-        .upsert_by_name(NewSkill::from_document(scope, &document, rendered))
+        .upsert_by_name(NewSkill::from_skill_markdown(scope, rendered))
         .await
         .expect("seed skill");
     skill_metadata_from_document(build_skill_path(&document.frontmatter.name), &document)
@@ -243,6 +243,24 @@ pub async fn load_active_skill(
         .await
         .expect("load active skill")
         .expect("active skill exists")
+}
+
+/// Loads the active skill's required `SKILL.md` markdown by name.
+pub async fn load_active_skill_markdown(
+    test_db: &TestDb,
+    scope: &MemoryScope,
+    skill_name: &str,
+) -> String {
+    let registry = SkillRegistry::new(test_db.store().pool().clone());
+    let row = registry
+        .load_by_name(scope, skill_name)
+        .await
+        .expect("load active skill")
+        .expect("active skill exists");
+    registry
+        .load_skill_markdown(scope, row.skill_uid)
+        .await
+        .expect("load active skill markdown")
 }
 
 /// Writes a compact output-matching regression suite for a skill.
@@ -277,8 +295,8 @@ pub async fn active_semantic_version(
     scope: &MemoryScope,
     skill_name: &str,
 ) -> String {
-    let row = load_active_skill(test_db, scope, skill_name).await;
-    parse_skill_markdown(&row.body)
+    let markdown = load_active_skill_markdown(test_db, scope, skill_name).await;
+    parse_skill_markdown(&markdown)
         .expect("parse active skill")
         .frontmatter
         .version()

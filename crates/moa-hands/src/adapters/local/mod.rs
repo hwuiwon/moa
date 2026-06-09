@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use moa_core::{
-    HandHandle, HandProvider, HandSpec, HandStatus, MoaError, Result, SandboxTier,
-    ToolFailureClass, ToolOutput, classify_tool_error,
+    HandHandle, HandProvider, HandSpec, HandStatus, MoaError, Result, SandboxFile, SandboxTier,
+    ToolFailureClass, ToolOutput, classify_tool_error, validate_sandbox_file_path,
 };
 use opentelemetry::trace::Status;
 use tokio::fs;
@@ -318,6 +318,20 @@ impl LocalHandProvider {
         }
     }
 
+    async fn install_files_at_root(&self, root: &Path, files: &[SandboxFile]) -> Result<()> {
+        for file in files {
+            let target = sandbox_install_path(root, &file.path)?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+            fs::write(&target, &file.content).await?;
+            if file.executable {
+                set_executable(&target).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Executes a tool with cooperative cancellation support.
     pub async fn execute_with_cancel(
         &self,
@@ -403,6 +417,34 @@ impl HandProvider for LocalHandProvider {
 
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput> {
         self.execute_with_cancel(handle, tool, input, None).await
+    }
+
+    async fn install_files(&self, handle: &HandHandle, files: &[SandboxFile]) -> Result<()> {
+        match handle {
+            HandHandle::Local { sandbox_dir } => {
+                let sandbox = self.resolve_local_sandbox(sandbox_dir).await;
+                self.install_files_at_root(&sandbox.execution_root, files)
+                    .await
+            }
+            HandHandle::Docker { container_id } => {
+                let sandbox = self
+                    .docker_sandboxes
+                    .read()
+                    .await
+                    .get(container_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        MoaError::ProviderError(format!(
+                            "unknown docker sandbox handle: {container_id}"
+                        ))
+                    })?;
+                self.install_files_at_root(&sandbox.sandbox_dir, files)
+                    .await
+            }
+            _ => Err(MoaError::Unsupported(
+                "non-local hand handle passed to LocalHandProvider".to_string(),
+            )),
+        }
     }
 
     async fn classify_error(
@@ -539,6 +581,28 @@ impl HandProvider for LocalHandProvider {
             )),
         }
     }
+}
+
+fn sandbox_install_path(root: &Path, relative_path: &str) -> Result<PathBuf> {
+    validate_sandbox_file_path(relative_path)?;
+    let mut target = root.to_path_buf();
+    for segment in relative_path.split('/') {
+        target.push(segment);
+    }
+    Ok(target)
+}
+
+#[cfg(unix)]
+async fn set_executable(path: &Path) -> Result<()> {
+    let mut permissions = fs::metadata(path).await?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).await?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn set_executable(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 async fn detect_docker() -> bool {

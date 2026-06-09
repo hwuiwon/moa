@@ -4,10 +4,10 @@ _Agent Skills, resolution-weighted ranking, and the unified learning log._
 
 ## Skill Format
 
-MOA uses Agent Skills-style directories:
+MOA uses Agent Skills-style packages:
 
 ```text
-skills/
+.moa/skills/
   deploy-to-fly/
     SKILL.md
     scripts/
@@ -17,12 +17,30 @@ skills/
 
 `SKILL.md` contains YAML frontmatter plus markdown instructions. MOA-specific metadata is stored under `metadata` with `moa-` keys such as source session, version, estimated tokens, use count, last used, and success signals.
 
+`SKILL.md` is required. Supporting files are optional, but when present they
+are part of the same package revision and may include scripts, references,
+templates, or other resources.
+
+## Storage
+
+Postgres is the only durable skill package store:
+
+- `moa.skill` stores package metadata, scope, versioning, hashes, file counts,
+  total size, tags, and a JSONB manifest derived from `SKILL.md`.
+- `moa.skill_file` stores each package file as `BYTEA`, keyed by skill revision
+  and normalized package path.
+
+MOA does not duplicate skill package bytes in object storage. Import/export uses
+package documents containing base64-encoded files. On each turn, selected skill
+packages are registered with the tool router and materialized into the active
+hand under `.moa/skills/<skill>/...` before the first hand tool executes.
+
 ## Progressive Disclosure
 
 | Tier | Loaded into context | When |
 |---|---|---|
 | Metadata | name, description, tags, allowed tools, estimates | stage 4 skill manifest |
-| Body | full `SKILL.md` | only when the agent activates the skill |
+| `SKILL.md` | full instructions | read from `.moa/skills/<skill>/SKILL.md` when the agent activates the skill |
 | Resources | scripts, references, assets | only when needed for execution |
 
 The skill manifest is budgeted and sorted deterministically for cache stability.
@@ -47,11 +65,12 @@ Skill distillation runs after successful multi-step work. Current flow:
 3. Compare against existing workspace skills.
 4. If a similar skill exists, attempt improvement.
 5. Otherwise ask the configured model to produce a complete skill document.
-6. Write the skill into workspace memory.
+6. Write the skill package into workspace memory.
 7. Generate a regression test suite for the skill.
 8. Append a `skill_created` learning entry when a learning store is present.
 
-Skill improvement writes updated skill content and appends `skill_improved`.
+Skill improvement writes an updated `SKILL.md`, preserves supporting package
+files from the previous revision, and appends `skill_improved`.
 
 ## Unified Learning Pipeline
 

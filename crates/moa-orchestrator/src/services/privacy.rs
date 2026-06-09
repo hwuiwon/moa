@@ -937,30 +937,50 @@ async fn collect_skills(
     let rows = sqlx::query_scalar::<_, Value>(
         r#"
         SELECT jsonb_build_object(
-            'skill_uid', skill_uid,
-            'workspace_id', workspace_id,
-            'user_id', user_id,
-            'scope', scope,
-            'name', name,
-            'description', description,
-            'body', body,
-            'body_hash_hex', encode(body_hash, 'hex'),
-            'version', version,
-            'previous_skill_uid', previous_skill_uid,
-            'tags', tags,
-            'valid_to', valid_to,
-            'created_at', created_at,
-            'updated_at', updated_at
+            'skill_uid', s.skill_uid,
+            'workspace_id', s.workspace_id,
+            'user_id', s.user_id,
+            'scope', s.scope,
+            'name', s.name,
+            'description', s.description,
+            'package_hash_hex', encode(s.package_hash, 'hex'),
+            'skill_md_hash_hex', encode(s.skill_md_hash, 'hex'),
+            'file_count', s.file_count,
+            'total_size_bytes', s.total_size_bytes,
+            'manifest', s.manifest,
+            'version', s.version,
+            'previous_skill_uid', s.previous_skill_uid,
+            'tags', s.tags,
+            'valid_to', s.valid_to,
+            'created_at', s.created_at,
+            'updated_at', s.updated_at,
+            'files', COALESCE((
+                SELECT jsonb_agg(jsonb_build_object(
+                    'path', f.path,
+                    'content_base64', encode(f.content, 'base64'),
+                    'content_sha256_hex', encode(f.content_sha256, 'hex'),
+                    'content_type', f.content_type,
+                    'executable', f.executable,
+                    'file_size_bytes', f.file_size_bytes
+                ) ORDER BY f.path)
+                FROM moa.skill_file f
+                WHERE f.skill_uid = s.skill_uid
+            ), '[]'::jsonb)
         )
-        FROM moa.skill
+        FROM moa.skill s
         WHERE valid_to IS NULL
-          AND ($1::text IS NULL OR workspace_id = $1)
+          AND ($1::text IS NULL OR s.workspace_id = $1)
           AND (
-              user_id = $2
-              OR body LIKE ('%' || $2 || '%')
-              OR description LIKE ('%' || $2 || '%')
+              s.user_id = $2
+              OR s.description LIKE ('%' || $2 || '%')
+              OR EXISTS (
+                  SELECT 1
+                  FROM moa.skill_file f
+                  WHERE f.skill_uid = s.skill_uid
+                    AND encode(f.content, 'escape') LIKE ('%' || $2 || '%')
+              )
           )
-        ORDER BY workspace_id NULLS FIRST, scope, name, version
+        ORDER BY s.workspace_id NULLS FIRST, s.scope, s.name, s.version
         "#,
     )
     .bind(ctx.workspace.as_deref())

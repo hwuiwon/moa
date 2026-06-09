@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
-    HandHandle, HandProvider, HandSpec, HandStatus, MoaConfig, MoaError, Result, SandboxTier,
-    ToolFailureClass, ToolOutput, classify_tool_error,
+    HandHandle, HandProvider, HandSpec, HandStatus, MoaConfig, MoaError, Result, SandboxFile,
+    SandboxTier, ToolFailureClass, ToolOutput, classify_tool_error, validate_sandbox_file_path,
 };
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, RETRY_AFTER};
 use serde_json::{Value, json};
@@ -205,11 +205,18 @@ impl DaytonaHandProvider {
             Err(MoaError::HttpStatus { status: 404, .. }) => ExistingFileContent::Missing,
             Err(error) => return Err(error),
         };
-        let duration = self.upload_file(workspace_id, path, content).await?;
+        let duration = self
+            .upload_file(workspace_id, path, content.as_bytes())
+            .await?;
         Ok(build_file_write_output(path, &existing, content, duration))
     }
 
-    async fn upload_file(&self, workspace_id: &str, path: &str, content: &str) -> Result<Duration> {
+    async fn upload_file(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        content: &[u8],
+    ) -> Result<Duration> {
         let started_at = Instant::now();
         let url = build_url(
             &format!("{}/{}/files/upload", self.toolbox_url, workspace_id),
@@ -217,9 +224,9 @@ impl DaytonaHandProvider {
         )?;
         let form = reqwest::multipart::Form::new().part(
             "file",
-            reqwest::multipart::Part::bytes(content.as_bytes().to_vec())
+            reqwest::multipart::Part::bytes(content.to_vec())
                 .file_name("upload.txt")
-                .mime_str("text/plain; charset=utf-8")
+                .mime_str("application/octet-stream")
                 .map_err(|error| {
                     MoaError::ValidationError(format!("invalid Daytona upload MIME type: {error}"))
                 })?,
@@ -237,6 +244,20 @@ impl DaytonaHandProvider {
         Ok(started_at.elapsed())
     }
 
+    async fn chmod_file(&self, workspace_id: &str, path: &str) -> Result<()> {
+        let command = format!("chmod 755 {}", shell_quote(path));
+        let output = self
+            .execute_command(workspace_id, &command, None, Some(30))
+            .await?;
+        if output.is_error {
+            return Err(MoaError::ProviderError(format!(
+                "failed to mark Daytona file executable `{path}`: {}",
+                output.to_text()
+            )));
+        }
+        Ok(())
+    }
+
     async fn str_replace_file(
         &self,
         workspace_id: &str,
@@ -250,7 +271,7 @@ impl DaytonaHandProvider {
         };
         let planned = plan_str_replace(input, existing_content.as_deref(), path, 4)?;
         let duration = self
-            .upload_file(workspace_id, path, &planned.updated_content)
+            .upload_file(workspace_id, path, planned.updated_content.as_bytes())
             .await?;
         Ok(build_text_edit_output(
             path,
@@ -336,6 +357,20 @@ impl HandProvider for DaytonaHandProvider {
                 "unsupported Daytona tool: {other}"
             ))),
         }
+    }
+
+    async fn install_files(&self, handle: &HandHandle, files: &[SandboxFile]) -> Result<()> {
+        let workspace_id = handle.daytona_id()?;
+        self.resume(handle).await?;
+        for file in files {
+            validate_sandbox_file_path(&file.path)?;
+            self.upload_file(workspace_id, &file.path, &file.content)
+                .await?;
+            if file.executable {
+                self.chmod_file(workspace_id, &file.path).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn classify_error(
@@ -544,6 +579,10 @@ fn build_url(base: &str, params: &[(&str, &str)]) -> Result<reqwest::Url> {
         }
     }
     Ok(url)
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Classifies one Daytona execution error for retry and re-provision decisions.
