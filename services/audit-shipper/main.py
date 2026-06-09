@@ -60,9 +60,9 @@ def load_settings() -> Settings:
     """Loads shipper settings from environment variables."""
 
     bucket = os.environ.get("BUCKET")
-    postgres_url = os.environ.get("POSTGRES_URL")
+    postgres_url = os.environ.get("MOA_DATABASE_URL")
     if not bucket and not postgres_url:
-        raise SystemExit("BUCKET or POSTGRES_URL is required")
+        raise SystemExit("BUCKET or MOA_DATABASE_URL is required")
 
     globs = tuple(
         item.strip()

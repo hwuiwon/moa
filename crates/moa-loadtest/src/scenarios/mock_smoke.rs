@@ -35,8 +35,6 @@ pub struct MockSmokeConfig {
     pub turn_duration: Duration,
     /// Restate ingress endpoint fronting `moa-orchestrator`.
     pub endpoint: String,
-    /// Optional explicit MOA config path.
-    pub config_path: Option<PathBuf>,
 }
 
 impl Default for MockSmokeConfig {
@@ -50,7 +48,6 @@ impl Default for MockSmokeConfig {
             ttft: DEFAULT_TTFT,
             turn_duration: DEFAULT_TURN_DURATION,
             endpoint: DEFAULT_ENDPOINT.to_string(),
-            config_path: None,
         }
     }
 }
@@ -68,7 +65,6 @@ pub async fn run_mock_smoke_gate(cfg: MockSmokeConfig) -> Result<()> {
         turn_timeout: cfg.duration.max(Duration::from_secs(1)),
         output: OutputFormat::Json,
         model: None,
-        config_path: cfg.config_path.clone(),
     })
     .await
     {

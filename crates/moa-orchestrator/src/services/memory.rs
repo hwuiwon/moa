@@ -431,13 +431,15 @@ async fn lookup_seed_uids(
 
 fn memory_stack(scope: &MemoryScope) -> (Arc<dyn GraphStore>, Arc<HybridRetriever>) {
     let graph = Arc::new(graph_store(scope));
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let runtime = OrchestratorCtx::current();
+    let pool = runtime.graph_pool.clone();
     let vector = Arc::new(PgvectorStore::new_for_app_role(
         pool.clone(),
         ScopeContext::new(scope.clone()),
     ));
     let retriever =
-        HybridRetriever::from_env(pool, graph.clone(), vector).with_assume_app_role(true);
+        HybridRetriever::from_config(runtime.config.as_ref(), pool, graph.clone(), vector)
+            .with_assume_app_role(true);
     (graph, Arc::new(retriever))
 }
 

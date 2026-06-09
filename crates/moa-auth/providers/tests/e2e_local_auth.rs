@@ -15,7 +15,7 @@ async fn create_present_validate_revoke() -> Result<(), Box<dyn std::error::Erro
 
     let edge_url =
         std::env::var("MOA_EDGE_URL").unwrap_or_else(|_| "http://127.0.0.1:10000".to_string());
-    let orchestrator_url = std::env::var("MOA__ORCHESTRATOR__ENDPOINT")
+    let orchestrator_url = std::env::var("MOA_ORCHESTRATOR_ENDPOINT")
         .unwrap_or_else(|_| "http://127.0.0.1:10010".to_string());
 
     let user_id = Uuid::new_v4();
@@ -96,14 +96,16 @@ fn github_secret_scanning_regex_is_public_contract() {
 
 fn live_fga_client() -> Result<FgaClient, Box<dyn std::error::Error>> {
     Ok(FgaClient::new(FgaConfig {
-        url: std::env::var("MOA_OPENFGA_URL")
+        url: std::env::var("MOA_AUTHZ_OPENFGA_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:10030".to_string()),
-        preshared_key: std::env::var("MOA_OPENFGA_PRESHARED_KEY")
+        preshared_key: std::env::var("MOA_AUTHZ_OPENFGA_PRESHARED_KEY")
             .unwrap_or_else(|_| "localdev-preshared-key-do-not-use-in-prod".to_string()),
-        store_id: std::env::var("MOA_OPENFGA_STORE_ID")
-            .expect("MOA_OPENFGA_STORE_ID must be set when live local auth tests are enabled"),
-        model_id: std::env::var("MOA_OPENFGA_MODEL_ID")
-            .expect("MOA_OPENFGA_MODEL_ID must be set when live local auth tests are enabled"),
+        store_id: std::env::var("MOA_AUTHZ_OPENFGA_STORE_ID").expect(
+            "MOA_AUTHZ_OPENFGA_STORE_ID must be set when live local auth tests are enabled",
+        ),
+        model_id: std::env::var("MOA_AUTHZ_OPENFGA_MODEL_ID").expect(
+            "MOA_AUTHZ_OPENFGA_MODEL_ID must be set when live local auth tests are enabled",
+        ),
         timeout_ms: 5000,
     })?)
 }

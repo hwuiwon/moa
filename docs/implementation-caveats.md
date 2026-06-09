@@ -118,7 +118,7 @@ These caveats relate to the gap between "cloud build succeeds" and "cloud deploy
 ### Cloud handler startup requires explicit database, Restate, and provider configuration
 
 - `Dockerfile` builds `moa-orchestrator-bin` and installs it as `/usr/local/bin/moa-orchestrator`.
-- The orchestrator process reads `POSTGRES_URL` directly and optionally reads `RESTATE_ADMIN_URL`, `MOA_SANDBOX_DIR`, `MOA_MEMORY_DIR`, `MOA_DOCKER_ENABLED`, OTLP settings, and metrics settings from the process environment.
+- The orchestrator process loads shared `MoaConfig` from flat `MOA_...` environment variables such as `MOA_DATABASE_URL`, `MOA_RESTATE_ADMIN_URL`, `MOA_RESTATE_INGRESS_URL`, `MOA_LOCAL_SANDBOX_DIR`, `MOA_LOCAL_MEMORY_DIR`, `MOA_LOCAL_DOCKER_ENABLED`, observability settings, and metrics settings.
 - Provider registration is environment-backed. Health readiness validates Postgres and optional Restate registration, not provider reachability; real LLM requests still need a configured key such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GOOGLE_API_KEY`.
-- `fly.toml` still carries shared `MOA__...` settings used by config-driven subsystems, but the Restate handler binary's required database setting is `POSTGRES_URL`.
+- `fly.toml` carries flat `MOA_...` settings. Kubernetes and Fly deployments should use environment variables for runtime configuration.
 - In live validation, a manually stopped machine took roughly 6 seconds to answer the next `/health` request, while a suspended machine resumed in about 1.29 seconds — close to, but not consistently below, the sub-second resume target from the step spec.

@@ -18,9 +18,9 @@ fn bootstrap_is_idempotent_across_two_runs() {
 
     // Pins: bootstrap can create or reuse a named store and emits a concrete store ID.
     let first = Command::new(binary)
-        .env("MOA_OPENFGA_STORE_NAME", "moa-test-idempotent")
+        .env("MOA_AUTHZ_OPENFGA_STORE_NAME", "moa-test-idempotent")
         .env(
-            "MOA_OPENFGA_PRESHARED_KEY",
+            "MOA_AUTHZ_OPENFGA_PRESHARED_KEY",
             default_preshared_key_if_unset(),
         )
         .env("MOA_FGA_ENV_OUTPUT", &output_path)
@@ -34,13 +34,13 @@ fn bootstrap_is_idempotent_across_two_runs() {
     );
     let first_stdout =
         String::from_utf8(first.stdout).expect("first bootstrap stdout should be UTF-8");
-    let first_store_id = grep_env(&first_stdout, "MOA_OPENFGA_STORE_ID");
+    let first_store_id = grep_env(&first_stdout, "MOA_AUTHZ_OPENFGA_STORE_ID");
 
     // Pins: bootstrap reuses the same store on the second run.
     let second = Command::new(binary)
-        .env("MOA_OPENFGA_STORE_NAME", "moa-test-idempotent")
+        .env("MOA_AUTHZ_OPENFGA_STORE_NAME", "moa-test-idempotent")
         .env(
-            "MOA_OPENFGA_PRESHARED_KEY",
+            "MOA_AUTHZ_OPENFGA_PRESHARED_KEY",
             default_preshared_key_if_unset(),
         )
         .env("MOA_FGA_ENV_OUTPUT", &output_path)
@@ -54,7 +54,7 @@ fn bootstrap_is_idempotent_across_two_runs() {
     );
     let second_stdout =
         String::from_utf8(second.stdout).expect("second bootstrap stdout should be UTF-8");
-    let second_store_id = grep_env(&second_stdout, "MOA_OPENFGA_STORE_ID");
+    let second_store_id = grep_env(&second_stdout, "MOA_AUTHZ_OPENFGA_STORE_ID");
 
     assert_eq!(
         first_store_id, second_store_id,
@@ -71,6 +71,6 @@ fn grep_env(stdout: &str, key: &str) -> String {
 }
 
 fn default_preshared_key_if_unset() -> String {
-    std::env::var("MOA_OPENFGA_PRESHARED_KEY")
+    std::env::var("MOA_AUTHZ_OPENFGA_PRESHARED_KEY")
         .unwrap_or_else(|_| "localdev-preshared-key-do-not-use-in-prod".to_string())
 }

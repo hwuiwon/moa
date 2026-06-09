@@ -83,6 +83,14 @@ async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: &str) -> ScopedConn<'a>
     conn
 }
 
+async fn cleanup_promoted_uid(test_db: &TestDb, uid: Uuid) {
+    sqlx::query("DELETE FROM moa.node_index WHERE uid = $1")
+        .bind(uid)
+        .execute(test_db.store().pool())
+        .await
+        .expect("delete promotion test node");
+}
+
 #[tokio::test]
 async fn promote_workspace_node_to_global_creates_global_row_with_same_uid() {
     let _guard = TEST_LOCK.lock().await;
@@ -120,6 +128,7 @@ async fn promote_workspace_node_to_global_creates_global_row_with_same_uid() {
         row.try_get::<String, _>("content").expect("decode content"),
         "promoted fact"
     );
+    cleanup_promoted_uid(&test_db, uid).await;
 }
 
 #[tokio::test]
@@ -154,6 +163,7 @@ async fn promote_workspace_node_to_global_invalidates_workspace_row() {
 
     assert_eq!(workspace_rows, 0);
     assert_eq!(global_valid_from, report.valid_from);
+    cleanup_promoted_uid(&test_db, uid).await;
 }
 
 #[tokio::test]
@@ -190,6 +200,7 @@ async fn promote_workspace_node_to_global_preserves_lineage_chain_via_supersedes
     .expect("count linked global create changelog row");
 
     assert_eq!(linked_global_create, 1);
+    cleanup_promoted_uid(&test_db, uid).await;
 }
 
 #[tokio::test]
@@ -215,6 +226,7 @@ async fn promote_workspace_node_to_global_with_existing_global_uid_collision_ret
         .expect_err("global UID collision must be typed");
 
     assert!(matches!(error, Error::PromotionUidCollision { uid: actual } if actual == uid));
+    cleanup_promoted_uid(&test_db, uid).await;
 }
 
 #[tokio::test]
@@ -256,4 +268,5 @@ async fn promote_workspace_node_visible_in_other_workspaces_after_promotion() {
     conn.commit().await.expect("commit after visibility read");
 
     assert_eq!(after, 1);
+    cleanup_promoted_uid(&test_db, uid).await;
 }

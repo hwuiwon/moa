@@ -1,6 +1,5 @@
 //! Binary entry point for the MOA load-test harness.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -45,10 +44,6 @@ struct Args {
     /// Optional model override for turn requests.
     #[arg(long)]
     model: Option<String>,
-
-    /// Optional explicit MOA config path.
-    #[arg(long)]
-    config: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -67,7 +62,6 @@ async fn main() -> Result<()> {
         turn_timeout: Duration::from_secs(args.turn_timeout_seconds),
         output: args.output,
         model: args.model,
-        config_path: args.config,
     };
 
     let report = run_loadtest(options.clone()).await?;

@@ -77,15 +77,17 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         authorize_workspace_admin(&ctx, &request.workspace_id).await?;
         let runtime = OrchestratorCtx::current();
         let pool = runtime.graph_pool.clone();
+        let config = runtime.config.clone();
 
         Ok(ctx
             .run(|| async move {
                 let workspace_id = request.workspace_id.to_string();
                 let scope = ScopeContext::workspace(WorkspaceId::new(workspace_id.clone()));
                 let pgvector = Arc::new(PgvectorStore::new(pool.clone(), scope));
-                let turbopuffer = Arc::new(TurbopufferStore::from_env().map_err(|error| {
-                    TerminalError::new(format!("loading Turbopuffer client: {error}"))
-                })?);
+                let turbopuffer =
+                    Arc::new(TurbopufferStore::from_config(&config).map_err(|error| {
+                        TerminalError::new(format!("loading Turbopuffer client: {error}"))
+                    })?);
                 let promotion = WorkspacePromotion::new(pool, pgvector, turbopuffer);
                 let report = promotion
                     .promote(PromotionOptions {

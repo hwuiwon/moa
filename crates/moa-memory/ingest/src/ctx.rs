@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use moa_core::traits::EmbeddingProvider;
+use moa_core::{MoaConfig, traits::EmbeddingProvider};
 use moa_memory_graph::GraphStore;
 use moa_memory_pii::PiiClassifier;
 use moa_memory_vector::VectorStore;
@@ -55,19 +55,48 @@ impl IngestCtx {
 #[derive(Clone)]
 pub struct IngestRuntime {
     pool: PgPool,
+    pii_service_url: Option<String>,
+    cohere_api_key_env: String,
 }
 
 impl IngestRuntime {
     /// Creates a runtime from a Postgres pool.
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        let default_config = MoaConfig::default();
+        Self {
+            pool,
+            pii_service_url: None,
+            cohere_api_key_env: default_config.memory.vector.embedder.cohere.api_key_env,
+        }
+    }
+
+    /// Creates a runtime from a Postgres pool and shared MOA config.
+    #[must_use]
+    pub fn from_config(pool: PgPool, config: &MoaConfig) -> Self {
+        Self {
+            pool,
+            pii_service_url: config.memory.pii_service_url.clone(),
+            cohere_api_key_env: config.memory.vector.embedder.cohere.api_key_env.clone(),
+        }
     }
 
     /// Returns the Postgres pool used by ingestion handlers.
     #[must_use]
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Returns the configured PII classifier sidecar URL.
+    #[must_use]
+    pub fn pii_service_url(&self) -> Option<&str> {
+        self.pii_service_url.as_deref()
+    }
+
+    /// Returns the configured Cohere API-key environment variable name.
+    #[must_use]
+    pub fn cohere_api_key_env(&self) -> &str {
+        &self.cohere_api_key_env
     }
 }
 
@@ -79,6 +108,14 @@ pub fn install_runtime(runtime: IngestRuntime) -> std::result::Result<(), Ingest
 /// Installs the process-local ingestion runtime from a Postgres pool.
 pub fn install_runtime_with_pool(pool: PgPool) -> std::result::Result<(), IngestRuntime> {
     install_runtime(IngestRuntime::new(pool))
+}
+
+/// Installs the process-local ingestion runtime from a Postgres pool and shared config.
+pub fn install_runtime_with_config(
+    pool: PgPool,
+    config: &MoaConfig,
+) -> std::result::Result<(), IngestRuntime> {
+    install_runtime(IngestRuntime::from_config(pool, config))
 }
 
 /// Returns the installed process-local ingestion runtime.

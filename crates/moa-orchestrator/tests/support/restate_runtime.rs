@@ -51,15 +51,16 @@ pub fn deployment_endpoint_url(port: u16) -> String {
 /// Return the Restate ingress URL used by e2e tests.
 ///
 /// The compose stack exposes ingress at `10010`; a host `restate-server`
-/// usually exposes it at `8080`. Set `RESTATE_INGRESS_URL` to select the
+/// usually exposes it at `8080`. Set `MOA_RESTATE_INGRESS_URL` to select the
 /// active topology.
 pub fn restate_ingress_url() -> String {
-    std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://127.0.0.1:10010".to_string())
+    std::env::var("MOA_RESTATE_INGRESS_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:10010".to_string())
 }
 
 /// Return the Restate admin URL used by e2e tests.
 pub fn restate_admin_url() -> String {
-    std::env::var("RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:10011".to_string())
+    std::env::var("MOA_RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:10011".to_string())
 }
 
 /// Register a spawned test deployment with Restate admin over HTTP.
@@ -175,12 +176,14 @@ async fn apply_raw_tuple(op: TupleOp, user: &str, relation: &str, object: &str) 
 
 fn live_fga_client() -> Result<FgaClient> {
     FgaClient::new(FgaConfig {
-        url: std::env::var("MOA_OPENFGA_URL")
+        url: std::env::var("MOA_AUTHZ_OPENFGA_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:10030".to_string()),
-        preshared_key: std::env::var("MOA_OPENFGA_PRESHARED_KEY")
+        preshared_key: std::env::var("MOA_AUTHZ_OPENFGA_PRESHARED_KEY")
             .unwrap_or_else(|_| "localdev-preshared-key-do-not-use-in-prod".to_string()),
-        store_id: std::env::var("MOA_OPENFGA_STORE_ID").context("MOA_OPENFGA_STORE_ID")?,
-        model_id: std::env::var("MOA_OPENFGA_MODEL_ID").context("MOA_OPENFGA_MODEL_ID")?,
+        store_id: std::env::var("MOA_AUTHZ_OPENFGA_STORE_ID")
+            .context("MOA_AUTHZ_OPENFGA_STORE_ID")?,
+        model_id: std::env::var("MOA_AUTHZ_OPENFGA_MODEL_ID")
+            .context("MOA_AUTHZ_OPENFGA_MODEL_ID")?,
         timeout_ms: 5000,
     })
     .context("build live OpenFGA client")

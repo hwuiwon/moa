@@ -12,7 +12,7 @@ Authentication and denied authorization events are emitted by default.
 Allowed authorization decisions are high volume and are controlled by:
 
 ```sh
-MOA__AUDIT_SECURITY__EMIT_AUTHZ_ALLOWS=true
+MOA_AUDIT_SECURITY_EMIT_AUTHZ_ALLOWS=true
 ```
 
 For most tenants, keep allow-emission off unless a compliance posture requires
@@ -63,5 +63,5 @@ wrong signing key was used.
 ## Shipper Configuration
 
 `services/audit-shipper` keeps the existing PostgreSQL log shipping path and
-adds a `security_events` source when `POSTGRES_URL` is set. Existing pgaudit
+adds a `security_events` source when `MOA_DATABASE_URL` is set. Existing pgaudit
 shipping still uses `BUCKET`; OCSF events use the per-tenant destination table.

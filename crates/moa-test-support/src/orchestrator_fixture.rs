@@ -118,13 +118,13 @@ impl OrchestratorTestFixture {
         let repo_root = repo_root();
         let ingress_url = trim_url(&raw_ingress_url)?;
         let admin_url = std::env::var("MOA_TEST_EXTERNAL_ADMIN_URL")
-            .or_else(|_| std::env::var("RESTATE_ADMIN_URL"))
+            .or_else(|_| std::env::var("MOA_RESTATE_ADMIN_URL"))
             .ok()
             .map(|url| trim_url(&url))
             .transpose()?
             .unwrap_or_else(|| derive_admin_url(&ingress_url));
         let postgres_url = std::env::var("MOA_TEST_EXTERNAL_POSTGRES_URL")
-            .or_else(|_| std::env::var("POSTGRES_URL"))
+            .or_else(|_| std::env::var("MOA_DATABASE_URL"))
             .unwrap_or_default();
         let fga_client = external_fga_client(&repo_root)?;
         let client = TestApiClient::new(&ingress_url)
@@ -960,21 +960,21 @@ fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<Child> {
         .arg(config.health_port.to_string())
         .arg("--scim-port")
         .arg(config.scim_port.to_string())
-        .env("POSTGRES_URL", config.postgres_url)
-        .env("RESTATE_ADMIN_URL", config.admin_url)
-        .env("MOA_LOCAL_INGRESS_URL", config.ingress_url)
+        .env("MOA_DATABASE_URL", config.postgres_url)
+        .env("MOA_RESTATE_ADMIN_URL", config.admin_url)
+        .env("MOA_RESTATE_INGRESS_URL", config.ingress_url)
         .env(
             "MOA_PROVIDERS_OVERRIDE",
             format!("scripted:{}", config.script_path.display()),
         )
-        .env("MOA__AUTHZ__OPENFGA__URL", &config.fga_config.url)
+        .env("MOA_AUTHZ_OPENFGA_URL", &config.fga_config.url)
         .env(
-            "MOA__AUTHZ__OPENFGA__PRESHARED_KEY",
+            "MOA_AUTHZ_OPENFGA_PRESHARED_KEY",
             &config.fga_config.preshared_key,
         )
-        .env("MOA__AUTHZ__OPENFGA__STORE_ID", &config.fga_config.store_id)
-        .env("MOA__AUTHZ__OPENFGA__MODEL_ID", &config.fga_config.model_id)
-        .env("MOA__ENVIRONMENT", "test")
+        .env("MOA_AUTHZ_OPENFGA_STORE_ID", &config.fga_config.store_id)
+        .env("MOA_AUTHZ_OPENFGA_MODEL_ID", &config.fga_config.model_id)
+        .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env("MOA_LINEAGE_SINK", "null")
         .env("RUST_LOG", "warn")
         .stdout(Stdio::piped())
@@ -1124,28 +1124,16 @@ fn repo_root() -> PathBuf {
 
 fn external_fga_client(repo_root: &Path) -> Result<Option<FgaClient>> {
     let values = fga_env_values(repo_root);
-    let Some(store_id) = fga_value(
-        &values,
-        "MOA__AUTHZ__OPENFGA__STORE_ID",
-        "MOA_OPENFGA_STORE_ID",
-    ) else {
+    let Some(store_id) = fga_value(&values, "MOA_AUTHZ_OPENFGA_STORE_ID") else {
         return Ok(None);
     };
-    let Some(model_id) = fga_value(
-        &values,
-        "MOA__AUTHZ__OPENFGA__MODEL_ID",
-        "MOA_OPENFGA_MODEL_ID",
-    ) else {
+    let Some(model_id) = fga_value(&values, "MOA_AUTHZ_OPENFGA_MODEL_ID") else {
         return Ok(None);
     };
-    let url = fga_value(&values, "MOA__AUTHZ__OPENFGA__URL", "MOA_OPENFGA_URL")
+    let url = fga_value(&values, "MOA_AUTHZ_OPENFGA_URL")
         .unwrap_or_else(|| "http://127.0.0.1:10030".to_string());
-    let preshared_key = fga_value(
-        &values,
-        "MOA__AUTHZ__OPENFGA__PRESHARED_KEY",
-        "MOA_OPENFGA_PRESHARED_KEY",
-    )
-    .unwrap_or_else(|| OPENFGA_PRESHARED_KEY.to_string());
+    let preshared_key = fga_value(&values, "MOA_AUTHZ_OPENFGA_PRESHARED_KEY")
+        .unwrap_or_else(|| OPENFGA_PRESHARED_KEY.to_string());
     FgaClient::new(FgaConfig {
         url,
         preshared_key,
@@ -1160,14 +1148,10 @@ fn external_fga_client(repo_root: &Path) -> Result<Option<FgaClient>> {
 fn fga_env_values(repo_root: &Path) -> HashMap<String, String> {
     let mut values = HashMap::new();
     for key in [
-        "MOA__AUTHZ__OPENFGA__URL",
-        "MOA_OPENFGA_URL",
-        "MOA__AUTHZ__OPENFGA__PRESHARED_KEY",
-        "MOA_OPENFGA_PRESHARED_KEY",
-        "MOA__AUTHZ__OPENFGA__STORE_ID",
-        "MOA_OPENFGA_STORE_ID",
-        "MOA__AUTHZ__OPENFGA__MODEL_ID",
-        "MOA_OPENFGA_MODEL_ID",
+        "MOA_AUTHZ_OPENFGA_URL",
+        "MOA_AUTHZ_OPENFGA_PRESHARED_KEY",
+        "MOA_AUTHZ_OPENFGA_STORE_ID",
+        "MOA_AUTHZ_OPENFGA_MODEL_ID",
     ] {
         if let Ok(value) = std::env::var(key) {
             values.insert(key.to_string(), value);
@@ -1191,10 +1175,9 @@ fn fga_env_values(repo_root: &Path) -> HashMap<String, String> {
     values
 }
 
-fn fga_value(values: &HashMap<String, String>, primary: &str, fallback: &str) -> Option<String> {
+fn fga_value(values: &HashMap<String, String>, key: &str) -> Option<String> {
     values
-        .get(primary)
-        .or_else(|| values.get(fallback))
+        .get(key)
         .filter(|value| !value.trim().is_empty())
         .cloned()
 }

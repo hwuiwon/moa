@@ -635,38 +635,28 @@ fn runtime_fast_ctx(scope: ScopeContext) -> Result<FastPathCtx, FastError> {
     let graph = Arc::new(
         AgeGraphStore::scoped(pool.clone(), scope.clone()).with_vector_store(vector.clone()),
     );
-    let embedder = Arc::new(CohereV4Embedder::new(SecretString::from(cohere_api_key()?)));
-    let pii: Arc<dyn PiiClassifier> = match pii_service_url() {
+    let embedder = Arc::new(CohereV4Embedder::new(SecretString::from(cohere_api_key(
+        runtime.cohere_api_key_env(),
+    )?)));
+    let pii: Arc<dyn PiiClassifier> = match runtime.pii_service_url() {
         Some(url) => Arc::new(OpenAiPrivacyFilterClassifier::new(url)?),
         None => Arc::new(FailClosedClassifier),
     };
+    let contradict = Arc::new(RrfPlusJudgeDetector::from_cohere_api_key_env_or_heuristic(
+        runtime.cohere_api_key_env(),
+    ));
 
     Ok(FastPathCtx::new(
-        pool,
-        scope,
-        graph,
-        vector,
-        embedder,
-        pii,
-        Arc::new(RrfPlusJudgeDetector::from_env_or_heuristic()),
+        pool, scope, graph, vector, embedder, pii, contradict,
     ))
 }
 
-fn cohere_api_key() -> Result<String, FastError> {
-    std::env::var("COHERE_API_KEY")
-        .or_else(|_| std::env::var("MOA_COHERE_API_KEY"))
-        .map_err(|_| {
-            FastError::Invalid(
-                "COHERE_API_KEY or MOA_COHERE_API_KEY is required for fast memory embedding"
-                    .to_string(),
-            )
-        })
-}
-
-fn pii_service_url() -> Option<String> {
-    std::env::var("MOA_PII_SERVICE_URL")
-        .or_else(|_| std::env::var("MOA_PII_URL"))
-        .ok()
+fn cohere_api_key(api_key_env: &str) -> Result<String, FastError> {
+    std::env::var(api_key_env).map_err(|_| {
+        FastError::Invalid(format!(
+            "{api_key_env} is required for fast memory embedding"
+        ))
+    })
 }
 
 fn parse_node_label(value: Option<&str>) -> Result<NodeLabel, FastError> {

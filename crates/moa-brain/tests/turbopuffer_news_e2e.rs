@@ -40,8 +40,7 @@ fn required_env(name: &str) -> TestResult<String> {
 
 fn cohere_api_key() -> TestResult<String> {
     std::env::var("COHERE_API_KEY")
-        .or_else(|_| std::env::var("MOA_COHERE_API_KEY"))
-        .map_err(|_| "COHERE_API_KEY or MOA_COHERE_API_KEY is required".into())
+        .map_err(|_| "COHERE_API_KEY is required".into())
         .and_then(|value| {
             if value.trim().is_empty() {
                 Err("Cohere API key must not be empty".into())

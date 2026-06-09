@@ -109,10 +109,6 @@ pub enum MoaError {
     #[error(transparent)]
     Io(#[from] io::Error),
 
-    /// A config crate error occurred.
-    #[error(transparent)]
-    Config(#[from] config::ConfigError),
-
     /// A JSON serialization error occurred.
     #[error(transparent)]
     SerdeJson(#[from] serde_json::Error),
@@ -186,8 +182,7 @@ impl MoaError {
             | Self::BudgetExhausted(_)
             | Self::Unsupported(_)
             | Self::NotImplemented(_)
-            | Self::Io(_)
-            | Self::Config(_) => true,
+            | Self::Io(_) => true,
             // Single-payload/event-shaped problems — resumable.
             Self::ProviderQuirk(_)
             | Self::ValidationError(_)
@@ -298,9 +293,6 @@ pub fn classify_tool_error(error: &MoaError, consecutive_timeouts: u32) -> ToolF
         },
         MoaError::Io(error) => ToolFailureClass::Fatal {
             reason: format!("tool execution failed with an I/O error: {error}"),
-        },
-        MoaError::Config(error) => ToolFailureClass::Fatal {
-            reason: format!("tool configuration is invalid: {error}"),
         },
         MoaError::SerdeJson(error) => ToolFailureClass::Fatal {
             reason: format!("tool payload could not be decoded: {error}"),
@@ -438,7 +430,7 @@ mod tests {
 
     #[test]
     fn config_error_is_fatal() {
-        assert!(MoaError::ConfigError("bad toml".into()).is_fatal());
+        assert!(MoaError::ConfigError("bad config".into()).is_fatal());
     }
 
     #[test]

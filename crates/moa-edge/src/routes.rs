@@ -165,7 +165,7 @@ async fn handle_auth0_connection_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let secret = match std::env::var("MOA__AUTH__AUTH0__WEBHOOK_SECRET") {
+    let secret = match std::env::var("MOA_AUTH_AUTH0_WEBHOOK_SECRET") {
         Ok(secret) if !secret.trim().is_empty() => secret,
         _ => {
             return (

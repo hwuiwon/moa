@@ -14,8 +14,7 @@ Supported values:
 - `mock:<seed>`: use a built-in deterministic mock response.
 
 The override is blocked when the orchestrator detects a production environment
-(`prod` or `production` via `observability.environment`, `DEPLOY_ENV`,
-`MOA_ENVIRONMENT`, or `MOA__ENVIRONMENT`).
+(`prod` or `production` via `MOA_OBSERVABILITY_ENVIRONMENT`).
 
 ### Script Format
 

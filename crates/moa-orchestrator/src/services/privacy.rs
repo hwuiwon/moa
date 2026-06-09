@@ -35,11 +35,8 @@ use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 
 const APPROVAL_PUBLIC_KEY_ENV: &str = "MOA_PRIVACY_APPROVAL_PUBLIC_KEY_HEX";
-const APPROVAL_PUBLIC_KEY_FALLBACK_ENV: &str = "MOA_PRIVACY_APPROVAL_PUBLIC_KEY";
 const EXPORT_SIGNING_KEY_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX";
-const EXPORT_SIGNING_KEY_FALLBACK_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY";
 const EXPORT_SIGNING_KEY_ID_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_ID";
-const PII_VAULT_SECRET_ENV: &str = "MOA_PII_VAULT_WORKSPACE_SECRET";
 const PII_VAULT_SECRET_HEX_ENV: &str = "MOA_PII_VAULT_WORKSPACE_SECRET_HEX";
 const ERASE_CHUNK_SIZE: usize = 1000;
 const ERASE_SAMPLE_LIMIT: usize = 20;
@@ -166,12 +163,7 @@ impl ApprovalTokenVerifier {
     /// Builds a verifier from the configured approval public key environment.
     pub fn from_env() -> Result<Self, HandlerError> {
         let raw = std::env::var(APPROVAL_PUBLIC_KEY_ENV)
-            .or_else(|_| std::env::var(APPROVAL_PUBLIC_KEY_FALLBACK_ENV))
-            .map_err(|_| {
-                TerminalError::new(format!(
-                    "{APPROVAL_PUBLIC_KEY_ENV} or {APPROVAL_PUBLIC_KEY_FALLBACK_ENV} is required"
-                ))
-            })?;
+            .map_err(|_| TerminalError::new(format!("{APPROVAL_PUBLIC_KEY_ENV} is required")))?;
         Self::from_public_key_material(&raw)
     }
 
@@ -236,12 +228,7 @@ impl Ed25519ManifestSigner {
     /// Builds a manifest signer from configured signing key environment.
     pub fn from_env() -> Result<Self, HandlerError> {
         let raw = std::env::var(EXPORT_SIGNING_KEY_ENV)
-            .or_else(|_| std::env::var(EXPORT_SIGNING_KEY_FALLBACK_ENV))
-            .map_err(|_| {
-                TerminalError::new(format!(
-                    "{EXPORT_SIGNING_KEY_ENV} or {EXPORT_SIGNING_KEY_FALLBACK_ENV} is required"
-                ))
-            })?;
+            .map_err(|_| TerminalError::new(format!("{EXPORT_SIGNING_KEY_ENV} is required")))?;
         let key_id = std::env::var(EXPORT_SIGNING_KEY_ID_ENV)
             .unwrap_or_else(|_| "moa-privacy-export-ops".to_string());
         Self::from_signing_key_material(key_id, &raw)
@@ -621,20 +608,19 @@ fn decode_key_material(raw: &str) -> Result<Vec<u8>, HandlerError> {
 }
 
 fn pii_vault_secret_from_env() -> Result<Option<Vec<u8>>, HandlerError> {
-    if let Ok(secret_hex) = std::env::var(PII_VAULT_SECRET_HEX_ENV) {
-        return hex::decode(secret_hex.trim()).map(Some).map_err(|error| {
-            TerminalError::new_with_code(
-                400,
-                format!("{PII_VAULT_SECRET_HEX_ENV} must be hex-encoded: {error}"),
-            )
-            .into()
-        });
-    }
-    Ok(std::env::var(PII_VAULT_SECRET_ENV)
+    std::env::var(PII_VAULT_SECRET_HEX_ENV)
         .ok()
-        .map(|secret| secret.into_bytes()))
+        .map(|secret_hex| {
+            hex::decode(secret_hex.trim()).map_err(|error| {
+                TerminalError::new_with_code(
+                    400,
+                    format!("{PII_VAULT_SECRET_HEX_ENV} must be hex-encoded: {error}"),
+                )
+                .into()
+            })
+        })
+        .transpose()
 }
-
 async fn erase_pii_vault_subject(ctx: &PrivacyEraseContext) -> Result<u64, HandlerError> {
     let Some(secret) = ctx.pii_vault_secret.clone() else {
         tracing::warn!(

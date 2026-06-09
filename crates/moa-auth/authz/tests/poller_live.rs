@@ -8,18 +8,18 @@ use uuid::Uuid;
 
 fn fga_from_env() -> FgaConfig {
     FgaConfig {
-        url: std::env::var("MOA_OPENFGA_URL").expect("MOA_OPENFGA_URL"),
-        preshared_key: std::env::var("MOA_OPENFGA_PRESHARED_KEY")
-            .expect("MOA_OPENFGA_PRESHARED_KEY"),
-        store_id: std::env::var("MOA_OPENFGA_STORE_ID").expect("MOA_OPENFGA_STORE_ID"),
-        model_id: std::env::var("MOA_OPENFGA_MODEL_ID").expect("MOA_OPENFGA_MODEL_ID"),
+        url: std::env::var("MOA_AUTHZ_OPENFGA_URL").expect("MOA_AUTHZ_OPENFGA_URL"),
+        preshared_key: std::env::var("MOA_AUTHZ_OPENFGA_PRESHARED_KEY")
+            .expect("MOA_AUTHZ_OPENFGA_PRESHARED_KEY"),
+        store_id: std::env::var("MOA_AUTHZ_OPENFGA_STORE_ID").expect("MOA_AUTHZ_OPENFGA_STORE_ID"),
+        model_id: std::env::var("MOA_AUTHZ_OPENFGA_MODEL_ID").expect("MOA_AUTHZ_OPENFGA_MODEL_ID"),
         timeout_ms: 5000,
     }
 }
 
 async fn test_pool() -> PgPool {
     let database_url = std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("POSTGRES_URL"))
+        .or_else(|_| std::env::var("MOA_DATABASE_URL"))
         .unwrap_or_else(|_| "postgres://moa_owner:dev@localhost:10040/moa".to_string());
     let pool = PgPoolOptions::new()
         .max_connections(2)

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moa_core::{ScopeContext, ScopedConn};
+use moa_core::{MoaConfig, ScopeContext, ScopedConn};
 use moa_memory_graph::{NodeIndexRow, NodeLabel};
 use moa_memory_vector::{Error as VectorError, VECTOR_DIMENSION, VectorQuery, VectorStore};
 use moka::future::Cache;
@@ -330,7 +330,25 @@ impl RrfPlusJudgeDetector {
     #[must_use]
     pub fn from_env_or_heuristic() -> Self {
         let reranker: Arc<dyn Reranker> = std::env::var("COHERE_API_KEY")
-            .or_else(|_| std::env::var("MOA_COHERE_API_KEY"))
+            .map(|api_key| {
+                Arc::new(CohereReranker::new(SecretString::from(api_key))) as Arc<dyn Reranker>
+            })
+            .unwrap_or_else(|_| Arc::new(NoopReranker));
+        Self::new(reranker, Arc::new(HeuristicJudge))
+    }
+
+    /// Creates a detector using the Cohere env-var name from shared MOA config.
+    #[must_use]
+    pub fn from_config_or_heuristic(config: &MoaConfig) -> Self {
+        Self::from_cohere_api_key_env_or_heuristic(
+            &config.memory.vector.embedder.cohere.api_key_env,
+        )
+    }
+
+    /// Creates a detector using a configured Cohere API-key env-var name.
+    #[must_use]
+    pub fn from_cohere_api_key_env_or_heuristic(api_key_env: &str) -> Self {
+        let reranker: Arc<dyn Reranker> = std::env::var(api_key_env)
             .map(|api_key| {
                 Arc::new(CohereReranker::new(SecretString::from(api_key))) as Arc<dyn Reranker>
             })

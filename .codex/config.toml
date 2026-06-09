@@ -3,6 +3,5 @@ command = "npx"
 args = ["-y", "@upstash/context7-mcp"]
 
 [features]
-codex_hooks = true
 multi_agent = true
 shell_snapshot = true

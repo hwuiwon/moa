@@ -21,16 +21,12 @@ fn live_cohere_key() -> Option<SecretString> {
     }
 
     let api_key = std::env::var("COHERE_API_KEY")
-        .or_else(|_| std::env::var("MOA_COHERE_API_KEY"))
-        .expect(
-            "COHERE_API_KEY or MOA_COHERE_API_KEY is required when \
-             MOA_RUN_LIVE_COHERE_TESTS=1",
-        );
+        .expect("COHERE_API_KEY is required when MOA_RUN_LIVE_COHERE_TESTS=1");
     Some(SecretString::from(api_key))
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_RUN_LIVE_COHERE_TESTS=1 and COHERE_API_KEY or MOA_COHERE_API_KEY"]
+#[ignore = "requires MOA_RUN_LIVE_COHERE_TESTS=1 and COHERE_API_KEY"]
 async fn cohere_rerank_v4_fast_prioritizes_relevant_retrieval_candidate() {
     let Some(api_key) = live_cohere_key() else {
         return;

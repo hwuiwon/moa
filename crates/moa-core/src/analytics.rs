@@ -162,7 +162,7 @@ pub async fn get_session_summary(
     .fetch_optional(pool)
     .await
     .map_err(map_sqlx_error)?
-    .ok_or_else(|| MoaError::SessionNotFound(session_id))?;
+    .ok_or(MoaError::SessionNotFound(session_id))?;
 
     session_analytics_from_row(&row)
 }

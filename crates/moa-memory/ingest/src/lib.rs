@@ -12,7 +12,8 @@ pub use contradiction::{
     Conflict, ContradictionContext, ContradictionDetector, RrfPlusJudgeDetector,
 };
 pub use ctx::{
-    IngestCtx, IngestRuntime, current_runtime, install_runtime, install_runtime_with_pool,
+    IngestCtx, IngestRuntime, current_runtime, install_runtime, install_runtime_with_config,
+    install_runtime_with_pool,
 };
 pub use error::{IngestError, Result};
 pub use extract::{

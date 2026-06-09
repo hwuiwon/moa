@@ -23,7 +23,6 @@ use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 
-const PII_VAULT_SECRET_ENV: &str = "MOA_PII_VAULT_WORKSPACE_SECRET";
 const PII_VAULT_SECRET_HEX_ENV: &str = "MOA_PII_VAULT_WORKSPACE_SECRET_HEX";
 
 /// Restate service surface for protected lineage administration.
@@ -578,18 +577,18 @@ fn service_signing_key(label: &str) -> SigningKey {
 }
 
 fn pii_vault_secret_from_env() -> Result<Option<Vec<u8>>, HandlerError> {
-    if let Ok(secret_hex) = std::env::var(PII_VAULT_SECRET_HEX_ENV) {
-        return hex::decode(secret_hex.trim()).map(Some).map_err(|error| {
-            TerminalError::new_with_code(
-                400,
-                format!("{PII_VAULT_SECRET_HEX_ENV} must be hex-encoded: {error}"),
-            )
-            .into()
-        });
-    }
-    Ok(std::env::var(PII_VAULT_SECRET_ENV)
+    std::env::var(PII_VAULT_SECRET_HEX_ENV)
         .ok()
-        .map(|secret| secret.into_bytes()))
+        .map(|secret_hex| {
+            hex::decode(secret_hex.trim()).map_err(|error| {
+                TerminalError::new_with_code(
+                    400,
+                    format!("{PII_VAULT_SECRET_HEX_ENV} must be hex-encoded: {error}"),
+                )
+                .into()
+            })
+        })
+        .transpose()
 }
 
 async fn create_temp_dir(prefix: &str) -> Result<std::path::PathBuf, HandlerError> {

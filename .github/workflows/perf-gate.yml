@@ -70,9 +70,9 @@ jobs:
         run: cargo build -p moa-orchestrator --bin moa-orchestrator-bin
       - name: Start orchestrator with scripted providers
         env:
-          POSTGRES_URL: postgres://postgres:ci@localhost:5432/postgres
-          RESTATE_ADMIN_URL: http://localhost:9070
-          MOA_LOCAL_INGRESS_URL: http://localhost:8080
+          MOA_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres
+          MOA_RESTATE_ADMIN_URL: http://localhost:9070
+          MOA_RESTATE_INGRESS_URL: http://localhost:8080
           MOA_PROVIDERS_OVERRIDE: scripted:${{ github.workspace }}/crates/moa-loadtest/scripts/perf-gate.json
           MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS: "false"
           MOA_DEREGISTER_ON_SHUTDOWN: "false"

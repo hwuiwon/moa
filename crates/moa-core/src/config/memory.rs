@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub struct MemoryConfig {
     /// Automatically bootstrap workspace memory when it is empty.
     pub auto_bootstrap: bool,
+    /// Optional HTTP base URL for the PII classification sidecar.
+    pub pii_service_url: Option<String>,
     /// Embedding provider used for graph memory retrieval. Set to `disabled` to turn it off.
     pub embedding_provider: String,
     /// Embedding model identifier used for graph memory embedding backfills and queries.
@@ -20,6 +22,7 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             auto_bootstrap: true,
+            pii_service_url: None,
             embedding_provider: "openai".to_string(),
             embedding_model: "text-embedding-3-small".to_string(),
             vector: MemoryVectorConfig::default(),
@@ -33,6 +36,33 @@ impl Default for MemoryConfig {
 pub struct MemoryVectorConfig {
     /// Embedder selection and credentials.
     pub embedder: VectorEmbedderConfig,
+    /// Optional Turbopuffer backend configuration.
+    pub turbopuffer: TurbopufferVectorConfig,
+}
+
+/// Turbopuffer graph-memory vector backend configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TurbopufferVectorConfig {
+    /// Environment variable containing the Turbopuffer API key.
+    pub api_key_env: String,
+    /// Optional Turbopuffer API base URL override.
+    pub base_url: Option<String>,
+    /// Optional namespace environment segment.
+    pub environment: Option<String>,
+    /// Whether the configured Turbopuffer account has a BAA for restricted data.
+    pub baa_enabled: bool,
+}
+
+impl Default for TurbopufferVectorConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: "TURBOPUFFER_API_KEY".to_string(),
+            base_url: None,
+            environment: None,
+            baa_enabled: false,
+        }
+    }
 }
 
 /// Per-workspace embedder selection.

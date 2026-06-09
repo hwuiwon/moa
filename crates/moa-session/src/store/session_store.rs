@@ -83,7 +83,7 @@ impl SessionStore for PostgresSessionStore {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(map_sqlx_error)?
-        .ok_or_else(|| MoaError::SessionNotFound(session_id))?;
+        .ok_or(MoaError::SessionNotFound(session_id))?;
         let sequence_num = locked_session
             .try_get::<i64, _>("event_count")
             .map_err(map_sqlx_error)? as u64;
@@ -242,7 +242,7 @@ impl SessionStore for PostgresSessionStore {
             .fetch_optional(&self.pool)
             .await
             .map_err(map_sqlx_error)?
-            .ok_or_else(|| MoaError::SessionNotFound(session_id))?;
+            .ok_or(MoaError::SessionNotFound(session_id))?;
         session_meta_from_row(&row)
     }
 

@@ -5,7 +5,7 @@ use crate::*;
 /// Runs one load-test scenario and returns the final report.
 pub async fn run_loadtest(options: LoadTestOptions) -> Result<LoadTestReport> {
     options.validate()?;
-    let mut config = load_config(options.config_path.as_deref())?;
+    let mut config = load_config()?;
     config.observability.enabled = false;
     config.metrics.enabled = false;
     config.memory.auto_bootstrap = false;

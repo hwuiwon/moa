@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use moa_core::{MemoryScope, ScopeContext, ScopedConn};
+use moa_core::{MemoryScope, MoaConfig, ScopeContext, ScopedConn};
 use moa_memory_graph::{GraphError, GraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_vector::{Error as VectorError, TurbopufferStore, VectorStore};
 use secrecy::SecretString;
@@ -129,12 +129,30 @@ impl HybridRetriever {
         vector: Arc<dyn VectorStore>,
     ) -> Self {
         let reranker = std::env::var("COHERE_API_KEY")
-            .or_else(|_| std::env::var("MOA_COHERE_API_KEY"))
             .map(|api_key| {
                 Arc::new(CohereReranker::new(SecretString::from(api_key))) as Arc<dyn Reranker>
             })
             .unwrap_or_else(|_| Arc::new(NoopReranker));
         let turbopuffer = TurbopufferStore::from_env().ok().map(Arc::new);
+        Self::new(pool, graph, vector)
+            .with_turbopuffer(turbopuffer)
+            .with_reranker(reranker)
+    }
+
+    /// Creates a hybrid retriever from shared config and secret-bearing environment variables.
+    #[must_use]
+    pub fn from_config(
+        config: &MoaConfig,
+        pool: PgPool,
+        graph: Arc<dyn GraphStore>,
+        vector: Arc<dyn VectorStore>,
+    ) -> Self {
+        let reranker = std::env::var(&config.memory.vector.embedder.cohere.api_key_env)
+            .map(|api_key| {
+                Arc::new(CohereReranker::new(SecretString::from(api_key))) as Arc<dyn Reranker>
+            })
+            .unwrap_or_else(|_| Arc::new(NoopReranker));
+        let turbopuffer = TurbopufferStore::from_config(config).ok().map(Arc::new);
         Self::new(pool, graph, vector)
             .with_turbopuffer(turbopuffer)
             .with_reranker(reranker)

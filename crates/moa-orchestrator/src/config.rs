@@ -1,224 +1,58 @@
-//! Environment-backed configuration for the Restate orchestrator binary.
+//! Runtime configuration helpers for the Restate orchestrator binary.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow, bail};
-use moa_core::config::{AsyncAuthzKind, AuthProviderKind, TokenVaultKind};
-use moa_core::{MoaConfig, OpenFgaConfig, OtlpProtocol};
-use serde::Deserialize;
+use anyhow::{Context as AnyhowContext, Result, bail};
+use moa_core::MoaConfig;
 
-/// Runtime configuration for the Restate-backed orchestrator.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct OrchestratorConfig {
-    /// Base URL for the Restate admin API.
-    pub restate_admin_url: String,
-    /// Postgres connection string for future orchestrator services.
-    pub postgres_url: String,
-    /// Optional LLM gateway URL for future service calls.
-    pub llm_gateway_url: Option<String>,
-    /// Optional override for the local sandbox root used by tool hands.
-    pub sandbox_dir: Option<String>,
-    /// Optional override for the file-backed memory root.
-    pub memory_dir: Option<String>,
-    /// Whether Docker-backed local hands are enabled.
-    pub docker_enabled: bool,
-    /// Optional OTLP exporter endpoint used for tracing.
-    pub otlp_endpoint: Option<String>,
-    /// OTLP transport protocol.
-    pub otlp_protocol: OtlpProtocol,
-    /// Additional OTLP headers for exporter auth and routing.
-    pub otlp_headers: HashMap<String, String>,
-    /// Optional deployment environment resource attribute.
-    pub deploy_env: Option<String>,
-    /// Whether the Prometheus scrape endpoint should be enabled.
-    pub metrics_enabled: bool,
-    /// Optional override for the Prometheus listener address.
-    pub metrics_listen: Option<String>,
-    /// Whether OpenFGA-backed authz is disabled for local non-auth work.
-    pub skip_fga: bool,
-    /// OpenFGA config for the authz outbox poller.
-    pub authz_openfga: Option<OpenFgaConfig>,
-    /// Credential authentication provider.
-    pub auth_provider: AuthProviderKind,
-    /// Token vault provider.
-    pub token_vault_provider: TokenVaultKind,
-    /// Async authorization provider.
-    pub async_authz_provider: AsyncAuthzKind,
-    /// Default async approval timeout in seconds.
-    pub async_authz_default_timeout_secs: u64,
-    /// Whether to emit allowed authorization checks as OCSF events.
-    pub audit_security_emit_authz_allows: bool,
+/// Loads the orchestrator's shared MOA runtime configuration from environment variables.
+pub fn load_moa_config_from_env() -> Result<MoaConfig> {
+    let mut config = MoaConfig::load_from_env().context("load MOA config from environment")?;
+    config.observability.service_name = "moa-orchestrator".to_string();
+    config
+        .observability
+        .release
+        .get_or_insert_with(|| env!("CARGO_PKG_VERSION").to_string());
+    Ok(config)
 }
 
-impl OrchestratorConfig {
-    /// Loads the orchestrator configuration from process environment variables.
-    pub fn from_env() -> Result<Self> {
-        Self::from_reader(|key| std::env::var(key).ok())
-    }
+/// Returns whether OpenFGA-backed authz should be skipped for local runs.
+#[must_use]
+pub fn skip_fga_from_env() -> bool {
+    env_flag_from_reader("MOA_SKIP_FGA", false, |key| std::env::var(key).ok())
+}
 
-    /// Converts the environment-backed settings into a `MoaConfig` used by shared subsystems.
-    #[must_use]
-    pub fn to_moa_config(&self) -> MoaConfig {
-        let mut config = MoaConfig::default();
-        config.database.url = self.postgres_url.clone();
-        config.local.docker_enabled = self.docker_enabled;
-        config.observability.enabled = self.otlp_endpoint.is_some();
-        config.observability.service_name = "moa-orchestrator".to_string();
-        config.observability.otlp_endpoint = self.otlp_endpoint.clone();
-        config.observability.otlp_protocol = self.otlp_protocol;
-        config.observability.otlp_headers = self.otlp_headers.clone();
-        config.observability.environment = self.deploy_env.clone();
-        config.observability.release = Some(env!("CARGO_PKG_VERSION").to_string());
-        config.metrics.enabled = self.metrics_enabled;
-        if let Some(listen) = &self.metrics_listen {
-            config.metrics.listen = listen.clone();
-        }
-        if let Some(sandbox_dir) = &self.sandbox_dir {
-            config.local.sandbox_dir = sandbox_dir.clone();
-        }
-        if let Some(memory_dir) = &self.memory_dir {
-            config.local.memory_dir = memory_dir.clone();
-        }
-        config.authz.openfga = self.authz_openfga.clone();
-        config.auth.provider = self.auth_provider;
-        config.token_vault.provider = self.token_vault_provider;
-        config.async_authz.provider = self.async_authz_provider;
-        config.async_authz.default_timeout_secs = self.async_authz_default_timeout_secs;
-        config.audit_security.emit_authz_allows = self.audit_security_emit_authz_allows;
-        config
-    }
+/// Resolves the Restate admin URL from the shared MOA config.
+pub fn restate_admin_url(config: &MoaConfig) -> Result<String> {
+    config
+        .orchestrator
+        .restate_admin_url
+        .clone()
+        .context("orchestrator.restate_admin_url config missing")
+}
 
-    fn from_reader(mut read_var: impl FnMut(&str) -> Option<String>) -> Result<Self> {
-        let postgres_url =
-            read_var("POSTGRES_URL").ok_or_else(|| anyhow!("POSTGRES_URL required"))?;
-        let skip_fga = read_var("MOA_SKIP_FGA")
-            .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
-            .unwrap_or(false);
-        let openfga_url = read_first(
-            &mut read_var,
-            &["MOA__AUTHZ__OPENFGA__URL", "MOA_OPENFGA_URL"],
-        );
-        let openfga_preshared_key = read_first(
-            &mut read_var,
-            &[
-                "MOA__AUTHZ__OPENFGA__PRESHARED_KEY",
-                "MOA_OPENFGA_PRESHARED_KEY",
-            ],
-        );
-        let openfga_store_id = read_first(
-            &mut read_var,
-            &["MOA__AUTHZ__OPENFGA__STORE_ID", "MOA_OPENFGA_STORE_ID"],
-        );
-        let openfga_model_id = read_first(
-            &mut read_var,
-            &["MOA__AUTHZ__OPENFGA__MODEL_ID", "MOA_OPENFGA_MODEL_ID"],
-        );
-        let openfga_timeout_ms = read_first(&mut read_var, &["MOA__AUTHZ__OPENFGA__TIMEOUT_MS"])
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(5000);
-        let authz_openfga = match (
-            openfga_url,
-            openfga_preshared_key,
-            openfga_store_id,
-            openfga_model_id,
-        ) {
-            (Some(url), Some(preshared_key), Some(store_id), Some(model_id)) => {
-                Some(OpenFgaConfig {
-                    url,
-                    preshared_key,
-                    store_id,
-                    model_id,
-                    timeout_ms: openfga_timeout_ms,
-                })
-            }
-            (None, None, None, None) => None,
-            _ => {
-                return Err(anyhow!(
-                    "OpenFGA authz config must include url, preshared key, store id, and model id"
-                ));
-            }
-        };
+/// Resolves the Restate ingress URL from the shared MOA config.
+pub fn restate_ingress_url(config: &MoaConfig) -> Result<String> {
+    config
+        .orchestrator
+        .restate_ingress_url
+        .clone()
+        .or_else(|| config.orchestrator.endpoint.clone())
+        .context("orchestrator.restate_ingress_url config missing")
+}
 
-        Ok(Self {
-            restate_admin_url: read_var("RESTATE_ADMIN_URL")
-                .unwrap_or_else(|| "http://localhost:10011".to_string()),
-            postgres_url,
-            llm_gateway_url: read_var("LLM_GATEWAY_URL"),
-            sandbox_dir: read_var("MOA_SANDBOX_DIR"),
-            memory_dir: read_var("MOA_MEMORY_DIR"),
-            docker_enabled: read_var("MOA_DOCKER_ENABLED")
-                .and_then(|value| value.parse::<bool>().ok())
-                .unwrap_or_else(|| MoaConfig::default().local.docker_enabled),
-            otlp_endpoint: read_var("OTEL_EXPORTER_OTLP_ENDPOINT"),
-            otlp_protocol: parse_otlp_protocol(read_var("OTEL_EXPORTER_OTLP_PROTOCOL")),
-            otlp_headers: parse_otlp_headers(read_var("OTEL_EXPORTER_OTLP_HEADERS")),
-            deploy_env: read_var("DEPLOY_ENV"),
-            metrics_enabled: read_var("MOA_METRICS_ENABLED")
-                .and_then(|value| value.parse::<bool>().ok())
-                .unwrap_or_else(|| MoaConfig::default().metrics.enabled),
-            metrics_listen: read_var("MOA_METRICS_LISTEN"),
-            skip_fga,
-            authz_openfga,
-            auth_provider: read_first(&mut read_var, &["MOA__AUTH__PROVIDER"])
-                .as_deref()
-                .map(parse_auth_provider)
-                .transpose()?
-                .unwrap_or_default(),
-            token_vault_provider: read_first(&mut read_var, &["MOA__TOKEN_VAULT__PROVIDER"])
-                .as_deref()
-                .map(parse_token_vault_provider)
-                .transpose()?
-                .unwrap_or_default(),
-            async_authz_provider: read_first(&mut read_var, &["MOA__ASYNC_AUTHZ__PROVIDER"])
-                .as_deref()
-                .map(parse_async_authz_provider)
-                .transpose()?
-                .unwrap_or_default(),
-            async_authz_default_timeout_secs: read_first(
-                &mut read_var,
-                &["MOA__ASYNC_AUTHZ__DEFAULT_TIMEOUT_SECS"],
-            )
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or_else(|| MoaConfig::default().async_authz.default_timeout_secs),
-            audit_security_emit_authz_allows: read_first(
-                &mut read_var,
-                &["MOA__AUDIT_SECURITY__EMIT_AUTHZ_ALLOWS"],
-            )
-            .and_then(|value| value.parse::<bool>().ok())
-            .unwrap_or(false),
+fn env_flag_from_reader(
+    key: &str,
+    default: bool,
+    mut read_var: impl FnMut(&str) -> Option<String>,
+) -> bool {
+    read_var(key)
+        .and_then(|value: String| match value.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
         })
-    }
-}
-
-fn read_first(read_var: &mut impl FnMut(&str) -> Option<String>, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| read_var(key))
-}
-
-fn parse_auth_provider(value: &str) -> Result<AuthProviderKind> {
-    match value {
-        "local" => Ok(AuthProviderKind::Local),
-        "disabled" | "none" => Ok(AuthProviderKind::Disabled),
-        "auth0" => Ok(AuthProviderKind::Auth0),
-        "oidc" => Ok(AuthProviderKind::Oidc),
-        other => Err(anyhow!("unknown auth provider: {other}")),
-    }
-}
-
-fn parse_token_vault_provider(value: &str) -> Result<TokenVaultKind> {
-    match value {
-        "none" => Ok(TokenVaultKind::None),
-        "auth0" => Ok(TokenVaultKind::Auth0),
-        other => Err(anyhow!("unknown token vault provider: {other}")),
-    }
-}
-
-fn parse_async_authz_provider(value: &str) -> Result<AsyncAuthzKind> {
-    match value {
-        "builtin" => Ok(AsyncAuthzKind::Builtin),
-        "auth0" => Ok(AsyncAuthzKind::Auth0),
-        other => Err(anyhow!("unknown async authz provider: {other}")),
-    }
+        .unwrap_or(default)
 }
 
 /// Provider override mode selected by `MOA_PROVIDERS_OVERRIDE`.
@@ -280,14 +114,7 @@ impl ProvidersOverride {
 }
 
 fn production_environment(config: &MoaConfig) -> bool {
-    if is_prod_value(config.observability.environment.as_deref()) {
-        return true;
-    }
-
-    ["MOA__ENVIRONMENT", "MOA_ENVIRONMENT", "DEPLOY_ENV"]
-        .into_iter()
-        .filter_map(|key| std::env::var(key).ok())
-        .any(|value| is_prod_value(Some(value.as_str())))
+    is_prod_value(config.observability.environment.as_deref())
 }
 
 fn is_prod_value(value: Option<&str>) -> bool {
@@ -297,119 +124,27 @@ fn is_prod_value(value: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
-fn parse_otlp_protocol(raw: Option<String>) -> OtlpProtocol {
-    match raw.as_deref().map(str::trim) {
-        Some("http") | Some("http/protobuf") => OtlpProtocol::Http,
-        _ => OtlpProtocol::Grpc,
-    }
-}
-
-fn parse_otlp_headers(raw: Option<String>) -> std::collections::HashMap<String, String> {
-    raw.unwrap_or_default()
-        .split(',')
-        .filter_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            let key = key.trim();
-            let value = value.trim();
-            if key.is_empty() || value.is_empty() {
-                return None;
-            }
-            Some((key.to_string(), value.to_string()))
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use moa_core::MoaConfig;
 
-    use super::{OrchestratorConfig, ProvidersOverride};
+    use super::{ProvidersOverride, env_flag_from_reader, restate_admin_url, restate_ingress_url};
 
     #[test]
-    fn from_reader_uses_defaults_and_optional_values() {
-        let config = OrchestratorConfig::from_reader(|key| match key {
-            "POSTGRES_URL" => Some("postgres://example".to_string()),
-            _ => None,
-        })
-        .expect("config should load");
-
-        assert_eq!(config.restate_admin_url, "http://localhost:10011");
-        assert_eq!(config.postgres_url, "postgres://example");
-        assert_eq!(config.llm_gateway_url, None);
-        assert_eq!(config.sandbox_dir, None);
-        assert_eq!(config.memory_dir, None);
-        assert!(config.docker_enabled);
-    }
-
-    #[test]
-    fn from_reader_requires_postgres_url() {
-        let error = OrchestratorConfig::from_reader(|_| None)
-            .expect_err("missing POSTGRES_URL should error");
-
-        assert_eq!(error.to_string(), "POSTGRES_URL required");
-    }
-
-    #[test]
-    fn to_moa_config_applies_local_overrides() {
-        let config = OrchestratorConfig::from_reader(|key| match key {
-            "POSTGRES_URL" => Some("postgres://example".to_string()),
-            "MOA_SANDBOX_DIR" => Some("/tmp/moa-sandbox".to_string()),
-            "MOA_MEMORY_DIR" => Some("/tmp/moa-memory".to_string()),
-            "MOA_DOCKER_ENABLED" => Some("false".to_string()),
-            _ => None,
-        })
-        .expect("config should load");
-
-        let moa_config = config.to_moa_config();
-        assert_eq!(moa_config.database.url, "postgres://example");
-        assert_eq!(moa_config.local.sandbox_dir, "/tmp/moa-sandbox");
-        assert_eq!(moa_config.local.memory_dir, "/tmp/moa-memory");
-        assert!(!moa_config.local.docker_enabled);
-    }
-
-    #[test]
-    fn auth_provider_disabled_env_maps_into_moa_config() {
-        let config = OrchestratorConfig::from_reader(|key| match key {
-            "POSTGRES_URL" => Some("postgres://example".to_string()),
-            "MOA__AUTH__PROVIDER" => Some("disabled".to_string()),
-            _ => None,
-        })
-        .expect("config should load");
+    fn restate_urls_resolve_from_moa_config() {
+        // Pins: orchestrator boot reads Restate URLs from the shared MoaConfig.
+        let mut config = MoaConfig::default();
+        config.orchestrator.restate_admin_url = Some("http://restate:9070".to_string());
+        config.orchestrator.restate_ingress_url = Some("http://restate:8080".to_string());
 
         assert_eq!(
-            config.auth_provider,
-            moa_core::config::AuthProviderKind::Disabled
+            restate_admin_url(&config).expect("admin url"),
+            "http://restate:9070"
         );
         assert_eq!(
-            config.to_moa_config().auth.provider,
-            moa_core::config::AuthProviderKind::Disabled
+            restate_ingress_url(&config).expect("ingress url"),
+            "http://restate:8080"
         );
-    }
-
-    #[test]
-    fn authz_openfga_env_maps_into_moa_config() {
-        let config = OrchestratorConfig::from_reader(|key| match key {
-            "POSTGRES_URL" => Some("postgres://example".to_string()),
-            "MOA__AUTHZ__OPENFGA__URL" => Some("http://openfga:8080".to_string()),
-            "MOA__AUTHZ__OPENFGA__PRESHARED_KEY" => Some("dev-key".to_string()),
-            "MOA__AUTHZ__OPENFGA__STORE_ID" => Some("store-1".to_string()),
-            "MOA__AUTHZ__OPENFGA__MODEL_ID" => Some("model-1".to_string()),
-            "MOA__AUTHZ__OPENFGA__TIMEOUT_MS" => Some("2500".to_string()),
-            _ => None,
-        })
-        .expect("config should load");
-
-        assert!(!config.skip_fga);
-        let moa_config = config.to_moa_config();
-        let openfga = moa_config
-            .authz
-            .openfga
-            .expect("openfga config should map into MoaConfig");
-        assert_eq!(openfga.url, "http://openfga:8080");
-        assert_eq!(openfga.preshared_key, "dev-key");
-        assert_eq!(openfga.store_id, "store-1");
-        assert_eq!(openfga.model_id, "model-1");
-        assert_eq!(openfga.timeout_ms, 2500);
     }
 
     #[test]
@@ -438,5 +173,27 @@ mod tests {
             error.to_string(),
             "MOA_PROVIDERS_OVERRIDE is not allowed when environment=prod"
         );
+    }
+
+    #[test]
+    fn env_flag_understands_common_truthy_and_falsey_values() {
+        // Pins: local process-only flags keep predictable bool parsing after config collapse.
+        assert!(env_flag_from_reader(
+            "MOA_SKIP_FGA",
+            false,
+            |key| match key {
+                "MOA_SKIP_FGA" => Some("yes".to_string()),
+                _ => None,
+            }
+        ));
+        assert!(!env_flag_from_reader(
+            "MOA_SKIP_FGA",
+            true,
+            |key| match key {
+                "MOA_SKIP_FGA" => Some("off".to_string()),
+                _ => None,
+            }
+        ));
+        assert!(env_flag_from_reader("MOA_SKIP_FGA", true, |_| None));
     }
 }

@@ -7,13 +7,13 @@ kill_timeout = "30s"
   dockerfile = "Dockerfile"
 
 [env]
-  MOA__CLOUD__ENABLED = "true"
-  MOA__CLOUD__HANDS__DEFAULT_PROVIDER = "local"
-  MOA__LOCAL__MEMORY_DIR = "/data/memory"
-  MOA__LOCAL__SANDBOX_DIR = "/data/sandbox"
-  MOA__CLOUD__MEMORY_DIR = "/data/memory"
-  MOA__CLOUD__FLYIO__INTERNAL_PORT = "8080"
-  MOA__CLOUD__FLYIO__HEALTH_BIND = "0.0.0.0"
+  MOA_CLOUD_ENABLED = "true"
+  MOA_CLOUD_HANDS_DEFAULT_PROVIDER = "local"
+  MOA_LOCAL_MEMORY_DIR = "/data/memory"
+  MOA_LOCAL_SANDBOX_DIR = "/data/sandbox"
+  MOA_CLOUD_MEMORY_DIR = "/data/memory"
+  MOA_CLOUD_FLYIO_INTERNAL_PORT = "8080"
+  MOA_CLOUD_FLYIO_HEALTH_BIND = "0.0.0.0"
 
 [http_service]
   internal_port = 8080
