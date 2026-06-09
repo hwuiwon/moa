@@ -1,6 +1,6 @@
 # Auth0 Token Vault setup
 
-`token_vault.provider = "auth0"` lets MOA retrieve third-party access tokens
+`MOA_TOKEN_VAULT_PROVIDER=auth0` lets MOA retrieve third-party access tokens
 from Auth0 just in time. MOA stores only linked-connection metadata in
 Postgres; it does not persist provider access tokens.
 
@@ -10,20 +10,17 @@ Postgres; it does not persist provider access tokens.
    connection that should provide tokens, such as `google-oauth2` or `github`.
 2. Create or reuse the MOA machine-to-machine application with access to the
    Auth0 Management API.
-3. Use the same Auth0 app settings already configured for `[auth.auth0]`:
+3. Use the same Auth0 app settings already configured for auth:
 
-```toml
-[auth]
-provider = "auth0"
-
-[auth.auth0]
-domain = "your-tenant.auth0.com"
-audience = "https://api.moa.example.com"
-client_id_env = "MOA_AUTH0_CLIENT_ID"
-client_secret_env = "MOA_AUTH0_CLIENT_SECRET"
-
-[token_vault]
-provider = "auth0"
+```sh
+MOA_AUTH_PROVIDER=auth0
+MOA_AUTH_AUTH0_DOMAIN=your-tenant.auth0.com
+MOA_AUTH_AUTH0_AUDIENCE=https://api.moa.example.com
+MOA_AUTH_AUTH0_CLIENT_ID_ENV=MOA_AUTH0_CLIENT_ID
+MOA_AUTH_AUTH0_CLIENT_SECRET_ENV=MOA_AUTH0_CLIENT_SECRET
+MOA_TOKEN_VAULT_PROVIDER=auth0
+MOA_AUTH0_CLIENT_ID=...
+MOA_AUTH0_CLIENT_SECRET=...
 ```
 
 4. Set `MOA_AUTH0_CLIENT_ID` and `MOA_AUTH0_CLIENT_SECRET` in the orchestrator
@@ -50,7 +47,7 @@ Auth0-Signature: sha256=<hmac_sha256_hex>
 ```
 
 The signature is HMAC-SHA256 over the raw request body using
-`MOA__AUTH__AUTH0__WEBHOOK_SECRET`. The edge verifies it in constant time and
+`MOA_AUTH_AUTH0_WEBHOOK_SECRET`. The edge verifies it in constant time and
 upserts `linked_connections`.
 
 ## Runtime behavior

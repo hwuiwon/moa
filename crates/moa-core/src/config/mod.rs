@@ -6,6 +6,7 @@ mod auth;
 mod authz;
 mod context;
 mod database;
+mod env_overlay;
 mod gateway;
 mod lineage;
 mod loader;
@@ -20,18 +21,22 @@ mod token_vault;
 
 pub use async_authz::{AsyncAuthzConfig, AsyncAuthzKind};
 pub use audit_security::AuditSecurityConfig;
-pub use auth::{Auth0AuthConfig, AuthConfig, AuthProviderKind, LocalAuthConfig, OidcAuthConfig};
+pub use auth::{
+    Auth0AuthConfig, AuthConfig, AuthHeaderTrustKind, AuthProviderKind, LocalAuthConfig,
+    OidcAuthConfig,
+};
 pub use authz::{AuthzConfig, AuthzEngine, OpenFgaConfig};
 pub use context::{
     BudgetConfig, CompactionConfig, ContextSnapshotConfig, QueryRewriteConfig, ResolutionConfig,
     ResolutionWeights, SessionLimitsConfig, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig,
 };
 pub use database::{DatabaseConfig, DatabaseNeonConfig};
+pub use env_overlay::MoaEnvOverlay;
 pub use gateway::GatewayConfig;
 pub use lineage::LineageConfig;
 pub use memory::{
     CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryVectorConfig,
-    VectorEmbedderConfig,
+    TurbopufferVectorConfig, VectorEmbedderConfig,
 };
 pub use orchestrator::OrchestratorConfig;
 pub use providers::{GeneralConfig, ModelsConfig, ProviderCredentialConfig, ProvidersConfig};
@@ -150,23 +155,24 @@ impl MoaConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use std::sync::Mutex;
-
-    use tempfile::NamedTempFile;
 
     use super::*;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
-    const AUTH_ENV_KEYS: &[&str] = &[
-        "MOA__AUTH__PROVIDER",
-        "MOA__AUTH__AUTH0__DOMAIN",
-        "MOA__AUTH__AUTH0__AUDIENCE",
-        "MOA__AUTH__AUTH0__CLIENT_ID_ENV",
-        "MOA__AUTH__AUTH0__CLIENT_SECRET_ENV",
-        "MOA__AUTH__OIDC__ISSUER",
-        "MOA__AUTH__OIDC__AUDIENCE",
-        "MOA__AUTH__OIDC__JWKS_URL",
+    const CONFIG_ENV_KEYS: &[&str] = &[
+        "HOME",
+        "MOA_DATABASE_URL",
+        "MOA_AUTH_PROVIDER",
+        "MOA_AUTHZ_OPENFGA_URL",
+        "MOA_AUTHZ_OPENFGA_PRESHARED_KEY",
+        "MOA_AUTHZ_OPENFGA_STORE_ID",
+        "MOA_AUTHZ_OPENFGA_MODEL_ID",
+        "MOA_AUTHZ_OPENFGA_TIMEOUT_MS",
+        "MOA_DATABASE_NEON_ENABLED",
+        "MOA_DATABASE_NEON_PROJECT_ID",
+        "MOA_DATABASE_NEON_MAX_CHECKPOINTS",
+        "MOA_ORCHESTRATOR_ENDPOINT",
     ];
 
     struct EnvRestore {
@@ -204,165 +210,35 @@ mod tests {
     }
 
     #[test]
-    fn config_loads_from_toml_string() {
-        let toml = r#"
-            [general]
-            default_provider = "openai"
-            reasoning_effort = "high"
+    fn load_does_not_require_home() {
+        // Pins: the default runtime loader does not require a home directory.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let _env = EnvRestore::clear(CONFIG_ENV_KEYS);
 
-            [models]
-            main = "claude-sonnet-4-6"
-            auxiliary = "claude-haiku-4-5"
+        let config = MoaConfig::load().expect("load config from env-only defaults");
 
-            [database]
-            admin_url = "postgres://direct.example/moa"
-
-            [local]
-            docker_enabled = false
-        "#;
-        let config: MoaConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.general.default_provider, "openai");
-        assert_eq!(config.models.main, "claude-sonnet-4-6");
-        assert_eq!(config.models.auxiliary.as_deref(), Some("claude-haiku-4-5"));
-        assert!(!config.local.docker_enabled);
-        assert_eq!(config.database.admin_url(), "postgres://direct.example/moa");
+        assert_eq!(config.database.url, MoaConfig::default().database.url);
     }
 
     #[test]
-    fn observability_config_http_with_langfuse_headers() {
-        let toml = r#"
-            [observability]
-            enabled = true
-            otlp_protocol = "http"
-            otlp_endpoint = "http://langfuse:3000/api/public/otel"
-            environment = "staging"
-            release = "abc123"
-            sample_rate = 0.5
+    fn env_only_loads_database_auth_and_openfga_config() {
+        // Pins: canonical single-underscore env names populate runtime config.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let _env = EnvRestore::clear(CONFIG_ENV_KEYS);
+        unsafe {
+            std::env::set_var("MOA_DATABASE_URL", "postgres://env.example/moa");
+            std::env::set_var("MOA_AUTH_PROVIDER", "disabled");
+            std::env::set_var("MOA_AUTHZ_OPENFGA_URL", "http://openfga:8080");
+            std::env::set_var("MOA_AUTHZ_OPENFGA_PRESHARED_KEY", "dev-key");
+            std::env::set_var("MOA_AUTHZ_OPENFGA_STORE_ID", "store-1");
+            std::env::set_var("MOA_AUTHZ_OPENFGA_MODEL_ID", "model-1");
+            std::env::set_var("MOA_AUTHZ_OPENFGA_TIMEOUT_MS", "1234");
+        }
 
-            [observability.otlp_headers]
-            Authorization = "Basic cGstbGYteHh4eHg6c2stbGYteHh4eHg="
-            x-langfuse-ingestion-version = "4"
-        "#;
-        let config: MoaConfig = toml::from_str(toml).expect("config should deserialize");
-        assert_eq!(config.observability.otlp_protocol, OtlpProtocol::Http);
-        assert_eq!(config.observability.environment.as_deref(), Some("staging"));
-        assert_eq!(config.observability.release.as_deref(), Some("abc123"));
-        assert!((config.observability.sample_rate - 0.5_f64).abs() < f64::EPSILON);
-        assert_eq!(config.observability.otlp_headers.len(), 2);
-    }
+        let config = MoaConfig::load_from_env().expect("load config from env");
 
-    #[test]
-    fn metrics_config_deserializes() {
-        let toml = r#"
-            [metrics]
-            enabled = true
-            listen = "127.0.0.1:19090"
-        "#;
-        let config: MoaConfig = toml::from_str(toml).expect("config should deserialize");
-        assert!(config.metrics.enabled);
-        assert_eq!(config.metrics.listen, "127.0.0.1:19090");
-    }
-
-    #[test]
-    fn config_loads_mcp_server_configuration() {
-        let toml = r#"
-            [[mcp_servers]]
-            name = "github"
-            transport = "stdio"
-            command = "npx"
-            args = ["-y", "@modelcontextprotocol/server-github"]
-
-            [[mcp_servers]]
-            name = "custom-api"
-            transport = "http"
-            url = "https://example.com/mcp"
-            credentials = { type = "bearer", token_env = "CUSTOM_TOKEN" }
-        "#;
-
-        let config: MoaConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.mcp_servers.len(), 2);
-        assert_eq!(config.mcp_servers[0].name, "github");
-        assert_eq!(config.mcp_servers[1].transport, McpTransportConfig::Http);
-        assert!(matches!(
-            config.mcp_servers[1].credentials,
-            Some(McpCredentialConfig::Bearer { .. })
-        ));
-    }
-
-    #[test]
-    fn auth_provider_disabled_deserializes_from_toml() {
-        let toml = r#"
-            [auth]
-            provider = "disabled"
-        "#;
-
-        let config: MoaConfig = toml::from_str(toml).expect("config should deserialize");
-
+        assert_eq!(config.database.url, "postgres://env.example/moa");
         assert_eq!(config.auth.provider, AuthProviderKind::Disabled);
-    }
-
-    #[test]
-    fn orchestrator_endpoint_overridable_via_env() {
-        // Pins: MOA__ORCHESTRATOR__ENDPOINT maps onto the thin-client endpoint.
-        let _guard = ENV_LOCK.lock().expect("env test lock");
-        let _auth_env = EnvRestore::clear(AUTH_ENV_KEYS);
-        let file = NamedTempFile::new().expect("config temp file");
-        unsafe {
-            std::env::set_var("MOA__ORCHESTRATOR__ENDPOINT", "http://example:1234");
-        }
-
-        let config = MoaConfig::load_from_path(file.path()).expect("load config with env");
-
-        unsafe {
-            std::env::remove_var("MOA__ORCHESTRATOR__ENDPOINT");
-        }
-        assert_eq!(
-            config.orchestrator.endpoint.as_deref(),
-            Some("http://example:1234")
-        );
-    }
-
-    #[test]
-    fn auth_provider_disabled_loads_from_env() {
-        // Pins: MOA__AUTH__PROVIDER can disable credential authentication explicitly.
-        let _guard = ENV_LOCK.lock().expect("env test lock");
-        let _auth_env = EnvRestore::clear(AUTH_ENV_KEYS);
-        let file = NamedTempFile::new().expect("config temp file");
-        unsafe {
-            std::env::set_var("MOA__AUTH__PROVIDER", "disabled");
-        }
-
-        let config = MoaConfig::load_from_path(file.path()).expect("load config with env");
-
-        unsafe {
-            std::env::remove_var("MOA__AUTH__PROVIDER");
-        }
-        assert_eq!(config.auth.provider, AuthProviderKind::Disabled);
-    }
-
-    #[test]
-    fn authz_openfga_config_loads_from_env() {
-        // Pins: MOA__AUTHZ__OPENFGA__* maps onto the authz config section.
-        let _guard = ENV_LOCK.lock().expect("env test lock");
-        let _auth_env = EnvRestore::clear(AUTH_ENV_KEYS);
-        let file = NamedTempFile::new().expect("config temp file");
-        unsafe {
-            std::env::set_var("MOA__AUTHZ__OPENFGA__URL", "http://openfga:8080");
-            std::env::set_var("MOA__AUTHZ__OPENFGA__PRESHARED_KEY", "dev-key");
-            std::env::set_var("MOA__AUTHZ__OPENFGA__STORE_ID", "store-1");
-            std::env::set_var("MOA__AUTHZ__OPENFGA__MODEL_ID", "model-1");
-            std::env::set_var("MOA__AUTHZ__OPENFGA__TIMEOUT_MS", "1234");
-        }
-
-        let config = MoaConfig::load_from_path(file.path()).expect("load config with env");
-
-        unsafe {
-            std::env::remove_var("MOA__AUTHZ__OPENFGA__URL");
-            std::env::remove_var("MOA__AUTHZ__OPENFGA__PRESHARED_KEY");
-            std::env::remove_var("MOA__AUTHZ__OPENFGA__STORE_ID");
-            std::env::remove_var("MOA__AUTHZ__OPENFGA__MODEL_ID");
-            std::env::remove_var("MOA__AUTHZ__OPENFGA__TIMEOUT_MS");
-        }
         assert_eq!(config.authz.engine, AuthzEngine::Openfga);
         let openfga = config
             .authz
@@ -376,61 +252,18 @@ mod tests {
     }
 
     #[test]
-    fn config_loads_from_file() {
+    fn env_only_loader_rejects_zero_neon_checkpoint_limit_when_enabled() {
+        // Pins: env-only config loading still validates nested config invariants.
         let _guard = ENV_LOCK.lock().expect("env test lock");
-        let _auth_env = EnvRestore::clear(AUTH_ENV_KEYS);
-        let mut file = NamedTempFile::new().unwrap();
-        file.write_all(include_bytes!("../../../../docs/sample-config.toml"))
-            .unwrap();
+        let _env = EnvRestore::clear(CONFIG_ENV_KEYS);
+        unsafe {
+            std::env::set_var("MOA_DATABASE_URL", "postgres://env.example/moa");
+            std::env::set_var("MOA_DATABASE_NEON_ENABLED", "true");
+            std::env::set_var("MOA_DATABASE_NEON_PROJECT_ID", "project-1");
+            std::env::set_var("MOA_DATABASE_NEON_MAX_CHECKPOINTS", "0");
+        }
 
-        let config = MoaConfig::load_from_path(file.path()).unwrap();
-        assert_eq!(config.general.default_provider, "openai");
-        assert_eq!(config.session_limits.max_turns, 50);
-        assert_eq!(config.session_limits.loop_detection_threshold, 3);
-        assert_eq!(config.tool_output.max_replay_chars, 20_000);
-        assert_eq!(config.tool_output.max_bash_lines, 200);
-        assert!((config.tool_output.head_ratio - 0.4_f64).abs() < f64::EPSILON);
-        assert_eq!(config.tool_budgets.file_read, 8_000);
-        assert_eq!(config.tool_budgets.bash_stdout, 4_000);
-        assert_eq!(config.tool_budgets.bash_stderr, 2_000);
-        assert_eq!(config.tool_budgets.grep, 4_000);
-        assert_eq!(config.tool_budgets.file_search, 4_000);
-        assert_eq!(config.tool_budgets.memory_search, 3_000);
-        assert_eq!(config.tool_budgets.file_outline, 2_000);
-        assert_eq!(config.tool_budgets.default, 8_000);
-        assert_eq!(config.skill_budget.max_manifest_chars, None);
-        assert_eq!(config.skill_budget.max_per_skill_chars, 1_536);
-        assert!(config.skill_budget.show_token_estimates);
-        assert!(config.query_rewrite.enabled);
-        assert_eq!(config.query_rewrite.timeout_ms, 5_000);
-        assert!(config.resolution.enabled);
-        assert_eq!(config.resolution.structural_min_samples, 20);
-        assert!(!config.metrics.enabled);
-        assert_eq!(config.metrics.listen, "0.0.0.0:9090");
-    }
-
-    #[test]
-    fn config_rejects_zero_neon_checkpoint_limit_when_enabled() {
-        let _guard = ENV_LOCK.lock().expect("env test lock");
-        let _auth_env = EnvRestore::clear(AUTH_ENV_KEYS);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            br#"
-                [database]
-                backend = "postgres"
-                url = "postgres://postgres:postgres@localhost/moa"
-
-                [database.neon]
-                enabled = true
-                project_id = "project-1"
-                max_checkpoints = 0
-            "#,
-        )
-        .unwrap();
-
-        let error = MoaConfig::load_from_path(&path).expect_err("invalid config");
+        let error = MoaConfig::load_from_env().expect_err("invalid config");
         assert!(
             error
                 .to_string()

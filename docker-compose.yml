@@ -104,7 +104,7 @@ services:
       OPENFGA_DATASTORE_ENGINE: postgres
       OPENFGA_DATASTORE_URI: postgres://moa_owner:${POSTGRES_PASSWORD:-dev}@postgres:5432/openfga?sslmode=disable
       OPENFGA_AUTHN_METHOD: preshared
-      OPENFGA_AUTHN_PRESHARED_KEYS: ${MOA_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod}
+      OPENFGA_AUTHN_PRESHARED_KEYS: ${MOA_AUTHZ_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod}
       OPENFGA_LOG_FORMAT: json
       OPENFGA_PLAYGROUND_ENABLED: "true"
     ports:
@@ -156,18 +156,19 @@ services:
         condition: service_healthy
     environment:
       HOME: /var/lib/moa
-      POSTGRES_URL: postgres://moa_owner:dev@postgres:5432/moa
-      RESTATE_ADMIN_URL: http://restate:9070
-      MOA__AUTH__HEADER_TRUST: ${MOA__AUTH__HEADER_TRUST:-lenient}
-      MOA__LOCAL__SANDBOX_DIR: /var/lib/moa/sandbox
-      MOA__LOCAL__MEMORY_DIR: /var/lib/moa/memory
-      MOA__OBSERVABILITY__LINEAGE__JOURNAL_PATH: /var/lib/moa/lineage-journal
+      MOA_DATABASE_URL: postgres://moa_owner:dev@postgres:5432/moa
+      MOA_RESTATE_ADMIN_URL: http://restate:9070
+      MOA_RESTATE_INGRESS_URL: http://restate:8080
+      MOA_AUTH_HEADER_TRUST: ${MOA_AUTH_HEADER_TRUST:-lenient}
+      MOA_LOCAL_SANDBOX_DIR: /var/lib/moa/sandbox
+      MOA_LOCAL_MEMORY_DIR: /var/lib/moa/memory
+      MOA_OBSERVABILITY_LINEAGE_JOURNAL_PATH: /var/lib/moa/lineage-journal
       MOA_LINEAGE_SINK: postgres
       MOA_SKIP_FGA: ${MOA_SKIP_FGA:-}
-      MOA__AUTHZ__OPENFGA__URL: http://openfga:8080
-      MOA__AUTHZ__OPENFGA__PRESHARED_KEY: ${MOA_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod}
-      MOA__AUTHZ__OPENFGA__STORE_ID: ${MOA_OPENFGA_STORE_ID:-}
-      MOA__AUTHZ__OPENFGA__MODEL_ID: ${MOA_OPENFGA_MODEL_ID:-}
+      MOA_AUTHZ_OPENFGA_URL: http://openfga:8080
+      MOA_AUTHZ_OPENFGA_PRESHARED_KEY: ${MOA_AUTHZ_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod}
+      MOA_AUTHZ_OPENFGA_STORE_ID: ${MOA_AUTHZ_OPENFGA_STORE_ID:-}
+      MOA_AUTHZ_OPENFGA_MODEL_ID: ${MOA_AUTHZ_OPENFGA_MODEL_ID:-}
       MOA_PROVIDERS_OVERRIDE: ${MOA_PROVIDERS_OVERRIDE:-}
       MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS: "false"
       MOA_DEREGISTER_ON_SHUTDOWN: "false"
@@ -195,7 +196,7 @@ services:
     environment:
       MOA_EDGE_BIND: 0.0.0.0:8080
       MOA_EDGE_UPSTREAM: http://restate:8080
-      MOA_EDGE_DATABASE_URL: postgres://moa_owner:${POSTGRES_PASSWORD:-dev}@postgres:5432/moa?sslmode=disable
+      MOA_DATABASE_URL: postgres://moa_owner:${POSTGRES_PASSWORD:-dev}@postgres:5432/moa?sslmode=disable
       RUST_LOG: info,moa_edge=debug
     ports:
       - "10000:8080"
@@ -215,7 +216,7 @@ services:
       moa-orchestrator:
         condition: service_started
     environment:
-      RESTATE_ADMIN_URL: http://restate:9070
+      MOA_RESTATE_ADMIN_URL: http://restate:9070
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -224,7 +225,7 @@ services:
         attempt=1
         while [ "$$attempt" -le 30 ]; do
           status=$$(curl -sS -o /tmp/register-response.txt -w "%{http_code}" \
-            -X POST "$${RESTATE_ADMIN_URL}/deployments" \
+            -X POST "$${MOA_RESTATE_ADMIN_URL}/deployments" \
             -H "content-type: application/json" \
             --data '{"uri":"http://moa-orchestrator:9080"}' || true)
           if [ "$$status" -ge 200 ] && [ "$$status" -lt 300 ] || [ "$$status" = "409" ]; then

@@ -4,6 +4,7 @@ use std::{collections::HashMap, time::Duration};
 
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
+use moa_core::MoaConfig;
 use reqwest::{Client, Method};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -36,29 +37,43 @@ pub struct TurbopufferStore {
 }
 
 impl TurbopufferStore {
-    /// Creates a Turbopuffer store from process environment.
-    ///
-    /// Required: `TURBOPUFFER_API_KEY`.
-    /// Optional: `TURBOPUFFER_BASE_URL`, `MOA_ENV`, `TURBOPUFFER_BAA`.
-    pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("TURBOPUFFER_API_KEY")
-            .map_err(|_| Error::TurbopufferConfig("TURBOPUFFER_API_KEY is required".to_string()))?;
+    /// Creates a Turbopuffer store from shared MOA config and the secret API key environment.
+    pub fn from_config(config: &MoaConfig) -> Result<Self> {
+        let turbopuffer = &config.memory.vector.turbopuffer;
+        let api_key_env = turbopuffer.api_key_env.as_str();
+        let api_key = std::env::var(api_key_env)
+            .map_err(|_| Error::TurbopufferConfig(format!("{api_key_env} is required")))?;
         if api_key.trim().is_empty() {
-            return Err(Error::TurbopufferConfig(
-                "TURBOPUFFER_API_KEY is empty".to_string(),
-            ));
+            return Err(Error::TurbopufferConfig(format!("{api_key_env} is empty")));
         }
 
-        let base_url =
-            std::env::var("TURBOPUFFER_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        let env = std::env::var("MOA_ENV")
-            .or_else(|_| std::env::var("MOA_ENVIRONMENT"))
-            .unwrap_or_else(|_| "dev".to_string());
-        let baa_enabled = std::env::var("TURBOPUFFER_BAA")
-            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-            .unwrap_or(false);
+        let base_url = turbopuffer
+            .base_url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        let env = turbopuffer
+            .environment
+            .clone()
+            .or_else(|| config.observability.environment.clone())
+            .unwrap_or_else(|| "dev".to_string());
 
-        Self::new(base_url, SecretString::from(api_key), env, baa_enabled)
+        Self::new(
+            base_url,
+            SecretString::from(api_key),
+            env,
+            turbopuffer.baa_enabled,
+        )
+    }
+
+    /// Creates a Turbopuffer store from process environment.
+    ///
+    /// Required: the API key environment named by `MOA_TURBOPUFFER_API_KEY_ENV`,
+    /// defaulting to `TURBOPUFFER_API_KEY`.
+    /// Optional settings use the canonical `MOA_TURBOPUFFER_*` and
+    /// `MOA_OBSERVABILITY_ENVIRONMENT` variables.
+    pub fn from_env() -> Result<Self> {
+        let config = MoaConfig::load_from_env()?;
+        Self::from_config(&config)
     }
 
     /// Creates a Turbopuffer store with explicit configuration.

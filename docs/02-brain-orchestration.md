@@ -18,7 +18,7 @@ _Restate orchestration, hosted API runtime mode, turn execution, and sub-agents.
 
 `moa-orchestrator` is an HTTP handler service registered with Restate. At startup it:
 
-1. Loads `OrchestratorConfig` from environment.
+1. Loads shared `MoaConfig` from flat `MOA_...` environment variables.
 2. Connects to Postgres and runs session migrations.
 3. Builds the Postgres session store, graph memory stack, provider registry, embedding provider, and tool router.
 4. Installs an `OrchestratorCtx` singleton for handlers.

@@ -20,15 +20,8 @@ struct Args {
     #[arg(long, env = "MOA_EDGE_BIND", default_value = "0.0.0.0:10000")]
     bind: String,
     /// Internal Restate ingress base URL.
-    #[arg(long, env = "MOA_EDGE_UPSTREAM", default_value = "http://restate:8080")]
-    upstream: String,
-    /// Postgres URL for local API-key authentication.
-    #[arg(
-        long,
-        env = "MOA_EDGE_DATABASE_URL",
-        default_value = "postgres://moa_owner:dev@postgres:5432/moa"
-    )]
-    database_url: String,
+    #[arg(long, env = "MOA_EDGE_UPSTREAM")]
+    upstream: Option<String>,
 }
 
 #[tokio::main]
@@ -42,15 +35,17 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    tracing::info!(bind = %args.bind, upstream = %args.upstream, "starting moa-edge");
+    let moa_config = moa_core::MoaConfig::load_from_env().context("load MOA config")?;
+    let database_url = moa_config.database.url.clone();
+    let upstream = edge_upstream_url(&moa_config, args.upstream);
+    tracing::info!(bind = %args.bind, upstream = %upstream, "starting moa-edge");
 
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(10)
-        .connect(&args.database_url)
+        .connect(&database_url)
         .await
         .context("connect edge api-key database")?;
     let pool = Arc::new(pool);
-    let moa_config = moa_core::MoaConfig::load().context("load MOA config")?;
     let providers = moa_auth_providers::build_providers(&moa_config, pool.clone())
         .context("build providers bundle")?;
 
@@ -58,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         auth: providers.auth.clone(),
         pool: pool.clone(),
         proxy: Arc::new(
-            proxy::OrchestratorProxy::new(&args.upstream).context("build orchestrator proxy")?,
+            proxy::OrchestratorProxy::new(&upstream).context("build orchestrator proxy")?,
         ),
     };
     let listener = tokio::net::TcpListener::bind(&args.bind)
@@ -76,4 +71,34 @@ async fn main() -> anyhow::Result<()> {
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("moa-edge shutdown signal received");
+}
+
+fn edge_upstream_url(config: &moa_core::MoaConfig, override_url: Option<String>) -> String {
+    override_url
+        .filter(|url| !url.trim().is_empty())
+        .or_else(|| config.orchestrator.restate_ingress_url.clone())
+        .or_else(|| config.orchestrator.endpoint.clone())
+        .unwrap_or_else(|| "http://restate:8080".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edge_upstream_url;
+
+    #[test]
+    fn edge_upstream_prefers_edge_override_then_shared_restate_config() {
+        // Pins: edge uses shared Restate ingress config unless the edge-specific override is set.
+        let mut config = moa_core::MoaConfig::default();
+        config.orchestrator.restate_ingress_url = Some("http://restate.example:8080".to_string());
+        config.orchestrator.endpoint = Some("http://endpoint.example:8080".to_string());
+
+        assert_eq!(
+            edge_upstream_url(&config, None),
+            "http://restate.example:8080"
+        );
+        assert_eq!(
+            edge_upstream_url(&config, Some("http://edge-upstream.example".to_string())),
+            "http://edge-upstream.example"
+        );
+    }
 }

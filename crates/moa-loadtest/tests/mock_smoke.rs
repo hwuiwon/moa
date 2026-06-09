@@ -7,24 +7,23 @@ use std::process::Command;
 #[ignore = "requires a running Restate orchestrator with MOA_PROVIDERS_OVERRIDE=scripted:<fixture>"]
 fn mock_short_profile_completes_within_budget_with_zero_errors() {
     if std::env::var("MOA_RUN_LOADTEST_REMOTE_SMOKE").as_deref() != Ok("1") {
-        panic!("set MOA_RUN_LOADTEST_REMOTE_SMOKE=1 and RESTATE_INGRESS_URL to run this test");
+        panic!("set MOA_RUN_LOADTEST_REMOTE_SMOKE=1 and MOA_RESTATE_INGRESS_URL to run this test");
     }
-    let endpoint =
-        std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://localhost:10010".into());
+    let endpoint = std::env::var("MOA_RESTATE_INGRESS_URL")
+        .unwrap_or_else(|_| "http://localhost:10010".into());
     let prom_out = repo_root().join(format!(
         "target/perf-gate/mock-short-{}.prom",
         uuid::Uuid::now_v7()
     ));
-    let config_path = repo_root().join("crates/moa-loadtest/scripts/mock-smoke-config.toml");
     let mut command = Command::new(env!("CARGO_BIN_EXE_perf_gate"));
     for key in [
-        "MOA__AUTH__AUTH0__DOMAIN",
-        "MOA__AUTH__AUTH0__AUDIENCE",
-        "MOA__AUTH__AUTH0__CLIENT_ID_ENV",
-        "MOA__AUTH__AUTH0__CLIENT_SECRET_ENV",
-        "MOA__AUTH__OIDC__ISSUER",
-        "MOA__AUTH__OIDC__AUDIENCE",
-        "MOA__AUTH__OIDC__JWKS_URL",
+        "MOA_AUTH_AUTH0_DOMAIN",
+        "MOA_AUTH_AUTH0_AUDIENCE",
+        "MOA_AUTH_AUTH0_CLIENT_ID_ENV",
+        "MOA_AUTH_AUTH0_CLIENT_SECRET_ENV",
+        "MOA_AUTH_OIDC_ISSUER",
+        "MOA_AUTH_OIDC_AUDIENCE",
+        "MOA_AUTH_OIDC_JWKS_URL",
     ] {
         command.env_remove(key);
     }
@@ -34,10 +33,6 @@ fn mock_short_profile_completes_within_budget_with_zero_errors() {
         .args([
             "--profile",
             "mock-short",
-            "--config",
-            config_path
-                .to_str()
-                .expect("mock smoke config path should be UTF-8"),
             "--endpoint",
             &endpoint,
             "--duration",

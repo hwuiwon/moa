@@ -13,12 +13,15 @@ use axum::routing::get;
 use axum::{Router, serve};
 use clap::Parser;
 use moa_authz::AwakeableResolver;
-use moa_core::config::AsyncAuthzKind;
+use moa_core::config::{AsyncAuthzKind, AuthHeaderTrustKind};
 use moa_core::{MoaConfig, TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_hands::ToolRouter;
 use moa_orchestrator::{
     OrchestratorCtx,
-    config::{OrchestratorConfig, ProvidersOverride},
+    config::{
+        ProvidersOverride, load_moa_config_from_env, restate_admin_url, restate_ingress_url,
+        skip_fga_from_env,
+    },
     ctx::{self, HeaderTrustMode},
     lineage::build_lineage_sink,
     objects::cron_job::{CronJob, CronJobImpl},
@@ -128,9 +131,12 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let config = OrchestratorConfig::from_env()?;
-    let moa_config = Arc::new(config.to_moa_config());
-    let header_trust_mode = header_trust_mode_from_env();
+    let moa_config = load_moa_config_from_env()?;
+    let header_trust_mode = header_trust_mode_from_config(&moa_config);
+    let restate_admin_url = restate_admin_url(&moa_config)?;
+    let restate_ingress_url = restate_ingress_url(&moa_config)?;
+    let skip_fga = skip_fga_from_env();
+    let moa_config = Arc::new(moa_config);
     let _ = ctx::HEADER_TRUST_MODE.set(header_trust_mode);
     let _telemetry = init_observability(
         moa_config.as_ref(),
@@ -143,11 +149,11 @@ async fn main() -> anyhow::Result<()> {
     providers_override.ensure_allowed(moa_config.as_ref())?;
     let pool = PgPoolOptions::new()
         .max_connections(25)
-        .connect(&config.postgres_url)
+        .connect(&moa_config.database.url)
         .await?;
     apply_database_migrations(&pool).await?;
     moa_authz::configure_security_audit(pool.clone(), moa_config.audit_security.emit_authz_allows);
-    let fga_client = if config.skip_fga {
+    let fga_client = if skip_fga {
         tracing::warn!("MOA_SKIP_FGA set; authz outbox poller disabled");
         None
     } else {
@@ -157,10 +163,10 @@ async fn main() -> anyhow::Result<()> {
         .clone()
         .map(|fga_client| start_authz_outbox_poller(&pool, fga_client));
     let session_store = Arc::new(
-        PostgresSessionStore::from_existing_pool(&config.postgres_url, pool.clone()).await?,
+        PostgresSessionStore::from_existing_pool(&moa_config.database.url, pool.clone()).await?,
     );
     let awakeable_resolver: Arc<dyn AwakeableResolver> = Arc::new(HttpAwakeableResolver::new(
-        cron_bootstrap_ingress_url(&config.restate_admin_url),
+        cron_bootstrap_ingress_url(&restate_ingress_url),
     )?);
     let auth_providers = moa_auth_providers::build_providers_with_resolver(
         moa_config.as_ref(),
@@ -170,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
     .context("build providers bundle")?;
 
     let llm_providers = Arc::new(match providers_override {
-        ProvidersOverride::None => ProviderRegistry::from_env(),
+        ProvidersOverride::None => ProviderRegistry::from_config(moa_config.as_ref()),
         ProvidersOverride::Scripted { path } => {
             tracing::warn!(
                 path = %path.display(),
@@ -205,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
         lineage_writer: lineage.writer.clone(),
     });
     OrchestratorCtx::install(ctx).expect("install orchestrator ctx");
-    let _ = memory_ingest::install_runtime_with_pool(pool.clone());
+    let _ = memory_ingest::install_runtime_with_config(pool.clone(), moa_config.as_ref());
     let scim_base_url = std::env::var("MOA_SCIM_BASE_URL")
         .unwrap_or_else(|_| format!("http://localhost:{}/scim/v2", args.scim_port));
     let scim_state = ScimState::new(
@@ -252,7 +258,7 @@ async fn main() -> anyhow::Result<()> {
         .build();
 
     let readiness = Arc::new(AtomicBool::new(false));
-    let probe_state = ProbeState::new(readiness.clone(), pool.clone(), config.restate_admin_url)?;
+    let probe_state = ProbeState::new(readiness.clone(), pool.clone(), restate_admin_url)?;
     let shutdown = CancellationToken::new();
     let approval_reaper_handle =
         start_approval_reaper_if_configured(&pool, moa_config.as_ref(), awakeable_resolver)?;
@@ -277,7 +283,7 @@ async fn main() -> anyhow::Result<()> {
     readiness.store(true, Ordering::Release);
     let _cron_bootstrap = spawn_default_cron_bootstrap(
         probe_state.clone(),
-        cron_bootstrap_ingress_url(probe_state.admin_base_url()),
+        cron_bootstrap_ingress_url(&restate_ingress_url),
     );
 
     tokio::select! {
@@ -351,18 +357,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn header_trust_mode_from_env() -> HeaderTrustMode {
-    match std::env::var("MOA__AUTH__HEADER_TRUST").ok().as_deref() {
-        Some("strict") => HeaderTrustMode::Strict,
-        Some("lenient") => HeaderTrustMode::Lenient,
-        Some(other) => {
-            tracing::warn!(
-                value = other,
-                "unknown MOA__AUTH__HEADER_TRUST value; using strict mode"
-            );
-            HeaderTrustMode::Strict
-        }
-        None => HeaderTrustMode::Strict,
+fn header_trust_mode_from_config(config: &MoaConfig) -> HeaderTrustMode {
+    match config.auth.header_trust {
+        AuthHeaderTrustKind::Strict => HeaderTrustMode::Strict,
+        AuthHeaderTrustKind::Lenient => HeaderTrustMode::Lenient,
     }
 }
 
@@ -634,21 +632,12 @@ fn spawn_default_cron_bootstrap(state: ProbeState, ingress_url: String) -> JoinH
     })
 }
 
-fn cron_bootstrap_ingress_url(admin_base_url: &str) -> String {
-    if let Ok(value) = std::env::var("MOA_LOCAL_INGRESS_URL") {
-        let trimmed = value.trim().trim_end_matches('/');
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
+fn cron_bootstrap_ingress_url(configured_ingress_url: &str) -> String {
+    let trimmed = configured_ingress_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return format!("http://localhost:{DEFAULT_RESTATE_INGRESS_PORT}");
     }
-
-    reqwest::Url::parse(admin_base_url)
-        .ok()
-        .and_then(|mut url| {
-            url.set_port(Some(DEFAULT_RESTATE_INGRESS_PORT)).ok()?;
-            Some(url.to_string().trim_end_matches('/').to_string())
-        })
-        .unwrap_or_else(|| format!("http://localhost:{DEFAULT_RESTATE_INGRESS_PORT}"))
+    trimmed.to_string()
 }
 
 async fn install_default_cron_jobs(ingress_url: &str) -> anyhow::Result<()> {

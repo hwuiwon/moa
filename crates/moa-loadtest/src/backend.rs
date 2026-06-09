@@ -478,15 +478,15 @@ where
 
 fn live_fga_client() -> Result<FgaClient> {
     FgaClient::new(FgaConfig {
-        url: std::env::var("MOA_OPENFGA_URL")
+        url: std::env::var("MOA_AUTHZ_OPENFGA_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:10030".to_string()),
-        preshared_key: std::env::var("MOA_OPENFGA_PRESHARED_KEY")
+        preshared_key: std::env::var("MOA_AUTHZ_OPENFGA_PRESHARED_KEY")
             .unwrap_or_else(|_| "localdev-preshared-key-do-not-use-in-prod".to_string()),
-        store_id: std::env::var("MOA_OPENFGA_STORE_ID").map_err(|_| {
-            MoaError::MissingEnvironmentVariable("MOA_OPENFGA_STORE_ID".to_string())
+        store_id: std::env::var("MOA_AUTHZ_OPENFGA_STORE_ID").map_err(|_| {
+            MoaError::MissingEnvironmentVariable("MOA_AUTHZ_OPENFGA_STORE_ID".to_string())
         })?,
-        model_id: std::env::var("MOA_OPENFGA_MODEL_ID").map_err(|_| {
-            MoaError::MissingEnvironmentVariable("MOA_OPENFGA_MODEL_ID".to_string())
+        model_id: std::env::var("MOA_AUTHZ_OPENFGA_MODEL_ID").map_err(|_| {
+            MoaError::MissingEnvironmentVariable("MOA_AUTHZ_OPENFGA_MODEL_ID".to_string())
         })?,
         timeout_ms: 5_000,
     })

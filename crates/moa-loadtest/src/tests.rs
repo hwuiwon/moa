@@ -19,7 +19,6 @@ fn test_options() -> LoadTestOptions {
         turn_timeout: Duration::from_secs(15),
         output: OutputFormat::Json,
         model: None,
-        config_path: None,
     }
 }
 

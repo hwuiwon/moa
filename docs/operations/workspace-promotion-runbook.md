@@ -20,8 +20,8 @@ curl -sS "$MOA_EDGE_URL/v1/admin-maintenance/promote-workspace" \
 Required environment:
 
 - `TURBOPUFFER_API_KEY`
-- `MOA_ENV` or `MOA_ENVIRONMENT`
-- `TURBOPUFFER_BAA=1` for HIPAA or restricted-tier workspaces
+- `MOA_TURBOPUFFER_ENVIRONMENT` or `MOA_OBSERVABILITY_ENVIRONMENT`
+- `MOA_TURBOPUFFER_BAA=true` for HIPAA or restricted-tier workspaces
 
 ## What Happens
 

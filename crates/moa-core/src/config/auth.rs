@@ -8,6 +8,9 @@ pub struct AuthConfig {
     /// Selected authentication provider.
     #[serde(default)]
     pub provider: AuthProviderKind,
+    /// How strictly internal handlers require trusted identity headers.
+    #[serde(default)]
+    pub header_trust: AuthHeaderTrustKind,
     /// Local API-key provider settings.
     #[serde(default)]
     pub local: Option<LocalAuthConfig>,
@@ -17,6 +20,28 @@ pub struct AuthConfig {
     /// Generic OIDC provider settings.
     #[serde(default)]
     pub oidc: Option<OidcAuthConfig>,
+}
+
+/// Trusted identity header handling mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthHeaderTrustKind {
+    /// Reject requests that do not include the required identity header set.
+    #[default]
+    Strict,
+    /// Accept requests without identity headers for transitional local wiring.
+    Lenient,
+}
+
+impl AuthHeaderTrustKind {
+    /// Return the serialized configuration value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Lenient => "lenient",
+        }
+    }
 }
 
 /// Supported authentication provider kinds.

@@ -1,9 +1,9 @@
 //! `[authz]` and `[authz.openfga]` configuration sections.
 //!
-//! Environment variable equivalents follow the `MOA__SECTION__KEY` convention:
-//! `MOA__AUTHZ__ENGINE`, `MOA__AUTHZ__OPENFGA__URL`,
-//! `MOA__AUTHZ__OPENFGA__PRESHARED_KEY`, `MOA__AUTHZ__OPENFGA__STORE_ID`,
-//! `MOA__AUTHZ__OPENFGA__MODEL_ID`, and `MOA__AUTHZ__OPENFGA__TIMEOUT_MS`.
+//! Environment variable equivalents follow the flat `MOA_SECTION_KEY` convention:
+//! `MOA_AUTHZ_ENGINE`, `MOA_AUTHZ_OPENFGA_URL`,
+//! `MOA_AUTHZ_OPENFGA_PRESHARED_KEY`, `MOA_AUTHZ_OPENFGA_STORE_ID`,
+//! `MOA_AUTHZ_OPENFGA_MODEL_ID`, and `MOA_AUTHZ_OPENFGA_TIMEOUT_MS`.
 
 use serde::{Deserialize, Serialize};
 

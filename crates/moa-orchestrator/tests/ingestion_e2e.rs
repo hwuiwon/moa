@@ -106,20 +106,18 @@ fn spawn_orchestrator(
         .arg(ports.health.to_string())
         .arg("--scim-port")
         .arg(ports.scim.to_string())
-        .env("POSTGRES_URL", postgres_url)
-        .env("RESTATE_ADMIN_URL", admin_url)
-        .env("MOA_MEMORY_DIR", memory_dir.path())
-        .env("MOA_SANDBOX_DIR", sandbox_dir.path())
-        .env("MOA_DOCKER_ENABLED", "false")
+        .env("MOA_DATABASE_URL", postgres_url)
+        .env("MOA_RESTATE_ADMIN_URL", admin_url)
+        .env("MOA_RESTATE_INGRESS_URL", restate_ingress_url())
+        .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
+        .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
+        .env("MOA_LOCAL_DOCKER_ENABLED", "false")
         .env_remove("COHERE_API_KEY")
-        .env_remove("MOA_COHERE_API_KEY")
         .env("RUST_LOG", "info")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    if let Ok(pii_url) =
-        std::env::var("MOA_PII_SERVICE_URL").or_else(|_| std::env::var("MOA_PII_URL"))
-    {
+    if let Ok(pii_url) = std::env::var("MOA_PII_SERVICE_URL") {
         command.env("MOA_PII_SERVICE_URL", pii_url);
     }
 
@@ -135,7 +133,8 @@ fn test_database_url() -> String {
 }
 
 fn restate_ingress_url() -> String {
-    std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://127.0.0.1:10010".to_string())
+    std::env::var("MOA_RESTATE_INGRESS_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:10010".to_string())
 }
 
 fn object_url(ingress: &str, turn: &SessionTurn) -> String {

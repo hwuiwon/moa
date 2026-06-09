@@ -1,7 +1,7 @@
 # Auth0 setup
 
 Auth0 support is optional. Local API keys remain available even when
-`auth.provider = "auth0"` because MOA routes `moa_...` bearer values to the
+`MOA_AUTH_PROVIDER=auth0` because MOA routes `moa_...` bearer values to the
 local API-key provider and JWT bearer values to Auth0.
 
 ## Auth0 tenant setup
@@ -28,15 +28,14 @@ Set `app_metadata.tenant_id` on each Auth0 user to the MOA tenant UUID.
 
 ## MOA configuration
 
-```toml
-[auth]
-provider = "auth0"
-
-[auth.auth0]
-domain = "your-tenant.auth0.com"
-audience = "https://api.moa.example.com"
-client_id_env = "MOA_AUTH0_CLIENT_ID"
-client_secret_env = "MOA_AUTH0_CLIENT_SECRET"
+```sh
+MOA_AUTH_PROVIDER=auth0
+MOA_AUTH_AUTH0_DOMAIN=your-tenant.auth0.com
+MOA_AUTH_AUTH0_AUDIENCE=https://api.moa.example.com
+MOA_AUTH_AUTH0_CLIENT_ID_ENV=MOA_AUTH0_CLIENT_ID
+MOA_AUTH_AUTH0_CLIENT_SECRET_ENV=MOA_AUTH0_CLIENT_SECRET
+MOA_AUTH0_CLIENT_ID=...
+MOA_AUTH0_CLIENT_SECRET=...
 ```
 
 Build binaries that need Auth0 with the feature enabled:

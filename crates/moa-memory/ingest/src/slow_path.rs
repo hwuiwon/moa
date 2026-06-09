@@ -1,6 +1,5 @@
 //! Restate virtual object for slow-path graph-memory ingestion.
 
-use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,7 +9,7 @@ use crate::{
     TurnChunk, chunk_turn, current_runtime, extract_facts, extraction_confidence_hint, fact_hash,
     scoped_fact_uid, should_ingest_degraded,
 };
-use moa_core::{ScopeContext, ScopedConn, traits::EmbeddingProvider};
+use moa_core::{MoaConfig, ScopeContext, ScopedConn, traits::EmbeddingProvider};
 use moa_memory_graph::{
     AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
 };
@@ -57,6 +56,8 @@ impl IngestionVO for IngestionVOImpl {
 
         let runtime = current_runtime().map_err(HandlerError::from)?;
         let pool = runtime.pool().clone();
+        let pii_service_url = runtime.pii_service_url().map(str::to_string);
+        let cohere_api_key_env = runtime.cohere_api_key_env().to_string();
         let degraded = workspace_degraded(&pool, &turn).await?;
         if degraded && !should_ingest_degraded(&turn) {
             ctx.set(&done_key, Json::from(true));
@@ -92,15 +93,24 @@ impl IngestionVO for IngestionVOImpl {
 
         let classify_facts_input = extracted.clone();
         let classified = ctx
-            .run(|| async move { classify_facts(&classify_facts_input).await.map(Json::from) })
+            .run(|| async move {
+                classify_facts(&classify_facts_input, pii_service_url.as_deref())
+                    .await
+                    .map(Json::from)
+            })
             .name("classify_pii")
             .retry_policy(ingest_step_retry_policy())
             .await?
             .into_inner();
 
         let embed_input = classified.clone();
+        let embed_cohere_api_key_env = cohere_api_key_env.clone();
         let embedded = ctx
-            .run(|| async move { embed_batch(&embed_input).await.map(Json::from) })
+            .run(|| async move {
+                embed_batch(&embed_input, &embed_cohere_api_key_env)
+                    .await
+                    .map(Json::from)
+            })
             .name("embed")
             .retry_policy(ingest_step_retry_policy())
             .await?
@@ -109,12 +119,14 @@ impl IngestionVO for IngestionVOImpl {
         let contradiction_turn = turn.clone();
         let contradiction_input = embedded.clone();
         let contradiction_pool = pool.clone();
+        let contradiction_cohere_api_key_env = cohere_api_key_env.clone();
         let decisions = ctx
             .run(|| async move {
                 detect_contradictions(
                     &contradiction_pool,
                     &contradiction_turn,
                     &contradiction_input,
+                    &contradiction_cohere_api_key_env,
                 )
                 .await
                 .map(Json::from)
@@ -149,7 +161,13 @@ impl IngestionVO for IngestionVOImpl {
 /// [`IngestionVO::ingest_turn`] so the step journal remains durable.
 pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, HandlerError> {
     let runtime = current_runtime().map_err(HandlerError::from)?;
-    ingest_turn_direct_with_pool(runtime.pool().clone(), turn).await
+    ingest_turn_direct_with_pool_and_pii(
+        runtime.pool().clone(),
+        runtime.pii_service_url().map(str::to_string),
+        runtime.cohere_api_key_env().to_string(),
+        turn,
+    )
+    .await
 }
 
 /// Runs the slow-path ingestion steps directly against an explicit Postgres pool.
@@ -159,6 +177,23 @@ pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, 
 /// [`IngestionVO::ingest_turn`] so the step journal remains durable.
 pub async fn ingest_turn_direct_with_pool(
     pool: PgPool,
+    turn: SessionTurn,
+) -> Result<IngestApplyReport, HandlerError> {
+    let config = MoaConfig::load_from_env().map_err(HandlerError::from)?;
+    let memory = config.memory;
+    ingest_turn_direct_with_pool_and_pii(
+        pool,
+        memory.pii_service_url,
+        memory.vector.embedder.cohere.api_key_env,
+        turn,
+    )
+    .await
+}
+
+async fn ingest_turn_direct_with_pool_and_pii(
+    pool: PgPool,
+    pii_service_url: Option<String>,
+    cohere_api_key_env: String,
     turn: SessionTurn,
 ) -> Result<IngestApplyReport, HandlerError> {
     let degraded = workspace_degraded(&pool, &turn).await?;
@@ -172,9 +207,9 @@ pub async fn ingest_turn_direct_with_pool(
     let chunks =
         chunk_turn(&turn, CHUNK_TARGET_TOKENS, CHUNK_OVERLAP_TOKENS).map_err(HandlerError::from)?;
     let extracted = extract_facts(&chunks);
-    let classified = classify_facts(&extracted).await?;
-    let embedded = embed_batch(&classified).await?;
-    let decisions = detect_contradictions(&pool, &turn, &embedded).await?;
+    let classified = classify_facts(&extracted, pii_service_url.as_deref()).await?;
+    let embedded = embed_batch(&classified, &cohere_api_key_env).await?;
+    let decisions = detect_contradictions(&pool, &turn, &embedded, &cohere_api_key_env).await?;
     apply_decisions(&pool, &turn, &decisions).await
 }
 
@@ -230,24 +265,27 @@ pub fn turn_transcript(messages: &[moa_core::ContextMessage], response_text: &st
     lines.join("\n")
 }
 
-async fn classify_facts(facts: &[ExtractedFact]) -> Result<Vec<ClassifiedFact>, HandlerError> {
-    let classifier = classifier_from_env()?;
-    match &classifier {
-        ClassifierBackend::Sidecar(classifier) => classify_facts_with(classifier, facts).await,
-        ClassifierBackend::Heuristic => {
-            let mut classified = Vec::with_capacity(facts.len());
-            for fact in facts {
-                let result = heuristic_classify(&fact.summary);
-                let redacted_fact = redact_fact(fact, &result);
-                classified.push(ClassifiedFact {
-                    fact: redacted_fact,
-                    pii_class: result.class,
-                    pii_spans: result.spans,
-                });
-            }
-            Ok(classified)
-        }
+async fn classify_facts(
+    facts: &[ExtractedFact],
+    pii_service_url: Option<&str>,
+) -> Result<Vec<ClassifiedFact>, HandlerError> {
+    if let Some(url) = pii_service_url {
+        let classifier =
+            OpenAiPrivacyFilterClassifier::new(url.to_string()).map_err(HandlerError::from)?;
+        return classify_facts_with(&classifier, facts).await;
     }
+
+    let mut classified = Vec::with_capacity(facts.len());
+    for fact in facts {
+        let result = heuristic_classify(&fact.summary);
+        let redacted_fact = redact_fact(fact, &result);
+        classified.push(ClassifiedFact {
+            fact: redacted_fact,
+            pii_class: result.class,
+            pii_spans: result.spans,
+        });
+    }
+    Ok(classified)
 }
 
 async fn classify_facts_with(
@@ -286,20 +324,6 @@ fn redact_fact(fact: &ExtractedFact, result: &PiiResult) -> ExtractedFact {
     .unwrap_or_else(|| fact.clone());
     redacted.source_chunk = fact.source_chunk;
     redacted
-}
-
-fn classifier_from_env() -> Result<ClassifierBackend, HandlerError> {
-    if let Ok(url) = env::var("MOA_PII_URL").or_else(|_| env::var("MOA_PII_SERVICE_URL")) {
-        return Ok(ClassifierBackend::Sidecar(
-            OpenAiPrivacyFilterClassifier::new(url).map_err(HandlerError::from)?,
-        ));
-    }
-    Ok(ClassifierBackend::Heuristic)
-}
-
-enum ClassifierBackend {
-    Sidecar(OpenAiPrivacyFilterClassifier),
-    Heuristic,
 }
 
 fn heuristic_classify(text: &str) -> PiiResult {
@@ -383,11 +407,11 @@ fn looks_like_card(token: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || byte == b'-' || byte == b' ')
 }
 
-async fn embed_batch(facts: &[ClassifiedFact]) -> Result<Vec<EmbeddedFact>, HandlerError> {
-    let Some(api_key) = env::var("COHERE_API_KEY")
-        .ok()
-        .or_else(|| env::var("MOA_COHERE_API_KEY").ok())
-    else {
+async fn embed_batch(
+    facts: &[ClassifiedFact],
+    cohere_api_key_env: &str,
+) -> Result<Vec<EmbeddedFact>, HandlerError> {
+    let Some(api_key) = std::env::var(cohere_api_key_env).ok() else {
         return Ok(facts
             .iter()
             .cloned()
@@ -430,11 +454,12 @@ async fn detect_contradictions(
     pool: &PgPool,
     turn: &SessionTurn,
     embedded: &[EmbeddedFact],
+    cohere_api_key_env: &str,
 ) -> Result<Vec<IngestDecision>, HandlerError> {
     let pool = pool.clone();
     let scope = ScopeContext::workspace(turn.workspace_id.clone());
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
-    let detector = RrfPlusJudgeDetector::from_env_or_heuristic();
+    let detector = RrfPlusJudgeDetector::from_cohere_api_key_env_or_heuristic(cohere_api_key_env);
     detect_contradictions_with(&detector, pool, vector, turn, embedded).await
 }
 

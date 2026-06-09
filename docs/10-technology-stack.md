@@ -43,7 +43,7 @@ The root workspace currently contains:
 | Area | Crates |
 |---|---|
 | Async runtime | `tokio`, `tokio-util`, `async-trait` |
-| Serialization | `serde`, `serde_json`, `toml` |
+| Serialization | `serde`, `serde_json`; `toml` remains for eval and skill-suite fixtures |
 | IDs and time | `uuid`, `chrono` |
 | Errors | `thiserror` for libraries, `anyhow` for binaries |
 | Logging/observability | `tracing`, `tracing-subscriber`, `opentelemetry`, `tracing-opentelemetry` |
@@ -96,27 +96,30 @@ cargo build
 cargo test --workspace --no-run
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
-POSTGRES_URL=postgres://... cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
+MOA_DATABASE_URL=postgres://... cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
 ```
 
 ## Configuration
 
-Config loads from `~/.moa/config.toml` plus `MOA__...` environment overrides. Key sections:
+Runtime config loads from flat `MOA_...` environment variables. Kubernetes
+deployments should inject non-secret values with ConfigMaps and secret values
+with Secrets. The root `.env.example` lists the canonical env names for local
+and deployment setup. Key groups:
 
-| Section | Controls |
+| Env group | Controls |
 |---|---|
-| `[models]` and `[providers]` | model routing and provider API key env vars |
-| `[database]` | Postgres URL, admin URL, pool settings, Neon branching |
-| `[memory]` | memory directory and embedding provider/model |
-| `[query_rewrite]` | fail-open query rewriter behavior |
-| `[resolution]` | automated resolution scoring weights and thresholds |
-| `[skill_budget]` | skill manifest budget controls |
-| `[cloud]` | cloud mode and hand provider settings |
-| `[orchestrator]` | Restate ingress endpoint and optional health URL for API tests and automation |
-| `[auth]`, `[authz]`, `[token_vault]`, `[async_authz]`, `[audit_security]` | identity, authorization, token vault, async approvals, and OCSF security-event audit |
-| `[gateway]` | messaging adapter tokens |
-| `[permissions]` | default approval posture |
-| `[compaction]` | history compaction thresholds |
+| `MOA_MODELS_*` and `MOA_PROVIDERS_*` | model routing and provider API key env names |
+| `MOA_DATABASE_*` | Postgres URL, admin URL, pool settings, Neon branching |
+| `MOA_MEMORY_*`, `MOA_PII_SERVICE_URL`, and `MOA_TURBOPUFFER_*` | memory directory, embedding provider/model, PII service, and vector backend |
+| `MOA_QUERY_REWRITE_*` | fail-open query rewriter behavior |
+| `MOA_RESOLUTION_*` | automated resolution scoring weights and thresholds |
+| `MOA_SKILL_BUDGET_*` | skill manifest budget controls |
+| `MOA_CLOUD_*` | cloud mode and hand provider settings |
+| `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Restate ingress/admin endpoints and optional health URL |
+| `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_TOKEN_VAULT_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, token vault, async approvals, and OCSF security-event audit |
+| `MOA_GATEWAY_*` | messaging adapter token env names |
+| `MOA_PERMISSIONS_*` | default approval posture |
+| `MOA_COMPACTION_*` | history compaction thresholds |
 
 ## Current Implementation State
 
@@ -143,8 +146,9 @@ Areas still evolving:
 Cloud deployments need:
 
 ```bash
-POSTGRES_URL=postgres://...
-RESTATE_ADMIN_URL=http://...
+MOA_DATABASE_URL=postgres://...
+MOA_RESTATE_ADMIN_URL=http://...
+MOA_RESTATE_INGRESS_URL=http://...
 OPENAI_API_KEY=... # or another configured provider key
 ```
 

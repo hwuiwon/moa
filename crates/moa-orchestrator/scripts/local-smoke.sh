@@ -25,13 +25,16 @@ trap cleanup EXIT
 
 cd "${REPO_ROOT}"
 
+: "${MOA_DATABASE_URL:?set MOA_DATABASE_URL before running local-smoke.sh}"
+: "${MOA_RESTATE_ADMIN_URL:?set MOA_RESTATE_ADMIN_URL before running local-smoke.sh}"
+: "${MOA_RESTATE_INGRESS_URL:?set MOA_RESTATE_INGRESS_URL before running local-smoke.sh}"
+
 echo "Starting restate-server in background..."
 restate-server --node-name local --base-dir "${RESTATE_DATA_DIR}" &
 RESTATE_PID=$!
 sleep 2
 
 echo "Starting moa-orchestrator..."
-POSTGRES_URL="${POSTGRES_URL:-postgres://unused}" \
 RUST_LOG="${RUST_LOG:-info}" \
 cargo run -p moa-orchestrator -- --port 10020 --health-port 10021 &
 ORCH_PID=$!
@@ -39,7 +42,7 @@ sleep 3
 
 echo "Registering deployment..."
 curl --fail --silent --show-error \
-  -X POST "${RESTATE_ADMIN_URL:-http://localhost:10011}/deployments" \
+  -X POST "${MOA_RESTATE_ADMIN_URL}/deployments" \
   -H "content-type: application/json" \
   --data '{"uri":"http://localhost:10020"}'
 

@@ -53,8 +53,6 @@ pub struct LoadTestOptions {
     pub output: OutputFormat,
     /// Optional explicit model override for turn requests.
     pub model: Option<String>,
-    /// Optional explicit config path.
-    pub config_path: Option<PathBuf>,
 }
 
 impl LoadTestOptions {

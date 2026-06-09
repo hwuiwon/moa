@@ -31,6 +31,7 @@ pub(crate) const MEMORY_REMINDER_PREFIX: &str = "<memory-reminder>";
 pub struct GraphMemoryRetriever {
     pool: PgPool,
     embedder: Option<Arc<dyn EmbeddingProvider>>,
+    config: moa_core::MoaConfig,
     assume_app_role: bool,
     lineage: Arc<dyn LineageHandle>,
     result_limit: usize,
@@ -47,9 +48,20 @@ impl GraphMemoryRetriever {
     /// Creates a graph-memory retriever backed by the shared Postgres pool.
     #[must_use]
     pub fn new(pool: PgPool, embedder: Option<Arc<dyn EmbeddingProvider>>) -> Self {
+        Self::new_with_config(moa_core::MoaConfig::default(), pool, embedder)
+    }
+
+    /// Creates a graph-memory retriever backed by the shared Postgres pool and runtime config.
+    #[must_use]
+    pub fn new_with_config(
+        config: moa_core::MoaConfig,
+        pool: PgPool,
+        embedder: Option<Arc<dyn EmbeddingProvider>>,
+    ) -> Self {
         Self {
             pool,
             embedder,
+            config,
             assume_app_role: false,
             lineage: Arc::new(NullLineageHandle),
             result_limit: GRAPH_MEMORY_RESULTS,
@@ -161,8 +173,13 @@ impl GraphMemoryRetriever {
         .with_vector_store(vector.clone());
         let graph: Arc<dyn GraphStore> = Arc::new(graph_store);
         let hybrid = Arc::new(
-            crate::retrieval::HybridRetriever::from_env(self.pool.clone(), graph.clone(), vector)
-                .with_assume_app_role(self.assume_app_role),
+            crate::retrieval::HybridRetriever::from_config(
+                &self.config,
+                self.pool.clone(),
+                graph.clone(),
+                vector,
+            )
+            .with_assume_app_role(self.assume_app_role),
         );
         let cached = if self.assume_app_role {
             crate::retrieval::CachedHybridRetriever::new_for_app_role(hybrid, self.pool.clone())

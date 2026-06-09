@@ -58,7 +58,7 @@ spec:
           env:
             - name: RUST_LOG
               value: info
-            - name: POSTGRES_URL
+            - name: MOA_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: moa-postgres
@@ -81,13 +81,17 @@ spec:
                   name: moa-llm-keys
                   key: openrouter
                   optional: true
-            - name: RESTATE_ADMIN_URL
+            - name: MOA_RESTATE_ADMIN_URL
               value: http://restate.moa-restate.svc.cluster.local:9070
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+            - name: MOA_RESTATE_INGRESS_URL
+              value: http://restate.moa-restate.svc.cluster.local:8080
+            - name: MOA_OBSERVABILITY_ENABLED
+              value: "true"
+            - name: MOA_OBSERVABILITY_OTLP_ENDPOINT
               value: http://alloy.observability.svc.cluster.local:4317
-            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+            - name: MOA_OBSERVABILITY_OTLP_PROTOCOL
               value: grpc
-            - name: DEPLOY_ENV
+            - name: MOA_OBSERVABILITY_ENVIRONMENT
               value: production
             - name: MOA_METRICS_ENABLED
               value: "true"

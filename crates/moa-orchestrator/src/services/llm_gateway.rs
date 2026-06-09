@@ -7,9 +7,9 @@ use std::{fs, path::Path};
 use chrono::Utc;
 use memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, Event, LLMProvider, MoaError,
-    ModelCapabilities, ModelId, ModelTier, QueryRewriteConfig, SessionId, StopReason, TokenPricing,
-    TokenUsage, ToolCallContent, ToolCallFormat, ToolInvocation, UserId, WorkspaceId,
+    CompletionContent, CompletionRequest, CompletionResponse, Event, LLMProvider, MoaConfig,
+    MoaError, ModelCapabilities, ModelId, ModelTier, QueryRewriteConfig, SessionId, StopReason,
+    TokenPricing, TokenUsage, ToolCallContent, ToolCallFormat, ToolInvocation, UserId, WorkspaceId,
     record_llm_cost_cents,
 };
 use moa_providers::{
@@ -105,8 +105,10 @@ impl ProviderKind {
 #[derive(Clone)]
 enum ProviderSource {
     Static(Arc<dyn LLMProvider>),
-    Factory(fn(&str) -> moa_core::Result<Arc<dyn LLMProvider>>),
+    Factory(ProviderFactory),
 }
+
+type ProviderFactory = Arc<dyn Fn(&str) -> moa_core::Result<Arc<dyn LLMProvider>> + Send + Sync>;
 
 #[derive(Clone)]
 struct RegisteredProvider {
@@ -152,15 +154,50 @@ impl ProviderRegistry {
         Self {
             anthropic: configured_env("ANTHROPIC_API_KEY").then_some(RegisteredProvider {
                 default_model: DEFAULT_ANTHROPIC_MODEL.to_string(),
-                source: ProviderSource::Factory(build_anthropic_provider),
+                source: ProviderSource::Factory(Arc::new(build_anthropic_provider)),
             }),
             openai: configured_env("OPENAI_API_KEY").then_some(RegisteredProvider {
                 default_model: DEFAULT_OPENAI_MODEL.to_string(),
-                source: ProviderSource::Factory(build_openai_provider),
+                source: ProviderSource::Factory(Arc::new(build_openai_provider)),
             }),
             google: configured_env("GOOGLE_API_KEY").then_some(RegisteredProvider {
                 default_model: DEFAULT_GOOGLE_MODEL.to_string(),
-                source: ProviderSource::Factory(build_google_provider),
+                source: ProviderSource::Factory(Arc::new(build_google_provider)),
+            }),
+        }
+    }
+
+    /// Builds a registry from configured provider API key environment names.
+    #[must_use]
+    pub fn from_config(config: &MoaConfig) -> Self {
+        let config = Arc::new(config.clone());
+        Self {
+            anthropic: configured_env(&config.providers.anthropic.api_key_env).then(|| {
+                let config = config.clone();
+                RegisteredProvider {
+                    default_model: DEFAULT_ANTHROPIC_MODEL.to_string(),
+                    source: ProviderSource::Factory(Arc::new(move |model| {
+                        build_anthropic_provider_from_config(&config, model)
+                    })),
+                }
+            }),
+            openai: configured_env(&config.providers.openai.api_key_env).then(|| {
+                let config = config.clone();
+                RegisteredProvider {
+                    default_model: DEFAULT_OPENAI_MODEL.to_string(),
+                    source: ProviderSource::Factory(Arc::new(move |model| {
+                        build_openai_provider_from_config(&config, model)
+                    })),
+                }
+            }),
+            google: configured_env(&config.providers.google.api_key_env).then(|| {
+                let config = config.clone();
+                RegisteredProvider {
+                    default_model: DEFAULT_GOOGLE_MODEL.to_string(),
+                    source: ProviderSource::Factory(Arc::new(move |model| {
+                        build_google_provider_from_config(&config, model)
+                    })),
+                }
             }),
         }
     }
@@ -706,6 +743,33 @@ fn build_google_provider(model: &str) -> moa_core::Result<Arc<dyn LLMProvider>> 
     Ok(Arc::new(GeminiProvider::from_env(model)?))
 }
 
+fn build_anthropic_provider_from_config(
+    config: &MoaConfig,
+    model: &str,
+) -> moa_core::Result<Arc<dyn LLMProvider>> {
+    Ok(Arc::new(AnthropicProvider::from_config_with_model(
+        config, model,
+    )?))
+}
+
+fn build_openai_provider_from_config(
+    config: &MoaConfig,
+    model: &str,
+) -> moa_core::Result<Arc<dyn LLMProvider>> {
+    Ok(Arc::new(OpenAIProvider::from_config_with_model(
+        config, model,
+    )?))
+}
+
+fn build_google_provider_from_config(
+    config: &MoaConfig,
+    model: &str,
+) -> moa_core::Result<Arc<dyn LLMProvider>> {
+    Ok(Arc::new(GeminiProvider::from_config_with_model(
+        config, model,
+    )?))
+}
+
 fn split_explicit_provider(model: &str) -> Option<(ProviderKind, &str)> {
     let (provider, model_id) = model.split_once(':')?;
     let model_id = model_id.trim();
@@ -920,5 +984,63 @@ fn parse_session_id(raw: &str) -> Option<SessionId> {
             tracing::warn!(session_id = raw, error = %error, "ignoring invalid _moa.session_id metadata");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use moa_core::ModelId;
+
+    use super::{ProviderKind, ProviderRegistry};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvRestore {
+        key: &'static str,
+        value: Option<String>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self {
+                key,
+                value: original,
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(value) = &self.value {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn from_config_uses_configured_api_key_env_name() {
+        // Pins: provider registry availability follows MoaConfig provider env-var names.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let _env = EnvRestore::set("MOA_TEST_OPENAI_API_KEY", "test-key");
+        let mut config = moa_core::MoaConfig::default();
+        config.providers.openai.api_key_env = "MOA_TEST_OPENAI_API_KEY".to_string();
+
+        let registry = ProviderRegistry::from_config(&config);
+        let (kind, model) = registry
+            .resolve_provider_kind(Some("openai:gpt-5.4-mini"))
+            .expect("configured custom OpenAI env should enable provider");
+
+        assert_eq!(kind, ProviderKind::OpenAI);
+        assert_eq!(model, ModelId::new("gpt-5.4-mini"));
     }
 }

@@ -161,8 +161,10 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
         stages.push(query_rewriter);
     }
     stages.extend([
-        Box::new(GraphMemoryRetriever::new(graph_pool, retrieval_embedder).with_lineage(lineage))
-            as Box<dyn ContextProcessor>,
+        Box::new(
+            GraphMemoryRetriever::new_with_config(config.clone(), graph_pool, retrieval_embedder)
+                .with_lineage(lineage),
+        ) as Box<dyn ContextProcessor>,
         history,
         Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
         Box::new(Compactor::new(
