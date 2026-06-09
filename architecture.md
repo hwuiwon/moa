@@ -7,7 +7,7 @@ drifts.
 MOA is now aimed at enterprise agent operations, not a personal desktop agent.
 The platform model is multi-tenant, auditable, Restate-backed, and Postgres-first.
 Local mode exists so engineers can develop and operate the same runtime model
-from the CLI, not as a separate consumer product.
+through hosted HTTP APIs, not as a separate consumer product.
 
 ---
 
@@ -15,8 +15,8 @@ from the CLI, not as a separate consumer product.
 
 MOA has four durable boundaries:
 
-1. **Runtime boundary:** clients talk through the public edge or thin clients
-   into the Restate handler service.
+1. **Runtime boundary:** callers talk through the public edge or test-only
+   direct Restate ingress calls into the handler service.
 2. **Brain boundary:** `moa-brain` compiles context, calls model providers, runs
    approval/tool loops, scores task resolution, and emits lineage.
 3. **Execution boundary:** `moa-hands` routes built-in tools, local/Docker
@@ -35,7 +35,7 @@ auditability.
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Client as CLI / REST / Gateway / Adapters
+    actor Client as REST / Gateway / API automation / Adapters
     participant Edge as moa-edge
     participant Auth as moa-auth/providers
     participant Restate as Restate ingress
@@ -159,12 +159,10 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 | `moa-providers` | Provider core and vendor adapters |
 | `moa-orchestrator` | Restate objects, services, workflows, and `moa-orchestrator-bin` |
 | `moa-gateway` | Messaging adapters and platform renderers |
-| `moa-runtime` | Shared runtime assembly |
-| `moa-cli` | `moa` CLI and local daemon |
 | `moa-security` | Vaults, MCP credential proxy, policies, prompt-injection controls |
 | `moa-skills` | Agent Skills parsing, distillation, improvement, and regression generation |
 | `moa-eval` | Evaluation harness |
-| `moa-loadtest` | Load-test harness |
+| `moa-loadtest` | Direct HTTP load-test harness |
 | `workspace-hack` | Generated `cargo-hakari` feature unification crate |
 | `xtask` | Repo-local audit and maintenance commands |
 
@@ -175,7 +173,7 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 ### Local Development And Operator Mode
 
 ```text
-CLI / daemon / moa-edge
+moa-edge / Restate ingress
   -> Restate dev stack
   -> moa-orchestrator-bin
   -> moa-brain
@@ -184,8 +182,8 @@ CLI / daemon / moa-edge
 ```
 
 Local development uses `make dev` for Postgres 17 with AGE, pgvector, pgaudit,
-OpenFGA, Restate, the PII service, and the audit shipper. `~/.moa/config.toml`
-plus `MOA__...` overrides configure the CLI/runtime. This is the fastest way to
+OpenFGA, Restate, the PII service, and the audit shipper. Environment variables
+and service config files configure the hosted runtime. This is the fastest way to
 test the enterprise runtime without a managed cloud control plane.
 
 ### Cloud Runtime
@@ -219,7 +217,7 @@ The Docker image builds `moa-orchestrator-bin` and installs it as
 sequenceDiagram
     autonumber
     actor User
-    participant Client as Gateway / CLI
+    participant Client as Gateway / API caller
     participant Session as Session VO
     participant Store as moa-session / Postgres
     participant Pipeline as Context pipeline

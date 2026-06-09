@@ -26,7 +26,6 @@ sha2.workspace = true
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 subtle.workspace = true
 tokio.workspace = true
-tower-http = { workspace = true, features = ["cors", "request-id", "set-header", "trace"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["json"] }
 uuid = { workspace = true, features = ["v4", "serde"] }

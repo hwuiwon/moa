@@ -14,7 +14,8 @@ use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::support::restate_runtime::{
-    OrchestratorPorts, deployment_endpoint_url, reserve_orchestrator_ports,
+    OrchestratorPorts, deployment_endpoint_url, register_deployment, reserve_orchestrator_ports,
+    restate_admin_url,
 };
 
 mod support;
@@ -89,33 +90,6 @@ impl Drop for LiveIngestionHarness {
     }
 }
 
-async fn register_deployment(admin_url: &str, endpoint_url: &str) -> Result<()> {
-    for _attempt in 0..20 {
-        let output = Command::new("restate")
-            .args([
-                "--connect-timeout",
-                "10000",
-                "--request-timeout",
-                "30000",
-                "deployments",
-                "register",
-                endpoint_url,
-                "--yes",
-            ])
-            .env("RESTATE_ADMIN_URL", admin_url)
-            .output()
-            .context("register deployment with local restate-server")?;
-
-        if output.status.success() {
-            return Ok(());
-        }
-
-        sleep(Duration::from_secs(1)).await;
-    }
-
-    bail!("deployment registration did not succeed before retry budget was exhausted")
-}
-
 fn spawn_orchestrator(
     ports: OrchestratorPorts,
     admin_url: &str,
@@ -158,10 +132,6 @@ fn test_database_url() -> String {
     std::env::var("TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string())
-}
-
-fn restate_admin_url() -> String {
-    std::env::var("RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:10011".to_string())
 }
 
 fn restate_ingress_url() -> String {

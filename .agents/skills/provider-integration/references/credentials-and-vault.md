@@ -40,7 +40,7 @@ MCP servers usually need credentials of their own (a Linear API token, a GitHub 
 
 The pattern:
 
-1. The user adds an MCP server to their workspace via the desktop or CLI; the server config includes a credential schema (named credential keys the server needs).
+1. The user adds an MCP server to their workspace via the desktop or hosted API; the server config includes a credential schema (named credential keys the server needs).
 2. The user supplies values for those keys; values go into `CredentialVault` under `mcp.<server>.<key>`.
 3. At dispatch time, the MCP router fetches the relevant credentials from the vault, injects them into the request to the MCP server (typically as headers), and the server uses them for the upstream call.
 4. Credentials never persist on disk in the MCP server's process; the vault is the source of truth.

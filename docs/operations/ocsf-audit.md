@@ -23,8 +23,12 @@ full allow/deny audit trails.
 Each tenant has one active HMAC-SHA256 signing key. Create or rotate keys with:
 
 ```sh
-moa tenants ensure-signing-key --tenant=<tenant_uuid>
-moa tenants rotate-signing-key --tenant=<tenant_uuid>
+curl -X POST http://localhost:10010/Tenants/ensure_signing_key \
+  -H "Content-Type: application/json" \
+  --data '"<tenant_uuid>"'
+curl -X POST http://localhost:10010/Tenants/rotate_signing_key \
+  -H "Content-Type: application/json" \
+  --data '"<tenant_uuid>"'
 ```
 
 Old key rows stay in `tenant_signing_keys` so historical events remain
@@ -35,12 +39,9 @@ verifiable after rotation.
 Configure the per-tenant S3 destination:
 
 ```sh
-moa tenants set-audit-destination \
-  --tenant=<tenant_uuid> \
-  --bucket=<customer_bucket> \
-  --region=us-east-1 \
-  --assume-role=<role_arn> \
-  --retention-days=2190
+curl -X POST http://localhost:10010/Tenants/set_audit_destination \
+  -H "Content-Type: application/json" \
+  --data '{"tenant_id":"<tenant_uuid>","bucket":"<customer_bucket>","region":"us-east-1","assume_role":"<role_arn>","retention_days":2190}'
 ```
 
 The shipper reads `tenant_audit_destinations`, groups unshipped
@@ -50,7 +51,9 @@ and requests Object Lock COMPLIANCE retention on each object.
 ## Verify An Event
 
 ```sh
-moa audit verify --event=<event_uuid>
+curl -X POST http://localhost:10010/Audit/verify \
+  -H "Content-Type: application/json" \
+  --data '"<event_uuid>"'
 ```
 
 `PASS` means the stored canonical JSON bytes still match `signature_hex` for

@@ -113,14 +113,6 @@ impl BufferedUserMessage {
             pending_signal_id: None,
         }
     }
-
-    /// Creates a buffered message from a persisted pending signal.
-    pub fn from_pending_signal(signal: PendingSignal) -> Result<Self> {
-        Ok(Self {
-            message: signal.user_message()?,
-            pending_signal_id: Some(signal.id),
-        })
-    }
 }
 
 /// Supported pending signal kinds stored durably outside the append-only event log.
@@ -162,13 +154,6 @@ impl PendingSignal {
     pub fn user_message(&self) -> Result<UserMessage> {
         match self.signal_type {
             PendingSignalType::QueueMessage => Ok(serde_json::from_value(self.payload.clone())?),
-        }
-    }
-
-    /// Consumes the signal and decodes the queued user message payload without cloning.
-    pub fn into_user_message(self) -> Result<UserMessage> {
-        match self.signal_type {
-            PendingSignalType::QueueMessage => Ok(serde_json::from_value(self.payload)?),
         }
     }
 }
@@ -223,15 +208,6 @@ pub struct StartSessionRequest {
 pub struct SessionHandle {
     /// Running session identifier.
     pub session_id: SessionId,
-}
-
-/// Snapshot of the active workspace budget state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceBudgetStatus {
-    /// Configured daily workspace budget in cents. `0` means unlimited.
-    pub daily_budget_cents: u32,
-    /// Total spend for the active UTC day in cents.
-    pub daily_spent_cents: u32,
 }
 
 /// Persistent session metadata.
@@ -302,7 +278,7 @@ impl Default for SessionMeta {
             user_id: UserId::new(""),
             title: None,
             status: SessionStatus::Created,
-            platform: Platform::Cli,
+            platform: Platform::Api,
             platform_channel: None,
             model: ModelId::new(""),
             created_at: now,

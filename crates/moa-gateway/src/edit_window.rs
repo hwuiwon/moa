@@ -104,6 +104,6 @@ pub fn is_fallback_edit_error(platform: &Platform, response: &GatewayEditRespons
             body.contains("message_not_found") || body.contains("cant_update_message")
         }
         Platform::Discord => response.status == 404 || body.contains("unknown message"),
-        Platform::Cli => false,
+        Platform::Api => false,
     }
 }

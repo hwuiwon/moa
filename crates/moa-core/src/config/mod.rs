@@ -45,7 +45,6 @@ pub use telemetry::{MetricsConfig, ObservabilityConfig, OtlpProtocol};
 pub use token_vault::{TokenVaultConfig, TokenVaultKind};
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 use crate::error::{MoaError, Result};
 
@@ -112,10 +111,6 @@ pub struct MoaConfig {
 }
 
 impl MoaConfig {
-    fn serialize_config(&self) -> Result<String> {
-        toml::to_string_pretty(self).map_err(|error| MoaError::ConfigError(error.to_string()))
-    }
-
     fn validate(&self) -> Result<()> {
         if self.database.url.trim().is_empty() {
             return Err(MoaError::ConfigError(
@@ -135,11 +130,6 @@ impl MoaConfig {
     }
 }
 
-fn config_parent_dir(path: &Path) -> Option<&Path> {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-}
-
 impl MoaConfig {
     /// Returns the configured model identifier for one routing task.
     #[must_use]
@@ -155,12 +145,6 @@ impl MoaConfig {
                 .as_deref()
                 .unwrap_or(self.models.main.as_str()),
         }
-    }
-
-    /// Sets the configured main-loop provider/model pair.
-    pub fn set_main_model(&mut self, provider: impl Into<String>, model: impl Into<String>) {
-        self.general.default_provider = provider.into();
-        self.models.main = model.into();
     }
 }
 

@@ -257,11 +257,6 @@ impl WorkingContext {
         &self.metadata
     }
 
-    /// Returns mutable auxiliary metadata shared across stages.
-    pub fn metadata_mut(&mut self) -> &mut HashMap<String, Value> {
-        &mut self.metadata
-    }
-
     /// Inserts one auxiliary metadata value for cross-stage coordination.
     pub fn insert_metadata(&mut self, key: impl Into<String>, value: Value) {
         self.metadata.insert(key.into(), value);
@@ -278,19 +273,6 @@ impl WorkingContext {
         self.cache_breakpoints.push(index);
         self.cache_controls
             .push(CacheBreakpoint::message(index, ttl));
-    }
-
-    /// Marks the tool definitions block as a cache breakpoint with an explicit TTL.
-    pub fn mark_tool_cache_breakpoint(&mut self, ttl: CacheTtl) {
-        self.cache_controls.push(CacheBreakpoint::tools(ttl));
-    }
-
-    /// Returns the approximate token count of the last message.
-    pub fn count_last(&self) -> usize {
-        self.messages
-            .last()
-            .map(|message| estimate_text_tokens(&message.content))
-            .unwrap_or(0)
     }
 
     /// Returns the most recent user-authored message text, if one exists.
@@ -414,7 +396,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Cli,
+            platform: Platform::Api,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };

@@ -24,10 +24,12 @@ If replay work grows materially across turns, step 86-style snapshots become hig
 
 2. Start your local telemetry stack if you use one (Jaeger, Tempo, Grafana, or an OpenTelemetry collector).
 
-3. Run a multi-turn local session against a workspace that requires repeated reads and tool use:
+3. Run a multi-turn session against the hosted API, either with a small
+   `reqwest`/curl script against `moa-edge` or an ignored Restate integration
+   test using `OrchestratorTestFixture`:
 
    ```bash
-   cargo run -p moa-cli -- exec "Refactor the auth module and verify it still works"
+   cargo test -p moa-orchestrator --test integration -- --ignored --nocapture --test-threads=1
    ```
 
 4. Capture the per-turn replay summary log lines:

@@ -31,12 +31,10 @@ The root workspace currently contains:
 | `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring |
 | `moa-orchestrator` | Restate services, virtual objects, workflows, `moa-orchestrator-bin` cloud binary |
 | `moa-gateway` | Telegram, Slack, Discord adapters and renderers |
-| `moa-runtime` | Thin runtime facade over `moa-orchestrator-client` |
-| `moa-cli` | Thin-client CLI and orchestrator diagnostics |
 | `moa-security` | Credential vault, policies, MCP proxy, prompt-injection controls |
 | `moa-skills` | Skill parser, registry, distillation, improvement, regression generation |
 | `moa-eval` | Evaluation harness |
-| `moa-loadtest` | Load-test harness |
+| `moa-loadtest` | Direct HTTP load-test harness for hosted orchestrator APIs |
 | `workspace-hack` | Generated `cargo-hakari` feature unification crate |
 | `xtask` | Repo-local audits and maintenance commands |
 
@@ -49,7 +47,7 @@ The root workspace currently contains:
 | IDs and time | `uuid`, `chrono` |
 | Errors | `thiserror` for libraries, `anyhow` for binaries |
 | Logging/observability | `tracing`, `tracing-subscriber`, `opentelemetry`, `tracing-opentelemetry` |
-| CLI | `clap` |
+| Repo binaries | `clap` for repo tools such as load tests and bootstraps |
 | HTTP | `reqwest`, `axum` |
 | Database | `sqlx` with Postgres, migrations, JSON, UUID, chrono |
 | Orchestration | `restate-sdk` |
@@ -98,7 +96,6 @@ cargo build
 cargo test --workspace --no-run
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
-cargo run -p moa-cli -- doctor
 POSTGRES_URL=postgres://... cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
 ```
 
@@ -115,7 +112,7 @@ Config loads from `~/.moa/config.toml` plus `MOA__...` environment overrides. Ke
 | `[resolution]` | automated resolution scoring weights and thresholds |
 | `[skill_budget]` | skill manifest budget controls |
 | `[cloud]` | cloud mode and hand provider settings |
-| `[orchestrator]` | Restate ingress endpoint and optional health URL for thin clients |
+| `[orchestrator]` | Restate ingress endpoint and optional health URL for API tests and automation |
 | `[auth]`, `[authz]`, `[token_vault]`, `[async_authz]`, `[audit_security]` | identity, authorization, token vault, async approvals, and OCSF security-event audit |
 | `[gateway]` | messaging adapter tokens |
 | `[permissions]` | default approval posture |
@@ -132,7 +129,7 @@ Implemented architectural pillars:
 - Query rewriting, segment creation, automated resolution scoring, and skill resolution-rate ranking.
 - Skill distillation/improvement with learning-log emission.
 - Lineage, eval score storage, cold export support, and opt-in compliance audit tables.
-- Thin-client CLI surfaces.
+- Hosted API automation surfaces.
 
 Areas still evolving:
 

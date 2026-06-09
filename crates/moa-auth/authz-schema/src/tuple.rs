@@ -240,7 +240,7 @@ impl fmt::Display for TupleOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SCHEMA_V1_DSL;
+    use crate::SCHEMA_V1_JSON;
 
     #[test]
     fn tuple_wire_format_user_to_workspace() {
@@ -295,26 +295,73 @@ mod tests {
     }
 
     #[test]
-    fn schema_v1_dsl_contains_security_contract_types_and_delegation() {
-        // Pins: the embedded schema includes the Phase 1 auth object set and agent delegation.
-        let expected_terms = [
-            "model\n  schema 1.2",
-            "type user",
-            "type tenant",
-            "type workspace",
-            "type session",
-            "type agent",
-            "type api_key",
-            "type knowledge_base",
-            "type document",
-            "type agent_template",
-            "can_act_as",
-        ];
+    fn schema_v1_json_contains_security_contract_types_and_delegation() {
+        // Pins: the deployed OpenFGA JSON model includes the auth object set and agent delegation.
+        let schema: serde_json::Value =
+            serde_json::from_str(SCHEMA_V1_JSON).expect("schema_v1.json must parse");
+        assert_eq!(schema["schema_version"], "1.2");
 
-        for term in expected_terms {
+        let definitions = schema["type_definitions"]
+            .as_array()
+            .expect("schema_v1.json type_definitions must be an array");
+        let mut types = definitions
+            .iter()
+            .map(|definition| {
+                definition["type"]
+                    .as_str()
+                    .expect("type definition must include a type")
+            })
+            .collect::<Vec<_>>();
+        types.sort_unstable();
+        assert_eq!(
+            types,
+            [
+                "agent",
+                "agent_template",
+                "api_key",
+                "document",
+                "knowledge_base",
+                "session",
+                "tenant",
+                "user",
+                "workspace",
+            ]
+        );
+
+        let agent = definitions
+            .iter()
+            .find(|definition| definition["type"] == "agent")
+            .expect("schema_v1.json must define agent");
+        let agent_relations = agent["relations"]
+            .as_object()
+            .expect("agent relations must be an object");
+        assert!(agent_relations.contains_key("can_act_as"));
+
+        let workspace = definitions
+            .iter()
+            .find(|definition| definition["type"] == "workspace")
+            .expect("schema_v1.json must define workspace");
+        let workspace_relations = workspace["relations"]
+            .as_object()
+            .expect("workspace relations must be an object");
+        for relation in ["tenant", "admin", "editor", "member"] {
             assert!(
-                SCHEMA_V1_DSL.contains(term),
-                "schema_v1.fga must contain `{term}`"
+                workspace_relations.contains_key(relation),
+                "workspace must define relation {relation}"
+            );
+        }
+
+        let session = definitions
+            .iter()
+            .find(|definition| definition["type"] == "session")
+            .expect("schema_v1.json must define session");
+        let session_relations = session["relations"]
+            .as_object()
+            .expect("session relations must be an object");
+        for relation in ["workspace", "owner", "participant"] {
+            assert!(
+                session_relations.contains_key(relation),
+                "session must define relation {relation}"
             );
         }
     }

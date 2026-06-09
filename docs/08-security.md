@@ -8,8 +8,8 @@ _Credential vault, sandbox tiers, prompt injection mitigation, approval policies
 
 | Mode | Posture | Rationale |
 |---|---|---|
-| **Local CLI** | Usable by default | User is physically present, can observe and intervene |
-| **Cloud (messaging)** | Secure by default | Agent runs persistently, user may not be watching |
+| **Local development API** | Usable by default | Engineer is running the same hosted stack in an isolated environment |
+| **Cloud API / messaging** | Secure by default | Agent runs persistently, user may not be watching |
 
 "Usable" means: common read tools auto-approved, write tools require approval, shell commands require approval. Docker sandbox if available, direct execution if not.
 

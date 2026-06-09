@@ -8,8 +8,7 @@ MOA has several front doors over the same session model:
 
 | Surface | Primary crate | Use |
 |---|---|---|
-| CLI | `moa-cli`, `moa-runtime`, `moa-orchestrator-client` | Local automation, diagnostics, one-shot prompts |
-| REST/gateway | `moa-orchestrator`, `moa-gateway` | Cloud and integration entrypoints |
+| REST/API | `moa-edge`, `moa-orchestrator` | Cloud, automation, diagnostics, and integration entrypoints |
 | Messaging adapters | `moa-gateway` | Telegram, Slack, Discord conversations and approvals |
 
 The interfaces differ in rendering and transport. They all eventually create or address a `SessionId`, append user messages, observe session events, and resolve approvals.
@@ -32,8 +31,7 @@ Outbound rendering is platform-specific, but the payload model is shared: text, 
 
 | Surface | Session mapping |
 |---|---|
-| CLI | `moa exec` creates or resumes work through the configured Restate ingress endpoint |
-| REST/gateway | HTTP or gateway request maps to a durable session and calls the cloud orchestrator |
+| REST/API | HTTP request maps to a durable session and calls the cloud orchestrator |
 | Telegram | Reply chains or threads map to sessions |
 | Slack | Slack threads map to sessions |
 | Discord | Direct messages or guild threads map to sessions |
@@ -80,22 +78,13 @@ This avoids losing information when a client disconnects or a gateway process re
 
 Clients choose their own verbosity, but durable events are the source of truth.
 
-## CLI
+## API Automation
 
-The CLI binary is `moa` from package `moa-cli`.
-
-```bash
-cargo run -p moa-cli -- exec "Summarize this repository"
-cargo run -p moa-cli -- sessions
-cargo run -p moa-cli -- memory search "deployment"
-cargo run -p moa-cli -- doctor
-```
-
-The CLI no longer embeds or serves an in-process runtime. `make dev` starts the
-long-running `moa-orchestrator` service with Restate and Postgres; the CLI reads
-`MOA__ORCHESTRATOR__ENDPOINT` or `[orchestrator].endpoint` and calls that
-endpoint over HTTP. `moa status` is the supported endpoint health and session
-status command. The legacy `moa daemon` commands were removed.
+Operator and test automation call `moa-edge` public
+HTTP routes or direct Restate ingress endpoints. `make dev` starts the
+long-running `moa-orchestrator` service with Restate and Postgres, and tests use
+`moa-test-support` fixtures or raw `reqwest` calls to exercise the same API
+surface.
 
 ## Messaging Gateway
 

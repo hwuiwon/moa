@@ -8,8 +8,8 @@ These docs describe the current MOA architecture as implemented in the Rust work
 |---|---|---|
 | 00 | [Direction](00-direction.md) | Product identity, principles, and differentiators |
 | 01 | [Architecture Overview](01-architecture-overview.md) | System diagram, trait map, data flow, workspace layout |
-| 02 | [Brain Orchestration](02-brain-orchestration.md) | Restate session objects, sub-agents, turn loop, thin-client runtime |
-| 03 | [Communication Layer](03-communication-layer.md) | REST/gateway surfaces, CLI, approvals, observation |
+| 02 | [Brain Orchestration](02-brain-orchestration.md) | Restate session objects, sub-agents, turn loop, hosted API runtime |
+| 03 | [Communication Layer](03-communication-layer.md) | REST/gateway surfaces, API automation, approvals, observation |
 | 04 | [Memory Architecture](04-memory-architecture.md) | Graph memory, privacy filtering, sidecar indexes, pgvector semantic retrieval, consolidation |
 | 05 | [Session & Event Log](05-session-event-log.md) | Postgres event schema, task segments, replay, compaction |
 | 06 | [Hands & MCP](06-hands-and-mcp.md) | Hand providers, tool routing, MCP, lazy provisioning |
@@ -40,7 +40,7 @@ before diving into the numbered specs.
 
 | # | Decision | Status |
 |---|---|---|
-| 1 | Rust workspace with explicit crate boundaries around core traits, brain, session storage, memory, hands, providers, orchestration, gateway, security, skills, eval, and CLI. | Implemented |
+| 1 | Rust workspace with explicit crate boundaries around core traits, brain, session storage, memory, hands, providers, orchestration, gateway, security, skills, and eval. | Implemented |
 | 2 | Restate is the durable cloud orchestration engine. Sessions and sub-agents are virtual objects; consolidation is a workflow. | Implemented |
 | 3 | Local development uses the same Restate-backed `moa-orchestrator` binary as cloud deployments, started through the compose stack. | Implemented |
 | 4 | Postgres is the single application database. Neon is the managed/cloud Postgres target and optional checkpoint branch provider. | Implemented |
@@ -53,9 +53,9 @@ before diving into the numbered specs.
 | 11 | Skill ranking uses tenant-level resolution outcomes plus dynamic query relevance. | Implemented |
 | 12 | Learning is recorded in a bitemporal append-only `learning_log` with provenance, confidence, batch IDs, and invalidation via `valid_to`. | Implemented |
 | 13 | Skills are ranked with a mix of keyword relevance, resolution rate, use count, and recency, with prompt-budget controls. | Implemented |
-| 14 | CLI and REST/gateway surfaces are separate product interfaces over the same runtime model. | Implemented |
+| 14 | REST/gateway and API automation surfaces share the same hosted runtime model. | Implemented |
 | 15 | Lineage, scoring, cold export, and compliance audit tiers are first-class enterprise evidence planes, not debugging-only logs. | Implemented |
-| 16 | Local development is a thin-client flow against the Restate-backed orchestrator, not a separate personal-agent product. | Implemented |
+| 16 | Local development exercises the same hosted API surface against the Restate-backed orchestrator, not a separate personal-agent product. | Implemented |
 
 ## Consistency Rules
 

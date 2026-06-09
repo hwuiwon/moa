@@ -45,7 +45,7 @@ impl GatewaySendResponse {
     fn retry_after_for_platform(&self, platform: Platform) -> Duration {
         let retry_after = match platform {
             Platform::Discord => self.header("x-ratelimit-reset-after"),
-            Platform::Telegram | Platform::Slack | Platform::Cli => self.header("retry-after"),
+            Platform::Telegram | Platform::Slack | Platform::Api => self.header("retry-after"),
         };
         retry_after
             .and_then(|value| value.parse::<f64>().ok())
@@ -106,7 +106,7 @@ impl GatewayRateLimiter {
         let per_channel_interval = match platform {
             Platform::Telegram | Platform::Slack => Duration::from_secs(1),
             Platform::Discord => Duration::from_millis(200),
-            Platform::Cli => Duration::ZERO,
+            Platform::Api => Duration::ZERO,
         };
         Self {
             platform,

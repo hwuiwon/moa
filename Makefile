@@ -1,4 +1,4 @@
-.PHONY: dev fga-bootstrap fga-install dev-down dev-wipe dev-logs dev-restate-ui dev-status loadtest-mock loadtest-live
+.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status loadtest-mock loadtest-live
 
 dev:
 ifeq ($(MOA_SKIP_FGA),1)
@@ -19,11 +19,6 @@ fga-bootstrap:
 	 MOA_OPENFGA_PRESHARED_KEY=$${MOA_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod} \
 	 cargo run -q -p moa-fga-bootstrap
 	@echo ">> store/model IDs written to .env.fga"
-
-fga-install:
-	@echo ">> installing fga CLI"
-	go install github.com/openfga/cli/cmd/fga@latest
-	@echo ">> done; ensure \$$GOPATH/bin (or \$$HOME/go/bin) is on PATH"
 
 dev-status:
 	@docker compose ps

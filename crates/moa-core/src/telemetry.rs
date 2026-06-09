@@ -47,7 +47,7 @@ impl Drop for TelemetryGuard {
     }
 }
 
-/// CLI-controlled telemetry settings layered on top of config-driven observability.
+/// API-controlled telemetry settings layered on top of config-driven observability.
 #[derive(Debug, Clone, Default)]
 pub struct TelemetryConfig {
     /// Enables debug-level file logging.
@@ -164,7 +164,7 @@ fn default_env_filter_directive() -> &'static str {
     // async-openai logs deserialization failures for stream event types it
     // does not model yet. moa-providers already handles known-safe unknown
     // events defensively, so surfacing those SDK internals as process-level
-    // errors creates false negatives in real CLI runs.
+    // errors creates false negatives in real API runs.
     "warn,async_openai::error=off"
 }
 

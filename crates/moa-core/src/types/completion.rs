@@ -318,13 +318,6 @@ impl CompletionStream {
         }
     }
 
-    /// Attaches a cooperative cancellation token to the stream.
-    #[must_use = "dropping the returned stream discards cancellation support"]
-    pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
-        self.cancel_token = Some(cancel_token);
-        self
-    }
-
     /// Creates a replayable stream from a fully buffered response.
     pub fn from_response(response: CompletionResponse) -> Self {
         let buffered_blocks = response.content.clone();

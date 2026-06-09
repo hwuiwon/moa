@@ -36,7 +36,7 @@ pub(crate) fn platform_to_db(platform: &Platform) -> &'static str {
         Platform::Telegram => "telegram",
         Platform::Slack => "slack",
         Platform::Discord => "discord",
-        Platform::Cli => "cli",
+        Platform::Api => "api",
     }
 }
 
@@ -46,7 +46,7 @@ pub(crate) fn platform_from_db(value: &str) -> Result<Platform> {
         "telegram" => Ok(Platform::Telegram),
         "slack" => Ok(Platform::Slack),
         "discord" => Ok(Platform::Discord),
-        "cli" => Ok(Platform::Cli),
+        "api" => Ok(Platform::Api),
         _ => Err(MoaError::StorageError(format!(
             "unknown platform value `{value}`"
         ))),

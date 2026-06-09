@@ -26,7 +26,7 @@ tenant:<tenant> tenant agent:<agent>
 user:<operator> operator agent:<agent>
 ```
 
-Delegation uses the OpenFGA object shape from `schema_v1.fga`:
+Delegation uses the OpenFGA object shape from `schema_v1.json`:
 
 ```text
 user:<user> can_act_as agent:<agent>

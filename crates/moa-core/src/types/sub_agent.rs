@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{ModelId, SessionId, TurnOutcome, UserId, WorkspaceId};
+use super::{ModelId, SessionId, UserId, WorkspaceId};
 
 /// Stable sub-agent identifier keyed under the parent session or sub-agent.
 pub type SubAgentId = String;
@@ -178,14 +178,4 @@ pub fn dispatch_sub_agent_tool_schema() -> serde_json::Value {
 /// Default token budget reserved for one dispatched child when the model omits it.
 pub fn default_dispatch_budget_tokens() -> u64 {
     8_192
-}
-
-/// Maps a terminal sub-agent state into the generic turn outcome used by the Session loop.
-pub fn turn_outcome_for_sub_agent_state(state: SubAgentState) -> TurnOutcome {
-    match state {
-        SubAgentState::Running => TurnOutcome::Continue,
-        SubAgentState::WaitingApproval => TurnOutcome::WaitingApproval,
-        SubAgentState::Completed => TurnOutcome::Idle,
-        SubAgentState::Failed | SubAgentState::Cancelled => TurnOutcome::Cancelled,
-    }
 }

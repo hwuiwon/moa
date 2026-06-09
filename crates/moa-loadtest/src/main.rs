@@ -1,4 +1,4 @@
-//! CLI entry point for the MOA load-test harness.
+//! Binary entry point for the MOA load-test harness.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -13,7 +13,7 @@ use moa_loadtest::{
 /// Runs a synthetic MOA workload against a Restate-backed orchestrator.
 #[derive(Debug, Parser)]
 #[command(name = "moa-loadtest", about = "MOA multi-turn workload generator")]
-struct Cli {
+struct Args {
     /// Infrastructure mode. `mock` expects the orchestrator to run with MOA_PROVIDERS_OVERRIDE.
     #[arg(long, value_enum, default_value_t = LoadMode::Mock)]
     mode: LoadMode,
@@ -53,21 +53,21 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let sessions = cli.sessions.unwrap_or(match cli.mode {
+    let args = Args::parse();
+    let sessions = args.sessions.unwrap_or(match args.mode {
         LoadMode::Mock => 100,
         LoadMode::Live => 5,
     });
     let options = LoadTestOptions {
-        mode: cli.mode,
-        endpoint: cli.endpoint,
+        mode: args.mode,
+        endpoint: args.endpoint,
         sessions,
-        profile: cli.profile,
-        inter_message_delay: Duration::from_millis(cli.inter_message_delay_ms),
-        turn_timeout: Duration::from_secs(cli.turn_timeout_seconds),
-        output: cli.output,
-        model: cli.model,
-        config_path: cli.config,
+        profile: args.profile,
+        inter_message_delay: Duration::from_millis(args.inter_message_delay_ms),
+        turn_timeout: Duration::from_secs(args.turn_timeout_seconds),
+        output: args.output,
+        model: args.model,
+        config_path: args.config,
     };
 
     let report = run_loadtest(options.clone()).await?;

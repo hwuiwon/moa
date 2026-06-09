@@ -1,47 +1,19 @@
 //! End-to-end SessionStore coverage through a local Restate ingress.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use moa_core::{Event, EventRange, EventRecord, SessionId};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
-use tokio::time::sleep;
 
 use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
-    grant_workspace_member, reserve_orchestrator_ports, restate_ingress_url, test_user_identity,
-    with_identity,
+    grant_workspace_member, register_deployment, reserve_orchestrator_ports, restate_admin_url,
+    restate_ingress_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
     append_event_request, get_events_request, test_session_meta, user_message_event,
 };
 
 const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
-
-async fn register_deployment(endpoint_url: &str) -> Result<()> {
-    for _attempt in 0..15 {
-        let output = Command::new("restate")
-            .args([
-                "--connect-timeout",
-                "10000",
-                "--request-timeout",
-                "30000",
-                "deployments",
-                "register",
-                endpoint_url,
-                "--yes",
-            ])
-            .output()
-            .context("register deployment with local restate-server")?;
-
-        if output.status.success() {
-            return Ok(());
-        }
-
-        sleep(Duration::from_secs(1)).await;
-    }
-
-    bail!("deployment registration did not succeed before retry budget was exhausted")
-}
 
 fn spawn_orchestrator(ports: OrchestratorPorts) -> Result<Child> {
     let postgres_url = std::env::var("TEST_DATABASE_URL")
@@ -71,7 +43,7 @@ async fn session_store_round_trip_through_restate() -> Result<()> {
     let mut orchestrator = spawn_orchestrator(ports)?;
     let endpoint_url = deployment_endpoint_url(ports.restate);
     let result = async {
-        register_deployment(endpoint_url.as_str()).await?;
+        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
 
         let client = reqwest::Client::new();
         let ingress = restate_ingress_url();

@@ -45,7 +45,7 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
         &SessionMeta {
             workspace_id: WorkspaceId::new("offline-query-rewrite"),
             user_id: UserId::new("offline-query-rewrite-user"),
-            platform: Platform::Cli,
+            platform: Platform::Api,
             model: provider.capabilities().model_id.clone(),
             ..SessionMeta::default()
         },

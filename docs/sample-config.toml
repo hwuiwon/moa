@@ -142,7 +142,8 @@ max_input_tokens_per_turn = 160000
 # accepts unauthenticated edge requests as a fixed service identity.
 
 [auth.local]
-# Local provider has no configuration. API keys are issued via `moa-cli auth keys create`.
+# Local provider has no configuration. API keys are issued through the hosted
+# ApiKeys service or a provisioning script that calls the public API.
 
 # [auth.auth0]
 # Required when provider = "auth0". Loaded only when the `auth0` Cargo feature is enabled.

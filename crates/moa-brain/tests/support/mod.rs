@@ -115,7 +115,7 @@ impl WorkingContextFixture {
             user_id: UserId::new(self.user_id.clone()),
             title: None,
             status: SessionStatus::Created,
-            platform: Platform::Cli,
+            platform: Platform::Api,
             platform_channel: None,
             model: ModelId::new(self.model_id.clone()),
             created_at: self.clock_at,

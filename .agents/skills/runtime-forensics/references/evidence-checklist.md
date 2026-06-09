@@ -43,13 +43,25 @@ If a target name is not present in the current `tests/` directory, list the dire
 
 When a repro yields a session id, collect both the row-level summary and the raw events.
 
-Use the CLI for the fast operational view:
+Use the hosted analytics API for the fast operational view:
 
 ```bash
-cargo run -p moa-cli -- session stats <session-id>
-cargo run -p moa-cli -- tool stats
-cargo run -p moa-cli -- workspace stats --days 30
-cargo run -p moa-cli -- cache stats --days 30
+curl -X POST "$MOA_EDGE_URL/v1/analytics/session-stats" \
+  -H "Authorization: Bearer $MOA_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"session_id":"<session-id>"}'
+curl -X POST "$MOA_EDGE_URL/v1/analytics/tool-stats" \
+  -H "Authorization: Bearer $MOA_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"workspace_id":"<workspace-id>"}'
+curl -X POST "$MOA_EDGE_URL/v1/analytics/workspace-stats" \
+  -H "Authorization: Bearer $MOA_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"workspace_id":"<workspace-id>","days":30}'
+curl -X POST "$MOA_EDGE_URL/v1/analytics/cache-stats" \
+  -H "Authorization: Bearer $MOA_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"workspace_id":"<workspace-id>","days":30}'
 ```
 
 If you need the raw event log, query the store or use the test harness path already used by the failing test. The key question is whether the expected event was persisted at all.

@@ -9,9 +9,6 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
-use std::io::Write;
-use std::process::Stdio;
 
 /// Bootstrap-only OpenFGA HTTP client.
 pub(crate) struct FgaClient {
@@ -89,13 +86,12 @@ impl FgaClient {
             .context("CreateStore response missing id")
     }
 
-    /// Transform DSL to JSON via the `fga` CLI, then write the model.
-    pub(crate) async fn write_authorization_model_from_dsl(
+    /// Write the authorization model JSON and return the generated model ID.
+    pub(crate) async fn write_authorization_model(
         &self,
         store_id: &str,
-        dsl: &str,
+        json_model: &serde_json::Value,
     ) -> Result<String> {
-        let json_model = transform_dsl_to_json(dsl).await?;
         let response = self
             .http
             .post(format!(
@@ -103,7 +99,7 @@ impl FgaClient {
                 self.base, store_id
             ))
             .bearer_auth(&self.token)
-            .json(&json_model)
+            .json(json_model)
             .send()
             .await?;
         let value = response_json_or_error(response, "WriteAuthorizationModel").await?;
@@ -356,43 +352,4 @@ fn batch_allowed_from_bool_map(
         );
     }
     Ok(allowed)
-}
-
-async fn transform_dsl_to_json(dsl: &str) -> Result<serde_json::Value> {
-    let mut temp = tempfile::Builder::new()
-        .prefix("moa-fga-model-")
-        .suffix(".fga")
-        .tempfile()
-        .context("create temporary OpenFGA model file")?;
-    temp.write_all(dsl.as_bytes())
-        .context("write temporary OpenFGA model file")?;
-    let path = temp.path();
-    let path_str = path
-        .to_str()
-        .with_context(|| format!("temporary path is not UTF-8: {}", path.display()))?;
-
-    let output = tokio::process::Command::new(OsStr::new("fga"))
-        .args([
-            "model",
-            "transform",
-            "--file",
-            path_str,
-            "--input-format",
-            "fga",
-            "--output-format",
-            "json",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .context("invoke fga CLI; run `make fga-install` if it is missing")?;
-    if !output.status.success() {
-        bail!(
-            "fga model transform failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    serde_json::from_slice(&output.stdout).context("parse fga model transform output")
 }

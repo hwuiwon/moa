@@ -13,4 +13,6 @@ pub mod transcript;
 
 mod orchestrator_fixture;
 
-pub use orchestrator_fixture::{IsolatedTest, OrchestratorTestFixture, SerializedTest};
+pub use orchestrator_fixture::{
+    IsolatedTest, OrchestratorTestFixture, SerializedTest, TestApiClient, TestSessionHandle,
+};

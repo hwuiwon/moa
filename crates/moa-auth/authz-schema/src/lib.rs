@@ -1,8 +1,8 @@
 //! Authorization schema for MOA.
 //!
 //! This crate is the single source of truth for object types, relations, and
-//! the OpenFGA model DSL. Other crates depend on this for compile-time checked
-//! tuple construction.
+//! the OpenFGA model. Other crates depend on this for compile-time checked tuple
+//! construction.
 //!
 //! Schema versioning is append-only: schema changes write a new model ID, and
 //! old tuples remain valid under the old model. See [`MODEL_VERSION`].
@@ -11,12 +11,11 @@ pub mod tuple;
 
 pub use tuple::{ObjectType, Relation, TupleKey, TupleKeyWire, TupleOp, UserType};
 
-/// The authoritative OpenFGA model DSL for schema v1.
+/// The OpenFGA JSON model written by `moa-fga-bootstrap`.
 ///
-/// This string is what `moa-fga-bootstrap` ships to OpenFGA through
-/// `WriteAuthorizationModel`. It is checked into version control because the
-/// schema is part of the security contract, not deployment configuration.
-pub const SCHEMA_V1_DSL: &str = include_str!("schema_v1.fga");
+/// This is the reviewed deployed artifact. It is checked in because the schema
+/// is part of the security contract, not deployment configuration.
+pub const SCHEMA_V1_JSON: &str = include_str!("schema_v1.json");
 
 /// Logical version of the schema.
 ///

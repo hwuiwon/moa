@@ -6,7 +6,7 @@
 
 MOA runs durable agent sessions on Restate, stores product and audit data in Postgres/Neon with pgvector, segments conversations into discrete tasks, scores task resolution automatically, and feeds those outcomes into tenant-controlled learning. It is built for organizations that need governed agent execution: auditable event logs, isolated tool execution, approval flows, lineage, and rollbackable learning.
 
-Local development uses the same Restate-backed orchestrator that production uses. The CLI is a thin client pointed at a Restate ingress endpoint.
+Local development uses the same Restate-backed orchestrator and HTTP API surface that production uses.
 
 Status: early active development. The architecture is stable enough to document, but APIs and product surfaces still move.
 
@@ -68,30 +68,31 @@ Skip OpenFGA for non-auth work:
 MOA_SKIP_FGA=1 make dev
 ```
 
-Install the `fga` CLI for schema iteration:
-
-```sh
-make fga-install
-```
+The `moa-fga-bootstrap` binary writes the checked-in OpenFGA JSON model through
+the OpenFGA HTTP API; no external conversion tool is required.
 
 OpenFGA Playground: <http://localhost:10032>.
 
 ### API keys
 
-For local development, bootstrap a direct CLI identity once, then create a dev
-API key:
+For local development, bootstrap a local API identity once, then create or seed
+a dev API key through the hosted `ApiKeys` service:
 
 ```sh
-./scripts/bootstrap-cli-identity.sh
-cargo run -p moa-cli -- auth keys create --name local --env dev
-cargo run -p moa-cli -- auth use-key <returned-key>
+./scripts/bootstrap-api-identity.sh
+curl -X POST http://localhost:10010/ApiKeys/create \
+  -H "Content-Type: application/json" \
+  -H "x-moa-identity-type: user" \
+  -H "x-moa-identity-id: 00000000-0000-0000-0000-000000000101" \
+  -H "x-moa-tenant-id: 00000000-0000-0000-0000-000000000201" \
+  --data '{"name":"local","env":"dev","description":null,"for_agent_id":null}'
 ```
 
 Present the returned key to the edge with `Authorization: Bearer <key>`.
-After `auth use-key`, CLI approval commands use the stored key:
+Approvals are resolved through hosted approval endpoints:
 
 ```sh
-cargo run -p moa-cli -- approvals list
+curl -H "Authorization: Bearer <key>" http://localhost:10080/v1/approvals
 ```
 
 To stop everything while preserving data:
@@ -109,14 +110,14 @@ make dev-wipe
 If `localhost:10010` is already in use, override the Restate ingress port in a
 local `compose.override.yml`.
 
-Use the CLI against the local stack:
+Exercise the local stack through HTTP APIs:
 
 ```bash
-MOA__ORCHESTRATOR__ENDPOINT=http://localhost:10010 cargo run -p moa-cli -- exec "What is 2+2?"
+curl -H "Authorization: Bearer <key>" http://localhost:10080/v1/whoami
 ```
 
-For a remote orchestrator, set `MOA__ORCHESTRATOR__ENDPOINT` to that Restate
-ingress URL or configure `[orchestrator].endpoint` in `~/.moa/config.toml`.
+For a remote deployment, call the public `moa-edge` URL with the same bearer
+token model.
 
 Run the deterministic load-test smoke profile against the local stack:
 
@@ -146,11 +147,12 @@ cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --healt
 
 The binary serves these Restate surfaces: virtual objects `Session`, `SubAgent`,
 `Workspace`, `CronJob`, and `IngestionVO`; services `AgentRegistry`,
-`AgentTemplates`, `Agents`, `Approvals`, `ApiKeys`, `Audit`, `Authz`,
-`GraphMemoryMaint`, `Health`, `LLMGateway`, `NeonMaint`, `SessionStore`,
-`Tenants`, `ToolExecutor`, `WorkspaceStore`, and `Whoami`; and workflows
-`Consolidate` and `TurnExecution`. Deployment registration is handled outside
-the binary.
+`AgentTemplates`, `Agents`, `AdminMaintenance`, `Analytics`, `Approvals`,
+`ApiKeys`, `Audit`, `Authz`, `Eval`, `GraphMemoryMaint`, `Health`,
+`LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`,
+`Skills`, `Tenants`, `ToolExecutor`, `WorkspaceStore`, and `Whoami`; and
+workflows `Consolidate`, `EvalRun`, and `TurnExecution`. Deployment
+registration is handled outside the binary.
 
 The Docker image builds `moa-orchestrator-bin` and installs it as `/usr/local/bin/moa-orchestrator`.
 
@@ -166,7 +168,7 @@ DAYTONA_API_KEY=... # optional, depending on hand provider
 ## Architecture
 
 ```text
-REST / Gateway / CLI
+REST / Gateway / API automation
         |
         v
 Restate handler service (`moa-orchestrator-bin`)
@@ -220,12 +222,10 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-providers`](crates/moa-providers/) | LLM and embedding providers |
 | [`moa-orchestrator`](crates/moa-orchestrator/) | Restate services, virtual objects, workflows, and handler binary |
 | [`moa-gateway`](crates/moa-gateway/) | Telegram, Slack, Discord adapters and platform rendering |
-| [`moa-runtime`](crates/moa-runtime/) | Thin runtime facade over the orchestrator HTTP client |
-| [`moa-cli`](crates/moa-cli/) | Thin-client `moa` CLI and orchestrator diagnostics |
 | [`moa-security`](crates/moa-security/) | Credential vault, MCP proxy, policies, prompt-injection controls |
 | [`moa-skills`](crates/moa-skills/) | Agent Skills parsing, distillation, improvement, regression suites |
 | [`moa-eval`](crates/moa-eval/) | Evaluation harness |
-| [`moa-loadtest`](crates/moa-loadtest/) | Load-test harness |
+| [`moa-loadtest`](crates/moa-loadtest/) | Direct HTTP load-test harness for hosted orchestrator APIs |
 | [`workspace-hack`](crates/workspace-hack/) | Generated `cargo-hakari` crate for dependency feature unification |
 | [`xtask`](crates/xtask/) | Repo-local audit and maintenance commands |
 

@@ -407,6 +407,256 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
             body: bytes,
         };
     }
+    if *method == Method::POST {
+        match uri.path() {
+            "/v1/analytics/session-stats" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Analytics/session_stats".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/analytics/workspace-stats" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Analytics/workspace_stats".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/analytics/tool-stats" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Analytics/tool_stats".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/analytics/cache-stats" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Analytics/cache_stats".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/evals/plan" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Eval/plan".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/evals/suites/list" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Eval/suites_list".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/evals/run" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Eval/run".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/evals/run-status" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Eval/run_status".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/evals/datasets/register" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Eval/datasets_register".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/evals/datasets/list" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Eval/datasets_list".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/evals/replay" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Eval/replay".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/evals/scores" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Eval/scores".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/evals/compare" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Eval/compare".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/admin-maintenance/promote-workspace" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/AdminMaintenance/promote_workspace".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/admin-maintenance/rollback-promotion" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/AdminMaintenance/rollback_promotion".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/admin-maintenance/finalize-promotion" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/AdminMaintenance/finalize_promotion".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/admin-maintenance/checkpoints/create" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/AdminMaintenance/checkpoint_create".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/admin-maintenance/checkpoints/list" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/AdminMaintenance/checkpoint_list".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/admin-maintenance/checkpoints/rollback" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/AdminMaintenance/checkpoint_rollback".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/admin-maintenance/checkpoints/cleanup" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/AdminMaintenance/checkpoint_cleanup".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/memory/search" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Memory/search".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/memory/show" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Memory/show".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/memory/ingest-documents" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Memory/ingest_documents".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/memory/retrieve-debug" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Memory/retrieve_debug".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/lineage/explain" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/LineageAdmin/explain".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/lineage/query" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/LineageAdmin/query".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/lineage/export" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/LineageAdmin/export".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/lineage/verify" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/LineageAdmin/verify".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/lineage/erase" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/LineageAdmin/erase".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/privacy/export" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Privacy/export".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/privacy/erase" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Privacy/erase".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/skills/export" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Skills/export".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/skills/import" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Skills/import".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/skills/list" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Skills/list".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/skills/bootstrap-global" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Skills/bootstrap_global".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            _ => {}
+        }
+    }
     if *method == Method::POST && uri.path() == "/v1/agent-templates" {
         return RouteTranslation::Forward {
             method: Method::POST,
@@ -599,5 +849,475 @@ mod tests {
             credential_for_request(&DisabledAuth, &headers),
             Some(Credential::ApiKey("moa_dev_example".to_string()))
         );
+    }
+
+    #[test]
+    fn whoami_public_route_translates_to_restate_handler() {
+        // Pins: hosted identity inspection stays available through the public edge API.
+        let uri = "/v1/whoami"
+            .parse::<Uri>()
+            .expect("route path should parse");
+
+        let translation = translate_public_route(&Method::GET, &uri, &Bytes::new());
+
+        match translation {
+            RouteTranslation::Forward { method, path, body } => {
+                assert_eq!(method, Method::POST);
+                assert_eq!(path, "/Whoami/whoami");
+                assert!(
+                    body.is_empty(),
+                    "whoami should not synthesize a request body"
+                );
+            }
+            RouteTranslation::NoChange => panic!("whoami should translate to Whoami service"),
+            RouteTranslation::BadRequest(message) => {
+                panic!("whoami should not fail translation: {message}")
+            }
+        }
+    }
+
+    #[test]
+    fn approval_public_routes_translate_to_restate_handlers() {
+        // Pins: builtin approval list and decision actions stay available through public edge APIs.
+        let list_uri = "/v1/approvals"
+            .parse::<Uri>()
+            .expect("route path should parse");
+        let list_translation = translate_public_route(&Method::GET, &list_uri, &Bytes::new());
+        match list_translation {
+            RouteTranslation::Forward { method, path, body } => {
+                assert_eq!(method, Method::POST);
+                assert_eq!(path, "/Approvals/list_mine");
+                assert!(
+                    body.is_empty(),
+                    "approval list should not synthesize a request body"
+                );
+            }
+            RouteTranslation::NoChange => {
+                panic!("approval list should translate to Approvals service")
+            }
+            RouteTranslation::BadRequest(message) => {
+                panic!("approval list should not fail translation: {message}")
+            }
+        }
+
+        let decision_uri = "/v1/approvals/11111111-1111-1111-1111-111111111111/decision"
+            .parse::<Uri>()
+            .expect("route path should parse");
+        let decision_body = Bytes::from_static(br#"{"outcome":"approved","reason":null}"#);
+        let decision_translation =
+            translate_public_route(&Method::POST, &decision_uri, &decision_body);
+        match decision_translation {
+            RouteTranslation::Forward { method, path, body } => {
+                assert_eq!(method, Method::POST);
+                assert_eq!(path, "/Approvals/decide");
+                let forwarded: serde_json::Value =
+                    serde_json::from_slice(&body).expect("decision body should be valid JSON");
+                assert_eq!(
+                    forwarded,
+                    serde_json::json!({
+                        "id": "11111111-1111-1111-1111-111111111111",
+                        "outcome": "approved",
+                        "reason": null
+                    })
+                );
+            }
+            RouteTranslation::NoChange => {
+                panic!("approval decision should translate to Approvals service")
+            }
+            RouteTranslation::BadRequest(message) => {
+                panic!("approval decision should not fail translation: {message}")
+            }
+        }
+    }
+
+    #[test]
+    fn analytics_public_routes_translate_to_restate_handlers() {
+        // Pins: hosted analytics edge routes forward to the internal Analytics service paths.
+        let cases = [
+            (
+                "/v1/analytics/session-stats",
+                "/Analytics/session_stats",
+                r#"{"session_id":"11111111-1111-1111-1111-111111111111"}"#,
+            ),
+            (
+                "/v1/analytics/workspace-stats",
+                "/Analytics/workspace_stats",
+                r#"{"workspace_id":"workspace-a","days":14}"#,
+            ),
+            (
+                "/v1/analytics/tool-stats",
+                "/Analytics/tool_stats",
+                r#"{"workspace_id":"workspace-a"}"#,
+            ),
+            (
+                "/v1/analytics/cache-stats",
+                "/Analytics/cache_stats",
+                r#"{"workspace_id":"workspace-a","days":7}"#,
+            ),
+        ];
+
+        for (public_path, internal_path, json_body) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let body = Bytes::from(json_body.as_bytes().to_vec());
+
+            let translation = translate_public_route(&Method::POST, &uri, &body);
+
+            match translation {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    assert_eq!(
+                        forwarded_body,
+                        json_body.as_bytes(),
+                        "{public_path} body should pass through unchanged"
+                    );
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{public_path} should translate to {internal_path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn eval_public_routes_translate_to_restate_handlers() {
+        // Pins: hosted eval edge routes forward to the internal Eval service paths.
+        let cases = [
+            (
+                "/v1/evals/plan",
+                "/Eval/plan",
+                r#"{"workspace_id":"workspace-a","suite_document":"[suite]\nname=\"s\"","config_documents":[]}"#,
+            ),
+            (
+                "/v1/evals/suites/list",
+                "/Eval/suites_list",
+                r#"{"workspace_id":"workspace-a","documents":[{"source":"suite.toml","body":"[suite]\nname=\"s\""}]}"#,
+            ),
+            (
+                "/v1/evals/run",
+                "/Eval/run",
+                r#"{"workspace_id":"workspace-a","suite_document":"[suite]\nname=\"s\"","config_documents":[]}"#,
+            ),
+            (
+                "/v1/evals/run-status",
+                "/Eval/run_status",
+                r#"{"workspace_id":"workspace-a","run_id":"11111111-1111-1111-1111-111111111111"}"#,
+            ),
+            (
+                "/v1/evals/datasets/register",
+                "/Eval/datasets_register",
+                r#"{"workspace_id":"workspace-a","name":"golden","jsonl":"{}"}"#,
+            ),
+            (
+                "/v1/evals/datasets/list",
+                "/Eval/datasets_list",
+                r#"{"workspace_id":"workspace-a"}"#,
+            ),
+            (
+                "/v1/evals/replay",
+                "/Eval/replay",
+                r#"{"workspace_id":"workspace-a","dataset_id":"22222222-2222-2222-2222-222222222222"}"#,
+            ),
+            (
+                "/v1/evals/scores",
+                "/Eval/scores",
+                r#"{"workspace_id":"workspace-a","run_id":"33333333-3333-3333-3333-333333333333"}"#,
+            ),
+            (
+                "/v1/evals/compare",
+                "/Eval/compare",
+                r#"{"workspace_id":"workspace-a","base_run":"33333333-3333-3333-3333-333333333333","new_run":"44444444-4444-4444-4444-444444444444"}"#,
+            ),
+        ];
+
+        for (public_path, internal_path, json_body) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let body = Bytes::from(json_body.as_bytes().to_vec());
+
+            let translation = translate_public_route(&Method::POST, &uri, &body);
+
+            match translation {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    assert_eq!(
+                        forwarded_body,
+                        json_body.as_bytes(),
+                        "{public_path} body should pass through unchanged"
+                    );
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{public_path} should translate to {internal_path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn admin_maintenance_public_routes_translate_to_restate_handlers() {
+        // Pins: hosted admin-maintenance routes forward to the internal AdminMaintenance service paths.
+        let cases = [
+            (
+                "/v1/admin-maintenance/promote-workspace",
+                "/AdminMaintenance/promote_workspace",
+                r#"{"workspace_id":"workspace-a","target_backend":"turbopuffer","validate_percent":5,"dual_read_hours":24}"#,
+            ),
+            (
+                "/v1/admin-maintenance/rollback-promotion",
+                "/AdminMaintenance/rollback_promotion",
+                r#"{"workspace_id":"workspace-a","action":"rollback"}"#,
+            ),
+            (
+                "/v1/admin-maintenance/finalize-promotion",
+                "/AdminMaintenance/finalize_promotion",
+                r#"{"workspace_id":"workspace-a","action":"finalize"}"#,
+            ),
+            (
+                "/v1/admin-maintenance/checkpoints/create",
+                "/AdminMaintenance/checkpoint_create",
+                r#"{"label":"before-deploy","session_id":null}"#,
+            ),
+            (
+                "/v1/admin-maintenance/checkpoints/list",
+                "/AdminMaintenance/checkpoint_list",
+                r#"{}"#,
+            ),
+            (
+                "/v1/admin-maintenance/checkpoints/rollback",
+                "/AdminMaintenance/checkpoint_rollback",
+                r#"{"id":"br-checkpoint"}"#,
+            ),
+            (
+                "/v1/admin-maintenance/checkpoints/cleanup",
+                "/AdminMaintenance/checkpoint_cleanup",
+                r#"{}"#,
+            ),
+        ];
+
+        for (public_path, internal_path, json_body) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let body = Bytes::from(json_body.as_bytes().to_vec());
+
+            let translation = translate_public_route(&Method::POST, &uri, &body);
+
+            match translation {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    assert_eq!(
+                        forwarded_body,
+                        json_body.as_bytes(),
+                        "{public_path} body should pass through unchanged"
+                    );
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{public_path} should translate to {internal_path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn memory_public_routes_translate_to_restate_handlers() {
+        // Pins: hosted memory edge routes forward to the internal Memory service paths.
+        let cases = [
+            (
+                "/v1/memory/search",
+                "/Memory/search",
+                r#"{"workspace_id":"workspace-a","query":"auth","limit":10}"#,
+            ),
+            (
+                "/v1/memory/show",
+                "/Memory/show",
+                r#"{"workspace_id":"workspace-a","uid":"22222222-2222-2222-2222-222222222222"}"#,
+            ),
+            (
+                "/v1/memory/ingest-documents",
+                "/Memory/ingest_documents",
+                r#"{"workspace_id":"workspace-a","documents":[{"source_name":"Auth","content":"Fact: auth uses JWT"}]}"#,
+            ),
+            (
+                "/v1/memory/retrieve-debug",
+                "/Memory/retrieve_debug",
+                r#"{"workspace_id":"workspace-a","query":"auth","limit":5,"no_flush_wait":true}"#,
+            ),
+        ];
+
+        for (public_path, internal_path, json_body) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let body = Bytes::from(json_body.as_bytes().to_vec());
+
+            let translation = translate_public_route(&Method::POST, &uri, &body);
+
+            match translation {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    assert_eq!(
+                        forwarded_body,
+                        json_body.as_bytes(),
+                        "{public_path} body should pass through unchanged"
+                    );
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{public_path} should translate to {internal_path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lineage_and_privacy_public_routes_translate_to_restate_handlers() {
+        // Pins: hosted lineage/privacy edge routes forward to internal Restate service paths.
+        let cases = [
+            (
+                "/v1/lineage/explain",
+                "/LineageAdmin/explain",
+                r#"{"workspace_id":"workspace-a","id":"11111111-1111-1111-1111-111111111111"}"#,
+            ),
+            (
+                "/v1/lineage/query",
+                "/LineageAdmin/query",
+                r#"{"workspace_id":"workspace-a","sql":"SELECT count(*) FROM lineage","since":"24 hours"}"#,
+            ),
+            (
+                "/v1/lineage/export",
+                "/LineageAdmin/export",
+                r#"{"workspace_id":"workspace-a","subject":"subject-a"}"#,
+            ),
+            (
+                "/v1/lineage/verify",
+                "/LineageAdmin/verify",
+                r#"{"workspace_id":"workspace-a","window":"hot","since":"24 hours"}"#,
+            ),
+            (
+                "/v1/lineage/erase",
+                "/LineageAdmin/erase",
+                r#"{"workspace_id":"workspace-a","subject":"00ff"}"#,
+            ),
+            (
+                "/v1/privacy/export",
+                "/Privacy/export",
+                r#"{"workspace_id":"workspace-a","subject_user_id":"22222222-2222-2222-2222-222222222222","reason":"GDPR","approval_token":"token"}"#,
+            ),
+            (
+                "/v1/privacy/erase",
+                "/Privacy/erase",
+                r#"{"workspace_id":"workspace-a","subject_user_id":"22222222-2222-2222-2222-222222222222","reason":"GDPR","approval_token":"token"}"#,
+            ),
+        ];
+
+        for (public_path, internal_path, json_body) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let body = Bytes::from(json_body.as_bytes().to_vec());
+
+            let translation = translate_public_route(&Method::POST, &uri, &body);
+
+            match translation {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    assert_eq!(
+                        forwarded_body,
+                        json_body.as_bytes(),
+                        "{public_path} body should pass through unchanged"
+                    );
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{public_path} should translate to {internal_path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn skills_public_routes_translate_to_restate_handlers() {
+        // Pins: hosted skills edge routes forward to the internal Skills service paths.
+        let cases = [
+            (
+                "/v1/skills/export",
+                "/Skills/export",
+                r#"{"workspace_id":"workspace-a"}"#,
+            ),
+            (
+                "/v1/skills/import",
+                "/Skills/import",
+                r#"{"workspace_id":"workspace-a","scope":{"kind":"workspace","workspace_id":"workspace-a"},"documents":[]}"#,
+            ),
+            (
+                "/v1/skills/list",
+                "/Skills/list",
+                r#"{"workspace_id":"workspace-a"}"#,
+            ),
+            (
+                "/v1/skills/bootstrap-global",
+                "/Skills/bootstrap_global",
+                r#"{"documents":[]}"#,
+            ),
+        ];
+
+        for (public_path, internal_path, json_body) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let body = Bytes::from(json_body.as_bytes().to_vec());
+
+            let translation = translate_public_route(&Method::POST, &uri, &body);
+
+            match translation {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    assert_eq!(
+                        forwarded_body,
+                        json_body.as_bytes(),
+                        "{public_path} body should pass through unchanged"
+                    );
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{public_path} should translate to {internal_path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
     }
 }
