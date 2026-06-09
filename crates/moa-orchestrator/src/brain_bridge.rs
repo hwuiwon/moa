@@ -8,15 +8,26 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
 };
 use moa_core::{
-    CompletionRequest, CountedSessionStore, EventRange, Result, SessionId, SessionStore,
-    WorkingContext, record_pipeline_compile_duration, record_turn_pipeline_compile_duration,
-    session_engine::session_requires_processing,
+    CompletionRequest, CountedSessionStore, EventRange, QueryRewriteResult, Result, SessionId,
+    SessionStore, WorkingContext, record_pipeline_compile_duration,
+    record_turn_pipeline_compile_duration, session_engine::session_requires_processing,
 };
+use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
 use crate::OrchestratorCtx;
 
 const TURN_EVENT_TAIL_LIMIT: usize = 16;
+const QUERY_REWRITE_METADATA_KEY: &str = "query_rewrite";
+
+/// Query-rewrite metadata cached for repeated compiles of one user message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct QueryRewriteCacheEntry {
+    /// Sequence number of the user message this rewrite belongs to.
+    pub user_sequence_num: u64,
+    /// Query-rewrite result to reuse for later compile steps.
+    pub result: QueryRewriteResult,
+}
 
 /// Prepared turn request outcome returned by the Restate-side bridge.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -27,8 +38,21 @@ pub(crate) enum PreparedTurnRequest {
     Request(Box<CompletionRequest>),
 }
 
+/// Prepared turn request plus reusable preparation metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PreparedTurnRequestOutput {
+    /// Request compilation outcome.
+    pub prepared: PreparedTurnRequest,
+    /// Query rewrite cache entry observed during compilation.
+    pub query_rewrite_cache: Option<QueryRewriteCacheEntry>,
+}
+
 /// Compiles the next LLM request for a session from durable state.
-pub(crate) async fn prepare_turn_request(session_id: SessionId) -> Result<PreparedTurnRequest> {
+pub(crate) async fn prepare_turn_request(
+    session_id: SessionId,
+    active_user_sequence_num: Option<u64>,
+    cached_query_rewrite: Option<QueryRewriteCacheEntry>,
+) -> Result<PreparedTurnRequestOutput> {
     let ctx = OrchestratorCtx::current();
     let session_store = ctx.session_store.clone();
     let counted_session_store: Arc<dyn SessionStore> =
@@ -38,7 +62,10 @@ pub(crate) async fn prepare_turn_request(session_id: SessionId) -> Result<Prepar
         .get_events(session_id, EventRange::recent(TURN_EVENT_TAIL_LIMIT))
         .await?;
     if !session_requires_processing(&session, &recent_events) {
-        return Ok(PreparedTurnRequest::Idle);
+        return Ok(PreparedTurnRequestOutput {
+            prepared: PreparedTurnRequest::Idle,
+            query_rewrite_cache: None,
+        });
     }
 
     let capabilities = ctx
@@ -70,6 +97,14 @@ pub(crate) async fn prepare_turn_request(session_id: SessionId) -> Result<Prepar
         },
     );
     let mut context = WorkingContext::new(&session, capabilities);
+    if let Some(cache) = cached_query_rewrite
+        .filter(|cache| Some(cache.user_sequence_num) == active_user_sequence_num)
+    {
+        context.insert_metadata(
+            QUERY_REWRITE_METADATA_KEY,
+            serde_json::to_value(cache.result)?,
+        );
+    }
     let pipeline_span = tracing::info_span!("pipeline_compile");
     let compile_started = Instant::now();
     pipeline.run(&mut context).instrument(pipeline_span).await?;
@@ -87,7 +122,24 @@ pub(crate) async fn prepare_turn_request(session_id: SessionId) -> Result<Prepar
     );
     context.insert_metadata("_moa.model", serde_json::json!(session.model.as_str()));
 
-    Ok(PreparedTurnRequest::Request(Box::new(
-        context.into_request(),
-    )))
+    let query_rewrite_cache = query_rewrite_cache_from_context(active_user_sequence_num, &context);
+    Ok(PreparedTurnRequestOutput {
+        prepared: PreparedTurnRequest::Request(Box::new(context.into_request())),
+        query_rewrite_cache,
+    })
+}
+
+fn query_rewrite_cache_from_context(
+    active_user_sequence_num: Option<u64>,
+    context: &WorkingContext,
+) -> Option<QueryRewriteCacheEntry> {
+    let user_sequence_num = active_user_sequence_num?;
+    let result = context
+        .metadata()
+        .get(QUERY_REWRITE_METADATA_KEY)
+        .and_then(|value| serde_json::from_value::<QueryRewriteResult>(value.clone()).ok())?;
+    Some(QueryRewriteCacheEntry {
+        user_sequence_num,
+        result,
+    })
 }

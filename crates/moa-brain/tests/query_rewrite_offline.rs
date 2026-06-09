@@ -107,7 +107,7 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
     assert_eq!(
         result.memory_action,
         MemoryAction::Retrieve,
-        "query rewrite should preserve memory router action"
+        "query rewrite should preserve the memory action hint"
     );
     assert_eq!(
         result.tool_bias,
@@ -130,12 +130,20 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
         .as_str()
         .expect("query rewrite request should include prompt text");
     assert!(
-        prompt.contains("observe-first mode router"),
-        "query rewrite prompt should describe observe-first routing"
+        prompt.contains("Produce retrieval and segment-boundary metadata only"),
+        "query rewrite prompt should avoid final action routing"
+    );
+    assert!(
+        prompt.contains("main agent model chooses tools and actions"),
+        "query rewrite prompt should leave action choice to the main agent"
+    );
+    assert!(
+        !prompt.contains("mode router"),
+        "query rewrite prompt should not describe itself as a mode router"
     );
     assert!(
         prompt.contains("freshness_required"),
-        "query rewrite prompt should request freshness routing"
+        "query rewrite prompt should request freshness metadata"
     );
     let schema = &bodies[0]["text"]["format"]["schema"];
     assert_eq!(

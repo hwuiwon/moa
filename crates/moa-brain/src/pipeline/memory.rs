@@ -395,7 +395,7 @@ fn turn_id_from_context(ctx: &WorkingContext) -> Option<TurnId> {
 fn query_expansions_from_context(ctx: &WorkingContext) -> Vec<String> {
     ctx.metadata()
         .get("query_rewrite")
-        .and_then(query_from_rewrite_metadata)
+        .and_then(rewritten_query_from_rewrite_metadata)
         .into_iter()
         .collect()
 }
@@ -445,6 +445,12 @@ fn extract_search_query(ctx: &WorkingContext) -> Option<String> {
 
 fn query_from_rewrite_metadata(value: &serde_json::Value) -> Option<String> {
     let result = serde_json::from_value::<QueryRewriteResult>(value.clone()).ok()?;
+    let query = result.rewritten_query.trim();
+    (!query.is_empty()).then(|| query.to_string())
+}
+
+fn rewritten_query_from_rewrite_metadata(value: &serde_json::Value) -> Option<String> {
+    let result = serde_json::from_value::<QueryRewriteResult>(value.clone()).ok()?;
     if result.source != RewriteSource::Rewritten {
         return None;
     }
@@ -460,12 +466,8 @@ fn extract_search_query_from_messages(messages: &[ContextMessage]) -> Option<Str
             moa_core::MessageRole::User => Some(message.content.as_str()),
             _ => None,
         })?;
-    let keywords = extract_search_keywords(text);
-    if keywords.is_empty() {
-        None
-    } else {
-        Some(keywords.join(" "))
-    }
+    let query = text.trim();
+    (!query.is_empty()).then(|| query.to_string())
 }
 
 pub(crate) fn extract_search_keywords(text: &str) -> Vec<String> {
@@ -510,7 +512,12 @@ fn truncate_excerpt(excerpt: &str, max_tokens: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_search_keywords;
+    use moa_core::{
+        ModelCapabilities, ModelId, Platform, QueryRewriteResult, SessionId, SessionMeta,
+        TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
+    };
+
+    use super::{extract_search_keywords, extract_search_query};
 
     #[test]
     fn keyword_extraction_filters_stopwords_and_duplicates() {
@@ -528,5 +535,54 @@ mod tests {
         let keywords = extract_search_keywords("What is news_article_001 about?");
 
         assert_eq!(keywords, vec!["news_article_001"]);
+    }
+
+    #[test]
+    fn passthrough_rewrite_metadata_uses_full_query_for_retrieval() {
+        // Pins: fail-open rewrites preserve the full semantic query instead of keyword-only fallback.
+        let mut ctx = WorkingContext::new(
+            &SessionMeta {
+                id: SessionId::new(),
+                workspace_id: WorkspaceId::new("workspace"),
+                user_id: UserId::new("user"),
+                platform: Platform::Api,
+                model: ModelId::new("mock"),
+                ..SessionMeta::default()
+            },
+            capabilities(),
+        );
+        ctx.insert_metadata(
+            "query_rewrite",
+            serde_json::to_value(QueryRewriteResult::passthrough(
+                "Please explain the OAuth refresh token race condition bug",
+            ))
+            .expect("rewrite result should serialize"),
+        );
+
+        assert_eq!(
+            extract_search_query(&ctx),
+            Some("Please explain the OAuth refresh token race condition bug".to_string())
+        );
+    }
+
+    fn capabilities() -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: ModelId::new("mock"),
+            context_window: 32_000,
+            max_output: 1_024,
+            supports_tools: true,
+            supports_vision: false,
+            supports_prefix_caching: false,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::OpenAiCompatible,
+            pricing: TokenPricing {
+                input_per_mtok: 1.0,
+                output_per_mtok: 1.0,
+                cached_input_per_mtok: None,
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
+            },
+            native_tools: Vec::new(),
+        }
     }
 }

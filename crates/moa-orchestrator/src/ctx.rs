@@ -34,7 +34,7 @@ pub struct OrchestratorCtx {
     pub auth_providers: moa_auth_providers::Providers,
     /// Registry of configured LLM providers.
     pub providers: Arc<ProviderRegistry>,
-    /// Optional embedding provider shared by intent classification.
+    /// Optional embedding provider shared by embedding-dependent runtime helpers.
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     /// Tool router used by Restate services.
     pub tool_router: Arc<ToolRouter>,

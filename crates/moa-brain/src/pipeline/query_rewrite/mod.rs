@@ -67,6 +67,17 @@ impl ContextProcessor for QueryRewriter {
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+        if let Some(result) = cached_rewrite_result(ctx) {
+            let metadata = HashMap::from([
+                ("rewrite_source".to_string(), json!("cached")),
+                ("task_kind".to_string(), json!(result.task_kind)),
+            ]);
+            return Ok(ProcessorOutput {
+                metadata,
+                ..ProcessorOutput::default()
+            });
+        }
+
         let input = match self.load_input(ctx).await {
             Ok(Some(input)) => input,
             Ok(None) => RewriteInput::empty(),
@@ -122,6 +133,12 @@ impl ContextProcessor for QueryRewriter {
     }
 }
 
+fn cached_rewrite_result(ctx: &WorkingContext) -> Option<QueryRewriteResult> {
+    ctx.metadata()
+        .get(METADATA_KEY)
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -131,9 +148,9 @@ mod tests {
     use async_trait::async_trait;
     use moa_core::{
         CompletionRequest, CompletionResponse, CompletionStream, ContextMessage, ContextProcessor,
-        LLMProvider, ModelCapabilities, ModelId, Platform, QueryRewriteConfig, QueryRewriteResult,
-        Result, RewriteSource, SessionId, SessionMeta, StopReason, TokenPricing, TokenUsage,
-        ToolCallFormat, UserId, WorkingContext, WorkspaceId,
+        LLMProvider, MemoryAction, ModelCapabilities, ModelId, Platform, QueryRewriteConfig,
+        QueryRewriteResult, Result, RewriteSource, SessionId, SessionMeta, StopReason, TaskKind,
+        TokenPricing, TokenUsage, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
     };
     use serde_json::json;
 
@@ -297,6 +314,51 @@ mod tests {
             "Fix the OAuth refresh token race condition in auth/refresh.rs"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cached_rewrite_metadata_skips_provider_call() {
+        // Pins: repeated compile steps reuse the turn's rewrite metadata instead of calling the rewrite LLM again.
+        let (rewriter, calls) =
+            rewriter_with_response(response_json("provider response", Vec::new()));
+        let mut ctx = context_with_messages(vec![
+            ContextMessage::user("The OAuth refresh token race condition is in auth/refresh.rs"),
+            ContextMessage::assistant("I found it."),
+            ContextMessage::user("fix that"),
+        ]);
+        let cached = QueryRewriteResult {
+            rewritten_query: "Fix the OAuth refresh token race condition in auth/refresh.rs"
+                .to_string(),
+            task_kind: TaskKind::Coding,
+            sub_queries: Vec::new(),
+            suggested_tools: Vec::new(),
+            freshness_required: false,
+            repo_context_required: false,
+            memory_action: MemoryAction::Retrieve,
+            needs_clarification: false,
+            clarification_question: None,
+            is_new_task: false,
+            task_summary: None,
+            tool_bias: Vec::new(),
+            suggested_promptlets: Vec::new(),
+            source: RewriteSource::Rewritten,
+        };
+        ctx.insert_metadata(
+            METADATA_KEY,
+            serde_json::to_value(cached.clone()).expect("cached rewrite should serialize"),
+        );
+
+        let output = rewriter
+            .process(&mut ctx)
+            .await
+            .expect("cached query rewrite should process");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            output.metadata.get("rewrite_source"),
+            Some(&json!("cached"))
+        );
+        assert_eq!(metadata_result(&ctx), cached);
     }
 
     #[tokio::test]

@@ -25,14 +25,14 @@ pub(super) fn build_rewriter_prompt(input: &RewriteInput, ctx: &WorkingContext) 
          - A new task means the user is asking about something unrelated to the current work\n\
          - Set is_new_task=true only when the topic genuinely shifts, not for follow-up questions\n\
          - Treat coreferences like \"that file\", \"the error above\", and \"try again\" as continuations\n\
-         - Also act as an observe-first mode router for downstream promptlets and tool hints\n\
+         - Produce retrieval and segment-boundary metadata only; do not decide the agent's final actions\n\
          - Set freshness_required=true when answering requires current, external, or time-sensitive information\n\
          - Set repo_context_required=true when the agent should inspect repository files, code, config, logs, or tests before answering\n\
          - Set memory_action to one of: none, retrieve, remember, forget, supersede, ingest\n\
          - Use memory_action=retrieve when existing workspace or user memory is likely needed before answering\n\
-         - Use needs_clarification as the clarification router flag; ask exactly one clarification_question when needed\n\
-         - Put concrete available tool names in suggested_tools; put higher-level routing hints in tool_bias\n\
-         - Put concise promptlet or skill names in suggested_promptlets when a known promptlet would help\n\
+         - Use needs_clarification only when the query cannot be interpreted even with history\n\
+         - Treat suggested_tools, tool_bias, and suggested_promptlets as best-effort advisory hints, not routing decisions\n\
+         - Prefer empty hint arrays when uncertain; the main agent model chooses tools and actions from context\n\
          - Respond ONLY with valid JSON matching the schema below. No preamble.\n\n\
          Schema: {{\"rewritten_query\": string, \"task_kind\": string, \"sub_queries\": [string],\n\
          \"suggested_tools\": [string], \"freshness_required\": bool,\n\
