@@ -4,20 +4,18 @@ Agents are first-class MOA principals. They have FGA subject identity
 (`agent:<uuid>`) and can receive permissions independently from the user who
 operates them.
 
-## Templates and instances
+## Agents and specialization
 
-An agent template is a reusable definition: name, description, instructions,
-and allowed tool names. An agent is an instance of a template with its own UUID,
-operator, API keys, and delegation grants.
+An agent is a first-class principal with its own UUID, operator, API keys, and
+delegation grants. It is not instantiated from a template. Task specialization
+comes from the compiled context, ranked Agent Skills, tool schemas, memory, and
+bounded sub-agents.
+
+There is no durable agent-template taxonomy for routing. Runtime routing and
+task specialization are handled by skills, context, tools, memory, and bounded
+sub-agents.
 
 ## Permission tuples
-
-Template creation writes:
-
-```text
-tenant:<tenant> tenant agent_template:<template>
-user:<creator> creator agent_template:<template>
-```
 
 Agent registration writes:
 

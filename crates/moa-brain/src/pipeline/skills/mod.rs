@@ -193,7 +193,11 @@ mod tests {
         assert_eq!(ctx.cache_breakpoints, vec![1]);
         assert!(ctx.messages[0].content.contains("<available_skills>"));
         assert!(ctx.messages[0].content.contains("debug-oauth"));
-        assert!(ctx.messages[0].content.contains("follow the listed skill"));
+        assert!(
+            ctx.messages[0]
+                .content
+                .contains("Activate a skill only when")
+        );
         assert!(!ctx.messages[0].content.contains("allowed-tools"));
         assert!(output.tokens_added > 0);
         assert_eq!(output.items_included, vec!["debug-oauth"]);

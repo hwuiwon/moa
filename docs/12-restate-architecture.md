@@ -70,7 +70,7 @@ Current orchestrator surfaces are bound by `moa-orchestrator` at startup:
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` |
 | Workflow | `TurnExecution`, `Consolidate`, `EvalRun` |
-| Service | `AgentRegistry`, `AgentTemplates`, `Agents`, `AdminMaintenance`, `Analytics`, `Approvals`, `ApiKeys`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `WorkspaceStore`, `Whoami` |
+| Service | `Agents`, `AdminMaintenance`, `Analytics`, `Approvals`, `ApiKeys`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `WorkspaceStore`, `Whoami` |
 
 When adding a handler, place it by ownership:
 

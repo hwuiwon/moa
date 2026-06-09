@@ -146,11 +146,11 @@ cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --healt
 ```
 
 The binary serves these Restate surfaces: virtual objects `Session`, `SubAgent`,
-`Workspace`, `CronJob`, and `IngestionVO`; services `AgentRegistry`,
-`AgentTemplates`, `Agents`, `AdminMaintenance`, `Analytics`, `Approvals`,
-`ApiKeys`, `Audit`, `Authz`, `Eval`, `GraphMemoryMaint`, `Health`,
-`LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`,
-`Skills`, `Tenants`, `ToolExecutor`, `WorkspaceStore`, and `Whoami`; and
+`Workspace`, `CronJob`, and `IngestionVO`; services `Agents`,
+`AdminMaintenance`, `Analytics`, `Approvals`, `ApiKeys`, `Audit`, `Authz`,
+`Eval`, `GraphMemoryMaint`, `Health`, `LineageAdmin`, `LLMGateway`, `Memory`,
+`NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`,
+`WorkspaceStore`, and `Whoami`; and
 workflows `Consolidate`, `EvalRun`, and `TurnExecution`. Deployment
 registration is handled outside the binary.
 
