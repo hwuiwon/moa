@@ -31,18 +31,6 @@ impl ContextPipeline {
         Self::with_runtime_limits(stages, 0, ContextSnapshotConfig::default())
     }
 
-    /// Creates a pipeline from an ordered list of processors and a workspace budget limit.
-    pub fn with_daily_workspace_budget(
-        stages: Vec<Box<dyn ContextProcessor>>,
-        daily_workspace_budget_cents: u32,
-    ) -> Self {
-        Self::with_runtime_limits(
-            stages,
-            daily_workspace_budget_cents,
-            ContextSnapshotConfig::default(),
-        )
-    }
-
     /// Creates a pipeline from an ordered list of processors and runtime limits.
     pub fn with_runtime_limits(
         stages: Vec<Box<dyn ContextProcessor>>,
@@ -269,7 +257,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Cli,
+            platform: Platform::Api,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
@@ -305,7 +293,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Cli,
+            platform: Platform::Api,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };

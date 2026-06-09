@@ -48,10 +48,7 @@ pub use identifiers::{
 };
 pub use learning::{LearningEntry, TenantId};
 pub use memory::{MemoryScope, ScopeContext, ScopeTier, SkillMetadata};
-pub use model::{
-    Credential, ModelCapabilities, ModelCapabilitiesBuilder, ProviderNativeTool, TokenPricing,
-    ToolCallFormat,
-};
+pub use model::{Credential, ModelCapabilities, ProviderNativeTool, TokenPricing, ToolCallFormat};
 pub use observability::{
     CacheReport, TraceContext, full_request_fingerprint, generate_trace_tags,
     normalize_environment, sanitize_langfuse_id, stable_prefix_fingerprint,
@@ -73,7 +70,6 @@ pub use session::{
     BufferedUserMessage, CancelMode, CheckpointHandle, CheckpointInfo, ObserveLevel, PendingSignal,
     PendingSignalType, SessionFilter, SessionHandle, SessionMeta, SessionSignal, SessionStatus,
     SessionSummary, StartSessionRequest, TurnOutcome, UserMessage, WakeContext,
-    WorkspaceBudgetStatus,
 };
 pub use snapshot::{
     CONTEXT_SNAPSHOT_FORMAT_VERSION, ContextSnapshot, FileReadDedupState, SnapshotFileReadState,
@@ -81,7 +77,6 @@ pub use snapshot::{
 pub use sub_agent::{
     DispatchSubAgentInput, SubAgentChildRef, SubAgentId, SubAgentMessage, SubAgentResult,
     SubAgentState, SubAgentStatus, default_dispatch_budget_tokens, dispatch_sub_agent_tool_schema,
-    turn_outcome_for_sub_agent_state,
 };
 pub use tools::{
     IdempotencyClass, ToolArtifactStream, ToolCallRequest, ToolContent, ToolDefinition,

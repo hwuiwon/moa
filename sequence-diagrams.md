@@ -7,7 +7,7 @@ Mermaid sequence diagrams showing how MOA actually moves at runtime. Start with 
 | Short | Component | Crate |
 |---|---|---|
 | `User` | Person sending messages | — |
-| `Platform` | Telegram / Slack / Discord / Desktop / CLI | `moa-gateway` (and `moa-desktop`, `moa-cli`) |
+| `Platform` | Telegram / Slack / Discord / Desktop / API caller | `moa-gateway`, `moa-edge` |
 | `Gateway` | Normalizes inbound, renders outbound | `moa-gateway` |
 | `Orch` | `BrainOrchestrator` (`LocalOrchestrator` or Restate-backed runtime) | `moa-orchestrator` |
 | `Brain` | Stateless harness loop | `moa-brain` |
@@ -399,46 +399,36 @@ sequenceDiagram
 
 ---
 
-## 9. Local mode wiring (`moa exec` / `moa-desktop`)
+## 9. Hosted API test wiring
 
-What gets wired up when you run without `MOA__CLOUD__ENABLED=true`.
+What gets exercised when local development or tests call the hosted API surface.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User
-    participant CLI as moa-cli / moa-desktop
-    participant Orch as LocalOrchestrator
-    participant Brain
+    participant Caller as API caller / test fixture
+    participant Edge as moa-edge
+    participant Restate
+    participant Orch as moa-orchestrator
+    participant Brain as TurnExecution / moa-brain
     participant Log as PostgresSessionStore
-    participant Hand as LocalHandProvider
-    participant Vault as FileVault (age)
-    participant Cron as tokio-cron-scheduler
+    participant Hand as HandProvider
 
-    User->>CLI: moa exec "hello" (or launches desktop)
-    CLI->>CLI: load ~/.moa/config.toml
-    CLI->>CLI: detect Docker availability
-    CLI->>Log: connect postgres://moa_owner:dev@localhost:5432/moa
-    CLI->>Orch: new(store, memory, llm, router, vault)
-    CLI->>Cron: start (consolidation, skill improvement)
-
-    CLI->>Orch: start_session(prompt)
-    Orch->>Brain: spawn tokio task
-    Brain->>Log: emit UserMessage
+    Caller->>Edge: POST /v1/sessions or direct Restate test call
+    Edge->>Restate: inject identity headers and forward
+    Restate->>Orch: invoke Session / service handler
+    Orch->>Log: persist session + user event
+    Orch->>Brain: start durable turn workflow
 
     loop Brain loop
         Brain->>Log: get_events
         Brain->>Brain: pipeline → LLM → route tools
-        alt Docker available
-            Brain->>Hand: execute in local container
-        else No Docker
-            Brain->>Hand: direct exec (allowlisted)
-        end
+        Brain->>Hand: execute in configured sandbox provider
     end
 
-    Brain-->>Orch: SessionCompleted
-    Orch->>CLI: broadcast events
-    CLI-->>User: stream to stderr, final to stdout
+    Brain-->>Orch: terminal outcome
+    Caller->>Restate: poll snapshot / events
+    Restate-->>Caller: session state and durable events
 ```
 
 ---

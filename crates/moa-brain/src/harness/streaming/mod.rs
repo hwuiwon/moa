@@ -26,6 +26,7 @@ use crate::turn::{
     stream_completion_response,
 };
 
+use super::StreamedTurnResult;
 use super::approval_flow::{process_resolved_approval, wait_for_approval};
 use super::budget::enforce_workspace_budget;
 use super::context_build::{
@@ -34,7 +35,6 @@ use super::context_build::{
     turn_number_for_events,
 };
 use super::tool_dispatch::{ToolCallOutcome, handle_tool_call};
-use super::{StreamedTurnResult, ToolLoopMode};
 
 const TURN_EVENT_TAIL_LIMIT: usize = 16;
 
@@ -54,7 +54,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
     queued_messages: Option<&mut Vec<BufferedUserMessage>>,
     soft_cancel_requested: Option<&mut bool>,
     lineage: Arc<dyn LineageHandle>,
-    tool_loop_mode: ToolLoopMode,
 ) -> Result<StreamedTurnResult> {
     let initial_session = session_store.get_session(session_id).await?;
     let initial_events = session_store
@@ -122,8 +121,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                     resolved_dispatch_started.elapsed(),
                     usize::from(resolved_dispatched),
                 );
-                if resolved_dispatched
-                {
+                if resolved_dispatched {
                     if *soft_cancel_requested {
                         record_turn_span_metrics(
                             &turn_span,
@@ -133,16 +131,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                             "cancelled",
                         );
                         return Ok(StreamedTurnResult::Cancelled);
-                    }
-                    if matches!(tool_loop_mode, ToolLoopMode::StepAfterToolBoundary) {
-                        record_turn_span_metrics(
-                            &turn_span,
-                            total_tool_calls,
-                            total_input_tokens,
-                            total_output_tokens,
-                            "continue",
-                        );
-                        return Ok(StreamedTurnResult::Continue);
                     }
                     continue;
                 }
@@ -192,16 +180,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                                         "cancelled",
                                     );
                                     return Ok(StreamedTurnResult::Cancelled);
-                                }
-                                if matches!(tool_loop_mode, ToolLoopMode::StepAfterToolBoundary) {
-                                    record_turn_span_metrics(
-                                        &turn_span,
-                                        total_tool_calls,
-                                        total_input_tokens,
-                                        total_output_tokens,
-                                        "continue",
-                                    );
-                                    return Ok(StreamedTurnResult::Continue);
                                 }
                                 continue;
                             }
@@ -550,16 +528,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
 
             if executed_tools || saw_tool_request || response.stop_reason == StopReason::ToolUse {
                 if tool_router.is_some() {
-                    if matches!(tool_loop_mode, ToolLoopMode::StepAfterToolBoundary) {
-                        record_turn_span_metrics(
-                            &turn_span,
-                            total_tool_calls,
-                            total_input_tokens,
-                            total_output_tokens,
-                            "continue",
-                        );
-                        return Ok(StreamedTurnResult::Continue);
-                    }
                     continue;
                 }
                 record_turn_span_metrics(

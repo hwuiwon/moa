@@ -25,7 +25,7 @@ managed FGA) so that self-hosted single-tenant deployments work cleanly.
 | P1.0 | Naming ADR + architecture refresh | ADR-0002 locks crate names, OpenFGA-by-default decision, Auth0-optional posture; `docs/01-architecture-overview.md` updated |
 | P1.1 | OpenFGA infra + authz schema v1 | OpenFGA in compose, `moa-authz-schema` crate, `moa-fga-bootstrap` bin |
 | P1.2 | `moa-authz` crate + transactional outbox + cross-crate traits | FGA client wrapper, `authz_outbox` poller, `AuthProvider`/`TokenVaultProvider`/`AsyncAuthzProvider` traits in `moa-core` |
-| P1.3 | Identity context + `moa-edge` HTTP edge + client surface | `X-Moa-*` header trust, new `moa-edge` crate, `OrchestratorClient::with_identity()` |
+| P1.3 | Identity context + `moa-edge` HTTP edge + client surface | `X-Moa-*` header trust, new `moa-edge` crate, `TestApiClient::with_identity()` |
 | P1.4 | `require_authz()` helpers + first handler enforcement | Authz checks wired into session create, turn dispatch, agent registration |
 | P1.5 | API keys: first-class identity surface | `moa_<env>_<random>_<crc32>` format, argon2id, FGA-tuple scopes, GitHub secret-scanning partner |
 | P1.6 | Local auth provider stack (zero-deps defaults) | `LocalAuthProvider` + `NullTokenVaultProvider` + `BuiltinAsyncAuthzProvider` |
@@ -104,7 +104,7 @@ begins.
   session-create handler based on a real FGA check.
 - **Gate after P1.6**: `make dev` produces a working stack where a user can
   hit `moa-edge`, present an API key, create a session, and the workflow
-  pauses on a builtin approval that the user resolves via `moa-cli approvals
+  pauses on a builtin approval that the user resolves via `hosted API approvals
   approve`.
 - **Gate after P1.10**: every authz check (allow + deny), every login, every
   approval, every API key event emits an OCSF v1.3 event to

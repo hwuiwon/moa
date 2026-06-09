@@ -121,6 +121,14 @@ const SESSION_MIGRATIONS: &[SessionMigration] = &[
         name: "027_events_append_only.sql",
         sql: include_str!("../migrations/postgres/027_events_append_only.sql"),
     },
+    SessionMigration {
+        name: "028_lineage_dead_letters.sql",
+        sql: include_str!("../migrations/postgres/028_lineage_dead_letters.sql"),
+    },
+    SessionMigration {
+        name: "029_repair_resolution_views.sql",
+        sql: include_str!("../migrations/postgres/029_repair_resolution_views.sql"),
+    },
 ];
 
 pub(crate) const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;
@@ -139,9 +147,46 @@ pub async fn migrate(pool: &PgPool, schema_name: Option<&str>) -> Result<()> {
             migrator.run(pool).await.map_err(|error| {
                 MoaError::StorageError(format!("postgres migration failed: {error}"))
             })?;
+            ensure_public_resolution_views(pool).await?;
             Ok(())
         }
     }
+}
+
+async fn ensure_public_resolution_views(pool: &PgPool) -> Result<()> {
+    let missing_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) \
+         FROM (VALUES ('skill_resolution_rates'), ('segment_baselines')) AS expected(name) \
+         LEFT JOIN pg_matviews views \
+           ON views.schemaname = 'public' \
+          AND views.matviewname = expected.name \
+         WHERE views.matviewname IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(map_sqlx_error)?;
+
+    if missing_count == 0 {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await.map_err(map_sqlx_error)?;
+    sqlx::query("SELECT pg_catalog.set_config('search_path', 'public', true)")
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    raw_sql(include_str!(
+        "../migrations/postgres/029_repair_resolution_views.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| {
+        MoaError::StorageError(format!(
+            "postgres resolution view repair migration failed: {error}"
+        ))
+    })?;
+    tx.commit().await.map_err(map_sqlx_error)?;
+    Ok(())
 }
 
 async fn migrate_in_schema(pool: &PgPool, schema_name: &str) -> Result<()> {

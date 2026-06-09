@@ -1,15 +1,13 @@
 //! Shared Prometheus-backed runtime metrics helpers for MOA.
 
-use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::pin::Pin;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 #[cfg(tokio_unstable)]
-use tokio_metrics::{RuntimeMonitor, TaskMetrics, TaskMonitor};
+use tokio_metrics::RuntimeMonitor;
 #[cfg(tokio_unstable)]
 use tracing::debug;
 
@@ -25,82 +23,6 @@ const TOKIO_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 static PROMETHEUS_ENDPOINT: OnceLock<SocketAddr> = OnceLock::new();
 #[cfg(tokio_unstable)]
 static TOKIO_RUNTIME_MONITOR_STARTED: OnceLock<()> = OnceLock::new();
-static SESSION_TASK_MONITOR: OnceLock<SessionTaskMonitor> = OnceLock::new();
-#[cfg(tokio_unstable)]
-static SESSION_TASK_MONITOR_PUBLISHER_STARTED: OnceLock<()> = OnceLock::new();
-
-/// Aggregates scheduler metrics for the local orchestrator's session task class.
-#[derive(Clone, Debug)]
-pub struct SessionTaskMonitor {
-    #[cfg(tokio_unstable)]
-    inner: TaskMonitor,
-}
-
-impl Default for SessionTaskMonitor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SessionTaskMonitor {
-    /// Creates a new session-task monitor.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            #[cfg(tokio_unstable)]
-            inner: TaskMonitor::new(),
-        }
-    }
-
-    /// Returns the shared process-level session-task monitor.
-    #[must_use]
-    pub fn shared() -> Self {
-        SESSION_TASK_MONITOR.get_or_init(Self::new).clone()
-    }
-
-    /// Instruments a spawned session future, falling back to the original future when
-    /// Tokio unstable runtime metrics are disabled.
-    pub fn instrument_task<F>(&self, future: F) -> Pin<Box<dyn Future<Output = F::Output> + Send>>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        #[cfg(tokio_unstable)]
-        {
-            Box::pin(self.inner.instrument(future))
-        }
-
-        #[cfg(not(tokio_unstable))]
-        {
-            Box::pin(future)
-        }
-    }
-
-    /// Starts the background publisher that exports aggregated session-task metrics.
-    pub fn spawn_publisher(&self, enabled: bool) {
-        if !enabled {
-            return;
-        }
-
-        #[cfg(tokio_unstable)]
-        {
-            if SESSION_TASK_MONITOR_PUBLISHER_STARTED.get().is_some() {
-                return;
-            }
-            let monitor = self.inner.clone();
-            tokio::spawn(async move {
-                let mut intervals = monitor.intervals();
-                loop {
-                    if let Some(interval) = intervals.next() {
-                        record_session_task_metrics(&interval);
-                    }
-                    tokio::time::sleep(TOKIO_MONITOR_INTERVAL).await;
-                }
-            });
-            let _ = SESSION_TASK_MONITOR_PUBLISHER_STARTED.set(());
-        }
-    }
-}
 
 /// Initializes the global Prometheus exporter when metrics are enabled.
 pub fn init_metrics(config: &MetricsConfig) -> Result<()> {
@@ -375,11 +297,6 @@ pub fn record_sandbox_provision_duration(provider: &str, tier: &str, duration: D
     .record(duration.as_secs_f64());
 }
 
-/// Sets the current embedding queue depth gauge.
-pub fn record_embedding_queue_depth(depth: u64) {
-    gauge!("moa_embedding_queue_depth").set(depth as f64);
-}
-
 #[cfg(tokio_unstable)]
 fn spawn_tokio_runtime_metrics_publisher() {
     if TOKIO_RUNTIME_MONITOR_STARTED.get().is_some() {
@@ -413,14 +330,6 @@ fn spawn_tokio_runtime_metrics_publisher() {
 #[cfg(not(tokio_unstable))]
 fn spawn_tokio_runtime_metrics_publisher() {}
 
-#[cfg(tokio_unstable)]
-fn record_session_task_metrics(interval: &TaskMetrics) {
-    gauge!("moa_session_task_mean_poll_duration_us")
-        .set(interval.mean_poll_duration().as_micros() as f64);
-    gauge!("moa_session_task_mean_first_poll_delay_us")
-        .set(interval.mean_first_poll_delay().as_micros() as f64);
-}
-
 fn parse_metrics_listen_addr(config: &MetricsConfig) -> Result<SocketAddr> {
     config.listen.parse::<SocketAddr>().map_err(|error| {
         MoaError::ConfigError(format!(
@@ -442,10 +351,6 @@ fn format_metrics_endpoint_url(addr: SocketAddr) -> String {
 fn register_metric_descriptions() {
     describe_gauge!("moa_sessions_active", "Currently active MOA sessions.");
     describe_gauge!(
-        "moa_embedding_queue_depth",
-        "Approximate number of graph memory records waiting for embeddings."
-    );
-    describe_gauge!(
         "tokio_workers_count",
         "Number of worker threads in the active Tokio runtime."
     );
@@ -464,14 +369,6 @@ fn register_metric_descriptions() {
     describe_counter!(
         "tokio_budget_forced_yield_count",
         "Number of task budget forced yields observed across runtime sampling intervals."
-    );
-    describe_gauge!(
-        "moa_session_task_mean_poll_duration_us",
-        "Mean poll duration for instrumented MOA session tasks in microseconds."
-    );
-    describe_gauge!(
-        "moa_session_task_mean_first_poll_delay_us",
-        "Mean first-poll delay for instrumented MOA session tasks in microseconds."
     );
     describe_counter!(
         "moa_sessions_total",

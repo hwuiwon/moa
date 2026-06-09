@@ -34,7 +34,7 @@ fn anthropic_request_body__minimal_request_serializes_with_stable_byte_layout() 
     let body = debug_build_anthropic_request_body(&request, false)
         .expect("anthropic request body should build");
 
-    insta::with_settings!({ prepend_module_to_snapshot => false }, {
+    insta::with_settings!({ prepend_module_to_snapshot => false, sort_maps => true }, {
         insta::assert_json_snapshot!("anthropic_request_body__minimal_request", body, {
             ".metadata.request_id" => "[redacted]",
             ".timestamp" => "[redacted]"
@@ -48,7 +48,7 @@ fn openai_request_body__minimal_request_serializes_with_stable_byte_layout() {
     let body =
         debug_build_openai_request_body(&request, false).expect("openai request body should build");
 
-    insta::with_settings!({ prepend_module_to_snapshot => false }, {
+    insta::with_settings!({ prepend_module_to_snapshot => false, sort_maps => true }, {
         insta::assert_json_snapshot!("openai_request_body__minimal_request", body, {
             ".metadata.request_id" => "[redacted]",
             ".timestamp" => "[redacted]"
@@ -62,7 +62,7 @@ fn gemini_request_body__minimal_request_serializes_with_stable_byte_layout() {
     let body =
         debug_build_gemini_request_body(&request, false).expect("gemini request body should build");
 
-    insta::with_settings!({ prepend_module_to_snapshot => false }, {
+    insta::with_settings!({ prepend_module_to_snapshot => false, sort_maps => true }, {
         insta::assert_json_snapshot!("gemini_request_body__minimal_request", body, {
             ".metadata.request_id" => "[redacted]",
             ".timestamp" => "[redacted]"

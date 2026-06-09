@@ -1,0 +1,593 @@
+{
+  "schema_version": "1.2",
+  "type_definitions": [
+    {
+      "type": "user"
+    },
+    {
+      "metadata": {
+        "relations": {
+          "can_act_as": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          },
+          "operator": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          },
+          "tenant": {
+            "directly_related_user_types": [
+              {
+                "type": "tenant"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "can_act_as": {
+          "this": {}
+        },
+        "operator": {
+          "this": {}
+        },
+        "tenant": {
+          "this": {}
+        }
+      },
+      "type": "agent"
+    },
+    {
+      "metadata": {
+        "relations": {
+          "owner": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "agent"
+              }
+            ]
+          },
+          "principal": {},
+          "tenant": {
+            "directly_related_user_types": [
+              {
+                "type": "tenant"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "owner": {
+          "this": {}
+        },
+        "principal": {
+          "computedUserset": {
+            "relation": "owner"
+          }
+        },
+        "tenant": {
+          "this": {}
+        }
+      },
+      "type": "api_key"
+    },
+    {
+      "metadata": {
+        "relations": {
+          "admin": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          },
+          "billing_admin": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          },
+          "member": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          },
+          "scim_admin": {
+            "directly_related_user_types": [
+              {
+                "type": "api_key"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "admin": {
+          "this": {}
+        },
+        "billing_admin": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "computedUserset": {
+                  "relation": "admin"
+                }
+              }
+            ]
+          }
+        },
+        "member": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "computedUserset": {
+                  "relation": "admin"
+                }
+              }
+            ]
+          }
+        },
+        "scim_admin": {
+          "this": {}
+        }
+      },
+      "type": "tenant"
+    },
+    {
+      "metadata": {
+        "relations": {
+          "admin": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          },
+          "editor": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          },
+          "member": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          },
+          "tenant": {
+            "directly_related_user_types": [
+              {
+                "type": "tenant"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "admin": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "tupleToUserset": {
+                  "computedUserset": {
+                    "relation": "admin"
+                  },
+                  "tupleset": {
+                    "relation": "tenant"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "editor": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "computedUserset": {
+                  "relation": "admin"
+                }
+              }
+            ]
+          }
+        },
+        "member": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "computedUserset": {
+                  "relation": "editor"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "computedUserset": {
+                    "relation": "member"
+                  },
+                  "tupleset": {
+                    "relation": "tenant"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "tenant": {
+          "this": {}
+        }
+      },
+      "type": "workspace"
+    },
+    {
+      "metadata": {
+        "relations": {
+          "owner": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "agent"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          },
+          "participant": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "agent"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          },
+          "workspace": {
+            "directly_related_user_types": [
+              {
+                "type": "workspace"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "owner": {
+          "this": {}
+        },
+        "participant": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "computedUserset": {
+                  "relation": "owner"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "computedUserset": {
+                    "relation": "member"
+                  },
+                  "tupleset": {
+                    "relation": "workspace"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "workspace": {
+          "this": {}
+        }
+      },
+      "type": "session"
+    },
+    {
+      "metadata": {
+        "relations": {
+          "admin": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          },
+          "reader": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "agent"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          },
+          "workspace": {
+            "directly_related_user_types": [
+              {
+                "type": "workspace"
+              }
+            ]
+          },
+          "writer": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "agent"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "admin": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "tupleToUserset": {
+                  "computedUserset": {
+                    "relation": "admin"
+                  },
+                  "tupleset": {
+                    "relation": "workspace"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "reader": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "computedUserset": {
+                  "relation": "writer"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "computedUserset": {
+                    "relation": "member"
+                  },
+                  "tupleset": {
+                    "relation": "workspace"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "workspace": {
+          "this": {}
+        },
+        "writer": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "computedUserset": {
+                  "relation": "admin"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "type": "knowledge_base"
+    },
+    {
+      "metadata": {
+        "relations": {
+          "knowledge_base": {
+            "directly_related_user_types": [
+              {
+                "type": "knowledge_base"
+              }
+            ]
+          },
+          "owner": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "agent"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          },
+          "reader": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "agent"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          },
+          "writer": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "agent"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "knowledge_base": {
+          "this": {}
+        },
+        "owner": {
+          "this": {}
+        },
+        "reader": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "computedUserset": {
+                  "relation": "owner"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "computedUserset": {
+                    "relation": "reader"
+                  },
+                  "tupleset": {
+                    "relation": "knowledge_base"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "writer": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "computedUserset": {
+                  "relation": "owner"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "computedUserset": {
+                    "relation": "writer"
+                  },
+                  "tupleset": {
+                    "relation": "knowledge_base"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "type": "document"
+    },
+    {
+      "metadata": {
+        "relations": {
+          "creator": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "api_key"
+              }
+            ]
+          },
+          "tenant": {
+            "directly_related_user_types": [
+              {
+                "type": "tenant"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "creator": {
+          "this": {}
+        },
+        "tenant": {
+          "this": {}
+        }
+      },
+      "type": "agent_template"
+    }
+  ]
+}

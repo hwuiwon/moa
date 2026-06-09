@@ -5,9 +5,15 @@ approval workflow. Pending requests are stored in
 `builtin_pending_approvals` and shown to users through:
 
 ```sh
-moa approvals list
-moa approvals approve <id>
-moa approvals deny <id> --reason "wrong tool"
+curl -H "Authorization: Bearer <key>" http://localhost:10080/v1/approvals
+curl -X POST -H "Authorization: Bearer <key>" \
+  -H "Content-Type: application/json" \
+  http://localhost:10080/v1/approvals/<id>/decision \
+  --data '{"outcome":"approved","reason":null}'
+curl -X POST -H "Authorization: Bearer <key>" \
+  -H "Content-Type: application/json" \
+  http://localhost:10080/v1/approvals/<id>/decision \
+  --data '{"outcome":"denied","reason":"wrong tool"}'
 ```
 
 The workflow waiting on the approval is suspended on a Restate awakeable. When

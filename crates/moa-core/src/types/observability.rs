@@ -6,6 +6,7 @@ use std::hash::{Hash, Hasher};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::{
     CacheTtl, CompletionRequest, ModelId, Platform, SessionId, SessionMeta, UserId, WorkspaceId,
@@ -162,10 +163,43 @@ fn fingerprint_json<T>(value: &T) -> u64
 where
     T: Serialize,
 {
-    let serialized = serde_json::to_string(value).unwrap_or_default();
+    let Ok(value) = serde_json::to_value(value) else {
+        return 0;
+    };
+    let serialized = canonical_json(&value);
     let mut hasher = DefaultHasher::new();
     serialized.hash(&mut hasher);
     hasher.finish()
+}
+
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => serde_json::to_string(value).unwrap_or_default(),
+        Value::Array(values) => {
+            let values = values
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[{values}]")
+        }
+        Value::Object(object) => {
+            let mut entries = object.iter().collect::<Vec<_>>();
+            entries.sort_by_key(|(key, _)| *key);
+            let entries = entries
+                .into_iter()
+                .map(|(key, value)| {
+                    let key = serde_json::to_string(key).unwrap_or_default();
+                    format!("{key}:{}", canonical_json(value))
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{entries}}}")
+        }
+    }
 }
 
 fn stable_prefix_byte_len(request: &CompletionRequest) -> usize {
@@ -340,8 +374,15 @@ pub fn normalize_environment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TraceContext, generate_trace_tags, trace_name_from_message};
-    use crate::types::{Platform, SessionId, SessionMeta, UserId, WorkspaceId};
+    use super::{
+        TraceContext, full_request_fingerprint, generate_trace_tags, stable_prefix_fingerprint,
+        trace_name_from_message,
+    };
+    use crate::types::{
+        CacheBreakpoint, CacheTtl, CompletionRequest, ContextMessage, Platform, SessionId,
+        SessionMeta, UserId, WorkspaceId,
+    };
+    use serde_json::json;
 
     #[test]
     fn trace_name_truncates_at_200_chars() {
@@ -371,5 +412,64 @@ mod tests {
         assert_eq!(ctx.trace_name.as_deref(), Some("Fix OAuth bug"));
         assert!(ctx.tags.contains(&"telegram".to_string()));
         assert_eq!(ctx.workspace_id, WorkspaceId::new("webapp"));
+    }
+
+    #[test]
+    fn completion_request_fingerprints_are_json_object_order_insensitive() {
+        let first = CompletionRequest {
+            model: None,
+            messages: vec![
+                ContextMessage::system("Static instructions"),
+                ContextMessage::user("Dynamic task A"),
+            ],
+            tools: vec![json!({
+                "name": "search",
+                "description": "Search indexed files.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            })],
+            max_output_tokens: Some(128),
+            temperature: None,
+            response_format: None,
+            cache_breakpoints: Vec::new(),
+            cache_controls: vec![CacheBreakpoint::message(1, CacheTtl::OneHour)],
+            metadata: Default::default(),
+        };
+        let second = CompletionRequest {
+            tools: vec![json!({
+                "input_schema": {
+                    "required": ["query"],
+                    "properties": {
+                        "query": {
+                            "description": "Search query",
+                            "type": "string"
+                        }
+                    },
+                    "type": "object"
+                },
+                "description": "Search indexed files.",
+                "name": "search"
+            })],
+            ..first.clone()
+        };
+
+        assert_eq!(
+            stable_prefix_fingerprint(&first),
+            stable_prefix_fingerprint(&second),
+            "stable prefix fingerprint should ignore JSON object key insertion order"
+        );
+        assert_eq!(
+            full_request_fingerprint(&first),
+            full_request_fingerprint(&second),
+            "full request fingerprint should ignore JSON object key insertion order"
+        );
     }
 }

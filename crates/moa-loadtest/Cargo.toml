@@ -18,13 +18,14 @@ moa-brain = { path = "../moa-brain" }
 moa-core = { path = "../moa-core" }
 moa-memory-graph = { path = "../moa-memory/graph" }
 moa-memory-vector = { path = "../moa-memory/vector" }
-moa-orchestrator-client = { path = "../moa-orchestrator-client" }
 moa-session = { path = "../moa-session" }
 rand = "0.8"
+reqwest.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid", "json"] }
+thiserror.workspace = true
 tokio.workspace = true
 url = "2.5"
 uuid.workspace = true

@@ -3,10 +3,18 @@
 Promote a workspace from pgvector to Turbopuffer when the workspace grows past
 the local HNSW operating range or needs namespace-level backend isolation.
 
-## Command
+## API Request
 
 ```sh
-moa promote-workspace --workspace <workspace-uuid> --to turbopuffer --validate-percent 5 --dual-read-hours 24
+curl -sS "$MOA_EDGE_URL/v1/admin-maintenance/promote-workspace" \
+  -H "Authorization: Bearer $MOA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspace_id": "<workspace-uuid>",
+    "target_backend": "turbopuffer",
+    "validate_percent": 5,
+    "dual_read_hours": 24
+  }'
 ```
 
 Required environment:
@@ -36,7 +44,13 @@ invalidates retrieval caches tied to the workspace version.
 Rollback is available during dual-read:
 
 ```sh
-moa rollback-promotion --workspace <workspace-uuid>
+curl -sS "$MOA_EDGE_URL/v1/admin-maintenance/rollback-promotion" \
+  -H "Authorization: Bearer $MOA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspace_id": "<workspace-uuid>",
+    "action": "rollback"
+  }'
 ```
 
 This sets the workspace back to `vector_backend='pgvector'`,
@@ -48,7 +62,13 @@ workspace changelog version.
 After the dual-read window is clean:
 
 ```sh
-moa finalize-promotion --workspace <workspace-uuid>
+curl -sS "$MOA_EDGE_URL/v1/admin-maintenance/finalize-promotion" \
+  -H "Authorization: Bearer $MOA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspace_id": "<workspace-uuid>",
+    "action": "finalize"
+  }'
 ```
 
 This leaves `vector_backend='turbopuffer'`, sets

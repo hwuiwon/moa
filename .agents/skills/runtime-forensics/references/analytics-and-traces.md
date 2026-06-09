@@ -92,7 +92,16 @@ cargo test -p moa-orchestrator-local --test live_observability -- --ignored --no
 Operational reads:
 
 ```bash
-cargo run -p moa-cli -- session stats <session-id>
-cargo run -p moa-cli -- tool stats
-cargo run -p moa-cli -- cache stats --days 30
+curl -X POST "$MOA_EDGE_URL/v1/analytics/session-stats" \
+  -H "Authorization: Bearer $MOA_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"session_id":"<session-id>"}'
+curl -X POST "$MOA_EDGE_URL/v1/analytics/tool-stats" \
+  -H "Authorization: Bearer $MOA_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"workspace_id":"<workspace-id>"}'
+curl -X POST "$MOA_EDGE_URL/v1/analytics/cache-stats" \
+  -H "Authorization: Bearer $MOA_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"workspace_id":"<workspace-id>","days":30}'
 ```

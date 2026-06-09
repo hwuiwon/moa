@@ -155,9 +155,13 @@ services:
       restate:
         condition: service_healthy
     environment:
+      HOME: /var/lib/moa
       POSTGRES_URL: postgres://moa_owner:dev@postgres:5432/moa
       RESTATE_ADMIN_URL: http://restate:9070
       MOA__AUTH__HEADER_TRUST: ${MOA__AUTH__HEADER_TRUST:-lenient}
+      MOA__LOCAL__SANDBOX_DIR: /var/lib/moa/sandbox
+      MOA__LOCAL__MEMORY_DIR: /var/lib/moa/memory
+      MOA__OBSERVABILITY__LINEAGE__JOURNAL_PATH: /var/lib/moa/lineage-journal
       MOA_LINEAGE_SINK: postgres
       MOA_SKIP_FGA: ${MOA_SKIP_FGA:-}
       MOA__AUTHZ__OPENFGA__URL: http://openfga:8080
@@ -202,7 +206,7 @@ services:
       retries: 12
 
   restate-register:
-    image: docker.restate.dev/restatedev/restate-cli:1.6.2
+    image: curlimages/curl:8.10.1
     container_name: moa-restate-register
     restart: "no"
     depends_on:
@@ -219,14 +223,15 @@ services:
         echo "registering moa-orchestrator with Restate admin..."
         attempt=1
         while [ "$$attempt" -le 30 ]; do
-          if restate \
-            --connect-timeout 10000 \
-            --request-timeout 30000 \
-            deployments register --force http://moa-orchestrator:9080 --yes; then
+          status=$$(curl -sS -o /tmp/register-response.txt -w "%{http_code}" \
+            -X POST "$${RESTATE_ADMIN_URL}/deployments" \
+            -H "content-type: application/json" \
+            --data '{"uri":"http://moa-orchestrator:9080"}' || true)
+          if [ "$$status" -ge 200 ] && [ "$$status" -lt 300 ] || [ "$$status" = "409" ]; then
             echo "registration complete"
             exit 0
           fi
-          echo "registration attempt $${attempt} failed; retrying..."
+          echo "registration attempt $${attempt} failed with status $${status}; retrying..."
           attempt=$$((attempt + 1))
           sleep 2
         done

@@ -1,13 +1,13 @@
 # 02 — Brain Orchestration
 
-_Restate orchestration, thin-client runtime mode, turn execution, and sub-agents._
+_Restate orchestration, hosted API runtime mode, turn execution, and sub-agents._
 
 ## Source Of Truth
 
 `docs/12-restate-architecture.md` is the detailed Restate architecture document. This file summarizes what the current code runs:
 
 - Cloud runtime: `moa-orchestrator`
-- Thin clients: `moa-runtime` and `moa-cli` through `moa-orchestrator-client`
+- Client surface: HTTP routes on `moa-edge` and Restate ingress test calls
 - Shared turn helpers: `crates/moa-orchestrator/src/turn/`
 - Session VO: `crates/moa-orchestrator/src/objects/session.rs`
 - Sub-agent VO: `crates/moa-orchestrator/src/objects/sub_agent.rs`
@@ -157,12 +157,13 @@ curl -X POST http://localhost:10010/CronJob/graph_memory_compact/resume
 To install a custom schedule, post a new body to `/CronJob/{key}/configure`
 and bump the bootstrap idempotency-key version suffix in code.
 
-## Thin Client Runtime
+## Hosted API Runtime
 
-`moa-cli` and `moa-runtime` call the Restate-backed orchestrator over the
-configured ingress endpoint. Local development starts that service through
-`make dev`, so development and cloud execution exercise the same orchestrator
-binary and Restate handler surface.
+MOA ships no embedded command/runtime client. Local development starts
+`moa-orchestrator` through `make dev`, and automation exercises that service
+through `moa-edge` public routes or direct Restate ingress calls in tests.
+Development and cloud execution therefore use the same orchestrator binary and
+handler surface.
 
 The local compose stack still uses:
 

@@ -2,11 +2,14 @@
 
 use std::net::TcpListener;
 
-use anyhow::{Context, Result};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
 use moa_authz::{FgaClient, FgaConfig};
 use moa_authz_schema::TupleOp;
 use moa_core::SessionId;
 use moa_core::traits::{Identity, IdentityType};
+use reqwest::StatusCode;
 use serde_json::json;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -52,6 +55,46 @@ pub fn deployment_endpoint_url(port: u16) -> String {
 /// active topology.
 pub fn restate_ingress_url() -> String {
     std::env::var("RESTATE_INGRESS_URL").unwrap_or_else(|_| "http://127.0.0.1:10010".to_string())
+}
+
+/// Return the Restate admin URL used by e2e tests.
+pub fn restate_admin_url() -> String {
+    std::env::var("RESTATE_ADMIN_URL").unwrap_or_else(|_| "http://127.0.0.1:10011".to_string())
+}
+
+/// Register a spawned test deployment with Restate admin over HTTP.
+pub async fn register_deployment(admin_url: &str, deployment_uri: &str) -> Result<()> {
+    let client = reqwest::Client::new();
+    let body = json!({ "uri": deployment_uri });
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match client
+            .post(format!("{}/deployments", admin_url.trim_end_matches('/')))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) if response.status() == StatusCode::CONFLICT => return Ok(()),
+            Ok(response) if Instant::now() < deadline => {
+                tracing::debug!(
+                    status = %response.status(),
+                    "waiting to register Restate deployment"
+                );
+            }
+            Err(error) if Instant::now() < deadline => {
+                tracing::debug!(%error, "waiting to register Restate deployment");
+            }
+            Ok(response) => {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                bail!("register deployment returned {status}: {text}");
+            }
+            Err(error) => return Err(error).context("register deployment with Restate admin"),
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 /// Return a fresh user identity suitable for direct Restate e2e calls.

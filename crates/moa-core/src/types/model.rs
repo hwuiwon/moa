@@ -44,13 +44,6 @@ impl TokenPricing {
     pub fn cache_write_per_mtok(&self) -> f64 {
         self.cache_write_5m_per_mtok.unwrap_or(self.input_per_mtok)
     }
-
-    /// Returns the one-hour prompt cache creation rate per million tokens.
-    #[must_use]
-    pub fn cache_write_one_hour_per_mtok(&self) -> f64 {
-        self.cache_write_1h_per_mtok
-            .unwrap_or_else(|| self.cache_write_per_mtok())
-    }
 }
 
 /// One tool implemented natively by the model provider instead of MOA.
@@ -110,120 +103,6 @@ impl Default for ModelCapabilities {
                 cache_write_1h_per_mtok: None,
             },
             native_tools: Vec::new(),
-        }
-    }
-}
-
-impl ModelCapabilities {
-    /// Returns a builder for constructing a [`ModelCapabilities`] value.
-    #[must_use]
-    pub fn builder() -> ModelCapabilitiesBuilder {
-        ModelCapabilitiesBuilder::default()
-    }
-}
-
-/// Builder for [`ModelCapabilities`].
-#[derive(Default)]
-pub struct ModelCapabilitiesBuilder {
-    model_id: Option<ModelId>,
-    context_window: Option<usize>,
-    max_output: Option<usize>,
-    supports_tools: Option<bool>,
-    supports_vision: Option<bool>,
-    supports_prefix_caching: Option<bool>,
-    cache_ttl: Option<Duration>,
-    tool_call_format: Option<ToolCallFormat>,
-    pricing: Option<TokenPricing>,
-    native_tools: Option<Vec<ProviderNativeTool>>,
-}
-
-impl ModelCapabilitiesBuilder {
-    /// Sets the model identifier.
-    #[must_use]
-    pub fn model_id(mut self, v: impl Into<ModelId>) -> Self {
-        self.model_id = Some(v.into());
-        self
-    }
-
-    /// Sets the maximum prompt context window.
-    #[must_use]
-    pub fn context_window(mut self, v: usize) -> Self {
-        self.context_window = Some(v);
-        self
-    }
-
-    /// Sets the maximum output tokens.
-    #[must_use]
-    pub fn max_output(mut self, v: usize) -> Self {
-        self.max_output = Some(v);
-        self
-    }
-
-    /// Sets whether the model supports tool use.
-    #[must_use]
-    pub fn supports_tools(mut self, v: bool) -> Self {
-        self.supports_tools = Some(v);
-        self
-    }
-
-    /// Sets whether the model supports vision inputs.
-    #[must_use]
-    pub fn supports_vision(mut self, v: bool) -> Self {
-        self.supports_vision = Some(v);
-        self
-    }
-
-    /// Sets whether the provider supports prompt prefix caching.
-    #[must_use]
-    pub fn supports_prefix_caching(mut self, v: bool) -> Self {
-        self.supports_prefix_caching = Some(v);
-        self
-    }
-
-    /// Sets the prompt cache time-to-live.
-    #[must_use]
-    pub fn cache_ttl(mut self, v: Option<Duration>) -> Self {
-        self.cache_ttl = v;
-        self
-    }
-
-    /// Sets the tool call encoding style.
-    #[must_use]
-    pub fn tool_call_format(mut self, v: ToolCallFormat) -> Self {
-        self.tool_call_format = Some(v);
-        self
-    }
-
-    /// Sets the token pricing metadata.
-    #[must_use]
-    pub fn pricing(mut self, v: TokenPricing) -> Self {
-        self.pricing = Some(v);
-        self
-    }
-
-    /// Sets the provider-native tools list.
-    #[must_use]
-    pub fn native_tools(mut self, v: Vec<ProviderNativeTool>) -> Self {
-        self.native_tools = Some(v);
-        self
-    }
-
-    /// Constructs the [`ModelCapabilities`], using defaults for any unset fields.
-    pub fn build(self) -> ModelCapabilities {
-        let defaults = ModelCapabilities::default();
-        ModelCapabilities {
-            model_id: self.model_id.unwrap_or(defaults.model_id),
-            context_window: self.context_window.unwrap_or(defaults.context_window),
-            max_output: self.max_output.unwrap_or(defaults.max_output),
-            supports_tools: self.supports_tools.unwrap_or(defaults.supports_tools),
-            supports_vision: self.supports_vision.unwrap_or(defaults.supports_vision),
-            supports_prefix_caching: self
-                .supports_prefix_caching
-                .unwrap_or(defaults.supports_prefix_caching),
-            cache_ttl: self.cache_ttl,
-            tool_call_format: self.tool_call_format.unwrap_or(defaults.tool_call_format),
-            pricing: self.pricing.unwrap_or(defaults.pricing),
-            native_tools: self.native_tools.unwrap_or(defaults.native_tools),
         }
     }
 }

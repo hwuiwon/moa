@@ -10,8 +10,8 @@ local API-key provider and JWT bearer values to Auth0.
 2. Set the API identifier to the audience MOA will validate, for example
    `https://api.moa.example.com`.
 3. Use RS256 signing.
-4. Create a Native Application for CLI device-code login.
-5. Enable Device Authorization Grant for that application.
+4. Create an Auth0 application suitable for the operator UI or automation flow.
+5. Enable the grant types used by that application.
 6. Add a post-login Auth0 Action that copies MOA metadata into the access
    token:
 
@@ -46,16 +46,9 @@ cargo build --release -p moa-orchestrator --features auth0
 cargo build --release -p moa-edge --features auth0
 ```
 
-Log in from the CLI:
-
-```sh
-moa auth login --issuer=https://your-tenant.auth0.com/ --client-id="$MOA_AUTH0_CLIENT_ID"
-```
-
-The command stores an access token, refresh token, token endpoint, client id,
-issuer, and access-token expiry in `~/.moa/credentials.json` with mode `0600`
-on Unix. Subsequent CLI requests refresh the access token when it is within
-60 seconds of expiry.
+Use the resulting bearer token against `moa-edge` public routes. Token storage
+and refresh are owned by the operator UI or automation environment, not by a
+MOA command client.
 
 ## Common failures
 

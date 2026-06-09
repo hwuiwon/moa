@@ -33,7 +33,7 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 - **Workspace memory:** graph memory stores facts, decisions, lessons, sources, and provenance while Postgres sidecars and pgvector provide retrieval.
 - **Skills:** successful workflows can become reusable Agent Skills; ranking improves as segment outcomes accumulate.
 - **Pluggable execution:** local hands, Docker, Daytona, E2B, and MCP servers are routed through one tool abstraction.
-- **Multiple interfaces:** CLI, REST/gateway, and messaging adapters all talk to the same session model.
+- **Multiple interfaces:** REST/gateway, API automation, and messaging adapters all talk to the same session model.
 
 ## Design Values
 
@@ -62,5 +62,5 @@ MOA's differentiators are architectural, not cosmetic:
 
 - MOA does not require a durable session intent taxonomy for routing or learning. The agent loop and skills decide dynamically from context.
 - MOA does not keep durable product state only in Restate. Restate is orchestration state; Postgres is the product record.
-- MOA does not bind agent work to a single front door. CLI, REST/gateway, and messaging adapters are peers over the same runtime model.
+- MOA does not bind agent work to a single front door. REST/gateway, API automation, and messaging adapters are peers over the same runtime model.
 - MOA does not optimize for a single-user personal desktop workflow. Local mode is a development and operator path over the same enterprise runtime model.

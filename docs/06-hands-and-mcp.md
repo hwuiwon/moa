@@ -16,7 +16,7 @@ The brain interacts with hands exclusively through `execute(tool_name, input) â†
 
 ### LocalHandProvider (zero-setup)
 
-For the CLI on-ramp. No Docker, no cloud.
+For isolated local development and tests. No Docker, no managed cloud hand provider.
 
 ```rust
 pub struct LocalHandProvider {

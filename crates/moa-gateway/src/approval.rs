@@ -137,7 +137,7 @@ pub fn resolved_approval_buttons(
             style: ButtonStyle::Secondary,
             callback_data: format!("ap:x:{request_id}"),
         }],
-        Platform::Discord | Platform::Cli => approval_buttons(platform, request_id),
+        Platform::Discord | Platform::Api => approval_buttons(platform, request_id),
     }
 }
 
@@ -262,7 +262,7 @@ mod tests {
         };
 
         let prepared = prepare_outbound_message(
-            Platform::Cli,
+            Platform::Api,
             &PlatformCapabilities {
                 max_message_length: 2_000,
                 supports_inline_buttons: false,

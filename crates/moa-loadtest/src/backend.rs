@@ -3,8 +3,11 @@
 use crate::*;
 use moa_authz::{FgaClient, FgaConfig};
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::StartTurnRequest;
-use moa_orchestrator_client::OrchestratorClient;
+use moa_core::wire::{
+    AppendEventRequest, GetEventsRequest, InitSessionVoRequest, SessionSnapshot, StartTurnRequest,
+    TurnOutcome,
+};
+use serde::Serialize;
 
 const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -24,7 +27,7 @@ pub(crate) trait SessionTarget: Send + Sync {
 
 #[derive(Clone)]
 pub(crate) struct RemoteTarget {
-    client: OrchestratorClient,
+    client: RemoteHttpClient,
     fga: FgaClient,
     identity: Identity,
     workspace_id: WorkspaceId,
@@ -44,7 +47,7 @@ impl SessionTarget for RemoteTarget {
             user_id: self.user_id.clone(),
             title: Some(plan.title.clone()),
             status: SessionStatus::Created,
-            platform: Platform::Cli,
+            platform: Platform::Api,
             platform_channel: None,
             model: self.model.clone(),
             created_at: now,
@@ -195,7 +198,7 @@ pub(crate) async fn build_backend(
         api_key_id: None,
         acting_on_behalf_of: None,
     };
-    let client = OrchestratorClient::new(&options.endpoint)
+    let client = RemoteHttpClient::new(&options.endpoint)
         .map_err(client_error)?
         .with_identity(identity.clone());
     let fga = live_fga_client()?;
@@ -216,8 +219,261 @@ pub(crate) async fn build_backend(
     }))
 }
 
-fn client_error(error: moa_orchestrator_client::Error) -> MoaError {
+fn client_error(error: RemoteHttpError) -> MoaError {
     MoaError::ProviderError(format!("orchestrator client error: {error}"))
+}
+
+#[derive(Clone)]
+struct RemoteHttpClient {
+    endpoint: String,
+    http: reqwest::Client,
+    identity: Option<Identity>,
+}
+
+impl RemoteHttpClient {
+    fn new(endpoint: &str) -> std::result::Result<Self, RemoteHttpError> {
+        let endpoint = endpoint.trim_end_matches('/').to_string();
+        url::Url::parse(&endpoint)
+            .map_err(|error| RemoteHttpError::InvalidEndpoint(format!("{endpoint}: {error}")))?;
+        Ok(Self {
+            endpoint,
+            http: reqwest::Client::new(),
+            identity: None,
+        })
+    }
+
+    fn with_identity(mut self, identity: Identity) -> Self {
+        self.identity = Some(identity);
+        self
+    }
+
+    async fn create_session(
+        &self,
+        meta: SessionMeta,
+    ) -> std::result::Result<SessionId, RemoteHttpError> {
+        self.post_call("/SessionStore/create_session", &meta).await
+    }
+
+    async fn init_session_vo(
+        &self,
+        session_id: SessionId,
+        meta: SessionMeta,
+    ) -> std::result::Result<(), RemoteHttpError> {
+        self.post_void(
+            "/SessionStore/init_session_vo",
+            &InitSessionVoRequest { session_id, meta },
+        )
+        .await
+    }
+
+    async fn append_event(
+        &self,
+        session_id: SessionId,
+        event: Event,
+    ) -> std::result::Result<u64, RemoteHttpError> {
+        self.post_call(
+            "/SessionStore/append_event",
+            &AppendEventRequest { session_id, event },
+        )
+        .await
+    }
+
+    async fn get_session(
+        &self,
+        session_id: SessionId,
+    ) -> std::result::Result<SessionMeta, RemoteHttpError> {
+        self.post_call("/SessionStore/get_session", &session_id)
+            .await
+    }
+
+    async fn get_events(
+        &self,
+        session_id: SessionId,
+        range: moa_core::EventRange,
+    ) -> std::result::Result<Vec<EventRecord>, RemoteHttpError> {
+        self.post_call(
+            "/SessionStore/get_events",
+            &GetEventsRequest { session_id, range },
+        )
+        .await
+    }
+
+    fn session(&self, session_id: String) -> RemoteSessionHandle<'_> {
+        RemoteSessionHandle {
+            client: self,
+            session_id,
+        }
+    }
+
+    async fn post_call<Req, Resp>(
+        &self,
+        path: &str,
+        body: &Req,
+    ) -> std::result::Result<Resp, RemoteHttpError>
+    where
+        Req: Serialize + ?Sized,
+        Resp: serde::de::DeserializeOwned,
+    {
+        self.post_call_with_idempotency(path, body, None).await
+    }
+
+    async fn post_call_with_idempotency<Req, Resp>(
+        &self,
+        path: &str,
+        body: &Req,
+        idempotency_key: Option<&str>,
+    ) -> std::result::Result<Resp, RemoteHttpError>
+    where
+        Req: Serialize + ?Sized,
+        Resp: serde::de::DeserializeOwned,
+    {
+        let mut request = self.apply_auth(
+            self.http
+                .post(format!("{}{path}", self.endpoint))
+                .json(body),
+        );
+        if let Some(key) = idempotency_key {
+            request = request.header("idempotency-key", key);
+        }
+        let response = request.send().await?;
+        decode_response(response).await
+    }
+
+    async fn post_empty_call<Resp>(&self, path: &str) -> std::result::Result<Resp, RemoteHttpError>
+    where
+        Resp: serde::de::DeserializeOwned,
+    {
+        let response = self
+            .apply_auth(self.http.post(format!("{}{path}", self.endpoint)))
+            .send()
+            .await?;
+        decode_response(response).await
+    }
+
+    async fn post_void<Req>(
+        &self,
+        path: &str,
+        body: &Req,
+    ) -> std::result::Result<(), RemoteHttpError>
+    where
+        Req: Serialize + ?Sized,
+    {
+        let response = self
+            .apply_auth(
+                self.http
+                    .post(format!("{}{path}", self.endpoint))
+                    .json(body),
+            )
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(RemoteHttpError::BadStatus { status, body });
+        }
+        Ok(())
+    }
+
+    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let Some(identity) = &self.identity else {
+            return request;
+        };
+        let identity_type = match identity.identity_type {
+            IdentityType::User => "user",
+            IdentityType::Agent => "agent",
+            IdentityType::Service => "service",
+        };
+        let mut request = request
+            .header("x-moa-identity-type", identity_type)
+            .header("x-moa-identity-id", identity.id.to_string())
+            .header("x-moa-tenant-id", identity.tenant_id.to_string());
+        if let Some(api_key_id) = identity.api_key_id {
+            request = request.header("x-moa-api-key-id", api_key_id.to_string());
+        }
+        if let Some(user_id) = identity.acting_on_behalf_of {
+            request = request.header("x-moa-acting-on-behalf-of", user_id.to_string());
+        }
+        request
+    }
+}
+
+struct RemoteSessionHandle<'a> {
+    client: &'a RemoteHttpClient,
+    session_id: String,
+}
+
+impl RemoteSessionHandle<'_> {
+    async fn start_turn(
+        &self,
+        request: StartTurnRequest,
+        idempotency_key: Option<&str>,
+    ) -> std::result::Result<moa_core::wire::StartTurnResponse, RemoteHttpError> {
+        self.client
+            .post_call_with_idempotency(
+                &format!("/Session/{}/start_turn", self.session_id),
+                &request,
+                idempotency_key,
+            )
+            .await
+    }
+
+    async fn snapshot(&self) -> std::result::Result<SessionSnapshot, RemoteHttpError> {
+        self.client
+            .post_empty_call(&format!("/Session/{}/snapshot", self.session_id))
+            .await
+    }
+
+    async fn await_turn_outcome(
+        &self,
+        turn_id: &str,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> std::result::Result<TurnOutcome, RemoteHttpError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let snapshot = self.snapshot().await?;
+            if let Some(outcome) = snapshot.last_outcome
+                && outcome.turn_id == turn_id
+            {
+                return Ok(outcome);
+            }
+            if Instant::now() >= deadline {
+                return Err(RemoteHttpError::Timeout(timeout));
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RemoteHttpError {
+    #[error("orchestrator endpoint URL invalid: {0}")]
+    InvalidEndpoint(String),
+    #[error("network error talking to orchestrator: {0}")]
+    Network(#[from] reqwest::Error),
+    #[error("orchestrator returned bad status {status}: {body}")]
+    BadStatus {
+        status: reqwest::StatusCode,
+        body: String,
+    },
+    #[error("failed to decode orchestrator response: {0}")]
+    Decode(#[from] serde_json::Error),
+    #[error("operation timed out after {0:?}")]
+    Timeout(Duration),
+}
+
+async fn decode_response<Resp>(
+    response: reqwest::Response,
+) -> std::result::Result<Resp, RemoteHttpError>
+where
+    Resp: serde::de::DeserializeOwned,
+{
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        return Err(RemoteHttpError::BadStatus { status, body });
+    }
+    Ok(serde_json::from_str(&body)?)
 }
 
 fn live_fga_client() -> Result<FgaClient> {

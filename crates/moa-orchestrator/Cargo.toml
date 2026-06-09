@@ -8,6 +8,7 @@ license.workspace = true
 default = []
 integration = []
 auth0 = ["moa-auth-providers/auth0"]
+langfuse = ["moa-eval/langfuse"]
 
 [[bin]]
 name = "moa-orchestrator-bin"
@@ -17,32 +18,44 @@ path = "src/main.rs"
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
+base64.workspace = true
+blake3.workspace = true
 chrono.workspace = true
 chrono-tz = "0.10"
 clap.workspace = true
 croner = "2.2"
+ed25519-dalek.workspace = true
+flate2 = "1"
+hex.workspace = true
 moa-authz.workspace = true
 moa-authz-schema.workspace = true
 moa-auth-providers.workspace = true
 moa-brain = { path = "../moa-brain" }
 moa-core = { path = "../moa-core" }
+moa-eval = { path = "../moa-eval" }
 moa-hands = { path = "../moa-hands" }
+moa-lineage-audit = { path = "../moa-lineage/audit" }
 moa-lineage-core = { path = "../moa-lineage/core" }
 moa-lineage-sink = { path = "../moa-lineage/sink" }
+moa-memory-graph = { path = "../moa-memory/graph" }
+moa-memory-vector = { path = "../moa-memory/vector" }
 moa-ocsf.workspace = true
 memory-ingest = { package = "moa-memory-ingest", path = "../moa-memory/ingest" }
 moa-providers = { path = "../moa-providers", features = ["test-util"] }
 moa-session = { path = "../moa-session" }
-opentelemetry.workspace = true
+moa-skills = { path = "../moa-skills" }
 restate-sdk.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 secrecy.workspace = true
+sha2.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "migrate", "json", "uuid", "chrono"] }
+tar = "0.4"
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+toml.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 uuid.workspace = true

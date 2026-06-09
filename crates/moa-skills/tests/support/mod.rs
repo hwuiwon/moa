@@ -110,7 +110,7 @@ pub fn load_session_fixture(json_text: &str) -> LoadedSession {
         user_id: user_id.clone(),
         title: Some(fixture.task.clone()),
         status: SessionStatus::Completed,
-        platform: Platform::Cli,
+        platform: Platform::Api,
         model: ModelId::new("scripted-skill-model"),
         ..SessionMeta::default()
     };

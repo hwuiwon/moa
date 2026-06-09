@@ -3,7 +3,7 @@
 MOA uses Tokio broadcast channels for live session updates:
 
 - `event_tx` for persisted session-event previews
-- `runtime_tx` for live runtime updates used by the CLI
+- `runtime_tx` for live runtime updates used by gateway/API observers
 
 When a subscriber falls behind, Tokio reports `RecvError::Lagged(n)`. MOA
 does not treat that as a fatal transport error anymore.
@@ -25,9 +25,8 @@ Important labels:
 ## Runtime behavior
 
 - Best-effort live preview consumers use `LagPolicy::SkipWithGap`
-  CLI `moa exec` receives a notice line when runtime updates were missed.
-  CLI and gateway clients render a transient gap marker and refresh the
-  detail view from the durable session log.
+  Gateway/API observers receive a gap marker when runtime updates were
+  missed and refresh the detail view from the durable session log.
 - Complete ordered consumers should use `LagPolicy::BackfillFromStore`
   On lag, reload from `SessionStore::get_events` starting at the last
   successfully processed sequence number, then resume the live subscription.

@@ -12,12 +12,16 @@ SCIM clients authenticate with a MOA API key whose OpenFGA scope grants
 `scim_admin` on one tenant. Create and scope the key:
 
 ```sh
-moa auth keys create --name="okta-scim" --env=prod
-moa auth use-key <admin-key>
-moa authz tuple-write \
-  --user=api_key:<scim-key-id> \
-  --relation=scim_admin \
-  --object=tenant:<tenant-id>
+curl -X POST http://localhost:10010/ApiKeys/create \
+  -H "Content-Type: application/json" \
+  -H "x-moa-identity-type: user" \
+  -H "x-moa-identity-id: <admin-user-id>" \
+  -H "x-moa-tenant-id: <tenant-id>" \
+  --data '{"name":"okta-scim","env":"prod","description":null,"for_agent_id":null}'
+curl -X POST http://localhost:10080/v1/authz/tuple-write \
+  -H "Authorization: Bearer <admin-key>" \
+  -H "Content-Type: application/json" \
+  --data '{"user":"api_key:<scim-key-id>","relation":"scim_admin","object":"tenant:<tenant-id>"}'
 ```
 
 Configure the IdP SCIM base URL as `https://<edge-or-orchestrator>/scim/v2`

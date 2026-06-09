@@ -6,7 +6,7 @@ _System model, trait map, data flow, and workspace layout._
 
 ```text
 Clients
-  CLI | REST/gateway | Telegram/Slack/Discord
+  REST/gateway | API automation | Telegram/Slack/Discord
         |
         v
 Runtime boundary
@@ -87,18 +87,22 @@ Phase 1 auth work adds `AuthProvider`, `TokenVaultProvider`, and
 `moa-orchestrator` exposes Restate handlers:
 
 - Virtual objects: `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO`
-- Services: `AgentRegistry`, `AgentTemplates`, `Agents`, `Approvals`, `ApiKeys`,
-  `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LLMGateway`, `NeonMaint`,
-  `SessionStore`, `Tenants`, `ToolExecutor`, `WorkspaceStore`, `Whoami`
-- Workflows: `Consolidate`, `TurnExecution`
+- Services: `AgentRegistry`, `AgentTemplates`, `Agents`, `AdminMaintenance`,
+  `Analytics`, `Approvals`, `ApiKeys`, `Audit`, `Authz`, `Eval`,
+  `GraphMemoryMaint`, `Health`, `LineageAdmin`, `LLMGateway`, `Memory`,
+  `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`,
+  `WorkspaceStore`, `Whoami`
+- Workflows: `Consolidate`, `EvalRun`, `TurnExecution`
 
 `Session` is the durable actor for one session key. It queues messages, calls `run_turn`, tracks the active task segment, records tool/skill usage, scores resolution, and writes learning entries. `SubAgent` is the same actor pattern for delegated work with depth and budget limits.
 
-### Thin Clients
+### Hosted API Clients
 
-`moa-cli` and `moa-runtime` call the configured Restate ingress through
-`moa-orchestrator-client`. Client paths do not embed an orchestrator process.
-Local development uses the same Restate-backed cloud runtime through `make dev`.
+MOA ships no embedded command/runtime client. Local development and automation
+exercise the same hosted surface as production: callers send HTTP requests to
+`moa-edge` public routes or directly to Restate ingress in test fixtures.
+Client code does not own sessions, memory, sandbox lifecycle, tool execution,
+approvals, or code execution.
 
 ## Turn Data Flow
 
@@ -199,10 +203,11 @@ written asynchronously to `analytics.turn_lineage`. Eval, online-judge, and
 human-review scores use the same sink via `LineageEvent::Eval(ScoreRecord)` and
 land in `analytics.scores`, keyed by turn, session, or dataset replay item.
 
-`moa eval datasets register` stores replay datasets in
-`analytics.eval_datasets` and `analytics.eval_dataset_items`. `moa eval replay`
-emits score records with a shared `run_id`, while `moa eval scores` and
-`moa eval compare` read directly from `analytics.scores`.
+The hosted eval API stores replay datasets through
+`POST /v1/evals/datasets/register` in `analytics.eval_datasets` and
+`analytics.eval_dataset_items`. `POST /v1/evals/replay` emits score records with
+a shared `run_id`, while `POST /v1/evals/scores` and
+`POST /v1/evals/compare` read directly from `analytics.scores`.
 
 Grafana dashboards live in `dashboards/grafana/` and Prometheus alert rules live
 in `ops/prometheus/alerts/`. Import the dashboards with a Postgres datasource
@@ -214,9 +219,10 @@ workspace selector is populated from `analytics.turn_lineage`.
 Compliance audit is an opt-in superset of the engineering lineage tier. A row
 in `analytics.compliance_workspaces` enables workspace-local BLAKE3 chain links
 on `analytics.turn_lineage`, periodic Merkle roots in `analytics.audit_roots`,
-PII pseudonymization side data in `pii_vault`, and DSAR tooling through
-`moa lineage export`, `moa lineage verify`, and `moa lineage erase`. Workspaces
-that are not enabled keep the L01-L03 behavior and store `prev_hash = NULL`.
+PII pseudonymization side data in `pii_vault`, and DSAR tooling through the
+hosted `POST /v1/lineage/export`, `POST /v1/lineage/verify`, and
+`POST /v1/lineage/erase` APIs. Workspaces that are not enabled keep the L01-L03
+behavior and store `prev_hash = NULL`.
 
 Audit bucket bootstrap lives in `scripts/bootstrap-audit-bucket.sh`. Buckets
 must be created with Object Lock enabled at creation time; production uses
@@ -265,12 +271,10 @@ and replay resistance on the verify path.
 | `moa-providers` | LLM and embedding providers |
 | `moa-orchestrator` | Restate handlers and cloud orchestration binary |
 | `moa-gateway` | Messaging adapters and renderers |
-| `moa-runtime` | Shared runtime assembly |
-| `moa-cli` | Thin-client CLI and orchestrator diagnostics |
 | `moa-security` | Vault, policies, MCP credential proxy, injection controls |
 | `moa-skills` | Skill parsing, distillation, improvement, regression generation |
 | `moa-eval` | Evaluation harness |
-| `moa-loadtest` | Load-test tooling |
+| `moa-loadtest` | Direct HTTP load-test tooling for hosted APIs |
 | `workspace-hack` | Generated `cargo-hakari` dependency feature unification crate |
 | `xtask` | Repo-local audit and maintenance commands |
 

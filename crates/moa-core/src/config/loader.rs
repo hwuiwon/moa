@@ -1,4 +1,4 @@
-//! Configuration loading and persistence.
+//! Configuration loading.
 
 use std::path::{Path, PathBuf};
 
@@ -6,7 +6,7 @@ use config::{Config, Environment, File};
 
 use crate::error::{MoaError, Result};
 
-use super::{MoaConfig, config_parent_dir};
+use super::MoaConfig;
 
 impl MoaConfig {
     /// Loads configuration from `~/.moa/config.toml` and environment variables.
@@ -136,10 +136,6 @@ impl MoaConfig {
                 "memory.vector.embedder.gemini.default_role",
                 Self::default().memory.vector.embedder.gemini.default_role,
             )?
-            .set_default("daemon.socket_path", Self::default().daemon.socket_path)?
-            .set_default("daemon.pid_file", Self::default().daemon.pid_file)?
-            .set_default("daemon.log_file", Self::default().daemon.log_file)?
-            .set_default("daemon.auto_connect", Self::default().daemon.auto_connect)?
             .set_default(
                 "orchestrator.endpoint",
                 Self::default().orchestrator.endpoint,
@@ -539,43 +535,5 @@ impl MoaConfig {
         let config: Self = builder.build()?.try_deserialize()?;
         config.validate()?;
         Ok(config)
-    }
-
-    /// Persists this config to the default MOA config path.
-    ///
-    /// This is a synchronous operation. Prefer [`save_async`][Self::save_async] when calling
-    /// from an async context to avoid blocking the executor.
-    pub fn save(&self) -> Result<()> {
-        self.save_to_path(Self::default_path()?)
-    }
-
-    /// Persists this config to an explicit TOML file path.
-    ///
-    /// This is a synchronous operation. Prefer [`save_to_path_async`][Self::save_to_path_async]
-    /// when calling from an async context to avoid blocking the executor.
-    pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-        if let Some(parent) = config_parent_dir(path) {
-            std::fs::create_dir_all(parent)?;
-        }
-        let content = self.serialize_config()?;
-        std::fs::write(path, content)?;
-        Ok(())
-    }
-
-    /// Persists this config to the default MOA config path using async I/O.
-    pub async fn save_async(&self) -> Result<()> {
-        self.save_to_path_async(Self::default_path()?).await
-    }
-
-    /// Persists this config to an explicit TOML file path using async I/O.
-    pub async fn save_to_path_async(&self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-        if let Some(parent) = config_parent_dir(path) {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let content = self.serialize_config()?;
-        tokio::fs::write(path, content).await?;
-        Ok(())
     }
 }

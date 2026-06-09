@@ -38,7 +38,10 @@ ORCH_PID=$!
 sleep 3
 
 echo "Registering deployment..."
-restate deployments register http://localhost:10020 --yes
+curl --fail --silent --show-error \
+  -X POST "${RESTATE_ADMIN_URL:-http://localhost:10011}/deployments" \
+  -H "content-type: application/json" \
+  --data '{"uri":"http://localhost:10020"}'
 
 echo "Calling Health/ping..."
 curl --fail --silent --show-error -X POST http://localhost:10010/Health/ping

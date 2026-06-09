@@ -8,7 +8,7 @@ fn test_meta() -> SessionMeta {
     SessionMeta {
         workspace_id: WorkspaceId::new("workspace-1"),
         user_id: UserId::new("user-1"),
-        platform: Platform::Cli,
+        platform: Platform::Api,
         model: ModelId::new("test-model"),
         ..SessionMeta::default()
     }

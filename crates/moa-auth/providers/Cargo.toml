@@ -14,7 +14,6 @@ argon2.workspace = true
 async-trait.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 crc32fast.workspace = true
-hex.workspace = true
 moa-authz.workspace = true
 moa-authz-schema.workspace = true
 moa-auth-providers-auth0 = { path = "../auth0", optional = true }

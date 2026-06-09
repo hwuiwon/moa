@@ -52,7 +52,7 @@ Do not use this skill for:
 
 - Preserve documented traits and crate boundaries. Do not invent new interfaces when `docs/01-architecture-overview.md` already defines one.
 - Prefer borrowing over cloning. Use owned inputs only when ownership transfer is part of the API.
-- Use `Result`-based APIs for fallible work. In library crates, model errors with `thiserror`. Use `anyhow` only in binary entrypoints such as `moa-cli` or `moa-desktop`.
+- Use `Result`-based APIs for fallible work. In library crates, model errors with `thiserror`. Use `anyhow` only in binary entrypoints such as `moa-orchestrator-bin`, `moa-edge`, `xtask`, or `moa-desktop`.
 - Keep all I/O async on `tokio`. Avoid blocking filesystem or network work in async paths.
 - Use `tracing` for observability. Never add `println!` or `eprintln!` to library code.
 - Every public function needs a doc comment. Every module needs a module-level doc comment.
@@ -77,7 +77,7 @@ When reviewing or writing code, check these in order:
 Before editing a subsystem, read the matching design doc:
 
 - `docs/02-brain-orchestration.md` for Restate orchestration, the local orchestrator, or the brain loop
-- `docs/03-communication-layer.md` for gateway, approvals, observation, or CLI message flow
+- `docs/03-communication-layer.md` for gateway, approvals, observation, or hosted API message flow
 - `docs/04-memory-architecture.md` and `docs/05-session-event-log.md` for memory or session persistence
 - `docs/06-hands-and-mcp.md` for hands, MCP, and tool routing
 - `docs/07-context-pipeline.md` for context processors, skills injection, and cache optimization

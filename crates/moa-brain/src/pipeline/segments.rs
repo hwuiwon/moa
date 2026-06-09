@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ActiveSegment, Event, QueryRewriteResult, Result, SegmentCompletion, SegmentId, SessionId,
-    SessionStore, TaskSegment, WorkingContext, deterministic_segment_id,
+    ActiveSegment, Event, QueryRewriteResult, SegmentCompletion, SegmentId, SessionId, TaskSegment,
+    deterministic_segment_id,
 };
 use serde_json::Value;
 
@@ -15,23 +15,6 @@ const QUERY_REWRITE_METADATA_KEY: &str = "query_rewrite";
 pub struct SegmentTracker;
 
 impl SegmentTracker {
-    /// Checks context metadata for a task transition after query rewriting.
-    pub async fn check_transition(
-        ctx: &WorkingContext,
-        _session_store: &dyn SessionStore,
-        session_id: SessionId,
-        tenant_id: &str,
-        current_segment: &Option<ActiveSegment>,
-    ) -> Result<Option<SegmentTransition>> {
-        Ok(Self::transition_from_metadata(
-            ctx.metadata(),
-            session_id,
-            tenant_id,
-            current_segment,
-            Utc::now(),
-        ))
-    }
-
     /// Builds a segment transition from compiled request metadata.
     #[must_use]
     pub fn transition_from_metadata(

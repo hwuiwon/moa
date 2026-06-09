@@ -1,0 +1,5 @@
+[models]
+main = "scripted-loadtest"
+
+[auth]
+provider = "local"

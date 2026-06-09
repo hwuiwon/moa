@@ -10,7 +10,7 @@ description: >
   these changes". Do NOT use for memory-pack step implementation (use `memory-pack`),
   diagnosing a failing test (use `runtime-forensics`), authoring new tests (use
   `test-authoring`), or general Rust review (use `rust`).
-compatibility: Rust 2024 MOA workspace with cargo; Restate CLI optional for cloud testing; live provider env vars optional
+compatibility: Rust 2024 MOA workspace with cargo; Restate admin API optional for cloud testing; live provider env vars optional
 allowed-tools:
   - Bash(cargo:*)
   - Bash(rg:*)

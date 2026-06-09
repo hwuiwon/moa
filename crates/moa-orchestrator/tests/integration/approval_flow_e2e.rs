@@ -11,38 +11,12 @@ use tokio::time::sleep;
 use crate::support::graph_ingest::{test_database_url, wait_for_ingested_brain_responses};
 use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
-    grant_workspace_member, reserve_orchestrator_ports, restate_ingress_url, test_user_identity,
-    with_identity,
+    grant_workspace_member, register_deployment, reserve_orchestrator_ports, restate_admin_url,
+    restate_ingress_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, test_session_meta, user_message,
 };
-
-async fn register_deployment(endpoint_url: &str) -> Result<()> {
-    for _attempt in 0..15 {
-        let output = Command::new("restate")
-            .args([
-                "--connect-timeout",
-                "10000",
-                "--request-timeout",
-                "30000",
-                "deployments",
-                "register",
-                endpoint_url,
-                "--yes",
-            ])
-            .output()
-            .context("register deployment with local restate-server")?;
-
-        if output.status.success() {
-            return Ok(());
-        }
-
-        sleep(Duration::from_secs(1)).await;
-    }
-
-    bail!("deployment registration did not succeed before retry budget was exhausted")
-}
 
 fn spawn_orchestrator(
     ports: OrchestratorPorts,
@@ -122,7 +96,7 @@ async fn approval_allow_once_round_trip_through_restate() -> Result<()> {
     let approval_token = format!("APPROVAL-{}", uuid::Uuid::now_v7());
 
     let result = async {
-        register_deployment(endpoint_url.as_str()).await?;
+        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
 
         let create_request = client.post(format!(
             "{}/SessionStore/create_session",

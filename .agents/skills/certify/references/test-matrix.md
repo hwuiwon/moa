@@ -149,7 +149,10 @@ cargo test -p moa-eval --tests -- --test-threads=1
 If a workspace skill or skill regression suite changed:
 
 ```bash
-cargo run -p moa-cli -- eval skill <skill-name> --ci
+curl -X POST "$MOA_EDGE_URL/v1/evals/run" \
+  -H "Authorization: Bearer $MOA_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data @skill-eval-request.json
 ```
 
 ## Gateway

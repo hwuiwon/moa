@@ -3,8 +3,7 @@
 //!
 //!   * `moa-providers` factory — for validation when the user picks a
 //!     model that needs a specific provider.
-//!   * `moa-cli` settings and diagnostics.
-//!   * Gateway/admin surfaces that need model capability metadata.
+//!   * Hosted API and gateway/admin surfaces that need model capability metadata.
 //!
 //! Context windows reflect public information as of 2026-04. Update
 //! this file (and nothing else) when providers ship new models or

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Parser;
 
-/// Command line arguments for `moa-edge`.
+/// Process arguments for `moa-edge`.
 #[derive(Debug, Parser)]
 struct Args {
     /// Socket address to bind.

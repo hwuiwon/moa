@@ -23,8 +23,8 @@ compliance tier.
 - `moa_lineage_sink::{MpscSink, NullSink, MpscSinkConfig, WriterHandle}`
 - `moa_lineage_otel::{emit_retrieval_attrs, emit_generation_attrs, emit_context_attrs}`
 
-The CLI subcommands (`moa explain`, `moa retrieve --debug`, `moa lineage query`,
-`moa lineage export`) live in `crates/moa-cli/`.
+Lineage explain, retrieval debug, query, and export operations are exposed
+through hosted orchestrator/edge APIs, not a local command client crate.
 
 Database schema for lineage lives in the central Postgres migration tree at
 `crates/moa-session/migrations/postgres/024_lineage.sql`; lineage crates do not

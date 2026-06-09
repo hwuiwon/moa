@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use moa_authz_schema::SCHEMA_V1_DSL;
+use moa_authz_schema::SCHEMA_V1_JSON;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -64,8 +64,9 @@ async fn main() -> Result<()> {
         }
     };
 
+    let model = serde_json::from_str(SCHEMA_V1_JSON).context("parse embedded OpenFGA model")?;
     let model_id = client
-        .write_authorization_model_from_dsl(&store_id, SCHEMA_V1_DSL)
+        .write_authorization_model(&store_id, &model)
         .await
         .context("write authorization model")?;
     tracing::info!(model_id = %model_id, "wrote schema v1 model");

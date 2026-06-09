@@ -78,7 +78,7 @@ Adding envelope encryption later requires:
 4. Hook into retrieval (`maybe_decrypt`): authorized readers see plaintext;
    unauthorized see ciphertext only.
 5. Re-introduce the `crypto_shred` op into `moa.graph_changelog` op CHECK.
-6. Re-introduce the `--mode crypto` branch in `moa privacy erase` (M24).
+6. Re-introduce a `mode: "crypto"` branch in `POST /v1/privacy/erase` (M24).
 7. Re-introduce the KEK-substitution attack in M25.
 
 Estimated effort: 2-3 weeks if all six steps are in scope.

@@ -86,7 +86,7 @@ Then load only the relevant reference file:
 
 ## Workflow
 
-1. Reproduce with the smallest exact test, CLI command, or live scenario that still shows the bug.
+1. Reproduce with the smallest exact test, API request, or live scenario that still shows the bug.
 2. Record the exact command, feature flags, orchestrator type, provider, and environment assumptions.
 3. Pull durable evidence first: persisted session status, event log, and analytics rows.
 4. If the symptom is adapter drift, run the shared orchestrator contract path before backend-specific tests.

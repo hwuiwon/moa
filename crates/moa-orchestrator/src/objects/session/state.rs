@@ -200,7 +200,7 @@ mod tests {
         moa_core::SessionMeta {
             workspace_id: WorkspaceId::new("workspace-1"),
             user_id: UserId::new("user-1"),
-            platform: Platform::Cli,
+            platform: Platform::Api,
             model: ModelId::new("test-model"),
             ..moa_core::SessionMeta::default()
         }

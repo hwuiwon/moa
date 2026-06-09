@@ -53,7 +53,7 @@ slack = ["dep:slack-morphism"]
 discord = ["dep:serenity"]
 ```
 
-Default builds compile with no platform adapters. The CLI and desktop binaries opt into the platforms they need. This keeps PR-CI fast and avoids dragging in a chat-platform SDK for a memory-only change.
+Default builds compile with no platform adapters. Hosted gateway and desktop builds opt into the platforms they need. This keeps PR-CI fast and avoids dragging in a chat-platform SDK for a memory-only change.
 
 ## Test Patterns
 
@@ -70,7 +70,7 @@ Live tests against the real platform are not gated by `MOA_RUN_LIVE_*_TESTS` bec
 1. The gateway feature flag in `crates/moa-gateway/Cargo.toml`.
 2. The adapter registry (search `PlatformAdapter` registration in `moa-gateway/src/lib.rs`).
 3. The credential vault for the platform's bot token and webhook secret.
-4. The CLI launch command if the platform is launchable from the CLI (`moa-cli serve --platform <name>`).
+4. The hosted gateway or deployment entrypoint for exercising the platform adapter, if one is required.
 
 ## Common Mistakes
 

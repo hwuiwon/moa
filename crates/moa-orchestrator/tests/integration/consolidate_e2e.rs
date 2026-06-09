@@ -1,9 +1,8 @@
 //! End-to-end workspace consolidation coverage through a local Restate ingress.
 
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use chrono::Utc;
 use moa_core::WorkspaceId;
 use moa_orchestrator::objects::workspace::{
@@ -11,40 +10,13 @@ use moa_orchestrator::objects::workspace::{
 };
 use moa_orchestrator::workflows::consolidate::{ConsolidateReport, ConsolidateRequest};
 use tempfile::TempDir;
-use tokio::time::sleep;
 
 use crate::support::restate_runtime::{
-    OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, reserve_orchestrator_ports,
-    restate_ingress_url,
+    OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, register_deployment,
+    reserve_orchestrator_ports, restate_admin_url, restate_ingress_url,
 };
 
 const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
-
-async fn register_deployment(endpoint_url: &str) -> Result<()> {
-    for _attempt in 0..15 {
-        let output = Command::new("restate")
-            .args([
-                "--connect-timeout",
-                "10000",
-                "--request-timeout",
-                "30000",
-                "deployments",
-                "register",
-                endpoint_url,
-                "--yes",
-            ])
-            .output()
-            .context("register deployment with local restate-server")?;
-
-        if output.status.success() {
-            return Ok(());
-        }
-
-        sleep(Duration::from_secs(1)).await;
-    }
-
-    bail!("deployment registration did not succeed before retry budget was exhausted")
-}
 
 fn spawn_orchestrator(
     ports: OrchestratorPorts,
@@ -111,7 +83,7 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
 
     let result = async {
-        register_deployment(endpoint_url.as_str()).await?;
+        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
 
         client
             .post(object_url(ingress, &workspace_id, "init"))

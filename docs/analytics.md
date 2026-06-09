@@ -33,7 +33,7 @@ generated columns are the only supported write path for these values.
 
 ### `session_summary`
 
-Live per-session rollup for CLI and operational reads.
+Live per-session rollup for operational API reads.
 
 Columns include:
 
@@ -145,8 +145,8 @@ REFRESH MATERIALIZED VIEW CONCURRENTLY skill_resolution_rates;
 REFRESH MATERIALIZED VIEW CONCURRENTLY segment_baselines;
 ```
 
-The local daemon runs this refresh loop hourly. CLI workspace and cache stats
-also trigger an on-demand refresh before reading these materialized views.
+The orchestrator runs this refresh loop hourly. Workspace and cache analytics
+API handlers also trigger an on-demand refresh before reading these materialized views.
 
 ## Adding new analytics
 

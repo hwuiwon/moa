@@ -18,8 +18,8 @@ pub enum Platform {
     Slack,
     /// Discord.
     Discord,
-    /// One-shot CLI.
-    Cli,
+    /// Hosted API request.
+    Api,
 }
 
 impl Platform {
@@ -29,7 +29,7 @@ impl Platform {
             Self::Telegram => "telegram",
             Self::Slack => "slack",
             Self::Discord => "discord",
-            Self::Cli => "cli",
+            Self::Api => "api",
         }
     }
 }

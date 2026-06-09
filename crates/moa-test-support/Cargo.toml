@@ -11,8 +11,9 @@ integration = []
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+moa-authz = { path = "../moa-auth/authz" }
+moa-authz-schema = { path = "../moa-auth/authz-schema" }
 moa-core = { path = "../moa-core" }
-moa-orchestrator-client = { path = "../moa-orchestrator-client" }
 moa-security = { path = "../moa-security" }
 moa-session = { path = "../moa-session" }
 nix = { version = "0.29", features = ["signal", "process"] }
