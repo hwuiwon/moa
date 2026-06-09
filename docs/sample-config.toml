@@ -183,7 +183,7 @@ max_input_tokens_per_turn = 160000
 # provider = "builtin"
 
 [audit_security]
-# OCSF v1.3 security-event audit. See P1.10.
+# OCSF v1.3 security-event audit. See docs/operations/ocsf-audit.md.
 # enabled = true
 # per_tenant_buckets = false  # set true to use customer-owned S3 with STS AssumeRole
 # default_bucket = "moa-security-audit"

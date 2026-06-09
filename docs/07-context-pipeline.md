@@ -71,7 +71,7 @@ It emits only a compact manifest. Full skill bodies are loaded later through mem
 
 `MemoryRetriever` loads ranked graph hits through the graph, sidecar, and vector
 memory crates. See
-`docs/architecture/decisions/0001-envelope-encryption-deferred.md` for the
+`docs/15-architecture-policy.md` for the
 current privacy boundary and `crates/moa-memory/README.md` for crate-level
 details.
 

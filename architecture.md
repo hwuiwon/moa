@@ -313,7 +313,7 @@ See [`docs/08-security.md`](docs/08-security.md) and
 | Authn/authz, SSO, SCIM, or audit issue | [`docs/01-architecture-overview.md`](docs/01-architecture-overview.md), [`docs/08-security.md`](docs/08-security.md), [`docs/operations/ocsf-audit.md`](docs/operations/ocsf-audit.md) |
 | Memory retrieval or ingestion issue | [`docs/04-memory-architecture.md`](docs/04-memory-architecture.md) |
 | Tenant learning issue | [`docs/14-multi-tenancy-and-learning.md`](docs/14-multi-tenancy-and-learning.md) |
-| Lineage/audit issue | [`docs/ops/audit-runbook.md`](docs/ops/audit-runbook.md), [`docs/operations/subject-access-runbook.md`](docs/operations/subject-access-runbook.md) |
+| Lineage/audit issue | [`docs/19-data-operations.md`](docs/19-data-operations.md), [`docs/operations/subject-access-runbook.md`](docs/operations/subject-access-runbook.md) |
 
 ---
 
