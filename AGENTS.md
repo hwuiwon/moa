@@ -53,6 +53,13 @@ The full architecture specification is in `docs/`. Read the relevant section bef
   - `cargo build --workspace` when public types, shared crates, or workspace wiring changed
   - `git diff --check`
 
+## Local Docker Compose Stack
+
+- Bring the MOA compose stack up only when a task needs local Postgres, Restate, OpenFGA, edge, PII, audit shipper, or loadtest services.
+- When the stack is no longer needed, stop it with `docker compose down` before ending work. This preserves volumes and avoids leaving background services running.
+- Use `docker compose down -v` or `make dev-wipe` only when an explicit reset is intended; those commands remove local state.
+- Check current stack state with `docker compose ps` before assuming services are running or stopped.
+
 ## Authorization review rule
 
 Every handler that touches data on behalf of a caller MUST either:

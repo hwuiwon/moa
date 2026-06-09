@@ -1,8 +1,8 @@
 # OIDC group mapping
 
 `OidcGroupSync` is an optional additive sync from identity-provider group names
-to OpenFGA tuples. P1.7 writes missing tuples through the authz outbox and does
-not delete tuples when a user leaves a group. Full removal semantics land with
+to OpenFGA tuples. It writes missing tuples through the authz outbox and does
+not delete tuples when a user leaves a group. Full removal semantics belong to
 SCIM reconciliation.
 
 ## Naming convention
@@ -30,6 +30,6 @@ MOA tenants without group-name collisions.
 
 ## Operational note
 
-This sync is best-effort and additive in P1.7. Removing a user from an IdP
-group does not remove the corresponding OpenFGA tuple yet, so operators should
-not use it as the only revocation path for production access.
+This sync is best-effort and additive. Removing a user from an IdP group does
+not remove the corresponding OpenFGA tuple yet, so operators should not use it
+as the only revocation path for production access.

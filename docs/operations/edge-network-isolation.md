@@ -30,4 +30,4 @@ handler debugging, bind `127.0.0.1:10020:9080` in a developer-only override.
 
 A misconfigured deployment that exposes 9080 publicly bypasses authentication
 and authorization entirely. There is no in-band defense; the design relies on
-the network boundary. P1.10 adds a deploy-time runbook check.
+the network boundary. Treat this as a release-blocking deployment failure.

@@ -191,9 +191,9 @@ behavior boundary; there are no procedural macros or implicit handler guards.
 ### Audit
 
 OCSF v1.3 security events are written synchronously to a Postgres
-`security_events` table. The existing `services/audit-shipper` service is
-extended in P1.10 to ship those events to S3 with per-tenant bucket routing and
-Object Lock compliance mode. Operational setup is documented in
+`security_events` table. The existing `services/audit-shipper` service ships
+those events to S3 with per-tenant bucket routing and Object Lock compliance
+mode. Operational setup is documented in
 [`docs/operations/ocsf-audit.md`](operations/ocsf-audit.md).
 
 ## Eval And Dashboards
@@ -282,7 +282,7 @@ and replay resistance on the verify path.
 
 - Orchestration details: `docs/02-brain-orchestration.md` and `docs/12-restate-architecture.md`
 - Memory details: `docs/04-memory-architecture.md`
-- Shared type placement: `docs/architecture/type-placement.md`
+- Shared type placement: `docs/15-architecture-policy.md`
 - Event and segment schema: `docs/05-session-event-log.md`
 - Context pipeline: `docs/07-context-pipeline.md`
 - Multi-tenant learning: `docs/14-multi-tenancy-and-learning.md`

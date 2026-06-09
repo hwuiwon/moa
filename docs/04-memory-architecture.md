@@ -10,7 +10,7 @@ _Graph memory, privacy filtering, sidecar indexes, pgvector semantic retrieval, 
 4. Retrieval combines graph structure, sidecar filters, keyword search, and vector similarity.
 5. Memory is part of the learning pipeline, not a separate cache.
 
-The graph stack (`moa-memory-graph`, `moa-memory-vector`, `moa-memory-pii`, `moa-memory-ingest`) is the only memory subsystem. See `crates/moa-memory/README.md` for crate-level details and `docs/architecture/type-placement.md` for ownership rules.
+The graph stack (`moa-memory-graph`, `moa-memory-vector`, `moa-memory-pii`, `moa-memory-ingest`) is the only memory subsystem. See `crates/moa-memory/README.md` for crate-level details and `docs/15-architecture-policy.md` for ownership rules.
 
 ## Scopes
 

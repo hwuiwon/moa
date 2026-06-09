@@ -89,8 +89,8 @@ LLM providers inside `moa-orchestrator`:
 
 The orchestrator refuses to start with an override when the environment is
 `prod` or `production`. The checked-in load-test fixture lives at
-`crates/moa-loadtest/scripts/perf-gate.json`; see
-`docs/testing/providers-override.md` for the script format.
+`crates/moa-loadtest/scripts/perf-gate.json`; see `docs/20-testing.md` for the
+script format.
 
 ## Approvals
 

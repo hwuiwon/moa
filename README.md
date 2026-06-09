@@ -198,7 +198,7 @@ Memory is split across four crates under `crates/moa-memory/`:
 - `pii/` - redaction at ingestion via openai/privacy-filter HTTP service
 - `ingest/` - slow-path Restate VO, fast-path API, contradiction detector
 
-See `docs/architecture/type-placement.md` for how types are owned across these
+See `docs/15-architecture-policy.md` for how types are owned across these
 crates and `crates/moa-memory/README.md` for crate-level details.
 
 ## Workspace Layout
@@ -249,7 +249,7 @@ cargo test --workspace --no-run
 
 ### Testing
 
-Provider request-body and other byte-stability snapshots follow the pattern in [`docs/testing/snapshot-pattern.md`](docs/testing/snapshot-pattern.md).
+Provider request-body and other byte-stability snapshots follow the pattern in [`docs/20-testing.md`](docs/20-testing.md).
 
 ## License
 

@@ -21,17 +21,22 @@ These docs describe the current MOA architecture as implemented in the Rust work
 | 12 | [Restate Architecture](12-restate-architecture.md) | Restate primitives, handler mapping, deployment strategy |
 | 13 | [Task Segmentation](13-task-segmentation.md) | Segment lifecycle, resolution scoring, analytics views |
 | 14 | [Multi-Tenancy & Learning](14-multi-tenancy-and-learning.md) | Tenant model, skills-first learning, audit and rollback |
+| 15 | [Architecture Policy](15-architecture-policy.md) | Type placement and accepted architecture decisions |
+| 16 | [Evaluation](16-evaluation.md) | Long-conversation harness, score cards, budgets, triage |
+| 17 | [Observability](17-observability.md) | Turn latency spans, broadcast lag, metrics |
+| 18 | [Performance](18-performance.md) | Perf gate hardware floor and baseline |
+| 19 | [Data Operations](19-data-operations.md) | Postgres extensions, changelog replication, audit retention, PII sidecar |
+| 20 | [Testing](20-testing.md) | Provider overrides and snapshot testing conventions |
 
 Supporting notes:
 
 | Document | Covers |
 |---|---|
 | [Analytics](analytics.md) | Session, tool, and task-segment analytics views |
+| [Auth Architecture](auth/README.md) | Identity, authorization, delegation, tuple consistency, and auth crate map |
 | [Implementation Caveats](implementation-caveats.md) | Known implementation tradeoffs and follow-up seams |
 | [Prompt Caching Architecture](prompt-caching-architecture.md) | Cache-region rules and verification |
-| [Approval Check](approval-check.md) | Approval behavior notes |
 | [Event Fanout](event-fanout.md) | Event broadcast and observation behavior |
-| [Observability](observability/) | Dashboard and metric notes |
 
 For a current end-to-end map, start with the root [`architecture.md`](../architecture.md)
 before diving into the numbered specs.
