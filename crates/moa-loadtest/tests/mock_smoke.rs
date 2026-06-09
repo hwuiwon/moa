@@ -15,11 +15,29 @@ fn mock_short_profile_completes_within_budget_with_zero_errors() {
         "target/perf-gate/mock-short-{}.prom",
         uuid::Uuid::now_v7()
     ));
-    let output = Command::new(env!("CARGO_BIN_EXE_perf_gate"))
+    let config_path = repo_root().join("crates/moa-loadtest/scripts/mock-smoke-config.toml");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_perf_gate"));
+    for key in [
+        "MOA__AUTH__AUTH0__DOMAIN",
+        "MOA__AUTH__AUTH0__AUDIENCE",
+        "MOA__AUTH__AUTH0__CLIENT_ID_ENV",
+        "MOA__AUTH__AUTH0__CLIENT_SECRET_ENV",
+        "MOA__AUTH__OIDC__ISSUER",
+        "MOA__AUTH__OIDC__AUDIENCE",
+        "MOA__AUTH__OIDC__JWKS_URL",
+    ] {
+        command.env_remove(key);
+    }
+
+    let output = command
         .current_dir(repo_root())
         .args([
             "--profile",
             "mock-short",
+            "--config",
+            config_path
+                .to_str()
+                .expect("mock smoke config path should be UTF-8"),
             "--endpoint",
             &endpoint,
             "--duration",

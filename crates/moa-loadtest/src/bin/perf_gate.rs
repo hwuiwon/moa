@@ -59,6 +59,10 @@ struct Args {
     /// Restate ingress endpoint fronting `moa-orchestrator`.
     #[arg(long, default_value = "http://localhost:10010")]
     endpoint: String,
+
+    /// Optional explicit MOA config path for profile execution.
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 impl Args {
@@ -83,6 +87,7 @@ impl Args {
             max_error_rate: self.max_error_rate.unwrap_or(0.01),
             prom_out: self.prom_out.clone(),
             endpoint: self.endpoint.clone(),
+            config_path: self.config.clone(),
             ..Default::default()
         }
     }

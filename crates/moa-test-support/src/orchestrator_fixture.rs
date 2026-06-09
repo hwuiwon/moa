@@ -185,17 +185,17 @@ impl OrchestratorTestFixture {
         let orchestrator_port = pick_free_port()?;
         let health_port = pick_free_port()?;
         let scim_port = pick_free_port()?;
-        let mut orchestrator = spawn_orchestrator(
-            &orchestrator_bin,
-            orchestrator_port,
+        let mut orchestrator = spawn_orchestrator(OrchestratorSpawnConfig {
+            binary: &orchestrator_bin,
+            port: orchestrator_port,
             health_port,
             scim_port,
-            &postgres_url,
-            &admin_url,
-            &ingress_url,
-            &script_path,
-            &fga_config,
-        )?;
+            postgres_url: &postgres_url,
+            admin_url: &admin_url,
+            ingress_url: &ingress_url,
+            script_path: &script_path,
+            fga_config: &fga_config,
+        })?;
         wait_for_orchestrator_health(health_port, &mut orchestrator).await?;
         let deployment_uri = format!("http://host.docker.internal:{orchestrator_port}");
         register_deployment(&admin_url, &deployment_uri).await?;
@@ -940,45 +940,47 @@ async fn locate_orchestrator_binary(repo_root: &Path) -> Result<PathBuf> {
     }
 }
 
-fn spawn_orchestrator(
-    binary: &Path,
+struct OrchestratorSpawnConfig<'a> {
+    binary: &'a Path,
     port: u16,
     health_port: u16,
     scim_port: u16,
-    postgres_url: &str,
-    admin_url: &str,
-    ingress_url: &str,
-    script_path: &Path,
-    fga_config: &FgaConfig,
-) -> Result<Child> {
-    Command::new(binary)
+    postgres_url: &'a str,
+    admin_url: &'a str,
+    ingress_url: &'a str,
+    script_path: &'a Path,
+    fga_config: &'a FgaConfig,
+}
+
+fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<Child> {
+    Command::new(config.binary)
         .arg("--port")
-        .arg(port.to_string())
+        .arg(config.port.to_string())
         .arg("--health-port")
-        .arg(health_port.to_string())
+        .arg(config.health_port.to_string())
         .arg("--scim-port")
-        .arg(scim_port.to_string())
-        .env("POSTGRES_URL", postgres_url)
-        .env("RESTATE_ADMIN_URL", admin_url)
-        .env("MOA_LOCAL_INGRESS_URL", ingress_url)
+        .arg(config.scim_port.to_string())
+        .env("POSTGRES_URL", config.postgres_url)
+        .env("RESTATE_ADMIN_URL", config.admin_url)
+        .env("MOA_LOCAL_INGRESS_URL", config.ingress_url)
         .env(
             "MOA_PROVIDERS_OVERRIDE",
-            format!("scripted:{}", script_path.display()),
+            format!("scripted:{}", config.script_path.display()),
         )
-        .env("MOA__AUTHZ__OPENFGA__URL", &fga_config.url)
+        .env("MOA__AUTHZ__OPENFGA__URL", &config.fga_config.url)
         .env(
             "MOA__AUTHZ__OPENFGA__PRESHARED_KEY",
-            &fga_config.preshared_key,
+            &config.fga_config.preshared_key,
         )
-        .env("MOA__AUTHZ__OPENFGA__STORE_ID", &fga_config.store_id)
-        .env("MOA__AUTHZ__OPENFGA__MODEL_ID", &fga_config.model_id)
+        .env("MOA__AUTHZ__OPENFGA__STORE_ID", &config.fga_config.store_id)
+        .env("MOA__AUTHZ__OPENFGA__MODEL_ID", &config.fga_config.model_id)
         .env("MOA__ENVIRONMENT", "test")
         .env("MOA_LINEAGE_SINK", "null")
         .env("RUST_LOG", "warn")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("spawn orchestrator binary {}", binary.display()))
+        .with_context(|| format!("spawn orchestrator binary {}", config.binary.display()))
 }
 
 async fn wait_for_orchestrator_health(health_port: u16, child: &mut Child) -> Result<()> {
