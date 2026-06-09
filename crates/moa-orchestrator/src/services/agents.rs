@@ -15,11 +15,10 @@ use uuid::Uuid;
 use crate::OrchestratorCtx;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 
-/// Request body for registering an agent from a template.
+/// Request body for registering an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RegisterAgentRequest {
-    /// Template to instantiate.
-    pub template_id: Uuid,
     /// Human-readable agent display name.
     pub display_name: String,
 }
@@ -40,8 +39,6 @@ pub struct AgentSummary {
     pub id: Uuid,
     /// Tenant UUID.
     pub tenant_id: Uuid,
-    /// Optional template UUID.
-    pub template_id: Option<Uuid>,
     /// User who operates the agent. Deactivation cascades can orphan agents.
     pub operator_user_id: Option<Uuid>,
     /// Human-readable agent display name.
@@ -60,7 +57,7 @@ pub struct AgentSummary {
 #[restate_sdk::service]
 #[name = "Agents"]
 pub trait Agents {
-    /// Register an agent from an active template.
+    /// Register an agent in the caller's tenant.
     async fn register(
         request: Json<RegisterAgentRequest>,
     ) -> Result<Json<AgentSummary>, HandlerError>;
@@ -96,7 +93,7 @@ impl Agents for AgentsImpl {
         let identity = require_identity(&ctx)?;
         let request = request.into_inner();
         validate_agent_name(&request.display_name)?;
-        require_template_creator_or_tenant_admin(&identity, request.template_id).await?;
+        require_tenant_admin(&identity).await?;
         let pool = OrchestratorCtx::current().graph_pool.clone();
 
         Ok(ctx
@@ -217,11 +214,7 @@ async fn register_agent_inner(
     identity: Identity,
     request: RegisterAgentRequest,
 ) -> Result<AgentSummary, HandlerError> {
-    let template = load_active_template(&pool, request.template_id).await?;
-    if template.tenant_id != identity.tenant_id {
-        return Err(TerminalError::new_with_code(404, "agent template not found").into());
-    }
-
+    let operator_user_id = required_operator_user_id(&identity)?;
     let mut transaction = pool
         .begin()
         .await
@@ -229,31 +222,20 @@ async fn register_agent_inner(
     let agent: AgentSummary = sqlx::query_as(
         r#"
         INSERT INTO agents
-            (tenant_id, template_id, operator_user_id, display_name)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, tenant_id, template_id, operator_user_id, display_name,
+            (tenant_id, operator_user_id, display_name)
+        VALUES ($1, $2, $3)
+        RETURNING id, tenant_id, operator_user_id, display_name,
                   status, created_at, deactivated_at, deactivated_reason
         "#,
     )
     .bind(identity.tenant_id)
-    .bind(request.template_id)
-    .bind(identity.id)
+    .bind(operator_user_id)
     .bind(request.display_name.trim())
     .fetch_one(&mut *transaction)
     .await
     .map_err(|error| TerminalError::new(format!("register agent: {error}")))?;
 
     enqueue_agent_tuples(&mut transaction, TupleOp::Write, &agent).await?;
-    enqueue_raw(
-        &mut *transaction,
-        TupleOp::Write,
-        &format!("tenant:{}", identity.tenant_id),
-        "tenant",
-        &format!("agent_template:{}", request.template_id),
-        Some(identity.tenant_id),
-    )
-    .await
-    .map_err(|error| TerminalError::new(format!("agent template tenant outbox: {error}")))?;
     moa_ocsf::emit_agent_registered_tx(&mut transaction, identity.tenant_id, &identity, agent.id)
         .await
         .map_err(|error| TerminalError::new(format!("audit agent register: {error}")))?;
@@ -270,7 +252,7 @@ async fn list_agents_inner(
 ) -> Result<Vec<AgentSummary>, HandlerError> {
     sqlx::query_as(
         r#"
-        SELECT id, tenant_id, template_id, operator_user_id, display_name,
+        SELECT id, tenant_id, operator_user_id, display_name,
                status, created_at, deactivated_at, deactivated_reason
         FROM agents
         WHERE tenant_id = $1
@@ -498,7 +480,7 @@ async fn enqueue_agent_tuples(
 async fn load_agent(pool: &PgPool, agent_id: Uuid) -> Result<AgentSummary, HandlerError> {
     sqlx::query_as(
         r#"
-        SELECT id, tenant_id, template_id, operator_user_id, display_name,
+        SELECT id, tenant_id, operator_user_id, display_name,
                status, created_at, deactivated_at, deactivated_reason
         FROM agents
         WHERE id = $1
@@ -509,34 +491,6 @@ async fn load_agent(pool: &PgPool, agent_id: Uuid) -> Result<AgentSummary, Handl
     .await
     .map_err(|error| TerminalError::new(format!("load agent: {error}")))?
     .ok_or_else(|| TerminalError::new_with_code(404, "agent not found").into())
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct TemplateRow {
-    tenant_id: Uuid,
-    deactivated_at: Option<DateTime<Utc>>,
-}
-
-async fn load_active_template(
-    pool: &PgPool,
-    template_id: Uuid,
-) -> Result<TemplateRow, HandlerError> {
-    let row: TemplateRow = sqlx::query_as(
-        r#"
-        SELECT tenant_id, deactivated_at
-        FROM agent_templates
-        WHERE id = $1
-        "#,
-    )
-    .bind(template_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| TerminalError::new(format!("load agent template: {error}")))?
-    .ok_or_else(|| TerminalError::new_with_code(404, "agent template not found"))?;
-    if row.deactivated_at.is_some() {
-        return Err(TerminalError::new_with_code(409, "agent template is deactivated").into());
-    }
-    Ok(row)
 }
 
 fn ensure_same_tenant(agent: AgentSummary, tenant_id: Uuid) -> Result<AgentSummary, HandlerError> {
@@ -551,6 +505,16 @@ fn validate_agent_name(name: &str) -> Result<(), HandlerError> {
         return Err(TerminalError::new_with_code(400, "agent name is required").into());
     }
     Ok(())
+}
+
+fn required_operator_user_id(identity: &Identity) -> Result<Uuid, HandlerError> {
+    if let Some(user_id) = identity.acting_on_behalf_of {
+        return Ok(user_id);
+    }
+    if identity.identity_type == IdentityType::User {
+        return Ok(identity.id);
+    }
+    Err(TerminalError::new_with_code(403, "agent registration requires a user operator").into())
 }
 
 async fn require_grant_authority(
@@ -591,26 +555,6 @@ async fn require_tenant_admin(identity: &Identity) -> Result<(), HandlerError> {
     .map_err(translate_authz_error)
 }
 
-async fn require_template_creator_or_tenant_admin(
-    identity: &Identity,
-    template_id: Uuid,
-) -> Result<(), HandlerError> {
-    let fga = require_fga_client()?;
-    match require_authz_with_delegation(
-        &fga,
-        identity,
-        ObjectType::AgentTemplate,
-        template_id,
-        Relation::Creator,
-    )
-    .await
-    {
-        Ok(()) => Ok(()),
-        Err(AuthzCheckError::Forbidden { .. }) => require_tenant_admin(identity).await,
-        Err(error) => Err(translate_authz_error(error)),
-    }
-}
-
 async fn require_agent_operator_or_tenant_admin(
     identity: &Identity,
     agent_id: Uuid,
@@ -635,5 +579,71 @@ fn actor_user_id(identity: &Identity) -> Option<Uuid> {
     match identity.identity_type {
         IdentityType::User => Some(identity.id),
         IdentityType::Agent | IdentityType::Service => identity.acting_on_behalf_of,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity(
+        identity_type: IdentityType,
+        id: Uuid,
+        acting_on_behalf_of: Option<Uuid>,
+    ) -> Identity {
+        Identity {
+            identity_type,
+            id,
+            tenant_id: Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+                .expect("tenant fixture UUID should parse"),
+            api_key_id: None,
+            acting_on_behalf_of,
+        }
+    }
+
+    #[test]
+    fn required_operator_user_id_accepts_user_identity() {
+        // Pins: a direct human caller becomes the operator for newly registered agents.
+        let user_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+            .expect("user fixture UUID should parse");
+        let identity = identity(IdentityType::User, user_id, None);
+
+        let operator_user_id =
+            required_operator_user_id(&identity).expect("user identity should be accepted");
+
+        assert_eq!(operator_user_id, user_id);
+    }
+
+    #[test]
+    fn required_operator_user_id_accepts_delegated_identity() {
+        // Pins: delegated service or agent callers register agents for the real user they represent.
+        let service_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222")
+            .expect("service fixture UUID should parse");
+        let user_id = Uuid::parse_str("33333333-3333-3333-3333-333333333333")
+            .expect("delegated user fixture UUID should parse");
+        let identity = identity(IdentityType::Service, service_id, Some(user_id));
+
+        let operator_user_id =
+            required_operator_user_id(&identity).expect("delegated identity should be accepted");
+
+        assert_eq!(operator_user_id, user_id);
+    }
+
+    #[test]
+    fn required_operator_user_id_rejects_service_without_delegation() {
+        // Pins: service callers cannot become durable agent operators without a real user.
+        let service_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222")
+            .expect("service fixture UUID should parse");
+        let identity = identity(IdentityType::Service, service_id, None);
+
+        let error = required_operator_user_id(&identity)
+            .expect_err("service identity without delegation should be rejected");
+        let error_ref =
+            <HandlerError as AsRef<dyn std::error::Error + Send + Sync>>::as_ref(&error);
+
+        assert_eq!(
+            error_ref.to_string(),
+            "Terminal error [403]: agent registration requires a user operator"
+        );
     }
 }

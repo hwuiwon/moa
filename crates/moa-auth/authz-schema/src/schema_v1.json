@@ -556,38 +556,6 @@
         }
       },
       "type": "document"
-    },
-    {
-      "metadata": {
-        "relations": {
-          "creator": {
-            "directly_related_user_types": [
-              {
-                "type": "user"
-              },
-              {
-                "type": "api_key"
-              }
-            ]
-          },
-          "tenant": {
-            "directly_related_user_types": [
-              {
-                "type": "tenant"
-              }
-            ]
-          }
-        }
-      },
-      "relations": {
-        "creator": {
-          "this": {}
-        },
-        "tenant": {
-          "this": {}
-        }
-      },
-      "type": "agent_template"
     }
   ]
 }

@@ -23,8 +23,6 @@ pub enum ObjectType {
     Document,
     /// A local API key principal.
     ApiKey,
-    /// A reusable agent template.
-    AgentTemplate,
     /// An AI agent principal.
     Agent,
 }
@@ -38,7 +36,6 @@ impl fmt::Display for ObjectType {
             Self::KnowledgeBase => "knowledge_base",
             Self::Document => "document",
             Self::ApiKey => "api_key",
-            Self::AgentTemplate => "agent_template",
             Self::Agent => "agent",
         };
         f.write_str(value)
@@ -95,8 +92,6 @@ pub enum Relation {
     Reader,
     /// Write access.
     Writer,
-    /// Creator relationship.
-    Creator,
     /// Agent operator relationship.
     Operator,
     /// Delegation relationship for agent impersonation.
@@ -123,7 +118,6 @@ impl fmt::Display for Relation {
             Self::Participant => "participant",
             Self::Reader => "reader",
             Self::Writer => "writer",
-            Self::Creator => "creator",
             Self::Operator => "operator",
             Self::CanActAs => "can_act_as",
             Self::Tenant => "tenant",
@@ -317,7 +311,6 @@ mod tests {
             types,
             [
                 "agent",
-                "agent_template",
                 "api_key",
                 "document",
                 "knowledge_base",

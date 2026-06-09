@@ -657,30 +657,6 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
             _ => {}
         }
     }
-    if *method == Method::POST && uri.path() == "/v1/agent-templates" {
-        return RouteTranslation::Forward {
-            method: Method::POST,
-            path: "/AgentTemplates/create".to_string(),
-            body: body.to_vec(),
-        };
-    }
-    if *method == Method::GET && uri.path() == "/v1/agent-templates" {
-        return RouteTranslation::Forward {
-            method: Method::POST,
-            path: "/AgentTemplates/list".to_string(),
-            body: Vec::new(),
-        };
-    }
-    if let Some(rest) = uri.path().strip_prefix("/v1/agent-templates/") {
-        if *method == Method::GET {
-            return translate_uuid_path(rest, "/AgentTemplates/get");
-        }
-        if *method == Method::POST
-            && let Some(id) = rest.strip_suffix("/deactivate")
-        {
-            return translate_uuid_path(id, "/AgentTemplates/deactivate");
-        }
-    }
     if *method == Method::POST && uri.path() == "/v1/agents" {
         return RouteTranslation::Forward {
             method: Method::POST,
@@ -1314,6 +1290,109 @@ mod tests {
                 RouteTranslation::NoChange => {
                     panic!("{public_path} should translate to {internal_path}")
                 }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn agent_public_routes_translate_to_restate_handlers() {
+        // Pins: public agent lifecycle routes forward to the remaining Agents service.
+        let body = Bytes::from_static(br#"{"display_name":"reviewer"}"#);
+        let create_uri = "/v1/agents"
+            .parse::<Uri>()
+            .expect("agent register path should parse");
+        match translate_public_route(&Method::POST, &create_uri, &body) {
+            RouteTranslation::Forward {
+                method,
+                path,
+                body: forwarded_body,
+            } => {
+                assert_eq!(method, Method::POST);
+                assert_eq!(path, "/Agents/register");
+                assert_eq!(forwarded_body, body.to_vec());
+            }
+            RouteTranslation::NoChange => panic!("agent register should translate"),
+            RouteTranslation::BadRequest(message) => {
+                panic!("agent register should not fail translation: {message}")
+            }
+        }
+
+        let list_uri = "/v1/agents"
+            .parse::<Uri>()
+            .expect("agent list path should parse");
+        match translate_public_route(&Method::GET, &list_uri, &Bytes::new()) {
+            RouteTranslation::Forward { method, path, body } => {
+                assert_eq!(method, Method::POST);
+                assert_eq!(path, "/Agents/list");
+                assert!(body.is_empty(), "agent list should not synthesize a body");
+            }
+            RouteTranslation::NoChange => panic!("agent list should translate"),
+            RouteTranslation::BadRequest(message) => {
+                panic!("agent list should not fail translation: {message}")
+            }
+        }
+
+        let agent_id = "11111111-1111-1111-1111-111111111111";
+        let uuid_cases = [
+            (Method::GET, format!("/v1/agents/{agent_id}"), "/Agents/get"),
+            (
+                Method::POST,
+                format!("/v1/agents/{agent_id}/deactivate"),
+                "/Agents/deactivate",
+            ),
+        ];
+        for (method, public_path, internal_path) in uuid_cases {
+            let uri = public_path.parse::<Uri>().expect("agent path should parse");
+            match translate_public_route(&method, &uri, &Bytes::new()) {
+                RouteTranslation::Forward { method, path, body } => {
+                    assert_eq!(method, Method::POST);
+                    assert_eq!(path, internal_path);
+                    let forwarded: Uuid =
+                        serde_json::from_slice(&body).expect("forwarded UUID should parse");
+                    assert_eq!(
+                        forwarded,
+                        Uuid::parse_str(agent_id).expect("agent fixture UUID should parse")
+                    );
+                }
+                RouteTranslation::NoChange => panic!("{public_path} should translate"),
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+
+        let user_id = "22222222-2222-2222-2222-222222222222";
+        let act_as_body = Bytes::from(format!(r#"{{"user_id":"{user_id}"}}"#));
+        let act_as_cases = [
+            (
+                format!("/v1/agents/{agent_id}/can-act-as"),
+                "/Agents/grant_can_act_as",
+            ),
+            (
+                format!("/v1/agents/{agent_id}/revoke-can-act-as"),
+                "/Agents/revoke_can_act_as",
+            ),
+        ];
+        for (public_path, internal_path) in act_as_cases {
+            let uri = public_path.parse::<Uri>().expect("agent path should parse");
+            match translate_public_route(&Method::POST, &uri, &act_as_body) {
+                RouteTranslation::Forward { method, path, body } => {
+                    assert_eq!(method, Method::POST);
+                    assert_eq!(path, internal_path);
+                    let forwarded: serde_json::Value =
+                        serde_json::from_slice(&body).expect("forwarded act-as body should parse");
+                    assert_eq!(
+                        forwarded,
+                        serde_json::json!({
+                            "agent_id": agent_id,
+                            "user_id": user_id
+                        })
+                    );
+                }
+                RouteTranslation::NoChange => panic!("{public_path} should translate"),
                 RouteTranslation::BadRequest(message) => {
                     panic!("{public_path} should not fail translation: {message}")
                 }

@@ -31,8 +31,6 @@ use moa_orchestrator::{
     restate_register::{IngestionVO, IngestionVOImpl},
     services::{
         admin_maintenance::{AdminMaintenance, AdminMaintenanceImpl},
-        agent_registry::{AgentRegistry, AgentRegistryImpl},
-        agent_templates::{AgentTemplates, AgentTemplatesImpl},
         agents::{Agents, AgentsImpl},
         analytics::{Analytics, AnalyticsImpl},
         api_keys::{ApiKeys, ApiKeysImpl},
@@ -81,8 +79,6 @@ const CRON_BOOTSTRAP_ATTEMPTS: u32 = 60;
 const CRON_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
 const EXPECTED_SERVICE_NAMES: &[&str] = &[
-    "AgentRegistry",
-    "AgentTemplates",
     "Agents",
     "AdminMaintenance",
     "Analytics",
@@ -227,8 +223,6 @@ async fn main() -> anyhow::Result<()> {
         .bind(HealthImpl.serve())
         .bind(SessionStoreImpl::new(session_store.clone()).serve())
         .bind(LLMGatewayImpl::new(llm_providers).serve())
-        .bind(AgentRegistryImpl.serve())
-        .bind(AgentTemplatesImpl.serve())
         .bind(AgentsImpl.serve())
         .bind(AdminMaintenanceImpl.serve())
         .bind(AnalyticsImpl.serve())
