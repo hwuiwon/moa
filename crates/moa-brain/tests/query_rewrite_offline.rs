@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use moa_brain::pipeline::query_rewrite::QueryRewriter;
 use moa_core::{
-    ContextMessage, ContextProcessor, LLMProvider, MoaConfig, Platform, QueryRewriteResult,
-    RewriteSource, SessionMeta, UserId, WorkspaceId,
+    ContextMessage, ContextProcessor, LLMProvider, MemoryAction, MoaConfig, Platform,
+    QueryRewriteResult, RewriteSource, SessionMeta, UserId, WorkspaceId,
 };
 use moa_providers::OpenAIProvider;
 use serde_json::json;
@@ -25,10 +25,15 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
             "task_kind": "coding",
             "sub_queries": ["patch auth/refresh.rs", "add regression tests"],
             "suggested_tools": ["file_read", "file_write"],
+            "freshness_required": false,
+            "repo_context_required": true,
+            "memory_action": "retrieve",
             "needs_clarification": false,
             "clarification_question": null,
             "is_new_task": false,
-            "task_summary": null
+            "task_summary": null,
+            "tool_bias": ["read_before_write", "repo_inspection", "repo_inspection"],
+            "suggested_promptlets": ["observe_first", "test_authoring"]
         })
         .to_string(),
         0,
@@ -91,10 +96,68 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
             .contains("refresh token")
     );
     assert!(!result.rewritten_query.to_lowercase().contains("kubernetes"));
+    assert!(
+        result.repo_context_required,
+        "query rewrite should mark repo inspection before coding"
+    );
+    assert!(
+        !result.freshness_required,
+        "query rewrite should not require current external information"
+    );
+    assert_eq!(
+        result.memory_action,
+        MemoryAction::Retrieve,
+        "query rewrite should preserve memory router action"
+    );
+    assert_eq!(
+        result.tool_bias,
+        vec![
+            "read_before_write".to_string(),
+            "repo_inspection".to_string()
+        ],
+        "query rewrite should trim and dedupe tool bias hints"
+    );
+    assert_eq!(
+        result.suggested_promptlets,
+        vec!["observe_first".to_string(), "test_authoring".to_string()],
+        "query rewrite should preserve promptlet hints"
+    );
 
     let bodies = captured_json_bodies(&server).await;
     assert_eq!(bodies.len(), 1);
     assert_eq!(bodies[0]["text"]["format"]["name"], "query_rewrite_result");
+    let prompt = bodies[0]["input"][0]["content"]
+        .as_str()
+        .expect("query rewrite request should include prompt text");
+    assert!(
+        prompt.contains("observe-first mode router"),
+        "query rewrite prompt should describe observe-first routing"
+    );
+    assert!(
+        prompt.contains("freshness_required"),
+        "query rewrite prompt should request freshness routing"
+    );
+    let schema = &bodies[0]["text"]["format"]["schema"];
+    assert_eq!(
+        schema["properties"]["memory_action"]["enum"],
+        json!([
+            "none",
+            "retrieve",
+            "remember",
+            "forget",
+            "supersede",
+            "ingest"
+        ]),
+        "query rewrite schema should constrain memory actions"
+    );
+    assert!(
+        schema["required"]
+            .as_array()
+            .expect("query rewrite schema required list should be an array")
+            .iter()
+            .any(|field| field == "suggested_promptlets"),
+        "query rewrite schema should require promptlet hints"
+    );
 
     Ok(())
 }

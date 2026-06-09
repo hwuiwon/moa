@@ -10,9 +10,10 @@ use crate::pipeline::memory::extract_search_keywords;
 
 pub(super) const MANIFEST_PREAMBLE: &str = "\
 <available_skills>
-When multiple skills apply, prefer the one whose trigger conditions most specifically match the current task.
-Skills can be composed - use multiple if the task requires steps from different skills.
-To activate a skill, follow the listed skill when it matches the task.
+Use this compact manifest for skill selection. Activate a skill only when its description,
+tags, or trigger conditions match the current task. When multiple skills apply, prefer the
+most specific match; compose skills only when the task genuinely requires multiple workflows.
+Do not invent skills not listed here.
 
 ";
 pub(super) const MANIFEST_FOOTER: &str = "</available_skills>";
@@ -383,5 +384,13 @@ mod tests {
         assert!(
             manifest.find("- alpha:").expect("alpha") < manifest.find("- zeta:").expect("zeta")
         );
+    }
+
+    #[test]
+    fn manifest_preamble_pins_activation_boundary() {
+        // Pins: the compact skill manifest tells the model when to activate listed skills.
+        assert!(MANIFEST_PREAMBLE.contains("Activate a skill only when"));
+        assert!(MANIFEST_PREAMBLE.contains("most specific match"));
+        assert!(MANIFEST_PREAMBLE.contains("Do not invent skills not listed here"));
     }
 }

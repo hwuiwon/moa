@@ -17,9 +17,9 @@ use moa_brain::pipeline::tools::ToolDefinitionProcessor;
 use moa_core::{
     CacheBreakpoint, CacheBreakpointTarget, CacheTtl, CompletionContent, CompletionRequest,
     CompletionResponse, CompletionStream, ContextMessage, ContextProcessor, LLMProvider,
-    MemoryScope, MessageRole, ModelCapabilities, ModelId, QueryRewriteConfig, QueryRewriteResult,
-    Result, RewriteSource, ScopeContext, StopReason, TaskKind, TokenUsage, WorkingContext,
-    WorkspaceId,
+    MemoryAction, MemoryScope, MessageRole, ModelCapabilities, ModelId, QueryRewriteConfig,
+    QueryRewriteResult, Result, RewriteSource, ScopeContext, StopReason, TaskKind, TokenUsage,
+    WorkingContext, WorkspaceId,
 };
 use moa_memory_graph::{NodeLabel, PiiClass};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorItem, VectorStore};
@@ -260,10 +260,15 @@ async fn query_rewrite_stage_emits_one_leg_per_strategy_for_a_user_query() -> Re
                 "add a regression test"
             ],
             "suggested_tools": ["file_read", "bash"],
+            "freshness_required": false,
+            "repo_context_required": true,
+            "memory_action": "retrieve",
             "needs_clarification": false,
             "clarification_question": null,
             "is_new_task": false,
-            "task_summary": null
+            "task_summary": null,
+            "tool_bias": ["repo_inspection", "read_before_write"],
+            "suggested_promptlets": ["observe_first"]
         })
         .to_string(),
         model_id: "rewrite-fixture".to_string(),
@@ -302,6 +307,32 @@ async fn query_rewrite_stage_emits_one_leg_per_strategy_for_a_user_query() -> Re
         result.suggested_tools,
         vec!["file_read".to_string(), "bash".to_string()],
         "QueryRewriter: suggested tool filtering changed"
+    );
+    assert!(
+        !result.freshness_required,
+        "QueryRewriter: freshness router flag changed"
+    );
+    assert!(
+        result.repo_context_required,
+        "QueryRewriter: repo-context router flag changed"
+    );
+    assert_eq!(
+        result.memory_action,
+        MemoryAction::Retrieve,
+        "QueryRewriter: memory router action changed"
+    );
+    assert_eq!(
+        result.tool_bias,
+        vec![
+            "repo_inspection".to_string(),
+            "read_before_write".to_string()
+        ],
+        "QueryRewriter: tool bias hints changed"
+    );
+    assert_eq!(
+        result.suggested_promptlets,
+        vec!["observe_first".to_string()],
+        "QueryRewriter: suggested promptlets changed"
     );
     Ok(())
 }
@@ -366,6 +397,18 @@ async fn memory_stage_includes_top_k_hits_with_lineage_uids_and_excludes_invalid
     assert!(
         memory_message.content.starts_with(MEMORY_REMINDER_PREFIX),
         "GraphMemoryRetriever: memory reminder prefix changed"
+    );
+    assert!(
+        memory_message
+            .content
+            .contains("Use these hits as background evidence"),
+        "GraphMemoryRetriever: memory reminder should frame retrieved memory as evidence"
+    );
+    assert!(
+        memory_message.content.contains("scope=")
+            && memory_message.content.contains("valid_from=")
+            && memory_message.content.contains("legs="),
+        "GraphMemoryRetriever: memory reminder should expose provenance and age fields"
     );
     for hit in expected_hits {
         assert!(

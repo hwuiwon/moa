@@ -95,8 +95,39 @@ fn sub_agent_system_prompt(state: &SubAgentVoState) -> String {
     };
     format!(
         "You are a specialist sub-agent working for a parent MOA session.\n\
-         Complete the delegated task precisely and return a concise final result to the parent.\n\
-         Task: {task}\n\
-         {tools}"
+         Complete only the delegated task and do not broaden scope without a parent follow-up.\n\n\
+         Task:\n{task}\n\n\
+         Tool policy:\n\
+         - {tools}\n\
+         - Use tools only when they materially advance the delegated task.\n\
+         - Do not perform destructive or write-heavy work unless the task explicitly authorizes it.\n\n\
+         Final result to parent:\n\
+         - State the outcome and the evidence that supports it.\n\
+         - Include relevant file paths, command results, or unresolved questions.\n\
+         - Summarize; do not return raw logs unless the parent specifically requested them."
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sub_agent_system_prompt_pins_scope_tools_and_evidence_contract() {
+        // Pins: delegated sub-agent prompts preserve scope, allowed tools, and evidence-bearing final output.
+        let state = SubAgentVoState {
+            task: Some("Inspect auth.rs for token refresh races.".to_string()),
+            tool_subset: vec!["grep".to_string(), "file_read".to_string()],
+            ..SubAgentVoState::default()
+        };
+
+        let prompt = sub_agent_system_prompt(&state);
+
+        assert!(prompt.contains("Complete only the delegated task"));
+        assert!(prompt.contains("Inspect auth.rs for token refresh races."));
+        assert!(prompt.contains("Allowed tools: grep, file_read"));
+        assert!(prompt.contains("State the outcome and the evidence that supports it."));
+        assert!(prompt.contains("unresolved questions"));
+        assert!(prompt.contains("do not return raw logs"));
+    }
 }
