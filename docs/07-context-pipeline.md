@@ -63,7 +63,9 @@ Compatibility fields such as `task_kind`, `suggested_tools`, `needs_clarificatio
 - normalized use count
 - recency
 
-It emits only a compact manifest. Full skill bodies are loaded later through memory tools when activated. The manifest is budget-aware through `SkillBudgetConfig`.
+It emits only a compact manifest. Full skill bodies and supporting package files
+are materialized in the active hand under `.moa/skills/<skill>/...` when a hand
+tool is first invoked. The manifest is budget-aware through `SkillBudgetConfig`.
 
 ## Memory Retrieval
 

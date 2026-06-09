@@ -386,9 +386,11 @@ async fn resolve_workspace_skill(
     let skills = registry.load_for_scope(&scope).await?;
 
     for skill in skills {
-        let document = parse_skill_markdown(&skill.body)?;
-        let metadata =
-            skill_metadata_from_document(crate::format::build_skill_path(&skill.name), &document);
+        let skill_markdown = registry
+            .load_skill_markdown(&scope, skill.skill_uid)
+            .await?;
+        let document = parse_skill_markdown(&skill_markdown)?;
+        let metadata = skill_metadata_from_document(skill.metadata()?.path, &document);
         if skill_selector_matches(selector, &metadata.name) {
             return Ok(ResolvedWorkspaceSkill { metadata, document });
         }

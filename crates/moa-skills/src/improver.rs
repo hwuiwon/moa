@@ -13,6 +13,7 @@ use moa_session::{PostgresSessionStore, create_session_store};
 use crate::format::{
     SkillDocument, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
 };
+use crate::package::{SKILL_MD_PATH, SkillPackage, SkillPackageFile, ValidatedSkillPackageFile};
 use crate::registry::{NewSkill, SkillRegistry};
 use crate::regression::{append_skill_regression_log, run_skill_regression};
 
@@ -108,10 +109,14 @@ pub async fn improve_skill_with_learning(
     let scope = MemoryScope::Workspace {
         workspace_id: session.workspace_id.clone(),
     };
-    let Some(row) = registry.load_by_name(&scope, &existing.name).await? else {
+    let Some(stored_package) = registry
+        .load_package_by_name(&scope, &existing.name)
+        .await?
+    else {
         return Ok(ImprovementResult::Skipped);
     };
-    let current = parse_skill_markdown(&row.body)?;
+    let stored_markdown = stored_package.skill_markdown()?;
+    let current = parse_skill_markdown(stored_markdown)?;
     let current_markdown = render_skill_markdown(&current)?;
     let prompt = build_improvement_prompt(&current_markdown, events);
     let llm = model_router.provider_for(ModelTask::SkillDistillation);
@@ -152,10 +157,9 @@ pub async fn improve_skill_with_learning(
 
     let candidate_markdown = render_skill_markdown(&improved)?;
     registry
-        .upsert_by_name(NewSkill::from_document(
+        .upsert_by_name(NewSkill::from_package(
             scope.clone(),
-            &improved,
-            candidate_markdown.clone(),
+            package_with_replaced_skill_md(&stored_package.files, candidate_markdown.clone()),
         ))
         .await?;
     let report = run_skill_regression(
@@ -185,7 +189,10 @@ pub async fn improve_skill_with_learning(
             .set_regression_count(restored.frontmatter.regression_count().saturating_add(1));
         let markdown = render_skill_markdown(&restored)?;
         registry
-            .upsert_by_name(NewSkill::from_document(scope, &restored, markdown))
+            .upsert_by_name(NewSkill::from_package(
+                scope,
+                package_with_replaced_skill_md(&stored_package.files, markdown),
+            ))
             .await?;
         return Ok(ImprovementResult::Rejected { report });
     }
@@ -213,6 +220,28 @@ pub async fn improve_skill_with_learning(
         previous_version: current.frontmatter.version(),
         version: improved.frontmatter.version(),
     })
+}
+
+fn package_with_replaced_skill_md(
+    files: &[ValidatedSkillPackageFile],
+    skill_md: String,
+) -> SkillPackage {
+    let skill_md_bytes = skill_md.into_bytes();
+    SkillPackage::new(
+        files
+            .iter()
+            .map(|file| SkillPackageFile {
+                path: file.path.clone(),
+                content: if file.path == SKILL_MD_PATH {
+                    skill_md_bytes.clone()
+                } else {
+                    file.content.clone()
+                },
+                content_type: file.content_type.clone(),
+                executable: file.executable,
+            })
+            .collect(),
+    )
 }
 
 pub(crate) fn normalize_llm_markdown(text: &str) -> &str {

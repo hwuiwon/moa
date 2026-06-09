@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    CacheBreakpoint, CacheTtl, CompletionRequest, ModelCapabilities, SessionId, SessionMeta,
-    ToolContent, ToolInvocation, UserId, WorkspaceId,
+    CacheBreakpoint, CacheTtl, CompletionRequest, ModelCapabilities, SandboxFile, SessionId,
+    SessionMeta, ToolContent, ToolInvocation, UserId, WorkspaceId,
 };
 
 /// Role of a context message passed to the LLM.
@@ -175,6 +175,9 @@ pub struct WorkingContext {
     tool_schemas: Vec<Value>,
     /// Arbitrary processor metadata.
     metadata: HashMap<String, Value>,
+    /// Runtime-only trusted files to install into a hand before tool execution.
+    #[serde(skip)]
+    trusted_sandbox_files: Vec<SandboxFile>,
 }
 
 impl WorkingContext {
@@ -194,6 +197,7 @@ impl WorkingContext {
             cache_controls: Vec::new(),
             tool_schemas: Vec::new(),
             metadata: HashMap::new(),
+            trusted_sandbox_files: Vec::new(),
         }
     }
 
@@ -260,6 +264,19 @@ impl WorkingContext {
     /// Inserts one auxiliary metadata value for cross-stage coordination.
     pub fn insert_metadata(&mut self, key: impl Into<String>, value: Value) {
         self.metadata.insert(key.into(), value);
+    }
+
+    /// Adds trusted files that the runtime may materialize into a sandbox.
+    pub fn extend_trusted_sandbox_files<I>(&mut self, files: I)
+    where
+        I: IntoIterator<Item = SandboxFile>,
+    {
+        self.trusted_sandbox_files.extend(files);
+    }
+
+    /// Takes trusted sandbox files out of the context without serializing them into model metadata.
+    pub fn take_trusted_sandbox_files(&mut self) -> Vec<SandboxFile> {
+        std::mem::take(&mut self.trusted_sandbox_files)
     }
 
     /// Marks the current message index as a cache breakpoint.

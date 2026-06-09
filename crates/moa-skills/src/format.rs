@@ -266,7 +266,7 @@ pub fn skill_metadata_from_document(path: String, skill: &SkillDocument) -> Skil
 
 /// Returns the canonical memory path for a skill name.
 pub fn build_skill_path(skill_name: &str) -> String {
-    format!("skills/{}/SKILL.md", slugify_skill_name(skill_name))
+    format!(".moa/skills/{}/SKILL.md", slugify_skill_name(skill_name))
 }
 
 /// Converts an arbitrary skill name into a stable slug.
@@ -472,6 +472,14 @@ Broken
     #[test]
     fn slugifies_skill_names_consistently() {
         assert_eq!(slugify_skill_name("Deploy to Fly.io"), "deploy-to-fly-io");
+    }
+
+    #[test]
+    fn builds_sandbox_skill_path() {
+        assert_eq!(
+            super::build_skill_path("Deploy to Fly.io"),
+            ".moa/skills/deploy-to-fly-io/SKILL.md"
+        );
     }
 
     #[test]

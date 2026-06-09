@@ -4,7 +4,7 @@ mod support;
 
 use memory_graph::GraphStore;
 use moa_core::{MoaError, Result, ScopeContext, ScopedConn};
-use moa_skills::{LessonContext, NewSkill, SkillRegistry, learn_lesson, parse_skill_markdown};
+use moa_skills::{LessonContext, NewSkill, SkillRegistry, learn_lesson};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -19,12 +19,10 @@ async fn learn_lesson_dual_write() -> Result<()> {
         moa_session::testing::create_isolated_test_store().await?;
     let workspace_name = format!("skills-lesson-{}", Uuid::now_v7());
     let scope = workspace_scope(&workspace_name);
-    let skill_doc = parse_skill_markdown(DISTILLED_SKILL)?;
     let registry = SkillRegistry::new(store.pool().clone());
     let skill_uid = registry
-        .upsert_by_name(NewSkill::from_document(
+        .upsert_by_name(NewSkill::from_skill_markdown(
             scope.clone(),
-            &skill_doc,
             DISTILLED_SKILL.to_string(),
         ))
         .await?;

@@ -26,6 +26,10 @@ tool-call arguments.
 All providers implement the `HandProvider` trait from `moa-core`. Tool routing
 code should depend on the trait, not on provider-specific clients.
 
+`HandProvider::install_files` is the trusted setup path for files the runtime
+must place in a sandbox before model-visible execution. MOA uses it to
+materialize selected skill packages under `.moa/skills/<skill>/...`.
+
 ## Tool Router
 
 `moa-hands::ToolRouter` owns the execution decision:
@@ -63,6 +67,13 @@ Active hands are keyed by session and provider. A first tool call provisions
 the hand. Later tool calls reuse the handle if it is healthy. On terminal
 session status, cancellation, failure, or panic cleanup, the orchestrator calls
 `destroy_session_hands(session_id)`.
+
+Before the LLM call for a turn, the context pipeline selects relevant skills and
+passes the selected package files to the router on a runtime-only side channel.
+The router materializes those files lazily into the hand provider that actually
+executes the first hand tool. The model only sees the manifest paths; full
+`SKILL.md` and supporting scripts remain filesystem resources that are read or
+executed on demand.
 
 Provider implementations must make cleanup best-effort and observable. Failed
 cleanup should warn through `tracing`, not panic or hide the terminal session

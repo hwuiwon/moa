@@ -3848,6 +3848,7 @@ dependencies = [
  "moa-providers",
  "moa-security",
  "moa-session",
+ "moa-skills",
  "moka",
  "proptest",
  "reqwest 0.13.2",

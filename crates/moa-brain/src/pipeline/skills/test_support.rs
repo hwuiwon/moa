@@ -65,7 +65,7 @@ pub(super) fn test_skill(
     last_used_days_ago: i64,
 ) -> SkillMetadata {
     SkillMetadata {
-        path: format!("skills/{name}/SKILL.md"),
+        path: format!(".moa/skills/{name}/SKILL.md"),
         name: name.to_string(),
         description: description.to_string(),
         tags: vec!["ops".to_string(), "debug".to_string()],

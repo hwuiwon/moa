@@ -42,7 +42,10 @@ pub use events_stream::{
     BroadcastChannel, ClaimCheck, EventFilter, EventRange, EventRecord, EventStream, EventType,
     LagPolicy, LiveEvent, MaybeBlob, SequenceNum,
 };
-pub use hands::{HandHandle, HandResources, HandSpec, HandStatus, SandboxTier};
+pub use hands::{
+    HandHandle, HandResources, HandSpec, HandStatus, SandboxFile, SandboxTier,
+    validate_sandbox_file_path,
+};
 pub use identifiers::{
     BrainId, ModelId, PendingSignalId, SegmentId, SessionId, ToolCallId, UserId, WorkspaceId,
 };

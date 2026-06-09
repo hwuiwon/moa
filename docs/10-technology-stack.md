@@ -32,7 +32,7 @@ The root workspace currently contains:
 | `moa-orchestrator` | Restate services, virtual objects, workflows, `moa-orchestrator-bin` cloud binary |
 | `moa-gateway` | Telegram, Slack, Discord adapters and renderers |
 | `moa-security` | Credential vault, policies, MCP proxy, prompt-injection controls |
-| `moa-skills` | Skill parser, registry, distillation, improvement, regression generation |
+| `moa-skills` | Skill parser, DB-backed package registry, distillation, improvement, regression generation |
 | `moa-eval` | Evaluation harness |
 | `moa-loadtest` | Direct HTTP load-test harness for hosted orchestrator APIs |
 | `workspace-hack` | Generated `cargo-hakari` feature unification crate |

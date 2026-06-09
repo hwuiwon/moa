@@ -872,25 +872,26 @@ pub struct SkillExportRequest {
     pub workspace_id: WorkspaceId,
 }
 
-/// Response payload containing exported skill documents.
+/// Response payload containing exported skill packages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillExportResponse {
     /// Workspace whose skills were exported.
     pub workspace_id: WorkspaceId,
-    /// Exported skill documents.
+    /// Exported skill packages.
     #[serde(default)]
-    pub documents: Vec<SkillImportDocument>,
+    pub packages: Vec<SkillPackageDocument>,
 }
 
-/// Skill markdown document supplied to skill import or returned by export.
+/// Skill package supplied to skill import or returned by export.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SkillImportDocument {
-    /// Optional stable skill name parsed from the document.
+pub struct SkillPackageDocument {
+    /// Optional stable skill name parsed from `SKILL.md`.
     pub name: Option<String>,
-    /// Optional one-line skill description parsed from the document.
+    /// Optional one-line skill description parsed from `SKILL.md`.
     pub description: Option<String>,
-    /// Markdown skill body.
-    pub body: String,
+    /// Files contained in this skill package.
+    #[serde(default)]
+    pub files: Vec<SkillPackageDocumentFile>,
     /// Optional logical source path or URI.
     pub source_uri: Option<String>,
     /// Additional skill metadata parsed by the server.
@@ -898,24 +899,38 @@ pub struct SkillImportDocument {
     pub metadata: Value,
 }
 
-/// Request payload for importing skill documents.
+/// One file in a skill package import or export.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillPackageDocumentFile {
+    /// POSIX relative path inside the skill package.
+    pub path: String,
+    /// Base64-encoded file content.
+    pub content_base64: String,
+    /// Optional media type hint.
+    pub content_type: Option<String>,
+    /// Whether the file should be executable in a sandbox.
+    #[serde(default)]
+    pub executable: bool,
+}
+
+/// Request payload for importing skill packages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillImportRequest {
     /// Workspace used for authorization and workspace/user scoped imports.
     pub workspace_id: WorkspaceId,
     /// Scope where imported skills should be written.
     pub scope: MemoryScope,
-    /// Skill documents to import.
+    /// Skill packages to import.
     #[serde(default)]
-    pub documents: Vec<SkillImportDocument>,
+    pub packages: Vec<SkillPackageDocument>,
 }
 
-/// Response payload for importing skill documents.
+/// Response payload for importing skill packages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillImportResponse {
     /// Scope where skills were imported.
     pub scope: MemoryScope,
-    /// Number of skill documents imported.
+    /// Number of skill packages imported.
     pub imported: u64,
 }
 
@@ -945,11 +960,19 @@ pub struct SkillSummary {
     pub version: i32,
     /// Skill name.
     pub name: String,
-    /// Optional skill description.
-    pub description: Option<String>,
+    /// Skill description.
+    pub description: String,
     /// Tags associated with the skill.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Hex-encoded SHA-256 digest of the full package tree.
+    pub package_hash: String,
+    /// Hex-encoded SHA-256 digest of the required `SKILL.md`.
+    pub skill_md_hash: String,
+    /// Number of files in the package.
+    pub file_count: i32,
+    /// Total package size in bytes.
+    pub total_size_bytes: i64,
     /// Timestamp when this skill version was created.
     pub created_at: DateTime<Utc>,
     /// Timestamp when this skill version was last updated.
@@ -959,9 +982,9 @@ pub struct SkillSummary {
 /// Request payload for bootstrapping global skills.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillBootstrapGlobalRequest {
-    /// Authored global skill documents to import.
+    /// Authored global skill packages to import.
     #[serde(default)]
-    pub documents: Vec<SkillImportDocument>,
+    pub packages: Vec<SkillPackageDocument>,
 }
 
 /// Response payload for bootstrapping global skills.

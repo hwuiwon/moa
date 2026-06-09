@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
-    HandHandle, HandProvider, HandSpec, HandStatus, MoaConfig, MoaError, Result, SandboxTier,
-    ToolFailureClass, ToolOutput,
+    HandHandle, HandProvider, HandSpec, HandStatus, MoaConfig, MoaError, Result, SandboxFile,
+    SandboxTier, ToolFailureClass, ToolOutput, validate_sandbox_file_path,
 };
 use reqwest::header::CONTENT_TYPE;
 use serde_json::{Value, json};
@@ -287,7 +287,9 @@ impl E2BHandProvider {
             Err(MoaError::HttpStatus { status: 404, .. }) => ExistingFileContent::Missing,
             Err(error) => return Err(error),
         };
-        let duration = self.upload_file(sandbox_id, sandbox, path, content).await?;
+        let duration = self
+            .upload_file(sandbox_id, sandbox, path, content.as_bytes())
+            .await?;
         Ok(build_file_write_output(path, &existing, content, duration))
     }
 
@@ -296,7 +298,7 @@ impl E2BHandProvider {
         sandbox_id: &str,
         sandbox: &ConnectedSandbox,
         path: &str,
-        content: &str,
+        content: &[u8],
     ) -> Result<Duration> {
         let started_at = Instant::now();
         let url = build_url(
@@ -308,7 +310,7 @@ impl E2BHandProvider {
             .post(url)
             .headers(envd_headers(sandbox_id, sandbox)?)
             .header(CONTENT_TYPE, "application/octet-stream")
-            .body(content.to_string())
+            .body(content.to_vec())
             .send()
             .await
             .map_err(|error| {
@@ -316,6 +318,28 @@ impl E2BHandProvider {
             })?;
         let _ = expect_success_json(response).await?;
         Ok(started_at.elapsed())
+    }
+
+    async fn chmod_file(
+        &self,
+        sandbox_id: &str,
+        sandbox: &ConnectedSandbox,
+        path: &str,
+    ) -> Result<()> {
+        let output = self
+            .execute_bash(
+                sandbox_id,
+                sandbox,
+                &format!("chmod 755 {}", shell_escape(path)),
+            )
+            .await?;
+        if output.is_error {
+            return Err(MoaError::ProviderError(format!(
+                "failed to mark E2B file executable `{path}`: {}",
+                output.to_text()
+            )));
+        }
+        Ok(())
     }
 
     async fn str_replace_file(
@@ -332,7 +356,12 @@ impl E2BHandProvider {
         };
         let planned = plan_str_replace(input, existing_content.as_deref(), path, 4)?;
         let duration = self
-            .upload_file(sandbox_id, sandbox, path, &planned.updated_content)
+            .upload_file(
+                sandbox_id,
+                sandbox,
+                path,
+                planned.updated_content.as_bytes(),
+            )
             .await?;
         Ok(build_text_edit_output(
             path,
@@ -418,6 +447,27 @@ impl HandProvider for E2BHandProvider {
                 "unsupported E2B tool: {other}"
             ))),
         }
+    }
+
+    async fn install_files(&self, handle: &HandHandle, files: &[SandboxFile]) -> Result<()> {
+        let sandbox_id = match handle {
+            HandHandle::E2B { sandbox_id } => sandbox_id.as_str(),
+            _ => {
+                return Err(MoaError::Unsupported(
+                    "non-E2B hand handle passed to E2BHandProvider".to_string(),
+                ));
+            }
+        };
+        let sandbox = self.connected_sandbox(sandbox_id).await?;
+        for file in files {
+            validate_sandbox_file_path(&file.path)?;
+            self.upload_file(sandbox_id, &sandbox, &file.path, &file.content)
+                .await?;
+            if file.executable {
+                self.chmod_file(sandbox_id, &sandbox, &file.path).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn classify_error(

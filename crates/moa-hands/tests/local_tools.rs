@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use moa_core::{
-    Event, HandProvider, HandResources, HandSpec, ModelId, SandboxTier, SessionMeta, SessionStore,
-    ToolBudgetConfig, ToolInvocation, UserId, WorkspaceId,
+    Event, HandProvider, HandResources, HandSpec, ModelId, SandboxFile, SandboxTier, SessionMeta,
+    SessionStore, ToolBudgetConfig, ToolInvocation, UserId, WorkspaceId,
 };
 use moa_hands::{LocalHandProvider, ToolRouter};
 use moa_session::{PostgresSessionStore, testing};
@@ -874,6 +874,87 @@ async fn local_bash_hard_cancel_kills_running_process() {
     let error = task.await.unwrap().unwrap_err();
     assert!(matches!(error, moa_core::MoaError::Cancelled));
     assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+#[tokio::test]
+async fn local_provider_installs_skill_package_files() {
+    let dir = tempdir().unwrap();
+    let provider = LocalHandProvider::new_with_docker_detection(dir.path(), false)
+        .await
+        .unwrap();
+    let handle = provider
+        .provision(HandSpec {
+            sandbox_tier: SandboxTier::Local,
+            image: None,
+            resources: HandResources::default(),
+            env: std::collections::HashMap::new(),
+            workspace_mount: None,
+            idle_timeout: Duration::from_secs(300),
+            max_lifetime: Duration::from_secs(300),
+        })
+        .await
+        .unwrap();
+    let sandbox_dir = match &handle {
+        moa_core::HandHandle::Local { sandbox_dir } => sandbox_dir.clone(),
+        other => panic!("expected local hand, got {other:?}"),
+    };
+
+    provider
+        .install_files(
+            &handle,
+            &[
+                SandboxFile {
+                    path: ".moa/skills/package-skill/SKILL.md".to_string(),
+                    content: b"skill body".to_vec(),
+                    executable: false,
+                },
+                SandboxFile {
+                    path: ".moa/skills/package-skill/scripts/run.sh".to_string(),
+                    content: b"#!/bin/sh\necho ok\n".to_vec(),
+                    executable: true,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let skill_md =
+        tokio::fs::read_to_string(sandbox_dir.join(".moa/skills/package-skill/SKILL.md"))
+            .await
+            .unwrap();
+    assert_eq!(skill_md, "skill body");
+    let script = sandbox_dir.join(".moa/skills/package-skill/scripts/run.sh");
+    assert_eq!(
+        tokio::fs::read_to_string(&script).await.unwrap(),
+        "#!/bin/sh\necho ok\n"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = tokio::fs::metadata(&script)
+            .await
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0);
+    }
+
+    let error = provider
+        .install_files(
+            &handle,
+            &[SandboxFile {
+                path: "../escape.txt".to_string(),
+                content: b"bad".to_vec(),
+                executable: false,
+            }],
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("invalid segment"));
+
+    provider.destroy(&handle).await.unwrap();
 }
 
 #[tokio::test]

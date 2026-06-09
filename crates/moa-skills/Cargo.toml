@@ -16,7 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
 sha2.workspace = true
-sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid"] }
+sqlx = { workspace = true, features = ["tls-rustls", "chrono", "json", "uuid"] }
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true

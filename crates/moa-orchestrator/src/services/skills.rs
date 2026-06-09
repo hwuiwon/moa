@@ -1,16 +1,20 @@
 //! Restate service for cloud-owned skill import, export, listing, and bootstrap requests.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{
     SkillBootstrapGlobalRequest, SkillBootstrapGlobalResponse, SkillExportRequest,
-    SkillExportResponse, SkillImportDocument, SkillImportRequest, SkillImportResponse,
-    SkillListRequest, SkillListResponse, SkillSummary,
+    SkillExportResponse, SkillImportRequest, SkillImportResponse, SkillListRequest,
+    SkillListResponse, SkillPackageDocument, SkillPackageDocumentFile, SkillSummary,
 };
 use moa_core::{MemoryScope, MoaError, UserId, WorkspaceId};
-use moa_skills::{NewSkill, Skill, SkillRegistry, parse_skill_markdown};
+use moa_skills::{
+    NewSkill, Skill, SkillPackage, SkillPackageFile, SkillRegistry, StoredSkillPackage,
+};
 use restate_sdk::prelude::*;
 
 use crate::OrchestratorCtx;
@@ -26,7 +30,7 @@ pub trait Skills {
         request: Json<SkillExportRequest>,
     ) -> Result<Json<SkillExportResponse>, HandlerError>;
 
-    /// Imports global, workspace, or user scoped skill documents after the matching authz check.
+    /// Imports global, workspace, or user scoped skill packages after the matching authz check.
     async fn import(
         request: Json<SkillImportRequest>,
     ) -> Result<Json<SkillImportResponse>, HandlerError>;
@@ -35,7 +39,7 @@ pub trait Skills {
     async fn list(request: Json<SkillListRequest>)
     -> Result<Json<SkillListResponse>, HandlerError>;
 
-    /// Imports deployment-global skill documents after a service-operator check.
+    /// Imports deployment-global skill packages after a service-operator check.
     async fn bootstrap_global(
         request: Json<SkillBootstrapGlobalRequest>,
     ) -> Result<Json<SkillBootstrapGlobalResponse>, HandlerError>;
@@ -80,10 +84,10 @@ impl Skills for SkillsImpl {
             checked_import_scope(&request.workspace_id, request.scope, &identity)
                 .map_err(skill_scope_handler_error)?
         };
-        let documents = request.documents;
+        let packages = request.packages;
 
         Ok(ctx
-            .run(|| async move { import_inner(scope, documents).await.map(Json::from) })
+            .run(|| async move { import_inner(scope, packages).await.map(Json::from) })
             .name("skills_import")
             .await?)
     }
@@ -112,11 +116,11 @@ impl Skills for SkillsImpl {
     ) -> Result<Json<SkillBootstrapGlobalResponse>, HandlerError> {
         annotate_restate_handler_span("Skills", "bootstrap_global");
         authorize_deployment_skill_admin(&ctx).await?;
-        let documents = request.into_inner().documents;
+        let packages = request.into_inner().packages;
 
         Ok(ctx
             .run(|| async move {
-                let response = import_inner(MemoryScope::Global, documents).await?;
+                let response = import_inner(MemoryScope::Global, packages).await?;
                 Ok(Json(SkillBootstrapGlobalResponse {
                     imported: response.imported,
                 }))
@@ -214,6 +218,10 @@ pub fn skill_summary_from_skill(skill: Skill) -> Result<SkillSummary, HandlerErr
         name: skill.name,
         description: skill.description,
         tags: skill.tags,
+        package_hash: hex::encode(skill.package_hash),
+        skill_md_hash: hex::encode(skill.skill_md_hash),
+        file_count: skill.file_count,
+        total_size_bytes: skill.total_size_bytes,
         created_at: skill.created_at,
         updated_at: skill.updated_at,
     })
@@ -225,29 +233,29 @@ async fn export_inner(request: SkillExportRequest) -> Result<SkillExportResponse
         workspace_id: workspace_id.clone(),
     };
     let registry = skill_registry();
-    let skills = registry
-        .load_for_scope(&scope)
+    let packages = registry
+        .load_packages_for_scope(&scope)
         .await
         .map_err(skill_handler_error)?;
-    let documents = skills
+    let packages = packages
         .into_iter()
-        .map(skill_import_document_from_skill)
+        .map(skill_package_document_from_stored)
         .collect();
     Ok(SkillExportResponse {
         workspace_id,
-        documents,
+        packages,
     })
 }
 
 async fn import_inner(
     scope: MemoryScope,
-    documents: Vec<SkillImportDocument>,
+    packages: Vec<SkillPackageDocument>,
 ) -> Result<SkillImportResponse, HandlerError> {
     let registry = skill_registry();
     let mut imported = 0_u64;
-    for document in documents {
-        let parsed = parse_skill_markdown(&document.body).map_err(skill_handler_error)?;
-        let skill = NewSkill::from_document(scope.clone(), &parsed, document.body);
+    for package in packages {
+        let files = decode_skill_package_files(package.files)?;
+        let skill = NewSkill::from_package(scope.clone(), SkillPackage::new(files));
         registry
             .upsert_by_name(skill)
             .await
@@ -335,17 +343,57 @@ async fn authorize_deployment_skill_admin(ctx: &impl RequestHeaders) -> Result<(
     .map_err(translate_authz_error)
 }
 
-fn skill_import_document_from_skill(skill: Skill) -> SkillImportDocument {
-    SkillImportDocument {
+fn skill_package_document_from_stored(stored: StoredSkillPackage) -> SkillPackageDocument {
+    let skill = stored.skill;
+    SkillPackageDocument {
         name: Some(skill.name),
-        description: skill.description,
-        body: skill.body,
+        description: Some(skill.description),
+        files: stored
+            .files
+            .into_iter()
+            .map(|file| SkillPackageDocumentFile {
+                path: file.path,
+                content_base64: BASE64.encode(file.content),
+                content_type: file.content_type,
+                executable: file.executable,
+            })
+            .collect(),
         source_uri: None,
         metadata: serde_json::json!({
             "skill_uid": skill.skill_uid,
             "version": skill.version,
+            "package_hash": hex::encode(skill.package_hash),
+            "skill_md_hash": hex::encode(skill.skill_md_hash),
+            "file_count": skill.file_count,
+            "total_size_bytes": skill.total_size_bytes,
+            "manifest": skill.manifest,
         }),
     }
+}
+
+fn decode_skill_package_files(
+    files: Vec<SkillPackageDocumentFile>,
+) -> Result<Vec<SkillPackageFile>, HandlerError> {
+    files
+        .into_iter()
+        .map(|file| {
+            let content = BASE64.decode(&file.content_base64).map_err(|error| {
+                HandlerError::from(TerminalError::new_with_code(
+                    400,
+                    format!(
+                        "skill package file `{}` content_base64 is invalid: {error}",
+                        file.path
+                    ),
+                ))
+            })?;
+            Ok(SkillPackageFile {
+                path: file.path,
+                content,
+                content_type: file.content_type,
+                executable: file.executable,
+            })
+        })
+        .collect()
 }
 
 fn memory_scope_from_skill(skill: &Skill) -> Result<MemoryScope, HandlerError> {

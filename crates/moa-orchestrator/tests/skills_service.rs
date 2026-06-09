@@ -6,7 +6,7 @@ use moa_core::{MemoryScope, UserId, WorkspaceId};
 use moa_orchestrator::services::skills::{
     SkillScopeError, checked_import_scope, effective_user_id, skill_summary_from_skill,
 };
-use moa_skills::Skill;
+use moa_skills::{Skill, SkillPackageManifest};
 use uuid::Uuid;
 
 fn user_identity(user_id: Uuid) -> Identity {
@@ -171,8 +171,22 @@ fn skill_summary_from_skill_preserves_visible_row_fields() {
         user_id: None,
         scope: "workspace".to_string(),
         name: "debug-oauth-refresh".to_string(),
-        description: Some("Investigate OAuth refresh bugs".to_string()),
-        body: "body".to_string(),
+        description: "Investigate OAuth refresh bugs".to_string(),
+        package_hash: vec![0xab, 0xcd],
+        skill_md_hash: vec![0x12, 0x34],
+        file_count: 2,
+        total_size_bytes: 64,
+        manifest: SkillPackageManifest {
+            schema_version: 1,
+            skill_md_path: "SKILL.md".to_string(),
+            skill_md_estimated_tokens: 12,
+            allowed_tools: Vec::new(),
+            use_count: 0,
+            last_used: None,
+            success_rate: 1.0,
+            auto_generated: false,
+            files: Vec::new(),
+        },
         version: 2,
         previous_skill_uid: None,
         tags: vec!["oauth".to_string(), "auth".to_string()],
@@ -191,11 +205,12 @@ fn skill_summary_from_skill_preserves_visible_row_fields() {
     );
     assert_eq!(summary.version, 2);
     assert_eq!(summary.name, "debug-oauth-refresh");
-    assert_eq!(
-        summary.description.as_deref(),
-        Some("Investigate OAuth refresh bugs")
-    );
+    assert_eq!(summary.description, "Investigate OAuth refresh bugs");
     assert_eq!(summary.tags, vec!["oauth".to_string(), "auth".to_string()]);
+    assert_eq!(summary.package_hash, "abcd");
+    assert_eq!(summary.skill_md_hash, "1234");
+    assert_eq!(summary.file_count, 2);
+    assert_eq!(summary.total_size_bytes, 64);
     assert_eq!(summary.created_at, now);
     assert_eq!(summary.updated_at, now);
 }
