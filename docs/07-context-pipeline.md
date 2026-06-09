@@ -23,7 +23,7 @@ The code reports fixed stage numbers through each `ContextProcessor`. With query
 | 2 | `InstructionProcessor` | Stable prefix | user/workspace instructions |
 | 3 | `ToolDefinitionProcessor` | Stable prefix | deterministic tool schema list, capped at 30 |
 | 4 | `SkillInjector` | Stable prefix breakpoint | budgeted skill manifest ranked for the task |
-| 5 | `QueryRewriter` | Dynamic metadata | rewritten query, high-level task kind, clarification flag, task transition flag |
+| 5 | `QueryRewriter` | Dynamic metadata | retrieval query preparation and task transition signal |
 | 6 | `MemoryRetriever` | Dynamic tail | user/workspace indexes and relevant memory pages |
 | 7 | `HistoryCompiler` | Dynamic/history prefix | replayed events, checkpoints, recent turns, errors |
 | 8 | `RuntimeContextProcessor` | Dynamic tail | current date, workspace, working directory, branch, user |
@@ -40,21 +40,19 @@ The stable prefix is produced by stages 1-4. These stages avoid per-turn values 
 
 ## Query Rewriting
 
-`QueryRewriter` is fail-open. On timeout, parsing error, circuit-breaker open, or skipped input, it stores a passthrough `QueryRewriteResult` and lets the turn continue.
+`QueryRewriter` is fail-open. On timeout, parsing error, circuit-breaker open, or skipped input, it stores a passthrough `QueryRewriteResult` and lets the turn continue. A turn execution reuses the same rewrite metadata across repeated compile steps for one user message, so tool-result follow-up requests do not call the rewriter again.
 
 The rewriter produces:
 
 - `rewritten_query`
-- high-level `task_kind`
 - `sub_queries`
-- `suggested_tools`
-- `needs_clarification`
-- `clarification_question`
 - `is_new_task`
 - `task_summary`
 - `source`
 
-`is_new_task` and `task_summary` feed the segment tracker. The rewritten query feeds memory retrieval.
+Compatibility fields such as `task_kind`, `suggested_tools`, `needs_clarification`, `tool_bias`, and `suggested_promptlets` are advisory preparation hints only. They are not a durable session intent taxonomy and do not route tool execution; the main agent model still chooses actions from the compiled context and tool schemas.
+
+`is_new_task` and `task_summary` feed the segment tracker. The rewritten query feeds memory retrieval. When the rewriter falls back to passthrough, memory retrieval uses the full original query for semantic retrieval rather than reducing it to keyword-only text.
 
 ## Skill Injection
 
@@ -75,7 +73,7 @@ memory crates. See
 current privacy boundary and `crates/moa-memory/README.md` for crate-level
 details.
 
-Search uses the rewritten query when available, otherwise extracted keywords from the latest user message. Retrieval can be keyword, semantic, or hybrid depending on the memory store configuration.
+Search uses the rewritten query when available, otherwise the full passthrough or latest user query. Lexical search still derives terms internally, while semantic retrieval keeps the natural-language query intact. Retrieval can be keyword, semantic, or hybrid depending on the memory store configuration.
 
 Memory is inserted as a reminder near the active turn so runtime facts and retrieved context do not disturb the stable prefix.
 

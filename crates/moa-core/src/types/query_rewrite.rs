@@ -8,11 +8,11 @@ use serde_json::{Value, json};
 pub struct QueryRewriteResult {
     /// The self-contained rewritten query. Never adds new entities.
     pub rewritten_query: String,
-    /// Coarse task kind inferred for prompt planning.
+    /// Coarse advisory task kind for observability and prompt preparation.
     pub task_kind: TaskKind,
     /// Optional sub-queries for compound tasks.
     pub sub_queries: Vec<String>,
-    /// Tool names the rewriter thinks are relevant.
+    /// Advisory tool hints retained for compatibility; the main agent still chooses actions.
     pub suggested_tools: Vec<String>,
     /// Whether the task likely needs fresh external information before answering.
     #[serde(default)]
@@ -20,7 +20,7 @@ pub struct QueryRewriteResult {
     /// Whether the task likely needs repository or workspace inspection before answering.
     #[serde(default)]
     pub repo_context_required: bool,
-    /// Memory routing action inferred from the user request.
+    /// Advisory memory action inferred from the user request.
     #[serde(default)]
     pub memory_action: MemoryAction,
     /// Whether the rewriter thinks clarification is needed.
@@ -34,10 +34,10 @@ pub struct QueryRewriteResult {
     /// Short summary of the new task when a segment transition is detected.
     #[serde(default)]
     pub task_summary: Option<String>,
-    /// Tool-selection biases for observe-first routing.
+    /// Advisory tool-selection biases for prompt preparation.
     #[serde(default)]
     pub tool_bias: Vec<String>,
-    /// Promptlets that downstream routing may prefer for this task.
+    /// Advisory promptlets that downstream preparation may prefer for this task.
     #[serde(default)]
     pub suggested_promptlets: Vec<String>,
     /// Whether the rewriter ran or fell back to the original query.
@@ -144,7 +144,7 @@ impl QueryRewriteResult {
     }
 }
 
-/// Memory action inferred by query rewriting for downstream routing.
+/// Advisory memory action inferred by query rewriting.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryAction {

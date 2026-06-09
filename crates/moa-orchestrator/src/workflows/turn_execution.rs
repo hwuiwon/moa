@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
 use crate::OrchestratorCtx;
-use crate::brain_bridge::{PreparedTurnRequest, prepare_turn_request};
+use crate::brain_bridge::{PreparedTurnRequest, QueryRewriteCacheEntry, prepare_turn_request};
 use crate::objects::sub_agent::SubAgentClient;
 use crate::services::{
     llm_gateway::LLMGatewayClient,
@@ -71,6 +71,8 @@ const K_CANCEL_REASON_PROMISE: &str = "cancel_reason";
 const K_PENDING_APPROVAL: &str = "pending_approval";
 const K_PHASE: &str = "phase";
 const K_CHILDREN: &str = "children";
+const K_USER_MESSAGE_SEQUENCE: &str = "user_message_sequence";
+const K_QUERY_REWRITE_CACHE: &str = "query_rewrite_cache";
 const APPROVAL_TIMEOUT_SECS_ENV: &str = "MOA_APPROVAL_TIMEOUT_SECS";
 const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 30 * 60;
 
@@ -223,7 +225,7 @@ async fn run_turn_inside_workflow(
         });
     }
 
-    append_session_event(
+    let user_sequence_num = append_session_event(
         ctx,
         session_id,
         Event::UserMessage {
@@ -232,6 +234,8 @@ async fn run_turn_inside_workflow(
         },
     )
     .await?;
+    ctx.set(K_USER_MESSAGE_SEQUENCE, Json::from(user_sequence_num));
+    ctx.clear(K_QUERY_REWRITE_CACHE);
 
     let max_turns = OrchestratorCtx::current().config.session_limits.max_turns;
     let max_turns = if max_turns == 0 {
@@ -393,9 +397,17 @@ async fn build_request_inside_workflow(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
 ) -> Result<Option<CompletionRequest>, HandlerError> {
+    let active_user_sequence_num = ctx
+        .get::<Json<u64>>(K_USER_MESSAGE_SEQUENCE)
+        .await?
+        .map(Json::into_inner);
+    let cached_query_rewrite = ctx
+        .get::<Json<QueryRewriteCacheEntry>>(K_QUERY_REWRITE_CACHE)
+        .await?
+        .map(Json::into_inner);
     let prepared = ctx
         .run(|| async move {
-            prepare_turn_request(session_id)
+            prepare_turn_request(session_id, active_user_sequence_num, cached_query_rewrite)
                 .await
                 .map(Json::from)
                 .map_err(to_handler_error)
@@ -403,8 +415,13 @@ async fn build_request_inside_workflow(
         .name("prepare_turn_request")
         .await?
         .into_inner();
+    if let Some(cache) = prepared.query_rewrite_cache {
+        ctx.set(K_QUERY_REWRITE_CACHE, Json::from(cache));
+    } else {
+        ctx.clear(K_QUERY_REWRITE_CACHE);
+    }
 
-    Ok(match prepared {
+    Ok(match prepared.prepared {
         PreparedTurnRequest::Idle => None,
         PreparedTurnRequest::Request(request) => Some(*request),
     })
@@ -1160,6 +1177,7 @@ async fn emit_turn_budget_exceeded(
         },
     )
     .await
+    .map(|_| ())
 }
 
 async fn append_tool_call_event(
@@ -1186,6 +1204,7 @@ async fn append_tool_call_event(
         },
     )
     .await
+    .map(|_| ())
 }
 
 async fn append_tool_result_event(
@@ -1208,22 +1227,24 @@ async fn append_tool_result_event(
         },
     )
     .await
+    .map(|_| ())
 }
 
 async fn append_session_event(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     event: Event,
-) -> Result<(), HandlerError> {
+) -> Result<u64, HandlerError> {
     let persist_span = event_persist_span(1);
     let persist_started = Instant::now();
-    ctx.service_client::<RestateSessionStoreClient>()
+    let sequence_num = ctx
+        .service_client::<RestateSessionStoreClient>()
         .append_event(Json(AppendEventRequest { session_id, event }))
         .call()
         .instrument(persist_span)
         .await?;
     record_turn_event_persist_duration(persist_started.elapsed(), 1);
-    Ok(())
+    Ok(sequence_num)
 }
 
 async fn load_session_meta(
