@@ -59,7 +59,7 @@ pub use platform::{
     MessageId, OutboundMessage, Platform, PlatformCapabilities, PlatformUser, ToolStatus,
 };
 pub use provider::{ModelTask, ModelTier};
-pub use query_rewrite::{QueryRewriteResult, RewriteSource, TaskKind};
+pub use query_rewrite::{MemoryAction, QueryRewriteResult, RewriteSource, TaskKind};
 pub use resolution::{
     ResolutionLabel, ResolutionScore, ScoringPhase, SegmentBaseline, SkillResolutionRate,
 };

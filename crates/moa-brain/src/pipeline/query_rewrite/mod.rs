@@ -221,10 +221,15 @@ mod tests {
             "task_kind": "coding",
             "sub_queries": sub_queries,
             "suggested_tools": [],
+            "freshness_required": false,
+            "repo_context_required": false,
+            "memory_action": "none",
             "needs_clarification": false,
             "clarification_question": null,
             "is_new_task": false,
             "task_summary": null,
+            "tool_bias": [],
+            "suggested_promptlets": [],
         })
         .to_string()
     }
@@ -304,10 +309,15 @@ mod tests {
                     "task_kind": "creative",
                     "sub_queries": [],
                     "suggested_tools": [],
+                    "freshness_required": false,
+                    "repo_context_required": false,
+                    "memory_action": "none",
                     "needs_clarification": false,
                     "clarification_question": null,
                     "is_new_task": true,
                     "task_summary": "Write a short project status headline about database migrations.",
+                    "tool_bias": [],
+                    "suggested_promptlets": [],
                 })
                 .to_string(),
             )),
@@ -421,10 +431,15 @@ mod tests {
             "task_kind": "software engineering task",
             "sub_queries": [],
             "suggested_tools": [],
+            "freshness_required": false,
+            "repo_context_required": false,
+            "memory_action": "none",
             "needs_clarification": false,
             "clarification_question": null,
             "is_new_task": false,
             "task_summary": null,
+            "tool_bias": [],
+            "suggested_promptlets": [],
         })
         .to_string();
         let (rewriter, calls) = rewriter_with_response(invalid_response);

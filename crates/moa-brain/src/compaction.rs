@@ -345,3 +345,36 @@ fn calculate_cost_cents(input_tokens: usize, output_tokens: usize, pricing: &Tok
         / 1_000_000.0;
     (cost_dollars * 100.0).round() as u32
 }
+
+#[cfg(test)]
+mod tests {
+    use moa_core::MessageRole;
+
+    use super::compaction_request;
+
+    #[test]
+    fn compaction_request_pins_resume_and_validation_sections() {
+        // Pins: checkpoint summaries preserve enough execution state for the next turn to resume.
+        let request = compaction_request(Some("## Goal\n- Existing work"), &[]);
+
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.messages[0].role, MessageRole::System);
+        let system_prompt = &request.messages[0].content;
+        assert!(system_prompt.contains("Commands And Validation"));
+        assert!(system_prompt.contains("Failures And Blockers"));
+        assert!(system_prompt.contains("pending approvals"));
+        assert!(system_prompt.contains("Do not conclude the task is done"));
+
+        assert_eq!(request.messages[1].role, MessageRole::User);
+        assert!(
+            request.messages[1]
+                .content
+                .contains("Existing checkpoint summary:")
+        );
+        assert!(
+            request.messages[1]
+                .content
+                .contains("New events to fold into the checkpoint:")
+        );
+    }
+}

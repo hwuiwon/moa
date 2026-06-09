@@ -185,7 +185,7 @@ fn completed_from_active(segment: &ActiveSegment, now: DateTime<Utc>) -> Segment
 mod tests {
     use chrono::{Duration, TimeZone};
     use moa_core::{
-        ActiveSegment, QueryRewriteResult, RewriteSource, SessionId, TaskKind,
+        ActiveSegment, MemoryAction, QueryRewriteResult, RewriteSource, SessionId, TaskKind,
         deterministic_segment_id,
     };
     use serde_json::json;
@@ -198,10 +198,15 @@ mod tests {
             task_kind: TaskKind::FileOperation,
             sub_queries: Vec::new(),
             suggested_tools: Vec::new(),
+            freshness_required: false,
+            repo_context_required: false,
+            memory_action: MemoryAction::None,
             needs_clarification: false,
             clarification_question: None,
             is_new_task,
             task_summary: Some("Update the README".to_string()),
+            tool_bias: Vec::new(),
+            suggested_promptlets: Vec::new(),
             source: RewriteSource::Rewritten,
         })
         .expect("rewrite result should serialize")

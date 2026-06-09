@@ -112,7 +112,7 @@ impl ToolRegistry {
         registry.register_builtin(Arc::new(tool_result::ToolResultSearchTool));
         registry.register_hand(
             "bash",
-            "Run a non-interactive shell command inside the active workspace root. Use bash for tests, builds, and commands the native file tools cannot express. Do not use bash for routine repository navigation or source inspection when file_search, grep, file_outline, file_read, or str_replace can handle the task.",
+            "Purpose: run a non-interactive shell command inside the active workspace root. Use when: tests, builds, package managers, git inspection, or commands native file tools cannot express. Do not use: routine repository navigation, source reading, or text edits that file_search, grep, file_outline, file_read, str_replace, or file_write can handle. If blocked: keep commands targeted, preserve stderr/stdout, and stop after repeated failures instead of looping.",
             json!({
                 "type": "object",
                 "properties": {
@@ -127,7 +127,7 @@ impl ToolRegistry {
         );
         registry.register_hand(
             "file_outline",
-            "Preferred navigation tool for large Python source files. Use symbol to focus on one class, function, or method and list its direct methods with line numbers. Use this instead of bash/rg/python AST scripts when locating methods.",
+            "Purpose: inspect a Python file's symbol outline without reading the full file. Use when: a large Python source file needs class, function, method, or line-number orientation. Do not use: non-Python files or exact content searches where grep is better. If blocked: fall back to a narrow file_read range after locating the nearest symbol.",
             json!({
                 "type": "object",
                 "properties": {
@@ -142,7 +142,7 @@ impl ToolRegistry {
         );
         registry.register_hand(
             "grep",
-            "Search file contents using a regex or literal pattern. Respects .gitignore, skips vendored directories, and returns matches with file paths and line numbers.",
+            "Purpose: search workspace file contents with regex or literal patterns. Use when: locating symbols, strings, errors, tests, or references before reading files. Do not use: broad exploratory filesystem walks or generated/vendor directories. If blocked: narrow path, enable literal matching for exact strings, or read a small matching range.",
             json!({
                 "type": "object",
                 "properties": {
@@ -159,7 +159,7 @@ impl ToolRegistry {
         );
         registry.register_hand(
             "file_read",
-            "Read a UTF-8 text file from the active workspace root. Supports optional line ranges; large unscoped reads return only the first chunk with line numbers and a truncation notice. Pair this with file_outline on large Python files.",
+            "Purpose: read UTF-8 text from a workspace file. Use when: you already know the relevant file or line range. Do not use: whole large files before searching or outlining. If blocked: use grep or file_outline first, then retry with a narrower start_line/end_line range.",
             json!({
                 "type": "object",
                 "properties": {
@@ -175,7 +175,7 @@ impl ToolRegistry {
         );
         registry.register_hand(
             "str_replace",
-            "Replace one unique string match in an existing UTF-8 text file. Use this for edits to existing files; include enough surrounding context in old_str to make the match unique.",
+            "Purpose: replace one unique string match in an existing UTF-8 text file. Use when: editing an existing file with enough surrounding context to make old_str match exactly once. Do not use: new files, ambiguous matches, or line-number-only insertions. If blocked: read a narrower span and retry with more exact context.",
             json!({
                 "type": "object",
                 "properties": {
@@ -191,7 +191,7 @@ impl ToolRegistry {
         );
         registry.register_hand(
             "file_write",
-            "Create or overwrite a UTF-8 text file inside the active workspace root. Paths must be relative and must not use `..`.",
+            "Purpose: create or deliberately overwrite a UTF-8 text file inside the active workspace root. Use when: adding a new file or replacing a whole generated/test fixture file intentionally. Do not use: small edits to existing source files where str_replace is safer. If blocked: verify the relative path and avoid `..` or paths outside the workspace.",
             json!({
                 "type": "object",
                 "properties": {
@@ -206,7 +206,7 @@ impl ToolRegistry {
         );
         registry.register_hand(
             "file_search",
-            "Find files inside the active workspace root using a glob pattern.",
+            "Purpose: find files inside the active workspace root with a glob pattern. Use when: locating paths before reading or editing. Do not use: content search, shell globbing, or generated/vendor directory exploration. If blocked: tighten the glob or switch to grep when the identifier is content rather than a path.",
             json!({
                 "type": "object",
                 "properties": {
@@ -334,5 +334,79 @@ fn default_budget_for_tool(tool_name: &str) -> u32 {
         "grep" | "file_search" => 4_000,
         "file_read" => 8_000,
         _ => 8_000,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToolRegistry;
+
+    #[test]
+    fn default_local_prompt_schemas_keep_structured_hand_tool_guidance() {
+        // Pins: prompt-facing hand tool descriptions carry usage policy without changing schemas.
+        let registry = ToolRegistry::default_local();
+
+        for name in [
+            "bash",
+            "file_outline",
+            "grep",
+            "file_read",
+            "str_replace",
+            "file_write",
+            "file_search",
+        ] {
+            let description = registry
+                .get(name)
+                .expect("default tool should exist")
+                .description
+                .as_str();
+            assert!(
+                description.contains("Purpose:"),
+                "{name}: missing Purpose guidance"
+            );
+            assert!(
+                description.contains("Use when:"),
+                "{name}: missing Use when guidance"
+            );
+            assert!(
+                description.contains("Do not use:"),
+                "{name}: missing Do not use guidance"
+            );
+            assert!(
+                description.contains("If blocked:"),
+                "{name}: missing blocked/failure guidance"
+            );
+        }
+
+        let tool_names = registry
+            .default_tool_schemas()
+            .into_iter()
+            .map(|schema| {
+                schema
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("schema should include name")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_names,
+            vec![
+                "memory_remember",
+                "memory_forget",
+                "memory_supersede",
+                "session_search",
+                "tool_result_read",
+                "tool_result_search",
+                "file_search",
+                "grep",
+                "file_outline",
+                "file_read",
+                "str_replace",
+                "file_write",
+                "bash",
+            ],
+            "default local loadout order changed"
+        );
     }
 }

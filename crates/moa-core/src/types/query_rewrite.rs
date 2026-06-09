@@ -14,6 +14,15 @@ pub struct QueryRewriteResult {
     pub sub_queries: Vec<String>,
     /// Tool names the rewriter thinks are relevant.
     pub suggested_tools: Vec<String>,
+    /// Whether the task likely needs fresh external information before answering.
+    #[serde(default)]
+    pub freshness_required: bool,
+    /// Whether the task likely needs repository or workspace inspection before answering.
+    #[serde(default)]
+    pub repo_context_required: bool,
+    /// Memory routing action inferred from the user request.
+    #[serde(default)]
+    pub memory_action: MemoryAction,
     /// Whether the rewriter thinks clarification is needed.
     pub needs_clarification: bool,
     /// If clarification is needed, the question to ask.
@@ -25,6 +34,12 @@ pub struct QueryRewriteResult {
     /// Short summary of the new task when a segment transition is detected.
     #[serde(default)]
     pub task_summary: Option<String>,
+    /// Tool-selection biases for observe-first routing.
+    #[serde(default)]
+    pub tool_bias: Vec<String>,
+    /// Promptlets that downstream routing may prefer for this task.
+    #[serde(default)]
+    pub suggested_promptlets: Vec<String>,
     /// Whether the rewriter ran or fell back to the original query.
     pub source: RewriteSource,
 }
@@ -38,10 +53,15 @@ impl QueryRewriteResult {
             task_kind: TaskKind::Unknown,
             sub_queries: Vec::new(),
             suggested_tools: Vec::new(),
+            freshness_required: false,
+            repo_context_required: false,
+            memory_action: MemoryAction::None,
             needs_clarification: false,
             clarification_question: None,
             is_new_task: false,
             task_summary: None,
+            tool_bias: Vec::new(),
+            suggested_promptlets: Vec::new(),
             source: RewriteSource::Passthrough,
         }
     }
@@ -75,6 +95,19 @@ impl QueryRewriteResult {
                     "type": "array",
                     "items": { "type": "string" }
                 },
+                "freshness_required": { "type": "boolean" },
+                "repo_context_required": { "type": "boolean" },
+                "memory_action": {
+                    "type": "string",
+                    "enum": [
+                        "none",
+                        "retrieve",
+                        "remember",
+                        "forget",
+                        "supersede",
+                        "ingest"
+                    ]
+                },
                 "needs_clarification": { "type": "boolean" },
                 "clarification_question": {
                     "type": ["string", "null"]
@@ -82,6 +115,14 @@ impl QueryRewriteResult {
                 "is_new_task": { "type": "boolean" },
                 "task_summary": {
                     "type": ["string", "null"]
+                },
+                "tool_bias": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "suggested_promptlets": {
+                    "type": "array",
+                    "items": { "type": "string" }
                 }
             },
             "required": [
@@ -89,13 +130,37 @@ impl QueryRewriteResult {
                 "task_kind",
                 "sub_queries",
                 "suggested_tools",
+                "freshness_required",
+                "repo_context_required",
+                "memory_action",
                 "needs_clarification",
                 "clarification_question",
                 "is_new_task",
-                "task_summary"
+                "task_summary",
+                "tool_bias",
+                "suggested_promptlets"
             ]
         })
     }
+}
+
+/// Memory action inferred by query rewriting for downstream routing.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryAction {
+    /// No memory-specific action is requested.
+    #[default]
+    None,
+    /// Retrieve existing memory before answering.
+    Retrieve,
+    /// Store a short fact, preference, or lesson.
+    Remember,
+    /// Remove remembered information.
+    Forget,
+    /// Replace or update remembered information.
+    Supersede,
+    /// Ingest longer reference material into memory.
+    Ingest,
 }
 
 /// Coarse task category inferred by query rewriting.

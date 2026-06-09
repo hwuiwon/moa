@@ -25,11 +25,22 @@ pub(super) fn build_rewriter_prompt(input: &RewriteInput, ctx: &WorkingContext) 
          - A new task means the user is asking about something unrelated to the current work\n\
          - Set is_new_task=true only when the topic genuinely shifts, not for follow-up questions\n\
          - Treat coreferences like \"that file\", \"the error above\", and \"try again\" as continuations\n\
+         - Also act as an observe-first mode router for downstream promptlets and tool hints\n\
+         - Set freshness_required=true when answering requires current, external, or time-sensitive information\n\
+         - Set repo_context_required=true when the agent should inspect repository files, code, config, logs, or tests before answering\n\
+         - Set memory_action to one of: none, retrieve, remember, forget, supersede, ingest\n\
+         - Use memory_action=retrieve when existing workspace or user memory is likely needed before answering\n\
+         - Use needs_clarification as the clarification router flag; ask exactly one clarification_question when needed\n\
+         - Put concrete available tool names in suggested_tools; put higher-level routing hints in tool_bias\n\
+         - Put concise promptlet or skill names in suggested_promptlets when a known promptlet would help\n\
          - Respond ONLY with valid JSON matching the schema below. No preamble.\n\n\
          Schema: {{\"rewritten_query\": string, \"task_kind\": string, \"sub_queries\": [string],\n\
-         \"suggested_tools\": [string], \"needs_clarification\": bool,\n\
+         \"suggested_tools\": [string], \"freshness_required\": bool,\n\
+         \"repo_context_required\": bool, \"memory_action\": string,\n\
+         \"needs_clarification\": bool,\n\
          \"clarification_question\": string|null, \"is_new_task\": bool,\n\
-         \"task_summary\": string|null}}\n\
+         \"task_summary\": string|null, \"tool_bias\": [string],\n\
+         \"suggested_promptlets\": [string]}}\n\
          task_kind must be one of: coding, research, file_operation, system_admin,\n\
          creative, question, conversation, unknown.\n\n\
          Available tools: {tools}\n\n\
