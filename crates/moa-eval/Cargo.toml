@@ -28,6 +28,7 @@ regex.workspace = true
 reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid", "json"] }
 thiserror.workspace = true
 tokio.workspace = true

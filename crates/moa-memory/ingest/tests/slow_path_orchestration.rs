@@ -2,17 +2,23 @@
 
 mod support;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::Duration;
-use moa_memory_ingest::ingest_turn_direct_with_ctx;
+use moa_memory_ingest::{
+    DeterministicEntityMergeVerifier, ScriptedFactExtractor, TurnChunk, extract_facts,
+    ingest_turn_direct_with_ctx,
+};
 use serde::Deserialize;
 use uuid::Uuid;
 
 use support::{
-    TEST_LOCK, active_fact_rows, configured_test_db, contradiction_edge_count,
-    create_changelog_payloads, create_fact, fact_rows, fixed_time, ingest_ctx, ingest_ctx_with_pii,
-    node_confidence, node_valid_to, turn,
+    SLOW_PATH_USER_ID, TEST_LOCK, active_user_entity_rows, active_user_fact_rows,
+    active_workspace_entity_rows, active_workspace_fact_rows, configured_test_db,
+    contradiction_edge_count, create_changelog_payloads, create_fact, entity_rows, fact_rows,
+    fixed_time, ingest_ctx, ingest_ctx_with_pii, node_confidence, node_valid_to, relates_to_edges,
+    supersede_protocol_count, supersedes_edge_exists, turn, user_fact_rows,
 };
 
 #[derive(Debug, Deserialize)]
@@ -56,7 +62,13 @@ async fn slow_path_ingests_simple_document_and_writes_expected_facts_to_graph() 
     assert_eq!(report.superseded, 0);
     assert_eq!(report.skipped, 0);
     assert_eq!(report.failed, 0);
-    let rows = fact_rows(test_db.store().pool(), workspace_id).await;
+    assert_eq!(
+        active_workspace_fact_rows(test_db.store().pool(), workspace_id)
+            .await
+            .len(),
+        0
+    );
+    let rows = active_user_fact_rows(test_db.store().pool(), workspace_id).await;
     assert_eq!(rows.len(), expected.facts.len());
     for expected in expected.facts {
         let row = rows
@@ -80,11 +92,91 @@ async fn slow_path_ingests_simple_document_and_writes_expected_facts_to_graph() 
             node_confidence(test_db.store().pool(), workspace_id, row.uid).await,
             expected.confidence
         );
+        assert_eq!(row.scope.as_str(), "user");
+        assert_eq!(row.user_id.as_deref(), Some(SLOW_PATH_USER_ID));
     }
+    assert_eq!(
+        active_user_entity_rows(test_db.store().pool(), workspace_id)
+            .await
+            .len(),
+        6
+    );
+    assert_eq!(
+        active_workspace_entity_rows(test_db.store().pool(), workspace_id)
+            .await
+            .len(),
+        0
+    );
 }
 
 #[tokio::test]
-async fn slow_path_ingests_document_with_contradictions_and_emits_contradicts_edges() {
+async fn slow_path_respects_user_default_and_workspace_shared_scope_markers() {
+    // Pins: unmarked and user-private slow-path facts stay user scoped, while explicit
+    // workspace-shared markers write workspace rows with the marker stripped.
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let workspace_id = Uuid::now_v7();
+    let ctx = ingest_ctx(test_db.store().pool(), workspace_id);
+
+    let report = ingest_turn_direct_with_ctx(
+        ctx,
+        turn(
+            workspace_id,
+            "Fact: editor_theme uses solarized\nFact: user private shell uses zsh\nFact: workspace shared API runs_on_port 3000",
+            10,
+        ),
+    )
+    .await
+    .expect("slow path ingests mixed-scope document");
+
+    assert_eq!(report.inserted, 3);
+    assert_eq!(report.superseded, 0);
+    assert_eq!(report.skipped, 0);
+    assert_eq!(report.failed, 0);
+    let user_rows = active_user_fact_rows(test_db.store().pool(), workspace_id).await;
+    let workspace_rows = active_workspace_fact_rows(test_db.store().pool(), workspace_id).await;
+    assert_eq!(user_rows.len(), 2);
+    assert_eq!(workspace_rows.len(), 1);
+    assert_eq!(
+        user_rows
+            .iter()
+            .map(|row| (
+                row.name.as_str(),
+                row.scope.as_str(),
+                row.user_id.as_deref()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("editor_theme", "user", Some(SLOW_PATH_USER_ID)),
+            ("shell", "user", Some(SLOW_PATH_USER_ID)),
+        ]
+    );
+    assert_eq!(workspace_rows[0].name, "API");
+    assert_eq!(workspace_rows[0].scope.as_str(), "workspace");
+    assert_eq!(workspace_rows[0].user_id.as_deref(), None);
+    let workspace_properties = workspace_rows[0]
+        .properties_summary
+        .as_ref()
+        .expect("workspace fact properties projected");
+    assert_eq!(workspace_properties["summary"], "API runs_on_port 3000");
+    assert_eq!(
+        active_user_entity_rows(test_db.store().pool(), workspace_id)
+            .await
+            .len(),
+        4
+    );
+    assert_eq!(
+        active_workspace_entity_rows(test_db.store().pool(), workspace_id)
+            .await
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn slow_path_ingests_document_with_contradictions_and_uses_supersedes_edges() {
     let _guard = TEST_LOCK.lock().await;
     let Some(test_db) = configured_test_db().await else {
         return;
@@ -119,9 +211,30 @@ async fn slow_path_ingests_document_with_contradictions_and_emits_contradicts_ed
             .await
             .is_some()
     );
+    let user_rows = active_user_fact_rows(test_db.store().pool(), workspace_id).await;
+    assert_eq!(user_rows.len(), 1);
+    assert_eq!(
+        active_workspace_fact_rows(test_db.store().pool(), workspace_id)
+            .await
+            .len(),
+        0
+    );
+    assert!(
+        supersedes_edge_exists(
+            test_db.store().pool(),
+            workspace_id,
+            old_uid,
+            user_rows[0].uid
+        )
+        .await
+    );
+    assert_eq!(
+        supersede_protocol_count(test_db.store().pool(), workspace_id).await,
+        1
+    );
     assert_eq!(
         contradiction_edge_count(test_db.store().pool(), workspace_id).await,
-        1
+        0
     );
 }
 
@@ -161,15 +274,46 @@ async fn slow_path_ingests_supersession_when_new_fact_replaces_existing() {
             .await
             .is_some()
     );
-    let rows = fact_rows(test_db.store().pool(), workspace_id).await;
-    assert_eq!(rows.len(), 2);
     assert_eq!(
-        active_fact_rows(test_db.store().pool(), workspace_id)
+        fact_rows(test_db.store().pool(), workspace_id).await.len(),
+        1
+    );
+    assert_eq!(
+        user_fact_rows(test_db.store().pool(), workspace_id)
             .await
+            .len(),
+        1
+    );
+    let active_user_rows = active_user_fact_rows(test_db.store().pool(), workspace_id).await;
+    assert_eq!(
+        active_user_rows
             .iter()
             .map(|row| row.name.as_str())
             .collect::<Vec<_>>(),
         vec!["API"]
+    );
+    assert_eq!(
+        active_workspace_fact_rows(test_db.store().pool(), workspace_id)
+            .await
+            .len(),
+        0
+    );
+    assert!(
+        supersedes_edge_exists(
+            test_db.store().pool(),
+            workspace_id,
+            old_uid,
+            active_user_rows[0].uid
+        )
+        .await
+    );
+    assert_eq!(
+        supersede_protocol_count(test_db.store().pool(), workspace_id).await,
+        1
+    );
+    assert_eq!(
+        contradiction_edge_count(test_db.store().pool(), workspace_id).await,
+        0
     );
 }
 
@@ -197,9 +341,131 @@ async fn slow_path_skips_chunks_that_yield_no_extractable_facts() {
     assert_eq!(report.superseded, 0);
     assert_eq!(report.skipped, 0);
     assert_eq!(report.failed, 0);
-    let rows = active_fact_rows(test_db.store().pool(), workspace_id).await;
+    assert_eq!(
+        active_workspace_fact_rows(test_db.store().pool(), workspace_id)
+            .await
+            .len(),
+        0
+    );
+    let rows = active_user_fact_rows(test_db.store().pool(), workspace_id).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].name, "API");
+}
+
+#[tokio::test]
+async fn slow_path_uses_scripted_extractor_for_fact_heuristic_would_skip() {
+    // Pins: direct slow-path ingestion uses the configured FactExtractor seam before writes.
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let workspace_id = Uuid::now_v7();
+    let transcript = "Should we retain the handoff note? Please review before standup.";
+    let heuristic_probe = extract_facts(&[TurnChunk {
+        index: 0,
+        text: transcript.to_string(),
+        token_estimate: 10,
+    }]);
+    assert_eq!(heuristic_probe, Vec::new());
+    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).with_extractor(Arc::new(
+        ScriptedFactExtractor::from_summaries(["handoff note names standup owner"]),
+    ));
+
+    let report = ingest_turn_direct_with_ctx(ctx, turn(workspace_id, transcript, 7))
+        .await
+        .expect("slow path should ingest scripted extractor fact");
+
+    assert_eq!(report.inserted, 1);
+    assert_eq!(report.superseded, 0);
+    assert_eq!(report.skipped, 0);
+    assert_eq!(report.failed, 0);
+    let rows = active_user_fact_rows(test_db.store().pool(), workspace_id).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "handoff");
+    let properties = rows[0]
+        .properties_summary
+        .as_ref()
+        .expect("scripted fact properties projected");
+    assert_eq!(properties["summary"], "handoff note names standup owner");
+    assert_eq!(properties["predicate"], "note");
+    assert_eq!(properties["object"], "names standup owner");
+    assert_eq!(properties["source_chunk"], 0);
+}
+
+#[tokio::test]
+async fn slow_path_resolves_entity_nodes_and_reuses_subject_across_sessions() {
+    // Pins: slow-path ingestion links user fact endpoints to user-scoped Entity nodes.
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let workspace_id = Uuid::now_v7();
+    let ctx = ingest_ctx(test_db.store().pool(), workspace_id)
+        .with_entity_merge_verifier(Arc::new(DeterministicEntityMergeVerifier));
+
+    let first = ingest_turn_direct_with_ctx(
+        ctx.clone(),
+        turn(workspace_id, "Fact: API runs_on_port 3000", 8),
+    )
+    .await
+    .expect("first fact ingests with entities");
+    let second = ingest_turn_direct_with_ctx(ctx, turn(workspace_id, "Fact: API uses Redis", 9))
+        .await
+        .expect("second fact reuses API entity");
+
+    assert_eq!(first.inserted, 1);
+    assert_eq!(second.inserted, 1);
+    assert_eq!(first.failed + second.failed, 0);
+
+    assert_eq!(
+        entity_rows(test_db.store().pool(), workspace_id)
+            .await
+            .len(),
+        0
+    );
+    let entities = active_user_entity_rows(test_db.store().pool(), workspace_id).await;
+    let entity_names = entities
+        .iter()
+        .map(|row| row.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(entity_names, vec!["3000", "API", "Redis"]);
+    let api_uid = entities
+        .iter()
+        .find(|row| row.name == "API")
+        .expect("API entity exists")
+        .uid
+        .to_string();
+    let entity_uids = entities
+        .iter()
+        .map(|row| row.uid.to_string())
+        .collect::<HashSet<_>>();
+    assert_eq!(entity_uids.len(), 3);
+
+    let fact_uids = active_user_fact_rows(test_db.store().pool(), workspace_id)
+        .await
+        .into_iter()
+        .map(|row| row.uid.to_string())
+        .collect::<HashSet<_>>();
+    assert_eq!(fact_uids.len(), 2);
+    let edges = relates_to_edges(test_db.store().pool(), workspace_id).await;
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|(start_uid, end_uid, role)| {
+                role == "subject" && start_uid == &api_uid && fact_uids.contains(end_uid)
+            })
+            .count(),
+        2
+    );
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|(start_uid, end_uid, role)| {
+                role == "object" && fact_uids.contains(start_uid) && entity_uids.contains(end_uid)
+            })
+            .count(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -233,6 +499,11 @@ async fn slow_path_is_atomic_when_a_chunk_fails_partway_through_extraction() {
     );
     assert!(
         fact_rows(test_db.store().pool(), workspace_id)
+            .await
+            .is_empty()
+    );
+    assert!(
+        user_fact_rows(test_db.store().pool(), workspace_id)
             .await
             .is_empty()
     );

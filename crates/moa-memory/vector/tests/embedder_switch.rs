@@ -117,6 +117,7 @@ fn query(workspace_id: &str, embedding: Vec<f32>) -> VectorQuery {
         label_filter: Some(vec!["Fact".to_string()]),
         max_pii_class: "restricted".to_string(),
         include_global: false,
+        as_of: None,
     }
 }
 

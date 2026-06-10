@@ -265,6 +265,12 @@ impl VectorStore for TurbopufferStore {
     }
 
     async fn knn(&self, query: &VectorQuery) -> Result<Vec<VectorMatch>> {
+        if query.as_of.is_some() {
+            return Err(Error::UnsupportedQueryFeature {
+                backend: BACKEND,
+                feature: "as_of",
+            });
+        }
         validate_dimension(&query.embedding)?;
         if query.k == 0 {
             return Ok(Vec::new());
@@ -508,6 +514,7 @@ mod tests {
                 label_filter: None,
                 max_pii_class: "restricted".to_string(),
                 include_global: false,
+                as_of: None,
             })
             .await
             .expect("query");
@@ -547,6 +554,7 @@ mod tests {
                 label_filter: Some(vec!["Fact".to_string()]),
                 max_pii_class: "restricted".to_string(),
                 include_global: false,
+                as_of: None,
             })
             .await
             .expect("query");
@@ -554,6 +562,45 @@ mod tests {
         assert_eq!(matches, vec![VectorMatch { uid, score: 1.0 }]);
         let requests = server.requests().await;
         assert!(requests[1].body.contains("\"valid_to\",\"Eq\",\"open\""));
+    }
+
+    #[tokio::test]
+    async fn turbopuffer_as_of_query_returns_typed_unsupported_without_network() {
+        // Pins: historical vector queries fail locally until Turbopuffer can filter history.
+        let server = MockServer::start(Vec::new()).await;
+        let store = TurbopufferStore::new(
+            server.base_url(),
+            SecretString::from("test-key".to_string()),
+            "test",
+            false,
+        )
+        .expect("store");
+
+        let error = store
+            .knn(&VectorQuery {
+                workspace_id: Some(Uuid::now_v7().to_string()),
+                embedding: basis_vector(0),
+                k: 10,
+                label_filter: Some(vec!["Fact".to_string()]),
+                max_pii_class: "restricted".to_string(),
+                include_global: false,
+                as_of: Some(
+                    chrono::DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z")
+                        .expect("test timestamp should parse")
+                        .with_timezone(&chrono::Utc),
+                ),
+            })
+            .await
+            .expect_err("as-of query should be unsupported");
+
+        assert!(matches!(
+            error,
+            Error::UnsupportedQueryFeature {
+                backend: "turbopuffer",
+                feature: "as_of"
+            }
+        ));
+        assert_eq!(server.requests().await.len(), 0);
     }
 
     fn test_item(uid: Uuid, workspace_id: &str) -> VectorItem {

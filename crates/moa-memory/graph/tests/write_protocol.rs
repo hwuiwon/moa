@@ -209,6 +209,7 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: "restricted".to_string(),
             include_global: false,
+            as_of: None,
         })
         .await
         .expect("query created vector");

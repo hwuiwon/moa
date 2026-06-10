@@ -24,6 +24,9 @@ pub enum IngestError {
         /// Maximum allowed chunk length in Unicode scalar values.
         max_chars: usize,
     },
+    /// Fact extraction failed.
+    #[error("fact extraction: {0}")]
+    Extraction(String),
     /// The process-local ingestion runtime was not installed.
     #[error("ingestion runtime has not been installed")]
     RuntimeNotInstalled,
@@ -45,6 +48,12 @@ pub enum IngestError {
     /// Contradiction detection failed.
     #[error("contradiction: {0}")]
     Contradiction(String),
+    /// Entity resolution failed.
+    #[error("entity resolution: {0}")]
+    EntityResolution(String),
+    /// Graph storage failed.
+    #[error("graph: {0}")]
+    Graph(#[from] moa_memory_graph::GraphError),
     /// JSON serialization or parsing failed.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),

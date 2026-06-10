@@ -42,6 +42,7 @@ async fn turbopuffer_live_round_trip() {
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: "restricted".to_string(),
             include_global: false,
+            as_of: None,
         })
         .await
         .expect("query");

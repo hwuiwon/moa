@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use moa_core::{MemoryScope, MoaError, traits::EmbeddingProvider};
 use moa_memory_graph::{GraphError, GraphStore, NodeLabel, PiiClass};
 use uuid::Uuid;
@@ -81,6 +81,7 @@ impl PlannedQuery {
             k_final,
             use_reranker,
             strategy: Some(self.strategy),
+            as_of: self.temporal_filter,
         }
     }
 }
@@ -194,7 +195,7 @@ impl<'a> QueryRetrievalCtx<'a> {
             hybrid,
             max_pii_class,
             k_final: 5,
-            use_reranker: true,
+            use_reranker: false,
         }
     }
 
@@ -297,8 +298,106 @@ fn infer_label_hint(text: &str, _spans: &[NerSpan]) -> Option<Vec<NodeLabel>> {
     None
 }
 
-fn parse_temporal(_text: &str) -> Option<DateTime<Utc>> {
-    None
+fn parse_temporal(text: &str) -> Option<DateTime<Utc>> {
+    parse_as_of_fragment(text)
+        .or_else(|| parse_rfc3339_in_text(text))
+        .or_else(|| parse_iso_date_in_text(text))
+        .or_else(|| parse_month_year_phrase(text))
+}
+
+fn parse_as_of_fragment(text: &str) -> Option<DateTime<Utc>> {
+    let lower = text.to_ascii_lowercase();
+    let start = lower.find("as of")?;
+    let fragment = text.get(start + "as of".len()..)?.trim_start();
+    parse_rfc3339_in_text(fragment)
+        .or_else(|| parse_iso_date_in_text(fragment))
+        .or_else(|| parse_month_year_fragment(fragment))
+}
+
+fn parse_rfc3339_in_text(text: &str) -> Option<DateTime<Utc>> {
+    text.split_whitespace()
+        .map(trim_temporal_token)
+        .find_map(|token| {
+            DateTime::parse_from_rfc3339(token)
+                .ok()
+                .map(|value| value.with_timezone(&Utc))
+        })
+}
+
+fn parse_iso_date_in_text(text: &str) -> Option<DateTime<Utc>> {
+    text.split(|ch: char| !(ch.is_ascii_digit() || ch == '-'))
+        .filter(|token| token.len() == 10)
+        .find_map(parse_iso_date_token)
+}
+
+fn parse_iso_date_token(token: &str) -> Option<DateTime<Utc>> {
+    let date = NaiveDate::parse_from_str(token, "%Y-%m-%d").ok()?;
+    let datetime = date.and_hms_opt(0, 0, 0)?;
+    Some(DateTime::<Utc>::from_naive_utc_and_offset(datetime, Utc))
+}
+
+fn parse_month_year_phrase(text: &str) -> Option<DateTime<Utc>> {
+    let words = temporal_words(text);
+    words.windows(3).find_map(|window| {
+        if window[0] == "in" {
+            parse_month_year(&window[1], &window[2])
+        } else {
+            None
+        }
+    })
+}
+
+fn parse_month_year_fragment(text: &str) -> Option<DateTime<Utc>> {
+    let words = temporal_words(text);
+    words
+        .windows(2)
+        .find_map(|window| parse_month_year(&window[0], &window[1]))
+}
+
+fn parse_month_year(month: &str, year: &str) -> Option<DateTime<Utc>> {
+    let year = parse_four_digit_year(year)?;
+    let date = NaiveDate::from_ymd_opt(year, month_number(month)?, 1)?;
+    let datetime = date.and_hms_opt(0, 0, 0)?;
+    Some(DateTime::<Utc>::from_naive_utc_and_offset(datetime, Utc))
+}
+
+fn parse_four_digit_year(value: &str) -> Option<i32> {
+    if value.len() == 4 && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        value.parse::<i32>().ok()
+    } else {
+        None
+    }
+}
+
+fn month_number(value: &str) -> Option<u32> {
+    match value {
+        "january" | "jan" => Some(1),
+        "february" | "feb" => Some(2),
+        "march" | "mar" => Some(3),
+        "april" | "apr" => Some(4),
+        "may" => Some(5),
+        "june" | "jun" => Some(6),
+        "july" | "jul" => Some(7),
+        "august" | "aug" => Some(8),
+        "september" | "sep" | "sept" => Some(9),
+        "october" | "oct" => Some(10),
+        "november" | "nov" => Some(11),
+        "december" | "dec" => Some(12),
+        _ => None,
+    }
+}
+
+fn temporal_words(text: &str) -> Vec<String> {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn trim_temporal_token(token: &str) -> &str {
+    token.trim_matches(|ch: char| {
+        !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | ':' | '+' | '.'))
+    })
 }
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
@@ -307,7 +406,15 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{NodeLabel, Strategy, classify_strategy, infer_label_hint};
+    use chrono::{DateTime, Utc};
+
+    use super::{NodeLabel, Strategy, classify_strategy, infer_label_hint, parse_temporal};
+
+    fn utc(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .expect("test timestamp should be valid RFC3339")
+            .with_timezone(&Utc)
+    }
 
     #[test]
     fn planner_classify_graphfirst_for_dependency_queries() {
@@ -335,6 +442,42 @@ mod tests {
         assert_eq!(
             infer_label_hint("show auth outage incidents", &[]),
             Some(vec![NodeLabel::Incident])
+        );
+    }
+
+    #[test]
+    fn temporal_parser_recognizes_rfc3339_timestamp() {
+        // Pins: query planning preserves explicit RFC3339 application time.
+        assert_eq!(
+            parse_temporal("incident status at 2026-03-11T14:15:16Z?"),
+            Some(utc("2026-03-11T14:15:16Z"))
+        );
+    }
+
+    #[test]
+    fn temporal_parser_recognizes_iso_date_as_utc_midnight() {
+        // Pins: date-only historical filters use deterministic UTC midnight.
+        assert_eq!(
+            parse_temporal("what did we know on 2026-03-11"),
+            Some(utc("2026-03-11T00:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn temporal_parser_prefers_as_of_fragment() {
+        // Pins: `as of` selects the historical filter even when other dates appear first.
+        assert_eq!(
+            parse_temporal("compare 2026-01-01 as of 2026-04-15"),
+            Some(utc("2026-04-15T00:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn temporal_parser_recognizes_month_year_phrase() {
+        // Pins: month/year phrases resolve to the first day of that month in UTC.
+        assert_eq!(
+            parse_temporal("what changed in March 2026?"),
+            Some(utc("2026-03-01T00:00:00Z"))
         );
     }
 }

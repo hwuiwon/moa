@@ -162,6 +162,7 @@ impl WorkspaceRetriever {
             k_final: 5,
             use_reranker: false,
             strategy: Some(Strategy::Both),
+            as_of: None,
         };
         let hits = self
             .cache

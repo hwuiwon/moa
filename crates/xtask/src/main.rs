@@ -8,13 +8,17 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 mod check_eval_budgets;
+mod generate_memory_eval_corpus;
+mod run_memory_retrieval_eval;
 
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("audit-paths") => cmd_audit_paths(),
         Some("check-eval-budgets") => check_eval_budgets::run(args),
+        Some("generate-memory-eval-corpus") => generate_memory_eval_corpus::run(args),
         Some("migrate-test-db") => cmd_migrate_test_db(),
+        Some("run-memory-retrieval-eval") => run_memory_retrieval_eval::run(args),
         Some(command) => bail!("unknown xtask command: {command}"),
         None => bail!("missing xtask command; try `cargo xtask audit-paths`"),
     }

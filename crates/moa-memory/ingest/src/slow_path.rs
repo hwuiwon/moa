@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use crate::{
     ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
-    ExtractedFact, IngestApplyReport, IngestCtx, IngestDecision, RrfPlusJudgeDetector, SessionTurn,
-    TurnChunk, chunk_turn, current_runtime, extract_facts, extraction_confidence_hint, fact_hash,
-    scoped_fact_uid, should_ingest_degraded,
+    EntityResolutionRequest, EntityResolver, ExtractedFact, ExtractedFactScopeHint, FactExtractor,
+    HeuristicFactExtractor, IngestApplyReport, IngestCtx, IngestDecision, ResolvedEntity,
+    RrfPlusJudgeDetector, SessionTurn, TurnChunk, chunk_turn, current_runtime, extract_facts,
+    extraction_confidence_hint, fact_hash, scoped_fact_uid, should_ingest_degraded,
 };
 use moa_core::{MoaConfig, ScopeContext, ScopedConn, traits::EmbeddingProvider};
 use moa_memory_graph::{
@@ -16,7 +17,7 @@ use moa_memory_graph::{
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiCategory, PiiClassifier, PiiResult, PiiSpan, redact_text,
 };
-use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
+use moa_memory_vector::{CohereV4Embedder, PgvectorStore};
 use restate_sdk::prelude::*;
 use secrecy::SecretString;
 use serde_json::json;
@@ -84,8 +85,15 @@ impl IngestionVO for IngestionVOImpl {
             .into_inner();
 
         let extract_chunks = chunks.clone();
+        let extractor = runtime.extractor();
         let extracted = ctx
-            .run(|| async move { Ok(Json::from(extract_facts(&extract_chunks))) })
+            .run(|| async move {
+                extractor
+                    .extract(&extract_chunks)
+                    .await
+                    .map(Json::from)
+                    .map_err(HandlerError::from)
+            })
             .name("extract")
             .retry_policy(ingest_step_retry_policy())
             .await?
@@ -138,11 +146,17 @@ impl IngestionVO for IngestionVOImpl {
 
         let upsert_turn = turn.clone();
         let upsert_pool = pool.clone();
+        let upsert_entity_resolver = runtime.entity_resolver();
         let report = ctx
             .run(|| async move {
-                apply_decisions(&upsert_pool, &upsert_turn, &decisions)
-                    .await
-                    .map(Json::from)
+                apply_decisions(
+                    &upsert_pool,
+                    upsert_entity_resolver.as_ref(),
+                    &upsert_turn,
+                    &decisions,
+                )
+                .await
+                .map(Json::from)
             })
             .name("upsert")
             .retry_policy(ingest_step_retry_policy())
@@ -165,6 +179,8 @@ pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, 
         runtime.pool().clone(),
         runtime.pii_service_url().map(str::to_string),
         runtime.cohere_api_key_env().to_string(),
+        runtime.extractor(),
+        runtime.entity_resolver(),
         turn,
     )
     .await
@@ -185,6 +201,8 @@ pub async fn ingest_turn_direct_with_pool(
         pool,
         memory.pii_service_url,
         memory.vector.embedder.cohere.api_key_env,
+        Arc::new(HeuristicFactExtractor),
+        Arc::new(EntityResolver::deterministic_for_app_role()),
         turn,
     )
     .await
@@ -194,6 +212,8 @@ async fn ingest_turn_direct_with_pool_and_pii(
     pool: PgPool,
     pii_service_url: Option<String>,
     cohere_api_key_env: String,
+    extractor: Arc<dyn FactExtractor>,
+    entity_resolver: Arc<EntityResolver>,
     turn: SessionTurn,
 ) -> Result<IngestApplyReport, HandlerError> {
     let degraded = workspace_degraded(&pool, &turn).await?;
@@ -206,11 +226,14 @@ async fn ingest_turn_direct_with_pool_and_pii(
 
     let chunks =
         chunk_turn(&turn, CHUNK_TARGET_TOKENS, CHUNK_OVERLAP_TOKENS).map_err(HandlerError::from)?;
-    let extracted = extract_facts(&chunks);
+    let extracted = extractor
+        .extract(&chunks)
+        .await
+        .map_err(HandlerError::from)?;
     let classified = classify_facts(&extracted, pii_service_url.as_deref()).await?;
     let embedded = embed_batch(&classified, &cohere_api_key_env).await?;
     let decisions = detect_contradictions(&pool, &turn, &embedded, &cohere_api_key_env).await?;
-    apply_decisions(&pool, &turn, &decisions).await
+    apply_decisions(&pool, entity_resolver.as_ref(), &turn, &decisions).await
 }
 
 /// Runs the slow-path ingestion steps with explicit deterministic dependencies.
@@ -231,18 +254,17 @@ pub async fn ingest_turn_direct_with_ctx(
 
     let chunks =
         chunk_turn(&turn, CHUNK_TARGET_TOKENS, CHUNK_OVERLAP_TOKENS).map_err(HandlerError::from)?;
-    let extracted = extract_facts(&chunks);
+    let extracted = ctx
+        .extractor
+        .extract(&chunks)
+        .await
+        .map_err(HandlerError::from)?;
     let classified = classify_facts_with(ctx.pii.as_ref(), &extracted).await?;
     let embedded = embed_batch_with(ctx.embedder.as_ref(), &classified).await?;
-    let decisions = detect_contradictions_with(
-        ctx.contradict.as_ref(),
-        ctx.pool.clone(),
-        ctx.vector.clone(),
-        &turn,
-        &embedded,
-    )
-    .await?;
-    apply_decisions_with_graph(&ctx.pool, ctx.graph.as_ref(), &turn, &decisions).await
+    let decisions =
+        detect_contradictions_with(ctx.contradict.as_ref(), ctx.pool.clone(), &turn, &embedded)
+            .await?;
+    apply_decisions(&ctx.pool, ctx.entity_resolver.as_ref(), &turn, &decisions).await
 }
 
 /// Builds the object key used to serialize ingestion per workspace/session.
@@ -323,6 +345,7 @@ fn redact_fact(fact: &ExtractedFact, result: &PiiResult) -> ExtractedFact {
     .next()
     .unwrap_or_else(|| fact.clone());
     redacted.source_chunk = fact.source_chunk;
+    redacted.scope_hint = fact.scope_hint;
     redacted
 }
 
@@ -457,24 +480,22 @@ async fn detect_contradictions(
     cohere_api_key_env: &str,
 ) -> Result<Vec<IngestDecision>, HandlerError> {
     let pool = pool.clone();
-    let scope = ScopeContext::workspace(turn.workspace_id.clone());
-    let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let detector = RrfPlusJudgeDetector::from_cohere_api_key_env_or_heuristic(cohere_api_key_env);
-    detect_contradictions_with(&detector, pool, vector, turn, embedded).await
+    detect_contradictions_with(&detector, pool, turn, embedded).await
 }
 
 async fn detect_contradictions_with(
     detector: &dyn ContradictionDetector,
     pool: PgPool,
-    vector: Arc<dyn VectorStore>,
     turn: &SessionTurn,
     embedded: &[EmbeddedFact],
 ) -> Result<Vec<IngestDecision>, HandlerError> {
-    let scope = ScopeContext::workspace(turn.workspace_id.clone());
-    let ctx = ContradictionContext::for_app_role(pool, scope, vector);
     let mut decisions = Vec::with_capacity(embedded.len());
 
     for fact in embedded {
+        let scope = fact_scope(turn, fact);
+        let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
+        let ctx = ContradictionContext::for_app_role(pool.clone(), scope, vector);
         let conflict = detector
             .check_one_slow(fact, &ctx)
             .await
@@ -493,47 +514,32 @@ fn decision_from_conflict(conflict: Conflict, fact: EmbeddedFact) -> IngestDecis
     }
 }
 
-async fn apply_decisions(
-    pool: &PgPool,
-    turn: &SessionTurn,
-    decisions: &[IngestDecision],
-) -> Result<IngestApplyReport, HandlerError> {
-    let scope = ScopeContext::workspace(turn.workspace_id.clone());
-    let mut report = IngestApplyReport::default();
-
-    for decision in decisions {
-        match apply_one_decision(pool, &scope, turn, decision).await {
-            Ok(ApplyOutcome::Inserted) => report.inserted += 1,
-            Ok(ApplyOutcome::Superseded) => report.superseded += 1,
-            Ok(ApplyOutcome::Skipped) => report.skipped += 1,
-            Err(error) => {
-                report.failed += 1;
-                let error_message = format!("{error:?}");
-                write_dlq(pool, &scope, turn, decision, &error_message).await?;
-                tracing::warn!(
-                    error = ?error,
-                    session_id = %turn.session_id,
-                    turn_seq = turn.turn_seq,
-                    "slow-path ingestion fact failed and was written to DLQ"
-                );
-            }
-        }
-    }
-
-    Ok(report)
+fn decision_scope(turn: &SessionTurn, decision: &IngestDecision) -> ScopeContext {
+    decision_fact(decision)
+        .map(|fact| fact_scope(turn, fact))
+        .unwrap_or_else(|| ScopeContext::user(turn.workspace_id.clone(), turn.user_id.clone()))
 }
 
-async fn apply_decisions_with_graph(
+fn fact_scope(turn: &SessionTurn, fact: &EmbeddedFact) -> ScopeContext {
+    match fact.classified.fact.scope_hint {
+        ExtractedFactScopeHint::User => {
+            ScopeContext::user(turn.workspace_id.clone(), turn.user_id.clone())
+        }
+        ExtractedFactScopeHint::Workspace => ScopeContext::workspace(turn.workspace_id.clone()),
+    }
+}
+
+async fn apply_decisions(
     pool: &PgPool,
-    graph: &dyn GraphStore,
+    entity_resolver: &EntityResolver,
     turn: &SessionTurn,
     decisions: &[IngestDecision],
 ) -> Result<IngestApplyReport, HandlerError> {
-    let scope = ScopeContext::workspace(turn.workspace_id.clone());
     let mut report = IngestApplyReport::default();
 
     for decision in decisions {
-        match apply_one_decision_with_graph(pool, &scope, graph, turn, decision).await {
+        let scope = decision_scope(turn, decision);
+        match apply_one_decision(pool, &scope, entity_resolver, turn, decision).await {
             Ok(ApplyOutcome::Inserted) => report.inserted += 1,
             Ok(ApplyOutcome::Superseded) => report.superseded += 1,
             Ok(ApplyOutcome::Skipped) => report.skipped += 1,
@@ -557,48 +563,22 @@ async fn apply_decisions_with_graph(
 async fn apply_one_decision(
     pool: &PgPool,
     scope: &ScopeContext,
+    entity_resolver: &EntityResolver,
     turn: &SessionTurn,
     decision: &IngestDecision,
 ) -> Result<ApplyOutcome, HandlerError> {
     let Some(fact) = decision_fact(decision) else {
         return Ok(ApplyOutcome::Skipped);
     };
-    let hash = fact_hash(&fact.classified.fact).map_err(HandlerError::from)?;
-    if dedup_fact_uid(pool, scope, turn, &hash).await?.is_some() {
-        return Ok(ApplyOutcome::Skipped);
-    }
-
     let graph = graph_store(pool.clone(), scope.clone(), fact);
-    let fact_uid = scoped_fact_uid(&turn.workspace_id, &turn.session_id, turn.turn_seq, &hash);
-    match decision {
-        IngestDecision::Insert { fact } => {
-            let uid = graph
-                .create_node(node_intent(turn, fact, &hash, fact_uid))
-                .await
-                .map_err(HandlerError::from)?;
-            insert_dedup(pool, scope, turn, &hash, uid).await?;
-            Ok(ApplyOutcome::Inserted)
-        }
-        IngestDecision::Supersede { old_uid, fact } => {
-            let uid = graph
-                .supersede_node(*old_uid, node_intent(turn, fact, &hash, fact_uid))
-                .await
-                .map_err(HandlerError::from)?;
-            graph
-                .create_edge(contradicts_edge_intent(turn, uid, *old_uid))
-                .await
-                .map_err(HandlerError::from)?;
-            insert_dedup(pool, scope, turn, &hash, uid).await?;
-            Ok(ApplyOutcome::Superseded)
-        }
-        IngestDecision::SkipDuplicate { .. } => Ok(ApplyOutcome::Skipped),
-    }
+    apply_one_decision_with_graph(pool, scope, &graph, entity_resolver, turn, decision).await
 }
 
 async fn apply_one_decision_with_graph(
     pool: &PgPool,
     scope: &ScopeContext,
     graph: &dyn GraphStore,
+    entity_resolver: &EntityResolver,
     turn: &SessionTurn,
     decision: &IngestDecision,
 ) -> Result<ApplyOutcome, HandlerError> {
@@ -610,25 +590,24 @@ async fn apply_one_decision_with_graph(
         return Ok(ApplyOutcome::Skipped);
     }
 
+    let entities = resolve_fact_entities(pool, scope, graph, entity_resolver, turn, fact).await?;
     let fact_uid = scoped_fact_uid(&turn.workspace_id, &turn.session_id, turn.turn_seq, &hash);
     match decision {
         IngestDecision::Insert { fact } => {
             let uid = graph
-                .create_node(node_intent(turn, fact, &hash, fact_uid))
+                .create_node(node_intent(turn, scope, fact, &hash, fact_uid))
                 .await
                 .map_err(HandlerError::from)?;
+            attach_fact_entity_edges(graph, turn, scope, uid, &entities).await?;
             insert_dedup(pool, scope, turn, &hash, uid).await?;
             Ok(ApplyOutcome::Inserted)
         }
         IngestDecision::Supersede { old_uid, fact } => {
             let uid = graph
-                .supersede_node(*old_uid, node_intent(turn, fact, &hash, fact_uid))
+                .supersede_node(*old_uid, node_intent(turn, scope, fact, &hash, fact_uid))
                 .await
                 .map_err(HandlerError::from)?;
-            graph
-                .create_edge(contradicts_edge_intent(turn, uid, *old_uid))
-                .await
-                .map_err(HandlerError::from)?;
+            attach_fact_entity_edges(graph, turn, scope, uid, &entities).await?;
             insert_dedup(pool, scope, turn, &hash, uid).await?;
             Ok(ApplyOutcome::Superseded)
         }
@@ -647,23 +626,28 @@ fn graph_store(pool: PgPool, scope: ScopeContext, fact: &EmbeddedFact) -> AgeGra
 
 fn node_intent(
     turn: &SessionTurn,
+    scope: &ScopeContext,
     fact: &EmbeddedFact,
     hash: &[u8],
     fact_uid: uuid::Uuid,
 ) -> NodeWriteIntent {
     let extracted = &fact.classified.fact;
+    let workspace_id = scope_workspace_id(scope);
+    let user_id = scope_user_id(scope);
+    let scope_tier = scope.tier_str();
     NodeWriteIntent {
         uid: fact_uid,
         label: NodeLabel::Fact,
-        workspace_id: Some(turn.workspace_id.to_string()),
-        user_id: None,
-        scope: "workspace".to_string(),
+        workspace_id: workspace_id.clone(),
+        user_id: user_id.clone(),
+        scope: scope_tier.to_string(),
         name: extracted.subject.clone(),
         properties: json!({
             "uid": fact_uid.to_string(),
             "extracted_uid": extracted.uid.to_string(),
-            "workspace_id": turn.workspace_id.to_string(),
-            "scope": "workspace",
+            "workspace_id": workspace_id,
+            "user_id": user_id,
+            "scope": scope_tier,
             "name": extracted.subject,
             "subject": extracted.subject,
             "predicate": extracted.predicate,
@@ -686,27 +670,148 @@ fn node_intent(
     }
 }
 
-fn contradicts_edge_intent(
+fn scope_workspace_id(scope: &ScopeContext) -> Option<String> {
+    scope
+        .workspace_id()
+        .map(|workspace_id| workspace_id.to_string())
+}
+
+fn scope_user_id(scope: &ScopeContext) -> Option<String> {
+    scope.user_id().map(|user_id| user_id.to_string())
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedFactEntities {
+    subject: ResolvedEntity,
+    object: ResolvedEntity,
+}
+
+async fn resolve_fact_entities(
+    pool: &PgPool,
+    scope: &ScopeContext,
+    graph: &dyn GraphStore,
+    entity_resolver: &EntityResolver,
     turn: &SessionTurn,
-    new_uid: uuid::Uuid,
-    old_uid: uuid::Uuid,
+    fact: &EmbeddedFact,
+) -> Result<ResolvedFactEntities, HandlerError> {
+    let extracted = &fact.classified.fact;
+    let confidence = extraction_confidence_hint(&extracted.summary);
+    let actor_id = turn.user_id.to_string();
+    let subject = entity_resolver
+        .resolve(
+            pool,
+            graph,
+            EntityResolutionRequest {
+                scope,
+                name: &extracted.subject,
+                pii_class: fact.classified.pii_class,
+                confidence,
+                valid_from: turn.finalized_at,
+                actor_id: &actor_id,
+                actor_kind: "user",
+            },
+        )
+        .await
+        .map_err(HandlerError::from)?;
+    let object = entity_resolver
+        .resolve(
+            pool,
+            graph,
+            EntityResolutionRequest {
+                scope,
+                name: &extracted.object,
+                pii_class: fact.classified.pii_class,
+                confidence,
+                valid_from: turn.finalized_at,
+                actor_id: &actor_id,
+                actor_kind: "user",
+            },
+        )
+        .await
+        .map_err(HandlerError::from)?;
+
+    Ok(ResolvedFactEntities { subject, object })
+}
+
+async fn attach_fact_entity_edges(
+    graph: &dyn GraphStore,
+    turn: &SessionTurn,
+    scope: &ScopeContext,
+    fact_uid: uuid::Uuid,
+    entities: &ResolvedFactEntities,
+) -> Result<(), HandlerError> {
+    graph
+        .create_edge(entity_fact_edge_intent(
+            turn,
+            scope,
+            entities.subject.uid,
+            fact_uid,
+            "subject",
+        ))
+        .await
+        .map_err(HandlerError::from)?;
+    graph
+        .create_edge(fact_entity_edge_intent(
+            turn,
+            scope,
+            fact_uid,
+            entities.object.uid,
+            "object",
+        ))
+        .await
+        .map_err(HandlerError::from)?;
+    Ok(())
+}
+
+fn entity_fact_edge_intent(
+    turn: &SessionTurn,
+    scope: &ScopeContext,
+    entity_uid: uuid::Uuid,
+    fact_uid: uuid::Uuid,
+    role: &str,
 ) -> EdgeWriteIntent {
     EdgeWriteIntent {
         uid: uuid::Uuid::now_v7(),
-        label: EdgeLabel::Contradicts,
-        start_uid: new_uid,
-        end_uid: old_uid,
-        properties: json!({
-            "source_session_id": turn.session_id.to_string(),
-            "source_turn_seq": turn.turn_seq,
-            "reason": "slow_path_supersession_conflict",
-        }),
-        workspace_id: Some(turn.workspace_id.to_string()),
-        user_id: None,
-        scope: "workspace".to_string(),
+        label: EdgeLabel::RelatesTo,
+        start_uid: entity_uid,
+        end_uid: fact_uid,
+        properties: entity_edge_properties(turn, role),
+        workspace_id: scope_workspace_id(scope),
+        user_id: scope_user_id(scope),
+        scope: scope.tier_str().to_string(),
         actor_id: turn.user_id.to_string(),
         actor_kind: "user".to_string(),
     }
+}
+
+fn fact_entity_edge_intent(
+    turn: &SessionTurn,
+    scope: &ScopeContext,
+    fact_uid: uuid::Uuid,
+    entity_uid: uuid::Uuid,
+    role: &str,
+) -> EdgeWriteIntent {
+    EdgeWriteIntent {
+        uid: uuid::Uuid::now_v7(),
+        label: EdgeLabel::RelatesTo,
+        start_uid: fact_uid,
+        end_uid: entity_uid,
+        properties: entity_edge_properties(turn, role),
+        workspace_id: scope_workspace_id(scope),
+        user_id: scope_user_id(scope),
+        scope: scope.tier_str().to_string(),
+        actor_id: turn.user_id.to_string(),
+        actor_kind: "user".to_string(),
+    }
+}
+
+fn entity_edge_properties(turn: &SessionTurn, role: &str) -> serde_json::Value {
+    json!({
+        "role": role,
+        "source": "slow_path_entity_resolution",
+        "source_session_id": turn.session_id.to_string(),
+        "source_turn_seq": turn.turn_seq,
+    })
 }
 
 async fn workspace_degraded(pool: &PgPool, turn: &SessionTurn) -> Result<bool, HandlerError> {
@@ -736,6 +841,7 @@ async fn dedup_fact_uid(
         .await
         .map_err(HandlerError::from)?;
     let turn_seq = turn_seq_i64(turn)?;
+    let user_id = scope_user_id(scope);
     let uid = sqlx::query_scalar::<_, uuid::Uuid>(
         r#"
         SELECT fact_uid
@@ -744,12 +850,16 @@ async fn dedup_fact_uid(
           AND session_id = $2
           AND turn_seq = $3
           AND fact_hash = $4
+          AND scope = $5
+          AND (($6::text IS NULL AND user_id IS NULL) OR user_id = $6)
         "#,
     )
     .bind(turn.workspace_id.to_string())
     .bind(turn.session_id.0)
     .bind(turn_seq)
     .bind(hash)
+    .bind(scope.tier_str())
+    .bind(user_id.as_deref())
     .fetch_optional(conn.as_mut())
     .await
     .map_err(HandlerError::from)?;
@@ -768,15 +878,17 @@ async fn insert_dedup(
         .await
         .map_err(HandlerError::from)?;
     let turn_seq = turn_seq_i64(turn)?;
+    let user_id = scope_user_id(scope);
     sqlx::query(
         r#"
         INSERT INTO moa.ingest_dedup
-            (workspace_id, session_id, turn_seq, fact_hash, fact_uid)
-        VALUES ($1, $2, $3, $4, $5)
+            (workspace_id, user_id, session_id, turn_seq, fact_hash, fact_uid)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (workspace_id, session_id, turn_seq, fact_hash) DO NOTHING
         "#,
     )
     .bind(turn.workspace_id.to_string())
+    .bind(user_id.as_deref())
     .bind(turn.session_id.0)
     .bind(turn_seq)
     .bind(hash)
@@ -799,14 +911,16 @@ async fn write_dlq(
         .map_err(HandlerError::from)?;
     let turn_seq = turn_seq_i64(turn)?;
     let payload = serde_json::to_value(decision).map_err(HandlerError::from)?;
+    let user_id = scope_user_id(scope);
     sqlx::query(
         r#"
         INSERT INTO moa.ingest_dlq
-            (workspace_id, session_id, turn_seq, payload, error, next_retry_at)
-        VALUES ($1, $2, $3, $4, $5, now() + INTERVAL '5 minutes')
+            (workspace_id, user_id, session_id, turn_seq, payload, error, next_retry_at)
+        VALUES ($1, $2, $3, $4, $5, $6, now() + INTERVAL '5 minutes')
         "#,
     )
     .bind(turn.workspace_id.to_string())
+    .bind(user_id.as_deref())
     .bind(turn.session_id.0)
     .bind(turn_seq)
     .bind(payload)

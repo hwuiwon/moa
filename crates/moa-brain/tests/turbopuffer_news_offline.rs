@@ -58,6 +58,7 @@ async fn turbopuffer_news_offline_upsert_and_query_returns_promoted_news_fact() 
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: "restricted".to_string(),
             include_global: false,
+            as_of: None,
         })
         .await
         .expect("wiremock query should succeed");

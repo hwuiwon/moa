@@ -70,6 +70,8 @@ pub struct RetrievalRequest {
     pub use_reranker: bool,
     /// Optional planner-selected strategy for leg weighting.
     pub strategy: Option<Strategy>,
+    /// Optional application-time filter for bitemporal retrieval.
+    pub as_of: Option<DateTime<Utc>>,
 }
 
 /// Retrieval legs that contributed to one fused candidate.
@@ -215,8 +217,14 @@ impl HybridRetriever {
         }
 
         let fused_uids = fused.iter().map(|(uid, _, _)| *uid).collect::<Vec<_>>();
-        let nodes =
-            hydrate_nodes(&self.pool, &req.scope, &fused_uids, self.assume_app_role).await?;
+        let nodes = hydrate_nodes(
+            &self.pool,
+            &req.scope,
+            &fused_uids,
+            self.assume_app_role,
+            req.as_of,
+        )
+        .await?;
         let mut hits = build_hits(fused, nodes);
         apply_layer_bias(&mut hits);
         let final_hits = if req.use_reranker && hits.len() > req.k_final {
@@ -255,7 +263,16 @@ impl HybridRetriever {
         }
         if state.vector_backend == "turbopuffer" {
             if let Some(turbopuffer) = &self.turbopuffer {
-                return run_vector_leg(turbopuffer.as_ref(), req).await;
+                return match run_vector_leg(turbopuffer.as_ref(), req).await {
+                    Ok(hits) => Ok(hits),
+                    Err(error) if is_turbopuffer_as_of_unsupported(&error) => {
+                        tracing::debug!(
+                            "Turbopuffer does not support as-of vector queries; using pgvector"
+                        );
+                        run_vector_leg(self.vector.as_ref(), req).await
+                    }
+                    Err(error) => Err(error),
+                };
             }
             tracing::warn!(
                 workspace_id = %workspace_id,
@@ -288,6 +305,9 @@ impl HybridRetriever {
             (Err(error), Ok(pg_hits)) => {
                 tracing::warn!(error = %error, "Turbopuffer vector dual-read leg failed; using pgvector result");
                 Ok(pg_hits)
+            }
+            (Err(tp_error), Err(pg_error)) if is_turbopuffer_as_of_unsupported(&tp_error) => {
+                Err(pg_error)
             }
             (Err(error), Err(_)) => Err(error),
         }
@@ -419,6 +439,15 @@ where
     }
 }
 
+fn is_turbopuffer_as_of_unsupported(error: &RetrievalError) -> bool {
+    if let RetrievalError::Vector(VectorError::UnsupportedQueryFeature { backend, feature }) = error
+    {
+        *backend == "turbopuffer" && *feature == "as_of"
+    } else {
+        false
+    }
+}
+
 fn build_hits(fused: Vec<(Uuid, f64, LegSources)>, nodes: Vec<NodeIndexRow>) -> Vec<RetrievalHit> {
     let mut nodes_by_uid = nodes
         .into_iter()
@@ -499,6 +528,7 @@ mod tests {
             k_final: 1,
             use_reranker: true,
             strategy: None,
+            as_of: None,
         };
         let first = hit(Uuid::now_v7(), "workspace", 2.0);
         let second = hit(Uuid::now_v7(), "workspace", 1.0);

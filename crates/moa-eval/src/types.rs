@@ -64,11 +64,43 @@ impl TestCase {
                 self.name
             ))
         })?;
-        if long.transcript.as_os_str().is_empty() {
-            return Err(crate::EvalError::InvalidConfig(format!(
-                "long test case '{}' must set transcript",
-                self.name
-            )));
+        match long.mode {
+            LongConversationMode::Recorded => {
+                if long.transcript.as_os_str().is_empty() {
+                    return Err(crate::EvalError::InvalidConfig(format!(
+                        "long test case '{}' must set transcript",
+                        self.name
+                    )));
+                }
+            }
+            LongConversationMode::ScriptedUser => {
+                if long
+                    .goal_card
+                    .as_ref()
+                    .is_none_or(|path| path.as_os_str().is_empty())
+                {
+                    return Err(crate::EvalError::InvalidConfig(format!(
+                        "long test case '{}' must set goal_card for scripted_user mode",
+                        self.name
+                    )));
+                }
+                if long
+                    .scripted_user
+                    .as_ref()
+                    .is_none_or(|path| path.as_os_str().is_empty())
+                {
+                    return Err(crate::EvalError::InvalidConfig(format!(
+                        "long test case '{}' must set scripted_user for scripted_user mode",
+                        self.name
+                    )));
+                }
+            }
+            LongConversationMode::Live => {
+                return Err(crate::EvalError::InvalidConfig(format!(
+                    "long test case '{}' uses live mode, which is not implemented",
+                    self.name
+                )));
+            }
         }
         if long.expectations.as_os_str().is_empty() {
             return Err(crate::EvalError::InvalidConfig(format!(
@@ -139,6 +171,8 @@ pub struct LongTestCase {
     pub goal_card: Option<PathBuf>,
     /// JSONL transcript used by recorded mode.
     pub transcript: PathBuf,
+    /// JSONL script used by scripted-user mode.
+    pub scripted_user: Option<PathBuf>,
     /// Optional secondary session for multi-session long-conversation scenarios.
     pub secondary_session: Option<SecondaryLongSession>,
     /// Scenario expectations file.

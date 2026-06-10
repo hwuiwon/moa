@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use moa_core::{MemoryScope, ScopeContext, ScopedConn};
 use moa_memory_graph::{GraphStore, NodeIndexRow, PiiClass};
 use moa_memory_vector::{VectorQuery, VectorStore};
@@ -53,12 +54,21 @@ pub async fn graph_leg(
     for seed in &req.seeds {
         let nodes = graph.neighbors(*seed, GRAPH_HOPS, None).await?;
         for node in nodes {
+            if !label_allowed(req, &node.label) {
+                continue;
+            }
             if seen.insert(node.uid) {
                 candidates.push(node.uid);
             }
         }
     }
     Ok(rank_uids(candidates))
+}
+
+fn label_allowed(req: &RetrievalRequest, label: &moa_memory_graph::NodeLabel) -> bool {
+    req.label_filter
+        .as_ref()
+        .is_none_or(|labels| labels.is_empty() || labels.contains(label))
 }
 
 /// Runs the vector KNN leg.
@@ -87,6 +97,7 @@ pub async fn vector_leg(
             label_filter,
             max_pii_class: req.max_pii_class.as_str().to_string(),
             include_global: true,
+            as_of: req.as_of,
         })
         .await?;
     Ok(rank_uids(hits.into_iter().map(|hit| hit.uid).collect()))
@@ -107,7 +118,11 @@ pub async fn lexical_leg(
         r#"
         SELECT uid
         FROM moa.node_index
-        WHERE valid_to IS NULL
+        WHERE "#,
+    );
+    push_validity_filter(&mut builder, None, req.as_of);
+    builder.push(
+        r#"
           AND name_tsv @@ plainto_tsquery('simple', "#,
     );
     builder.push_bind(&req.query_text);
@@ -181,7 +196,11 @@ async fn lexical_fallback_leg(
             WHERE LOWER(node.name || ' ' || COALESCE(node.properties_summary::text, ''))
                   LIKE '%' || terms.term || '%'
         ) AS matches
-        WHERE node.valid_to IS NULL
+        WHERE "#,
+    );
+    push_validity_filter(&mut builder, Some("node"), req.as_of);
+    builder.push(
+        r#"
           AND matches.match_count > 0
           AND CASE node.pii_class
                 WHEN 'none' THEN 0
@@ -244,26 +263,62 @@ pub async fn hydrate_nodes(
     scope: &MemoryScope,
     uids: &[Uuid],
     assume_app_role: bool,
+    as_of: Option<DateTime<Utc>>,
 ) -> Result<Vec<NodeIndexRow>> {
     if uids.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut conn = begin_scoped(pool, scope, assume_app_role).await?;
-    let rows = sqlx::query_as::<_, NodeIndexRow>(
+    let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
                valid_to, valid_from, properties_summary, last_accessed_at
         FROM moa.node_index
-        WHERE uid = ANY($1)
-          AND valid_to IS NULL
-        "#,
-    )
-    .bind(uids)
-    .fetch_all(conn.as_mut())
-    .await?;
+        WHERE uid = ANY("#,
+    );
+    builder.push_bind(uids);
+    builder.push(") AND ");
+    push_validity_filter(&mut builder, None, as_of);
+    let rows = builder
+        .build_query_as::<NodeIndexRow>()
+        .fetch_all(conn.as_mut())
+        .await?;
     conn.commit().await?;
     Ok(rows)
+}
+
+fn push_validity_filter(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    table_alias: Option<&'static str>,
+    as_of: Option<DateTime<Utc>>,
+) {
+    let valid_from = if let Some(alias) = table_alias {
+        format!("{alias}.valid_from")
+    } else {
+        "valid_from".to_string()
+    };
+    let valid_to = if let Some(alias) = table_alias {
+        format!("{alias}.valid_to")
+    } else {
+        "valid_to".to_string()
+    };
+
+    if let Some(as_of) = as_of {
+        builder.push(valid_from);
+        builder.push(" <= ");
+        builder.push_bind(as_of);
+        builder.push(" AND (");
+        builder.push(valid_to.as_str());
+        builder.push(" IS NULL OR ");
+        builder.push(valid_to);
+        builder.push(" > ");
+        builder.push_bind(as_of);
+        builder.push(")");
+    } else {
+        builder.push(valid_to);
+        builder.push(" IS NULL");
+    }
 }
 
 /// Updates `last_accessed_at` for retrieved nodes in a scoped background transaction.

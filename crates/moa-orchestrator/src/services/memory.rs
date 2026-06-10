@@ -412,6 +412,7 @@ async fn retrieve_hits(
             k_final: usize::try_from(inputs.limit).unwrap_or(usize::MAX),
             use_reranker: inputs.use_reranker,
             strategy: None,
+            as_of: None,
         })
         .await
         .map_err(memory_handler_error)

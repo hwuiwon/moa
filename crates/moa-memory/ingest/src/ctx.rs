@@ -8,7 +8,10 @@ use moa_memory_pii::PiiClassifier;
 use moa_memory_vector::VectorStore;
 use sqlx::PgPool;
 
-use crate::{ContradictionDetector, IngestError, Result};
+use crate::{
+    ContradictionDetector, EntityMergeVerifier, EntityResolver, FactExtractor,
+    HeuristicFactExtractor, IngestError, Result,
+};
 
 static INGEST_RUNTIME: OnceLock<IngestRuntime> = OnceLock::new();
 
@@ -25,6 +28,10 @@ pub struct IngestCtx {
     pub pii: Arc<dyn PiiClassifier>,
     /// Contradiction detector shared by slow and fast ingestion.
     pub contradict: Arc<dyn ContradictionDetector>,
+    /// Fact extractor used before privacy classification and graph writes.
+    pub extractor: Arc<dyn FactExtractor>,
+    /// Entity resolver used to connect extracted facts to shared entity nodes.
+    pub entity_resolver: Arc<EntityResolver>,
     /// Postgres pool used for sidecar and dedup queries.
     pub pool: PgPool,
 }
@@ -40,14 +47,58 @@ impl IngestCtx {
         pii: Arc<dyn PiiClassifier>,
         contradict: Arc<dyn ContradictionDetector>,
     ) -> Self {
+        Self::new_with_extractor(
+            pool,
+            graph,
+            vector,
+            embedder,
+            pii,
+            contradict,
+            Arc::new(HeuristicFactExtractor),
+        )
+    }
+
+    /// Creates an ingestion context with an explicit fact extractor.
+    #[must_use]
+    pub fn new_with_extractor(
+        pool: PgPool,
+        graph: Arc<dyn GraphStore>,
+        vector: Arc<dyn VectorStore>,
+        embedder: Arc<dyn EmbeddingProvider>,
+        pii: Arc<dyn PiiClassifier>,
+        contradict: Arc<dyn ContradictionDetector>,
+        extractor: Arc<dyn FactExtractor>,
+    ) -> Self {
         Self {
             graph,
             vector,
             embedder,
             pii,
             contradict,
+            extractor,
+            entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
             pool,
         }
+    }
+
+    /// Returns a copy of this context that uses the provided fact extractor.
+    #[must_use]
+    pub fn with_extractor(mut self, extractor: Arc<dyn FactExtractor>) -> Self {
+        self.extractor = extractor;
+        self
+    }
+
+    /// Returns a copy of this context that uses the provided entity resolver.
+    #[must_use]
+    pub fn with_entity_resolver(mut self, entity_resolver: Arc<EntityResolver>) -> Self {
+        self.entity_resolver = entity_resolver;
+        self
+    }
+
+    /// Returns a copy of this context that uses the provided entity merge verifier.
+    #[must_use]
+    pub fn with_entity_merge_verifier(self, verifier: Arc<dyn EntityMergeVerifier>) -> Self {
+        self.with_entity_resolver(Arc::new(EntityResolver::for_app_role(verifier)))
     }
 }
 
@@ -57,6 +108,8 @@ pub struct IngestRuntime {
     pool: PgPool,
     pii_service_url: Option<String>,
     cohere_api_key_env: String,
+    extractor: Arc<dyn FactExtractor>,
+    entity_resolver: Arc<EntityResolver>,
 }
 
 impl IngestRuntime {
@@ -68,6 +121,8 @@ impl IngestRuntime {
             pool,
             pii_service_url: None,
             cohere_api_key_env: default_config.memory.vector.embedder.cohere.api_key_env,
+            extractor: Arc::new(HeuristicFactExtractor),
+            entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
         }
     }
 
@@ -78,7 +133,29 @@ impl IngestRuntime {
             pool,
             pii_service_url: config.memory.pii_service_url.clone(),
             cohere_api_key_env: config.memory.vector.embedder.cohere.api_key_env.clone(),
+            extractor: Arc::new(HeuristicFactExtractor),
+            entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
         }
+    }
+
+    /// Returns a copy of this runtime that uses the provided fact extractor.
+    #[must_use]
+    pub fn with_extractor(mut self, extractor: Arc<dyn FactExtractor>) -> Self {
+        self.extractor = extractor;
+        self
+    }
+
+    /// Returns a copy of this runtime that uses the provided entity resolver.
+    #[must_use]
+    pub fn with_entity_resolver(mut self, entity_resolver: Arc<EntityResolver>) -> Self {
+        self.entity_resolver = entity_resolver;
+        self
+    }
+
+    /// Returns a copy of this runtime that uses the provided entity merge verifier.
+    #[must_use]
+    pub fn with_entity_merge_verifier(self, verifier: Arc<dyn EntityMergeVerifier>) -> Self {
+        self.with_entity_resolver(Arc::new(EntityResolver::for_app_role(verifier)))
     }
 
     /// Returns the Postgres pool used by ingestion handlers.
@@ -97,6 +174,18 @@ impl IngestRuntime {
     #[must_use]
     pub fn cohere_api_key_env(&self) -> &str {
         &self.cohere_api_key_env
+    }
+
+    /// Returns the configured fact extractor.
+    #[must_use]
+    pub fn extractor(&self) -> Arc<dyn FactExtractor> {
+        self.extractor.clone()
+    }
+
+    /// Returns the configured entity resolver.
+    #[must_use]
+    pub fn entity_resolver(&self) -> Arc<EntityResolver> {
+        self.entity_resolver.clone()
     }
 }
 

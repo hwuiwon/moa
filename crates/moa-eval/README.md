@@ -2,12 +2,14 @@
 
 Evaluation harness for MOA agent behavior.
 
-The long-conversation harness foundation is documented in
-[`docs/eval/long-conversation-harness.md`](../../docs/eval/long-conversation-harness.md).
+The evaluation contracts are documented in
+[`docs/16-evaluation.md`](../../docs/16-evaluation.md), with the memory
+retrieval gate in
+[`docs/eval/memory-eval-pipeline.md`](../../docs/eval/memory-eval-pipeline.md).
 
-Useful long-conversation eval references:
+Useful eval references:
 
-- [Harness design](../../docs/eval/long-conversation-harness.md)
+- [Evaluation spec](../../docs/16-evaluation.md)
+- [Memory eval pipeline](../../docs/eval/memory-eval-pipeline.md)
 - [Recording protocol](scenarios/long_conversation/RECORDING.md)
-- [Failure triage runbook](../../docs/eval/triage-runbook.md)
 - [Grafana dashboard](../../dashboards/long-conversation-eval.json)

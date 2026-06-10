@@ -1,6 +1,8 @@
 //! Wiremock offline counterpart for Turbopuffer vector-store live coverage.
 
-use moa_memory_vector::{TurbopufferStore, VECTOR_DIMENSION, VectorItem, VectorQuery, VectorStore};
+use moa_memory_vector::{
+    Error, TurbopufferStore, VECTOR_DIMENSION, VectorItem, VectorQuery, VectorStore,
+};
 use secrecy::SecretString;
 use serde_json::json;
 use uuid::Uuid;
@@ -51,6 +53,7 @@ async fn turbopuffer_offline_round_trip() {
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: "restricted".to_string(),
             include_global: false,
+            as_of: None,
         })
         .await
         .expect("query");
@@ -67,6 +70,43 @@ async fn turbopuffer_offline_round_trip() {
         .await
         .expect("wiremock should expose captured requests");
     assert_eq!(requests.len(), 3);
+}
+
+#[tokio::test]
+async fn turbopuffer_as_of_query_returns_unsupported_without_http_request() {
+    // Pins: Turbopuffer historical queries return the typed unsupported feature error locally.
+    let server = MockServer::start().await;
+    let store = TurbopufferStore::new(server.uri(), SecretString::from("test-key"), "test", false)
+        .expect("store");
+    let error = store
+        .knn(&VectorQuery {
+            workspace_id: Some(Uuid::now_v7().to_string()),
+            embedding: basis_vector(0),
+            k: 10,
+            label_filter: Some(vec!["Fact".to_string()]),
+            max_pii_class: "restricted".to_string(),
+            include_global: false,
+            as_of: Some(
+                chrono::DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z")
+                    .expect("test timestamp should parse")
+                    .with_timezone(&chrono::Utc),
+            ),
+        })
+        .await
+        .expect_err("as-of query should be rejected before HTTP");
+
+    assert!(matches!(
+        error,
+        Error::UnsupportedQueryFeature {
+            backend: "turbopuffer",
+            feature: "as_of"
+        }
+    ));
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests");
+    assert_eq!(requests.len(), 0);
 }
 
 fn test_item(uid: Uuid, workspace_id: &str) -> VectorItem {

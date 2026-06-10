@@ -98,6 +98,7 @@ pub(super) async fn attack_vector_oracle(stack: &Stack) -> Result<(), String> {
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: "restricted".to_string(),
             include_global: false,
+            as_of: None,
         },
     )
     .await

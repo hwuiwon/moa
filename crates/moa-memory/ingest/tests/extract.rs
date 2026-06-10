@@ -1,7 +1,8 @@
 //! Out-of-line tests for deterministic fact extraction.
 
 use moa_memory_ingest::{
-    IngestError, TurnChunk, extract_facts, extract_facts_checked, extraction_confidence_hint,
+    FactExtractor, HeuristicFactExtractor, IngestError, ScriptedFactExtractor, TurnChunk,
+    extract_facts, extract_facts_checked, extraction_confidence_hint,
 };
 use serde::Deserialize;
 
@@ -38,6 +39,42 @@ fn extract_emits_expected_facts_from_canonical_paragraph_describing_a_service() 
         assert_eq!(fact.predicate, expected.predicate);
         assert_eq!(fact.object, expected.object);
     }
+}
+
+#[tokio::test]
+async fn heuristic_extractor_matches_legacy_extract_facts_output() {
+    // Pins: the default extractor preserves the legacy deterministic extraction API.
+    let chunks = [chunk(
+        "Fact: API runs_on_port 3000\nFact: worker_queue uses Redis",
+    )];
+    let legacy = extract_facts(&chunks);
+
+    let facts = HeuristicFactExtractor
+        .extract(&chunks)
+        .await
+        .expect("heuristic extractor should not fail");
+
+    assert_eq!(facts, legacy);
+}
+
+#[tokio::test]
+async fn scripted_extractor_can_emit_fact_for_text_skipped_by_heuristic() {
+    // Pins: scripted extraction can supply corpus facts for non-declarative transcript text.
+    let chunks = [chunk("Should we use Redis? Please review the design.")];
+    assert_eq!(extract_facts(&chunks), Vec::new());
+    let extractor = ScriptedFactExtractor::from_summaries(["planner chooses Redis"]);
+
+    let facts = extractor
+        .extract(&chunks)
+        .await
+        .expect("scripted extractor should not fail");
+
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].subject, "planner");
+    assert_eq!(facts[0].predicate, "chooses");
+    assert_eq!(facts[0].object, "Redis");
+    assert_eq!(facts[0].summary, "planner chooses Redis");
+    assert_eq!(facts[0].source_chunk, 0);
 }
 
 #[test]
