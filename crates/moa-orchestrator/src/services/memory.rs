@@ -413,6 +413,7 @@ async fn retrieve_hits(
             use_reranker: inputs.use_reranker,
             strategy: None,
             as_of: None,
+            ranking_reference_time: None,
         })
         .await
         .map_err(memory_handler_error)

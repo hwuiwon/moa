@@ -35,8 +35,9 @@ pub use env_overlay::MoaEnvOverlay;
 pub use gateway::GatewayConfig;
 pub use lineage::LineageConfig;
 pub use memory::{
-    CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryRerankerMode,
-    MemoryRetrievalConfig, MemoryVectorConfig, TurbopufferVectorConfig, VectorEmbedderConfig,
+    CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryRankingConfig,
+    MemoryRankingMode, MemoryRankingWeights, MemoryRerankerMode, MemoryRetrievalConfig,
+    MemoryVectorConfig, TurbopufferVectorConfig, VectorEmbedderConfig,
 };
 pub use orchestrator::OrchestratorConfig;
 pub use providers::{GeneralConfig, ModelsConfig, ProviderCredentialConfig, ProvidersConfig};

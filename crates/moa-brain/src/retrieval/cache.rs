@@ -22,12 +22,19 @@ type WorkspaceCache = Cache<CacheKey, CachedEntry>;
 /// Backend abstraction used by the read-time cache.
 #[async_trait]
 pub trait RetrievalBackend: Send + Sync {
+    /// Returns a stable fingerprint for the backend's ranking pipeline.
+    fn ranking_fingerprint(&self) -> [u8; 32];
+
     /// Runs one uncached retrieval request.
     async fn retrieve(&self, req: RetrievalRequest) -> Result<Vec<RetrievalHit>>;
 }
 
 #[async_trait]
 impl RetrievalBackend for HybridRetriever {
+    fn ranking_fingerprint(&self) -> [u8; 32] {
+        HybridRetriever::ranking_fingerprint(self)
+    }
+
     async fn retrieve(&self, req: RetrievalRequest) -> Result<Vec<RetrievalHit>> {
         HybridRetriever::retrieve(self, req).await
     }
@@ -208,7 +215,7 @@ impl CachedHybridRetriever {
             .await?;
         let key = CacheKey {
             workspace_id: workspace_id.clone(),
-            fingerprint: fingerprint(planned, &req),
+            fingerprint: fingerprint(planned, &req, self.inner.ranking_fingerprint()),
         };
         let workspace_cache = self.workspace_cache(&workspace_id).await;
 
@@ -269,12 +276,27 @@ fn workspace_cache_id(scope: &MemoryScope) -> String {
         .unwrap_or_else(|| "global".to_string())
 }
 
-fn fingerprint(planned: &PlannedQuery, req: &RetrievalRequest) -> [u8; 32] {
-    *blake3::hash(canonicalize(planned, req).as_bytes()).as_bytes()
+fn fingerprint(
+    planned: &PlannedQuery,
+    req: &RetrievalRequest,
+    ranking_fingerprint: [u8; 32],
+) -> [u8; 32] {
+    *blake3::hash(canonicalize(planned, req, ranking_fingerprint).as_bytes()).as_bytes()
 }
 
-fn canonicalize(planned: &PlannedQuery, req: &RetrievalRequest) -> String {
+fn canonicalize(
+    planned: &PlannedQuery,
+    req: &RetrievalRequest,
+    ranking_fingerprint: [u8; 32],
+) -> String {
+    use std::fmt::Write as _;
+
     let mut out = String::new();
+    out.push_str("ranking=");
+    for byte in ranking_fingerprint {
+        write!(&mut out, "{byte:02x}").expect("write to string should not fail");
+    }
+    out.push('|');
     out.push_str("strategy=");
     out.push_str(strategy_str(planned.strategy));
     out.push_str("|scope=");
@@ -329,6 +351,10 @@ fn canonicalize(planned: &PlannedQuery, req: &RetrievalRequest) -> String {
     if let Some(temporal) = req.as_of {
         out.push_str(&temporal.to_rfc3339());
     }
+    out.push_str("|ranking_reference_time=");
+    if let Some(reference_time) = req.ranking_reference_time {
+        out.push_str(&reference_time.to_rfc3339());
+    }
     out
 }
 
@@ -370,6 +396,7 @@ mod tests {
 
     use super::*;
     use crate::retrieval::LegSources;
+    use crate::retrieval::ranking::{RankingConfig, RankingMode, ranking_fingerprint};
 
     #[tokio::test]
     async fn cache_hit_reuses_successful_workspace_retrieval() {
@@ -486,8 +513,16 @@ mod tests {
         right.label_hint = Some(vec![NodeLabel::Decision, NodeLabel::Fact]);
 
         assert_eq!(
-            fingerprint(&left, &request(&left, "what owns auth?")),
-            fingerprint(&right, &request(&right, "what owns auth?"))
+            fingerprint(
+                &left,
+                &request(&left, "what owns auth?"),
+                ranking_fingerprint(&RankingConfig::default()),
+            ),
+            fingerprint(
+                &right,
+                &request(&right, "what owns auth?"),
+                ranking_fingerprint(&RankingConfig::default()),
+            )
         );
     }
 
@@ -504,8 +539,33 @@ mod tests {
         );
 
         assert_ne!(
-            fingerprint(&planned, &current),
-            fingerprint(&planned, &historical)
+            fingerprint(
+                &planned,
+                &current,
+                ranking_fingerprint(&RankingConfig::default()),
+            ),
+            fingerprint(
+                &planned,
+                &historical,
+                ranking_fingerprint(&RankingConfig::default()),
+            )
+        );
+    }
+
+    #[test]
+    fn cache_key_changes_with_ranking_fingerprint() {
+        // Pins: final ranked hits cannot be reused across ranking modes.
+        let planned = planned_query(workspace_scope(), "auth service");
+        let req = request(&planned, "what owns auth?");
+        let legacy = RankingConfig {
+            mode: RankingMode::Legacy,
+            weights: Default::default(),
+        };
+        let feature = RankingConfig::default();
+
+        assert_ne!(
+            fingerprint(&planned, &req, ranking_fingerprint(&legacy)),
+            fingerprint(&planned, &req, ranking_fingerprint(&feature))
         );
     }
 
@@ -526,6 +586,10 @@ mod tests {
 
     #[async_trait]
     impl RetrievalBackend for CountingBackend {
+        fn ranking_fingerprint(&self) -> [u8; 32] {
+            ranking_fingerprint(&RankingConfig::default())
+        }
+
         async fn retrieve(&self, _req: RetrievalRequest) -> Result<Vec<RetrievalHit>> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             let uid = Uuid::now_v7();
@@ -608,6 +672,7 @@ mod tests {
             use_reranker: false,
             strategy: Some(planned.strategy),
             as_of: planned.temporal_filter,
+            ranking_reference_time: None,
         }
     }
 }

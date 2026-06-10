@@ -1,16 +1,19 @@
 //! Retrieval metric aggregation for memory-evaluation reports.
 
 use std::collections::{BTreeSet, HashMap};
+use std::ops::{Deref, DerefMut};
 
 use moa_brain::retrieval::{LegSources, RetrievalHit};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::kernel::{
+    BootstrapConfig, ClusterBootstrapReport, ClusterObservation, MetricSummary, PerLegRecall,
+    RetrievalCoreMetrics, cluster_bootstrap_mean_by_user,
+};
+
 use super::ProbeType;
 use super::gold::{GoldResolutionReport, GoldResolutionStatus};
-use super::stats::{
-    BootstrapConfig, ClusterBootstrapReport, ClusterObservation, cluster_bootstrap_mean_by_user,
-};
 
 const RECALL_AT_4: usize = 4;
 const RECALL_AT_25: usize = 25;
@@ -222,53 +225,12 @@ impl ProbeResult {
     }
 }
 
-/// Mean metric value with numerator and denominator retained for reports.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-pub struct MetricSummary {
-    /// Aggregated numerator before normalization.
-    pub numerator: f64,
-    /// Number of items in the denominator.
-    pub denominator: usize,
-    /// Normalized metric value.
-    pub value: f64,
-}
-
-impl MetricSummary {
-    /// Builds a ratio summary from count-like values.
-    #[must_use]
-    pub fn from_counts(numerator: usize, denominator: usize) -> Self {
-        Self::from_total(numerator as f64, denominator)
-    }
-
-    /// Builds a mean summary from a total and denominator.
-    #[must_use]
-    pub fn from_total(numerator: f64, denominator: usize) -> Self {
-        Self {
-            numerator,
-            denominator,
-            value: if denominator == 0 {
-                0.0
-            } else {
-                numerator / denominator as f64
-            },
-        }
-    }
-}
-
-/// Per-leg recall summaries for graph, vector, and lexical retrieval.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct PerLegRecall {
-    /// Recall for facts reached by the graph leg.
-    pub graph: MetricSummary,
-    /// Recall for facts reached by the vector leg.
-    pub vector: MetricSummary,
-    /// Recall for facts reached by the lexical leg.
-    pub lexical: MetricSummary,
-}
-
 /// Aggregated memory-retrieval metrics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetrievalMetrics {
+    /// Suite-agnostic retrieval metrics serialized flat for report compatibility.
+    #[serde(flatten)]
+    pub core: RetrievalCoreMetrics,
     /// Fraction of ledger facts resolved to graph nodes during ingestion.
     pub ingestion_coverage: MetricSummary,
     /// Mean pre-rerank recall@4 over probes with expected facts.
@@ -280,25 +242,10 @@ pub struct RetrievalMetrics {
     /// Mean post-rerank recall@4 over probes with expected facts.
     #[serde(default)]
     pub post_rerank_recall_at_4: MetricSummary,
-    /// Mean final-window recall@4 over probes with expected facts.
-    pub recall_at_4: MetricSummary,
-    /// Mean pre-rerank recall@25 over probes with expected facts.
-    pub recall_at_25: MetricSummary,
-    /// Mean reciprocal rank over probes with expected facts.
-    pub mrr: MetricSummary,
-    /// Mean binary-relevance nDCG@4 over probes with expected facts.
-    pub ndcg_at_4: MetricSummary,
-    /// Fraction of probes with expected facts that retrieved none in the top 25.
-    pub zero_recall_rate: MetricSummary,
     /// Fraction of judged answers that were faithful.
     pub answer_faithfulness: MetricSummary,
     /// Fraction of abstention-relevant probes that abstained correctly.
     pub abstention_correctness: MetricSummary,
-    /// Number of blocked cross-user facts retrieved.
-    pub cross_user_leak_count: usize,
-    /// Number of PII-redaction probes that returned unredacted material.
-    #[serde(default)]
-    pub pii_unredacted_count: usize,
     /// Fraction of PII-relevant probes with redacted answer material.
     pub pii_redaction_rate: MetricSummary,
     /// Fraction of temporal probes that answered for the requested valid-time instant.
@@ -309,11 +256,20 @@ pub struct RetrievalMetrics {
     /// Number of temporal probes where the parser fired but produced the wrong instant.
     #[serde(default)]
     pub temporal_parse_mismatch_count: usize,
-    /// Recall by contributing retrieval leg.
-    pub per_leg_recall: PerLegRecall,
-    /// p95 end-to-end retrieval latency in milliseconds.
-    #[serde(default)]
-    pub p95_retrieval_latency_ms: u64,
+}
+
+impl Deref for RetrievalMetrics {
+    type Target = RetrievalCoreMetrics;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl DerefMut for RetrievalMetrics {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
+    }
 }
 
 /// Full retrieval-evaluation report suitable for JSON output.
@@ -403,25 +359,30 @@ fn aggregate_metrics(
     });
 
     RetrievalMetrics {
+        core: RetrievalCoreMetrics {
+            recall_at_4: post_rerank_recall_at_4,
+            recall_at_25: pre_rerank_recall_at_25,
+            mrr: summarize_probe_values(probe_results, ProbeResult::reciprocal_rank),
+            ndcg_at_4: summarize_probe_values(probe_results, |probe| probe.ndcg_at(RECALL_AT_4)),
+            zero_recall_rate: summarize_probe_values(probe_results, |probe| {
+                probe.zero_recall().map(bool_value)
+            }),
+            per_leg_recall: per_leg_recall(probe_results),
+            p50_retrieval_latency_ms: p50_retrieval_latency_ms(probe_results),
+            p95_retrieval_latency_ms: p95_retrieval_latency_ms(probe_results),
+            cross_user_leak_count: cross_user_leak_count(probe_results),
+            pii_unredacted_count: pii_unredacted_count(probe_results),
+        },
         ingestion_coverage: MetricSummary::from_counts(resolved_facts, total_facts),
         pre_rerank_recall_at_4,
         pre_rerank_recall_at_25,
         post_rerank_recall_at_4,
-        recall_at_4: post_rerank_recall_at_4,
-        recall_at_25: pre_rerank_recall_at_25,
-        mrr: summarize_probe_values(probe_results, ProbeResult::reciprocal_rank),
-        ndcg_at_4: summarize_probe_values(probe_results, |probe| probe.ndcg_at(RECALL_AT_4)),
-        zero_recall_rate: summarize_probe_values(probe_results, |probe| {
-            probe.zero_recall().map(bool_value)
-        }),
         answer_faithfulness: summarize_probe_values(probe_results, |probe| {
             probe.answer_faithful.map(bool_value)
         }),
         abstention_correctness: summarize_probe_values(probe_results, |probe| {
             probe.abstention_correct.map(bool_value)
         }),
-        cross_user_leak_count: cross_user_leak_count(probe_results),
-        pii_unredacted_count: pii_unredacted_count(probe_results),
         pii_redaction_rate: summarize_probe_values(probe_results, |probe| {
             probe.pii_redacted.map(bool_value)
         }),
@@ -430,8 +391,6 @@ fn aggregate_metrics(
         }),
         temporal_parse_rate: temporal_parse_rate(probe_results),
         temporal_parse_mismatch_count: temporal_parse_mismatch_count(probe_results),
-        per_leg_recall: per_leg_recall(probe_results),
-        p95_retrieval_latency_ms: p95_retrieval_latency_ms(probe_results),
     }
 }
 
@@ -615,6 +574,14 @@ fn discount(rank: usize) -> f64 {
 }
 
 fn p95_retrieval_latency_ms(probe_results: &[ProbeResult]) -> u64 {
+    percentile_retrieval_latency_ms(probe_results, 0.95)
+}
+
+fn p50_retrieval_latency_ms(probe_results: &[ProbeResult]) -> u64 {
+    percentile_retrieval_latency_ms(probe_results, 0.50)
+}
+
+fn percentile_retrieval_latency_ms(probe_results: &[ProbeResult], percentile: f64) -> u64 {
     let mut values = probe_results
         .iter()
         .map(|probe| probe.retrieval_latency_ms)
@@ -623,6 +590,6 @@ fn p95_retrieval_latency_ms(probe_results: &[ProbeResult]) -> u64 {
         return 0;
     }
     values.sort_unstable();
-    let rank = (values.len() as f64 * 0.95).ceil() as usize;
+    let rank = (values.len() as f64 * percentile).ceil() as usize;
     values[rank.saturating_sub(1).min(values.len() - 1)]
 }

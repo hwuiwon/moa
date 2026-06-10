@@ -82,6 +82,7 @@ impl PlannedQuery {
             use_reranker,
             strategy: Some(self.strategy),
             as_of: self.temporal_filter,
+            ranking_reference_time: None,
         }
     }
 }
@@ -177,6 +178,8 @@ pub struct QueryRetrievalCtx<'a> {
     pub k_final: usize,
     /// Whether the retriever should call the configured reranker.
     pub use_reranker: bool,
+    /// Optional deterministic reference time for ranking features.
+    pub ranking_reference_time: Option<DateTime<Utc>>,
 }
 
 impl<'a> QueryRetrievalCtx<'a> {
@@ -197,6 +200,7 @@ impl<'a> QueryRetrievalCtx<'a> {
             max_pii_class,
             k_final: 5,
             use_reranker: false,
+            ranking_reference_time: None,
         }
     }
 
@@ -211,6 +215,13 @@ impl<'a> QueryRetrievalCtx<'a> {
     #[must_use]
     pub fn with_reranker(mut self, use_reranker: bool) -> Self {
         self.use_reranker = use_reranker;
+        self
+    }
+
+    /// Overrides the deterministic reference time used by ranking features.
+    #[must_use]
+    pub fn with_ranking_reference_time(mut self, reference_time: DateTime<Utc>) -> Self {
+        self.ranking_reference_time = Some(reference_time);
         self
     }
 }
@@ -230,13 +241,14 @@ pub async fn retrieve_for_query(
     metrics::histogram!("moa_retrieval_embedder_seconds")
         .record(embed_started.elapsed().as_secs_f64());
     let embedding = embeddings.pop().ok_or(PlanError::EmptyQueryEmbedding)?;
-    let request = planned.clone().into_retrieval_request(
+    let mut request = planned.clone().into_retrieval_request(
         query_text,
         embedding,
         ctx.max_pii_class,
         ctx.k_final,
         ctx.use_reranker,
     );
+    request.ranking_reference_time = ctx.ranking_reference_time;
     ctx.hybrid
         .retrieve(&planned, request)
         .await

@@ -6,6 +6,7 @@ pub mod error;
 pub mod evaluator;
 pub mod evaluators;
 pub mod golden;
+pub mod kernel;
 pub mod loader;
 pub mod long_conversation;
 pub mod memory_eval;

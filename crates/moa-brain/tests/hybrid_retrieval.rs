@@ -277,6 +277,7 @@ async fn hybrid_retrieval_e2e_returns_fused_annotated_results() {
         use_reranker: false,
         strategy: None,
         as_of: None,
+        ranking_reference_time: None,
     };
     let lexical_hits = lexical_leg(session_store.pool(), &request, true)
         .await
@@ -315,6 +316,7 @@ async fn hybrid_retrieval_e2e_returns_fused_annotated_results() {
             use_reranker: false,
             strategy: None,
             as_of: None,
+            ranking_reference_time: None,
         })
         .await
         .expect("retrieve graph-only entity seed hits");
@@ -387,6 +389,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
         use_reranker: false,
         strategy: None,
         as_of: Some(utc("2026-03-01T00:00:00Z")),
+        ranking_reference_time: None,
     };
 
     let lexical_hits = lexical_leg(session_store.pool(), &historical, true)
@@ -412,6 +415,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
         use_reranker: false,
         strategy: None,
         as_of: None,
+        ranking_reference_time: None,
     };
     let current_hits = retriever
         .retrieve(current)
@@ -487,6 +491,7 @@ async fn temporal_turbopuffer_unsupported_as_of_falls_back_to_pgvector() {
             use_reranker: false,
             strategy: None,
             as_of: Some(utc("2026-03-01T00:00:00Z")),
+            ranking_reference_time: None,
         })
         .await
         .expect("retrieve through pgvector fallback");

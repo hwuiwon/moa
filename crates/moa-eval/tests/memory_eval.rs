@@ -798,6 +798,21 @@ fn probe_result_deserializes_without_temporal_parse_field() -> TestResult {
 }
 
 #[test]
+fn retrieval_metrics_flatten_round_trips_checked_in_baseline() -> TestResult {
+    // Pins: splitting core metrics into a flattened Rust field does not change report JSON.
+    let baseline_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("docs/eval/baselines/memory-retrieval-pr-baseline.json");
+    let raw = std::fs::read_to_string(&baseline_path)?;
+    let before: serde_json::Value = serde_json::from_str(&raw)?;
+    let report: MemoryRetrievalEvalReport = serde_json::from_str(&raw)?;
+    let after = serde_json::to_value(report)?;
+
+    assert_eq!(after, before);
+    Ok(())
+}
+
+#[test]
 fn temporal_parse_rate_aggregates_over_temporal_probes_only() {
     // Pins: parser diagnostics count temporal probes only and separate wrong-date parses.
     let report = aggregate_retrieval_eval_from_counts(
