@@ -349,8 +349,18 @@ fn split_summary(summary: &str) -> (String, String, String) {
         [subject, predicate, rest @ ..] => (
             (*subject).trim_matches(':').to_string(),
             (*predicate).trim_matches(':').to_string(),
-            rest.join(" "),
+            object_words(rest).join(" "),
         ),
+    }
+}
+
+fn object_words<'a>(words: &'a [&'a str]) -> &'a [&'a str] {
+    if let [first, rest @ ..] = words
+        && first.eq_ignore_ascii_case("is")
+    {
+        rest
+    } else {
+        words
     }
 }
 

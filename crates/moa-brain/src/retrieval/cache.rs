@@ -396,7 +396,9 @@ mod tests {
 
     use super::*;
     use crate::retrieval::LegSources;
-    use crate::retrieval::ranking::{RankingConfig, RankingMode, ranking_fingerprint};
+    use crate::retrieval::ranking::{
+        RANKING_PIPELINE_VERSION, RankingConfig, RankingMode, ranking_fingerprint,
+    };
 
     #[tokio::test]
     async fn cache_hit_reuses_successful_workspace_retrieval() {
@@ -567,6 +569,12 @@ mod tests {
             fingerprint(&planned, &req, ranking_fingerprint(&legacy)),
             fingerprint(&planned, &req, ranking_fingerprint(&feature))
         );
+    }
+
+    #[test]
+    fn cache_key_changes_with_pipeline_version_bump() {
+        // Pins: graph-expansion candidate-pool changes require ranking fingerprint version 2.
+        assert_eq!(RANKING_PIPELINE_VERSION, 2);
     }
 
     #[derive(Default)]

@@ -127,6 +127,15 @@ impl GraphStore for SeedGraph {
         Ok(Vec::new())
     }
 
+    async fn expand_seeds(
+        &self,
+        _seeds: &[Uuid],
+        _max_hops: u8,
+        _as_of: Option<DateTime<Utc>>,
+    ) -> Result<Vec<moa_memory_graph::GraphExpansionHit>, GraphError> {
+        Ok(Vec::new())
+    }
+
     async fn lookup_seeds(
         &self,
         name: &str,
@@ -186,6 +195,15 @@ impl GraphStore for TemporalSeedGraph {
         _edge_filter: Option<&[EdgeLabel]>,
         _as_of: Option<DateTime<Utc>>,
     ) -> Result<Vec<NodeIndexRow>, GraphError> {
+        Ok(Vec::new())
+    }
+
+    async fn expand_seeds(
+        &self,
+        _seeds: &[Uuid],
+        _max_hops: u8,
+        _as_of: Option<DateTime<Utc>>,
+    ) -> Result<Vec<moa_memory_graph::GraphExpansionHit>, GraphError> {
         Ok(Vec::new())
     }
 

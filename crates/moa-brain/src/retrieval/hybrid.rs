@@ -18,8 +18,8 @@ use uuid::Uuid;
 use crate::planning::Strategy;
 use crate::retrieval::legs::{
     GRAPH_BUDGET, GRAPH_WEIGHT, LEXICAL_BUDGET, LEXICAL_WEIGHT, LegCandidate, VECTOR_BUDGET,
-    VECTOR_WEIGHT, bump_last_accessed, graph_leg, hydrate_nodes, lexical_leg, rrf_fuse, timed_leg,
-    vector_leg as run_vector_leg,
+    VECTOR_WEIGHT, bump_last_accessed, graph_expansion_leg, hydrate_nodes, lexical_leg, rrf_fuse,
+    timed_leg, vector_leg as run_vector_leg,
 };
 use crate::retrieval::ranking::{
     FeatureRanker, RankingConfig, RankingMode, normalize_tokens, ranking_fingerprint,
@@ -28,6 +28,8 @@ use crate::retrieval::reranker::{CohereReranker, NoopReranker, Reranker};
 
 const RERANK_MODEL: &str = "rerank-v4.0-fast";
 const FUSED_CANDIDATE_LIMIT: usize = 25;
+const PHASE_ONE_GRAPH_SEED_LIMIT: usize = FUSED_CANDIDATE_LIMIT;
+const PHASE_ONE_SEED_DECAY: f64 = 0.85;
 
 /// Result type returned by hybrid retrieval.
 pub type Result<T> = std::result::Result<T, RetrievalError>;
@@ -211,20 +213,33 @@ impl HybridRetriever {
         }
 
         let strategy = req.strategy.unwrap_or(Strategy::Both);
-        let graph = self.graph.as_ref();
-        let graph_future = timed_leg("graph", GRAPH_BUDGET, graph_leg(graph, &req));
         let vector_future = timed_leg("vector", VECTOR_BUDGET, self.vector_leg(&req));
         let lexical_future = timed_leg(
             "lexical",
             LEXICAL_BUDGET,
             lexical_leg(&self.pool, &req, self.assume_app_role),
         );
-        let (graph_result, vector_result, lexical_result) =
-            tokio::join!(graph_future, vector_future, lexical_future);
+        let (vector_result, lexical_result) = tokio::join!(vector_future, lexical_future);
 
-        let graph_hits = leg_or_empty("graph", graph_result)?;
         let vector_hits = leg_or_empty("vector", vector_result)?;
         let lexical_hits = leg_or_empty("lexical", lexical_result)?;
+        let interim = rrf_fuse(&[], &vector_hits, &lexical_hits, weights_for(strategy));
+        let graph_seed_rows =
+            hydrate_graph_seed_rows(&self.pool, &req, &interim, self.assume_app_role).await?;
+        let graph_seed_strengths =
+            interim_graph_seed_strengths(&req.seeds, &interim, &graph_seed_rows, &req.query_text);
+        let graph_result = timed_leg(
+            "graph",
+            GRAPH_BUDGET,
+            graph_expansion_leg(
+                self.graph.as_ref(),
+                &req,
+                &graph_seed_strengths,
+                &graph_seed_rows,
+            ),
+        )
+        .await;
+        let graph_hits = leg_or_empty("graph", graph_result)?;
         let fusion_started = std::time::Instant::now();
         let mut fused = rrf_fuse(
             &graph_hits,
@@ -446,6 +461,70 @@ fn weights_for(strategy: Strategy) -> (f64, f64, f64) {
     }
 }
 
+fn interim_graph_seed_strengths(
+    planner_seeds: &[Uuid],
+    interim: &[(Uuid, f64, LegSources)],
+    phase_one_rows: &[NodeIndexRow],
+    query_text: &str,
+) -> Vec<(Uuid, f64)> {
+    let mut seen = HashSet::new();
+    let mut strengths = Vec::new();
+    for seed in planner_seeds {
+        if seen.insert(*seed) {
+            strengths.push((*seed, 1.0));
+        }
+    }
+
+    let exact_seed_uids = exact_phase_one_seed_uids(phase_one_rows, query_text);
+    let mut phase_one = interim
+        .iter()
+        .take(PHASE_ONE_GRAPH_SEED_LIMIT)
+        .enumerate()
+        .map(|(index, (uid, _, _))| (*uid, index, exact_seed_uids.contains(uid)))
+        .collect::<Vec<_>>();
+    phase_one.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.1.cmp(&right.1)));
+    for (index, (uid, _, _)) in phase_one.into_iter().enumerate() {
+        if seen.insert(uid) {
+            strengths.push((uid, PHASE_ONE_SEED_DECAY.powi(index as i32)));
+        }
+    }
+    strengths
+}
+
+async fn hydrate_graph_seed_rows(
+    pool: &PgPool,
+    req: &RetrievalRequest,
+    interim: &[(Uuid, f64, LegSources)],
+    assume_app_role: bool,
+) -> Result<Vec<NodeIndexRow>> {
+    let mut seen = HashSet::new();
+    let mut uids = req
+        .seeds
+        .iter()
+        .copied()
+        .filter(|uid| seen.insert(*uid))
+        .collect::<Vec<_>>();
+    uids.extend(
+        interim
+            .iter()
+            .take(PHASE_ONE_GRAPH_SEED_LIMIT)
+            .map(|(uid, _, _)| *uid)
+            .filter(|uid| seen.insert(*uid)),
+    );
+    hydrate_nodes(pool, &req.scope, &uids, assume_app_role, req.as_of).await
+}
+
+fn exact_phase_one_seed_uids(rows: &[NodeIndexRow], query_text: &str) -> HashSet<Uuid> {
+    let query_tokens = normalize_tokens(query_text);
+    rows.iter()
+        .filter(|row| {
+            let name_tokens = normalize_tokens(&row.name);
+            !name_tokens.is_empty() && name_tokens.iter().all(|token| query_tokens.contains(token))
+        })
+        .map(|row| row.uid)
+        .collect()
+}
+
 fn leg_or_empty<T>(
     name: &'static str,
     result: std::result::Result<Result<T>, tokio::time::error::Elapsed>,
@@ -509,6 +588,9 @@ fn apply_feature_ranking(
     for hit in hits.iter_mut() {
         hit.score = ranker.score(hit.score, max_fused_score, &query_tokens, &hit.node);
         if hit.legs.lexical && !hit.legs.vector && !hit.legs.graph {
+            hit.score += config.weights.overlap;
+        }
+        if hit.legs.graph && !hit.legs.vector && !hit.legs.lexical {
             hit.score += config.weights.overlap;
         }
     }
@@ -748,6 +830,145 @@ mod tests {
         assert_eq!(hits[0].uid, lexical_uid);
     }
 
+    #[test]
+    fn feature_mode_rescues_graph_only_expansion_hit() {
+        // Pins: FeatureV1 can promote graph-only expansion hits that vector and lexical missed.
+        let reference_time = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+            .expect("test timestamp should parse")
+            .with_timezone(&Utc);
+        let graph_uid = Uuid::now_v7();
+        let vector_uid = Uuid::now_v7();
+        let mut graph_hit = hit(graph_uid, "workspace", 0.8);
+        graph_hit.legs = LegSources {
+            graph: true,
+            vector: false,
+            lexical: false,
+        };
+        graph_hit.node.valid_from = reference_time;
+        graph_hit.node.last_accessed_at = reference_time;
+        let mut vector_hit = hit(vector_uid, "workspace", 1.0);
+        vector_hit.legs = LegSources {
+            graph: false,
+            vector: true,
+            lexical: false,
+        };
+        vector_hit.node.valid_from = reference_time;
+        vector_hit.node.last_accessed_at = reference_time;
+        let mut config = RankingConfig::default();
+        config.weights.rrf = 0.0;
+        config.weights.recency = 0.0;
+        config.weights.access = 0.0;
+        config.weights.subject_match = 0.0;
+        config.weights.scope_workspace = 0.0;
+        let mut hits = vec![vector_hit, graph_hit];
+
+        rank_hydrated_hits(
+            &mut hits,
+            &config,
+            &RetrievalRequest {
+                seeds: Vec::new(),
+                query_text: "library owner".to_string(),
+                query_embedding: Vec::new(),
+                scope: MemoryScope::Global,
+                label_filter: None,
+                max_pii_class: PiiClass::Restricted,
+                k_final: 2,
+                use_reranker: false,
+                strategy: None,
+                as_of: None,
+                ranking_reference_time: Some(reference_time),
+            },
+        );
+
+        assert_eq!(hits[0].uid, graph_uid);
+    }
+
+    #[test]
+    fn interim_seed_selection_caps_at_configured_limit_and_keeps_ner_strength_on_collision() {
+        // Pins: phase-one seeds are capped and planner NER seeds keep strength 1.0 on collision.
+        let collision = Uuid::from_u128(1);
+        let interim = (1_u128..=(PHASE_ONE_GRAPH_SEED_LIMIT as u128 + 4))
+            .map(|value| (Uuid::from_u128(value), 1.0, LegSources::default()))
+            .collect::<Vec<_>>();
+
+        let strengths = interim_graph_seed_strengths(&[collision], &interim, &[], "");
+
+        assert_eq!(strengths.len(), PHASE_ONE_GRAPH_SEED_LIMIT);
+        assert_eq!(strengths[0], (collision, 1.0));
+        assert_eq!(strengths[1], (Uuid::from_u128(2), 0.85));
+        let (last_uid, last_strength) = strengths.last().expect("last seed should exist");
+        assert_eq!(
+            *last_uid,
+            Uuid::from_u128(PHASE_ONE_GRAPH_SEED_LIMIT as u128)
+        );
+        assert!(
+            (*last_strength - PHASE_ONE_SEED_DECAY.powi((PHASE_ONE_GRAPH_SEED_LIMIT - 1) as i32))
+                .abs()
+                < f64::EPSILON
+        );
+        assert!(
+            strengths
+                .iter()
+                .all(|(uid, strength)| *uid != collision || *strength == 1.0)
+        );
+    }
+
+    #[test]
+    fn graph_seed_selection_uses_phase_one_when_planner_seeds_empty() {
+        // Pins: graph expansion can still run when NER finds no planner seeds.
+        let first = Uuid::from_u128(10);
+        let second = Uuid::from_u128(11);
+        let interim = vec![
+            (first, 1.0, LegSources::default()),
+            (second, 0.5, LegSources::default()),
+        ];
+
+        let strengths = interim_graph_seed_strengths(&[], &interim, &[], "");
+
+        assert_eq!(strengths, vec![(first, 1.0), (second, 0.85)]);
+    }
+
+    #[test]
+    fn interim_seed_selection_promotes_exact_phase_one_subject_match() {
+        // Pins: graph expansion starts from the exact entity mention before same-shape siblings.
+        let sibling = Uuid::from_u128(10);
+        let exact = Uuid::from_u128(11);
+        let interim = vec![
+            (sibling, 1.0, LegSources::default()),
+            (exact, 0.9, LegSources::default()),
+        ];
+        let rows = vec![
+            node_row(sibling, "audit-shipper-dep-0-4-0"),
+            node_row(exact, "audit-shipper-dep-0-0-0"),
+        ];
+
+        let strengths = interim_graph_seed_strengths(
+            &[],
+            &interim,
+            &rows,
+            "Which team owns the library that audit-shipper-dep-0-0-0 depends on?",
+        );
+
+        assert_eq!(strengths, vec![(exact, 1.0), (sibling, 0.85)]);
+    }
+
+    #[test]
+    fn strategy_weighting_unchanged_after_two_phase_restructure() {
+        // Pins: GraphFirst still halves only the lexical fusion weight.
+        assert_eq!(
+            weights_for(Strategy::GraphFirst),
+            (GRAPH_WEIGHT, VECTOR_WEIGHT, LEXICAL_WEIGHT * 0.5)
+        );
+        assert_eq!(
+            weights_for(Strategy::VectorFirst),
+            (GRAPH_WEIGHT, VECTOR_WEIGHT, LEXICAL_WEIGHT)
+        );
+        assert_eq!(
+            weights_for(Strategy::Both),
+            (GRAPH_WEIGHT, VECTOR_WEIGHT, LEXICAL_WEIGHT)
+        );
+    }
+
     fn hit(uid: Uuid, scope: &str, score: f64) -> RetrievalHit {
         RetrievalHit {
             uid,
@@ -770,6 +991,22 @@ mod tests {
                 properties_summary: None,
                 last_accessed_at: Utc::now(),
             },
+        }
+    }
+
+    fn node_row(uid: Uuid, name: &str) -> NodeIndexRow {
+        NodeIndexRow {
+            uid,
+            label: NodeLabel::Fact,
+            workspace_id: Some("workspace".to_string()),
+            user_id: None,
+            scope: "workspace".to_string(),
+            name: name.to_string(),
+            pii_class: PiiClass::None,
+            valid_to: None,
+            valid_from: Utc::now(),
+            properties_summary: None,
+            last_accessed_at: Utc::now(),
         }
     }
 
@@ -851,6 +1088,15 @@ mod tests {
             _edge_filter: Option<&[moa_memory_graph::EdgeLabel]>,
             _as_of: Option<DateTime<Utc>>,
         ) -> std::result::Result<Vec<NodeIndexRow>, GraphError> {
+            Ok(Vec::new())
+        }
+
+        async fn expand_seeds(
+            &self,
+            _seeds: &[Uuid],
+            _max_hops: u8,
+            _as_of: Option<DateTime<Utc>>,
+        ) -> std::result::Result<Vec<moa_memory_graph::GraphExpansionHit>, GraphError> {
             Ok(Vec::new())
         }
 

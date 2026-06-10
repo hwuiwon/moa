@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::Duration;
+use moa_memory_graph::{EdgeLabel, NodeLabel};
 use moa_memory_ingest::{
     DeterministicEntityMergeVerifier, ScriptedFactExtractor, TurnChunk, extract_facts,
     ingest_turn_direct_with_ctx,
@@ -469,6 +470,69 @@ async fn slow_path_resolves_entity_nodes_and_reuses_subject_across_sessions() {
 }
 
 #[tokio::test]
+async fn slow_path_multi_hop_facts_expand_through_shared_object_entity() {
+    // Pins: corpus-style dependency and ownership facts are connected as Fact -> Entity -> Fact.
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let workspace_id = Uuid::now_v7();
+    let ctx = ingest_ctx(test_db.store().pool(), workspace_id);
+    let graph = ctx.graph.clone();
+
+    let dependency = ingest_turn_direct_with_ctx(
+        ctx.clone(),
+        turn(
+            workspace_id,
+            "Fact: workspace shared audit-shipper-dep-test depends_on is lib-audit-wire-test.",
+            10,
+        ),
+    )
+    .await
+    .expect("dependency fact ingests");
+    let ownership = ingest_turn_direct_with_ctx(
+        ctx,
+        turn(
+            workspace_id,
+            "Fact: workspace shared lib-audit-wire-test owned_by is profile-experience-test.",
+            11,
+        ),
+    )
+    .await
+    .expect("ownership fact ingests");
+
+    assert_eq!(dependency.inserted, 1);
+    assert_eq!(ownership.inserted, 1);
+
+    let facts = active_workspace_fact_rows(test_db.store().pool(), workspace_id).await;
+    let dependency_uid = fact_uid_with_subject(&facts, "audit-shipper-dep-test");
+    let owner_uid = fact_uid_with_subject(&facts, "lib-audit-wire-test");
+
+    let expanded = graph
+        .expand_seeds(&[dependency_uid], 3, None)
+        .await
+        .expect("expand dependency fact");
+    let entities = active_workspace_entity_rows(test_db.store().pool(), workspace_id).await;
+    let edges = relates_to_edges(test_db.store().pool(), workspace_id).await;
+    let owner_hit = expanded
+        .iter()
+        .find(|hit| hit.uid == owner_uid)
+        .unwrap_or_else(|| {
+            panic!(
+                "owner fact should be reachable through shared library entity; facts={facts:?} entities={entities:?} edges={edges:?} expanded={expanded:?}"
+            )
+        });
+
+    assert_eq!(owner_hit.seed, dependency_uid);
+    assert_eq!(owner_hit.label, NodeLabel::Fact);
+    assert_eq!(owner_hit.hop, 2);
+    assert_eq!(
+        owner_hit.edges,
+        vec![EdgeLabel::RelatesTo, EdgeLabel::RelatesTo]
+    );
+}
+
+#[tokio::test]
 async fn slow_path_is_atomic_when_a_chunk_fails_partway_through_extraction() {
     let _guard = TEST_LOCK.lock().await;
     let Some(test_db) = configured_test_db().await else {
@@ -540,4 +604,17 @@ async fn slow_path_emits_lineage_events_for_each_extracted_fact() {
         assert_eq!(after["source_chunk"], 0);
         assert!(after.get("summary").is_some(), "{after}");
     }
+}
+
+fn fact_uid_with_subject(rows: &[moa_memory_graph::NodeIndexRow], subject: &str) -> Uuid {
+    rows.iter()
+        .find(|row| {
+            row.properties_summary
+                .as_ref()
+                .and_then(|properties| properties.get("subject"))
+                .and_then(serde_json::Value::as_str)
+                == Some(subject)
+        })
+        .map(|row| row.uid)
+        .expect("fact with expected subject should exist")
 }

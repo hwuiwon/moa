@@ -98,6 +98,19 @@ fn extract_handles_negation_correctly_in_emitted_facts() {
 }
 
 #[test]
+fn extract_strips_marked_fact_is_connector_from_object() {
+    // Pins: marked corpus facts connect dependency objects to ownership subjects through one entity.
+    let facts = extract_facts(&[chunk(
+        "Fact: workspace shared audit-shipper-dep-test depends_on is lib-audit-wire-test.",
+    )]);
+
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].subject, "audit-shipper-dep-test");
+    assert_eq!(facts[0].predicate, "depends_on");
+    assert_eq!(facts[0].object, "lib-audit-wire-test.");
+}
+
+#[test]
 fn extract_skips_questions_and_imperatives_yielding_no_facts() {
     let facts = extract_facts(&[chunk("Should we use Redis? Please review the design.")]);
 

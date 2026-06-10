@@ -50,6 +50,14 @@ The metric surface is:
 retrieval legs. Use it to localize the first bottleneck before proposing a new
 ranking or indexing feature.
 
+The graph leg is a seeded expansion leg. Retrieval runs vector and lexical
+first, then expands from planner NER seeds plus the top phase-one fused hits.
+Expansion applies the same as-of validity window as the other legs, scores
+paths with hop decay and edge weights, treats `Entity` rows as conduits, and
+feeds surviving `Fact` ids back into normal RRF fusion. The current PR baseline
+keeps the aggregate-best 250ms graph budget profile; graph-leg recall is still
+the tuning target for the next pass.
+
 Superseded graph writes delete the old pgvector row, so historical hits for
 superseded facts must be carried by lexical lookup plus graph traversal and
 hydration. Vector retrieval can only serve historical rows whose embedding rows
@@ -234,6 +242,9 @@ When the budget gate fails, triage in this order:
    `extraction_precision`, and the gold-resolution section.
 3. Retrieval: inspect `recall_at_4`, `recall_at_25`, `mrr`, `ndcg_at_4`,
    `zero_recall_rate`, and `per_leg_recall`.
+   Low graph recall with healthy vector and lexical recall now points at edge
+   topology, entity resolution, or graph expansion latency rather than missing
+   phase-one seeds.
 4. Answer behavior: inspect `answer_faithfulness`,
    `abstention_correctness`, `pii_redaction_rate`, and
    `temporal_as_of_accuracy`. For temporal failures, read

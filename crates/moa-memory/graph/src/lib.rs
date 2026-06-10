@@ -28,6 +28,25 @@ pub use validity::push_validity_filter;
 /// Result type returned by graph-memory helpers.
 pub type Result<T> = std::result::Result<T, GraphError>;
 
+/// One path discovered while expanding graph retrieval seeds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphExpansionHit {
+    /// Candidate node reached by traversal.
+    pub uid: Uuid,
+    /// Candidate node label from the sidecar projection.
+    pub label: NodeLabel,
+    /// Input seed that reached this candidate.
+    pub seed: Uuid,
+    /// Validity start for the input seed row used by this path.
+    pub seed_valid_from: DateTime<Utc>,
+    /// Validity start for the reached candidate row.
+    pub valid_from: DateTime<Utc>,
+    /// One-based distance from the seed.
+    pub hop: u8,
+    /// Edge labels along the shortest discovered path.
+    pub edges: Vec<EdgeLabel>,
+}
+
 /// Canonical graph-memory storage interface.
 #[async_trait]
 pub trait GraphStore: Send + Sync {
@@ -71,6 +90,14 @@ pub trait GraphStore: Send + Sync {
         edge_filter: Option<&[EdgeLabel]>,
         as_of: Option<DateTime<Utc>>,
     ) -> Result<Vec<NodeIndexRow>>;
+
+    /// Expands a batch of seed nodes and returns shortest directed labeled paths to visible nodes.
+    async fn expand_seeds(
+        &self,
+        seeds: &[Uuid],
+        max_hops: u8,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<Vec<GraphExpansionHit>>;
 
     /// Looks up NER seed nodes by name through the sidecar full-text index.
     async fn lookup_seeds(
