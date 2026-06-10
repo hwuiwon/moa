@@ -297,6 +297,77 @@ pub fn record_sandbox_provision_duration(provider: &str, tier: &str, duration: D
     .record(duration.as_secs_f64());
 }
 
+/// Records the time spent beginning a scoped Postgres transaction.
+pub fn record_scoped_transaction_begin_duration(duration: Duration) {
+    histogram!("moa_scoped_transaction_begin_seconds").record(duration.as_secs_f64());
+}
+
+/// Records the time spent applying scoped Postgres GUC values.
+pub fn record_scoped_guc_application_duration(duration: Duration) {
+    histogram!("moa_scoped_guc_application_seconds").record(duration.as_secs_f64());
+}
+
+/// Records one appended session event, labeled by event type.
+pub fn record_session_event_append(event_type: &str) {
+    counter!(
+        "moa_session_events_appended_total",
+        "event_type" => event_type.to_string()
+    )
+    .increment(1);
+}
+
+/// Records one session event load operation and the number of events returned.
+pub fn record_session_event_load(event_count: u64) {
+    counter!("moa_session_event_loads_total").increment(1);
+    histogram!("moa_session_event_load_events").record(event_count as f64);
+}
+
+/// Records decoded session event payload bytes.
+pub fn record_session_event_decoded_bytes(bytes: u64) {
+    if bytes == 0 {
+        return;
+    }
+
+    counter!("moa_session_event_decoded_bytes_total").increment(bytes);
+}
+
+/// Records the time spent constructing a context pipeline.
+pub fn record_context_pipeline_construction(duration: Duration) {
+    histogram!("moa_context_pipeline_construction_seconds").record(duration.as_secs_f64());
+}
+
+/// Records the time spent constructing a retrieval embedder.
+pub fn record_retrieval_embedder_construction(result: &str, duration: Duration) {
+    histogram!(
+        "moa_retrieval_embedder_construction_seconds",
+        "result" => result.to_string()
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// Records one tool idempotency scan and the number of prior events scanned.
+pub fn record_tool_idempotency_scan(event_type: &str, scanned_events: u64, duration: Duration) {
+    histogram!(
+        "moa_tool_idempotency_scan_seconds",
+        "event_type" => event_type.to_string()
+    )
+    .record(duration.as_secs_f64());
+    histogram!(
+        "moa_tool_idempotency_scan_events",
+        "event_type" => event_type.to_string()
+    )
+    .record(scanned_events as f64);
+}
+
+/// Records the time spent validating an API key.
+pub fn record_api_key_validation_duration(result: &str, duration: Duration) {
+    histogram!(
+        "moa_api_key_validation_seconds",
+        "result" => result.to_string()
+    )
+    .record(duration.as_secs_f64());
+}
+
 #[cfg(tokio_unstable)]
 fn spawn_tokio_runtime_metrics_publisher() {
     if TOKIO_RUNTIME_MONITOR_STARTED.get().is_some() {
@@ -502,6 +573,50 @@ fn register_metric_descriptions() {
         "moa_cache_hit_rate",
         "Ratio of cached input tokens to total input tokens for one request."
     );
+    describe_histogram!(
+        "moa_scoped_transaction_begin_seconds",
+        "Scoped Postgres transaction begin duration in seconds."
+    );
+    describe_histogram!(
+        "moa_scoped_guc_application_seconds",
+        "Scoped Postgres GUC application duration in seconds."
+    );
+    describe_counter!(
+        "moa_session_events_appended_total",
+        "Session events appended to the durable event log, labeled by event type."
+    );
+    describe_counter!(
+        "moa_session_event_loads_total",
+        "Session event load operations executed against the durable event log."
+    );
+    describe_histogram!(
+        "moa_session_event_load_events",
+        "Number of session events returned by one durable event log load."
+    );
+    describe_counter!(
+        "moa_session_event_decoded_bytes_total",
+        "Decoded session event payload bytes loaded from the durable event log."
+    );
+    describe_histogram!(
+        "moa_context_pipeline_construction_seconds",
+        "Context pipeline construction duration in seconds."
+    );
+    describe_histogram!(
+        "moa_retrieval_embedder_construction_seconds",
+        "Retrieval embedder construction duration in seconds, labeled by result."
+    );
+    describe_histogram!(
+        "moa_tool_idempotency_scan_seconds",
+        "Tool idempotency prior-event scan duration in seconds, labeled by event type."
+    );
+    describe_histogram!(
+        "moa_tool_idempotency_scan_events",
+        "Number of prior session events inspected by one tool idempotency scan."
+    );
+    describe_histogram!(
+        "moa_api_key_validation_seconds",
+        "API-key validation duration in seconds, labeled by result."
+    );
 }
 
 fn session_status_label(status: &SessionStatus) -> &'static str {
@@ -552,6 +667,15 @@ mod tests {
         record_tokens_output("mock", "gpt-5.4", 4);
         record_cache_hit_rate("mock", "gpt-5.4", 0.5);
         record_turn_latency(Duration::from_millis(25));
+        record_scoped_transaction_begin_duration(Duration::from_millis(1));
+        record_scoped_guc_application_duration(Duration::from_millis(2));
+        record_session_event_append("ToolCall");
+        record_session_event_load(2);
+        record_session_event_decoded_bytes(128);
+        record_context_pipeline_construction(Duration::from_millis(3));
+        record_retrieval_embedder_construction("success", Duration::from_millis(4));
+        record_tool_idempotency_scan("ToolResult", 5, Duration::from_millis(5));
+        record_api_key_validation_duration("failure", Duration::from_millis(6));
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -577,6 +701,17 @@ mod tests {
         assert!(scrape.contains("moa_tokens_output_total"));
         assert!(scrape.contains("moa_cache_hit_rate"));
         assert!(scrape.contains("moa_turn_latency_seconds"));
+        assert!(scrape.contains("moa_scoped_transaction_begin_seconds"));
+        assert!(scrape.contains("moa_scoped_guc_application_seconds"));
+        assert!(scrape.contains("moa_session_events_appended_total"));
+        assert!(scrape.contains("moa_session_event_loads_total"));
+        assert!(scrape.contains("moa_session_event_load_events"));
+        assert!(scrape.contains("moa_session_event_decoded_bytes_total"));
+        assert!(scrape.contains("moa_context_pipeline_construction_seconds"));
+        assert!(scrape.contains("moa_retrieval_embedder_construction_seconds"));
+        assert!(scrape.contains("moa_tool_idempotency_scan_seconds"));
+        assert!(scrape.contains("moa_tool_idempotency_scan_events"));
+        assert!(scrape.contains("moa_api_key_validation_seconds"));
 
         #[cfg(tokio_unstable)]
         {

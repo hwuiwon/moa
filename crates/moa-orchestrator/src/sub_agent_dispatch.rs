@@ -1,7 +1,5 @@
 //! Helper functions for spawning sub-agent virtual objects and awaiting their results.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use moa_core::{
@@ -29,14 +27,22 @@ pub struct DispatchedSubAgent {
 
 /// Computes a stable hash used for duplicate child-task detection.
 pub fn task_hash(task: &str, tool_subset: &[String]) -> String {
-    let mut hasher = DefaultHasher::new();
-    task.hash(&mut hasher);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"moa.orchestrator.sub_agent_task_hash.v1");
+    update_len_prefixed(&mut hasher, task.as_bytes());
 
     let mut sorted = tool_subset.to_vec();
     sorted.sort();
-    sorted.hash(&mut hasher);
+    for tool in sorted {
+        update_len_prefixed(&mut hasher, tool.as_bytes());
+    }
 
-    format!("{:016x}", hasher.finish())
+    hex::encode(&hasher.finalize().as_bytes()[..8])
+}
+
+fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
 }
 
 /// Validates depth, fan-out, and duplicate-task constraints before dispatch.
@@ -199,6 +205,7 @@ mod tests {
         );
 
         assert_eq!(left, right);
+        assert_eq!(left, "926925371cadf8cf");
     }
 
     #[test]

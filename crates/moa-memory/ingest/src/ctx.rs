@@ -10,7 +10,7 @@ use sqlx::PgPool;
 
 use crate::{
     ContradictionDetector, EntityMergeVerifier, EntityResolver, FactExtractor,
-    HeuristicFactExtractor, IngestError, Result,
+    HeuristicFactExtractor, IngestError, Result, RrfPlusJudgeDetector,
 };
 
 static INGEST_RUNTIME: OnceLock<IngestRuntime> = OnceLock::new();
@@ -110,6 +110,7 @@ pub struct IngestRuntime {
     cohere_api_key_env: String,
     extractor: Arc<dyn FactExtractor>,
     entity_resolver: Arc<EntityResolver>,
+    contradiction_detector: Arc<dyn ContradictionDetector>,
 }
 
 impl IngestRuntime {
@@ -117,12 +118,16 @@ impl IngestRuntime {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
         let default_config = MoaConfig::default();
+        let contradiction_detector = Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(
+            &default_config,
+        ));
         Self {
             pool,
             pii_service_url: None,
             cohere_api_key_env: default_config.memory.vector.embedder.cohere.api_key_env,
             extractor: Arc::new(HeuristicFactExtractor),
             entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
+            contradiction_detector,
         }
     }
 
@@ -135,6 +140,9 @@ impl IngestRuntime {
             cohere_api_key_env: config.memory.vector.embedder.cohere.api_key_env.clone(),
             extractor: Arc::new(HeuristicFactExtractor),
             entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
+            contradiction_detector: Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(
+                config,
+            )),
         }
     }
 
@@ -156,6 +164,13 @@ impl IngestRuntime {
     #[must_use]
     pub fn with_entity_merge_verifier(self, verifier: Arc<dyn EntityMergeVerifier>) -> Self {
         self.with_entity_resolver(Arc::new(EntityResolver::for_app_role(verifier)))
+    }
+
+    /// Returns a copy of this runtime that uses the provided contradiction detector.
+    #[must_use]
+    pub fn with_contradiction_detector(mut self, detector: Arc<dyn ContradictionDetector>) -> Self {
+        self.contradiction_detector = detector;
+        self
     }
 
     /// Returns the Postgres pool used by ingestion handlers.
@@ -187,6 +202,12 @@ impl IngestRuntime {
     pub fn entity_resolver(&self) -> Arc<EntityResolver> {
         self.entity_resolver.clone()
     }
+
+    /// Returns the configured contradiction detector.
+    #[must_use]
+    pub fn contradiction_detector(&self) -> Arc<dyn ContradictionDetector> {
+        self.contradiction_detector.clone()
+    }
 }
 
 /// Installs the process-local ingestion runtime.
@@ -213,4 +234,27 @@ pub fn current_runtime() -> Result<IngestRuntime> {
         .get()
         .cloned()
         .ok_or(IngestError::RuntimeNotInstalled)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use sqlx::postgres::PgPoolOptions;
+
+    use super::IngestRuntime;
+
+    #[tokio::test]
+    async fn ingest_runtime_reuses_contradiction_detector() {
+        // Pins: runtime-backed ingestion paths share one detector allocation and its judge cache.
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/moa_test")
+            .expect("lazy test pool should not connect");
+        let runtime = IngestRuntime::new(pool);
+
+        let first = runtime.contradiction_detector();
+        let second = runtime.contradiction_detector();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
 }

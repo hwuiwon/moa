@@ -27,10 +27,7 @@ use tokio::time::timeout;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::{
-    Conflict, ContradictionContext, ContradictionDetector, IngestError, RrfPlusJudgeDetector,
-    current_runtime,
-};
+use crate::{Conflict, ContradictionContext, ContradictionDetector, IngestError, current_runtime};
 
 const JUDGE_TIMEOUT: Duration = Duration::from_millis(250);
 const SUPERSEDE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -642,9 +639,7 @@ fn runtime_fast_ctx(scope: ScopeContext) -> Result<FastPathCtx, FastError> {
         Some(url) => Arc::new(OpenAiPrivacyFilterClassifier::new(url)?),
         None => Arc::new(FailClosedClassifier),
     };
-    let contradict = Arc::new(RrfPlusJudgeDetector::from_cohere_api_key_env_or_heuristic(
-        runtime.cohere_api_key_env(),
-    ));
+    let contradict = runtime.contradiction_detector();
 
     Ok(FastPathCtx::new(
         pool, scope, graph, vector, embedder, pii, contradict,

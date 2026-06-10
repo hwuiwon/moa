@@ -1,7 +1,5 @@
 //! Pure turn helpers shared by the durable session and sub-agent runners.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use moa_core::{
@@ -71,12 +69,27 @@ pub(crate) fn stable_tool_call_id(
         return ToolCallId(uuid);
     }
 
-    let mut hasher = DefaultHasher::new();
-    session_id.hash(&mut hasher);
-    index.hash(&mut hasher);
-    tool_call.invocation.name.hash(&mut hasher);
-    tool_call.invocation.input.to_string().hash(&mut hasher);
-    ToolCallId(Uuid::from_u128(hasher.finish() as u128))
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"moa.orchestrator.tool_call_id.v1");
+    update_len_prefixed(&mut hasher, session_id.0.as_bytes());
+    update_len_prefixed(&mut hasher, &(index as u64).to_be_bytes());
+    update_len_prefixed(&mut hasher, tool_call.invocation.name.as_bytes());
+    let input = serde_json::to_vec(&tool_call.invocation.input).unwrap_or_default();
+    update_len_prefixed(&mut hasher, &input);
+    ToolCallId(uuid_from_hash(hasher.finalize()))
+}
+
+fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn uuid_from_hash(hash: blake3::Hash) -> Uuid {
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 /// Appends the provider response into a sub-agent's local history buffer.
@@ -148,6 +161,7 @@ mod tests {
         TurnOutcome,
     };
     use serde_json::json;
+    use uuid::Uuid;
 
     use super::{stable_tool_call_id, summarize_response_text, turn_outcome_for_response};
 
@@ -198,7 +212,10 @@ mod tests {
 
     #[test]
     fn stable_tool_call_id_is_deterministic() {
-        let session_id = SessionId::new();
+        let session_id = SessionId(
+            Uuid::parse_str("11111111-1111-4111-8111-111111111111")
+                .expect("fixture UUID should parse"),
+        );
         let call = moa_core::ToolCallContent {
             invocation: ToolInvocation {
                 id: Some("provider-tool-id".to_string()),
@@ -214,6 +231,7 @@ mod tests {
 
         assert_eq!(first, second);
         assert_ne!(first, third);
+        assert_eq!(first.0.to_string(), "cbd69d4a-b3b5-4604-99f0-651dd9dbb308");
     }
 
     #[test]

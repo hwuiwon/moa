@@ -1,7 +1,7 @@
 //! Restate service for hosted eval planning, execution, datasets, replay, and scores.
 
 use std::sync::Arc;
-use std::{future::Future, result::Result as StdResult};
+use std::{future::Future, pin::Pin, result::Result as StdResult};
 
 use chrono::Utc;
 use moa_authz::require_authz_with_delegation;
@@ -28,13 +28,15 @@ use moa_lineage_sink::{MpscSink, MpscSinkConfig};
 use restate_sdk::prelude::*;
 use serde::Deserialize;
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 use crate::workflows::eval_run::{EvalRunClient, EvalRunWorkflowRequest};
+
+type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 
 /// Workspace-scoped score summary SQL used by `Eval/scores`.
 pub const EVAL_SCORES_SQL: &str = r#"
@@ -555,9 +557,10 @@ pub fn failed_eval_run_response(
 
 /// Runs an already-authorized eval request inside a hosted workflow.
 pub async fn execute_eval_run_request(run_id: Uuid, request: EvalRunRequest) -> EvalRunResponse {
-    match execute_eval_run_request_inner(run_id, request.clone()).await {
+    let workspace_id = request.workspace_id.clone();
+    match Box::pin(execute_eval_run_request_inner(run_id, request)).await {
         Ok(response) => response,
-        Err(error) => failed_eval_run_response(request.workspace_id, run_id, error.to_string()),
+        Err(error) => failed_eval_run_response(workspace_id, run_id, error.to_string()),
     }
 }
 
@@ -568,7 +571,7 @@ pub async fn execute_eval_run_request_isolated(
 ) -> EvalRunResponse {
     let workspace_id = request.workspace_id.clone();
     let join = tokio::task::spawn_blocking(move || {
-        block_on_current_thread(execute_eval_run_request(run_id, request))
+        block_on_current_thread(Box::pin(execute_eval_run_request(run_id, request)))
     })
     .await;
     match join {
@@ -822,33 +825,31 @@ async fn register_dataset_for_workspace(
     .execute(&mut *tx)
     .await?;
 
-    for item in &items {
-        sqlx::query(
-            r#"
-            INSERT INTO analytics.eval_dataset_items (
-                item_id,
-                dataset_id,
-                workspace_id,
-                scope,
-                query,
-                expected_answer,
-                expected_chunk_ids,
-                metadata
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            "#,
+    let mut item_insert = QueryBuilder::<Postgres>::new(
+        r#"
+        INSERT INTO analytics.eval_dataset_items (
+            item_id,
+            dataset_id,
+            workspace_id,
+            scope,
+            query,
+            expected_answer,
+            expected_chunk_ids,
+            metadata
         )
-        .bind(item.item_id)
-        .bind(dataset_id)
-        .bind(item.workspace_id.as_str())
-        .bind(sqlx::types::Json(&item.scope))
-        .bind(&item.query)
-        .bind(item.expected_answer.as_deref())
-        .bind(&item.expected_chunk_ids)
-        .bind(sqlx::types::Json(&item.metadata))
-        .execute(&mut *tx)
-        .await?;
-    }
+        "#,
+    );
+    item_insert.push_values(&items, |mut row, item| {
+        row.push_bind(item.item_id)
+            .push_bind(dataset_id)
+            .push_bind(item.workspace_id.as_str())
+            .push_bind(sqlx::types::Json(&item.scope))
+            .push_bind(&item.query)
+            .push_bind(item.expected_answer.as_deref())
+            .push_bind(&item.expected_chunk_ids)
+            .push_bind(sqlx::types::Json(&item.metadata));
+    });
+    item_insert.build().execute(&mut *tx).await?;
 
     tx.commit().await?;
     Ok(EvalDatasetRegisterResponse {
@@ -929,12 +930,12 @@ async fn replay_dataset_for_workspace(
         pool.clone(),
     )
     .await?;
-    let report = replay_items_live(
+    let report = Box::pin(replay_items_live(
         config,
         Arc::new(sink) as Arc<dyn LineageSink>,
         replay_config,
         items,
-    )
+    ))
     .await?;
     writer.shutdown().await?;
     Ok(EvalReplayResponse {
@@ -954,7 +955,9 @@ async fn run_replay_request_isolated(
     request: EvalReplayRequest,
 ) -> Result<EvalReplayResponse, EvalServiceError> {
     tokio::task::spawn_blocking(move || {
-        block_on_current_thread(replay_dataset_for_workspace(config, pool, request))
+        block_on_current_thread(Box::pin(replay_dataset_for_workspace(
+            config, pool, request,
+        )))
     })
     .await
     .map_err(|error| EvalServiceError::Runtime {
@@ -1327,10 +1330,7 @@ fn eval_error_to_handler_error(error: EvalServiceError) -> HandlerError {
     }
 }
 
-fn block_on_current_thread<F, T>(future: F) -> StdResult<T, String>
-where
-    F: Future<Output = T>,
-{
+fn block_on_current_thread<T>(future: BoxFuture<T>) -> StdResult<T, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

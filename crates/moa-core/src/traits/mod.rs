@@ -64,6 +64,29 @@ pub trait SessionStore: Send + Sync {
     /// Appends an event to the session log.
     async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<SequenceNum>;
 
+    /// Appends an event and returns the persisted record.
+    ///
+    /// Store implementations can override this to avoid a reload when insert
+    /// metadata is already available. The default preserves existing stores by
+    /// appending first and then loading exactly the inserted sequence number.
+    async fn emit_event_record(&self, session_id: SessionId, event: Event) -> Result<EventRecord> {
+        let sequence_num = self.emit_event(session_id, event).await?;
+        let mut events = self
+            .get_events(
+                session_id,
+                EventRange {
+                    from_seq: Some(sequence_num),
+                    to_seq: Some(sequence_num),
+                    event_types: None,
+                    limit: Some(1),
+                },
+            )
+            .await?;
+        events
+            .pop()
+            .ok_or_else(|| MoaError::StorageError("failed to reload appended event".to_string()))
+    }
+
     /// Stores a large text artifact behind a session-scoped claim check.
     async fn store_text_artifact(&self, _session_id: SessionId, _text: &str) -> Result<ClaimCheck> {
         Err(MoaError::Unsupported(
@@ -112,8 +135,8 @@ pub trait SessionStore: Send + Sync {
             self.delete_snapshot(session_id).await?;
         }
 
-        let sequence_num = self
-            .emit_event(
+        let record = self
+            .emit_event_record(
                 session_id,
                 Event::SessionStatusChanged {
                     from: previous,
@@ -121,20 +144,6 @@ pub trait SessionStore: Send + Sync {
                 },
             )
             .await?;
-        let mut events = self
-            .get_events(
-                session_id,
-                EventRange {
-                    from_seq: Some(sequence_num),
-                    to_seq: Some(sequence_num),
-                    event_types: None,
-                    limit: Some(1),
-                },
-            )
-            .await?;
-        let record = events.pop().ok_or_else(|| {
-            MoaError::StorageError("failed to reload status transition event".to_string())
-        })?;
         Ok(Some(record))
     }
 

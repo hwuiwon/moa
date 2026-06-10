@@ -3,6 +3,7 @@
 use std::sync::{Arc, OnceLock};
 
 use moa_authz::FgaClient;
+use moa_brain::pipeline::memory::GraphMemoryRetriever;
 use moa_core::{
     LineageHandle, MoaConfig,
     traits::{EmbeddingProvider, Identity, IdentityType},
@@ -40,6 +41,8 @@ pub struct OrchestratorCtx {
     pub tool_router: Arc<ToolRouter>,
     /// Precompiled tool schemas exposed to the model.
     pub tool_schemas: Arc<Vec<Value>>,
+    /// Process-wide graph-memory retriever reused by Restate turn pipelines.
+    pub graph_memory_retriever: Arc<GraphMemoryRetriever>,
     /// Hot-path lineage capture bridge selected at startup.
     pub lineage: Arc<dyn LineageHandle>,
     /// Optional durable lineage writer used for graceful shutdown.

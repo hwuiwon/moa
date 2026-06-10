@@ -69,6 +69,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
         session_store.clone(),
         GraphMemoryPipelineOptions {
             graph_pool,
+            shared_graph_memory_retriever: None,
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
             discovered_workspace_instructions: None,

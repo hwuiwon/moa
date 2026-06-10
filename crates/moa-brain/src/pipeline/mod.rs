@@ -19,7 +19,8 @@ pub mod tools;
 pub use builder::{
     GraphMemoryPipelineOptions,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
-    build_default_pipeline, build_default_pipeline_with_tools,
+    build_default_graph_memory_retriever, build_default_pipeline,
+    build_default_pipeline_with_tools,
 };
 pub use runner::{ContextPipeline, PipelineStageReport};
 

@@ -31,8 +31,8 @@ use super::approval_flow::{process_resolved_approval, wait_for_approval};
 use super::budget::enforce_workspace_budget;
 use super::context_build::{
     BuildTurnContextOptions, append_event, build_cache_report, build_turn_context,
-    calculate_response_cost_cents, last_user_message_text, record_turn_span_metrics,
-    turn_number_for_events,
+    calculate_response_cost_cents, complete_cache_report, last_user_message_text,
+    record_turn_span_metrics, turn_number_for_events,
 };
 use super::tool_dispatch::{ToolCallOutcome, handle_tool_call};
 
@@ -224,16 +224,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 }
             }
 
-            enforce_workspace_budget(
-                &session_store,
-                &session_id,
-                &session.workspace_id,
-                pipeline.daily_workspace_budget_cents(),
-                runtime_tx,
-                event_tx,
-            )
-            .await?;
-
             let pipeline_compile_span = tracing::info_span!(
                 "pipeline_compile",
                 moa.pipeline.stages = pipeline.stage_count() as i64,
@@ -276,6 +266,12 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             .await?;
 
             let request = ctx.into_request();
+            let request_model = request
+                .model
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| session.model.to_string());
+            let cache_report = build_cache_report(&events, llm_provider.name(), &request);
             let llm_call_span = tracing::info_span!(
                 "llm_call",
                 otel.kind = "client",
@@ -292,7 +288,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             let streamed = if let Some(receiver) = signal_rx.as_deref_mut() {
                 stream_completion_response(
                     llm_provider.clone(),
-                    request.clone(),
+                    request,
                     Some(&llm_call_span),
                     cancel_token.as_ref(),
                     Some(receiver),
@@ -312,7 +308,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             } else {
                 stream_completion_response(
                     llm_provider.clone(),
-                    request.clone(),
+                    request,
                     Some(&llm_call_span),
                     cancel_token.as_ref(),
                     None,
@@ -348,7 +344,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 turn_id,
                 &session,
                 llm_provider.name(),
-                &request,
+                &request_model,
                 &response,
                 response_cost_cents,
                 llm_call_duration,
@@ -374,7 +370,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 event_tx,
                 session_id,
                 Event::CacheReport {
-                    report: build_cache_report(&events, llm_provider.name(), &request, &response),
+                    report: complete_cache_report(cache_report, &response),
                 },
             )
             .await?;

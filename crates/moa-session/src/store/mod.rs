@@ -11,6 +11,7 @@ use moa_core::{
     SessionAnalyticsSummary, SessionFilter, SessionMeta, SessionStatus, SessionStore,
     SessionSummary, SessionTurnMetric, SkillResolutionRate, TaskSegment, ToolCallSummary,
     WakeContext, WorkspaceAnalyticsSummary, WorkspaceId, record_session_created,
+    record_session_event_append, record_session_event_decoded_bytes, record_session_event_load,
     record_sessions_active, record_turn_completed,
 };
 use moa_security::ApprovalRuleStore;

@@ -63,8 +63,24 @@ impl SessionStore for PostgresSessionStore {
 
     /// Appends an event to the session log.
     async fn emit_event(&self, session_id: moa_core::SessionId, event: Event) -> Result<u64> {
+        Ok(self
+            .emit_event_record(session_id, event)
+            .await?
+            .sequence_num)
+    }
+
+    /// Appends an event and returns the persisted event record.
+    async fn emit_event_record(
+        &self,
+        session_id: moa_core::SessionId,
+        event: Event,
+    ) -> Result<EventRecord> {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
         let event_id = Uuid::now_v7();
+        let event_type = event.type_name();
+        let event_type_record = event.event_type();
+        let hand_id = event_hand_id(&event);
+        let token_count = event.token_count();
         let payload = encode_event_for_storage(
             self.blob_store.as_ref(),
             &session_id,
@@ -104,15 +120,15 @@ impl SessionStore for PostgresSessionStore {
         .bind(workspace_id)
         .bind(user_id)
         .bind(sequence_num as i64)
-        .bind(event.type_name())
+        .bind(event_type)
         .bind(Json(payload))
         .bind(now)
         .bind(Option::<Uuid>::None)
-        .bind(event_hand_id(&event))
-        .bind(event.token_count() as i32)
+        .bind(&hand_id)
+        .bind(token_count as i32)
         .execute(&mut *transaction)
-            .await
-            .map_err(map_sqlx_error)?;
+        .await
+        .map_err(map_sqlx_error)?;
 
         let session_channel = session_channel_name(&session_id);
         sqlx::query("SELECT pg_notify($1, $2)")
@@ -138,7 +154,18 @@ impl SessionStore for PostgresSessionStore {
         {
             record_turn_completed(model, *model_tier);
         }
-        Ok(sequence_num)
+        record_session_event_append(event_type);
+        Ok(EventRecord {
+            id: event_id,
+            session_id,
+            sequence_num,
+            event_type: event_type_record,
+            event,
+            timestamp: now,
+            brain_id: None,
+            hand_id,
+            token_count: Some(token_count),
+        })
     }
 
     async fn store_text_artifact(
@@ -222,6 +249,16 @@ impl SessionStore for PostgresSessionStore {
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
+        let decoded_bytes = rows.iter().try_fold(0_u64, |total, row| {
+            let payload_bytes = row
+                .try_get_raw("payload")
+                .map_err(map_sqlx_error)?
+                .as_bytes()
+                .map_err(|error| {
+                    MoaError::StorageError(format!("failed to read event payload bytes: {error}"))
+                })?;
+            Ok::<_, MoaError>(total + payload_bytes.len() as u64)
+        })?;
         let mut events = Vec::with_capacity(rows.len());
         for row in &rows {
             events.push(self.event_record_from_row(row).await?);
@@ -229,6 +266,8 @@ impl SessionStore for PostgresSessionStore {
         if use_recent_order {
             events.reverse();
         }
+        record_session_event_load(events.len() as u64);
+        record_session_event_decoded_bytes(decoded_bytes);
         Ok(events)
     }
 

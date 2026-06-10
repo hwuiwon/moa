@@ -1,8 +1,7 @@
 //! Durable Restate façade over the workspace tool router.
 
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use memory_ingest::{execute_memory_tool, is_fast_memory_tool};
 pub use moa_core::wire::ToolDescriptor;
@@ -11,6 +10,7 @@ use moa_core::{
     Event, EventRange, EventRecord, EventType, IdempotencyClass, MoaError, SessionId, SessionMeta,
     SessionStatus, SessionStore as _, ToolCallId, ToolCallRequest, ToolDefinition,
     ToolFailureClass, ToolInvocation, ToolOutput, classify_tool_error,
+    record_tool_idempotency_scan,
 };
 use moa_hands::ToolRouter;
 use restate_sdk::prelude::*;
@@ -296,23 +296,20 @@ async fn resolve_session(
 }
 
 fn synthetic_session_id(workspace_id: &moa_core::WorkspaceId) -> SessionId {
-    let raw = workspace_id.as_str();
-    let mut left = std::collections::hash_map::DefaultHasher::new();
-    "moa.tool_executor.synthetic_session.left".hash(&mut left);
-    raw.hash(&mut left);
-    let left = left.finish();
-
-    let mut right = std::collections::hash_map::DefaultHasher::new();
-    "moa.tool_executor.synthetic_session.right".hash(&mut right);
-    raw.hash(&mut right);
-    let right = right.finish();
-
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"moa.orchestrator.synthetic_session.v1");
+    update_len_prefixed(&mut hasher, workspace_id.as_str().as_bytes());
+    let hash = hasher.finalize();
     let mut bytes = [0_u8; 16];
-    bytes[..8].copy_from_slice(&left.to_be_bytes());
-    bytes[8..].copy_from_slice(&right.to_be_bytes());
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     SessionId(Uuid::from_bytes(bytes))
+}
+
+fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
 }
 
 async fn prior_non_idempotent_result_exists(
@@ -326,6 +323,7 @@ async fn prior_non_idempotent_result_exists(
         )))
     })?;
     let store = OrchestratorCtx::current().session_store.clone();
+    let scan_started = Instant::now();
     let events = ctx
         .run(|| async move {
             store
@@ -345,6 +343,7 @@ async fn prior_non_idempotent_result_exists(
         .name("tool_executor_get_prior_tool_results")
         .await?
         .into_inner();
+    record_tool_idempotency_scan("ToolResult", events.len() as u64, scan_started.elapsed());
     Ok(has_prior_non_idempotent_result(
         &events,
         request.tool_call_id,
@@ -360,6 +359,7 @@ async fn prior_tool_call_event_exists(
     };
 
     let store = OrchestratorCtx::current().session_store.clone();
+    let scan_started = Instant::now();
     let events = ctx
         .run(|| async move {
             store
@@ -379,6 +379,7 @@ async fn prior_tool_call_event_exists(
         .name("tool_executor_get_prior_tool_calls")
         .await?
         .into_inner();
+    record_tool_idempotency_scan("ToolCall", events.len() as u64, scan_started.elapsed());
     Ok(has_prior_tool_call_event(&events, request.tool_call_id))
 }
 
@@ -493,10 +494,10 @@ fn to_handler_error(error: MoaError) -> HandlerError {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{Event, EventRecord, EventType, ToolCallId};
+    use moa_core::{Event, EventRecord, EventType, ToolCallId, WorkspaceId};
     use uuid::Uuid;
 
-    use super::has_prior_tool_call_event;
+    use super::{has_prior_tool_call_event, synthetic_session_id};
 
     fn tool_call_record(tool_call_id: ToolCallId) -> EventRecord {
         EventRecord {
@@ -526,5 +527,17 @@ mod tests {
 
         assert!(has_prior_tool_call_event(&events, existing));
         assert!(!has_prior_tool_call_event(&events, ToolCallId::new()));
+    }
+
+    #[test]
+    fn synthetic_session_id_is_domain_stable_uuid() {
+        let session_id = synthetic_session_id(&WorkspaceId::new("workspace-1"));
+
+        assert_eq!(
+            session_id.0.to_string(),
+            "d69e7597-867f-4211-925d-8343bafa1617"
+        );
+        assert_eq!(session_id.0.get_version_num(), 4);
+        assert_eq!(session_id.0.get_variant(), uuid::Variant::RFC4122);
     }
 }

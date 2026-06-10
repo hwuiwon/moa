@@ -12,12 +12,14 @@ auth0 = ["dep:moa-auth-providers-auth0"]
 [dependencies]
 argon2.workspace = true
 async-trait.workspace = true
+blake3.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 crc32fast.workspace = true
 moa-authz.workspace = true
 moa-authz-schema.workspace = true
 moa-auth-providers-auth0 = { path = "../auth0", optional = true }
 moa-core.workspace = true
+moka.workspace = true
 rand.workspace = true
 secrecy.workspace = true
 serde = { workspace = true, features = ["derive"] }

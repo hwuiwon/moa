@@ -42,14 +42,18 @@ pub use diff::compute_unified_diff;
 pub use error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 pub use events::Event;
 pub use runtime_metrics::{
-    init_metrics, metrics_endpoint_url, record_approval_wait, record_broadcast_lag,
-    record_cache_hit_rate, record_compaction_tier_applied, record_llm_cost_cents,
-    record_llm_request, record_llm_streaming_duration, record_llm_ttft,
-    record_pipeline_compile_duration_metric, record_sandbox_provision_duration,
-    record_session_created, record_session_error, record_sessions_active,
+    init_metrics, metrics_endpoint_url, record_api_key_validation_duration, record_approval_wait,
+    record_broadcast_lag, record_cache_hit_rate, record_compaction_tier_applied,
+    record_context_pipeline_construction, record_llm_cost_cents, record_llm_request,
+    record_llm_streaming_duration, record_llm_ttft, record_pipeline_compile_duration_metric,
+    record_retrieval_embedder_construction, record_sandbox_provision_duration,
+    record_scoped_guc_application_duration, record_scoped_transaction_begin_duration,
+    record_session_created, record_session_error, record_session_event_append,
+    record_session_event_decoded_bytes, record_session_event_load, record_sessions_active,
     record_tokens_input_cached, record_tokens_input_uncached, record_tokens_output,
-    record_tool_call, record_tool_failure, record_tool_output_truncated_metric,
-    record_tool_reprovision, record_tool_retry, record_turn_completed, record_turn_latency,
+    record_tool_call, record_tool_failure, record_tool_idempotency_scan,
+    record_tool_output_truncated_metric, record_tool_reprovision, record_tool_retry,
+    record_turn_completed, record_turn_latency,
 };
 pub use session_replay::{
     CountedSessionStore, TurnReplayCounters, TurnReplaySnapshot, record_pipeline_compile_duration,

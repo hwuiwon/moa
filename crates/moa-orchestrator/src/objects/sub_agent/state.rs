@@ -282,12 +282,10 @@ fn latest_assistant_text(history: &[ContextMessage]) -> Option<String> {
 
 impl SubAgentVoState {
     pub(super) fn task_hash(&self) -> String {
-        let mut hasher = DefaultHasher::new();
-        self.task.hash(&mut hasher);
-        let mut tools = self.tool_subset.clone();
-        tools.sort();
-        tools.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+        crate::sub_agent_dispatch::task_hash(
+            self.task.as_deref().unwrap_or_default(),
+            &self.tool_subset,
+        )
     }
 }
 
@@ -365,5 +363,15 @@ mod tests {
 
         assert!(result.success);
         assert_eq!(result.output, "finished");
+    }
+
+    #[test]
+    fn task_hash_uses_shared_dispatch_hash() {
+        let mut state = SubAgentVoState::default();
+        state
+            .initialize(&initial_task())
+            .expect("initial task should seed state");
+
+        assert_eq!(state.task_hash(), "9be010055aa996c5");
     }
 }
