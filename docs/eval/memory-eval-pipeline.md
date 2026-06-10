@@ -36,11 +36,18 @@ The metric surface is:
 - `pii_unredacted_count`
 - `pii_redaction_rate`
 - `temporal_as_of_accuracy`
+- `temporal_parse_rate`
+- `temporal_parse_mismatch_count`
 - `per_leg_recall`
 
 `per_leg_recall` attributes expected fact recall to graph, vector, and lexical
 retrieval legs. Use it to localize the first bottleneck before proposing a new
 ranking or indexing feature.
+
+Superseded graph writes delete the old pgvector row, so historical hits for
+superseded facts must be carried by lexical lookup plus graph traversal and
+hydration. Vector retrieval can only serve historical rows whose embedding rows
+were retained.
 
 ## PR Hermetic Check
 
@@ -132,7 +139,9 @@ When the budget gate fails, triage in this order:
    `zero_recall_rate`, and `per_leg_recall`.
 4. Answer behavior: inspect `answer_faithfulness`,
    `abstention_correctness`, `pii_redaction_rate`, and
-   `temporal_as_of_accuracy`.
+   `temporal_as_of_accuracy`. For temporal failures, read
+   `temporal_parse_rate` first: a low parse rate is a planner bug, while a high
+   parse rate with low accuracy is a retrieval-leg or validity-window bug.
 5. Baseline drift: when `MOA_EVAL_PREVIOUS_MEMORY_REPORT` is set, inspect
    regression failures for `retrieval.recall_at_4`, `retrieval.mrr`, and
    `retrieval.ndcg_at_4`.

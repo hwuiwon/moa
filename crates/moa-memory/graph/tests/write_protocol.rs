@@ -242,6 +242,24 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
         vector_count(session_store.pool(), &workspace_id, new_uid).await,
         1
     );
+    let historical_vector_matches = vector
+        .knn(&VectorQuery {
+            workspace_id: Some(workspace_id.clone()),
+            embedding: basis_vector(0),
+            k: 5,
+            label_filter: Some(vec!["Fact".to_string()]),
+            max_pii_class: "restricted".to_string(),
+            include_global: false,
+            as_of: Some(t0 + Duration::seconds(30)),
+        })
+        .await
+        .expect("query old-window vector after supersession");
+    assert!(
+        historical_vector_matches
+            .iter()
+            .all(|row| row.uid != old_uid),
+        "superseded pgvector row is deleted, so old uid should not be returned"
+    );
     supersedes_edge_exists(session_store.pool(), &workspace_id, old_uid, new_uid).await;
     linked_supersede_rows(session_store.pool(), &workspace_id, old_uid, new_uid).await;
     assert_eq!(

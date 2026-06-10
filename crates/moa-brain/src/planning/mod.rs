@@ -6,5 +6,5 @@ pub mod planner;
 pub use ner::{NerExtractor, NerLabel, NerSpan};
 pub use planner::{
     PlanError, PlannedQuery, PlanningCtx, QueryPlanner, QueryRetrievalCtx, Result, Strategy,
-    classify_strategy, retrieve_for_query,
+    classify_strategy, parse_temporal, retrieve_for_query,
 };

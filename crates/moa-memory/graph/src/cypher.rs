@@ -206,4 +206,25 @@ pub mod traverse {
          WHERE n.valid_to IS NULL \
          RETURN DISTINCT n.uid AS result LIMIT $limit"
     ));
+
+    /// One-hop undirected neighbor traversal for an application-time instant.
+    pub const NEIGHBORS_1HOP_AS_OF: Cypher = Cypher::new(cypher_sql!(
+        "MATCH (s {uid: $seed_uid})-[*1..1]-(n) \
+         WHERE n.valid_from <= $as_of AND (n.valid_to IS NULL OR n.valid_to > $as_of) \
+         RETURN DISTINCT n.uid AS result LIMIT $limit"
+    ));
+
+    /// Two-hop undirected neighbor traversal for an application-time instant.
+    pub const NEIGHBORS_2HOP_AS_OF: Cypher = Cypher::new(cypher_sql!(
+        "MATCH (s {uid: $seed_uid})-[*1..2]-(n) \
+         WHERE n.valid_from <= $as_of AND (n.valid_to IS NULL OR n.valid_to > $as_of) \
+         RETURN DISTINCT n.uid AS result LIMIT $limit"
+    ));
+
+    /// Three-hop undirected neighbor traversal for an application-time instant.
+    pub const NEIGHBORS_3HOP_AS_OF: Cypher = Cypher::new(cypher_sql!(
+        "MATCH (s {uid: $seed_uid})-[*1..3]-(n) \
+         WHERE n.valid_from <= $as_of AND (n.valid_to IS NULL OR n.valid_to > $as_of) \
+         RETURN DISTINCT n.uid AS result LIMIT $limit"
+    ));
 }

@@ -8,7 +8,9 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_brain::planning::{PlanningCtx, QueryPlanner, QueryRetrievalCtx, retrieve_for_query};
+use moa_brain::planning::{
+    PlanningCtx, QueryPlanner, QueryRetrievalCtx, parse_temporal, retrieve_for_query,
+};
 use moa_brain::retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalHit};
 use moa_core::{MemoryScope, ScopeContext, WorkspaceId, traits::EmbeddingProvider};
 use moa_memory_graph::{AgeGraphStore, GraphStore, PiiClass};
@@ -171,7 +173,9 @@ async fn run_memory_retrieval_eval_in_store(
 ) -> Result<MemoryRetrievalEvalReport> {
     let embedder = Arc::new(cached_embedding_provider_for_corpus(&corpus)?);
     let ingest_ctx = store.ingest_ctx(embedder.clone());
-    let gold_resolution = resolve_gold_nodes(ingest_ctx, &corpus.ledger, &corpus.sessions).await?;
+    let mut gold_resolution =
+        resolve_gold_nodes(ingest_ctx, &corpus.ledger, &corpus.sessions).await?;
+    apply_eval_validity_windows(store.pool(), &mut gold_resolution).await?;
     let fact_ids_by_uid = fact_ids_by_uid(&gold_resolution);
     let gold_records_by_fact_id = gold_records_by_fact_id(&gold_resolution);
     let planner = QueryPlanner::new();
@@ -209,6 +213,39 @@ async fn run_memory_retrieval_eval_in_store(
     );
     write_report(options.output_path(), &report).await?;
     Ok(report)
+}
+
+async fn apply_eval_validity_windows(
+    pool: &PgPool,
+    gold_resolution: &mut GoldResolutionReport,
+) -> Result<()> {
+    for record in &mut gold_resolution.records {
+        let Some(valid_to) = record.expected_valid_to else {
+            continue;
+        };
+        if record.node_uids.is_empty() {
+            continue;
+        }
+
+        sqlx::query("UPDATE moa.node_index SET valid_to = $1 WHERE uid = ANY($2)")
+            .bind(valid_to)
+            .bind(&record.node_uids)
+            .execute(pool)
+            .await?;
+        sqlx::query("UPDATE moa.embeddings SET valid_to = $1 WHERE uid = ANY($2)")
+            .bind(valid_to)
+            .bind(&record.node_uids)
+            .execute(pool)
+            .await?;
+
+        record.valid_to = Some(valid_to);
+        record.active = false;
+        for node in &mut record.nodes {
+            node.valid_to = Some(valid_to);
+            node.active = false;
+        }
+    }
+    Ok(())
 }
 
 async fn retrieve_probe(
@@ -328,6 +365,7 @@ fn probe_result_for(
     let pii_redacted = pii_redacted_for_probe(probe, gold_records_by_fact_id);
     let answer_faithful =
         answer_faithful_for_probe(probe, expected_found_at_4, blocked_leaked, pii_redacted);
+    let (temporal_filter_parsed, temporal_filter_matches_as_of) = temporal_parse_diagnostics(probe);
 
     ProbeResult {
         probe_id: probe.probe_id.clone(),
@@ -342,6 +380,8 @@ fn probe_result_for(
         abstention_correct: abstention_correct_for_probe(probe, blocked_leaked),
         pii_redacted,
         temporal_as_of_correct: temporal_as_of_correct_for_probe(probe, expected_found_at_4),
+        temporal_filter_parsed,
+        temporal_filter_matches_as_of,
     }
 }
 
@@ -372,6 +412,18 @@ fn temporal_as_of_correct_for_probe(probe: &Probe, expected_found_at_4: bool) ->
     } else {
         None
     }
+}
+
+fn temporal_parse_diagnostics(probe: &Probe) -> (Option<bool>, Option<bool>) {
+    if probe.probe_type != ProbeType::TemporalAsOf {
+        return (None, None);
+    }
+
+    let parsed = parse_temporal(&probe.query);
+    (
+        Some(parsed.is_some()),
+        parsed.map(|instant| Some(instant) == probe.as_of),
+    )
 }
 
 fn pii_redacted_for_probe(

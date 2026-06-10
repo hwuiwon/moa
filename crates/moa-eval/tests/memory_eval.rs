@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use moa_brain::planning::parse_temporal;
 use moa_brain::retrieval::{LegSources, RetrievalHit};
 use moa_core::{
     MoaError, ScopeContext, ScopeTier, SessionId, UserId, WorkspaceId, traits::EmbeddingProvider,
@@ -218,6 +219,42 @@ async fn memory_eval_pr_generator_writes_byte_stable_ledger_first_corpus() {
             .count(),
         probes.len()
     );
+}
+
+#[test]
+fn generator_emits_four_temporal_variants_per_supersession_chain() {
+    // Pins: each PR workspace supersession chain emits four absolute-date temporal probes.
+    let corpus = generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3])
+        .expect("generate PR memory eval corpus");
+    let temporal = corpus
+        .probes
+        .iter()
+        .filter(|probe| probe.probe_type == ProbeType::TemporalAsOf)
+        .collect::<Vec<_>>();
+
+    assert_eq!(temporal.len(), 24);
+    for suffix in ["month", "date", "current", "back-in"] {
+        assert_eq!(
+            temporal
+                .iter()
+                .filter(|probe| probe.probe_id.ends_with(suffix))
+                .count(),
+            6,
+            "expected one `{suffix}` temporal probe per seed/workspace chain"
+        );
+    }
+    assert!(
+        temporal.iter().all(|probe| probe.as_of.is_some()),
+        "each temporal probe should carry the instant encoded in query text"
+    );
+    for probe in temporal {
+        assert_eq!(
+            parse_temporal(&probe.query),
+            probe.as_of,
+            "temporal parser should recover generator query date for {}",
+            probe.probe_id
+        );
+    }
 }
 
 #[tokio::test]
@@ -441,6 +478,8 @@ fn retrieval_metrics_aggregate_exact_small_fixture() {
     assert_eq!(report.metrics.pii_unredacted_count, 0);
     assert_metric(report.metrics.pii_redaction_rate, 1.0, 1, 1.0);
     assert_metric(report.metrics.temporal_as_of_accuracy, 0.0, 1, 0.0);
+    assert_metric(report.metrics.temporal_parse_rate, 1.0, 1, 1.0);
+    assert_eq!(report.metrics.temporal_parse_mismatch_count, 0);
     assert_metric(
         report.metrics.per_leg_recall.graph,
         2.0,
@@ -534,6 +573,8 @@ fn reranker_metrics_track_pre_post_windows_and_p95_latency() {
                 abstention_correct: None,
                 pii_redacted: None,
                 temporal_as_of_correct: None,
+                temporal_filter_parsed: None,
+                temporal_filter_matches_as_of: None,
             },
             ProbeResult {
                 probe_id: "probe-stable-top-hit".to_string(),
@@ -560,6 +601,8 @@ fn reranker_metrics_track_pre_post_windows_and_p95_latency() {
                 abstention_correct: None,
                 pii_redacted: None,
                 temporal_as_of_correct: None,
+                temporal_filter_parsed: None,
+                temporal_filter_matches_as_of: None,
             },
         ],
         BootstrapConfig {
@@ -676,6 +719,8 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 abstention_correct: None,
                 pii_redacted: None,
                 temporal_as_of_correct: None,
+                temporal_filter_parsed: None,
+                temporal_filter_matches_as_of: None,
             },
             ProbeResult {
                 probe_id: "probe-cross-user-clean".to_string(),
@@ -690,6 +735,8 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 abstention_correct: Some(true),
                 pii_redacted: None,
                 temporal_as_of_correct: None,
+                temporal_filter_parsed: None,
+                temporal_filter_matches_as_of: None,
             },
             ProbeResult {
                 probe_id: "probe-pii-unredacted".to_string(),
@@ -710,6 +757,8 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 abstention_correct: None,
                 pii_redacted: Some(false),
                 temporal_as_of_correct: None,
+                temporal_filter_parsed: None,
+                temporal_filter_matches_as_of: None,
             },
         ],
         BootstrapConfig {
@@ -722,6 +771,72 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
     assert_eq!(report.cross_user_leak_probe_ids, Vec::<String>::new());
     assert_eq!(report.metrics.pii_unredacted_count, 1);
     assert_metric(report.metrics.pii_redaction_rate, 0.0, 1, 0.0);
+}
+
+#[test]
+fn probe_result_deserializes_without_temporal_parse_field() -> TestResult {
+    // Pins: reports written before parser diagnostics remain readable.
+    let json = serde_json::json!({
+        "probe_id": "probe-old-report",
+        "user_id": "user-alice",
+        "probe_type": "temporal_as_of",
+        "expected_fact_ids": ["fact-old"],
+        "blocked_fact_ids": [],
+        "candidates": [],
+        "retrieval_latency_ms": 0,
+        "answer_faithful": false,
+        "abstention_correct": null,
+        "pii_redacted": null,
+        "temporal_as_of_correct": false
+    });
+
+    let result: ProbeResult = serde_json::from_value(json)?;
+
+    assert_eq!(result.temporal_filter_parsed, None);
+    assert_eq!(result.temporal_filter_matches_as_of, None);
+    Ok(())
+}
+
+#[test]
+fn temporal_parse_rate_aggregates_over_temporal_probes_only() {
+    // Pins: parser diagnostics count temporal probes only and separate wrong-date parses.
+    let report = aggregate_retrieval_eval_from_counts(
+        3,
+        3,
+        vec![
+            parse_metric_probe(
+                "probe-temporal-parsed",
+                ProbeType::TemporalAsOf,
+                Some(true),
+                Some(true),
+            ),
+            parse_metric_probe(
+                "probe-temporal-missing",
+                ProbeType::TemporalAsOf,
+                Some(false),
+                None,
+            ),
+            parse_metric_probe(
+                "probe-temporal-mismatch",
+                ProbeType::TemporalAsOf,
+                Some(true),
+                Some(false),
+            ),
+            parse_metric_probe(
+                "probe-point-with-diagnostic-noise",
+                ProbeType::PointRecall,
+                Some(false),
+                Some(false),
+            ),
+        ],
+        BootstrapConfig {
+            resamples: 25,
+            seed: 41,
+        },
+    );
+
+    assert_metric(report.metrics.temporal_parse_rate, 2.0, 3, 2.0 / 3.0);
+    assert_eq!(report.metrics.temporal_parse_mismatch_count, 1);
 }
 
 #[test]
@@ -1431,6 +1546,8 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             abstention_correct: None,
             pii_redacted: None,
             temporal_as_of_correct: None,
+            temporal_filter_parsed: None,
+            temporal_filter_matches_as_of: None,
         },
         ProbeResult {
             probe_id: "probe-rank-five".to_string(),
@@ -1469,6 +1586,8 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             abstention_correct: None,
             pii_redacted: None,
             temporal_as_of_correct: None,
+            temporal_filter_parsed: None,
+            temporal_filter_matches_as_of: None,
         },
         ProbeResult {
             probe_id: "probe-multi-hop".to_string(),
@@ -1503,6 +1622,8 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             abstention_correct: None,
             pii_redacted: None,
             temporal_as_of_correct: None,
+            temporal_filter_parsed: None,
+            temporal_filter_matches_as_of: None,
         },
         ProbeResult {
             probe_id: "probe-temporal-miss".to_string(),
@@ -1523,6 +1644,8 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             abstention_correct: None,
             pii_redacted: None,
             temporal_as_of_correct: Some(false),
+            temporal_filter_parsed: Some(true),
+            temporal_filter_matches_as_of: Some(true),
         },
         ProbeResult {
             probe_id: "probe-pii-redacted".to_string(),
@@ -1543,6 +1666,8 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             abstention_correct: None,
             pii_redacted: Some(true),
             temporal_as_of_correct: None,
+            temporal_filter_parsed: None,
+            temporal_filter_matches_as_of: None,
         },
         ProbeResult {
             probe_id: "probe-abstains".to_string(),
@@ -1557,6 +1682,8 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             abstention_correct: Some(true),
             pii_redacted: None,
             temporal_as_of_correct: None,
+            temporal_filter_parsed: None,
+            temporal_filter_matches_as_of: None,
         },
         ProbeResult {
             probe_id: "probe-cross-user-leak".to_string(),
@@ -1577,6 +1704,8 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             abstention_correct: Some(false),
             pii_redacted: None,
             temporal_as_of_correct: None,
+            temporal_filter_parsed: None,
+            temporal_filter_matches_as_of: None,
         },
     ]
 }
@@ -1621,6 +1750,36 @@ fn metric_node(uid: Uuid) -> NodeIndexRow {
         valid_from: utc("2026-05-01T00:00:00Z"),
         properties_summary: None,
         last_accessed_at: utc("2026-05-02T00:00:00Z"),
+    }
+}
+
+fn parse_metric_probe(
+    probe_id: &str,
+    probe_type: ProbeType,
+    temporal_filter_parsed: Option<bool>,
+    temporal_filter_matches_as_of: Option<bool>,
+) -> ProbeResult {
+    ProbeResult {
+        probe_id: probe_id.to_string(),
+        user_id: "user-parser".to_string(),
+        probe_type,
+        expected_fact_ids: fact_ids(&["fact-parser"]),
+        blocked_fact_ids: Vec::new(),
+        candidates: metric_candidates(
+            0x1_0000,
+            &[CandidateSpec {
+                fact_id: Some("fact-parser"),
+                legs: legs(false, false, true),
+            }],
+        ),
+        post_rerank_candidates: None,
+        retrieval_latency_ms: 0,
+        answer_faithful: Some(true),
+        abstention_correct: None,
+        pii_redacted: None,
+        temporal_as_of_correct: (probe_type == ProbeType::TemporalAsOf).then_some(true),
+        temporal_filter_parsed,
+        temporal_filter_matches_as_of,
     }
 }
 
@@ -1741,6 +1900,8 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
             abstention_correct: None,
             pii_redacted: None,
             temporal_as_of_correct: None,
+            temporal_filter_parsed: None,
+            temporal_filter_matches_as_of: None,
         },
         ProbeResult {
             probe_id: "probe-cross-user-leak".to_string(),
@@ -1755,6 +1916,8 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
             abstention_correct: Some(!cross_user_leak),
             pii_redacted: None,
             temporal_as_of_correct: None,
+            temporal_filter_parsed: None,
+            temporal_filter_matches_as_of: None,
         },
         ProbeResult {
             probe_id: "probe-pii-redacted".to_string(),
@@ -1775,6 +1938,8 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
             abstention_correct: None,
             pii_redacted: Some(true),
             temporal_as_of_correct: None,
+            temporal_filter_parsed: None,
+            temporal_filter_matches_as_of: None,
         },
     ]
 }
@@ -1805,6 +1970,8 @@ fn reranker_recall_regression_probe_results() -> Vec<ProbeResult> {
         abstention_correct: None,
         pii_redacted: None,
         temporal_as_of_correct: None,
+        temporal_filter_parsed: None,
+        temporal_filter_matches_as_of: None,
     }]
 }
 
@@ -1834,6 +2001,8 @@ fn reranker_latency_without_gain_probe_results() -> Vec<ProbeResult> {
         abstention_correct: None,
         pii_redacted: None,
         temporal_as_of_correct: None,
+        temporal_filter_parsed: None,
+        temporal_filter_matches_as_of: None,
     }]
 }
 
@@ -1876,6 +2045,8 @@ fn memory_budget_regression_probe_results(full_recall: bool) -> Vec<ProbeResult>
             abstention_correct: None,
             pii_redacted: None,
             temporal_as_of_correct: None,
+            temporal_filter_parsed: None,
+            temporal_filter_matches_as_of: None,
         },
         ProbeResult {
             probe_id: "probe-regression-cross-user-clean".to_string(),
@@ -1890,6 +2061,8 @@ fn memory_budget_regression_probe_results(full_recall: bool) -> Vec<ProbeResult>
             abstention_correct: Some(true),
             pii_redacted: None,
             temporal_as_of_correct: None,
+            temporal_filter_parsed: None,
+            temporal_filter_matches_as_of: None,
         },
     ]
 }

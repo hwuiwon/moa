@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, TimeZone, Utc};
 use moa_core::{ScopeTier, SessionId, UserId, WorkspaceId};
 use moa_memory_graph::PiiClass;
 use serde::de::DeserializeOwned;
@@ -444,8 +444,12 @@ struct WorkspaceFactRefs {
     contradiction_subject: String,
     temporal_old_fact_id: String,
     temporal_new_fact_id: String,
-    temporal_as_of: DateTime<Utc>,
+    temporal_subject: String,
+    temporal_month_as_of: DateTime<Utc>,
+    temporal_iso_as_of: DateTime<Utc>,
+    temporal_current_as_of: DateTime<Utc>,
     temporal_answer: String,
+    temporal_current_answer: String,
 }
 
 #[derive(Debug, Clone)]
@@ -512,9 +516,12 @@ fn schedule_workspace_facts(
     let base_day = seed_index as i64 * 40 + workspace_index as i64 * 10;
     let deploy_old_from = fixed_time(base_day, 0)?;
     let deploy_new_from = fixed_time(base_day + 7, 0)?;
-    let temporal_old_from = fixed_time(base_day + 2, 0)?;
-    let temporal_new_from = fixed_time(base_day + 12, 0)?;
-    let temporal_as_of = fixed_time(base_day + 5, 12)?;
+    let temporal_old_from = first_day_after_months(seed_index * 8 + workspace_index * 2)?;
+    let temporal_new_from = first_day_of_next_month(temporal_old_from)?;
+    let temporal_iso_as_of = temporal_old_from + Duration::days(5);
+    let temporal_month_as_of = temporal_old_from;
+    let temporal_current_as_of = temporal_new_from + Duration::days(1);
+    let temporal_subject = format!("{component}-support-rotation");
 
     let deploy_old_fact_id = fact_id(
         profile,
@@ -657,7 +664,7 @@ fn schedule_workspace_facts(
             scope: ScopeTier::Workspace,
             valid_from: temporal_old_from,
             valid_to: Some(temporal_new_from),
-            subject: format!("{component} incident response"),
+            subject: temporal_subject.clone(),
             predicate: "on_call_primary".to_string(),
             object: old_on_call.to_string(),
             answer: format!("At that time, {old_on_call} was primary on-call for {component}."),
@@ -682,11 +689,11 @@ fn schedule_workspace_facts(
             scope: ScopeTier::Workspace,
             valid_from: temporal_new_from,
             valid_to: None,
-            subject: format!("{component} incident response"),
+            subject: temporal_subject.clone(),
             predicate: "on_call_primary".to_string(),
             object: new_on_call.to_string(),
             answer: format!("{new_on_call} is now primary on-call for {component}."),
-            supersedes: Vec::new(),
+            supersedes: vec![temporal_old_fact_id.clone()],
             pii_class: PiiClass::None,
             expected_redacted: false,
         },
@@ -703,10 +710,14 @@ fn schedule_workspace_facts(
         contradiction_subject,
         temporal_old_fact_id,
         temporal_new_fact_id,
-        temporal_as_of,
+        temporal_subject,
+        temporal_month_as_of,
+        temporal_iso_as_of,
+        temporal_current_as_of,
         temporal_answer: format!(
             "At that time, {old_on_call} was primary on-call for {component}."
         ),
+        temporal_current_answer: format!("{new_on_call} is now primary on-call for {component}."),
     })
 }
 
@@ -985,15 +996,70 @@ fn build_probes(
             });
 
             probes.push(Probe {
-                probe_id: format!("{workspace_prefix}-temporal-on-call"),
+                probe_id: format!("{workspace_prefix}-temporal-on-call-month"),
                 probe_type: ProbeType::TemporalAsOf,
                 workspace_id: workspace.clone(),
                 user_id: user.clone(),
-                query: "Who was primary on-call at the requested historical time?".to_string(),
+                query: format!(
+                    "What was the on_call_primary for {} as of {}?",
+                    refs.temporal_subject,
+                    month_year(refs.temporal_month_as_of)
+                ),
                 answer: refs.temporal_answer.clone(),
                 expected_fact_ids: vec![refs.temporal_old_fact_id.clone()],
                 blocked_fact_ids: vec![refs.temporal_new_fact_id.clone()],
-                as_of: Some(refs.temporal_as_of),
+                as_of: Some(refs.temporal_month_as_of),
+                expected_redacted: false,
+            });
+
+            probes.push(Probe {
+                probe_id: format!("{workspace_prefix}-temporal-on-call-date"),
+                probe_type: ProbeType::TemporalAsOf,
+                workspace_id: workspace.clone(),
+                user_id: user.clone(),
+                query: format!(
+                    "What was the on_call_primary for {} on {}?",
+                    refs.temporal_subject,
+                    iso_date(refs.temporal_iso_as_of)
+                ),
+                answer: refs.temporal_answer.clone(),
+                expected_fact_ids: vec![refs.temporal_old_fact_id.clone()],
+                blocked_fact_ids: vec![refs.temporal_new_fact_id.clone()],
+                as_of: Some(refs.temporal_iso_as_of),
+                expected_redacted: false,
+            });
+
+            probes.push(Probe {
+                probe_id: format!("{workspace_prefix}-temporal-on-call-current"),
+                probe_type: ProbeType::TemporalAsOf,
+                workspace_id: workspace.clone(),
+                user_id: user.clone(),
+                query: format!(
+                    "What was the on_call_primary for {} as of {}?",
+                    refs.temporal_subject,
+                    iso_date(refs.temporal_current_as_of)
+                ),
+                answer: refs.temporal_current_answer.clone(),
+                expected_fact_ids: vec![refs.temporal_new_fact_id.clone()],
+                blocked_fact_ids: vec![refs.temporal_old_fact_id.clone()],
+                as_of: Some(refs.temporal_current_as_of),
+                expected_redacted: false,
+            });
+
+            probes.push(Probe {
+                probe_id: format!("{workspace_prefix}-temporal-on-call-back-in"),
+                probe_type: ProbeType::TemporalAsOf,
+                workspace_id: workspace.clone(),
+                user_id: user.clone(),
+                query: format!(
+                    "What was the on_call_primary for {} back in {}?",
+                    refs.temporal_subject,
+                    month_year(refs.temporal_month_as_of)
+                ),
+                answer: refs.temporal_answer.clone(),
+                expected_fact_ids: vec![refs.temporal_old_fact_id.clone()],
+                blocked_fact_ids: vec![refs.temporal_new_fact_id.clone()],
+                as_of: Some(refs.temporal_month_as_of),
                 expected_redacted: false,
             });
 
@@ -1218,14 +1284,15 @@ fn render_fact_transcript(category: FactCategory, fact: &LedgerFact) -> String {
             fact.subject, fact.predicate, fact.object
         ),
         FactCategory::Temporal => format!(
-            "Fact: temporal {} {} is {} from {} until {}.",
+            "Fact: workspace shared {} {} is {} from {} until {}. Supersedes: {}.",
             fact.subject,
             fact.predicate,
             fact.object,
             fact.valid_from.to_rfc3339(),
             fact.valid_to
                 .map(|valid_to| valid_to.to_rfc3339())
-                .unwrap_or_else(|| "open-ended".to_string())
+                .unwrap_or_else(|| "open-ended".to_string()),
+            list_or_none(&fact.supersedes)
         ),
         FactCategory::Preference => format!(
             "Fact: preference {} {} is {}.",
@@ -1458,6 +1525,60 @@ fn fixed_time(day_offset: i64, hour: i64) -> Result<DateTime<Utc>> {
     Utc.timestamp_opt(timestamp, 0)
         .single()
         .ok_or_else(|| EvalError::InvalidConfig(format!("invalid generated timestamp {timestamp}")))
+}
+
+fn first_day_after_months(month_offset: usize) -> Result<DateTime<Utc>> {
+    let year = 2026
+        + i32::try_from(month_offset / 12).map_err(|_| {
+            EvalError::InvalidConfig("generated month offset overflowed".to_string())
+        })?;
+    let month = u32::try_from((month_offset % 12) + 1)
+        .map_err(|_| EvalError::InvalidConfig("generated month offset overflowed".to_string()))?;
+    Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0)
+        .single()
+        .ok_or_else(|| {
+            EvalError::InvalidConfig(format!(
+                "invalid generated month boundary {year:04}-{month:02}-01"
+            ))
+        })
+}
+
+fn first_day_of_next_month(value: DateTime<Utc>) -> Result<DateTime<Utc>> {
+    let (year, month) = if value.month() == 12 {
+        (value.year() + 1, 1)
+    } else {
+        (value.year(), value.month() + 1)
+    };
+    Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0)
+        .single()
+        .ok_or_else(|| {
+            EvalError::InvalidConfig(format!(
+                "invalid generated month boundary {year:04}-{month:02}-01"
+            ))
+        })
+}
+
+fn month_year(value: DateTime<Utc>) -> String {
+    const MONTHS: &[&str] = &[
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let month_index = usize::try_from(value.month0()).unwrap_or(0);
+    format!("{} {}", MONTHS[month_index], value.year())
+}
+
+fn iso_date(value: DateTime<Utc>) -> String {
+    value.format("%Y-%m-%d").to_string()
 }
 
 fn choose<'a>(rng: &mut StableRng, values: &'a [&str]) -> Result<&'a str> {

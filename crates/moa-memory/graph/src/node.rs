@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, PgConnection, Row, postgres::PgRow};
+use sqlx::{FromRow, PgConnection, Postgres, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::{GraphError, Result};
@@ -195,33 +195,48 @@ pub async fn lookup_seed_by_name(
     conn: &mut PgConnection,
     name: &str,
     limit: i64,
+    as_of: Option<DateTime<Utc>>,
 ) -> Result<Vec<NodeIndexRow>> {
     if limit <= 0 {
         return Ok(Vec::new());
     }
 
-    sqlx::query_as::<_, NodeIndexRow>(
+    let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
                valid_to, valid_from, properties_summary, last_accessed_at
         FROM moa.node_index
-        WHERE valid_to IS NULL
-          AND name_tsv @@ plainto_tsquery('simple', $1)
-        ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', $1)) DESC,
+        WHERE "#,
+    );
+    crate::push_validity_filter(&mut builder, None, as_of);
+    builder.push(
+        r#"
+          AND name_tsv @@ plainto_tsquery('simple', "#,
+    );
+    builder.push_bind(name);
+    builder.push(
+        r#")
+        ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', "#,
+    );
+    builder.push_bind(name);
+    builder.push(
+        r#")) DESC,
                  (
                    0.55 * (1.0 / (1.0 + GREATEST(EXTRACT(EPOCH FROM (now() - valid_from)) / 86400.0, 0.0))) +
                    0.35 * LEAST(GREATEST(COALESCE(confidence, 0.0), 0.0), 1.0) +
                    0.10 * (LN(LEAST(reference_count, 100)::DOUBLE PRECISION + 1.0) / LN(101.0))
                  ) DESC,
                  uid ASC
-        LIMIT $2
         "#,
-    )
-    .bind(name)
-    .bind(limit)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(GraphError::from)
+    );
+    builder.push(" LIMIT ");
+    builder.push_bind(limit);
+
+    builder
+        .build_query_as::<NodeIndexRow>()
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(GraphError::from)
 }
 
 /// Updates `last_accessed_at` for projected graph node rows.

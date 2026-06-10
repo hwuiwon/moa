@@ -642,6 +642,7 @@ mod tests {
             _seed: Uuid,
             _hops: u8,
             _edge_filter: Option<&[moa_memory_graph::EdgeLabel]>,
+            _as_of: Option<DateTime<Utc>>,
         ) -> std::result::Result<Vec<NodeIndexRow>, GraphError> {
             Ok(Vec::new())
         }
@@ -650,6 +651,7 @@ mod tests {
             &self,
             _name: &str,
             _limit: i64,
+            _as_of: Option<DateTime<Utc>>,
         ) -> std::result::Result<Vec<NodeIndexRow>, GraphError> {
             Ok(Vec::new())
         }

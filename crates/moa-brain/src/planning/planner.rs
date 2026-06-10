@@ -137,12 +137,13 @@ impl QueryPlanner {
 
     /// Plans one free-form query into seed nodes, labels, scope, and strategy.
     pub async fn plan(&self, query_text: &str, ctx: &PlanningCtx) -> Result<PlannedQuery> {
+        let temporal_filter = parse_temporal(query_text);
         let spans = self.ner.extract(query_text);
         let mut seeds = Vec::new();
         for span in &spans {
             let candidates = ctx
                 .graph
-                .lookup_seeds(&span.text, ctx.seed_limit_per_span)
+                .lookup_seeds(&span.text, ctx.seed_limit_per_span, temporal_filter)
                 .await?;
             seeds.extend(candidates.into_iter().map(|candidate| candidate.uid));
         }
@@ -155,7 +156,7 @@ impl QueryPlanner {
             label_hint: infer_label_hint(query_text, &spans),
             scope: ctx.scope.clone(),
             scope_ancestors: ctx.scope.ancestors(),
-            temporal_filter: parse_temporal(query_text),
+            temporal_filter,
         })
     }
 }
@@ -280,6 +281,9 @@ pub fn classify_strategy(text: &str) -> Strategy {
 
 fn infer_label_hint(text: &str, _spans: &[NerSpan]) -> Option<Vec<NodeLabel>> {
     let lower = text.to_ascii_lowercase();
+    if contains_any(&lower, &["deploy_target", "on_call_primary"]) {
+        return Some(vec![NodeLabel::Fact]);
+    }
     if contains_any(&lower, &["decision", "decided", "decide"]) {
         return Some(vec![NodeLabel::Decision]);
     }
@@ -298,10 +302,13 @@ fn infer_label_hint(text: &str, _spans: &[NerSpan]) -> Option<Vec<NodeLabel>> {
     None
 }
 
-fn parse_temporal(text: &str) -> Option<DateTime<Utc>> {
+/// Parses an absolute valid-time instant from retrieval query text.
+#[must_use]
+pub fn parse_temporal(text: &str) -> Option<DateTime<Utc>> {
     parse_as_of_fragment(text)
         .or_else(|| parse_rfc3339_in_text(text))
         .or_else(|| parse_iso_date_in_text(text))
+        .or_else(|| parse_month_day_year(text))
         .or_else(|| parse_month_year_phrase(text))
 }
 
@@ -311,6 +318,7 @@ fn parse_as_of_fragment(text: &str) -> Option<DateTime<Utc>> {
     let fragment = text.get(start + "as of".len()..)?.trim_start();
     parse_rfc3339_in_text(fragment)
         .or_else(|| parse_iso_date_in_text(fragment))
+        .or_else(|| parse_month_day_year(fragment))
         .or_else(|| parse_month_year_fragment(fragment))
 }
 
@@ -334,6 +342,18 @@ fn parse_iso_date_token(token: &str) -> Option<DateTime<Utc>> {
     let date = NaiveDate::parse_from_str(token, "%Y-%m-%d").ok()?;
     let datetime = date.and_hms_opt(0, 0, 0)?;
     Some(DateTime::<Utc>::from_naive_utc_and_offset(datetime, Utc))
+}
+
+fn parse_month_day_year(text: &str) -> Option<DateTime<Utc>> {
+    let words = temporal_words(text);
+    words.windows(3).find_map(|window| {
+        let month = month_number(&window[0])?;
+        let day = parse_day_of_month(&window[1])?;
+        let year = parse_four_digit_year(&window[2])?;
+        let date = NaiveDate::from_ymd_opt(year, month, day)?;
+        let datetime = date.and_hms_opt(0, 0, 0)?;
+        Some(DateTime::<Utc>::from_naive_utc_and_offset(datetime, Utc))
+    })
 }
 
 fn parse_month_year_phrase(text: &str) -> Option<DateTime<Utc>> {
@@ -367,6 +387,11 @@ fn parse_four_digit_year(value: &str) -> Option<i32> {
     } else {
         None
     }
+}
+
+fn parse_day_of_month(value: &str) -> Option<u32> {
+    let day = value.parse::<u32>().ok()?;
+    (1..=31).contains(&day).then_some(day)
 }
 
 fn month_number(value: &str) -> Option<u32> {
@@ -477,6 +502,55 @@ mod tests {
         // Pins: month/year phrases resolve to the first day of that month in UTC.
         assert_eq!(
             parse_temporal("what changed in March 2026?"),
+            Some(utc("2026-03-01T00:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn temporal_parser_covers_generator_probe_phrasings() {
+        // Pins: every temporal probe phrasing emitted by the memory eval generator parses.
+        let cases = [
+            (
+                "What was the on_call_primary for billing-api-support-rotation as of March 2026?",
+                "2026-03-01T00:00:00Z",
+            ),
+            (
+                "What was the on_call_primary for billing-api-support-rotation on 2026-03-11?",
+                "2026-03-11T00:00:00Z",
+            ),
+            (
+                "What was the on_call_primary for billing-api-support-rotation as of 2026-04-15?",
+                "2026-04-15T00:00:00Z",
+            ),
+            (
+                "What was the on_call_primary for billing-api-support-rotation back in March 2026?",
+                "2026-03-01T00:00:00Z",
+            ),
+        ];
+
+        for (query, expected) in cases {
+            assert_eq!(parse_temporal(query), Some(utc(expected)), "{query}");
+        }
+    }
+
+    #[test]
+    fn temporal_parser_recognizes_month_day_year_date() {
+        // Pins: absolute month-day-year phrases resolve to UTC midnight on that day.
+        assert_eq!(
+            parse_temporal("what was the deploy target on March 11, 2026?"),
+            Some(utc("2026-03-11T00:00:00Z"))
+        );
+        assert_eq!(
+            parse_temporal("what was the deploy target on Mar 11 2026?"),
+            Some(utc("2026-03-11T00:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn temporal_parser_recognizes_back_in_month_year() {
+        // Pins: generator `back in <Month> <YYYY>` probes reuse month/year semantics.
+        assert_eq!(
+            parse_temporal("who was primary on-call back in March 2026?"),
             Some(utc("2026-03-01T00:00:00Z"))
         );
     }

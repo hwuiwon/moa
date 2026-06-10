@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use moa_core::{MemoryScope, ScopeContext, ScopedConn};
-use moa_memory_graph::{GraphStore, NodeIndexRow, PiiClass};
+use moa_memory_graph::{GraphStore, NodeIndexRow, PiiClass, push_validity_filter};
 use moa_memory_vector::{VectorQuery, VectorStore};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -51,8 +51,15 @@ pub async fn graph_leg(
 
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
+    if req.as_of.is_some() {
+        for seed in &req.seeds {
+            if seen.insert(*seed) {
+                candidates.push(*seed);
+            }
+        }
+    }
     for seed in &req.seeds {
-        let nodes = graph.neighbors(*seed, GRAPH_HOPS, None).await?;
+        let nodes = graph.neighbors(*seed, GRAPH_HOPS, None, req.as_of).await?;
         for node in nodes {
             if !label_allowed(req, &node.label) {
                 continue;
@@ -286,39 +293,6 @@ pub async fn hydrate_nodes(
         .await?;
     conn.commit().await?;
     Ok(rows)
-}
-
-fn push_validity_filter(
-    builder: &mut QueryBuilder<'_, Postgres>,
-    table_alias: Option<&'static str>,
-    as_of: Option<DateTime<Utc>>,
-) {
-    let valid_from = if let Some(alias) = table_alias {
-        format!("{alias}.valid_from")
-    } else {
-        "valid_from".to_string()
-    };
-    let valid_to = if let Some(alias) = table_alias {
-        format!("{alias}.valid_to")
-    } else {
-        "valid_to".to_string()
-    };
-
-    if let Some(as_of) = as_of {
-        builder.push(valid_from);
-        builder.push(" <= ");
-        builder.push_bind(as_of);
-        builder.push(" AND (");
-        builder.push(valid_to.as_str());
-        builder.push(" IS NULL OR ");
-        builder.push(valid_to);
-        builder.push(" > ");
-        builder.push_bind(as_of);
-        builder.push(")");
-    } else {
-        builder.push(valid_to);
-        builder.push(" IS NULL");
-    }
 }
 
 /// Updates `last_accessed_at` for retrieved nodes in a scoped background transaction.

@@ -94,7 +94,7 @@ async fn node_index_rls_scopes_seed_lookup_and_bump() {
             .expect("count visible node_index rows");
     assert_eq!(visible_count, 40);
 
-    let seeds = lookup_seed_by_name(conn.as_mut(), "auth service", 10)
+    let seeds = lookup_seed_by_name(conn.as_mut(), "auth service", 10, None)
         .await
         .expect("lookup node_index seeds");
     assert!(!seeds.is_empty());

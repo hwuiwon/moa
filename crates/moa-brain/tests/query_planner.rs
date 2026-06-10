@@ -1,7 +1,7 @@
 //! Integration-style coverage for graph-memory query planning.
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use moa_brain::planning::{PlanningCtx, QueryPlanner, Strategy};
 use moa_core::{MemoryScope, WorkspaceId};
 use moa_memory_graph::{
@@ -63,6 +63,24 @@ async fn planner_classify_vector_query_and_builds_retrieval_request() {
     assert_eq!(request.k_final, 5);
 }
 
+#[tokio::test]
+async fn planner_passes_temporal_filter_to_seed_lookup() {
+    let historical_uid = Uuid::now_v7();
+    let graph = std::sync::Arc::new(TemporalSeedGraph { historical_uid });
+    let scope = MemoryScope::Workspace {
+        workspace_id: WorkspaceId::new("planner-workspace"),
+    };
+    let ctx = PlanningCtx::new(scope, graph);
+
+    let planned = QueryPlanner::new()
+        .plan("What did auth service use as of March 2026?", &ctx)
+        .await
+        .expect("planner should pass parsed as_of into seed lookup");
+
+    assert_eq!(planned.temporal_filter, Some(utc("2026-03-01T00:00:00Z")));
+    assert_eq!(planned.seeds, vec![historical_uid]);
+}
+
 #[derive(Clone)]
 struct SeedGraph {
     auth_uid: Uuid,
@@ -104,17 +122,85 @@ impl GraphStore for SeedGraph {
         _seed: Uuid,
         _hops: u8,
         _edge_filter: Option<&[EdgeLabel]>,
+        _as_of: Option<DateTime<Utc>>,
     ) -> Result<Vec<NodeIndexRow>, GraphError> {
         Ok(Vec::new())
     }
 
-    async fn lookup_seeds(&self, name: &str, _limit: i64) -> Result<Vec<NodeIndexRow>, GraphError> {
+    async fn lookup_seeds(
+        &self,
+        name: &str,
+        _limit: i64,
+        _as_of: Option<DateTime<Utc>>,
+    ) -> Result<Vec<NodeIndexRow>, GraphError> {
         let lower = name.to_ascii_lowercase();
         if lower.contains("auth") {
             return Ok(vec![row(self.auth_uid, "auth service")]);
         }
         if lower.contains("deploy") {
             return Ok(vec![row(self.deploy_uid, "deploy pipeline")]);
+        }
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Clone)]
+struct TemporalSeedGraph {
+    historical_uid: Uuid,
+}
+
+#[async_trait]
+impl GraphStore for TemporalSeedGraph {
+    async fn create_node(&self, _intent: NodeWriteIntent) -> Result<Uuid, GraphError> {
+        unreachable!("query planner tests do not write graph nodes")
+    }
+
+    async fn supersede_node(
+        &self,
+        _old_uid: Uuid,
+        _intent: NodeWriteIntent,
+    ) -> Result<Uuid, GraphError> {
+        unreachable!("query planner tests do not supersede graph nodes")
+    }
+
+    async fn invalidate_node(&self, _uid: Uuid, _reason: &str) -> Result<(), GraphError> {
+        unreachable!("query planner tests do not invalidate graph nodes")
+    }
+
+    async fn hard_purge(&self, _uid: Uuid, _redaction_marker: &str) -> Result<(), GraphError> {
+        unreachable!("query planner tests do not purge graph nodes")
+    }
+
+    async fn create_edge(&self, _intent: EdgeWriteIntent) -> Result<Uuid, GraphError> {
+        unreachable!("query planner tests do not write graph edges")
+    }
+
+    async fn get_node(&self, _uid: Uuid) -> Result<Option<NodeIndexRow>, GraphError> {
+        Ok(None)
+    }
+
+    async fn neighbors(
+        &self,
+        _seed: Uuid,
+        _hops: u8,
+        _edge_filter: Option<&[EdgeLabel]>,
+        _as_of: Option<DateTime<Utc>>,
+    ) -> Result<Vec<NodeIndexRow>, GraphError> {
+        Ok(Vec::new())
+    }
+
+    async fn lookup_seeds(
+        &self,
+        name: &str,
+        _limit: i64,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<Vec<NodeIndexRow>, GraphError> {
+        assert_eq!(as_of, Some(utc("2026-03-01T00:00:00Z")));
+        if name.to_ascii_lowercase().contains("auth") {
+            return Ok(vec![row(
+                self.historical_uid,
+                "auth service historical fact",
+            )]);
         }
         Ok(Vec::new())
     }
@@ -134,4 +220,10 @@ fn row(uid: Uuid, name: &str) -> NodeIndexRow {
         properties_summary: None,
         last_accessed_at: Utc::now(),
     }
+}
+
+fn utc(value: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(value)
+        .expect("test timestamp should be valid RFC3339")
+        .with_timezone(&Utc)
 }

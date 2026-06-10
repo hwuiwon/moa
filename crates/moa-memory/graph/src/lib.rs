@@ -1,6 +1,7 @@
 //! Graph-memory store, AGE templates, and SQL sidecar helpers.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 pub mod age;
@@ -11,6 +12,7 @@ pub mod error;
 pub mod lexical;
 pub mod node;
 pub mod read;
+pub mod validity;
 pub mod write;
 
 pub use age::AgeGraphStore;
@@ -21,6 +23,7 @@ pub use lexical::LexicalStore;
 pub use node::{
     NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass, bump_last_accessed, lookup_seed_by_name,
 };
+pub use validity::push_validity_filter;
 
 /// Result type returned by graph-memory helpers.
 pub type Result<T> = std::result::Result<T, GraphError>;
@@ -66,8 +69,14 @@ pub trait GraphStore: Send + Sync {
         seed: Uuid,
         hops: u8,
         edge_filter: Option<&[EdgeLabel]>,
+        as_of: Option<DateTime<Utc>>,
     ) -> Result<Vec<NodeIndexRow>>;
 
     /// Looks up NER seed nodes by name through the sidecar full-text index.
-    async fn lookup_seeds(&self, name: &str, limit: i64) -> Result<Vec<NodeIndexRow>>;
+    async fn lookup_seeds(
+        &self,
+        name: &str,
+        limit: i64,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<Vec<NodeIndexRow>>;
 }

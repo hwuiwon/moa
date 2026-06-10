@@ -83,6 +83,12 @@ pub struct ProbeResult {
     pub pii_redacted: Option<bool>,
     /// Whether the returned answer matched the requested valid-time instant.
     pub temporal_as_of_correct: Option<bool>,
+    /// Whether the planner parsed a temporal filter from this probe's query.
+    #[serde(default)]
+    pub temporal_filter_parsed: Option<bool>,
+    /// Whether the parsed temporal filter matched the probe's encoded `as_of` instant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporal_filter_matches_as_of: Option<bool>,
 }
 
 impl ProbeResult {
@@ -297,6 +303,12 @@ pub struct RetrievalMetrics {
     pub pii_redaction_rate: MetricSummary,
     /// Fraction of temporal probes that answered for the requested valid-time instant.
     pub temporal_as_of_accuracy: MetricSummary,
+    /// Fraction of temporal probes whose query text produced an absolute temporal filter.
+    #[serde(default)]
+    pub temporal_parse_rate: MetricSummary,
+    /// Number of temporal probes where the parser fired but produced the wrong instant.
+    #[serde(default)]
+    pub temporal_parse_mismatch_count: usize,
     /// Recall by contributing retrieval leg.
     pub per_leg_recall: PerLegRecall,
     /// p95 end-to-end retrieval latency in milliseconds.
@@ -416,6 +428,8 @@ fn aggregate_metrics(
         temporal_as_of_accuracy: summarize_probe_values(probe_results, |probe| {
             probe.temporal_as_of_correct.map(bool_value)
         }),
+        temporal_parse_rate: temporal_parse_rate(probe_results),
+        temporal_parse_mismatch_count: temporal_parse_mismatch_count(probe_results),
         per_leg_recall: per_leg_recall(probe_results),
         p95_retrieval_latency_ms: p95_retrieval_latency_ms(probe_results),
     }
@@ -468,6 +482,27 @@ fn pii_unredacted_count(probe_results: &[ProbeResult]) -> usize {
         .iter()
         .filter(|probe| probe.probe_type == ProbeType::PiiRedaction)
         .filter(|probe| probe.pii_redacted == Some(false))
+        .count()
+}
+
+fn temporal_parse_rate(probe_results: &[ProbeResult]) -> MetricSummary {
+    let temporal_probes = probe_results
+        .iter()
+        .filter(|probe| probe.probe_type == ProbeType::TemporalAsOf)
+        .collect::<Vec<_>>();
+    let parsed = temporal_probes
+        .iter()
+        .filter(|probe| probe.temporal_filter_parsed == Some(true))
+        .count();
+    MetricSummary::from_counts(parsed, temporal_probes.len())
+}
+
+fn temporal_parse_mismatch_count(probe_results: &[ProbeResult]) -> usize {
+    probe_results
+        .iter()
+        .filter(|probe| probe.probe_type == ProbeType::TemporalAsOf)
+        .filter(|probe| probe.temporal_filter_parsed == Some(true))
+        .filter(|probe| probe.temporal_filter_matches_as_of == Some(false))
         .count()
 }
 

@@ -310,7 +310,7 @@ async fn show_inner(request: MemoryShowRequest) -> Result<MemoryShowResponse, Ha
         Vec::new()
     } else {
         graph
-            .neighbors(request.uid, neighbor_depth as u8, None)
+            .neighbors(request.uid, neighbor_depth as u8, None, None)
             .await
             .map_err(memory_handler_error)?
     };
@@ -424,7 +424,7 @@ async fn lookup_seed_uids(
     limit: u32,
 ) -> Result<Vec<Uuid>, HandlerError> {
     graph
-        .lookup_seeds(query, i64::from(limit.max(1)))
+        .lookup_seeds(query, i64::from(limit.max(1)), None)
         .await
         .map(|rows| rows.into_iter().map(|row| row.uid).collect())
         .map_err(memory_handler_error)

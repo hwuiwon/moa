@@ -1,8 +1,9 @@
 //! Read-side implementation for the AGE graph store.
 
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use sqlx::Row;
+use sqlx::{Postgres, QueryBuilder, Row};
 
 use crate::{
     GraphError, GraphStore,
@@ -73,6 +74,7 @@ impl GraphStore for AgeGraphStore {
         seed: Uuid,
         hops: u8,
         edge_filter: Option<&[EdgeLabel]>,
+        as_of: Option<DateTime<Utc>>,
     ) -> Result<Vec<NodeIndexRow>, GraphError> {
         if edge_filter.is_some_and(|labels| !labels.is_empty()) {
             return Err(GraphError::Conflict(
@@ -81,14 +83,22 @@ impl GraphStore for AgeGraphStore {
         }
 
         let (template, limit) = match hops {
+            0 | 1 if as_of.is_some() => (&cypher::traverse::NEIGHBORS_1HOP_AS_OF, 50_i64),
             0 | 1 => (&cypher::traverse::NEIGHBORS_1HOP, 50_i64),
+            2 if as_of.is_some() => (&cypher::traverse::NEIGHBORS_2HOP_AS_OF, 100_i64),
             2 => (&cypher::traverse::NEIGHBORS_2HOP, 100_i64),
+            _ if as_of.is_some() => (&cypher::traverse::NEIGHBORS_3HOP_AS_OF, 200_i64),
             _ => (&cypher::traverse::NEIGHBORS_3HOP, 200_i64),
         };
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "seed_uid": seed.to_string(),
             "limit": limit,
         });
+        if let Some(as_of) = as_of
+            && let Some(object) = params.as_object_mut()
+        {
+            object.insert("as_of".to_string(), serde_json::json!(as_of.to_rfc3339()));
+        }
 
         let uid_texts = if let Some(mut conn) = self.begin().await? {
             let rows = template
@@ -119,17 +129,22 @@ impl GraphStore for AgeGraphStore {
             return Ok(Vec::new());
         }
 
-        fetch_nodes_by_uid(self, &uids).await
+        fetch_nodes_by_uid(self, &uids, as_of).await
     }
 
-    async fn lookup_seeds(&self, name: &str, limit: i64) -> Result<Vec<NodeIndexRow>, GraphError> {
+    async fn lookup_seeds(
+        &self,
+        name: &str,
+        limit: i64,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<Vec<NodeIndexRow>, GraphError> {
         if let Some(mut conn) = self.begin().await? {
-            let rows = crate::node::lookup_seed_by_name(conn.as_mut(), name, limit).await?;
+            let rows = crate::node::lookup_seed_by_name(conn.as_mut(), name, limit, as_of).await?;
             conn.commit().await?;
             return Ok(rows);
         }
 
-        lexical::lookup_seed_rows(&self.pool, name, limit).await
+        lexical::lookup_seed_rows(&self.pool, name, limit, as_of).await
     }
 }
 
@@ -154,45 +169,53 @@ async fn fetch_node(
 async fn fetch_nodes_by_uid(
     store: &AgeGraphStore,
     uids: &[Uuid],
+    as_of: Option<DateTime<Utc>>,
 ) -> Result<Vec<NodeIndexRow>, GraphError> {
     if let Some(mut conn) = store.begin().await? {
-        let rows = fetch_nodes(conn.as_mut(), uids).await?;
+        let rows = fetch_nodes(conn.as_mut(), uids, as_of).await?;
         conn.commit().await?;
         return Ok(rows);
     }
 
-    sqlx::query_as::<_, NodeIndexRow>(
+    let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
                valid_to, valid_from, properties_summary, last_accessed_at
         FROM moa.node_index
-        WHERE uid = ANY($1)
-          AND valid_to IS NULL
+        WHERE uid = ANY(
         "#,
-    )
-    .bind(uids)
-    .fetch_all(&store.pool)
-    .await
-    .map_err(GraphError::from)
+    );
+    builder.push_bind(uids);
+    builder.push(") AND ");
+    crate::push_validity_filter(&mut builder, None, as_of);
+    builder
+        .build_query_as::<NodeIndexRow>()
+        .fetch_all(&store.pool)
+        .await
+        .map_err(GraphError::from)
 }
 
 async fn fetch_nodes(
     conn: &mut sqlx::PgConnection,
     uids: &[Uuid],
+    as_of: Option<DateTime<Utc>>,
 ) -> Result<Vec<NodeIndexRow>, GraphError> {
-    sqlx::query_as::<_, NodeIndexRow>(
+    let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
                valid_to, valid_from, properties_summary, last_accessed_at
         FROM moa.node_index
-        WHERE uid = ANY($1)
-          AND valid_to IS NULL
+        WHERE uid = ANY(
         "#,
-    )
-    .bind(uids)
-    .fetch_all(conn)
-    .await
-    .map_err(GraphError::from)
+    );
+    builder.push_bind(uids);
+    builder.push(") AND ");
+    crate::push_validity_filter(&mut builder, None, as_of);
+    builder
+        .build_query_as::<NodeIndexRow>()
+        .fetch_all(conn)
+        .await
+        .map_err(GraphError::from)
 }
 
 fn parse_agtype_uuid(value: &str) -> Option<Uuid> {

@@ -1,25 +1,10 @@
 //! Lexical lookup over the `moa.node_index` sidecar.
 
+use chrono::{DateTime, Utc};
 use moa_core::{ScopeContext, ScopedConn};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::{GraphError, NodeIndexRow};
-
-const RANKING_SQL: &str = r#"
-        SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
-               valid_to, valid_from, properties_summary, last_accessed_at
-        FROM moa.node_index
-        WHERE valid_to IS NULL
-          AND name_tsv @@ plainto_tsquery('simple', $1)
-        ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', $1)) DESC,
-                 (
-                   0.55 * (1.0 / (1.0 + GREATEST(EXTRACT(EPOCH FROM (now() - valid_from)) / 86400.0, 0.0))) +
-                   0.35 * LEAST(GREATEST(COALESCE(confidence, 0.0), 0.0), 1.0) +
-                   0.10 * (LN(LEAST(reference_count, 100)::DOUBLE PRECISION + 1.0) / LN(101.0))
-                 ) DESC,
-                 uid ASC
-        LIMIT $2
-        "#;
 
 /// Thin lexical store for NER seed lookup through `name_tsv`.
 #[derive(Clone)]
@@ -73,7 +58,7 @@ impl LexicalStore {
         }
 
         let Some(scope) = &self.scope else {
-            return lookup_seed_rows(&self.pool, name, limit).await;
+            return lookup_seed_rows(&self.pool, name, limit, None).await;
         };
 
         let mut conn = ScopedConn::begin(&self.pool, scope).await?;
@@ -82,7 +67,7 @@ impl LexicalStore {
                 .execute(conn.as_mut())
                 .await?;
         }
-        let rows = crate::node::lookup_seed_by_name(conn.as_mut(), name, limit).await?;
+        let rows = crate::node::lookup_seed_by_name(conn.as_mut(), name, limit, None).await?;
         conn.commit().await?;
         Ok(rows)
     }
@@ -92,14 +77,44 @@ pub(crate) async fn lookup_seed_rows(
     pool: &PgPool,
     name: &str,
     limit: i64,
+    as_of: Option<DateTime<Utc>>,
 ) -> Result<Vec<NodeIndexRow>, GraphError> {
     if limit <= 0 {
         return Ok(Vec::new());
     }
 
-    sqlx::query_as::<_, NodeIndexRow>(RANKING_SQL)
-        .bind(name)
-        .bind(limit)
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
+               valid_to, valid_from, properties_summary, last_accessed_at
+        FROM moa.node_index
+        WHERE "#,
+    );
+    crate::push_validity_filter(&mut builder, None, as_of);
+    builder.push(
+        r#"
+          AND name_tsv @@ plainto_tsquery('simple', "#,
+    );
+    builder.push_bind(name);
+    builder.push(
+        r#")
+        ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', "#,
+    );
+    builder.push_bind(name);
+    builder.push(
+        r#")) DESC,
+                 (
+                   0.55 * (1.0 / (1.0 + GREATEST(EXTRACT(EPOCH FROM (now() - valid_from)) / 86400.0, 0.0))) +
+                   0.35 * LEAST(GREATEST(COALESCE(confidence, 0.0), 0.0), 1.0) +
+                   0.10 * (LN(LEAST(reference_count, 100)::DOUBLE PRECISION + 1.0) / LN(101.0))
+                 ) DESC,
+                 uid ASC
+        LIMIT "#,
+    );
+    builder.push_bind(limit);
+
+    builder
+        .build_query_as::<NodeIndexRow>()
         .fetch_all(pool)
         .await
         .map_err(GraphError::from)
