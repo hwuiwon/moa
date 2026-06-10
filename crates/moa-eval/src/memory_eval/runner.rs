@@ -29,12 +29,12 @@ use uuid::Uuid;
 
 use super::{
     BootstrapConfig, CachedEmbeddingFixture, CachedEmbeddingProvider, ClusterBootstrapReport,
-    CorpusManifest, DEFAULT_BOOTSTRAP_RESAMPLES, EmbeddingInput, GoldPiiStatus,
-    GoldResolutionReport, LedgerFact, Probe, ProbeResult, ProbeType, RetrievalEvalReport,
-    RetrievalMetrics, RetrievedCandidate, SyntheticSession, candidates_from_retrieval_hits,
-    embedding_text_hash, read_embedding_inputs_jsonl, read_embeddings_jsonl, read_ledger_jsonl,
-    read_manifest_json, read_probes_jsonl, read_sessions_jsonl, resolve_gold_nodes,
-    validate_corpus,
+    CorpusManifest, DEFAULT_BOOTSTRAP_RESAMPLES, EmbeddingInput, ExtractionPrecisionCounts,
+    GoldPiiStatus, GoldResolutionReport, LedgerFact, Probe, ProbeResult, ProbeType,
+    RetrievalEvalReport, RetrievalMetrics, RetrievedCandidate, SyntheticSession,
+    candidates_from_retrieval_hits, embedding_text_hash, read_embedding_inputs_jsonl,
+    read_embeddings_jsonl, read_ledger_jsonl, read_manifest_json, read_probes_jsonl,
+    read_sessions_jsonl, resolve_gold_nodes, validate_corpus,
 };
 use crate::{EvalError, Result};
 
@@ -201,6 +201,7 @@ async fn run_memory_retrieval_eval_in_store(
     corpus: LoadedMemoryEvalCorpus,
     store: &IsolatedEvalStore,
 ) -> Result<MemoryRetrievalEvalReport> {
+    cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
     let embedder = Arc::new(cached_embedding_provider_for_corpus(&corpus)?);
     let ingest_ctx = store.ingest_ctx(embedder.clone());
     let mut gold_resolution =
@@ -208,6 +209,8 @@ async fn run_memory_retrieval_eval_in_store(
     apply_eval_validity_windows(store.pool(), &mut gold_resolution).await?;
     let ranking_reference_time = Some(deterministic_ranking_reference_time(&corpus.ledger));
     let fact_ids_by_uid = fact_ids_by_uid(&gold_resolution);
+    let extraction_precision =
+        extraction_precision_counts(store.pool(), &corpus.ledger, &fact_ids_by_uid).await?;
     let gold_records_by_fact_id = gold_records_by_fact_id(&gold_resolution);
     let planner = QueryPlanner::new();
     let mut probe_results = Vec::with_capacity(corpus.probes.len());
@@ -236,8 +239,12 @@ async fn run_memory_retrieval_eval_in_store(
         ));
     }
 
-    let retrieval =
-        super::aggregate_retrieval_eval(&gold_resolution, probe_results, options.bootstrap_config);
+    let retrieval = super::aggregate_retrieval_eval_with_extraction_precision(
+        &gold_resolution,
+        probe_results,
+        options.bootstrap_config,
+        extraction_precision,
+    );
     let report = MemoryRetrievalEvalReport::from_retrieval_report(
         corpus.manifest,
         gold_resolution,
@@ -245,7 +252,45 @@ async fn run_memory_retrieval_eval_in_store(
         options.reranker_enabled(),
     );
     write_report(options.output_path(), &report).await?;
+    cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
     Ok(report)
+}
+
+async fn cleanup_eval_graph_rows(pool: &PgPool, ledger: &[LedgerFact]) -> Result<()> {
+    let workspace_ids = eval_workspace_ids(ledger);
+    if workspace_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("DELETE FROM moa.ingest_dlq WHERE workspace_id = ANY($1)")
+        .bind(&workspace_ids)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM moa.ingest_dedup WHERE workspace_id = ANY($1)")
+        .bind(&workspace_ids)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM moa.graph_changelog WHERE workspace_id = ANY($1)")
+        .bind(&workspace_ids)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM moa.node_index WHERE workspace_id = ANY($1)")
+        .bind(&workspace_ids)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM moa.workspace_state WHERE workspace_id = ANY($1)")
+        .bind(&workspace_ids)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+fn eval_workspace_ids(ledger: &[LedgerFact]) -> Vec<String> {
+    ledger
+        .iter()
+        .map(|fact| fact.workspace_id.to_string())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 async fn apply_eval_validity_windows(
@@ -495,11 +540,18 @@ fn pii_redacted_for_probe(
         return None;
     }
 
-    Some(probe.expected_fact_ids.iter().all(|fact_id| {
-        gold_records_by_fact_id
-            .get(fact_id)
-            .is_some_and(|record| record.pii_status == GoldPiiStatus::Redacted)
-    }))
+    let mut resolved_pii = false;
+    for fact_id in &probe.expected_fact_ids {
+        let Some(record) = gold_records_by_fact_id.get(fact_id) else {
+            continue;
+        };
+        match record.pii_status {
+            GoldPiiStatus::Unredacted | GoldPiiStatus::Mixed => return Some(false),
+            GoldPiiStatus::Redacted => resolved_pii = true,
+            GoldPiiStatus::NotExpected | GoldPiiStatus::NotResolved => {}
+        }
+    }
+    resolved_pii.then_some(true)
 }
 
 fn all_expected_found_at_k(
@@ -543,6 +595,32 @@ fn fact_ids_by_uid(gold_resolution: &GoldResolutionReport) -> HashMap<Uuid, Stri
         }
     }
     fact_ids
+}
+
+async fn extraction_precision_counts(
+    pool: &PgPool,
+    ledger: &[LedgerFact],
+    fact_ids_by_uid: &HashMap<Uuid, String>,
+) -> Result<ExtractionPrecisionCounts> {
+    let workspace_ids = eval_workspace_ids(ledger);
+    let total_fact_nodes = if workspace_ids.is_empty() {
+        0_i64
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM moa.node_index WHERE label = 'Fact' AND workspace_id = ANY($1)",
+        )
+        .bind(&workspace_ids)
+        .fetch_one(pool)
+        .await?
+    };
+    Ok(ExtractionPrecisionCounts {
+        mapped_fact_nodes: fact_ids_by_uid.len(),
+        total_fact_nodes: usize::try_from(total_fact_nodes).map_err(|_| {
+            EvalError::InvalidConfig(format!(
+                "stored Fact node count {total_fact_nodes} cannot fit usize"
+            ))
+        })?,
+    })
 }
 
 fn gold_records_by_fact_id(

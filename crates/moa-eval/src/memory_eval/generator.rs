@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use super::corpus::{
     CORPUS_SCHEMA_VERSION, CorpusManifest, CorpusProfile, LedgerFact, Probe, ProbeType,
-    SyntheticSession, SyntheticTurn, validate_corpus, write_ledger_jsonl, write_manifest_json,
-    write_probes_jsonl, write_sessions_jsonl,
+    SyntheticSession, SyntheticTurn, TranscriptStyle, validate_corpus, write_ledger_jsonl,
+    write_manifest_json, write_probes_jsonl, write_sessions_jsonl,
 };
 use crate::{EvalError, Result};
 
@@ -78,6 +78,22 @@ const ON_CALLS: &[(&str, &str)] = &[
     ("Casey", "Devon"),
     ("Elliot", "Finley"),
     ("Gray", "Harper"),
+];
+const LIBRARIES: &[&str] = &[
+    "lib-ledger-core",
+    "lib-search-flow",
+    "lib-audit-wire",
+    "lib-policy-kit",
+    "lib-profile-cache",
+    "lib-catalog-sync",
+];
+const OWNER_TEAMS: &[&str] = &[
+    "payments-platform",
+    "search-infra",
+    "audit-systems",
+    "policy-runtime",
+    "profile-experience",
+    "catalog-ops",
 ];
 
 /// A generated memory-evaluation corpus and its derived embedding inputs.
@@ -151,6 +167,15 @@ pub fn generate_memory_eval_corpus(
     profile: CorpusProfile,
     seeds: Vec<u64>,
 ) -> Result<GeneratedMemoryEvalCorpus> {
+    generate_memory_eval_corpus_with_style(profile, seeds, TranscriptStyle::Marked)
+}
+
+/// Generates a deterministic memory-evaluation corpus with a transcript style.
+pub fn generate_memory_eval_corpus_with_style(
+    profile: CorpusProfile,
+    seeds: Vec<u64>,
+    transcript_style: TranscriptStyle,
+) -> Result<GeneratedMemoryEvalCorpus> {
     validate_seeds(&seeds)?;
     let settings = ProfileSettings::new(profile);
     let users = build_users(profile, settings.user_count);
@@ -190,7 +215,7 @@ pub fn generate_memory_eval_corpus(
     let schedule = builder.finish();
     validate_schedule_categories(&schedule.facts)?;
     let ledger = schedule.ledger();
-    let sessions = schedule.render_sessions();
+    let sessions = schedule.render_sessions(transcript_style);
     let probes = build_probes(
         profile,
         &seeds,
@@ -202,13 +227,15 @@ pub fn generate_memory_eval_corpus(
     let embedding_inputs = build_embedding_inputs(&ledger, &probes);
     let manifest = CorpusManifest {
         version: CORPUS_SCHEMA_VERSION,
-        corpus_id: corpus_id(profile, &seeds),
+        corpus_id: corpus_id(profile, transcript_style, &seeds),
         profile,
         description: format!(
-            "{} deterministic ledger-first memory evaluation corpus",
-            profile_slug(profile)
+            "{} deterministic ledger-first memory evaluation corpus with {} transcripts",
+            profile_slug(profile),
+            transcript_style_slug(transcript_style)
         ),
         seeds,
+        transcript_style,
     };
     let corpus = GeneratedMemoryEvalCorpus {
         manifest,
@@ -274,6 +301,7 @@ pub async fn write_embedding_inputs_jsonl(
 struct ProfileSettings {
     user_count: usize,
     workspace_count: usize,
+    multi_hop_pairs_per_user: usize,
 }
 
 impl ProfileSettings {
@@ -282,10 +310,12 @@ impl ProfileSettings {
             CorpusProfile::Pr => Self {
                 user_count: PR_USER_COUNT,
                 workspace_count: PR_WORKSPACE_COUNT,
+                multi_hop_pairs_per_user: 2,
             },
             CorpusProfile::Full => Self {
                 user_count: FULL_USER_COUNT,
                 workspace_count: FULL_WORKSPACE_COUNT,
+                multi_hop_pairs_per_user: 1,
             },
         }
     }
@@ -306,7 +336,6 @@ enum FactCategory {
 struct ScheduledFact {
     category: FactCategory,
     session_key: String,
-    transcript: String,
     fact: LedgerFact,
 }
 
@@ -354,11 +383,9 @@ impl ScheduleBuilder {
             pii_class: draft.pii_class,
             expected_redacted: draft.expected_redacted,
         };
-        let transcript = render_fact_transcript(draft.category, &fact);
         self.facts.push(ScheduledFact {
             category: draft.category,
             session_key: assignment.key,
-            transcript,
             fact,
         });
         Ok(fact_id)
@@ -386,7 +413,12 @@ impl FactSchedule {
             .collect()
     }
 
-    fn render_sessions(&self) -> Vec<SyntheticSession> {
+    fn render_sessions(&self, transcript_style: TranscriptStyle) -> Vec<SyntheticSession> {
+        let facts_by_id = self
+            .facts
+            .iter()
+            .map(|scheduled| (scheduled.fact.fact_id.as_str(), &scheduled.fact))
+            .collect::<BTreeMap<_, _>>();
         self.sessions
             .iter()
             .filter_map(|(session_key, plan)| {
@@ -396,7 +428,12 @@ impl FactSchedule {
                     .filter(|scheduled| scheduled.session_key == *session_key)
                     .map(|scheduled| SyntheticTurn {
                         turn_seq: scheduled.fact.source_turn_seq,
-                        transcript: scheduled.transcript.clone(),
+                        transcript: render_fact_transcript(
+                            transcript_style,
+                            scheduled.category,
+                            &scheduled.fact,
+                            &facts_by_id,
+                        ),
                         fact_ids: vec![scheduled.fact.fact_id.clone()],
                     })
                     .collect::<Vec<_>>();
@@ -404,6 +441,17 @@ impl FactSchedule {
                 if turns.is_empty() {
                     None
                 } else {
+                    if transcript_style == TranscriptStyle::Natural {
+                        let turn_seq = turns
+                            .last()
+                            .and_then(|turn| turn.turn_seq.checked_add(1))
+                            .unwrap_or(u64::MAX);
+                        turns.push(SyntheticTurn {
+                            turn_seq,
+                            transcript: natural_frames::distractor(session_key),
+                            fact_ids: Vec::new(),
+                        });
+                    }
                     Some(SyntheticSession {
                         session_id: plan.session_id,
                         workspace_id: plan.workspace_id.clone(),
@@ -461,6 +509,16 @@ struct UserFactRefs {
     preference_answer: String,
     pii_fact_id: String,
     pii_answer: String,
+    multi_hop_pairs: Vec<MultiHopFactRefs>,
+}
+
+#[derive(Debug, Clone)]
+struct MultiHopFactRefs {
+    depends_fact_id: String,
+    owner_fact_id: String,
+    service: String,
+    library: String,
+    team: String,
 }
 
 #[derive(Debug)]
@@ -730,6 +788,7 @@ fn schedule_user_facts(
     users: &[UserId],
     workspaces: &[WorkspaceId],
 ) -> Result<UserFactRefs> {
+    let settings = ProfileSettings::new(profile);
     let workspace_index = workspace_index_for_user(user_index, workspaces.len());
     let mut rng = StableRng::new(seed ^ mix_u64(user_index as u64) ^ 0x515E_D123);
     let repository = choose(&mut rng, REPOSITORIES)?;
@@ -831,6 +890,86 @@ fn schedule_user_facts(
         },
     )?;
 
+    let mut multi_hop_pairs = Vec::new();
+    for pair_index in 0..settings.multi_hop_pairs_per_user {
+        let component = choose(&mut rng, COMPONENTS)?;
+        let library = choose(&mut rng, LIBRARIES)?;
+        let team = choose(&mut rng, OWNER_TEAMS)?;
+        let service = format!("{component}-dep-{seed_index}-{user_index}-{pair_index}");
+        let dependency_fact_id = fact_id(
+            profile,
+            seed_index,
+            workspace_index,
+            Some(user_index),
+            &format!("depends-on-{pair_index}"),
+        );
+        builder.push_fact(
+            user_session(
+                profile,
+                seed_index,
+                seed,
+                workspace_index,
+                user_index,
+                users,
+                workspaces,
+            ),
+            FactDraft {
+                category: FactCategory::WorkspaceShared,
+                fact_id: dependency_fact_id.clone(),
+                scope: ScopeTier::Workspace,
+                valid_from: fixed_time(base_day + 8 + pair_index as i64 * 2, 0)?,
+                valid_to: None,
+                subject: service.clone(),
+                predicate: "depends_on".to_string(),
+                object: library.to_string(),
+                answer: format!("{service} depends on {library}."),
+                supersedes: Vec::new(),
+                pii_class: PiiClass::None,
+                expected_redacted: false,
+            },
+        )?;
+
+        let owner_fact_id = fact_id(
+            profile,
+            seed_index,
+            workspace_index,
+            Some(user_index),
+            &format!("owned-by-{pair_index}"),
+        );
+        builder.push_fact(
+            user_aux_session(
+                profile,
+                seed_index,
+                seed,
+                user_index,
+                3 + pair_index as u128,
+                users,
+                workspaces,
+            ),
+            FactDraft {
+                category: FactCategory::WorkspaceShared,
+                fact_id: owner_fact_id.clone(),
+                scope: ScopeTier::Workspace,
+                valid_from: fixed_time(base_day + 9 + pair_index as i64 * 2, 0)?,
+                valid_to: None,
+                subject: library.to_string(),
+                predicate: "owned_by".to_string(),
+                object: team.to_string(),
+                answer: format!("The {team} team owns {library}."),
+                supersedes: Vec::new(),
+                pii_class: PiiClass::None,
+                expected_redacted: false,
+            },
+        )?;
+        multi_hop_pairs.push(MultiHopFactRefs {
+            depends_fact_id: dependency_fact_id,
+            owner_fact_id,
+            service,
+            library: library.to_string(),
+            team: team.to_string(),
+        });
+    }
+
     Ok(UserFactRefs {
         workspace_index,
         private_fact_id,
@@ -839,6 +978,7 @@ fn schedule_user_facts(
         preference_answer,
         pii_fact_id,
         pii_answer,
+        multi_hop_pairs,
     })
 }
 
@@ -949,6 +1089,30 @@ fn build_probes(
                 as_of: None,
                 expected_redacted: true,
             });
+
+            for (pair_index, pair) in refs.multi_hop_pairs.iter().enumerate() {
+                probes.push(Probe {
+                    probe_id: format!("{user_prefix}-multi-hop-library-owner-{pair_index}"),
+                    probe_type: ProbeType::MultiHop,
+                    workspace_id: workspace.clone(),
+                    user_id: user.clone(),
+                    query: format!(
+                        "Which team owns the library that {} depends on?",
+                        pair.service
+                    ),
+                    answer: format!(
+                        "{} depends on {}, which is owned by {}.",
+                        pair.service, pair.library, pair.team
+                    ),
+                    expected_fact_ids: vec![
+                        pair.depends_fact_id.clone(),
+                        pair.owner_fact_id.clone(),
+                    ],
+                    blocked_fact_ids: Vec::new(),
+                    as_of: None,
+                    expected_redacted: false,
+                });
+            }
         }
 
         for workspace_index in 0..workspaces.len() {
@@ -974,22 +1138,6 @@ fn build_probes(
                 query: "Which runbook is required for this workspace deploy?".to_string(),
                 answer: format!("Use {} for this workspace deploy.", refs.runbook),
                 expected_fact_ids: vec![refs.runbook_fact_id.clone()],
-                blocked_fact_ids: Vec::new(),
-                as_of: None,
-                expected_redacted: false,
-            });
-
-            probes.push(Probe {
-                probe_id: format!("{workspace_prefix}-multi-hop-deploy-runbook"),
-                probe_type: ProbeType::MultiHop,
-                workspace_id: workspace.clone(),
-                user_id: user.clone(),
-                query: "Where should the service deploy and which runbook applies?".to_string(),
-                answer: format!("Deploy to {} and use {}.", refs.deploy_target, refs.runbook),
-                expected_fact_ids: vec![
-                    refs.deploy_new_fact_id.clone(),
-                    refs.runbook_fact_id.clone(),
-                ],
                 blocked_fact_ids: Vec::new(),
                 as_of: None,
                 expected_redacted: false,
@@ -1262,7 +1410,21 @@ fn validate_embedding_inputs(
     Ok(())
 }
 
-fn render_fact_transcript(category: FactCategory, fact: &LedgerFact) -> String {
+fn render_fact_transcript(
+    transcript_style: TranscriptStyle,
+    category: FactCategory,
+    fact: &LedgerFact,
+    facts_by_id: &BTreeMap<&str, &LedgerFact>,
+) -> String {
+    match transcript_style {
+        TranscriptStyle::Marked => render_marked_fact_transcript(category, fact),
+        TranscriptStyle::Natural => {
+            natural_frames::render_fact(category, fact, superseded_object(fact, facts_by_id))
+        }
+    }
+}
+
+fn render_marked_fact_transcript(category: FactCategory, fact: &LedgerFact) -> String {
     match category {
         FactCategory::Supersession => format!(
             "Fact: {} {} is {}. Supersedes: {}.",
@@ -1302,6 +1464,120 @@ fn render_fact_transcript(category: FactCategory, fact: &LedgerFact) -> String {
             "Fact: pii {} {} is {}. Expected answer must be redacted.",
             fact.subject, fact.predicate, fact.object
         ),
+    }
+}
+
+fn superseded_object<'a>(
+    fact: &LedgerFact,
+    facts_by_id: &'a BTreeMap<&str, &LedgerFact>,
+) -> Option<&'a str> {
+    fact.supersedes
+        .first()
+        .and_then(|fact_id| facts_by_id.get(fact_id.as_str()))
+        .map(|superseded| superseded.object.as_str())
+}
+
+mod natural_frames {
+    use super::{FactCategory, LedgerFact, ScopeTier, mix_u64};
+
+    const USER_FRAMES: &[&str] = &[
+        "Just so you know, I prefer {object} when it comes to {subject}.",
+        "For my work, {subject} should use {object}.",
+        "I switched my {subject} to {object} recently.",
+        "My {subject} {predicate_phrase} {object} these days.",
+    ];
+    const WORKSPACE_FRAMES: &[&str] = &[
+        "The team agreed that {subject} {predicate_phrase} {object}.",
+        "Heads up everyone: {subject} now {predicate_phrase} {object}.",
+        "We standardized {subject} on {object} last sprint.",
+        "{subject} {predicate_phrase} {object} per the platform decision.",
+    ];
+    const UPDATE_FRAMES: &[&str] = &[
+        "Quick update: {subject} {predicate_phrase} {object} now, not {old_object} anymore.",
+        "Correction to earlier: {subject} moved to {object}.",
+    ];
+    const DISTRACTORS: &[&str] = &[
+        "Thanks, that all sounds reasonable to me.",
+        "Busy week here, lots of meetings about nothing in particular.",
+    ];
+
+    pub(super) fn render_fact(
+        category: FactCategory,
+        fact: &LedgerFact,
+        old_object: Option<&str>,
+    ) -> String {
+        if matches!(
+            category,
+            FactCategory::Supersession | FactCategory::Temporal
+        ) && !fact.supersedes.is_empty()
+        {
+            let frame = select(&fact.fact_id, UPDATE_FRAMES);
+            return apply_frame(
+                frame,
+                fact,
+                old_object.unwrap_or("the previous value"),
+                predicate_phrase(&fact.predicate),
+            );
+        }
+
+        let frames = if fact.scope == ScopeTier::User {
+            USER_FRAMES
+        } else {
+            WORKSPACE_FRAMES
+        };
+        apply_frame(
+            select(&fact.fact_id, frames),
+            fact,
+            "the previous value",
+            predicate_phrase(&fact.predicate),
+        )
+    }
+
+    pub(super) fn distractor(session_key: &str) -> String {
+        let index = stable_index(session_key, DISTRACTORS.len());
+        DISTRACTORS[index].to_string()
+    }
+
+    pub(super) fn predicate_phrase(predicate: &str) -> &'static str {
+        match predicate {
+            "cache_backend_conflict" => "has cache backend",
+            "contact_email" => "uses contact email",
+            "depends_on" => "depends on",
+            "deploy_target" => "deploys to",
+            "on_call_primary" => "has primary on-call",
+            "owned_by" => "is owned by",
+            "private_repository" => "keeps private repository",
+            "require_runbook" => "requires",
+            "response_style" => "uses response style",
+            _ => "is",
+        }
+    }
+
+    fn select<'a>(key: &str, frames: &'a [&str]) -> &'a str {
+        let index = stable_index(key, frames.len());
+        frames[index]
+    }
+
+    fn stable_index(key: &str, len: usize) -> usize {
+        let mut state = 0xD1B5_4A32_D192_ED03_u64;
+        for byte in key.bytes() {
+            state ^= u64::from(byte);
+            state = mix_u64(state);
+        }
+        (state as usize) % len
+    }
+
+    fn apply_frame(
+        frame: &str,
+        fact: &LedgerFact,
+        old_object: &str,
+        predicate_phrase: &str,
+    ) -> String {
+        frame
+            .replace("{subject}", &fact.subject)
+            .replace("{predicate_phrase}", predicate_phrase)
+            .replace("{object}", &fact.object)
+            .replace("{old_object}", old_object)
     }
 }
 
@@ -1431,6 +1707,33 @@ fn user_session(
     }
 }
 
+fn user_aux_session(
+    profile: CorpusProfile,
+    seed_index: usize,
+    seed: u64,
+    user_index: usize,
+    purpose: u128,
+    users: &[UserId],
+    workspaces: &[WorkspaceId],
+) -> SessionAssignment {
+    let workspace_index = workspace_index_for_user(user_index, workspaces.len());
+    SessionAssignment {
+        key: format!("s{seed_index:02}-w{workspace_index:02}-u{user_index:02}-aux-{purpose}"),
+        plan: SessionPlan {
+            session_id: deterministic_session_id(
+                profile,
+                seed_index,
+                seed,
+                workspace_index,
+                user_index,
+                purpose,
+            ),
+            workspace_id: workspaces[workspace_index].clone(),
+            user_id: users[user_index].clone(),
+        },
+    }
+}
+
 fn deterministic_session_id(
     profile: CorpusProfile,
     seed_index: usize,
@@ -1491,19 +1794,30 @@ fn probe_prefix(
     }
 }
 
-fn corpus_id(profile: CorpusProfile, seeds: &[u64]) -> String {
+fn corpus_id(profile: CorpusProfile, transcript_style: TranscriptStyle, seeds: &[u64]) -> String {
     let seed_segment = seeds
         .iter()
         .map(u64::to_string)
         .collect::<Vec<_>>()
         .join("-");
-    format!("memory-eval-{}-{seed_segment}", profile_slug(profile))
+    format!(
+        "memory-eval-{}-{}-{seed_segment}",
+        profile_slug(profile),
+        transcript_style_slug(transcript_style)
+    )
 }
 
 fn profile_slug(profile: CorpusProfile) -> &'static str {
     match profile {
         CorpusProfile::Pr => "pr",
         CorpusProfile::Full => "full",
+    }
+}
+
+fn transcript_style_slug(transcript_style: TranscriptStyle) -> &'static str {
+    match transcript_style {
+        TranscriptStyle::Marked => "marked",
+        TranscriptStyle::Natural => "natural",
     }
 }
 

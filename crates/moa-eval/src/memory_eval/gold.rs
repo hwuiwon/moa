@@ -49,6 +49,34 @@ impl GoldResolutionReport {
         resolved as f64 / self.records.len() as f64
     }
 
+    /// Returns the fraction of resolved ledger facts stored with the expected scope.
+    #[must_use]
+    pub fn scope_match_rate(&self) -> f64 {
+        let (matches, total) = self.scope_match_counts();
+        if total == 0 {
+            0.0
+        } else {
+            matches as f64 / total as f64
+        }
+    }
+
+    /// Returns expected-scope match and resolved-record counts.
+    #[must_use]
+    pub fn scope_match_counts(&self) -> (usize, usize) {
+        let mut matches = 0_usize;
+        let mut total = 0_usize;
+        for record in &self.records {
+            if record.resolution_status == GoldResolutionStatus::Unresolved {
+                continue;
+            }
+            total += 1;
+            if record.scope.as_deref() == Some(record.expected_scope.as_str()) {
+                matches += 1;
+            }
+        }
+        (matches, total)
+    }
+
     /// Returns unresolved ledger fact identifiers in output order.
     #[must_use]
     pub fn unresolved_facts(&self) -> Vec<&str> {
@@ -256,13 +284,21 @@ async fn resolve_fact_nodes(
         return Ok(hash_matches);
     }
 
-    if source.turn.fact_ids.len() == 1 && source_candidates.len() == 1 {
+    if is_marked_transcript(&source.turn.transcript)
+        && source.turn.fact_ids.len() == 1
+        && source_candidates.len() == 1
+    {
         return Ok(source_candidates);
     }
 
     let structured_source_matches = match_by_structured_fact(&source_candidates, fact);
     if !structured_source_matches.is_empty() {
         return Ok(structured_source_matches);
+    }
+
+    let containment_matches = match_by_provenance_containment(&source_candidates, fact);
+    if !containment_matches.is_empty() {
+        return Ok(containment_matches);
     }
 
     let broad_candidates = fetch_workspace_fact_candidates(ctx, fact).await?;
@@ -332,6 +368,54 @@ fn match_by_structured_fact(candidates: &[NodeIndexRow], fact: &LedgerFact) -> V
         .collect()
 }
 
+fn match_by_provenance_containment(
+    candidates: &[NodeIndexRow],
+    fact: &LedgerFact,
+) -> Vec<NodeIndexRow> {
+    let object_tokens = match_tokens(&fact.object);
+    if object_tokens.is_empty() {
+        return Vec::new();
+    }
+    let answer_tokens = match_tokens(&fact.answer);
+    let answer_mentions_object = object_tokens
+        .iter()
+        .all(|token| answer_tokens.contains(token));
+    let answer_required = if answer_mentions_object {
+        answer_tokens
+    } else {
+        BTreeSet::new()
+    };
+
+    candidates
+        .iter()
+        .filter(|candidate| {
+            let candidate_tokens = candidate_match_tokens(candidate);
+            contains_all_tokens(&candidate_tokens, &object_tokens)
+                && (answer_required.is_empty()
+                    || contains_all_tokens(&candidate_tokens, &answer_required))
+        })
+        .cloned()
+        .collect()
+}
+
+fn candidate_match_tokens(candidate: &NodeIndexRow) -> BTreeSet<String> {
+    let mut text = String::new();
+    text.push_str(&candidate.name);
+    text.push(' ');
+    if let Some(summary) = property_text(candidate.properties_summary.as_ref(), "summary") {
+        text.push_str(&summary);
+    }
+    text.push(' ');
+    if let Some(object) = property_text(candidate.properties_summary.as_ref(), "object") {
+        text.push_str(&object);
+    }
+    match_tokens(&text)
+}
+
+fn contains_all_tokens(candidate: &BTreeSet<String>, required: &BTreeSet<String>) -> bool {
+    required.iter().all(|token| candidate.contains(token))
+}
+
 fn structured_fact_matches(properties: Option<&Value>, fact: &LedgerFact) -> bool {
     let Some(properties) = properties else {
         return false;
@@ -360,6 +444,10 @@ fn structured_fact_matches(properties: Option<&Value>, fact: &LedgerFact) -> boo
 }
 
 fn expected_fact_hashes(fact: &LedgerFact, source: &FactSource<'_>) -> Result<BTreeSet<String>> {
+    if !is_marked_transcript(&source.turn.transcript) {
+        return Ok(BTreeSet::new());
+    }
+
     let turn = SessionTurn {
         workspace_id: source.session.workspace_id.clone(),
         user_id: source.session.user_id.clone(),
@@ -400,6 +488,12 @@ fn expected_fact_hashes(fact: &LedgerFact, source: &FactSource<'_>) -> Result<BT
         }
     }
     Ok(hashes)
+}
+
+fn is_marked_transcript(transcript: &str) -> bool {
+    transcript
+        .lines()
+        .any(|line| line.trim_start().starts_with("Fact:"))
 }
 
 fn extracted_fact_matches_ledger(
@@ -716,11 +810,13 @@ fn turn_finalized_at(
         })?;
         timestamps.push(fact.valid_from);
     }
-    timestamps.into_iter().min().ok_or_else(|| {
-        EvalError::InvalidConfig(format!(
-            "synthetic turn {} must reference at least one fact for gold resolution",
-            turn.turn_seq
-        ))
+    if let Some(timestamp) = timestamps.into_iter().min() {
+        return Ok(timestamp);
+    }
+    DateTime::<Utc>::from_timestamp(0, 0).ok_or_else(|| {
+        EvalError::InvalidConfig(
+            "failed to construct deterministic empty-turn timestamp".to_string(),
+        )
     })
 }
 
@@ -763,6 +859,14 @@ fn normalize_match_text(text: &str) -> String {
         }
     }
     normalized.trim().to_string()
+}
+
+fn match_tokens(text: &str) -> BTreeSet<String> {
+    normalize_match_text(text)
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn scope_tier_str(scope: moa_core::ScopeTier) -> &'static str {
@@ -849,4 +953,184 @@ fn io_error(path: &Path, source: std::io::Error) -> EvalError {
 struct FactSource<'a> {
     session: &'a SyntheticSession,
     turn: &'a SyntheticTurn,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use moa_core::{ScopeTier, SessionId, UserId, WorkspaceId};
+    use serde_json::json;
+
+    #[test]
+    fn gold_matcher_four_resolves_natural_fact_by_object_and_answer_containment() {
+        // Pins: provenance-bounded containment resolves a paraphrased source candidate.
+        let fact = test_fact("fact-runtime", "runtime", "uses", "restate");
+        let candidate = node_row(
+            1,
+            "A natural turn said runtime definitely uses restate, and the answer is runtime uses restate.",
+            "restate",
+        );
+
+        let matches = match_by_provenance_containment(std::slice::from_ref(&candidate), &fact);
+
+        assert_eq!(matches, vec![candidate]);
+    }
+
+    #[test]
+    fn gold_matcher_four_stays_inside_source_turn_candidates() {
+        // Pins: the containment matcher only scores the caller-provided source candidates.
+        let fact = test_fact("fact-runtime", "runtime", "uses", "restate");
+        let other_turn_candidate = node_row(
+            2,
+            "Another turn also says runtime uses restate and runtime uses restate.",
+            "restate",
+        );
+
+        let matches = match_by_provenance_containment(&[], &fact);
+
+        assert!(
+            matches.is_empty(),
+            "workspace-wide candidates are not considered by matcher four; caller must pass source-turn rows"
+        );
+        assert_eq!(
+            match_by_provenance_containment(&[other_turn_candidate], &fact).len(),
+            1,
+            "the helper itself is intentionally candidate-list bounded"
+        );
+    }
+
+    #[test]
+    fn gold_matcher_four_multi_match_yields_duplicate_status() {
+        // Pins: ambiguous containment matches stay visible as duplicate gold resolution.
+        let fact = test_fact("fact-runtime", "runtime", "uses", "restate");
+        let matches = match_by_provenance_containment(
+            &[
+                node_row(
+                    3,
+                    "runtime uses restate because runtime uses restate",
+                    "restate",
+                ),
+                node_row(
+                    4,
+                    "runtime uses restate and the answer says runtime uses restate",
+                    "restate",
+                ),
+            ],
+            &fact,
+        );
+
+        let record = record_for_fact(&fact, &matches, &BTreeMap::new());
+
+        assert_eq!(matches.len(), 2);
+        assert_eq!(record.resolution_status, GoldResolutionStatus::Duplicate);
+        assert_eq!(record.node_uids.len(), 2);
+    }
+
+    #[test]
+    fn scope_match_rate_counts_mixed_scope_as_mismatch() {
+        // Pins: mixed-scope gold resolution is a scope bug, not partial credit.
+        let report = GoldResolutionReport {
+            ingest_reports: Vec::new(),
+            records: vec![
+                gold_record(
+                    "fact-workspace",
+                    Some("workspace"),
+                    "workspace",
+                    GoldResolutionStatus::Resolved,
+                ),
+                gold_record(
+                    "fact-mixed",
+                    Some("mixed"),
+                    "user",
+                    GoldResolutionStatus::Duplicate,
+                ),
+                gold_record(
+                    "fact-missing",
+                    None,
+                    "user",
+                    GoldResolutionStatus::Unresolved,
+                ),
+            ],
+        };
+
+        assert_eq!(report.scope_match_counts(), (1, 2));
+        assert_eq!(report.scope_match_rate(), 0.5);
+    }
+
+    fn test_fact(
+        fact_id: &'static str,
+        subject: &'static str,
+        predicate: &'static str,
+        object: &'static str,
+    ) -> LedgerFact {
+        LedgerFact {
+            workspace_id: WorkspaceId::new("workspace-test"),
+            user_id: UserId::new("user-test"),
+            scope: ScopeTier::Workspace,
+            fact_id: fact_id.to_string(),
+            valid_from: timestamp(),
+            valid_to: None,
+            subject: subject.to_string(),
+            predicate: predicate.to_string(),
+            object: object.to_string(),
+            answer: format!("{subject} {predicate} {object}."),
+            supersedes: Vec::new(),
+            source_session_id: SessionId(uuid::Uuid::from_u128(1)),
+            source_turn_seq: 1,
+            pii_class: PiiClass::None,
+            expected_redacted: false,
+        }
+    }
+
+    fn node_row(uid_suffix: u128, summary: &str, object: &str) -> NodeIndexRow {
+        NodeIndexRow {
+            uid: uuid::Uuid::from_u128(uid_suffix),
+            label: NodeLabel::Fact,
+            workspace_id: Some("workspace-test".to_string()),
+            user_id: None,
+            scope: "workspace".to_string(),
+            name: summary.to_string(),
+            pii_class: PiiClass::None,
+            valid_to: None,
+            valid_from: timestamp(),
+            properties_summary: Some(json!({
+                "summary": summary,
+                "object": object,
+            })),
+            last_accessed_at: timestamp(),
+        }
+    }
+
+    fn gold_record(
+        fact_id: &str,
+        scope: Option<&str>,
+        expected_scope: &str,
+        status: GoldResolutionStatus,
+    ) -> GoldNodeRecord {
+        GoldNodeRecord {
+            fact_id: fact_id.to_string(),
+            node_uids: Vec::new(),
+            scope: scope.map(ToOwned::to_owned),
+            active: false,
+            valid_from: None,
+            valid_to: None,
+            resolution_status: status,
+            expected_scope: expected_scope.to_string(),
+            expected_valid_from: timestamp(),
+            expected_valid_to: None,
+            pii_status: GoldPiiStatus::NotExpected,
+            stored_pii_classes: Vec::new(),
+            supersedes: Vec::new(),
+            superseded_by: Vec::new(),
+            supersession_chain: Vec::new(),
+            nodes: Vec::new(),
+        }
+    }
+
+    fn timestamp() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("valid timestamp")
+    }
 }

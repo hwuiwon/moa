@@ -5,6 +5,8 @@ report before shipping new retrieval machinery. It decomposes failures into
 three ordered questions:
 
 1. Did ingestion preserve the expected facts? Track `ingestion_coverage`.
+   For production-shaped source text, also track `scope_match_rate` and
+   `extraction_precision`.
 2. Did retrieval surface the preserved facts? Track `recall_at_4`,
    `recall_at_25`, `mrr`, `ndcg_at_4`, `zero_recall_rate`, and
    `per_leg_recall`.
@@ -25,6 +27,8 @@ bootstrap intervals, cross-user leak probe ids, and `RetrievalMetrics`.
 The metric surface is:
 
 - `ingestion_coverage`
+- `scope_match_rate`
+- `extraction_precision`
 - `recall_at_4`
 - `recall_at_25`
 - `mrr`
@@ -51,6 +55,11 @@ superseded facts must be carried by lexical lookup plus graph traversal and
 hydration. Vector retrieval can only serve historical rows whose embedding rows
 were retained.
 
+`scope_match_rate` is the fraction of resolved gold facts whose stored scope
+matches the ledger scope; `mixed` counts as a mismatch. `extraction_precision`
+is the fraction of stored `Fact` nodes in the eval workspaces that map back to a
+ledger fact, including superseded nodes in both numerator and denominator.
+
 ## Eval Layering
 
 `moa-eval::kernel` is the suite-agnostic layer for retrieval stats, core
@@ -72,9 +81,10 @@ plus `RANKING_PIPELINE_VERSION`.
 
 ## PR Hermetic Check
 
-PR checks use the `pr` corpus profile. The run is deterministic and uses cached
-embedding fixtures; it must not call live providers or billed embedding APIs.
-It does require a local Postgres URL, usually from the MOA compose stack:
+PR checks use the `pr` corpus profile with marked transcripts. The run is
+deterministic and uses cached embedding fixtures; it must not call live
+providers or billed embedding APIs. It does require a local Postgres URL,
+usually from the MOA compose stack:
 
 ```bash
 export MOA_TEST_POSTGRES_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa
@@ -91,6 +101,30 @@ PR runs use the deterministic `FeatureV1` ranking mode by default. Pass
 `--ranking legacy` to `run-memory-retrieval-eval` only for A/B comparison. In
 PR runs without Cohere credentials, the reranker is `Noop`, so the post-rerank
 top 4 equals the pre-rerank top 4.
+
+## Transcript styles
+
+Corpus size and transcript realism are separate axes. `--profile pr|full`
+controls size, and `--transcript-style marked|natural` controls source-turn
+rendering.
+
+`marked` is the CI-gated style. It keeps the legacy `Fact:` and scope markers
+so deterministic retrieval and ranking changes can be validated without
+depending on a better extractor.
+
+`natural` is an observed profile. It renders conversational deterministic
+sentences, includes at least one distractor turn per session, and contains no
+`Fact:`, `workspace shared`, or `user private` markers. The heuristic extractor
+is expected to lose facts, drift scope, and extract spurious distractors here;
+that is the signal this profile exists to preserve. Natural reports enforce
+hard blockers (`cross_user_leak_count == 0` and `pii_unredacted_count == 0`)
+but do not gate quality metrics until the Section 2 extraction work can move
+them.
+
+Corpus realism v2 also expands PR-profile multi-hop probes from 6 to 30 using
+cross-session `depends_on`/`owned_by` fact pairs. Recall@4 is mechanically lower
+than prompt-02 baselines because multi-hop probes require both supporting facts
+inside the final window.
 
 ## Paired Comparison
 
@@ -144,6 +178,12 @@ The current PR-profile baseline is checked in at:
 docs/eval/baselines/memory-retrieval-pr-baseline.json
 ```
 
+The observed natural PR-profile baseline is checked in at:
+
+```bash
+docs/eval/baselines/memory-retrieval-pr-natural-baseline.json
+```
+
 Use it when evaluating an implementation candidate:
 
 ```bash
@@ -175,6 +215,11 @@ Examples:
   `mrr` or `ndcg_at_4` shows ranking quality is the bottleneck.
 - Add adaptive gating only after the report shows predictable over-retrieval or
   under-retrieval patterns that fixed cutoffs cannot address.
+- Add LLM extraction or scope classification only after the natural profile's
+  `ingestion_coverage` and `scope_match_rate` show the marked extractor signal
+  no longer represents production transcripts.
+- Add entity-resolution upgrades only after `extraction_precision` and graph-leg
+  attribution show spurious facts or unresolved entity links are the bottleneck.
 
 The report decides the next architecture step. A feature without a named report
 bottleneck stays out of the shipping path.
@@ -185,7 +230,8 @@ When the budget gate fails, triage in this order:
 
 1. Hard blockers: fix any `cross_user_leak_count != 0` or
    `pii_unredacted_count != 0` before reading quality metrics.
-2. Ingestion: inspect `ingestion_coverage` and the gold-resolution section.
+2. Ingestion: inspect `ingestion_coverage`, `scope_match_rate`,
+   `extraction_precision`, and the gold-resolution section.
 3. Retrieval: inspect `recall_at_4`, `recall_at_25`, `mrr`, `ndcg_at_4`,
    `zero_recall_rate`, and `per_leg_recall`.
 4. Answer behavior: inspect `answer_faithfulness`,
