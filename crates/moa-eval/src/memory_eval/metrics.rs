@@ -233,6 +233,12 @@ pub struct RetrievalMetrics {
     pub core: RetrievalCoreMetrics,
     /// Fraction of ledger facts resolved to graph nodes during ingestion.
     pub ingestion_coverage: MetricSummary,
+    /// Fraction of resolved ledger facts stored with the expected scope.
+    #[serde(default)]
+    pub scope_match_rate: MetricSummary,
+    /// Fraction of stored Fact nodes that mapped back to a ledger fact.
+    #[serde(default)]
+    pub extraction_precision: MetricSummary,
     /// Mean pre-rerank recall@4 over probes with expected facts.
     #[serde(default)]
     pub pre_rerank_recall_at_4: MetricSummary,
@@ -256,6 +262,15 @@ pub struct RetrievalMetrics {
     /// Number of temporal probes where the parser fired but produced the wrong instant.
     #[serde(default)]
     pub temporal_parse_mismatch_count: usize,
+}
+
+/// Counts used to compute stored-Fact extraction precision.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExtractionPrecisionCounts {
+    /// Stored Fact nodes resolved to at least one ledger fact.
+    pub mapped_fact_nodes: usize,
+    /// Total stored Fact nodes observed in the eval workspace.
+    pub total_fact_nodes: usize,
 }
 
 impl Deref for RetrievalMetrics {
@@ -310,14 +325,34 @@ pub fn aggregate_retrieval_eval(
     probe_results: Vec<ProbeResult>,
     bootstrap_config: BootstrapConfig,
 ) -> RetrievalEvalReport {
+    aggregate_retrieval_eval_with_extraction_precision(
+        gold_resolution,
+        probe_results,
+        bootstrap_config,
+        ExtractionPrecisionCounts::default(),
+    )
+}
+
+/// Aggregates retrieval metrics with stored-Fact extraction precision counts.
+#[must_use]
+pub fn aggregate_retrieval_eval_with_extraction_precision(
+    gold_resolution: &GoldResolutionReport,
+    probe_results: Vec<ProbeResult>,
+    bootstrap_config: BootstrapConfig,
+    extraction_precision: ExtractionPrecisionCounts,
+) -> RetrievalEvalReport {
     let resolved = gold_resolution
         .records
         .iter()
         .filter(|record| record.resolution_status != GoldResolutionStatus::Unresolved)
         .count();
-    aggregate_retrieval_eval_from_counts(
+    let (scope_matches, scope_total) = gold_resolution.scope_match_counts();
+    aggregate_retrieval_eval_from_diagnostic_counts(
         resolved,
         gold_resolution.records.len(),
+        scope_matches,
+        scope_total,
+        extraction_precision,
         probe_results,
         bootstrap_config,
     )
@@ -331,7 +366,36 @@ pub fn aggregate_retrieval_eval_from_counts(
     probe_results: Vec<ProbeResult>,
     bootstrap_config: BootstrapConfig,
 ) -> RetrievalEvalReport {
-    let metrics = aggregate_metrics(resolved_facts, total_facts, &probe_results);
+    aggregate_retrieval_eval_from_diagnostic_counts(
+        resolved_facts,
+        total_facts,
+        0,
+        0,
+        ExtractionPrecisionCounts::default(),
+        probe_results,
+        bootstrap_config,
+    )
+}
+
+/// Aggregates retrieval metrics from explicit ingestion and diagnostic counts.
+#[must_use]
+pub fn aggregate_retrieval_eval_from_diagnostic_counts(
+    resolved_facts: usize,
+    total_facts: usize,
+    scope_matched_facts: usize,
+    scope_resolved_facts: usize,
+    extraction_precision: ExtractionPrecisionCounts,
+    probe_results: Vec<ProbeResult>,
+    bootstrap_config: BootstrapConfig,
+) -> RetrievalEvalReport {
+    let metrics = aggregate_metrics(
+        resolved_facts,
+        total_facts,
+        scope_matched_facts,
+        scope_resolved_facts,
+        extraction_precision,
+        &probe_results,
+    );
     let bootstrap = bootstrap_reports(&probe_results, bootstrap_config);
     let cross_user_leak_probe_ids = cross_user_leak_probe_ids(&probe_results);
 
@@ -346,6 +410,9 @@ pub fn aggregate_retrieval_eval_from_counts(
 fn aggregate_metrics(
     resolved_facts: usize,
     total_facts: usize,
+    scope_matched_facts: usize,
+    scope_resolved_facts: usize,
+    extraction_precision: ExtractionPrecisionCounts,
     probe_results: &[ProbeResult],
 ) -> RetrievalMetrics {
     let pre_rerank_recall_at_4 = summarize_probe_values(probe_results, |probe| {
@@ -374,6 +441,11 @@ fn aggregate_metrics(
             pii_unredacted_count: pii_unredacted_count(probe_results),
         },
         ingestion_coverage: MetricSummary::from_counts(resolved_facts, total_facts),
+        scope_match_rate: MetricSummary::from_counts(scope_matched_facts, scope_resolved_facts),
+        extraction_precision: MetricSummary::from_counts(
+            extraction_precision.mapped_fact_nodes,
+            extraction_precision.total_fact_nodes,
+        ),
         pre_rerank_recall_at_4,
         pre_rerank_recall_at_25,
         post_rerank_recall_at_4,

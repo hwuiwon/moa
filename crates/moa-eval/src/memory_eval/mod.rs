@@ -15,9 +15,10 @@ pub use crate::kernel::{
 };
 pub use corpus::{
     CORPUS_SCHEMA_VERSION, CorpusManifest, CorpusProfile, LedgerFact, Probe, ProbeType,
-    SyntheticSession, SyntheticTurn, read_ledger_jsonl, read_manifest_json, read_probes_jsonl,
-    read_sessions_jsonl, validate_corpus, validate_ledger, validate_probes, validate_sessions,
-    write_ledger_jsonl, write_manifest_json, write_probes_jsonl, write_sessions_jsonl,
+    SyntheticSession, SyntheticTurn, TranscriptStyle, read_ledger_jsonl, read_manifest_json,
+    read_probes_jsonl, read_sessions_jsonl, validate_corpus, validate_ledger, validate_probes,
+    validate_sessions, write_ledger_jsonl, write_manifest_json, write_probes_jsonl,
+    write_sessions_jsonl,
 };
 pub use embeddings::{
     CACHED_EMBEDDING_MODEL, CachedEmbeddingFixture, CachedEmbeddingProvider,
@@ -26,7 +27,8 @@ pub use embeddings::{
 };
 pub use generator::{
     EmbeddingInput, EmbeddingInputKind, GeneratedMemoryEvalCorpus, generate_memory_eval_corpus,
-    read_embedding_inputs_jsonl, write_embedding_inputs_jsonl, write_memory_eval_corpus,
+    generate_memory_eval_corpus_with_style, read_embedding_inputs_jsonl,
+    write_embedding_inputs_jsonl, write_memory_eval_corpus,
 };
 pub use gold::{
     GoldIngestTurnReport, GoldNodeRecord, GoldNodeSnapshot, GoldPiiStatus, GoldResolutionReport,
@@ -36,8 +38,10 @@ pub use judge::{
     AnswerJudge, DeterministicJudge, JudgeInput, JudgeOutcome, PairwiseLlmJudge, PairwiseWinner,
 };
 pub use metrics::{
-    CandidateLegs, ProbeResult, RetrievalEvalReport, RetrievalMetrics, RetrievedCandidate,
-    aggregate_retrieval_eval, aggregate_retrieval_eval_from_counts, candidates_from_retrieval_hits,
+    CandidateLegs, ExtractionPrecisionCounts, ProbeResult, RetrievalEvalReport, RetrievalMetrics,
+    RetrievedCandidate, aggregate_retrieval_eval, aggregate_retrieval_eval_from_counts,
+    aggregate_retrieval_eval_from_diagnostic_counts,
+    aggregate_retrieval_eval_with_extraction_precision, candidates_from_retrieval_hits,
 };
 pub use moa_brain::retrieval::{RankingConfig, RankingMode, RankingWeights};
 pub use runner::{

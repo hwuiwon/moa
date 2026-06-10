@@ -29,6 +29,9 @@ pub struct CorpusManifest {
     pub description: String,
     /// Deterministic generation seeds that produced this corpus.
     pub seeds: Vec<u64>,
+    /// Transcript rendering style used by synthetic source sessions.
+    #[serde(default)]
+    pub transcript_style: TranscriptStyle,
 }
 
 impl CorpusManifest {
@@ -52,6 +55,17 @@ pub enum CorpusProfile {
     Pr,
     /// Larger corpus for nightly or manual runs.
     Full,
+}
+
+/// Rendering style for synthetic source transcripts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptStyle {
+    /// Legacy marker-heavy transcripts optimized for the heuristic extractor.
+    #[default]
+    Marked,
+    /// Conversational transcripts with no fact or scope markers.
+    Natural,
 }
 
 /// A ledger-first fact that probes should be able to retrieve or suppress.

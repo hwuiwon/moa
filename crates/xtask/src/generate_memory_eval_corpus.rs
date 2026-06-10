@@ -4,14 +4,15 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use moa_eval::memory_eval::{
-    CorpusProfile, build_cached_embedding_fixtures, generate_memory_eval_corpus,
-    write_embeddings_jsonl, write_memory_eval_corpus,
+    CorpusProfile, TranscriptStyle, build_cached_embedding_fixtures,
+    generate_memory_eval_corpus_with_style, write_embeddings_jsonl, write_memory_eval_corpus,
 };
 
 /// Runs the memory evaluation corpus generator command.
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let options = Options::parse(args)?;
-    let corpus = generate_memory_eval_corpus(options.profile, options.seeds)?;
+    let corpus =
+        generate_memory_eval_corpus_with_style(options.profile, options.seeds, options.style)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -24,8 +25,9 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         })
         .with_context(|| format!("write memory eval corpus to {}", options.output.display()))?;
     println!(
-        "wrote memory eval corpus: profile={:?} seeds={:?} output={} probes={} embeddings={}",
+        "wrote memory eval corpus: profile={:?} style={:?} seeds={:?} output={} probes={} embeddings={}",
         corpus.manifest.profile,
+        corpus.manifest.transcript_style,
         corpus.manifest.seeds,
         options.output.display(),
         corpus.probes.len(),
@@ -37,6 +39,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
 #[derive(Debug)]
 struct Options {
     profile: CorpusProfile,
+    style: TranscriptStyle,
     seeds: Vec<u64>,
     output: PathBuf,
 }
@@ -44,6 +47,7 @@ struct Options {
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self> {
         let mut profile = None;
+        let mut style = TranscriptStyle::Marked;
         let mut seeds = Vec::new();
         let mut output = None;
         let mut args = args.peekable();
@@ -53,6 +57,12 @@ impl Options {
                 "--profile" => {
                     let value = args.next().context("--profile requires pr or full")?;
                     profile = Some(parse_profile(&value)?);
+                }
+                "--transcript-style" => {
+                    let value = args
+                        .next()
+                        .context("--transcript-style requires marked or natural")?;
+                    style = parse_transcript_style(&value)?;
                 }
                 "--seed" => {
                     let value = args.next().context("--seed requires a u64 value")?;
@@ -75,6 +85,7 @@ impl Options {
 
         Ok(Self {
             profile: profile.context("--profile pr|full is required")?,
+            style,
             seeds,
             output: output.context("--output <path> is required")?,
         })
@@ -89,6 +100,16 @@ fn parse_profile(value: &str) -> Result<CorpusProfile> {
     }
 }
 
+fn parse_transcript_style(value: &str) -> Result<TranscriptStyle> {
+    match value {
+        "marked" => Ok(TranscriptStyle::Marked),
+        "natural" => Ok(TranscriptStyle::Natural),
+        other => {
+            bail!("unsupported memory eval transcript style {other:?}; expected marked or natural")
+        }
+    }
+}
+
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- generate-memory-eval-corpus --profile pr|full --seed <u64> --seed <u64> --seed <u64> --output <path>"
+    "usage: cargo run -p xtask -- generate-memory-eval-corpus --profile pr|full [--transcript-style marked|natural] --seed <u64> --seed <u64> --seed <u64> --output <path>"
 }

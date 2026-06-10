@@ -14,17 +14,19 @@ use moa_core::{
 use moa_eval::EvalError;
 use moa_eval::memory_eval::{
     BinaryProbeOutcome, BootstrapConfig, CORPUS_SCHEMA_VERSION, CachedEmbeddingProvider,
-    CandidateLegs, CorpusManifest, CorpusProfile, EmbeddingInputKind, GeneratedMemoryEvalCorpus,
-    GoldPiiStatus, GoldResolutionReport, GoldResolutionStatus, LedgerFact,
-    MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport, MetricSummary, Probe, ProbeResult,
-    ProbeType, RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K, RetrievedCandidate,
-    SyntheticSession, SyntheticTurn, aggregate_retrieval_eval_from_counts, benjamini_hochberg,
+    CandidateLegs, CorpusManifest, CorpusProfile, EmbeddingInputKind, ExtractionPrecisionCounts,
+    GeneratedMemoryEvalCorpus, GoldPiiStatus, GoldResolutionReport, GoldResolutionStatus,
+    LedgerFact, MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport, MetricSummary, Probe,
+    ProbeResult, ProbeType, RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K, RetrievedCandidate,
+    SyntheticSession, SyntheticTurn, TranscriptStyle, aggregate_retrieval_eval_from_counts,
+    aggregate_retrieval_eval_from_diagnostic_counts, benjamini_hochberg,
     build_cached_embedding_fixtures, candidates_from_retrieval_hits, embedding_text_hash,
-    generate_memory_eval_corpus, mcnemar_paired_test, read_embedding_inputs_jsonl,
-    read_embeddings_jsonl, read_gold_nodes_jsonl, read_ledger_jsonl, read_manifest_json,
-    read_probes_jsonl, read_sessions_jsonl, resolve_gold_nodes, run_memory_retrieval_eval,
-    validate_corpus, write_embeddings_jsonl, write_gold_nodes_jsonl, write_ledger_jsonl,
-    write_manifest_json, write_memory_eval_corpus, write_probes_jsonl, write_sessions_jsonl,
+    generate_memory_eval_corpus, generate_memory_eval_corpus_with_style, mcnemar_paired_test,
+    read_embedding_inputs_jsonl, read_embeddings_jsonl, read_gold_nodes_jsonl, read_ledger_jsonl,
+    read_manifest_json, read_probes_jsonl, read_sessions_jsonl, resolve_gold_nodes,
+    run_memory_retrieval_eval, validate_corpus, write_embeddings_jsonl, write_gold_nodes_jsonl,
+    write_ledger_jsonl, write_manifest_json, write_memory_eval_corpus, write_probes_jsonl,
+    write_sessions_jsonl,
 };
 use moa_memory_graph::{AgeGraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_ingest::{
@@ -255,6 +257,172 @@ fn generator_emits_four_temporal_variants_per_supersession_chain() {
             probe.probe_id
         );
     }
+}
+
+#[test]
+fn manifest_round_trips_transcript_style_and_defaults_to_marked() -> TestResult {
+    // Pins: prompt-02-era manifests remain readable and new manifests preserve transcript style.
+    let old_manifest = serde_json::json!({
+        "version": CORPUS_SCHEMA_VERSION,
+        "corpus_id": "memory-eval-pr-legacy",
+        "profile": "pr",
+        "description": "legacy manifest without transcript style",
+        "seeds": [1, 2, 3]
+    });
+    let parsed_old: CorpusManifest = serde_json::from_value(old_manifest)?;
+    assert_eq!(parsed_old.transcript_style, TranscriptStyle::Marked);
+
+    let natural_manifest = serde_json::json!({
+        "version": CORPUS_SCHEMA_VERSION,
+        "corpus_id": "memory-eval-pr-natural-1-2-3",
+        "profile": "pr",
+        "description": "natural manifest",
+        "seeds": [1, 2, 3],
+        "transcript_style": "natural"
+    });
+    let parsed_natural: CorpusManifest = serde_json::from_value(natural_manifest)?;
+    assert_eq!(parsed_natural.transcript_style, TranscriptStyle::Natural);
+    Ok(())
+}
+
+#[test]
+fn natural_transcripts_contain_no_fact_markers() {
+    // Pins: natural transcripts do not use marker tokens the heuristic extractor was tuned for.
+    let corpus = generate_memory_eval_corpus_with_style(
+        CorpusProfile::Pr,
+        vec![1, 2, 3],
+        TranscriptStyle::Natural,
+    )
+    .expect("generate natural PR corpus");
+
+    for turn in corpus.sessions.iter().flat_map(|session| &session.turns) {
+        for forbidden in ["Fact:", "workspace shared", "user private"] {
+            assert!(
+                !turn.transcript.contains(forbidden),
+                "natural transcript should not contain marker `{forbidden}`: {}",
+                turn.transcript
+            );
+        }
+    }
+    assert!(
+        corpus
+            .sessions
+            .iter()
+            .all(|session| session.turns.iter().any(|turn| turn.fact_ids.is_empty())),
+        "each natural session should include at least one distractor turn"
+    );
+}
+
+#[test]
+fn natural_generation_is_deterministic_for_same_seed() {
+    // Pins: natural corpus generation is byte-stable for the same profile and seeds.
+    let first = generate_memory_eval_corpus_with_style(
+        CorpusProfile::Pr,
+        vec![1, 2, 3],
+        TranscriptStyle::Natural,
+    )
+    .expect("generate first natural corpus");
+    let second = generate_memory_eval_corpus_with_style(
+        CorpusProfile::Pr,
+        vec![1, 2, 3],
+        TranscriptStyle::Natural,
+    )
+    .expect("generate second natural corpus");
+
+    assert_eq!(first, second);
+}
+
+#[test]
+fn corpus_id_encodes_transcript_style() {
+    // Pins: marked and natural corpora have distinct identities for paired comparison.
+    let marked = generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3])
+        .expect("generate marked PR corpus");
+    let natural = generate_memory_eval_corpus_with_style(
+        CorpusProfile::Pr,
+        vec![1, 2, 3],
+        TranscriptStyle::Natural,
+    )
+    .expect("generate natural PR corpus");
+
+    assert_eq!(marked.manifest.corpus_id, "memory-eval-pr-marked-1-2-3");
+    assert_eq!(natural.manifest.corpus_id, "memory-eval-pr-natural-1-2-3");
+    assert_ne!(marked.manifest.corpus_id, natural.manifest.corpus_id);
+}
+
+#[test]
+fn natural_frames_cover_every_generated_predicate() {
+    // Pins: generated predicates stay inside the deterministic natural phrase table contract.
+    let corpus = generate_memory_eval_corpus_with_style(
+        CorpusProfile::Pr,
+        vec![1, 2, 3],
+        TranscriptStyle::Natural,
+    )
+    .expect("generate natural PR corpus");
+    let predicates = corpus
+        .ledger
+        .iter()
+        .map(|fact| fact.predicate.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected = BTreeSet::from([
+        "cache_backend_conflict",
+        "contact_email",
+        "depends_on",
+        "deploy_target",
+        "on_call_primary",
+        "owned_by",
+        "private_repository",
+        "require_runbook",
+        "response_style",
+    ]);
+
+    assert_eq!(predicates, expected);
+}
+
+#[test]
+fn multi_hop_templates_emit_two_expected_fact_ids_sharing_entity() {
+    // Pins: multi-hop probes require a dependency fact and an owner fact linked by library.
+    let corpus = generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3])
+        .expect("generate marked PR corpus");
+    let facts = corpus
+        .ledger
+        .iter()
+        .map(|fact| (fact.fact_id.as_str(), fact))
+        .collect::<HashMap<_, _>>();
+
+    for probe in corpus
+        .probes
+        .iter()
+        .filter(|probe| probe.probe_type == ProbeType::MultiHop)
+    {
+        assert_eq!(probe.expected_fact_ids.len(), 2);
+        let dependency = facts
+            .get(probe.expected_fact_ids[0].as_str())
+            .expect("dependency fact exists");
+        let owner = facts
+            .get(probe.expected_fact_ids[1].as_str())
+            .expect("owner fact exists");
+        assert_eq!(dependency.predicate, "depends_on");
+        assert_eq!(owner.predicate, "owned_by");
+        assert_eq!(dependency.object, owner.subject);
+        assert_ne!(dependency.source_session_id, owner.source_session_id);
+    }
+}
+
+#[test]
+fn pr_profile_emits_at_least_thirty_multi_hop_probes() {
+    // Pins: prompt 04 has enough multi-hop probes for a statistical graph-leg gate.
+    let corpus = generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3])
+        .expect("generate marked PR corpus");
+    let multi_hop_count = corpus
+        .probes
+        .iter()
+        .filter(|probe| probe.probe_type == ProbeType::MultiHop)
+        .count();
+
+    assert!(
+        multi_hop_count >= 30,
+        "PR profile should emit at least 30 multi-hop probes, got {multi_hop_count}"
+    );
 }
 
 #[tokio::test]
@@ -521,6 +689,30 @@ fn retrieval_metrics_aggregate_exact_small_fixture() {
     assert_eq!(recall_bootstrap.cluster_count, 3);
     assert_eq!(recall_bootstrap.observation_count, 5);
     assert_close(recall_bootstrap.mean, 0.6);
+}
+
+#[test]
+fn extraction_precision_counts_unmapped_fact_nodes_as_spurious() {
+    // Pins: stored Fact nodes that do not map to ledger facts lower extraction precision.
+    let report = aggregate_retrieval_eval_from_diagnostic_counts(
+        2,
+        3,
+        1,
+        2,
+        ExtractionPrecisionCounts {
+            mapped_fact_nodes: 2,
+            total_fact_nodes: 5,
+        },
+        Vec::new(),
+        BootstrapConfig {
+            resamples: 25,
+            seed: 43,
+        },
+    );
+
+    assert_metric(report.metrics.ingestion_coverage, 2.0, 3, 2.0 / 3.0);
+    assert_metric(report.metrics.scope_match_rate, 1.0, 2, 0.5);
+    assert_metric(report.metrics.extraction_precision, 2.0, 5, 0.4);
 }
 
 #[test]
@@ -794,6 +986,42 @@ fn probe_result_deserializes_without_temporal_parse_field() -> TestResult {
 
     assert_eq!(result.temporal_filter_parsed, None);
     assert_eq!(result.temporal_filter_matches_as_of, None);
+    Ok(())
+}
+
+#[test]
+fn retrieval_metrics_deserialize_without_new_fields() -> TestResult {
+    // Pins: reports written before scope and precision metrics remain readable.
+    let json = serde_json::json!({
+        "recall_at_4": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+        "recall_at_25": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+        "mrr": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+        "ndcg_at_4": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+        "zero_recall_rate": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+        "per_leg_recall": {
+            "graph": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+            "vector": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+            "lexical": {"numerator": 0.0, "denominator": 0, "value": 0.0}
+        },
+        "p95_retrieval_latency_ms": 0,
+        "cross_user_leak_count": 0,
+        "pii_unredacted_count": 0,
+        "ingestion_coverage": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+        "pre_rerank_recall_at_4": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+        "pre_rerank_recall_at_25": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+        "post_rerank_recall_at_4": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+        "answer_faithfulness": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+        "abstention_correctness": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+        "pii_redaction_rate": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+        "temporal_as_of_accuracy": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+        "temporal_parse_rate": {"numerator": 0.0, "denominator": 0, "value": 0.0},
+        "temporal_parse_mismatch_count": 0
+    });
+
+    let metrics: moa_eval::memory_eval::RetrievalMetrics = serde_json::from_value(json)?;
+
+    assert_eq!(metrics.scope_match_rate, MetricSummary::default());
+    assert_eq!(metrics.extraction_precision, MetricSummary::default());
     Ok(())
 }
 
@@ -1861,6 +2089,7 @@ fn memory_budget_report_with_reranker(
             profile: CorpusProfile::Pr,
             description: "Hermetic budget gate fixture.".to_string(),
             seeds: vec![1, 2, 3],
+            transcript_style: TranscriptStyle::Marked,
         },
         candidate_k: RETRIEVAL_EVAL_CANDIDATE_K,
         final_k: RETRIEVAL_EVAL_FINAL_K,
@@ -2152,6 +2381,7 @@ fn realistic_corpus() -> (
             "PR memory retrieval corpus with updates, isolation, temporal, and PII probes."
                 .to_string(),
         seeds: vec![1, 2, 3],
+        transcript_style: TranscriptStyle::Marked,
     };
 
     let facts = vec![
