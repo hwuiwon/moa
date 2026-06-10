@@ -30,6 +30,8 @@ The metric surface is:
 - `mrr`
 - `ndcg_at_4`
 - `zero_recall_rate`
+- `p50_retrieval_latency_ms`
+- `p95_retrieval_latency_ms`
 - `answer_faithfulness`
 - `abstention_correctness`
 - `cross_user_leak_count`
@@ -49,6 +51,25 @@ superseded facts must be carried by lexical lookup plus graph traversal and
 hydration. Vector retrieval can only serve historical rows whose embedding rows
 were retained.
 
+## Eval Layering
+
+`moa-eval::kernel` is the suite-agnostic layer for retrieval stats, core
+metrics, and paired report comparison. Kernel modules must not import
+`memory_eval` or any future suite module; suites import the kernel instead.
+The guard test `kernel_sources_never_import_memory_eval` enforces that rule.
+
+`RetrievalCoreMetrics` contains the universal retrieval metrics: recall, MRR,
+nDCG, zero-recall rate, per-leg recall, latency, cross-user leak count, and
+unredacted-PII count. The memory suite flattens those core fields into
+`RetrievalMetrics` and keeps memory-specific fields such as ingestion,
+temporal, faithfulness, abstention, and redaction metrics as extensions.
+Promote the kernel to a separate crate only when a second suite needs it.
+
+`CachedHybridRetriever` caches final ranked hits. Its key includes scope, query
+text and embedding fingerprint, cutoff, reranker flag, temporal filter, ranking
+reference time, and a stable ranking fingerprint made from the ranking config
+plus `RANKING_PIPELINE_VERSION`.
+
 ## PR Hermetic Check
 
 PR checks use the `pr` corpus profile. The run is deterministic and uses cached
@@ -65,6 +86,36 @@ cargo run -p xtask -- check-eval-budgets --suite memory_retrieval --max-regressi
 The budget gate treats `cross_user_leak_count != 0` and
 `pii_unredacted_count != 0` as hard blockers. These failures block regardless
 of improvements to recall, MRR, or nDCG.
+
+PR runs use the deterministic `FeatureV1` ranking mode by default. Pass
+`--ranking legacy` to `run-memory-retrieval-eval` only for A/B comparison. In
+PR runs without Cohere credentials, the reranker is `Noop`, so the post-rerank
+top 4 equals the pre-rerank top 4.
+
+## Paired Comparison
+
+Ranking-affecting changes ship only when `compare-eval-reports` shows a paired
+`recall_at_4` delta with a cluster-bootstrap confidence interval excluding 0
+and a Benjamini-Hochberg-adjusted McNemar p-value below 0.05. MRR and nDCG
+should move in the same direction, and `recall_at_25` should stay unchanged
+unless the change intentionally alters candidate generation.
+
+Run legacy and candidate reports on the same corpus, then compare them:
+
+```bash
+cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --ranking legacy --output target/memory-eval/legacy.json
+cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --ranking feature_v1 --output target/memory-eval/feature_v1.json
+cargo run -p xtask -- compare-eval-reports --baseline target/memory-eval/legacy.json --candidate target/memory-eval/feature_v1.json
+```
+
+The comparison refuses cross-corpus inputs with exit code 2. It checks corpus
+identity, seeds, final cutoff, and exact probe-id set equality before computing
+paired statistics.
+
+For the `FeatureV1` default selected in this change, the PR-profile sweep picked
+`overlap = 0.35` and `subject_match = 0.5`: it improved `recall_at_4` by +0.098
+over legacy on the current corpus with CI `[+0.059,+0.142]` and adjusted p-value
+`0.010`.
 
 ## Nightly And Manual Scale Check
 

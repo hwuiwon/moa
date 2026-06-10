@@ -11,7 +11,9 @@ use chrono::{DateTime, Utc};
 use moa_brain::planning::{
     PlanningCtx, QueryPlanner, QueryRetrievalCtx, parse_temporal, retrieve_for_query,
 };
-use moa_brain::retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalHit};
+use moa_brain::retrieval::{
+    CachedHybridRetriever, HybridRetriever, RankingConfig, RankingMode, RetrievalHit,
+};
 use moa_core::{MemoryScope, ScopeContext, WorkspaceId, traits::EmbeddingProvider};
 use moa_memory_graph::{AgeGraphStore, GraphStore, PiiClass};
 use moa_memory_ingest::{
@@ -52,6 +54,7 @@ pub struct MemoryRetrievalEvalOptions {
     output_path: PathBuf,
     bootstrap_config: BootstrapConfig,
     reranker_enabled: bool,
+    ranking_config: RankingConfig,
 }
 
 impl MemoryRetrievalEvalOptions {
@@ -65,6 +68,7 @@ impl MemoryRetrievalEvalOptions {
                 seed: 13_579,
             },
             reranker_enabled: false,
+            ranking_config: RankingConfig::default(),
         }
     }
 
@@ -79,6 +83,20 @@ impl MemoryRetrievalEvalOptions {
     #[must_use]
     pub fn with_reranker(mut self, enabled: bool) -> Self {
         self.reranker_enabled = enabled;
+        self
+    }
+
+    /// Overrides the deterministic ranking mode used by the eval run.
+    #[must_use]
+    pub fn with_ranking_mode(mut self, ranking_mode: RankingMode) -> Self {
+        self.ranking_config.mode = ranking_mode;
+        self
+    }
+
+    /// Overrides the full deterministic ranking configuration used by the eval run.
+    #[must_use]
+    pub fn with_ranking_config(mut self, ranking_config: RankingConfig) -> Self {
+        self.ranking_config = ranking_config;
         self
     }
 
@@ -98,6 +116,18 @@ impl MemoryRetrievalEvalOptions {
     #[must_use]
     pub fn reranker_enabled(&self) -> bool {
         self.reranker_enabled
+    }
+
+    /// Returns the configured deterministic ranking mode.
+    #[must_use]
+    pub fn ranking_mode(&self) -> RankingMode {
+        self.ranking_config.mode
+    }
+
+    /// Returns the configured deterministic ranking config.
+    #[must_use]
+    pub fn ranking_config(&self) -> &RankingConfig {
+        &self.ranking_config
     }
 }
 
@@ -176,6 +206,7 @@ async fn run_memory_retrieval_eval_in_store(
     let mut gold_resolution =
         resolve_gold_nodes(ingest_ctx, &corpus.ledger, &corpus.sessions).await?;
     apply_eval_validity_windows(store.pool(), &mut gold_resolution).await?;
+    let ranking_reference_time = Some(deterministic_ranking_reference_time(&corpus.ledger));
     let fact_ids_by_uid = fact_ids_by_uid(&gold_resolution);
     let gold_records_by_fact_id = gold_records_by_fact_id(&gold_resolution);
     let planner = QueryPlanner::new();
@@ -188,6 +219,8 @@ async fn run_memory_retrieval_eval_in_store(
             embedder.as_ref(),
             probe,
             options.reranker_enabled(),
+            options.ranking_config().clone(),
+            ranking_reference_time,
         )
         .await?;
         let candidates =
@@ -254,6 +287,8 @@ async fn retrieve_probe(
     embedder: &dyn EmbeddingProvider,
     probe: &Probe,
     use_reranker: bool,
+    ranking_config: RankingConfig,
+    ranking_reference_time: Option<DateTime<Utc>>,
 ) -> Result<ProbeRetrieval> {
     let started = Instant::now();
     let scope = MemoryScope::User {
@@ -269,7 +304,9 @@ async fn retrieve_probe(
         .with_vector_store(vector.clone());
     let graph: Arc<dyn GraphStore> = Arc::new(graph_store);
     let hybrid = Arc::new(
-        HybridRetriever::new(pool.clone(), graph.clone(), vector).with_assume_app_role(true),
+        HybridRetriever::new(pool.clone(), graph.clone(), vector)
+            .with_ranking_config(ranking_config)
+            .with_assume_app_role(true),
     );
     let cached = CachedHybridRetriever::new_for_app_role(hybrid, pool.clone());
     let planning = PlanningCtx::new(scope, graph);
@@ -280,8 +317,11 @@ async fn retrieve_probe(
         embedder,
         &cached,
         probe,
-        RETRIEVAL_EVAL_CANDIDATE_K,
-        false,
+        ProbeHitOptions {
+            k_final: RETRIEVAL_EVAL_CANDIDATE_K,
+            use_reranker: false,
+            ranking_reference_time,
+        },
     )
     .await?;
     let post_rerank_hits = if use_reranker {
@@ -291,8 +331,11 @@ async fn retrieve_probe(
             embedder,
             &cached,
             probe,
-            RETRIEVAL_EVAL_FINAL_K,
-            true,
+            ProbeHitOptions {
+                k_final: RETRIEVAL_EVAL_FINAL_K,
+                use_reranker: true,
+                ranking_reference_time,
+            },
         )
         .await?
     } else {
@@ -316,13 +359,15 @@ async fn retrieve_probe_hits(
     embedder: &dyn EmbeddingProvider,
     cached: &CachedHybridRetriever,
     probe: &Probe,
-    k_final: usize,
-    use_reranker: bool,
+    options: ProbeHitOptions,
 ) -> Result<Vec<RetrievalHit>> {
-    let retrieval_ctx =
+    let mut retrieval_ctx =
         QueryRetrievalCtx::new(planner, planning, embedder, cached, PiiClass::Restricted)
-            .with_k_final(k_final)
-            .with_reranker(use_reranker);
+            .with_k_final(options.k_final)
+            .with_reranker(options.use_reranker);
+    if let Some(ranking_reference_time) = options.ranking_reference_time {
+        retrieval_ctx = retrieval_ctx.with_ranking_reference_time(ranking_reference_time);
+    }
 
     retrieve_for_query(&probe.query, &retrieval_ctx)
         .await
@@ -334,10 +379,26 @@ async fn retrieve_probe_hits(
         })
 }
 
+fn deterministic_ranking_reference_time(ledger: &[LedgerFact]) -> DateTime<Utc> {
+    ledger
+        .iter()
+        .map(|fact| fact.valid_from)
+        .max()
+        .unwrap_or_else(Utc::now)
+        + chrono::Duration::days(7)
+}
+
 struct ProbeRetrieval {
     pre_rerank_hits: Vec<RetrievalHit>,
     post_rerank_hits: Vec<RetrievalHit>,
     retrieval_latency_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProbeHitOptions {
+    k_final: usize,
+    use_reranker: bool,
+    ranking_reference_time: Option<DateTime<Utc>>,
 }
 
 fn duration_ms_u64(elapsed: std::time::Duration) -> u64 {

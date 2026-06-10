@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 /// Memory bootstrap and maintenance configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryConfig {
     /// Automatically bootstrap workspace memory when it is empty.
@@ -35,11 +35,105 @@ impl Default for MemoryConfig {
 }
 
 /// Graph-memory retrieval configuration.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryRetrievalConfig {
     /// Runtime/eval mode for post-fusion memory reranking.
     pub reranker_mode: MemoryRerankerMode,
+    /// Deterministic post-hydration ranking behavior.
+    pub ranking: MemoryRankingConfig,
+}
+
+/// Deterministic ranking configuration for graph-memory retrieval.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryRankingConfig {
+    /// Ranking mode.
+    pub mode: MemoryRankingMode,
+    /// Feature weights used by FeatureV1.
+    pub weights: MemoryRankingWeights,
+}
+
+impl Default for MemoryRankingConfig {
+    fn default() -> Self {
+        Self {
+            mode: MemoryRankingMode::FeatureV1,
+            weights: MemoryRankingWeights::default(),
+        }
+    }
+}
+
+/// Ranking mode for graph-memory retrieval.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryRankingMode {
+    /// Preserve the legacy RRF plus layer-bias ranking path.
+    Legacy,
+    /// Apply deterministic feature scoring after candidate hydration.
+    #[default]
+    FeatureV1,
+}
+
+impl FromStr for MemoryRankingMode {
+    type Err = MemoryRankingModeParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "legacy" => Ok(Self::Legacy),
+            "feature_v1" => Ok(Self::FeatureV1),
+            _ => Err(MemoryRankingModeParseError),
+        }
+    }
+}
+
+/// Parse error for memory ranking mode strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryRankingModeParseError;
+
+impl std::fmt::Display for MemoryRankingModeParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("expected one of legacy, feature_v1")
+    }
+}
+
+/// Weights used by deterministic graph-memory ranking.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryRankingWeights {
+    /// Normalized reciprocal-rank fusion contribution.
+    pub rrf: f64,
+    /// Valid-from recency contribution.
+    pub recency: f64,
+    /// Last-access recency contribution.
+    pub access: f64,
+    /// Exact subject-token match contribution.
+    pub subject_match: f64,
+    /// Query-to-summary token overlap contribution.
+    pub overlap: f64,
+    /// Additive score for user-scoped rows.
+    pub scope_user: f64,
+    /// Additive score for workspace-scoped rows.
+    pub scope_workspace: f64,
+    /// Half-life in days for valid-from recency.
+    pub recency_half_life_days: f64,
+    /// Half-life in days for access recency.
+    pub access_half_life_days: f64,
+}
+
+impl Default for MemoryRankingWeights {
+    fn default() -> Self {
+        Self {
+            rrf: 1.0,
+            recency: 0.3,
+            access: 0.15,
+            subject_match: 0.5,
+            overlap: 0.35,
+            scope_user: 0.2,
+            scope_workspace: 0.1,
+            recency_half_life_days: 90.0,
+            access_half_life_days: 14.0,
+        }
+    }
 }
 
 /// Reranker enablement mode for graph-memory retrieval.

@@ -150,6 +150,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         use_reranker: false,
         strategy: None,
         as_of: None,
+        ranking_reference_time: None,
     };
 
     let dual_read_hits = retriever.retrieve(req.clone()).await?;

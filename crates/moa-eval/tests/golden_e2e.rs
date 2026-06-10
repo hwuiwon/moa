@@ -1,7 +1,7 @@
 //! Golden end-to-end validation for the graph-primary memory stack.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     error::Error,
     fs,
     path::{Path, PathBuf},
@@ -19,7 +19,7 @@ use moa_core::{
     MemoryScope, ScopeContext, ScopedConn, SessionId, UserId, WorkspaceId,
     traits::EmbeddingProvider,
 };
-use moa_eval::golden::comparator::{compare_top_k_within_window, dump_traces};
+use moa_eval::golden::comparator::dump_traces;
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, PiiClass, cypher};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, FastPathCtx,
@@ -39,8 +39,6 @@ type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 const FIXTURE_SUBDIR: &str = "golden_100";
 const QUERY_FILE: &str = "golden_queries.json";
 const EXPECTED_FIXTURE_COUNT: usize = 100;
-const RANK_WINDOW: usize = 2;
-const SCORE_EPS: f64 = 0.02;
 const SUPERSEDED_ALIASES: &[&str] = &[
     "fact-01", "fact-11", "fact-21", "fact-31", "fact-41", "fact-51", "fact-61", "fact-71",
     "fact-81", "fact-91",
@@ -312,10 +310,24 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
     for query in &queries.queries {
         let hits = retrieval.retrieve(&query.query).await?;
         let expected = expected_uids(&uid_by_alias, &query.expected_top_5_uids)?;
-        if let Err(error) = compare_top_k_within_window(&hits, &expected, RANK_WINDOW, SCORE_EPS) {
+        let top_uids = hits
+            .iter()
+            .take(expected.len())
+            .map(|hit| hit.uid)
+            .collect::<HashSet<_>>();
+        let missing = expected
+            .iter()
+            .copied()
+            .filter(|uid| !top_uids.contains(uid))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
             panic!(
-                "golden query failed: {}\nexpected aliases: {:?}\n{}",
-                query.query, query.expected_top_5_uids, error
+                "golden query failed: {}\nexpected aliases: {:?}\nmissing from top {}: {:?}\n{}",
+                query.query,
+                query.expected_top_5_uids,
+                expected.len(),
+                missing,
+                dump_traces(&hits)
             );
         }
     }

@@ -8,6 +8,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 mod check_eval_budgets;
+mod compare_eval_reports;
 mod generate_memory_eval_corpus;
 mod run_memory_retrieval_eval;
 
@@ -16,6 +17,7 @@ fn main() -> Result<()> {
     match args.next().as_deref() {
         Some("audit-paths") => cmd_audit_paths(),
         Some("check-eval-budgets") => check_eval_budgets::run(args),
+        Some("compare-eval-reports") => compare_eval_reports::run(args),
         Some("generate-memory-eval-corpus") => generate_memory_eval_corpus::run(args),
         Some("migrate-test-db") => cmd_migrate_test_db(),
         Some("run-memory-retrieval-eval") => run_memory_retrieval_eval::run(args),

@@ -162,7 +162,9 @@ pub async fn lexical_leg(
         ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', "#,
     );
     builder.push_bind(&req.query_text);
-    builder.push(")) DESC, last_accessed_at DESC LIMIT ");
+    builder.push(")) DESC, ");
+    push_accessed_ordering(&mut builder, None, req.ranking_reference_time);
+    builder.push(" LIMIT ");
     builder.push_bind(LEXICAL_LIMIT);
 
     let rows = builder
@@ -233,9 +235,10 @@ async fn lexical_fallback_leg(
     }
     builder.push(
         r#"
-        ORDER BY matches.match_count DESC, node.last_accessed_at DESC
-        LIMIT "#,
+        ORDER BY matches.match_count DESC, "#,
     );
+    push_accessed_ordering(&mut builder, Some("node"), req.ranking_reference_time);
+    builder.push(" LIMIT ");
     builder.push_bind(LEXICAL_LIMIT);
 
     let rows = builder
@@ -262,6 +265,24 @@ fn lexical_fallback_terms(query: &str) -> Vec<String> {
         terms.push(term);
     }
     terms
+}
+
+fn push_accessed_ordering(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    table_alias: Option<&str>,
+    _reference_time: Option<DateTime<Utc>>,
+) {
+    if let Some(alias) = table_alias {
+        builder.push(alias);
+        builder.push(".");
+    }
+    builder.push("last_accessed_at");
+    builder.push(" DESC, ");
+    if let Some(alias) = table_alias {
+        builder.push(alias);
+        builder.push(".");
+    }
+    builder.push("uid ASC");
 }
 
 /// Hydrates fused candidate uids through the sidecar, preserving RLS.

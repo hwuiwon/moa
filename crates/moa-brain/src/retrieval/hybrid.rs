@@ -21,6 +21,9 @@ use crate::retrieval::legs::{
     VECTOR_WEIGHT, bump_last_accessed, graph_leg, hydrate_nodes, lexical_leg, rrf_fuse, timed_leg,
     vector_leg as run_vector_leg,
 };
+use crate::retrieval::ranking::{
+    FeatureRanker, RankingConfig, RankingMode, normalize_tokens, ranking_fingerprint,
+};
 use crate::retrieval::reranker::{CohereReranker, NoopReranker, Reranker};
 
 const RERANK_MODEL: &str = "rerank-v4.0-fast";
@@ -72,6 +75,8 @@ pub struct RetrievalRequest {
     pub strategy: Option<Strategy>,
     /// Optional application-time filter for bitemporal retrieval.
     pub as_of: Option<DateTime<Utc>>,
+    /// Optional deterministic clock for post-hydration ranking features.
+    pub ranking_reference_time: Option<DateTime<Utc>>,
 }
 
 /// Retrieval legs that contributed to one fused candidate.
@@ -90,7 +95,7 @@ pub struct LegSources {
 pub struct RetrievalHit {
     /// Stable graph node uid.
     pub uid: Uuid,
-    /// Fused retrieval score after layer-priority bias.
+    /// Retrieval score after the configured ranking stage.
     pub score: f64,
     /// Source legs that contributed to the score.
     pub legs: LegSources,
@@ -106,6 +111,7 @@ pub struct HybridRetriever {
     vector: Arc<dyn VectorStore>,
     turbopuffer: Option<Arc<TurbopufferStore>>,
     reranker: Arc<dyn Reranker>,
+    ranking_config: RankingConfig,
     assume_app_role: bool,
 }
 
@@ -119,6 +125,7 @@ impl HybridRetriever {
             vector,
             turbopuffer: None,
             reranker: Arc::new(NoopReranker),
+            ranking_config: RankingConfig::default(),
             assume_app_role: false,
         }
     }
@@ -158,6 +165,7 @@ impl HybridRetriever {
         Self::new(pool, graph, vector)
             .with_turbopuffer(turbopuffer)
             .with_reranker(reranker)
+            .with_ranking_config(RankingConfig::from(&config.memory.retrieval.ranking))
     }
 
     /// Adds an optional Turbopuffer target backend for promoted workspaces.
@@ -172,6 +180,19 @@ impl HybridRetriever {
     pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
         self.reranker = reranker;
         self
+    }
+
+    /// Overrides the deterministic post-hydration ranking configuration.
+    #[must_use]
+    pub fn with_ranking_config(mut self, ranking_config: RankingConfig) -> Self {
+        self.ranking_config = ranking_config;
+        self
+    }
+
+    /// Returns the cache fingerprint for the configured ranking stage.
+    #[must_use]
+    pub fn ranking_fingerprint(&self) -> [u8; 32] {
+        ranking_fingerprint(&self.ranking_config)
     }
 
     /// Assumes the `moa_app` role inside sidecar transactions.
@@ -226,7 +247,7 @@ impl HybridRetriever {
         )
         .await?;
         let mut hits = build_hits(fused, nodes);
-        apply_layer_bias(&mut hits);
+        rank_hydrated_hits(&mut hits, &self.ranking_config, &req);
         let final_hits = if req.use_reranker && hits.len() > req.k_final {
             self.rerank_hits(&req, &hits).await?
         } else {
@@ -235,16 +256,19 @@ impl HybridRetriever {
         metrics::histogram!("moa_retrieval_rrf_rerank_seconds")
             .record(fusion_started.elapsed().as_secs_f64());
 
-        let touched_uids = final_hits.iter().map(|hit| hit.uid).collect::<Vec<_>>();
-        let pool = self.pool.clone();
-        let scope = req.scope.clone();
-        let assume_app_role = self.assume_app_role;
-        tokio::spawn(async move {
-            if let Err(error) = bump_last_accessed(pool, scope, touched_uids, assume_app_role).await
-            {
-                tracing::debug!(error = %error, "failed to bump graph-memory access timestamps");
-            }
-        });
+        if req.ranking_reference_time.is_none() {
+            let touched_uids = final_hits.iter().map(|hit| hit.uid).collect::<Vec<_>>();
+            let pool = self.pool.clone();
+            let scope = req.scope.clone();
+            let assume_app_role = self.assume_app_role;
+            tokio::spawn(async move {
+                if let Err(error) =
+                    bump_last_accessed(pool, scope, touched_uids, assume_app_role).await
+                {
+                    tracing::debug!(error = %error, "failed to bump graph-memory access timestamps");
+                }
+            });
+        }
 
         Ok(final_hits)
     }
@@ -466,6 +490,36 @@ fn build_hits(fused: Vec<(Uuid, f64, LegSources)>, nodes: Vec<NodeIndexRow>) -> 
         .collect()
 }
 
+fn rank_hydrated_hits(hits: &mut [RetrievalHit], config: &RankingConfig, req: &RetrievalRequest) {
+    match config.mode {
+        RankingMode::Legacy => apply_layer_bias(hits),
+        RankingMode::FeatureV1 => apply_feature_ranking(hits, config, req),
+    }
+}
+
+fn apply_feature_ranking(
+    hits: &mut [RetrievalHit],
+    config: &RankingConfig,
+    req: &RetrievalRequest,
+) {
+    let max_fused_score = hits.iter().map(|hit| hit.score).fold(0.0_f64, f64::max);
+    let query_tokens = normalize_tokens(&req.query_text);
+    let reference_time = req.ranking_reference_time.unwrap_or_else(Utc::now);
+    let ranker = FeatureRanker::new(config, reference_time).with_request_scope(&req.scope);
+    for hit in hits.iter_mut() {
+        hit.score = ranker.score(hit.score, max_fused_score, &query_tokens, &hit.node);
+        if hit.legs.lexical && !hit.legs.vector && !hit.legs.graph {
+            hit.score += config.weights.overlap;
+        }
+    }
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.uid.cmp(&right.uid))
+    });
+}
+
 pub(crate) fn apply_layer_bias(hits: &mut [RetrievalHit]) {
     for hit in hits.iter_mut() {
         hit.score *= match hit.node.scope.as_str() {
@@ -529,6 +583,7 @@ mod tests {
             use_reranker: true,
             strategy: None,
             as_of: None,
+            ranking_reference_time: None,
         };
         let first = hit(Uuid::now_v7(), "workspace", 2.0);
         let second = hit(Uuid::now_v7(), "workspace", 1.0);
@@ -539,6 +594,158 @@ mod tests {
             .expect("rerank should succeed");
 
         assert_eq!(reranked, vec![second]);
+    }
+
+    #[test]
+    fn legacy_mode_preserves_apply_layer_bias_ordering() {
+        // Pins: Legacy remains a rollback path for the pre-FeatureV1 ordering.
+        let user_uid = Uuid::now_v7();
+        let workspace_uid = Uuid::now_v7();
+        let mut expected = vec![
+            hit(workspace_uid, "workspace", 1.0),
+            hit(user_uid, "user", 1.0),
+        ];
+        apply_layer_bias(&mut expected);
+
+        let mut ranked = vec![
+            hit(workspace_uid, "workspace", 1.0),
+            hit(user_uid, "user", 1.0),
+        ];
+        rank_hydrated_hits(
+            &mut ranked,
+            &RankingConfig {
+                mode: RankingMode::Legacy,
+                weights: Default::default(),
+            },
+            &RetrievalRequest {
+                seeds: Vec::new(),
+                query_text: "workspace fact".to_string(),
+                query_embedding: Vec::new(),
+                scope: MemoryScope::Global,
+                label_filter: None,
+                max_pii_class: PiiClass::Restricted,
+                k_final: 2,
+                use_reranker: false,
+                strategy: None,
+                as_of: None,
+                ranking_reference_time: None,
+            },
+        );
+
+        assert_eq!(
+            ranked.iter().map(|hit| hit.uid).collect::<Vec<_>>(),
+            expected.iter().map(|hit| hit.uid).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            ranked.iter().map(|hit| hit.score).collect::<Vec<_>>(),
+            expected.iter().map(|hit| hit.score).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn feature_mode_rescues_lexical_non_vector_hit_over_vector_noise() {
+        // Pins: FeatureV1 can promote exact lexical hits that vector retrieval missed.
+        let reference_time = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+            .expect("test timestamp should parse")
+            .with_timezone(&Utc);
+        let lexical_uid = Uuid::now_v7();
+        let vector_uid = Uuid::now_v7();
+        let mut lexical_hit = hit(lexical_uid, "workspace", 0.8);
+        lexical_hit.legs = LegSources {
+            graph: false,
+            vector: false,
+            lexical: true,
+        };
+        lexical_hit.node.name = "contact email".to_string();
+        lexical_hit.node.valid_from = reference_time;
+        lexical_hit.node.last_accessed_at = reference_time;
+        lexical_hit.node.properties_summary = Some(serde_json::json!({
+            "predicate": "contact_email",
+            "object": "user@example.invalid"
+        }));
+        let mut vector_hit = hit(vector_uid, "workspace", 1.0);
+        vector_hit.legs = LegSources {
+            graph: false,
+            vector: true,
+            lexical: false,
+        };
+        vector_hit.node.name = "private repository".to_string();
+        vector_hit.node.valid_from = reference_time;
+        vector_hit.node.last_accessed_at = reference_time;
+        let mut hits = vec![vector_hit, lexical_hit];
+
+        rank_hydrated_hits(
+            &mut hits,
+            &RankingConfig::default(),
+            &RetrievalRequest {
+                seeds: Vec::new(),
+                query_text: "contact email".to_string(),
+                query_embedding: Vec::new(),
+                scope: MemoryScope::Global,
+                label_filter: None,
+                max_pii_class: PiiClass::Restricted,
+                k_final: 2,
+                use_reranker: false,
+                strategy: None,
+                as_of: None,
+                ranking_reference_time: Some(reference_time),
+            },
+        );
+
+        assert_eq!(hits[0].uid, lexical_uid);
+    }
+
+    #[test]
+    fn feature_mode_rescue_skips_graph_lexical_neighbors() {
+        // Pins: lexical rescue is for lexical-only hits, not graph-expanded neighbors.
+        let reference_time = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+            .expect("test timestamp should parse")
+            .with_timezone(&Utc);
+        let lexical_uid = Uuid::now_v7();
+        let graph_lexical_uid = Uuid::now_v7();
+        let mut lexical_hit = hit(lexical_uid, "workspace", 1.0);
+        lexical_hit.legs = LegSources {
+            graph: false,
+            vector: false,
+            lexical: true,
+        };
+        lexical_hit.node.valid_from = reference_time;
+        lexical_hit.node.last_accessed_at = reference_time;
+        let mut graph_lexical_hit = hit(graph_lexical_uid, "workspace", 1.0);
+        graph_lexical_hit.legs = LegSources {
+            graph: true,
+            vector: false,
+            lexical: true,
+        };
+        graph_lexical_hit.node.valid_from = reference_time;
+        graph_lexical_hit.node.last_accessed_at = reference_time;
+        let mut config = RankingConfig::default();
+        config.weights.rrf = 0.0;
+        config.weights.recency = 0.0;
+        config.weights.access = 0.0;
+        config.weights.subject_match = 0.0;
+        config.weights.scope_workspace = 0.0;
+        let mut hits = vec![graph_lexical_hit, lexical_hit];
+
+        rank_hydrated_hits(
+            &mut hits,
+            &config,
+            &RetrievalRequest {
+                seeds: Vec::new(),
+                query_text: "regional network".to_string(),
+                query_embedding: Vec::new(),
+                scope: MemoryScope::Global,
+                label_filter: None,
+                max_pii_class: PiiClass::Restricted,
+                k_final: 2,
+                use_reranker: false,
+                strategy: None,
+                as_of: None,
+                ranking_reference_time: Some(reference_time),
+            },
+        );
+
+        assert_eq!(hits[0].uid, lexical_uid);
     }
 
     fn hit(uid: Uuid, scope: &str, score: f64) -> RetrievalHit {
