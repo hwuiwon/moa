@@ -216,7 +216,12 @@ pub async fn lookup_seed_by_name(
     builder.push_bind(name);
     builder.push(
         r#")
-        ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', "#,
+        ORDER BY (LOWER(name) = LOWER("#,
+    );
+    builder.push_bind(name);
+    builder.push(
+        r#")) DESC,
+                 ts_rank(name_tsv, plainto_tsquery('simple', "#,
     );
     builder.push_bind(name);
     builder.push(

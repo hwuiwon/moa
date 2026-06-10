@@ -1,16 +1,20 @@
 //! Individual retrieval legs and reciprocal-rank fusion helpers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use moa_core::{MemoryScope, ScopeContext, ScopedConn};
-use moa_memory_graph::{GraphStore, NodeIndexRow, PiiClass, push_validity_filter};
+use moa_memory_graph::{
+    EdgeLabel, GraphExpansionHit, GraphStore, NodeIndexRow, NodeLabel, PiiClass,
+    push_validity_filter,
+};
 use moa_memory_vector::{VectorQuery, VectorStore};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::retrieval::hybrid::{LegSources, Result, RetrievalRequest};
+use crate::retrieval::ranking::normalize_tokens;
 
 /// Reciprocal-rank fusion denominator offset.
 pub const RRF_K: f64 = 60.0;
@@ -28,6 +32,7 @@ pub const VECTOR_BUDGET: Duration = Duration::from_millis(250);
 pub const LEXICAL_BUDGET: Duration = Duration::from_secs(1);
 
 const GRAPH_HOPS: u8 = 3;
+const GRAPH_EXPANSION_DECAY: f64 = 0.5;
 const VECTOR_LIMIT: usize = 20;
 const LEXICAL_LIMIT: i64 = 20;
 
@@ -40,42 +45,163 @@ pub struct LegCandidate {
     pub score: f64,
 }
 
-/// Runs the graph traversal leg from planner-supplied seed nodes.
-pub async fn graph_leg(
+/// Runs the graph expansion leg from weighted planner and phase-one seeds.
+pub async fn graph_expansion_leg(
     graph: &dyn GraphStore,
     req: &RetrievalRequest,
+    seed_strengths: &[(Uuid, f64)],
+    seed_rows: &[NodeIndexRow],
 ) -> Result<Vec<LegCandidate>> {
-    if req.seeds.is_empty() {
+    if seed_strengths.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut candidates = Vec::new();
-    let mut seen = HashSet::new();
-    if req.as_of.is_some() {
-        for seed in &req.seeds {
-            if seen.insert(*seed) {
-                candidates.push(*seed);
-            }
-        }
-    }
-    for seed in &req.seeds {
-        let nodes = graph.neighbors(*seed, GRAPH_HOPS, None, req.as_of).await?;
-        for node in nodes {
-            if !label_allowed(req, &node.label) {
-                continue;
-            }
-            if seen.insert(node.uid) {
-                candidates.push(node.uid);
-            }
-        }
-    }
+    let seeds = seed_strengths
+        .iter()
+        .map(|(seed, _)| *seed)
+        .collect::<Vec<_>>();
+    let strengths = seed_strengths
+        .iter()
+        .copied()
+        .collect::<HashMap<Uuid, f64>>();
+    let hits = graph.expand_seeds(&seeds, GRAPH_HOPS, req.as_of).await?;
+    let seed_candidates = exact_seed_candidates(
+        seed_rows,
+        &strengths,
+        &req.query_text,
+        req.label_filter.as_deref(),
+    );
+    let candidates = merge_ordered_uids(
+        seed_candidates,
+        score_expansion(&hits, &strengths, req.as_of, req.label_filter.as_deref()),
+    );
     Ok(rank_uids(candidates))
 }
 
-fn label_allowed(req: &RetrievalRequest, label: &moa_memory_graph::NodeLabel) -> bool {
-    req.label_filter
-        .as_ref()
-        .is_none_or(|labels| labels.is_empty() || labels.contains(label))
+fn label_allowed_by_filter(label_filter: Option<&[NodeLabel]>, label: &NodeLabel) -> bool {
+    label_filter.is_none_or(|labels| labels.is_empty() || labels.contains(label))
+}
+
+/// Scores graph expansion paths by seed strength, edge weight, and hop decay.
+///
+/// Edge weights are explicit for all current `EdgeLabel` variants:
+/// `RELATES_TO`, `DEPENDS_ON`, `DERIVED_FROM`, `MENTIONED_IN`, `CAUSED`,
+/// `LEARNED_FROM`, and `APPLIES_TO` carry weight 1.0; `CONTRADICTS` carries
+/// 0.0; `SUPERSEDES` carries 0.6 only for as-of retrieval. `supersede_node`
+/// creates `new -[:SUPERSEDES]-> old`, so historical as-of expansion can cross
+/// from an active replacement seed to its superseded predecessor.
+#[must_use]
+pub fn score_expansion(
+    hits: &[GraphExpansionHit],
+    strengths: &HashMap<Uuid, f64>,
+    as_of: Option<DateTime<Utc>>,
+    label_filter: Option<&[NodeLabel]>,
+) -> Vec<Uuid> {
+    let entity_explicitly_allowed =
+        label_filter.is_some_and(|labels| labels.contains(&NodeLabel::Entity));
+    let mut activation_by_uid = HashMap::<Uuid, (f64, NodeLabel)>::new();
+
+    for hit in hits {
+        if hit.uid == hit.seed {
+            continue;
+        }
+        if hit.label == NodeLabel::Entity && !entity_explicitly_allowed {
+            continue;
+        }
+        if !label_allowed_by_filter(label_filter, &hit.label) {
+            continue;
+        }
+        let Some(seed_strength) = strengths.get(&hit.seed).copied() else {
+            continue;
+        };
+        let path_weight = path_weight(&hit.edges, as_of);
+        if path_weight <= 0.0 {
+            continue;
+        }
+        let activation =
+            seed_strength * path_weight * GRAPH_EXPANSION_DECAY.powi(i32::from(hit.hop));
+        if activation <= 0.0 {
+            continue;
+        }
+        let entry = activation_by_uid.entry(hit.uid).or_insert((0.0, hit.label));
+        entry.0 += activation;
+    }
+
+    let mut scored = activation_by_uid
+        .into_iter()
+        .map(|(uid, (activation, _))| (uid, activation))
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    scored.into_iter().map(|(uid, _)| uid).collect()
+}
+
+fn path_weight(edges: &[EdgeLabel], as_of: Option<DateTime<Utc>>) -> f64 {
+    if edges.is_empty() {
+        return 0.0;
+    }
+    edges.iter().map(|edge| edge_weight(*edge, as_of)).product()
+}
+
+fn edge_weight(edge: EdgeLabel, as_of: Option<DateTime<Utc>>) -> f64 {
+    match edge {
+        EdgeLabel::RelatesTo
+        | EdgeLabel::DependsOn
+        | EdgeLabel::DerivedFrom
+        | EdgeLabel::MentionedIn
+        | EdgeLabel::Caused
+        | EdgeLabel::LearnedFrom
+        | EdgeLabel::AppliesTo => 1.0,
+        EdgeLabel::Supersedes if as_of.is_some() => 0.6,
+        EdgeLabel::Supersedes | EdgeLabel::Contradicts => 0.0,
+    }
+}
+
+fn exact_seed_candidates(
+    seed_rows: &[NodeIndexRow],
+    strengths: &HashMap<Uuid, f64>,
+    query_text: &str,
+    label_filter: Option<&[NodeLabel]>,
+) -> Vec<Uuid> {
+    let entity_explicitly_allowed =
+        label_filter.is_some_and(|labels| labels.contains(&NodeLabel::Entity));
+    let query_tokens = normalize_tokens(query_text);
+    let mut candidates = seed_rows
+        .iter()
+        .filter(|row| strengths.contains_key(&row.uid))
+        .filter(|row| row.label != NodeLabel::Entity || entity_explicitly_allowed)
+        .filter(|row| label_allowed_by_filter(label_filter, &row.label))
+        .filter(|row| {
+            let name_tokens = normalize_tokens(&row.name);
+            !name_tokens.is_empty() && name_tokens.iter().all(|token| query_tokens.contains(token))
+        })
+        .map(|row| {
+            (
+                row.uid,
+                strengths.get(&row.uid).copied().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    candidates.into_iter().map(|(uid, _)| uid).collect()
+}
+
+fn merge_ordered_uids(first: Vec<Uuid>, second: Vec<Uuid>) -> Vec<Uuid> {
+    let mut seen = std::collections::HashSet::new();
+    first
+        .into_iter()
+        .chain(second)
+        .filter(|uid| seen.insert(*uid))
+        .collect()
 }
 
 /// Runs the vector KNN leg.
@@ -448,10 +574,15 @@ fn pii_rank(class: PiiClass) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use chrono::TimeZone;
+    use moa_memory_graph::{EdgeLabel, GraphExpansionHit, NodeIndexRow, NodeLabel, PiiClass};
     use uuid::Uuid;
 
     use super::{
-        GRAPH_WEIGHT, LEXICAL_WEIGHT, LegCandidate, VECTOR_WEIGHT, lexical_fallback_terms, rrf_fuse,
+        GRAPH_WEIGHT, LEXICAL_WEIGHT, LegCandidate, VECTOR_WEIGHT, exact_seed_candidates,
+        lexical_fallback_terms, merge_ordered_uids, rrf_fuse, score_expansion,
     };
 
     #[test]
@@ -497,5 +628,286 @@ mod tests {
         let terms = lexical_fallback_terms("What is news_article_001 about?");
 
         assert_eq!(terms, vec!["news_article_001"]);
+    }
+
+    #[test]
+    fn score_expansion_decays_activation_by_half_per_hop() {
+        // Pins: a one-hop path outranks a two-hop path with the same seed strength and edge weight.
+        let seed = uid(1);
+        let near = uid(2);
+        let far = uid(3);
+        let ordered = score_expansion(
+            &[
+                expansion_hit(
+                    seed,
+                    far,
+                    2,
+                    vec![EdgeLabel::RelatesTo, EdgeLabel::RelatesTo],
+                ),
+                expansion_hit(seed, near, 1, vec![EdgeLabel::RelatesTo]),
+            ],
+            &strengths(&[(seed, 1.0)]),
+            None,
+            None,
+        );
+
+        assert_eq!(ordered, vec![near, far]);
+    }
+
+    #[test]
+    fn score_expansion_sums_paths_from_multiple_seeds() {
+        // Pins: activation for the same target accumulates across independent seeds.
+        let seed_a = uid(1);
+        let seed_b = uid(2);
+        let summed = uid(10);
+        let single = uid(11);
+        let ordered = score_expansion(
+            &[
+                expansion_hit(seed_a, single, 1, vec![EdgeLabel::RelatesTo]),
+                expansion_hit(seed_a, summed, 1, vec![EdgeLabel::RelatesTo]),
+                expansion_hit(seed_b, summed, 1, vec![EdgeLabel::RelatesTo]),
+            ],
+            &strengths(&[(seed_a, 1.0), (seed_b, 0.5)]),
+            None,
+            None,
+        );
+
+        assert_eq!(ordered[0], summed);
+    }
+
+    #[test]
+    fn score_expansion_zero_weight_edge_kills_path() {
+        // Pins: contradiction paths never produce graph candidates.
+        let seed = uid(1);
+        let contradicted = uid(2);
+        let ordered = score_expansion(
+            &[expansion_hit(
+                seed,
+                contradicted,
+                1,
+                vec![EdgeLabel::Contradicts],
+            )],
+            &strengths(&[(seed, 1.0)]),
+            None,
+            None,
+        );
+
+        assert!(ordered.is_empty());
+    }
+
+    #[test]
+    fn score_expansion_prunes_supersedes_paths_without_as_of() {
+        // Pins: present-time expansion does not leak superseded facts through SUPERSEDES.
+        let seed = uid(1);
+        let old = uid(2);
+        let ordered = score_expansion(
+            &[expansion_hit(seed, old, 1, vec![EdgeLabel::Supersedes])],
+            &strengths(&[(seed, 1.0)]),
+            None,
+            None,
+        );
+
+        assert!(ordered.is_empty());
+    }
+
+    #[test]
+    fn score_expansion_allows_supersedes_paths_with_as_of() {
+        // Pins: as-of expansion can traverse replacement -> superseded history.
+        let seed = uid(1);
+        let old = uid(2);
+        let as_of = chrono::Utc
+            .with_ymd_and_hms(2026, 3, 1, 0, 0, 0)
+            .single()
+            .expect("test timestamp should be valid");
+        let ordered = score_expansion(
+            &[expansion_hit(seed, old, 1, vec![EdgeLabel::Supersedes])],
+            &strengths(&[(seed, 1.0)]),
+            Some(as_of),
+            None,
+        );
+
+        assert_eq!(ordered, vec![old]);
+    }
+
+    #[test]
+    fn score_expansion_drops_entity_labeled_candidates() {
+        // Pins: Entity rows are conduits by default and do not consume final candidate slots.
+        let seed = uid(1);
+        let entity = uid(2);
+        let fact = uid(3);
+        let mut entity_hit = expansion_hit(seed, entity, 1, vec![EdgeLabel::RelatesTo]);
+        entity_hit.label = NodeLabel::Entity;
+        let ordered = score_expansion(
+            &[
+                entity_hit,
+                expansion_hit(
+                    seed,
+                    fact,
+                    2,
+                    vec![EdgeLabel::RelatesTo, EdgeLabel::RelatesTo],
+                ),
+            ],
+            &strengths(&[(seed, 1.0)]),
+            None,
+            None,
+        );
+
+        assert_eq!(ordered, vec![fact]);
+    }
+
+    #[test]
+    fn score_expansion_orders_by_activation_then_uid() {
+        // Pins: activation ties sort by uid for byte-stable reports.
+        let seed = uid(1);
+        let lower = uid(2);
+        let higher = uid(3);
+        let ordered = score_expansion(
+            &[
+                expansion_hit(seed, higher, 1, vec![EdgeLabel::RelatesTo]),
+                expansion_hit(seed, lower, 1, vec![EdgeLabel::RelatesTo]),
+            ],
+            &strengths(&[(seed, 1.0)]),
+            None,
+            None,
+        );
+
+        assert_eq!(ordered, vec![lower, higher]);
+    }
+
+    #[test]
+    fn score_expansion_drops_seed_self_paths() {
+        // Pins: undirected traversal cycles do not mark phase-one seeds as graph discoveries.
+        let seed = uid(1);
+        let ordered = score_expansion(
+            &[expansion_hit(
+                seed,
+                seed,
+                2,
+                vec![EdgeLabel::RelatesTo, EdgeLabel::RelatesTo],
+            )],
+            &strengths(&[(seed, 1.0)]),
+            None,
+            None,
+        );
+
+        assert!(ordered.is_empty());
+    }
+
+    #[test]
+    fn leg_sources_mark_graph_for_expansion_candidates() {
+        // Pins: expansion candidates keep graph attribution through RRF fusion.
+        let graph_uid = uid(1);
+        let fused = rrf_fuse(
+            &[LegCandidate {
+                uid: graph_uid,
+                score: 1.0 / 61.0,
+            }],
+            &[],
+            &[],
+            (GRAPH_WEIGHT, VECTOR_WEIGHT, LEXICAL_WEIGHT),
+        );
+
+        assert_eq!(fused[0].0, graph_uid);
+        assert!(fused[0].2.graph);
+        assert!(!fused[0].2.vector);
+        assert!(!fused[0].2.lexical);
+    }
+
+    #[test]
+    fn exact_seed_candidates_emit_matching_fact_seed() {
+        // Pins: exact non-Entity graph seeds can carry phase-one facts into graph attribution.
+        let exact = uid(10);
+        let sibling = uid(11);
+        let ordered = exact_seed_candidates(
+            &[
+                node_row(exact, NodeLabel::Fact, "audit-shipper-dep-0-0-0"),
+                node_row(sibling, NodeLabel::Fact, "audit-shipper-dep-0-4-0"),
+            ],
+            &strengths(&[(exact, 0.5), (sibling, 1.0)]),
+            "Which team owns the library that audit-shipper-dep-0-0-0 depends on?",
+            None,
+        );
+
+        assert_eq!(ordered, vec![exact]);
+    }
+
+    #[test]
+    fn exact_seed_candidates_keep_entities_as_conduits() {
+        // Pins: exact Entity seeds are not emitted unless the caller explicitly asks for Entity rows.
+        let entity = uid(10);
+        let ordered = exact_seed_candidates(
+            &[node_row(
+                entity,
+                NodeLabel::Entity,
+                "audit-shipper-dep-0-0-0",
+            )],
+            &strengths(&[(entity, 1.0)]),
+            "Which team owns the library that audit-shipper-dep-0-0-0 depends on?",
+            None,
+        );
+
+        assert!(ordered.is_empty());
+    }
+
+    #[test]
+    fn merge_ordered_uids_preserves_first_occurrence() {
+        // Pins: graph seed candidates precede expansion candidates without duplicate rows.
+        let seed = uid(1);
+        let expanded = uid(2);
+
+        let ordered = merge_ordered_uids(vec![seed], vec![expanded, seed]);
+
+        assert_eq!(ordered, vec![seed, expanded]);
+    }
+
+    fn uid(value: u128) -> Uuid {
+        Uuid::from_u128(value)
+    }
+
+    fn expansion_hit(seed: Uuid, uid: Uuid, hop: u8, edges: Vec<EdgeLabel>) -> GraphExpansionHit {
+        let valid_from = chrono::Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("test timestamp should be valid");
+        expansion_hit_with_validity(seed, uid, hop, edges, valid_from, valid_from)
+    }
+
+    fn expansion_hit_with_validity(
+        seed: Uuid,
+        uid: Uuid,
+        hop: u8,
+        edges: Vec<EdgeLabel>,
+        seed_valid_from: chrono::DateTime<chrono::Utc>,
+        valid_from: chrono::DateTime<chrono::Utc>,
+    ) -> GraphExpansionHit {
+        GraphExpansionHit {
+            uid,
+            label: NodeLabel::Fact,
+            seed,
+            seed_valid_from,
+            valid_from,
+            hop,
+            edges,
+        }
+    }
+
+    fn strengths(pairs: &[(Uuid, f64)]) -> HashMap<Uuid, f64> {
+        pairs.iter().copied().collect()
+    }
+
+    fn node_row(uid: Uuid, label: NodeLabel, name: &str) -> NodeIndexRow {
+        NodeIndexRow {
+            uid,
+            label,
+            workspace_id: Some("workspace".to_string()),
+            user_id: None,
+            scope: "workspace".to_string(),
+            name: name.to_string(),
+            pii_class: PiiClass::None,
+            valid_to: None,
+            valid_from: chrono::Utc::now(),
+            properties_summary: None,
+            last_accessed_at: chrono::Utc::now(),
+        }
     }
 }

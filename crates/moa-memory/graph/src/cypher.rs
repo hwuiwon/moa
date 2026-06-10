@@ -29,12 +29,41 @@ impl Cypher {
     }
 }
 
+/// Static Cypher template returning path expansion columns.
+pub struct ExpansionCypher {
+    sql: &'static str,
+}
+
+impl ExpansionCypher {
+    /// Creates a static path-expansion Cypher template wrapper.
+    pub const fn new(sql: &'static str) -> Self {
+        Self { sql }
+    }
+
+    /// Builds a sqlx query for this template with a single agtype parameter map.
+    pub fn execute(&self, params: &Value) -> Query<'_, Postgres, PgArguments> {
+        sqlx::query(self.sql).bind(AgTypeParam(params.to_string()))
+    }
+}
+
 macro_rules! cypher_sql {
     ($($body:tt)*) => {
         concat!(
             "SELECT result::text FROM ag_catalog.cypher('moa_graph', $$ ",
             $($body)*,
             " $$, $1) AS (result ag_catalog.agtype)"
+        )
+    };
+}
+
+macro_rules! expansion_cypher_sql {
+    ($($body:tt)*) => {
+        concat!(
+            "SELECT seed::text, uid::text, hop::text, edges::text, path_nodes::text ",
+            "FROM ag_catalog.cypher('moa_graph', $$ ",
+            $($body)*,
+            " $$, $1) AS (seed ag_catalog.agtype, uid ag_catalog.agtype, ",
+            "hop ag_catalog.agtype, edges ag_catalog.agtype, path_nodes ag_catalog.agtype)"
         )
     };
 }
@@ -184,7 +213,7 @@ pub mod edge {
 pub mod traverse {
     //! Traversal Cypher templates.
 
-    use super::Cypher;
+    use super::{Cypher, ExpansionCypher};
 
     /// One-hop undirected neighbor traversal.
     pub const NEIGHBORS_1HOP: Cypher = Cypher::new(cypher_sql!(
@@ -227,4 +256,73 @@ pub mod traverse {
          WHERE n.valid_from <= $as_of AND (n.valid_to IS NULL OR n.valid_to > $as_of) \
          RETURN DISTINCT n.uid AS result LIMIT $limit"
     ));
+
+    /// Batched one-hop seed expansion returning shortest paths for active nodes.
+    pub const EXPAND_SEEDS_1HOP: ExpansionCypher = ExpansionCypher::new(expansion_cypher_sql!(
+        "UNWIND $seed_uids AS seed_uid \
+         MATCH path = (s {uid: seed_uid})-[*1..1]-(n) \
+         WITH seed_uid AS seed, n.uid AS uid, length(path) AS hop, \
+              [edge IN relationships(path) | type(edge)] AS edges, nodes(path) AS path_nodes \
+         ORDER BY seed, uid, hop \
+         RETURN seed, uid, hop, edges, path_nodes \
+         ORDER BY seed, uid LIMIT $limit"
+    ));
+
+    /// Batched two-hop seed expansion returning shortest paths for active nodes.
+    pub const EXPAND_SEEDS_2HOP: ExpansionCypher = ExpansionCypher::new(expansion_cypher_sql!(
+        "UNWIND $seed_uids AS seed_uid \
+         MATCH path = (s {uid: seed_uid})-[*1..2]-(n) \
+         WITH seed_uid AS seed, n.uid AS uid, length(path) AS hop, \
+              [edge IN relationships(path) | type(edge)] AS edges, nodes(path) AS path_nodes \
+         ORDER BY seed, uid, hop \
+         RETURN seed, uid, hop, edges, path_nodes \
+         ORDER BY seed, uid LIMIT $limit"
+    ));
+
+    /// Batched three-hop seed expansion returning shortest paths for active nodes.
+    pub const EXPAND_SEEDS_3HOP: ExpansionCypher = ExpansionCypher::new(expansion_cypher_sql!(
+        "UNWIND $seed_uids AS seed_uid \
+         MATCH path = (s {uid: seed_uid})-[*1..3]-(n) \
+         WITH seed_uid AS seed, n.uid AS uid, length(path) AS hop, \
+              [edge IN relationships(path) | type(edge)] AS edges, nodes(path) AS path_nodes \
+         ORDER BY seed, uid, hop \
+         RETURN seed, uid, hop, edges, path_nodes \
+         ORDER BY seed, uid LIMIT $limit"
+    ));
+
+    /// Batched one-hop seed expansion returning shortest paths for an application-time instant.
+    pub const EXPAND_SEEDS_1HOP_AS_OF: ExpansionCypher =
+        ExpansionCypher::new(expansion_cypher_sql!(
+            "UNWIND $seed_uids AS seed_uid \
+             MATCH path = (s {uid: seed_uid})-[*1..1]-(n) \
+             WITH seed_uid AS seed, n.uid AS uid, length(path) AS hop, \
+                  [edge IN relationships(path) | type(edge)] AS edges, nodes(path) AS path_nodes \
+             ORDER BY seed, uid, hop \
+             RETURN seed, uid, hop, edges, path_nodes \
+             ORDER BY seed, uid LIMIT $limit"
+        ));
+
+    /// Batched two-hop seed expansion returning shortest paths for an application-time instant.
+    pub const EXPAND_SEEDS_2HOP_AS_OF: ExpansionCypher =
+        ExpansionCypher::new(expansion_cypher_sql!(
+            "UNWIND $seed_uids AS seed_uid \
+             MATCH path = (s {uid: seed_uid})-[*1..2]-(n) \
+             WITH seed_uid AS seed, n.uid AS uid, length(path) AS hop, \
+                  [edge IN relationships(path) | type(edge)] AS edges, nodes(path) AS path_nodes \
+             ORDER BY seed, uid, hop \
+             RETURN seed, uid, hop, edges, path_nodes \
+             ORDER BY seed, uid LIMIT $limit"
+        ));
+
+    /// Batched three-hop seed expansion returning shortest paths for an application-time instant.
+    pub const EXPAND_SEEDS_3HOP_AS_OF: ExpansionCypher =
+        ExpansionCypher::new(expansion_cypher_sql!(
+            "UNWIND $seed_uids AS seed_uid \
+             MATCH path = (s {uid: seed_uid})-[*1..3]-(n) \
+             WITH seed_uid AS seed, n.uid AS uid, length(path) AS hop, \
+                  [edge IN relationships(path) | type(edge)] AS edges, nodes(path) AS path_nodes \
+             ORDER BY seed, uid, hop \
+             RETURN seed, uid, hop, edges, path_nodes \
+             ORDER BY seed, uid LIMIT $limit"
+        ));
 }

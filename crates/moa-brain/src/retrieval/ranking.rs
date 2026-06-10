@@ -8,7 +8,7 @@ use moa_memory_graph::NodeIndexRow;
 use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.
-pub const RANKING_PIPELINE_VERSION: u32 = 1;
+pub const RANKING_PIPELINE_VERSION: u32 = 2;
 
 /// Ranking mode for hydrated hybrid retrieval candidates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,7 +192,7 @@ pub fn normalize_tokens(text: &str) -> BTreeSet<String> {
     text.split(|ch: char| !ch.is_ascii_alphanumeric())
         .filter_map(|raw| {
             let token = raw.to_ascii_lowercase();
-            (token.len() >= 3).then_some(token)
+            (token.len() >= 3 || token.chars().any(|ch| ch.is_ascii_digit())).then_some(token)
         })
         .collect()
 }
@@ -225,7 +225,7 @@ fn subject_match_score(query_tokens: &BTreeSet<String>, name: &str) -> f64 {
 }
 
 fn is_identifier_token(token: &str) -> bool {
-    token.chars().any(|ch| ch.is_ascii_digit())
+    token.len() >= 3 && token.chars().any(|ch| ch.is_ascii_digit())
 }
 
 fn overlap_score(query_tokens: &BTreeSet<String>, row: &NodeIndexRow) -> f64 {
@@ -372,6 +372,44 @@ mod tests {
         assert!(
             ranker.score(1.0, 1.0, &query_tokens, &explicit_identifier)
                 > ranker.score(1.0, 1.0, &query_tokens, &missing_identifier)
+        );
+    }
+
+    #[test]
+    fn feature_score_numeric_subject_segments_must_all_match() {
+        // Pins: service-like numeric suffixes disambiguate otherwise identical subject tokens.
+        let reference_time = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .single()
+            .expect("test timestamp should be valid");
+        let mut config = RankingConfig::default();
+        config.weights.rrf = 0.0;
+        config.weights.recency = 0.0;
+        config.weights.access = 0.0;
+        config.weights.overlap = 0.0;
+        config.weights.scope_workspace = 0.0;
+        let ranker = FeatureRanker::new(&config, reference_time);
+        let query_tokens = normalize_tokens(
+            "Which team owns the library that audit-shipper-dep-0-0-0 depends on?",
+        );
+        let exact = row(
+            "workspace",
+            "audit-shipper-dep-0-0-0",
+            reference_time,
+            reference_time,
+            None,
+        );
+        let sibling = row(
+            "workspace",
+            "audit-shipper-dep-0-4-0",
+            reference_time,
+            reference_time,
+            None,
+        );
+
+        assert!(
+            ranker.score(1.0, 1.0, &query_tokens, &exact)
+                > ranker.score(1.0, 1.0, &query_tokens, &sibling)
         );
     }
 
