@@ -1,8 +1,12 @@
 //! Context pipeline assembly helpers.
 
 use std::sync::Arc;
+use std::time::Instant;
 
-use moa_core::{ContextProcessor, LLMProvider, LineageHandle, MoaConfig, SessionStore};
+use moa_core::{
+    ContextProcessor, LLMProvider, LineageHandle, MoaConfig, SessionStore,
+    record_context_pipeline_construction, record_retrieval_embedder_construction,
+};
 use moa_memory_vector::{EmbedderConstructionRole, build_embedder_from_config};
 
 use super::cache::CacheOptimizer;
@@ -10,7 +14,7 @@ use super::compactor::Compactor;
 use super::history::HistoryCompiler;
 use super::identity::IdentityProcessor;
 use super::instructions::InstructionProcessor;
-use super::memory::GraphMemoryRetriever;
+use super::memory::{GraphMemoryRetriever, SharedGraphMemoryRetriever};
 use super::query_rewrite::QueryRewriter;
 use super::runner::ContextPipeline;
 use super::runtime_context::RuntimeContextProcessor;
@@ -73,6 +77,8 @@ pub fn build_default_pipeline_with_tools(
 pub struct GraphMemoryPipelineOptions {
     /// Postgres pool used by graph retrieval.
     pub graph_pool: sqlx::PgPool,
+    /// Optional process-wide graph-memory retriever reused across pipelines.
+    pub shared_graph_memory_retriever: Option<Arc<GraphMemoryRetriever>>,
     /// Optional LLM provider used by context compaction.
     pub compaction_llm_provider: Option<Arc<dyn LLMProvider>>,
     /// Optional LLM provider used by query rewriting.
@@ -85,6 +91,38 @@ pub struct GraphMemoryPipelineOptions {
     pub lineage: Arc<dyn LineageHandle>,
 }
 
+/// Builds the default graph-memory retriever and its retrieval embedder.
+#[must_use]
+pub fn build_default_graph_memory_retriever(
+    config: &MoaConfig,
+    graph_pool: sqlx::PgPool,
+    lineage: Arc<dyn LineageHandle>,
+) -> Arc<GraphMemoryRetriever> {
+    let embedder_started = Instant::now();
+    let retrieval_embedder = match build_embedder_from_config(
+        config,
+        EmbedderConstructionRole::Retrieval,
+    ) {
+        Ok(embedder) => {
+            record_retrieval_embedder_construction("success", embedder_started.elapsed());
+            Some(embedder)
+        }
+        Err(error) => {
+            record_retrieval_embedder_construction("failure", embedder_started.elapsed());
+            tracing::warn!(
+                %error,
+                "graph memory vector retrieval disabled because the retrieval embedder could not be constructed"
+            );
+            None
+        }
+    };
+
+    Arc::new(
+        GraphMemoryRetriever::new_with_config(config.clone(), graph_pool, retrieval_embedder)
+            .with_lineage(lineage),
+    )
+}
+
 /// Builds the default context pipeline with graph-backed memory retrieval.
 ///
 pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
@@ -92,8 +130,10 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
     session_store: Arc<dyn SessionStore>,
     options: GraphMemoryPipelineOptions,
 ) -> ContextPipeline {
+    let pipeline_started = Instant::now();
     let GraphMemoryPipelineOptions {
         graph_pool,
+        shared_graph_memory_retriever,
         compaction_llm_provider,
         query_rewrite_llm_provider,
         discovered_workspace_instructions,
@@ -129,18 +169,11 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
     } else {
         None
     };
-    let retrieval_embedder = match build_embedder_from_config(
-        config,
-        EmbedderConstructionRole::Retrieval,
-    ) {
-        Ok(embedder) => Some(embedder),
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "graph memory vector retrieval disabled because the retrieval embedder could not be constructed"
-            );
-            None
-        }
+    let graph_memory: Box<dyn ContextProcessor> = match shared_graph_memory_retriever {
+        Some(retriever) => Box::new(SharedGraphMemoryRetriever::new(retriever)),
+        None => Box::new(SharedGraphMemoryRetriever::new(
+            build_default_graph_memory_retriever(config, graph_pool.clone(), lineage.clone()),
+        )),
     };
 
     let mut stages: Vec<Box<dyn ContextProcessor>> = vec![
@@ -161,10 +194,7 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
         stages.push(query_rewriter);
     }
     stages.extend([
-        Box::new(
-            GraphMemoryRetriever::new_with_config(config.clone(), graph_pool, retrieval_embedder)
-                .with_lineage(lineage),
-        ) as Box<dyn ContextProcessor>,
+        graph_memory,
         history,
         Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
         Box::new(Compactor::new(
@@ -175,9 +205,11 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
         Box::new(CacheOptimizer) as Box<dyn ContextProcessor>,
     ]);
 
-    ContextPipeline::with_runtime_limits(
+    let pipeline = ContextPipeline::with_runtime_limits(
         stages,
         config.budgets.daily_workspace_cents,
         config.context_snapshot.clone(),
-    )
+    );
+    record_context_pipeline_construction(pipeline_started.elapsed());
+    pipeline
 }

@@ -523,11 +523,14 @@ fn append_piece(piece: &str, limit: usize, current: &mut String, chunks: &mut Ve
 fn split_hard(text: &str, limit: usize) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
+    let mut current_len = 0;
     for grapheme in text.graphemes(true) {
-        if current.graphemes(true).count() == limit {
+        if current_len == limit {
             parts.push(std::mem::take(&mut current));
+            current_len = 0;
         }
         current.push_str(grapheme);
+        current_len += 1;
     }
     if !current.is_empty() {
         parts.push(current);

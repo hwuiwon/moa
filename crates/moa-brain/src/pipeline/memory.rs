@@ -39,6 +39,35 @@ pub struct GraphMemoryRetriever {
     scoped_runtimes: Mutex<HashMap<MemoryScope, Arc<ScopedRetrievalRuntime>>>,
 }
 
+/// Shared graph-memory retrieval stage backed by a process-wide retriever.
+#[derive(Clone)]
+pub struct SharedGraphMemoryRetriever {
+    inner: Arc<GraphMemoryRetriever>,
+}
+
+impl SharedGraphMemoryRetriever {
+    /// Creates a shared graph-memory processor from a process-wide retriever.
+    #[must_use]
+    pub fn new(inner: Arc<GraphMemoryRetriever>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl ContextProcessor for SharedGraphMemoryRetriever {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn stage(&self) -> u8 {
+        self.inner.stage()
+    }
+
+    async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+        self.inner.process(ctx).await
+    }
+}
+
 struct ScopedRetrievalRuntime {
     graph: Arc<dyn GraphStore>,
     hybrid: Arc<crate::retrieval::CachedHybridRetriever>,
@@ -517,11 +546,29 @@ fn truncate_excerpt(excerpt: &str, max_tokens: usize) -> String {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        ModelCapabilities, ModelId, Platform, QueryRewriteResult, SessionId, SessionMeta,
-        TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
+        ContextProcessor, ModelCapabilities, ModelId, Platform, QueryRewriteResult, SessionId,
+        SessionMeta, TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
+    };
+    use sqlx::postgres::PgPoolOptions;
+
+    use super::{
+        GraphMemoryRetriever, SharedGraphMemoryRetriever, extract_search_keywords,
+        extract_search_query,
     };
 
-    use super::{extract_search_keywords, extract_search_query};
+    #[tokio::test]
+    async fn shared_graph_memory_retriever_preserves_processor_identity() {
+        // Pins: shared graph-memory runtime remains the stage-6 memory processor.
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/moa_test")
+            .expect("lazy test pool should not connect");
+        let shared = SharedGraphMemoryRetriever::new(std::sync::Arc::new(
+            GraphMemoryRetriever::new(pool, None),
+        ));
+
+        assert_eq!(shared.name(), "graph_memory");
+        assert_eq!(shared.stage(), 6);
+    }
 
     #[test]
     fn keyword_extraction_filters_stopwords_and_duplicates() {

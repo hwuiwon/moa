@@ -40,7 +40,8 @@ pub(crate) const FILE_READ_DEDUP_PLACEHOLDER: &str =
     "[file previously read — see latest version below]";
 pub(crate) const HISTORY_START_INDEX_METADATA_KEY: &str = "_moa.history.start_index";
 pub(crate) const HISTORY_END_INDEX_METADATA_KEY: &str = "_moa.history.end_index";
-pub(crate) const HISTORY_SNAPSHOT_METADATA_KEY: &str = "_moa.history.snapshot";
+/// Metadata key used by the history stage to expose the latest reusable context snapshot.
+pub const HISTORY_SNAPSHOT_METADATA_KEY: &str = "_moa.history.snapshot";
 
 pub struct HistoryCompiler {
     session_store: Arc<dyn SessionStore>,

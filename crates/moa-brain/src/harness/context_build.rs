@@ -6,11 +6,11 @@ use std::time::{Duration, Instant};
 
 use moa_core::{
     ApprovalDecision, BufferedUserMessage, CacheReport, CompletionRequest, CompletionResponse,
-    ContextSnapshot, Event, EventRange, EventRecord, LLMProvider, MoaError, Result, SessionId,
-    SessionMeta, SessionStore, TokenPricing, TraceContext, UserMessage, WorkingContext,
-    current_turn_root_span, record_pipeline_compile_duration, record_turn_compaction,
-    record_turn_event_persist_duration, record_turn_pipeline_compile_duration,
-    record_turn_snapshot_write_duration, stable_prefix_fingerprint,
+    ContextSnapshot, Event, EventRecord, LLMProvider, Result, SessionId, SessionMeta, SessionStore,
+    TokenPricing, TraceContext, UserMessage, WorkingContext, current_turn_root_span,
+    record_pipeline_compile_duration, record_turn_compaction, record_turn_event_persist_duration,
+    record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
+    stable_prefix_fingerprint,
 };
 use moa_lineage_core::TurnId;
 use moa_security::inject_canary;
@@ -278,7 +278,6 @@ pub(super) fn build_cache_report(
     events: &[EventRecord],
     provider: &str,
     request: &CompletionRequest,
-    response: &CompletionResponse,
 ) -> CacheReport {
     let previous_stable_prefix = events.iter().rev().find_map(|record| match &record.event {
         Event::CacheReport { report } => Some(report.stable_prefix_fingerprint),
@@ -292,12 +291,32 @@ pub(super) fn build_cache_report(
     CacheReport::from_request(
         request,
         provider.to_string(),
-        response.model.clone(),
+        request
+            .model
+            .clone()
+            .unwrap_or_else(|| moa_core::ModelId::new("")),
         stable_prefix_reused,
-        response.token_usage().total_input_tokens(),
-        response.token_usage().input_tokens_cache_read,
-        response.token_usage().output_tokens,
+        0,
+        0,
+        0,
     )
+}
+
+pub(super) fn complete_cache_report(
+    mut report: CacheReport,
+    response: &CompletionResponse,
+) -> CacheReport {
+    let usage = response.token_usage();
+    report.model = response.model.clone();
+    report.input_tokens = usage.total_input_tokens();
+    report.cached_input_tokens = usage.input_tokens_cache_read;
+    report.output_tokens = usage.output_tokens;
+    report.cached_vs_stable_estimate_ratio = if report.stable_total_tokens_estimate == 0 {
+        0.0
+    } else {
+        usage.input_tokens_cache_read as f64 / report.stable_total_tokens_estimate as f64
+    };
+    report
 }
 
 pub(super) fn approval_decision_label(decision: &ApprovalDecision) -> &'static str {
@@ -322,22 +341,8 @@ pub(super) async fn append_event(
     );
     let started_at = Instant::now();
     let result = async {
-        let sequence_num = session_store.emit_event(session_id, event).await?;
+        let record = session_store.emit_event_record(session_id, event).await?;
         if let Some(event_tx) = event_tx {
-            let mut records = session_store
-                .get_events(
-                    session_id,
-                    EventRange {
-                        from_seq: Some(sequence_num),
-                        to_seq: Some(sequence_num),
-                        event_types: None,
-                        limit: Some(1),
-                    },
-                )
-                .await?;
-            let record = records.pop().ok_or_else(|| {
-                MoaError::StorageError("failed to reload appended event".to_string())
-            })?;
             let _ = event_tx.send(record);
         }
         Ok(())

@@ -1,8 +1,6 @@
 //! Restate virtual object that owns one durable conversational sub-agent.
 
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 use chrono::Utc;
 use moa_core::{

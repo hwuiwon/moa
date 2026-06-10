@@ -13,9 +13,6 @@
 //! awakeable if needed. After resolving the cancel promise, `request_cancel`
 //! reads the body-owned awakeable ID and resolves it when present.
 //!
-//! TODO(turn-body): replace the placeholder sleep in `run` with the real port
-//! of `turn::runner::TurnRunner` driven from a workflow context.
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,11 +29,11 @@ use moa_core::restate_observability::{
 use moa_core::wire::{RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress};
 use moa_core::{
     ActiveSegment, ApprovalDecision, ApprovalPrompt, CompletionRequest, CompletionResponse,
-    DispatchSubAgentInput, Event, EventRange, EventRecord, LearningEntry, MoaError, PolicyAction,
-    QueryRewriteResult, ScoringPhase, SegmentId, SessionId, SessionMeta, SessionStatus,
-    SessionStore as _, SubAgentChildRef, ToolCallContent, ToolCallId, ToolCallRequest,
-    ToolInvocation, ToolOutput, TurnLatencyCounters, TurnOutcome as CoreTurnOutcome,
-    TurnReplayCounters, record_approval_wait, record_session_error,
+    DispatchSubAgentInput, Event, EventRange, EventRecord, EventType, LearningEntry, MoaError,
+    PolicyAction, QueryRewriteResult, ScoringPhase, SegmentId, SessionId, SessionMeta,
+    SessionStatus, SessionStore as _, SubAgentChildRef, ToolCallContent, ToolCallId,
+    ToolCallRequest, ToolInvocation, ToolOutput, TurnLatencyCounters,
+    TurnOutcome as CoreTurnOutcome, TurnReplayCounters, record_approval_wait, record_session_error,
     record_turn_event_persist_duration, record_turn_latency, record_turn_llm_call_duration,
     record_turn_tool_dispatch_duration, scope_turn_latency_counters, scope_turn_replay_counters,
 };
@@ -88,6 +85,12 @@ struct PendingApprovalState {
 struct BodyOutcome {
     kind: TurnOutcomeKind,
     message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SegmentBoundarySequences {
+    start_seq: u64,
+    completed_seq: Option<u64>,
 }
 
 /// Restate workflow surface for durable turn execution.
@@ -860,11 +863,41 @@ async fn score_completed_segment_at_transition(
         return Ok(());
     }
 
-    let events = load_session_events(ctx, session_id).await?;
-    let (next_user_message, next_user_seq) = latest_user_message(&events)
-        .map(|(text, sequence_num)| (Some(text.to_string()), Some(sequence_num)))
-        .unwrap_or((None, None));
-    let segment_events = segment_events_for_scoring(&events, completed.segment_id, next_user_seq);
+    let boundaries = load_segment_boundary_events(ctx, session_id).await?;
+    let (segment_events, next_user_message) = if let Some(boundary) =
+        segment_boundary_sequences(&boundaries, completed.segment_id)
+    {
+        let next_user = load_next_user_message_cutoff(ctx, session_id, boundary.start_seq)
+            .await?
+            .map(|(text, sequence_num)| (Some(text), Some(sequence_num)))
+            .unwrap_or((None, None));
+        let events = load_segment_scoring_events(
+            ctx,
+            session_id,
+            completed.segment_id,
+            boundary,
+            next_user.1,
+            true,
+        )
+        .await?;
+        (
+            segment_events_for_scoring(&events, completed.segment_id, next_user.1),
+            next_user.0,
+        )
+    } else {
+        tracing::warn!(
+            session_id = %session_id,
+            segment_id = %completed.segment_id,
+            "segment start event missing; falling back to full event log for completed segment scoring"
+        );
+        let events = load_session_events_fallback(ctx, session_id).await?;
+        let (next_user_message, next_user_seq) = latest_user_message(&events)
+            .map(|(text, sequence_num)| (Some(text.to_string()), Some(sequence_num)))
+            .unwrap_or((None, None));
+        let segment_events =
+            segment_events_for_scoring(&events, completed.segment_id, next_user_seq);
+        (segment_events, next_user_message)
+    };
     let rewrite = query_rewrite_from_metadata(metadata);
     let baseline = load_segment_baseline(ctx, tenant_id).await?;
     let phase = if next_user_message.is_some() {
@@ -917,8 +950,21 @@ async fn score_current_active_segment(
         return Ok(());
     };
 
-    let events = load_session_events(ctx, session_id).await?;
-    let segment_events = segment_events_for_scoring(&events, segment.id, None);
+    let boundaries = load_segment_boundary_events(ctx, session_id).await?;
+    let segment_events = if let Some(boundary) = segment_boundary_sequences(&boundaries, segment.id)
+    {
+        let events =
+            load_segment_scoring_events(ctx, session_id, segment.id, boundary, None, true).await?;
+        segment_events_for_scoring(&events, segment.id, None)
+    } else {
+        tracing::warn!(
+            session_id = %session_id,
+            segment_id = %segment.id,
+            "segment start event missing; falling back to full event log for active segment scoring"
+        );
+        let events = load_session_events_fallback(ctx, session_id).await?;
+        segment_events_for_scoring(&events, segment.id, None)
+    };
     let baseline = load_segment_baseline(ctx, meta.workspace_id.as_str()).await?;
     let duration_ms = durable_utc_now(ctx)
         .await?
@@ -985,22 +1031,185 @@ async fn record_resolution_learning(
     Ok(())
 }
 
-async fn load_session_events(
+async fn load_events_in_range(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    range: EventRange,
+    operation_name: &'static str,
+) -> Result<Vec<EventRecord>, HandlerError> {
+    let store = OrchestratorCtx::current().session_store.clone();
+    Ok(ctx
+        .run(move || {
+            let store = store.clone();
+            let range = range.clone();
+            async move {
+                store
+                    .get_events(session_id, range)
+                    .await
+                    .map(Json::from)
+                    .map_err(HandlerError::from)
+            }
+        })
+        .name(operation_name)
+        .await?
+        .into_inner())
+}
+
+async fn load_segment_boundary_events(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+) -> Result<Vec<EventRecord>, HandlerError> {
+    load_events_in_range(
+        ctx,
+        session_id,
+        EventRange {
+            event_types: Some(vec![EventType::SegmentStarted, EventType::SegmentCompleted]),
+            ..EventRange::default()
+        },
+        "turn_execution_load_segment_boundaries",
+    )
+    .await
+}
+
+async fn load_segment_scoring_events(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    segment_id: SegmentId,
+    boundary: SegmentBoundarySequences,
+    cutoff_before_seq: Option<u64>,
+    stop_at_completion: bool,
+) -> Result<Vec<EventRecord>, HandlerError> {
+    let to_seq = segment_scoring_to_seq(boundary, cutoff_before_seq, stop_at_completion);
+    tracing::debug!(
+        session_id = %session_id,
+        segment_id = %segment_id,
+        from_seq = boundary.start_seq,
+        to_seq = ?to_seq,
+        "loading bounded events for segment scoring"
+    );
+    load_events_in_range(
+        ctx,
+        session_id,
+        EventRange {
+            from_seq: Some(boundary.start_seq),
+            to_seq,
+            ..EventRange::default()
+        },
+        "turn_execution_load_segment_scoring_events",
+    )
+    .await
+}
+
+async fn load_next_user_message_cutoff(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    segment_start_seq: u64,
+) -> Result<Option<(String, u64)>, HandlerError> {
+    let current_user_sequence = ctx
+        .get::<Json<u64>>(K_USER_MESSAGE_SEQUENCE)
+        .await?
+        .map(Json::into_inner)
+        .filter(|sequence_num| *sequence_num > segment_start_seq);
+    if let Some(sequence_num) = current_user_sequence {
+        let events = load_events_in_range(
+            ctx,
+            session_id,
+            EventRange {
+                from_seq: Some(sequence_num),
+                to_seq: Some(sequence_num),
+                event_types: Some(vec![EventType::UserMessage]),
+                ..EventRange::default()
+            },
+            "turn_execution_load_current_user_message",
+        )
+        .await?;
+        if let Some((text, sequence_num)) = latest_user_message(&events) {
+            return Ok(Some((text.to_string(), sequence_num)));
+        }
+        tracing::warn!(
+            session_id = %session_id,
+            sequence_num,
+            "current user message sequence was not found during completed segment scoring"
+        );
+    }
+
+    let events = load_events_in_range(
+        ctx,
+        session_id,
+        EventRange {
+            from_seq: Some(segment_start_seq.saturating_add(1)),
+            event_types: Some(vec![EventType::UserMessage]),
+            ..EventRange::default()
+        },
+        "turn_execution_load_segment_user_messages",
+    )
+    .await?;
+    Ok(latest_user_message(&events).map(|(text, sequence_num)| (text.to_string(), sequence_num)))
+}
+
+async fn load_session_events_fallback(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
 ) -> Result<Vec<EventRecord>, HandlerError> {
     let store = OrchestratorCtx::current().session_store.clone();
     Ok(ctx
-        .run(|| async move {
-            store
-                .get_events(session_id, EventRange::all())
-                .await
-                .map(Json::from)
-                .map_err(HandlerError::from)
+        .run(move || {
+            let store = store.clone();
+            async move {
+                store
+                    .get_events(session_id, EventRange::all())
+                    .await
+                    .map(Json::from)
+                    .map_err(HandlerError::from)
+            }
         })
-        .name("turn_execution_load_session_events")
+        .name("turn_execution_load_session_events_fallback")
         .await?
         .into_inner())
+}
+
+fn segment_boundary_sequences(
+    boundary_events: &[EventRecord],
+    segment_id: SegmentId,
+) -> Option<SegmentBoundarySequences> {
+    let mut start_seq = None;
+    let mut completed_seq = None;
+    for record in boundary_events {
+        match &record.event {
+            Event::SegmentStarted {
+                segment_id: started_id,
+                ..
+            } if *started_id == segment_id && start_seq.is_none() => {
+                start_seq = Some(record.sequence_num);
+            }
+            Event::SegmentCompleted {
+                segment_id: completed_id,
+                ..
+            } if *completed_id == segment_id && completed_seq.is_none() => {
+                completed_seq = Some(record.sequence_num);
+            }
+            _ => {}
+        }
+    }
+
+    start_seq.map(|start_seq| SegmentBoundarySequences {
+        start_seq,
+        completed_seq,
+    })
+}
+
+fn segment_scoring_to_seq(
+    boundary: SegmentBoundarySequences,
+    cutoff_before_seq: Option<u64>,
+    stop_at_completion: bool,
+) -> Option<u64> {
+    if let Some(sequence_num) = cutoff_before_seq {
+        return Some(sequence_num.saturating_sub(1));
+    }
+    if stop_at_completion {
+        return boundary.completed_seq;
+    }
+    None
 }
 
 async fn load_segment_baseline(
@@ -1380,4 +1589,153 @@ fn is_terminal_phase(phase: &TurnPhase) -> bool {
         phase,
         TurnPhase::Completed | TurnPhase::Cancelled | TurnPhase::Failed
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use moa_core::{Event, EventRecord, SegmentId, SessionId};
+    use uuid::Uuid;
+
+    use super::{
+        SegmentBoundarySequences, segment_boundary_sequences, segment_events_for_scoring,
+        segment_scoring_to_seq,
+    };
+
+    fn event_record(session_id: SessionId, sequence_num: u64, event: Event) -> EventRecord {
+        let event_type = event.event_type();
+        EventRecord {
+            id: Uuid::from_u128(sequence_num as u128),
+            session_id,
+            sequence_num,
+            event_type,
+            event,
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        }
+    }
+
+    fn segment_started(
+        session_id: SessionId,
+        sequence_num: u64,
+        segment_id: SegmentId,
+    ) -> EventRecord {
+        event_record(
+            session_id,
+            sequence_num,
+            Event::SegmentStarted {
+                segment_id,
+                segment_index: 0,
+                task_summary: Some("target task".to_string()),
+                previous_segment_id: None,
+            },
+        )
+    }
+
+    fn segment_completed(
+        session_id: SessionId,
+        sequence_num: u64,
+        segment_id: SegmentId,
+    ) -> EventRecord {
+        event_record(
+            session_id,
+            sequence_num,
+            Event::SegmentCompleted {
+                segment_id,
+                segment_index: 0,
+                task_summary: Some("target task".to_string()),
+                turn_count: 1,
+                tools_used: Vec::new(),
+                skills_activated: Vec::new(),
+                token_cost: 10,
+                duration_ms: 50,
+            },
+        )
+    }
+
+    fn user_message(session_id: SessionId, sequence_num: u64, text: &str) -> EventRecord {
+        event_record(
+            session_id,
+            sequence_num,
+            Event::UserMessage {
+                text: text.to_string(),
+                attachments: Vec::new(),
+            },
+        )
+    }
+
+    fn warning(session_id: SessionId, sequence_num: u64, message: &str) -> EventRecord {
+        event_record(
+            session_id,
+            sequence_num,
+            Event::Warning {
+                message: message.to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn segment_boundary_sequences_match_requested_segment_only() {
+        // Pins: boundary lookup uses durable segment boundary events for the target segment.
+        let session_id = SessionId::new();
+        let target_segment = SegmentId::new();
+        let other_segment = SegmentId::new();
+        let boundaries = vec![
+            segment_started(session_id, 2, other_segment),
+            segment_started(session_id, 10, target_segment),
+            segment_completed(session_id, 18, other_segment),
+            segment_completed(session_id, 31, target_segment),
+        ];
+
+        assert_eq!(
+            segment_boundary_sequences(&boundaries, target_segment),
+            Some(SegmentBoundarySequences {
+                start_seq: 10,
+                completed_seq: Some(31),
+            })
+        );
+        assert_eq!(
+            segment_boundary_sequences(&boundaries, SegmentId::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn segment_scoring_to_seq_prefers_next_user_cutoff() {
+        // Pins: completed segment scoring ends before the next user message when known.
+        let boundary = SegmentBoundarySequences {
+            start_seq: 10,
+            completed_seq: Some(40),
+        };
+
+        assert_eq!(segment_scoring_to_seq(boundary, Some(35), true), Some(34));
+        assert_eq!(segment_scoring_to_seq(boundary, None, true), Some(40));
+        assert_eq!(segment_scoring_to_seq(boundary, None, false), None);
+    }
+
+    #[test]
+    fn segment_events_for_scoring_starts_at_segment_and_stops_before_cutoff() {
+        // Pins: segment scoring excludes prior events and the next task's user message.
+        let session_id = SessionId::new();
+        let target_segment = SegmentId::new();
+        let events = vec![
+            user_message(session_id, 1, "previous task"),
+            segment_started(session_id, 2, target_segment),
+            user_message(session_id, 3, "target task"),
+            warning(session_id, 4, "inside target segment"),
+            user_message(session_id, 5, "next task"),
+            segment_completed(session_id, 6, target_segment),
+            warning(session_id, 7, "after target segment"),
+        ];
+
+        let filtered = segment_events_for_scoring(&events, target_segment, Some(5));
+        let sequences = filtered
+            .iter()
+            .map(|record| record.sequence_num)
+            .collect::<Vec<_>>();
+
+        assert_eq!(sequences, vec![2, 3, 4]);
+    }
 }

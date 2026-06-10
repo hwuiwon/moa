@@ -6,11 +6,13 @@ use std::time::Instant;
 use moa_brain::{
     GraphMemoryPipelineOptions,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
+    pipeline::history::HISTORY_SNAPSHOT_METADATA_KEY,
 };
 use moa_core::{
-    CompletionRequest, CountedSessionStore, EventRange, QueryRewriteResult, Result, SessionId,
-    SessionStore, WorkingContext, record_pipeline_compile_duration,
-    record_turn_pipeline_compile_duration, session_engine::session_requires_processing,
+    CompletionRequest, ContextSnapshot, CountedSessionStore, EventRange, QueryRewriteResult,
+    Result, SessionId, SessionStore, WorkingContext, record_pipeline_compile_duration,
+    record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
+    session_engine::session_requires_processing,
 };
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
@@ -89,6 +91,7 @@ pub(crate) async fn prepare_turn_request(
         counted_session_store,
         GraphMemoryPipelineOptions {
             graph_pool: ctx.graph_pool.clone(),
+            shared_graph_memory_retriever: Some(ctx.graph_memory_retriever.clone()),
             compaction_llm_provider: None,
             query_rewrite_llm_provider: query_rewrite_provider,
             discovered_workspace_instructions: None,
@@ -111,6 +114,12 @@ pub(crate) async fn prepare_turn_request(
     let compile_duration = compile_started.elapsed();
     record_pipeline_compile_duration(compile_duration);
     record_turn_pipeline_compile_duration(compile_duration);
+    persist_context_snapshot(
+        session_store.as_ref(),
+        &context,
+        pipeline.snapshot_config().max_size_bytes,
+    )
+    .await;
     context.insert_metadata("_moa.session_id", serde_json::json!(session.id.to_string()));
     context.insert_metadata(
         "_moa.user_id",
@@ -127,6 +136,83 @@ pub(crate) async fn prepare_turn_request(
         prepared: PreparedTurnRequest::Request(Box::new(context.into_request())),
         query_rewrite_cache,
     })
+}
+
+async fn persist_context_snapshot(
+    session_store: &dyn SessionStore,
+    context: &WorkingContext,
+    max_size_bytes: usize,
+) {
+    let Some(snapshot_value) = context
+        .metadata()
+        .get(HISTORY_SNAPSHOT_METADATA_KEY)
+        .cloned()
+    else {
+        return;
+    };
+
+    if snapshot_value.is_null() {
+        let started_at = Instant::now();
+        if let Err(error) = session_store.delete_snapshot(context.session_id).await {
+            tracing::warn!(
+                session_id = %context.session_id,
+                error = %error,
+                "compiled context snapshot delete failed in Restate bridge"
+            );
+            return;
+        }
+
+        record_turn_snapshot_write_duration(started_at.elapsed());
+        return;
+    }
+
+    let mut snapshot = match serde_json::from_value::<ContextSnapshot>(snapshot_value) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %context.session_id,
+                error = %error,
+                "failed to deserialize compiled context snapshot metadata in Restate bridge"
+            );
+            return;
+        }
+    };
+    snapshot.cache_controls = context.cache_controls.clone();
+
+    let serialized = match serde_json::to_vec(&snapshot) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %context.session_id,
+                error = %error,
+                "failed to serialize compiled context snapshot in Restate bridge"
+            );
+            return;
+        }
+    };
+    if serialized.len() > max_size_bytes {
+        tracing::warn!(
+            session_id = %context.session_id,
+            snapshot_bytes = serialized.len(),
+            max_snapshot_bytes = max_size_bytes,
+            "compiled context snapshot exceeded expected size in Restate bridge"
+        );
+    }
+
+    let started_at = Instant::now();
+    if let Err(error) = session_store
+        .put_snapshot(context.session_id, snapshot)
+        .await
+    {
+        tracing::warn!(
+            session_id = %context.session_id,
+            error = %error,
+            "compiled context snapshot persist failed in Restate bridge; next turn will fall back to replay"
+        );
+        return;
+    }
+
+    record_turn_snapshot_write_duration(started_at.elapsed());
 }
 
 fn query_rewrite_cache_from_context(

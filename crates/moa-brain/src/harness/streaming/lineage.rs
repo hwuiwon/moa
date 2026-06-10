@@ -1,8 +1,8 @@
 //! Lineage emission helpers for streamed turns.
 
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, LineageHandle,
-    SessionMeta, WorkingContext,
+    CompletionContent, CompletionResponse, ContextMessage, LineageHandle, SessionMeta,
+    WorkingContext,
 };
 use moa_lineage_core::{
     CitationLineage, ContextChunk, ContextLineage, GenerationLineage, LineageEvent, ScoreRecord,
@@ -92,7 +92,7 @@ pub(super) fn emit_generation_lineage(
     turn_id: TurnId,
     session: &SessionMeta,
     provider: &str,
-    request: &CompletionRequest,
+    request_model: &str,
     response: &CompletionResponse,
     cost_cents: u32,
     duration: std::time::Duration,
@@ -106,11 +106,7 @@ pub(super) fn emit_generation_lineage(
         user_id: session.user_id.clone(),
         ts: chrono::Utc::now(),
         provider: provider.to_string(),
-        request_model: request
-            .model
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| session.model.to_string()),
+        request_model: request_model.to_string(),
         response_model: response.model.to_string(),
         usage: TokenUsage {
             input_tokens: usage.total_input_tokens().min(u32::MAX as usize) as u32,

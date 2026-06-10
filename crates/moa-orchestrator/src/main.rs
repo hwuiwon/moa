@@ -13,6 +13,7 @@ use axum::routing::get;
 use axum::{Router, serve};
 use clap::Parser;
 use moa_authz::AwakeableResolver;
+use moa_brain::build_default_graph_memory_retriever;
 use moa_core::config::{AsyncAuthzKind, AuthHeaderTrustKind};
 use moa_core::{MoaConfig, TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_hands::ToolRouter;
@@ -193,6 +194,11 @@ async fn main() -> anyhow::Result<()> {
             .with_session_store(session_store.clone()),
     );
     let lineage = build_lineage_sink(moa_config.as_ref(), pool.clone()).await?;
+    let graph_memory_retriever = build_default_graph_memory_retriever(
+        moa_config.as_ref(),
+        session_store.pool().clone(),
+        lineage.handle.clone(),
+    );
     let ctx = Arc::new(OrchestratorCtx {
         config: moa_config.clone(),
         session_store: session_store.clone(),
@@ -203,6 +209,7 @@ async fn main() -> anyhow::Result<()> {
         embedding_provider: embedding_provider.clone(),
         tool_router: tool_router.clone(),
         tool_schemas: Arc::new(tool_router.tool_schemas()),
+        graph_memory_retriever,
         lineage: lineage.handle.clone(),
         lineage_writer: lineage.writer.clone(),
     });

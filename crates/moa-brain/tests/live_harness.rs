@@ -38,6 +38,7 @@ async fn live_brain_turn_returns_brain_response() -> Result<()> {
         store.clone(),
         GraphMemoryPipelineOptions {
             graph_pool: store.pool().clone(),
+            shared_graph_memory_retriever: None,
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
             discovered_workspace_instructions: None,

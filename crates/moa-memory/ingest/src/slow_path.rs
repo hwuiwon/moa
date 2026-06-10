@@ -59,6 +59,7 @@ impl IngestionVO for IngestionVOImpl {
         let pool = runtime.pool().clone();
         let pii_service_url = runtime.pii_service_url().map(str::to_string);
         let cohere_api_key_env = runtime.cohere_api_key_env().to_string();
+        let contradiction_detector = runtime.contradiction_detector();
         let degraded = workspace_degraded(&pool, &turn).await?;
         if degraded && !should_ingest_degraded(&turn) {
             ctx.set(&done_key, Json::from(true));
@@ -127,14 +128,14 @@ impl IngestionVO for IngestionVOImpl {
         let contradiction_turn = turn.clone();
         let contradiction_input = embedded.clone();
         let contradiction_pool = pool.clone();
-        let contradiction_cohere_api_key_env = cohere_api_key_env.clone();
+        let contradiction_detector = contradiction_detector.clone();
         let decisions = ctx
             .run(|| async move {
-                detect_contradictions(
-                    &contradiction_pool,
+                detect_contradictions_with(
+                    contradiction_detector.as_ref(),
+                    contradiction_pool,
                     &contradiction_turn,
                     &contradiction_input,
-                    &contradiction_cohere_api_key_env,
                 )
                 .await
                 .map(Json::from)
@@ -181,6 +182,7 @@ pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, 
         runtime.cohere_api_key_env().to_string(),
         runtime.extractor(),
         runtime.entity_resolver(),
+        runtime.contradiction_detector(),
         turn,
     )
     .await
@@ -196,6 +198,7 @@ pub async fn ingest_turn_direct_with_pool(
     turn: SessionTurn,
 ) -> Result<IngestApplyReport, HandlerError> {
     let config = MoaConfig::load_from_env().map_err(HandlerError::from)?;
+    let contradiction_detector = Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(&config));
     let memory = config.memory;
     ingest_turn_direct_with_pool_and_pii(
         pool,
@@ -203,6 +206,7 @@ pub async fn ingest_turn_direct_with_pool(
         memory.vector.embedder.cohere.api_key_env,
         Arc::new(HeuristicFactExtractor),
         Arc::new(EntityResolver::deterministic_for_app_role()),
+        contradiction_detector,
         turn,
     )
     .await
@@ -214,6 +218,7 @@ async fn ingest_turn_direct_with_pool_and_pii(
     cohere_api_key_env: String,
     extractor: Arc<dyn FactExtractor>,
     entity_resolver: Arc<EntityResolver>,
+    contradiction_detector: Arc<dyn ContradictionDetector>,
     turn: SessionTurn,
 ) -> Result<IngestApplyReport, HandlerError> {
     let degraded = workspace_degraded(&pool, &turn).await?;
@@ -232,7 +237,13 @@ async fn ingest_turn_direct_with_pool_and_pii(
         .map_err(HandlerError::from)?;
     let classified = classify_facts(&extracted, pii_service_url.as_deref()).await?;
     let embedded = embed_batch(&classified, &cohere_api_key_env).await?;
-    let decisions = detect_contradictions(&pool, &turn, &embedded, &cohere_api_key_env).await?;
+    let decisions = detect_contradictions_with(
+        contradiction_detector.as_ref(),
+        pool.clone(),
+        &turn,
+        &embedded,
+    )
+    .await?;
     apply_decisions(&pool, entity_resolver.as_ref(), &turn, &decisions).await
 }
 
@@ -471,17 +482,6 @@ async fn embed_batch_with(
             embedding_model_version: Some(embedder.model_version()),
         })
         .collect())
-}
-
-async fn detect_contradictions(
-    pool: &PgPool,
-    turn: &SessionTurn,
-    embedded: &[EmbeddedFact],
-    cohere_api_key_env: &str,
-) -> Result<Vec<IngestDecision>, HandlerError> {
-    let pool = pool.clone();
-    let detector = RrfPlusJudgeDetector::from_cohere_api_key_env_or_heuristic(cohere_api_key_env);
-    detect_contradictions_with(&detector, pool, turn, embedded).await
 }
 
 async fn detect_contradictions_with(

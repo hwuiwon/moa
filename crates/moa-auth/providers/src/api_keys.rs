@@ -4,10 +4,14 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use argon2::password_hash::{PasswordHash, SaltString, rand_core::OsRng as SaltOsRng};
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use chrono::{DateTime, Utc};
+use moa_core::record_api_key_validation_duration;
+use moka::future::Cache;
 use rand::Rng;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -22,7 +26,14 @@ pub const GITHUB_SECRET_SCANNING_REGEX: &str =
 const RANDOM_LEN: usize = 32;
 const PREFIX_RANDOM_LEN: usize = 8;
 const CHARSET: &[u8; 62] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const VALIDATION_CACHE_CAPACITY: u64 = 10_000;
+const VALIDATION_CACHE_TTL: Duration = Duration::from_secs(60);
+const VALIDATION_CACHE_DOMAIN: &[u8] = b"moa.api_key.validation.v1";
 type ApiKeyLookupRow = (Uuid, String, Option<Uuid>, Option<Uuid>, Uuid);
+type ValidationCacheKey = [u8; 32];
+
+static VALIDATION_CACHE: OnceLock<Cache<ValidationCacheKey, ResolvedKey>> = OnceLock::new();
+static VALIDATION_KEY_IDS: OnceLock<Cache<Uuid, ValidationCacheKey>> = OnceLock::new();
 
 /// Environment segment embedded in a MOA API key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -313,6 +324,53 @@ pub struct ResolvedKey {
 
 /// Validate a presented key and return its owner identity.
 pub async fn validate(pool: &sqlx::PgPool, presented: &str) -> Result<ResolvedKey, ApiKeyError> {
+    let started = Instant::now();
+    let cache_key = validation_cache_key(presented);
+    let result = if let Some(cached) = validation_cache().get(&cache_key).await {
+        validate_cached_resolution(pool, cache_key, cached).await
+    } else {
+        let result = validate_inner(pool, presented).await;
+        if let Ok(resolved) = result.as_ref() {
+            cache_successful_validation(cache_key, resolved).await;
+        }
+        result
+    };
+    let label = if result.is_ok() { "success" } else { "failure" };
+    record_api_key_validation_duration(label, started.elapsed());
+    result
+}
+
+async fn validate_cached_resolution(
+    pool: &sqlx::PgPool,
+    cache_key: ValidationCacheKey,
+    cached: ResolvedKey,
+) -> Result<ResolvedKey, ApiKeyError> {
+    if cached_key_is_active(pool, cached.id).await? {
+        return Ok(cached);
+    }
+
+    validation_cache().invalidate(&cache_key).await;
+    validation_key_ids().invalidate(&cached.id).await;
+    Err(ApiKeyError::NotFoundOrRevoked)
+}
+
+async fn cached_key_is_active(pool: &sqlx::PgPool, key_id: Uuid) -> Result<bool, ApiKeyError> {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM api_keys
+            WHERE id = $1 AND revoked_at IS NULL
+        )
+        "#,
+    )
+    .bind(key_id)
+    .fetch_one(pool)
+    .await
+    .map_err(ApiKeyError::Database)
+}
+
+async fn validate_inner(pool: &sqlx::PgPool, presented: &str) -> Result<ResolvedKey, ApiKeyError> {
     let prefix = prefix_of(presented)?;
     let row: Option<ApiKeyLookupRow> = sqlx::query_as(
         r#"
@@ -376,7 +434,46 @@ where
     .bind(actor_user_id)
     .execute(exec)
     .await?;
+    invalidate_validation_cache_for_key_id(key_id).await;
     Ok(())
+}
+
+fn validation_cache() -> &'static Cache<ValidationCacheKey, ResolvedKey> {
+    VALIDATION_CACHE.get_or_init(|| {
+        Cache::builder()
+            .max_capacity(VALIDATION_CACHE_CAPACITY)
+            .time_to_live(VALIDATION_CACHE_TTL)
+            .build()
+    })
+}
+
+fn validation_key_ids() -> &'static Cache<Uuid, ValidationCacheKey> {
+    VALIDATION_KEY_IDS.get_or_init(|| {
+        Cache::builder()
+            .max_capacity(VALIDATION_CACHE_CAPACITY)
+            .time_to_live(VALIDATION_CACHE_TTL)
+            .build()
+    })
+}
+
+fn validation_cache_key(presented: &str) -> ValidationCacheKey {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(VALIDATION_CACHE_DOMAIN);
+    hasher.update(&(presented.len() as u64).to_le_bytes());
+    hasher.update(presented.as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+async fn cache_successful_validation(cache_key: ValidationCacheKey, resolved: &ResolvedKey) {
+    validation_cache().insert(cache_key, resolved.clone()).await;
+    validation_key_ids().insert(resolved.id, cache_key).await;
+}
+
+async fn invalidate_validation_cache_for_key_id(key_id: Uuid) {
+    if let Some(cache_key) = validation_key_ids().get(&key_id).await {
+        validation_cache().invalidate(&cache_key).await;
+    }
+    validation_key_ids().invalidate(&key_id).await;
 }
 
 #[cfg(test)]
@@ -441,5 +538,38 @@ mod tests {
         let key = "moa_dev_01234567ABCDEFGHIJKLMNOPQRSTUVWX_f3deaf6b";
         let prefix = prefix_of(key).expect("fixture key has valid crc");
         assert_eq!(prefix, "moa_dev_01234567");
+    }
+
+    #[test]
+    fn validation_cache_key_is_deterministic_and_secret_sensitive() {
+        // Pins: cache identity is a stable digest of the whole presented key, not the raw key.
+        let key = "moa_dev_01234567ABCDEFGHIJKLMNOPQRSTUVWX_f3deaf6b";
+        let changed = "moa_dev_01234567ABCDEFGHIJKLMNOPQRSTUVWY_01234567";
+
+        assert_eq!(validation_cache_key(key), validation_cache_key(key));
+        assert_ne!(validation_cache_key(key), validation_cache_key(changed));
+    }
+
+    #[tokio::test]
+    async fn validation_cache_invalidates_by_key_id() {
+        // Pins: in-process revocation removes cached successful validation results.
+        let cache_key = validation_cache_key("moa_dev_cached_key");
+        let resolved = ResolvedKey {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            owner_user_id: Some(Uuid::new_v4()),
+            owner_agent_id: None,
+        };
+
+        cache_successful_validation(cache_key, &resolved).await;
+        assert_eq!(
+            validation_cache().get(&cache_key).await,
+            Some(resolved.clone())
+        );
+
+        invalidate_validation_cache_for_key_id(resolved.id).await;
+
+        assert_eq!(validation_cache().get(&cache_key).await, None);
+        assert_eq!(validation_key_ids().get(&resolved.id).await, None);
     }
 }
