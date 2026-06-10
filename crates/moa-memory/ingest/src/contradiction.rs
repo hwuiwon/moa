@@ -571,6 +571,7 @@ async fn vector_candidate_uids(
             label_filter: Some(vec![label.as_str().to_string()]),
             max_pii_class: "phi".to_string(),
             include_global: true,
+            as_of: None,
         })
         .await?;
     Ok(hits.into_iter().map(|hit| hit.uid).collect())

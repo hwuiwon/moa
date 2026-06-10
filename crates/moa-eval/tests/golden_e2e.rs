@@ -257,13 +257,16 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
     }
 
     wait_for_dlq_empty(&stack.pool, stack.workspace_uuid, Duration::from_secs(60)).await?;
-    assert_eq!(node_count(&stack.pool, stack.workspace_uuid).await?, 100);
+    assert_eq!(
+        fact_node_count(&stack.pool, stack.workspace_uuid).await?,
+        100
+    );
     assert_eq!(
         embedding_count(&stack.pool, stack.workspace_uuid).await?,
         100
     );
     assert_eq!(
-        changelog_count(&stack.pool, stack.workspace_uuid).await?,
+        fact_create_changelog_count(&stack.pool, stack.workspace_uuid).await?,
         100
     );
 
@@ -335,13 +338,9 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
     }
 
     for historical in &queries.historical_queries {
-        let hits = retrieve_historical(
-            &stack.pool,
-            stack.workspace_uuid,
-            &historical.query,
-            historical.as_of,
-        )
-        .await?;
+        let hits = retrieval
+            .retrieve_as_of(&historical.query, historical.as_of)
+            .await?;
         let expected = *uid_by_alias
             .get(&historical.expected_pre_supersession)
             .ok_or_else(|| {
@@ -351,7 +350,7 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
                 ))
             })?;
         assert_eq!(
-            hits.first().copied(),
+            hits.first().map(|hit| hit.uid),
             Some(expected),
             "historical query `{}` returned {:?}",
             historical.query,
@@ -406,6 +405,33 @@ impl RetrievalHarness {
         .with_reranker(false);
         retrieve_for_query(query, &ctx).await.map_err(box_error)
     }
+
+    async fn retrieve_as_of(
+        &self,
+        query: &str,
+        as_of: DateTime<Utc>,
+    ) -> TestResult<Vec<RetrievalHit>> {
+        let mut planned = self
+            .planner
+            .plan(query, &self.planning)
+            .await
+            .map_err(box_error)?;
+        planned.temporal_filter = Some(as_of);
+        planned.label_hint = Some(vec![NodeLabel::Fact]);
+        // Historical golden queries are stable fact identifiers; supersession may remove the
+        // old vector row, so this path exercises temporal lexical retrieval and hydration.
+        let request = planned.clone().into_retrieval_request(
+            query,
+            Vec::new(),
+            PiiClass::Restricted,
+            5,
+            false,
+        );
+        self.hybrid
+            .retrieve(&planned, request)
+            .await
+            .map_err(box_error)
+    }
 }
 
 fn fixture_root() -> PathBuf {
@@ -442,7 +468,7 @@ fn session_turn(stack: &GoldenStack, fixture: &GoldenFixture, turn_seq: u64) -> 
         user_id: UserId::new(stack.user_uuid.to_string()),
         session_id: stack.session_id,
         turn_seq,
-        transcript: format!("Fact: {}", fixture.summary),
+        transcript: format!("Fact: workspace shared {}", fixture.summary),
         dominant_pii_class: "none".to_string(),
         finalized_at: fixture.valid_from,
     }
@@ -528,16 +554,21 @@ async fn uid_for_turn_seq(pool: &PgPool, workspace_id: Uuid, turn_seq: u64) -> T
     .bind(workspace_id.to_string())
     .bind(turn_seq.to_string())
     .fetch_one(conn.as_mut())
-    .await?;
+    .await
+    .map_err(|error| {
+        box_message(format!(
+            "uid_for_turn_seq failed for workspace {workspace_id} turn_seq {turn_seq}: {error}"
+        ))
+    })?;
     conn.commit().await.map_err(box_error)?;
     Ok(uid)
 }
 
-async fn node_count(pool: &PgPool, workspace_id: Uuid) -> TestResult<i64> {
+async fn fact_node_count(pool: &PgPool, workspace_id: Uuid) -> TestResult<i64> {
     scoped_count(
         pool,
         workspace_id,
-        "SELECT count(*) FROM moa.node_index WHERE workspace_id = $1",
+        "SELECT count(*) FROM moa.node_index WHERE workspace_id = $1 AND label = 'Fact'",
     )
     .await
 }
@@ -551,11 +582,12 @@ async fn embedding_count(pool: &PgPool, workspace_id: Uuid) -> TestResult<i64> {
     .await
 }
 
-async fn changelog_count(pool: &PgPool, workspace_id: Uuid) -> TestResult<i64> {
+async fn fact_create_changelog_count(pool: &PgPool, workspace_id: Uuid) -> TestResult<i64> {
     scoped_count(
         pool,
         workspace_id,
-        "SELECT count(*) FROM moa.graph_changelog WHERE workspace_id = $1",
+        "SELECT count(*) FROM moa.graph_changelog \
+         WHERE workspace_id = $1 AND op = 'create' AND target_kind = 'node' AND target_label = 'Fact'",
     )
     .await
 }
@@ -621,36 +653,6 @@ async fn wait_for_dlq_empty(pool: &PgPool, workspace_id: Uuid, timeout: Duration
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-}
-
-async fn retrieve_historical(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    query: &str,
-    as_of: DateTime<Utc>,
-) -> TestResult<Vec<Uuid>> {
-    let mut conn = scoped_conn(pool, workspace_id).await?;
-    let rows = sqlx::query_scalar::<_, Uuid>(
-        r#"
-        SELECT uid
-        FROM moa.node_index
-        WHERE workspace_id = $1
-          AND valid_from <= $2
-          AND (valid_to IS NULL OR valid_to > $2)
-          AND name_tsv @@ plainto_tsquery('simple', $3)
-        ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', $3)) DESC,
-                 valid_from DESC,
-                 uid
-        LIMIT 5
-        "#,
-    )
-    .bind(workspace_id.to_string())
-    .bind(as_of)
-    .bind(query)
-    .fetch_all(conn.as_mut())
-    .await?;
-    conn.commit().await.map_err(box_error)?;
-    Ok(rows)
 }
 
 async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: Uuid) -> TestResult<ScopedConn<'a>> {

@@ -3,8 +3,10 @@
 pub mod chunking;
 pub mod contradiction;
 pub mod ctx;
+pub mod entity_resolution;
 pub mod error;
 pub mod extract;
+pub mod extractor;
 pub mod fast_path;
 pub mod slow_path;
 
@@ -15,12 +17,18 @@ pub use ctx::{
     IngestCtx, IngestRuntime, current_runtime, install_runtime, install_runtime_with_config,
     install_runtime_with_pool,
 };
+pub use entity_resolution::{
+    DeterministicEntityMergeVerifier, EntityMergeVerifier, EntityResolutionRequest, EntityResolver,
+    ResolvedEntity,
+};
 pub use error::{IngestError, Result};
 pub use extract::{
-    ClassifiedFact, EmbeddedFact, ExtractedFact, IngestApplyReport, IngestDecision, SessionTurn,
-    TurnChunk, chunk_turn, extract_facts, extract_facts_checked, extraction_confidence_hint,
-    fact_hash, fact_uid_from_hash, scoped_fact_uid, should_ingest_degraded,
+    ClassifiedFact, EmbeddedFact, ExtractedFact, ExtractedFactScopeHint, IngestApplyReport,
+    IngestDecision, SessionTurn, TurnChunk, chunk_turn, extract_facts, extract_facts_checked,
+    extraction_confidence_hint, fact_hash, fact_uid_from_hash, scoped_fact_uid,
+    should_ingest_degraded,
 };
+pub use extractor::{FactExtractor, HeuristicFactExtractor, ScriptedFactExtractor};
 pub use fast_path::{
     FastError, FastMemoryToolExecutor, FastPathCtx, FastRememberRequest, ForgetPattern,
     execute_memory_tool, fast_forget, fast_remember, fast_supersede, is_fast_memory_tool,

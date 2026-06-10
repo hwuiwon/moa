@@ -96,13 +96,29 @@ impl VectorStore for PgvectorStore {
         guard_workspace_embedder(conn.as_mut(), query).await?;
         validate_dimension(&query.embedding)?;
         let halfvec = HalfVector::from_f32_slice(&query.embedding);
-        let mut builder = QueryBuilder::<Postgres>::new("SELECT uid, (1.0 - (embedding <=> ");
+        let mut builder =
+            QueryBuilder::<Postgres>::new("SELECT embedding.uid, (1.0 - (embedding.embedding <=> ");
         builder.push_bind(halfvec.clone());
         builder.push(
             r#"))::float4 AS score
-               FROM moa.embeddings
-               WHERE valid_to IS NULL
-                 AND CASE pii_class
+               FROM moa.embeddings AS embedding
+               JOIN moa.node_index AS node ON node.uid = embedding.uid
+               WHERE "#,
+        );
+        if let Some(as_of) = query.as_of {
+            builder.push("node.valid_from <= ");
+            builder.push_bind(as_of);
+            builder.push(" AND (node.valid_to IS NULL OR node.valid_to > ");
+            builder.push_bind(as_of);
+            builder.push(") AND (embedding.valid_to IS NULL OR embedding.valid_to > ");
+            builder.push_bind(as_of);
+            builder.push(")");
+        } else {
+            builder.push("node.valid_to IS NULL AND embedding.valid_to IS NULL");
+        }
+        builder.push(
+            r#"
+                 AND CASE embedding.pii_class
                        WHEN 'none' THEN 0
                        WHEN 'pii' THEN 1
                        WHEN 'phi' THEN 2
@@ -112,18 +128,18 @@ impl VectorStore for PgvectorStore {
         );
         builder.push_bind(max_pii_rank);
         if !query.include_global {
-            builder.push(" AND scope <> 'global'");
+            builder.push(" AND embedding.scope <> 'global'");
         }
         if let Some(labels) = query
             .label_filter
             .as_ref()
             .filter(|labels| !labels.is_empty())
         {
-            builder.push(" AND label = ANY(");
+            builder.push(" AND embedding.label = ANY(");
             builder.push_bind(labels.as_slice());
             builder.push(")");
         }
-        builder.push(" ORDER BY embedding <=> ");
+        builder.push(" ORDER BY embedding.embedding <=> ");
         builder.push_bind(halfvec);
         builder.push(" LIMIT ");
         builder.push_bind(limit);

@@ -1,6 +1,7 @@
 //! Memory subsystem and embedding configuration.
 
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 /// Memory bootstrap and maintenance configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,6 +15,8 @@ pub struct MemoryConfig {
     pub embedding_provider: String,
     /// Embedding model identifier used for graph memory embedding backfills and queries.
     pub embedding_model: String,
+    /// Graph-memory retrieval behavior.
+    pub retrieval: MemoryRetrievalConfig,
     /// Graph-memory vector embedding configuration.
     pub vector: MemoryVectorConfig,
 }
@@ -25,8 +28,53 @@ impl Default for MemoryConfig {
             pii_service_url: None,
             embedding_provider: "openai".to_string(),
             embedding_model: "text-embedding-3-small".to_string(),
+            retrieval: MemoryRetrievalConfig::default(),
             vector: MemoryVectorConfig::default(),
         }
+    }
+}
+
+/// Graph-memory retrieval configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryRetrievalConfig {
+    /// Runtime/eval mode for post-fusion memory reranking.
+    pub reranker_mode: MemoryRerankerMode,
+}
+
+/// Reranker enablement mode for graph-memory retrieval.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryRerankerMode {
+    /// Do not apply reranking.
+    #[default]
+    Off,
+    /// Keep runtime reranking disabled while allowing eval jobs to opt in.
+    EvalOnly,
+    /// Apply reranking in the normal runtime retrieval pipeline.
+    On,
+}
+
+impl FromStr for MemoryRerankerMode {
+    type Err = MemoryRerankerModeParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "off" => Ok(Self::Off),
+            "eval_only" => Ok(Self::EvalOnly),
+            "on" => Ok(Self::On),
+            _ => Err(MemoryRerankerModeParseError),
+        }
+    }
+}
+
+/// Parse error for memory reranker mode strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryRerankerModeParseError;
+
+impl std::fmt::Display for MemoryRerankerModeParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("expected one of off, eval_only, on")
     }
 }
 

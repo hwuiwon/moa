@@ -9,7 +9,7 @@ use crate::error::{MoaError, Result};
 
 use super::{
     AsyncAuthzKind, Auth0AuthConfig, AuthHeaderTrustKind, AuthProviderKind, AuthzEngine,
-    OidcAuthConfig, OpenFgaConfig, OtlpProtocol, TokenVaultKind,
+    MemoryRerankerMode, OidcAuthConfig, OpenFgaConfig, OtlpProtocol, TokenVaultKind,
 };
 use super::{CloudFlyioConfig, CloudHandsConfig, MoaConfig};
 
@@ -114,6 +114,8 @@ pub struct MoaEnvOverlay {
     pub memory_embedding_provider: Option<String>,
     /// `MOA_MEMORY_EMBEDDING_MODEL`.
     pub memory_embedding_model: Option<String>,
+    /// `MOA_MEMORY_RETRIEVAL_RERANKER_MODE`.
+    pub memory_retrieval_reranker_mode: Option<MemoryRerankerMode>,
     /// `MOA_MEMORY_VECTOR_EMBEDDER_NAME`.
     pub memory_vector_embedder_name: Option<String>,
     /// `MOA_MEMORY_VECTOR_EMBEDDER_OUTPUT_DIM`.
@@ -438,6 +440,10 @@ impl MoaEnvOverlay {
         set_if_some(
             &mut config.memory.embedding_model,
             &self.memory_embedding_model,
+        );
+        set_copy_if_some(
+            &mut config.memory.retrieval.reranker_mode,
+            self.memory_retrieval_reranker_mode,
         );
         set_if_some(
             &mut config.memory.vector.embedder.name,
@@ -992,6 +998,7 @@ struct RawMoaEnvOverlay {
     memory_auto_bootstrap: Option<String>,
     memory_embedding_provider: Option<String>,
     memory_embedding_model: Option<String>,
+    memory_retrieval_reranker_mode: Option<String>,
     memory_vector_embedder_name: Option<String>,
     memory_vector_embedder_output_dim: Option<String>,
     memory_vector_embedder_cohere_api_key_env: Option<String>,
@@ -1228,6 +1235,10 @@ impl TryFrom<RawMoaEnvOverlay> for MoaEnvOverlay {
             )?,
             memory_embedding_provider: raw.memory_embedding_provider,
             memory_embedding_model: raw.memory_embedding_model,
+            memory_retrieval_reranker_mode: parse_optional(
+                "MOA_MEMORY_RETRIEVAL_RERANKER_MODE",
+                raw.memory_retrieval_reranker_mode,
+            )?,
             memory_vector_embedder_name: raw.memory_vector_embedder_name,
             memory_vector_embedder_output_dim: parse_optional(
                 "MOA_MEMORY_VECTOR_EMBEDDER_OUTPUT_DIM",
@@ -1712,6 +1723,7 @@ mod tests {
             ("MOA_LOCAL_DOCKER_ENABLED", "false"),
             ("MOA_LOCAL_SANDBOX_DIR", "/tmp/moa-sandbox"),
             ("MOA_PII_SERVICE_URL", "http://pii.example:8080"),
+            ("MOA_MEMORY_RETRIEVAL_RERANKER_MODE", "eval_only"),
             ("MOA_MEMORY_VECTOR_EMBEDDER_OUTPUT_DIM", "1536"),
             ("MOA_TURBOPUFFER_API_KEY_ENV", "CUSTOM_TURBOPUFFER_KEY"),
             ("MOA_TURBOPUFFER_BASE_URL", "https://tpuf.example"),
@@ -1763,6 +1775,10 @@ mod tests {
         assert_eq!(
             config.memory.pii_service_url.as_deref(),
             Some("http://pii.example:8080")
+        );
+        assert_eq!(
+            config.memory.retrieval.reranker_mode,
+            MemoryRerankerMode::EvalOnly
         );
         assert_eq!(
             config.memory.vector.turbopuffer.api_key_env,
@@ -1846,6 +1862,28 @@ mod tests {
         assert_config_error_contains(
             MoaEnvOverlay::from_iter(env_pairs([("MOA_AUTH_PROVIDER", "saml")])),
             "MOA_AUTH_PROVIDER",
+        );
+    }
+
+    #[test]
+    fn memory_retrieval_reranker_mode_overlay_applies_and_rejects_unknown_values() {
+        // Pins: MOA_MEMORY_RETRIEVAL_RERANKER_MODE accepts off/eval_only/on and rejects unsupported modes.
+        let overlay =
+            MoaEnvOverlay::from_iter(env_pairs([("MOA_MEMORY_RETRIEVAL_RERANKER_MODE", "on")]))
+                .expect("reranker mode overlay should parse");
+        let mut config = MoaConfig::default();
+
+        overlay
+            .apply_to(&mut config)
+            .expect("reranker mode overlay should apply");
+
+        assert_eq!(
+            config.memory.retrieval.reranker_mode,
+            MemoryRerankerMode::On
+        );
+        assert_config_error_contains(
+            MoaEnvOverlay::from_iter(env_pairs([("MOA_MEMORY_RETRIEVAL_RERANKER_MODE", "auto")])),
+            "MOA_MEMORY_RETRIEVAL_RERANKER_MODE",
         );
     }
 

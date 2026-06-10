@@ -1,4 +1,4 @@
-//! Budget gate for recorded long-conversation eval score cards.
+//! Budget gates for recorded eval score cards and memory retrieval reports.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -6,23 +6,35 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use moa_eval::memory_eval::{CorpusProfile, MemoryRetrievalEvalReport, ProbeResult, ProbeType};
 use serde::Deserialize;
 use serde_json::Value;
 
 const DEFAULT_SUITE: &str = "long_conversation";
+const MEMORY_RETRIEVAL_SUITE: &str = "memory_retrieval";
 const DEFAULT_SCENARIO_ROOT: &str = "crates/moa-eval/scenarios/long_conversation";
 const DEFAULT_SCORE_CARD_ROOT: &str = "target/score-cards";
 const DEFAULT_REGRESSION_PCT: f64 = 5.0;
+const MEMORY_PR_ZERO_RECALL_RATE_MAX: f64 = 0.10;
+const MEMORY_RERANKER_RECALL_REGRESSION_MAX: f64 = 0.03;
+const MEMORY_RERANKER_RECALL_GAIN_MIN_FOR_LATENCY: f64 = 0.03;
+const MEMORY_RERANKER_P95_LATENCY_MS_MAX: u64 = 2_000;
+const PREVIOUS_MEMORY_REPORT_ENV: &str = "MOA_EVAL_PREVIOUS_MEMORY_REPORT";
 
-/// Runs the long-conversation budget gate.
+/// Runs the requested eval budget gate.
 pub fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     let options = Options::parse(&mut args)?;
-    let config = SuiteConfig::load(Path::new(DEFAULT_SCENARIO_ROOT).join("budgets.toml"))?;
-    let suite = options.suite.unwrap_or_else(|| DEFAULT_SUITE.to_string());
+    let suite = options.suite.as_deref().unwrap_or(DEFAULT_SUITE);
+    if suite == MEMORY_RETRIEVAL_SUITE {
+        return run_memory_retrieval_budget_gate(options);
+    }
     if suite != DEFAULT_SUITE {
-        bail!("unsupported eval budget suite `{suite}`; supported suite: {DEFAULT_SUITE}");
+        bail!(
+            "unsupported eval budget suite `{suite}`; supported suites: {DEFAULT_SUITE}, {MEMORY_RETRIEVAL_SUITE}"
+        );
     }
 
+    let config = SuiteConfig::load(Path::new(DEFAULT_SCENARIO_ROOT).join("budgets.toml"))?;
     let scenario_root = config
         .scenario_root()
         .unwrap_or_else(|| PathBuf::from(DEFAULT_SCENARIO_ROOT));
@@ -112,6 +124,7 @@ struct Options {
     suite: Option<String>,
     max_regression_pct: Option<f64>,
     analytics_scores_jsonl: Option<PathBuf>,
+    memory_eval_report: Option<PathBuf>,
 }
 
 impl Options {
@@ -133,9 +146,13 @@ impl Options {
                     options.analytics_scores_jsonl =
                         Some(PathBuf::from(next_arg(args, "--analytics-scores-jsonl")?));
                 }
+                "--memory-eval-report" => {
+                    options.memory_eval_report =
+                        Some(PathBuf::from(next_arg(args, "--memory-eval-report")?));
+                }
                 "-h" | "--help" => {
                     println!(
-                        "usage: cargo xtask check-eval-budgets [--suite long_conversation] [--max-regression-pct N] [--analytics-scores-jsonl path]"
+                        "usage: cargo xtask check-eval-budgets [--suite long_conversation|memory_retrieval] [--max-regression-pct N] [--analytics-scores-jsonl path] [--memory-eval-report path]"
                     );
                     std::process::exit(0);
                 }
@@ -149,6 +166,198 @@ impl Options {
 fn next_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
     args.next()
         .with_context(|| format!("{flag} requires a value"))
+}
+
+fn run_memory_retrieval_budget_gate(options: Options) -> Result<()> {
+    let report_path = options
+        .memory_eval_report
+        .as_deref()
+        .context("--memory-eval-report is required for --suite memory_retrieval")?;
+    let max_regression_pct = options.max_regression_pct.unwrap_or(DEFAULT_REGRESSION_PCT);
+    let report = load_memory_retrieval_report(report_path)?;
+
+    let mut failure = ScenarioFailure::new(MEMORY_RETRIEVAL_SUITE.to_string());
+    failure
+        .violations
+        .extend(memory_retrieval_gate_violations(&report));
+
+    let mut regression_compared = 0_usize;
+    if let Some(previous_path) = previous_memory_report_path() {
+        let previous = load_memory_retrieval_report(&previous_path).with_context(|| {
+            format!(
+                "load previous memory report from {PREVIOUS_MEMORY_REPORT_ENV}={}",
+                previous_path.display()
+            )
+        })?;
+        regression_compared += 1;
+        failure.violations.extend(compare_memory_regression(
+            &report,
+            &previous,
+            max_regression_pct,
+        ));
+    }
+
+    if failure.violations.is_empty() {
+        println!(
+            "Memory-retrieval budgets passed: 1 report checked, {regression_compared} regression baseline(s) compared."
+        );
+        return Ok(());
+    }
+
+    let violation_count = failure.violations.len();
+    print_failures(&[failure]);
+    bail!("memory-retrieval budget gate failed: {violation_count} metric violation(s)");
+}
+
+fn load_memory_retrieval_report(path: &Path) -> Result<MemoryRetrievalEvalReport> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("read memory retrieval report {}", path.display()))?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("parse memory retrieval report {}", path.display()))
+}
+
+fn previous_memory_report_path() -> Option<PathBuf> {
+    env::var_os(PREVIOUS_MEMORY_REPORT_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn memory_retrieval_gate_violations(report: &MemoryRetrievalEvalReport) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    let cross_user_leak_probe_ids = cross_user_leak_probe_ids(&report.probe_results);
+    let cross_user_leak_count = cross_user_leak_count(&report.probe_results);
+    if cross_user_leak_count != 0 {
+        violations.push(
+            Violation::new(
+                "cross_user_leak_count",
+                "0",
+                cross_user_leak_count.to_string(),
+            )
+            .with_probe_ids(cross_user_leak_probe_ids),
+        );
+    }
+
+    let pii_unredacted_probe_ids = pii_unredacted_probe_ids(&report.probe_results);
+    if !pii_unredacted_probe_ids.is_empty() {
+        violations.push(
+            Violation::new(
+                "pii_unredacted_count",
+                "0",
+                pii_unredacted_probe_ids.len().to_string(),
+            )
+            .with_probe_ids(pii_unredacted_probe_ids),
+        );
+    }
+
+    if report.manifest.profile == CorpusProfile::Pr {
+        check_max_f64(
+            &mut violations,
+            "zero_recall_rate",
+            MEMORY_PR_ZERO_RECALL_RATE_MAX,
+            report.metrics.zero_recall_rate.value,
+        );
+    }
+
+    if report.reranker_enabled {
+        let pre_recall_at_4 = report.metrics.pre_rerank_recall_at_4.value;
+        let post_recall_at_4 = report.metrics.post_rerank_recall_at_4.value;
+        let recall_delta = post_recall_at_4 - pre_recall_at_4;
+        let recall_regression = pre_recall_at_4 - post_recall_at_4;
+        if recall_regression > MEMORY_RERANKER_RECALL_REGRESSION_MAX {
+            violations.push(Violation::new(
+                "retrieval.reranker_recall_at_4_regression",
+                format!("<= {MEMORY_RERANKER_RECALL_REGRESSION_MAX:.2}"),
+                format!(
+                    "{recall_regression:.4} (pre {pre_recall_at_4:.4}, post {post_recall_at_4:.4})"
+                ),
+            ));
+        }
+        if report.metrics.p95_retrieval_latency_ms > MEMORY_RERANKER_P95_LATENCY_MS_MAX
+            && recall_delta < MEMORY_RERANKER_RECALL_GAIN_MIN_FOR_LATENCY
+        {
+            violations.push(Violation::new(
+                "retrieval.p95_retrieval_latency_ms",
+                format!(
+                    "<= {MEMORY_RERANKER_P95_LATENCY_MS_MAX} unless recall@4 gain >= {MEMORY_RERANKER_RECALL_GAIN_MIN_FOR_LATENCY:.2}"
+                ),
+                format!(
+                    "{} (recall@4 gain {recall_delta:.4})",
+                    report.metrics.p95_retrieval_latency_ms
+                ),
+            ));
+        }
+    }
+
+    violations
+}
+
+fn compare_memory_regression(
+    current: &MemoryRetrievalEvalReport,
+    previous: &MemoryRetrievalEvalReport,
+    max_regression_pct: f64,
+) -> Vec<Violation> {
+    [
+        (
+            "retrieval.recall_at_4",
+            current.metrics.recall_at_4.value,
+            previous.metrics.recall_at_4.value,
+        ),
+        (
+            "retrieval.mrr",
+            current.metrics.mrr.value,
+            previous.metrics.mrr.value,
+        ),
+        (
+            "retrieval.ndcg_at_4",
+            current.metrics.ndcg_at_4.value,
+            previous.metrics.ndcg_at_4.value,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(metric, current_value, previous_value)| {
+        regression_pct(current_value, previous_value, Direction::HigherIsBetter)
+            .filter(|regression| *regression > max_regression_pct)
+            .map(|regression| {
+                Violation::new(
+                    metric,
+                    format!("regression <= {max_regression_pct:.2}%"),
+                    format!(
+                        "{current_value:.4} (regression: {regression:+.2}% vs baseline {previous_value:.4})"
+                    ),
+                )
+            })
+    })
+    .collect()
+}
+
+fn cross_user_leak_count(probe_results: &[ProbeResult]) -> usize {
+    probe_results
+        .iter()
+        .filter(|probe| probe.probe_type == ProbeType::CrossUserIsolation)
+        .map(|probe| probe.leaked_blocked_fact_ids().len())
+        .sum()
+}
+
+fn cross_user_leak_probe_ids(probe_results: &[ProbeResult]) -> Vec<String> {
+    probe_results
+        .iter()
+        .filter(|probe| probe.probe_type == ProbeType::CrossUserIsolation)
+        .filter(|probe| !probe.leaked_blocked_fact_ids().is_empty())
+        .map(|probe| probe.probe_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn pii_unredacted_probe_ids(probe_results: &[ProbeResult]) -> Vec<String> {
+    probe_results
+        .iter()
+        .filter(|probe| probe.probe_type == ProbeType::PiiRedaction)
+        .filter(|probe| probe.pii_redacted == Some(false))
+        .map(|probe| probe.probe_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -764,6 +973,7 @@ struct Violation {
     metric: String,
     expected: String,
     actual: String,
+    affected_probe_ids: Vec<String>,
 }
 
 impl Violation {
@@ -776,7 +986,13 @@ impl Violation {
             metric: metric.into(),
             expected: expected.into(),
             actual: actual.into(),
+            affected_probe_ids: Vec::new(),
         }
+    }
+
+    fn with_probe_ids(mut self, probe_ids: Vec<String>) -> Self {
+        self.affected_probe_ids = probe_ids;
+        self
     }
 }
 
@@ -912,6 +1128,16 @@ fn check_max_u64(violations: &mut Vec<Violation>, metric: &str, expected_max: u6
     }
 }
 
+fn check_max_f64(violations: &mut Vec<Violation>, metric: &str, expected_max: f64, actual: f64) {
+    if actual > expected_max {
+        violations.push(Violation::new(
+            metric,
+            format!("<= {expected_max:.4}"),
+            format!("{actual:.4}"),
+        ));
+    }
+}
+
 fn check_min_u64(violations: &mut Vec<Violation>, metric: &str, expected_min: u64, actual: u64) {
     if actual < expected_min {
         violations.push(Violation::new(
@@ -937,10 +1163,20 @@ fn print_failures(failures: &[ScenarioFailure]) {
     for failure in failures {
         eprintln!("  scenario: {}", failure.scenario);
         for violation in &failure.violations {
-            eprintln!(
-                "    {}: expected {}, actual {}",
-                violation.metric, violation.expected, violation.actual
-            );
+            if violation.affected_probe_ids.is_empty() {
+                eprintln!(
+                    "    {}: expected {}, actual {}",
+                    violation.metric, violation.expected, violation.actual
+                );
+            } else {
+                eprintln!(
+                    "    {}: expected {}, actual {} (affected probe IDs: {})",
+                    violation.metric,
+                    violation.expected,
+                    violation.actual,
+                    violation.affected_probe_ids.join(", ")
+                );
+            }
         }
     }
     let violation_count = failures

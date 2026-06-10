@@ -518,6 +518,7 @@ impl EmbeddingRow {
             label_filter: Some(vec![self.label.clone()]),
             max_pii_class: "restricted".to_string(),
             include_global: false,
+            as_of: None,
         })
     }
 
@@ -575,6 +576,7 @@ mod tests {
                 label_filter: None,
                 max_pii_class: "restricted".to_string(),
                 include_global: false,
+                as_of: None,
             }],
         )
         .await

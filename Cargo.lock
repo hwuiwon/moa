@@ -3949,6 +3949,7 @@ dependencies = [
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
@@ -8919,8 +8920,10 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "moa-eval",
  "serde",
  "serde_json",
+ "tokio",
  "toml 0.8.23",
  "workspace-hack",
 ]

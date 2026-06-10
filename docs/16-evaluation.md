@@ -9,6 +9,11 @@ multi-turn scenario runs. It catches regressions that appear only after
 context, cache, memory, and tool state accumulate across a realistic
 conversation.
 
+Memory retrieval and answer-faithfulness gates are documented separately in
+[Memory Eval Pipeline](eval/memory-eval-pipeline.md). That sequence keeps
+ingestion coverage, retrieval recall, and answer faithfulness separate so the
+report identifies the bottleneck before new memory architecture ships.
+
 ## Modes
 
 | Mode | Use |

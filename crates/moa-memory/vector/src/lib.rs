@@ -154,6 +154,14 @@ pub enum Error {
     /// The vector backend cannot participate in the caller's Postgres transaction.
     #[error("vector backend `{0}` does not support Postgres transactional writes")]
     TransactionalWritesUnsupported(&'static str),
+    /// The vector backend cannot satisfy a requested query feature.
+    #[error("vector backend `{backend}` does not support query feature `{feature}`")]
+    UnsupportedQueryFeature {
+        /// Vector backend identifier.
+        backend: &'static str,
+        /// Unsupported feature identifier.
+        feature: &'static str,
+    },
     /// An HTTP request failed.
     #[error("embedding HTTP request failed: {0}")]
     Reqwest(#[from] reqwest::Error),
@@ -222,6 +230,8 @@ pub struct VectorQuery {
     pub max_pii_class: String,
     /// Whether global rows should remain eligible after RLS has scoped visibility.
     pub include_global: bool,
+    /// Optional application-time filter for bitemporal retrieval.
+    pub as_of: Option<DateTime<Utc>>,
 }
 
 /// One KNN result from vector retrieval.

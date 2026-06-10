@@ -8,9 +8,9 @@ use std::time::Instant;
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    ContextMessage, ContextProcessor, LineageHandle, MemoryScope, NullLineageHandle,
-    ProcessorOutput, QueryRewriteResult, Result, RewriteSource, ScopeContext, WorkingContext,
-    traits::EmbeddingProvider,
+    ContextMessage, ContextProcessor, LineageHandle, MemoryRerankerMode, MemoryScope,
+    NullLineageHandle, ProcessorOutput, QueryRewriteResult, Result, RewriteSource, ScopeContext,
+    WorkingContext, traits::EmbeddingProvider,
 };
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
@@ -109,7 +109,7 @@ impl GraphMemoryRetriever {
                 PiiClass::Restricted,
             )
             .with_k_final(self.result_limit)
-            .with_reranker(false);
+            .with_reranker(self.reranker_enabled());
             crate::planning::retrieve_for_query(&query, &query_ctx)
                 .await
                 .map_err(|error| {
@@ -132,7 +132,7 @@ impl GraphMemoryRetriever {
                 Vec::new(),
                 PiiClass::Restricted,
                 self.result_limit,
-                false,
+                self.reranker_enabled(),
             );
             runtime
                 .hybrid
@@ -146,6 +146,10 @@ impl GraphMemoryRetriever {
         };
 
         Ok(hits)
+    }
+
+    fn reranker_enabled(&self) -> bool {
+        self.config.memory.retrieval.reranker_mode == MemoryRerankerMode::On
     }
 
     fn runtime_for_scope(&self, scope: &MemoryScope) -> Result<Arc<ScopedRetrievalRuntime>> {

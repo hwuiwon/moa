@@ -7,8 +7,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use moa_brain::{StreamedTurnResult, run_streamed_turn_with_signals};
 use moa_core::{
-    ApprovalDecision, BufferedUserMessage, Event, EventRange, EventRecord, LLMProvider, MoaConfig,
-    RuntimeEvent, SessionId, SessionMeta, SessionSignal,
+    BufferedUserMessage, Event, EventRange, EventRecord, LLMProvider, MoaConfig, RuntimeEvent,
+    SessionId, SessionMeta, SessionSignal,
 };
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
@@ -21,12 +21,13 @@ use super::score_card::{
     CacheScores, ContextScores, CostScores, FunctionalScores, LatencyScores, MemoryScores,
     SafetyScores, ScoreCard, ToolScores,
 };
+use super::scripted_user::{ScriptedApprovalDecision, ScriptedUserScript, ScriptedUserTurn};
 use super::transcript::Transcript;
 use crate::collector::{CollectedExecution, TrajectoryCollector};
 use crate::setup::build_agent_environment_with_provider;
 use crate::{
-    AgentConfig, EngineOptions, EvalError, EvalResult, EvalScore, EvalStatus,
-    LongSessionInterleaving, Result, ScoreValue, TestCase,
+    AgentConfig, EngineOptions, EvalError, EvalResult, EvalScore, EvalStatus, LongConversationMode,
+    LongSessionInterleaving, LongTestCase, Result, ScoreValue, TestCase,
 };
 
 const MAX_LONG_CONVERSATION_AGENT_TURNS: usize = 32;
@@ -53,13 +54,44 @@ pub async fn run_scenario_with_provider(
     llm_provider: Arc<dyn LLMProvider>,
 ) -> Result<LongRunReport> {
     let long_case = case.long_case()?;
-    if !long_case.mode.is_recorded() {
-        return Err(EvalError::InvalidConfig(format!(
-            "long conversation mode {:?} is not implemented yet",
-            long_case.mode
-        )));
-    }
 
+    match long_case.mode {
+        LongConversationMode::Recorded => {
+            run_recorded_scenario_with_provider(
+                base_config,
+                agent_config,
+                options,
+                case,
+                long_case,
+                llm_provider,
+            )
+            .await
+        }
+        LongConversationMode::ScriptedUser => {
+            run_scripted_user_scenario_with_provider(
+                base_config,
+                agent_config,
+                options,
+                case,
+                long_case,
+                llm_provider,
+            )
+            .await
+        }
+        LongConversationMode::Live => Err(EvalError::InvalidConfig(
+            "long conversation live mode is not implemented".to_string(),
+        )),
+    }
+}
+
+async fn run_recorded_scenario_with_provider(
+    base_config: &MoaConfig,
+    agent_config: &AgentConfig,
+    options: &EngineOptions,
+    case: &TestCase,
+    long_case: &LongTestCase,
+    llm_provider: Arc<dyn LLMProvider>,
+) -> Result<LongRunReport> {
     let transcript_path = resolve_path(&long_case.transcript)?;
     let transcript = Transcript::read_jsonl(&transcript_path).map_err(|error| {
         EvalError::InvalidConfig(format!(
@@ -102,7 +134,73 @@ pub async fn run_scenario_with_provider(
     } else {
         drive_transcript(case, agent_config, options, transcript, environment).await
     };
-    let cleanup = cleanup_workspace(&run_root).await;
+    cleanup_workspace_after_run(run_root.as_path(), outcome).await
+}
+
+async fn run_scripted_user_scenario_with_provider(
+    base_config: &MoaConfig,
+    agent_config: &AgentConfig,
+    options: &EngineOptions,
+    case: &TestCase,
+    long_case: &LongTestCase,
+    llm_provider: Arc<dyn LLMProvider>,
+) -> Result<LongRunReport> {
+    let Some(goal_card_path) = long_case.goal_card.as_deref() else {
+        return Err(EvalError::InvalidConfig(format!(
+            "long test case '{}' must set goal_card for scripted_user mode",
+            case.name
+        )));
+    };
+    let goal_card_path = resolve_path(goal_card_path)?;
+    let goal_card = tokio::fs::read_to_string(&goal_card_path)
+        .await
+        .map_err(|source| EvalError::Io {
+            path: goal_card_path.clone(),
+            source,
+        })?;
+    if goal_card.trim().is_empty() {
+        return Err(EvalError::InvalidConfig(format!(
+            "long test case '{}' goal_card must not be empty",
+            case.name
+        )));
+    }
+
+    let Some(script_path) = long_case.scripted_user.as_deref() else {
+        return Err(EvalError::InvalidConfig(format!(
+            "long test case '{}' must set scripted_user for scripted_user mode",
+            case.name
+        )));
+    };
+    let script_path = resolve_path(script_path)?;
+    let script = ScriptedUserScript::read_jsonl(&script_path)
+        .await
+        .map_err(|error| {
+            EvalError::InvalidConfig(format!(
+                "failed to read scripted-user script {}: {error}",
+                script_path.display()
+            ))
+        })?;
+    let environment = build_agent_environment_with_provider(
+        base_config,
+        agent_config,
+        &options.temp_dir,
+        llm_provider,
+    )
+    .await?;
+    let run_root = environment
+        .workspace_dir
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| environment.workspace_dir.clone());
+    let outcome = drive_scripted_user(case, agent_config, options, script, environment).await;
+    cleanup_workspace_after_run(run_root.as_path(), outcome).await
+}
+
+async fn cleanup_workspace_after_run(
+    run_root: &Path,
+    outcome: Result<LongRunReport>,
+) -> Result<LongRunReport> {
+    let cleanup = cleanup_workspace(run_root).await;
     match (outcome, cleanup) {
         (Ok(report), Ok(())) => Ok(report),
         (Err(error), _) => Err(error),
@@ -203,6 +301,59 @@ async fn drive_multi_session_transcripts(
         started_at,
         completed_at,
     }))
+}
+
+async fn drive_scripted_user(
+    case: &TestCase,
+    agent_config: &AgentConfig,
+    options: &EngineOptions,
+    script: ScriptedUserScript,
+    environment: crate::AgentEnvironment,
+) -> Result<LongRunReport> {
+    let started_at = Utc::now();
+    let mut primary =
+        ScriptedUserSession::new(environment.session_id, environment.llm_provider.clone());
+
+    for turn in &script.turns {
+        primary.drive_turn(case, &environment, turn).await?;
+    }
+
+    let completed_at = Utc::now();
+    let events = collect_events_for_sessions(&environment, &[primary.session_id]).await?;
+    let report = finish_report(FinishReportInput {
+        case,
+        agent_config,
+        options,
+        environment: &environment,
+        events,
+        user_turn_count: primary.user_turn_count,
+        started_at,
+        completed_at,
+    });
+    validate_scripted_final_answer(&script, &report)?;
+    Ok(report)
+}
+
+fn validate_scripted_final_answer(
+    script: &ScriptedUserScript,
+    report: &LongRunReport,
+) -> Result<()> {
+    let response = report.result.response.as_deref().unwrap_or_default();
+    let missing = script
+        .expected_final_answer_fragments
+        .iter()
+        .filter(|fragment| !response.contains(fragment.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(EvalError::InvalidConfig(format!(
+        "scripted-user scenario '{}' final answer is missing expected fragment(s): {}",
+        script.scenario,
+        missing.join(", ")
+    )))
 }
 
 struct FinishReportInput<'a> {
@@ -404,7 +555,13 @@ impl TranscriptSession {
             user_text.as_str(),
         )
         .await?;
-        spawn_scripted_signal_task(case, user_text.as_str(), &self.runtime_tx, &self.signal_tx);
+        spawn_scripted_signal_task(
+            case,
+            user_text.as_str(),
+            None,
+            &self.runtime_tx,
+            &self.signal_tx,
+        );
         drive_one_turn(
             environment,
             self.session_id,
@@ -426,6 +583,69 @@ impl TranscriptSession {
         {
             self.provider_turn_index += 1;
         }
+        Ok(())
+    }
+}
+
+struct ScriptedUserSession {
+    session_id: SessionId,
+    llm_provider: Arc<dyn LLMProvider>,
+    user_turn_count: usize,
+    runtime_tx: broadcast::Sender<RuntimeEvent>,
+    signal_tx: mpsc::Sender<SessionSignal>,
+    signal_state: TurnSignalState,
+    cancel_token: CancellationToken,
+    hard_cancel_token: CancellationToken,
+}
+
+impl ScriptedUserSession {
+    fn new(session_id: SessionId, llm_provider: Arc<dyn LLMProvider>) -> Self {
+        let (runtime_tx, _) = broadcast::channel::<RuntimeEvent>(256);
+        let (signal_tx, signal_rx) = mpsc::channel::<SessionSignal>(16);
+        Self {
+            session_id,
+            llm_provider,
+            user_turn_count: 0,
+            runtime_tx,
+            signal_tx,
+            signal_state: TurnSignalState::new(signal_rx),
+            cancel_token: CancellationToken::new(),
+            hard_cancel_token: CancellationToken::new(),
+        }
+    }
+
+    async fn drive_turn(
+        &mut self,
+        case: &TestCase,
+        environment: &crate::AgentEnvironment,
+        turn: &ScriptedUserTurn,
+    ) -> Result<()> {
+        let user_text = turn.user.text.clone();
+        emit_user_turn(
+            environment,
+            self.session_id,
+            self.user_turn_count,
+            user_text.as_str(),
+        )
+        .await?;
+        spawn_scripted_signal_task(
+            case,
+            user_text.as_str(),
+            turn.approval.as_ref(),
+            &self.runtime_tx,
+            &self.signal_tx,
+        );
+        drive_one_turn(
+            environment,
+            self.session_id,
+            self.llm_provider.clone(),
+            &self.runtime_tx,
+            &mut self.signal_state,
+            &self.cancel_token,
+            &self.hard_cancel_token,
+        )
+        .await?;
+        self.user_turn_count += 1;
         Ok(())
     }
 }
@@ -486,10 +706,14 @@ impl TurnSignalState {
 fn spawn_scripted_signal_task(
     case: &TestCase,
     user_text: &str,
+    turn_decision: Option<&ScriptedApprovalDecision>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     signal_tx: &mpsc::Sender<SessionSignal>,
 ) {
-    let Some(scripted_decision) = scripted_approval_decision(case, user_text) else {
+    let scripted_decision = turn_decision
+        .cloned()
+        .or_else(|| scripted_approval_decision(case, user_text));
+    let Some(scripted_decision) = scripted_decision else {
         return;
     };
 
@@ -530,29 +754,6 @@ fn spawn_scripted_signal_task(
     });
 }
 
-#[derive(Debug, Clone)]
-enum ScriptedApprovalDecision {
-    AllowOnce,
-    AlwaysAllow { pattern: Option<String> },
-    Deny { reason: Option<String> },
-}
-
-impl ScriptedApprovalDecision {
-    fn to_approval_decision(&self, prompt_pattern: &str) -> ApprovalDecision {
-        match self {
-            Self::AllowOnce => ApprovalDecision::AllowOnce,
-            Self::AlwaysAllow { pattern } => ApprovalDecision::AlwaysAllow {
-                pattern: pattern
-                    .clone()
-                    .unwrap_or_else(|| prompt_pattern.to_string()),
-            },
-            Self::Deny { reason } => ApprovalDecision::Deny {
-                reason: reason.clone(),
-            },
-        }
-    }
-}
-
 fn scripted_approval_decision(
     case: &TestCase,
     user_text: &str,
@@ -571,27 +772,20 @@ fn scripted_approval_decision(
 }
 
 fn parse_scripted_decision(value: &Value) -> Option<ScriptedApprovalDecision> {
-    let decision = value
-        .get("decision")
-        .and_then(Value::as_str)
-        .unwrap_or("allow_once");
-    match decision {
-        "allow_once" => Some(ScriptedApprovalDecision::AllowOnce),
-        "always_allow" => Some(ScriptedApprovalDecision::AlwaysAllow {
-            pattern: value
-                .get("pattern")
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-        }),
-        "deny" => Some(ScriptedApprovalDecision::Deny {
-            reason: value
-                .get("reason")
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-        }),
-        other => {
+    let mut normalized = match value {
+        Value::Object(_) => value.clone(),
+        _ => serde_json::json!({ "decision": "allow_once" }),
+    };
+    if let Value::Object(object) = &mut normalized {
+        object
+            .entry("decision".to_string())
+            .or_insert_with(|| Value::String("allow_once".to_string()));
+    }
+    match serde_json::from_value(normalized) {
+        Ok(decision) => Some(decision),
+        Err(error) => {
             tracing::warn!(
-                scenario_decision = other,
+                error = %error,
                 "unknown scripted long-conversation approval decision"
             );
             None

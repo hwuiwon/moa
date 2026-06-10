@@ -1,0 +1,2265 @@
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::error::Error;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use moa_brain::retrieval::{LegSources, RetrievalHit};
+use moa_core::{
+    MoaError, ScopeContext, ScopeTier, SessionId, UserId, WorkspaceId, traits::EmbeddingProvider,
+};
+use moa_eval::EvalError;
+use moa_eval::memory_eval::{
+    BinaryProbeOutcome, BootstrapConfig, CORPUS_SCHEMA_VERSION, CachedEmbeddingProvider,
+    CandidateLegs, CorpusManifest, CorpusProfile, EmbeddingInputKind, GeneratedMemoryEvalCorpus,
+    GoldPiiStatus, GoldResolutionReport, GoldResolutionStatus, LedgerFact,
+    MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport, MetricSummary, Probe, ProbeResult,
+    ProbeType, RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K, RetrievedCandidate,
+    SyntheticSession, SyntheticTurn, aggregate_retrieval_eval_from_counts, benjamini_hochberg,
+    build_cached_embedding_fixtures, candidates_from_retrieval_hits, embedding_text_hash,
+    generate_memory_eval_corpus, mcnemar_paired_test, read_embedding_inputs_jsonl,
+    read_embeddings_jsonl, read_gold_nodes_jsonl, read_ledger_jsonl, read_manifest_json,
+    read_probes_jsonl, read_sessions_jsonl, resolve_gold_nodes, run_memory_retrieval_eval,
+    validate_corpus, write_embeddings_jsonl, write_gold_nodes_jsonl, write_ledger_jsonl,
+    write_manifest_json, write_memory_eval_corpus, write_probes_jsonl, write_sessions_jsonl,
+};
+use moa_memory_graph::{AgeGraphStore, NodeIndexRow, NodeLabel, PiiClass};
+use moa_memory_ingest::{
+    Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, IngestCtx, IngestError,
+};
+use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
+use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
+use moa_session::testing;
+use sqlx::PgPool;
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
+type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
+
+static GOLD_RESOLUTION_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+#[tokio::test]
+async fn memory_eval_corpus_round_trips_versioned_jsonl() {
+    // Pins: memory eval corpus files preserve scoped, temporal, PII, and probe metadata.
+    let (manifest, facts, sessions, probes) = realistic_corpus();
+    let temp = tempfile::tempdir().expect("create temp corpus directory");
+    let manifest_path = temp.path().join("manifest.json");
+    let ledger_path = temp.path().join("ledger.jsonl");
+    let sessions_path = temp.path().join("sessions.jsonl");
+    let probes_path = temp.path().join("probes.jsonl");
+
+    write_manifest_json(&manifest_path, &manifest)
+        .await
+        .expect("write manifest");
+    write_ledger_jsonl(&ledger_path, &facts)
+        .await
+        .expect("write ledger jsonl");
+    write_sessions_jsonl(&sessions_path, &sessions)
+        .await
+        .expect("write sessions jsonl");
+    write_probes_jsonl(&probes_path, &probes, &facts)
+        .await
+        .expect("write probes jsonl");
+
+    let round_tripped_manifest = read_manifest_json(&manifest_path)
+        .await
+        .expect("read manifest");
+    let round_tripped_facts = read_ledger_jsonl(&ledger_path)
+        .await
+        .expect("read ledger jsonl");
+    let round_tripped_sessions = read_sessions_jsonl(&sessions_path)
+        .await
+        .expect("read sessions jsonl");
+    let round_tripped_probes = read_probes_jsonl(&probes_path, &round_tripped_facts)
+        .await
+        .expect("read probes jsonl");
+
+    validate_corpus(
+        &round_tripped_manifest,
+        &round_tripped_facts,
+        &round_tripped_sessions,
+        &round_tripped_probes,
+    )
+    .expect("round-tripped corpus validates");
+
+    assert_eq!(round_tripped_manifest, manifest);
+    assert_eq!(round_tripped_facts, facts);
+    assert_eq!(round_tripped_sessions, sessions);
+    assert_eq!(round_tripped_probes, probes);
+
+    let probes_jsonl = tokio::fs::read_to_string(&probes_path)
+        .await
+        .expect("read probes jsonl text");
+    for probe_type in [
+        "point_recall",
+        "latest_value_after_update",
+        "abstention",
+        "cross_user_isolation",
+        "workspace_shared_fact",
+        "multi_hop",
+        "temporal_as_of",
+        "preference_application",
+        "pii_redaction",
+    ] {
+        assert!(
+            probes_jsonl.contains(probe_type),
+            "serialized probes should include {probe_type}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn memory_eval_corpus_rejects_cross_user_probe_owned_by_asking_user() {
+    // Pins: cross-user isolation probes must reference another user's private fact.
+    let (_, facts, _, _) = realistic_corpus();
+    let temp = tempfile::tempdir().expect("create temp corpus directory");
+    let probes_path = temp.path().join("probes.jsonl");
+    let bad_probe = Probe {
+        probe_id: "probe-cross-user-bad-owner".to_string(),
+        probe_type: ProbeType::CrossUserIsolation,
+        workspace_id: workspace("workspace-payments"),
+        user_id: user("user-bob"),
+        query: "What editor does Bob prefer?".to_string(),
+        answer: "The assistant should abstain instead of exposing Bob's private preference."
+            .to_string(),
+        expected_fact_ids: Vec::new(),
+        blocked_fact_ids: vec!["fact-bob-editor".to_string()],
+        as_of: None,
+        expected_redacted: false,
+    };
+
+    let error = write_probes_jsonl(&probes_path, &[bad_probe], &facts)
+        .await
+        .expect_err("cross-user probe owned by asking user should fail validation");
+
+    match error {
+        EvalError::InvalidConfig(message) => {
+            assert!(
+                message.contains("cross-user isolation")
+                    && message.contains("probe-cross-user-bad-owner")
+                    && message.contains("fact-bob-editor"),
+                "error should identify the invalid cross-user probe: {message}"
+            );
+        }
+        other => panic!("expected EvalError::InvalidConfig, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn memory_eval_pr_generator_writes_byte_stable_ledger_first_corpus() {
+    // Pins: PR corpus generation is deterministic and includes every ledger-first fact class.
+    let corpus = generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3])
+        .expect("generate PR memory eval corpus");
+    assert_profile_shape(&corpus, 5, 2, 60..=usize::MAX);
+    assert_ledger_first_fact_classes(&corpus.ledger);
+
+    let temp = tempfile::tempdir().expect("create temp corpus root");
+    let first_dir = temp.path().join("pr-a");
+    let second_dir = temp.path().join("pr-b");
+    write_memory_eval_corpus(&first_dir, &corpus)
+        .await
+        .expect("write first generated corpus");
+    write_memory_eval_corpus(
+        &second_dir,
+        &generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3])
+            .expect("regenerate PR memory eval corpus"),
+    )
+    .await
+    .expect("write second generated corpus");
+
+    for file_name in [
+        "manifest.json",
+        "ledger.jsonl",
+        "sessions.jsonl",
+        "probes.jsonl",
+        "embedding_inputs.jsonl",
+    ] {
+        let first = tokio::fs::read(first_dir.join(file_name))
+            .await
+            .expect("read first generated file");
+        let second = tokio::fs::read(second_dir.join(file_name))
+            .await
+            .expect("read second generated file");
+        assert_eq!(first, second, "{file_name} should be byte-stable");
+    }
+
+    let manifest = read_manifest_json(&first_dir.join("manifest.json"))
+        .await
+        .expect("read generated manifest");
+    let ledger = read_ledger_jsonl(&first_dir.join("ledger.jsonl"))
+        .await
+        .expect("read generated ledger");
+    let sessions = read_sessions_jsonl(&first_dir.join("sessions.jsonl"))
+        .await
+        .expect("read generated sessions");
+    let probes = read_probes_jsonl(&first_dir.join("probes.jsonl"), &ledger)
+        .await
+        .expect("read generated probes");
+    let embedding_inputs =
+        read_embedding_inputs_jsonl(&first_dir.join("embedding_inputs.jsonl"), &ledger, &probes)
+            .await
+            .expect("read generated embedding inputs");
+
+    validate_corpus(&manifest, &ledger, &sessions, &probes).expect("generated corpus validates");
+    assert_eq!(embedding_inputs.len(), ledger.len() + probes.len());
+    assert_eq!(
+        embedding_inputs
+            .iter()
+            .filter(|input| input.kind == EmbeddingInputKind::Fact)
+            .count(),
+        ledger.len()
+    );
+    assert_eq!(
+        embedding_inputs
+            .iter()
+            .filter(|input| input.kind == EmbeddingInputKind::Probe)
+            .count(),
+        probes.len()
+    );
+}
+
+#[tokio::test]
+async fn cached_embedding_provider_returns_fixture_vectors_and_missing_hash_errors() {
+    // Pins: cached embeddings are hermetic, dimension-checked, order-preserving, and fail closed.
+    let corpus = generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3])
+        .expect("generate PR memory eval corpus");
+    let fixtures = build_cached_embedding_fixtures(&corpus.embedding_inputs)
+        .expect("build deterministic cached embedding fixtures");
+    assert!(
+        fixtures
+            .iter()
+            .all(|fixture| fixture.dimension == VECTOR_DIMENSION
+                && fixture.vector.len() == VECTOR_DIMENSION),
+        "every cached fixture should match moa_memory_vector::VECTOR_DIMENSION"
+    );
+
+    let temp = tempfile::tempdir().expect("create temp embedding fixture directory");
+    let embeddings_path = temp.path().join("embeddings.jsonl");
+    write_embeddings_jsonl(&embeddings_path, &fixtures)
+        .await
+        .expect("write cached embeddings jsonl");
+
+    let serialized = tokio::fs::read_to_string(&embeddings_path)
+        .await
+        .expect("read embeddings jsonl text");
+    assert!(
+        serialized.contains("\"text_hash\"")
+            && serialized.contains("\"model\"")
+            && serialized.contains("\"dimension\"")
+            && serialized.contains("\"vector\""),
+        "embeddings.jsonl should preserve the frozen fixture fields"
+    );
+
+    let loaded_fixtures = read_embeddings_jsonl(&embeddings_path)
+        .await
+        .expect("read cached embeddings jsonl");
+    let provider = CachedEmbeddingProvider::from_jsonl(&embeddings_path)
+        .await
+        .expect("load cached embedding provider");
+    assert_eq!(provider.dimensions(), VECTOR_DIMENSION);
+
+    let first_input = corpus
+        .embedding_inputs
+        .first()
+        .expect("generated corpus has embedding inputs");
+    let last_input = corpus
+        .embedding_inputs
+        .last()
+        .expect("generated corpus has embedding inputs");
+    let request = vec![last_input.text.clone(), first_input.text.clone()];
+    let embeddings = provider
+        .embed(&request)
+        .await
+        .expect("embed from cached fixtures");
+    assert_eq!(embeddings.len(), 2);
+    assert_eq!(
+        embeddings[0],
+        fixture_vector(&loaded_fixtures, &last_input.text)
+    );
+    assert_eq!(
+        embeddings[1],
+        fixture_vector(&loaded_fixtures, &first_input.text)
+    );
+
+    let missing_text = "this text intentionally has no cached fixture".to_string();
+    let missing_hash = embedding_text_hash(&missing_text);
+    let error = provider
+        .embed(&[missing_text])
+        .await
+        .expect_err("missing cached fixture should fail closed");
+    match error {
+        MoaError::ProviderError(message) => assert!(
+            message.contains(&missing_hash),
+            "missing fixture error should name text_hash {missing_hash}: {message}"
+        ),
+        other => panic!("expected MoaError::ProviderError, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn gold_resolution_reports_partial_and_full_ingestion_coverage() -> TestResult {
+    // Pins: gold resolution ingests real turns and distinguishes explicit facts from unextractable ledger facts.
+    let _guard = GOLD_RESOLUTION_TEST_LOCK.lock().await;
+
+    let explicit_stack = GoldResolutionStack::up().await?;
+    let explicit_result = run_explicit_gold_resolution_case(&explicit_stack).await;
+    let explicit_cleanup = explicit_stack.cleanup().await;
+    explicit_result?;
+    explicit_cleanup?;
+
+    let partial_stack = GoldResolutionStack::up().await?;
+    let partial_result = run_partial_gold_resolution_case(&partial_stack).await;
+    let partial_cleanup = partial_stack.cleanup().await;
+    partial_result?;
+    partial_cleanup
+}
+
+#[tokio::test]
+async fn memory_retrieval_eval_runner_writes_report_from_cached_embeddings() -> TestResult {
+    // Pins: retrieval eval uses cached embeddings, resolves gold nodes, collects top-25 candidates, and writes the report sections.
+    let _guard = GOLD_RESOLUTION_TEST_LOCK.lock().await;
+    let corpus = generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3])
+        .expect("generate PR memory eval corpus");
+    let temp = tempfile::tempdir()?;
+    let corpus_dir = temp.path().join("pr-corpus");
+    write_memory_eval_corpus(&corpus_dir, &corpus).await?;
+    let embeddings = build_cached_embedding_fixtures(&corpus.embedding_inputs)
+        .expect("build cached embedding fixtures");
+    write_embeddings_jsonl(&corpus_dir.join("embeddings.jsonl"), &embeddings).await?;
+
+    let report_path = temp.path().join("report.json");
+    let report = run_memory_retrieval_eval(
+        MemoryRetrievalEvalOptions::new(&corpus_dir, &report_path).with_bootstrap_config(
+            BootstrapConfig {
+                resamples: 200,
+                seed: 29,
+            },
+        ),
+    )
+    .await?;
+
+    assert_eq!(report.candidate_k, RETRIEVAL_EVAL_CANDIDATE_K);
+    assert_eq!(report.final_k, RETRIEVAL_EVAL_FINAL_K);
+    assert!(!report.reranker_enabled);
+    assert_eq!(report.probe_results.len(), corpus.probes.len());
+    assert!(!report.gold_resolution.records.is_empty());
+    assert!(
+        report.metrics.recall_at_25.denominator > 0,
+        "report should include non-empty retrieval metrics"
+    );
+    assert!(
+        report
+            .probe_results
+            .iter()
+            .flat_map(|probe| probe.candidates.iter())
+            .all(|candidate| candidate.rank > 0
+                && candidate.rank <= RETRIEVAL_EVAL_CANDIDATE_K
+                && candidate.score.is_finite()),
+        "every candidate should include bounded rank and finite score"
+    );
+    assert!(
+        report.probe_results.iter().all(|probe| {
+            probe
+                .post_rerank_candidates
+                .as_ref()
+                .is_some_and(|candidates| candidates.len() <= RETRIEVAL_EVAL_FINAL_K)
+        }),
+        "every runner probe should include a bounded post-rerank window"
+    );
+    assert!(
+        report
+            .probe_results
+            .iter()
+            .any(|probe| probe.candidates.len() > RETRIEVAL_EVAL_FINAL_K),
+        "runner should collect the top-25 candidate window before metrics view top-4"
+    );
+    assert!(
+        report
+            .bootstrap
+            .iter()
+            .all(|interval| interval.resamples == 200),
+        "test bootstrap override should keep the runner test fast and deterministic"
+    );
+
+    let report_json = tokio::fs::read_to_string(&report_path).await?;
+    let value: serde_json::Value = serde_json::from_str(&report_json)?;
+    assert!(
+        value.get("metrics").is_some(),
+        "report should contain metrics"
+    );
+    assert!(
+        value
+            .get("probe_results")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| !items.is_empty()),
+        "report should contain non-empty probe_results"
+    );
+    assert!(
+        value
+            .get("gold_resolution")
+            .and_then(|section| section.get("records"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| !items.is_empty()),
+        "report should contain non-empty gold_resolution records"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn retrieval_metrics_aggregate_exact_small_fixture() {
+    // Pins: retrieval metrics compute exact recall, ranking, safety, PII, temporal, and per-leg values.
+    let report = aggregate_retrieval_eval_from_counts(
+        4,
+        5,
+        retrieval_metric_probe_results(),
+        BootstrapConfig {
+            resamples: 200,
+            seed: 17,
+        },
+    );
+
+    assert_metric(report.metrics.ingestion_coverage, 4.0, 5, 0.8);
+    assert_metric(report.metrics.pre_rerank_recall_at_4, 3.0, 5, 0.6);
+    assert_metric(report.metrics.pre_rerank_recall_at_25, 4.0, 5, 0.8);
+    assert_metric(report.metrics.post_rerank_recall_at_4, 3.0, 5, 0.6);
+    assert_metric(report.metrics.recall_at_4, 3.0, 5, 0.6);
+    assert_metric(report.metrics.recall_at_25, 4.0, 5, 0.8);
+    assert_metric(report.metrics.mrr, 2.7, 5, 0.54);
+    assert_metric(
+        report.metrics.ndcg_at_4,
+        2.650_920_929_807_133,
+        5,
+        0.530_184_185_961_426_6,
+    );
+    assert_metric(report.metrics.zero_recall_rate, 1.0, 5, 0.2);
+    assert_metric(report.metrics.answer_faithfulness, 4.0, 5, 0.8);
+    assert_metric(report.metrics.abstention_correctness, 1.0, 2, 0.5);
+    assert_eq!(report.metrics.cross_user_leak_count, 1);
+    assert_eq!(report.metrics.pii_unredacted_count, 0);
+    assert_metric(report.metrics.pii_redaction_rate, 1.0, 1, 1.0);
+    assert_metric(report.metrics.temporal_as_of_accuracy, 0.0, 1, 0.0);
+    assert_metric(
+        report.metrics.per_leg_recall.graph,
+        2.0,
+        6,
+        0.333_333_333_333_333_3,
+    );
+    assert_metric(
+        report.metrics.per_leg_recall.vector,
+        2.0,
+        6,
+        0.333_333_333_333_333_3,
+    );
+    assert_metric(report.metrics.per_leg_recall.lexical, 3.0, 6, 0.5);
+    assert_eq!(report.metrics.p95_retrieval_latency_ms, 0);
+    assert_eq!(
+        report.cross_user_leak_probe_ids,
+        vec!["probe-cross-user-leak".to_string()]
+    );
+
+    let first_candidate = &report.probe_results[0].candidates[0];
+    assert_eq!(first_candidate.fact_id.as_deref(), Some("fact-runtime"));
+    assert_eq!(
+        first_candidate.legs,
+        CandidateLegs {
+            graph: true,
+            vector: true,
+            lexical: false,
+        },
+        "candidate conversion must copy RetrievalHit.legs into serializable output"
+    );
+
+    let recall_bootstrap = report
+        .bootstrap
+        .iter()
+        .find(|interval| interval.metric_name == "retrieval.recall_at_4")
+        .expect("recall@4 bootstrap report exists");
+    assert_eq!(recall_bootstrap.resamples, 200);
+    assert_eq!(recall_bootstrap.seed, 17);
+    assert_eq!(recall_bootstrap.cluster_count, 3);
+    assert_eq!(recall_bootstrap.observation_count, 5);
+    assert_close(recall_bootstrap.mean, 0.6);
+}
+
+#[test]
+fn reranker_metrics_track_pre_post_windows_and_p95_latency() {
+    // Pins: reranker eval reports pre-rerank recall, post-rerank recall, nDCG@4, and p95 latency separately.
+    let report = aggregate_retrieval_eval_from_counts(
+        2,
+        2,
+        vec![
+            ProbeResult {
+                probe_id: "probe-reranked-into-final-window".to_string(),
+                user_id: "user-alice".to_string(),
+                probe_type: ProbeType::PointRecall,
+                expected_fact_ids: fact_ids(&["fact-reranked"]),
+                blocked_fact_ids: Vec::new(),
+                candidates: metric_candidates(
+                    0xe00,
+                    &[
+                        CandidateSpec {
+                            fact_id: None,
+                            legs: legs(true, false, false),
+                        },
+                        CandidateSpec {
+                            fact_id: None,
+                            legs: legs(false, true, false),
+                        },
+                        CandidateSpec {
+                            fact_id: None,
+                            legs: legs(false, false, true),
+                        },
+                        CandidateSpec {
+                            fact_id: None,
+                            legs: legs(true, true, false),
+                        },
+                        CandidateSpec {
+                            fact_id: Some("fact-reranked"),
+                            legs: legs(false, true, true),
+                        },
+                    ],
+                ),
+                post_rerank_candidates: Some(metric_candidates(
+                    0xf00,
+                    &[CandidateSpec {
+                        fact_id: Some("fact-reranked"),
+                        legs: legs(false, true, true),
+                    }],
+                )),
+                retrieval_latency_ms: 2_400,
+                answer_faithful: Some(true),
+                abstention_correct: None,
+                pii_redacted: None,
+                temporal_as_of_correct: None,
+            },
+            ProbeResult {
+                probe_id: "probe-stable-top-hit".to_string(),
+                user_id: "user-bob".to_string(),
+                probe_type: ProbeType::PointRecall,
+                expected_fact_ids: fact_ids(&["fact-stable"]),
+                blocked_fact_ids: Vec::new(),
+                candidates: metric_candidates(
+                    0x1000,
+                    &[CandidateSpec {
+                        fact_id: Some("fact-stable"),
+                        legs: legs(true, false, false),
+                    }],
+                ),
+                post_rerank_candidates: Some(metric_candidates(
+                    0x1100,
+                    &[CandidateSpec {
+                        fact_id: Some("fact-stable"),
+                        legs: legs(true, false, false),
+                    }],
+                )),
+                retrieval_latency_ms: 100,
+                answer_faithful: Some(true),
+                abstention_correct: None,
+                pii_redacted: None,
+                temporal_as_of_correct: None,
+            },
+        ],
+        BootstrapConfig {
+            resamples: 25,
+            seed: 31,
+        },
+    );
+
+    assert_metric(report.metrics.pre_rerank_recall_at_4, 1.0, 2, 0.5);
+    assert_metric(report.metrics.pre_rerank_recall_at_25, 2.0, 2, 1.0);
+    assert_metric(report.metrics.post_rerank_recall_at_4, 2.0, 2, 1.0);
+    assert_metric(report.metrics.recall_at_4, 2.0, 2, 1.0);
+    assert_metric(report.metrics.ndcg_at_4, 2.0, 2, 1.0);
+    assert_eq!(report.metrics.p95_retrieval_latency_ms, 2_400);
+}
+
+#[test]
+fn retrieval_metrics_stats_pin_bootstrap_mcnemar_and_bh() {
+    // Pins: statistical comparisons resample user clusters and correct paired binary tests.
+    let report = aggregate_retrieval_eval_from_counts(
+        4,
+        5,
+        retrieval_metric_probe_results(),
+        BootstrapConfig {
+            resamples: 200,
+            seed: 17,
+        },
+    );
+    let recall_bootstrap = report
+        .bootstrap
+        .iter()
+        .find(|interval| interval.metric_name == "retrieval.recall_at_4")
+        .expect("recall@4 bootstrap report exists");
+    assert_close(recall_bootstrap.lower, 0.5);
+    assert_close(recall_bootstrap.upper, 1.0);
+
+    let comparison_a = mcnemar_paired_test(
+        "retrieval.recall_at_4",
+        &binary_outcomes("abcdef", |_| false),
+        &binary_outcomes("abcdef", |_| true),
+    );
+    assert_eq!(comparison_a.total_pairs, 6);
+    assert_eq!(comparison_a.control_only_successes, 0);
+    assert_eq!(comparison_a.treatment_only_successes, 6);
+    assert_close(comparison_a.p_value, 0.03125);
+
+    let comparison_b = mcnemar_paired_test(
+        "retrieval.mrr",
+        &binary_outcomes("abcdef", |index| index == 0),
+        &binary_outcomes("abcdef", |index| index > 0),
+    );
+    assert_eq!(comparison_b.control_only_successes, 1);
+    assert_eq!(comparison_b.treatment_only_successes, 5);
+    assert_close(comparison_b.p_value, 0.21875);
+
+    let comparison_c = mcnemar_paired_test(
+        "retrieval.ndcg_at_4",
+        &binary_outcomes("abcdef", |index| index < 3),
+        &binary_outcomes("abcdef", |index| index >= 3),
+    );
+    assert_eq!(comparison_c.control_only_successes, 3);
+    assert_eq!(comparison_c.treatment_only_successes, 3);
+    assert_close(comparison_c.p_value, 1.0);
+
+    let corrected = benjamini_hochberg(
+        vec![
+            comparison_b.clone(),
+            comparison_c.clone(),
+            comparison_a.clone(),
+        ],
+        0.1,
+    );
+    assert_eq!(corrected[0].metric_name, "retrieval.mrr");
+    assert_close(corrected[0].adjusted_p_value, 0.328125);
+    assert!(!corrected[0].significant);
+    assert_eq!(corrected[1].metric_name, "retrieval.ndcg_at_4");
+    assert_close(corrected[1].adjusted_p_value, 1.0);
+    assert!(!corrected[1].significant);
+    assert_eq!(corrected[2].metric_name, "retrieval.recall_at_4");
+    assert_close(corrected[2].adjusted_p_value, 0.09375);
+    assert!(corrected[2].significant);
+}
+
+#[test]
+fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_count_pii_unredacted()
+{
+    // Pins: only cross-user isolation probes contribute hard leak counts, and PII probe redaction failures are counted.
+    let report = aggregate_retrieval_eval_from_counts(
+        3,
+        3,
+        vec![
+            ProbeResult {
+                probe_id: "probe-latest-ordinary-blocked-leak".to_string(),
+                user_id: "user-alice".to_string(),
+                probe_type: ProbeType::LatestValueAfterUpdate,
+                expected_fact_ids: fact_ids(&["fact-current"]),
+                blocked_fact_ids: fact_ids(&["fact-old"]),
+                candidates: metric_candidates(
+                    0x800,
+                    &[
+                        CandidateSpec {
+                            fact_id: Some("fact-old"),
+                            legs: legs(true, false, false),
+                        },
+                        CandidateSpec {
+                            fact_id: Some("fact-current"),
+                            legs: legs(false, true, false),
+                        },
+                    ],
+                ),
+                post_rerank_candidates: None,
+                retrieval_latency_ms: 0,
+                answer_faithful: Some(true),
+                abstention_correct: None,
+                pii_redacted: None,
+                temporal_as_of_correct: None,
+            },
+            ProbeResult {
+                probe_id: "probe-cross-user-clean".to_string(),
+                user_id: "user-alice".to_string(),
+                probe_type: ProbeType::CrossUserIsolation,
+                expected_fact_ids: Vec::new(),
+                blocked_fact_ids: fact_ids(&["fact-bob-secret"]),
+                candidates: Vec::new(),
+                post_rerank_candidates: None,
+                retrieval_latency_ms: 0,
+                answer_faithful: Some(true),
+                abstention_correct: Some(true),
+                pii_redacted: None,
+                temporal_as_of_correct: None,
+            },
+            ProbeResult {
+                probe_id: "probe-pii-unredacted".to_string(),
+                user_id: "user-alice".to_string(),
+                probe_type: ProbeType::PiiRedaction,
+                expected_fact_ids: fact_ids(&["fact-phone"]),
+                blocked_fact_ids: Vec::new(),
+                candidates: metric_candidates(
+                    0x900,
+                    &[CandidateSpec {
+                        fact_id: Some("fact-phone"),
+                        legs: legs(false, false, true),
+                    }],
+                ),
+                post_rerank_candidates: None,
+                retrieval_latency_ms: 0,
+                answer_faithful: Some(false),
+                abstention_correct: None,
+                pii_redacted: Some(false),
+                temporal_as_of_correct: None,
+            },
+        ],
+        BootstrapConfig {
+            resamples: 200,
+            seed: 19,
+        },
+    );
+
+    assert_eq!(report.metrics.cross_user_leak_count, 0);
+    assert_eq!(report.cross_user_leak_probe_ids, Vec::<String>::new());
+    assert_eq!(report.metrics.pii_unredacted_count, 1);
+    assert_metric(report.metrics.pii_redaction_rate, 0.0, 1, 0.0);
+}
+
+#[test]
+fn budget_gate_zero_leak_fixture_passes_with_previous_report() -> TestResult {
+    // Pins: the memory_retrieval budget gate accepts zero hard leaks and loads the previous report env path.
+    let temp = tempfile::tempdir()?;
+    let report_path = temp.path().join("current.json");
+    let previous_path = temp.path().join("previous.json");
+    let report = memory_budget_report(memory_budget_probe_results(false));
+    write_memory_budget_report(&report_path, &report)?;
+    write_memory_budget_report(&previous_path, &report)?;
+
+    let output = run_memory_budget_gate(&report_path, Some(&previous_path))?;
+    assert!(
+        output.status.success(),
+        "zero-leak memory budget fixture should pass:\n{}",
+        command_output_text(&output)
+    );
+    let text = command_output_text(&output);
+    assert!(
+        text.contains("Memory-retrieval budgets passed")
+            && text.contains("1 regression baseline(s) compared"),
+        "pass output should mention the previous-report comparison:\n{text}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn budget_gate_cross_user_leak_fixture_fails_with_probe_ids() -> TestResult {
+    // Pins: a cross-user isolation leak is a hard budget failure with metric, expected/actual values, and probe id.
+    let temp = tempfile::tempdir()?;
+    let report_path = temp.path().join("cross-user-leak.json");
+    write_memory_budget_report(
+        &report_path,
+        &memory_budget_report(memory_budget_probe_results(true)),
+    )?;
+
+    let output = run_memory_budget_gate(&report_path, None)?;
+    assert!(
+        !output.status.success(),
+        "cross-user leak fixture should fail:\n{}",
+        command_output_text(&output)
+    );
+    let text = command_output_text(&output);
+    for expected in [
+        "cross_user_leak_count",
+        "expected 0",
+        "actual 1",
+        "affected probe IDs: probe-cross-user-leak",
+    ] {
+        assert!(
+            text.contains(expected),
+            "failure output should include `{expected}`:\n{text}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn budget_gate_previous_report_regression_fails_recall_mrr_ndcg_gate() -> TestResult {
+    // Pins: previous memory reports from MOA_EVAL_PREVIOUS_MEMORY_REPORT gate recall, MRR, and nDCG regressions.
+    let temp = tempfile::tempdir()?;
+    let report_path = temp.path().join("current-regressed.json");
+    let previous_path = temp.path().join("previous-strong.json");
+    write_memory_budget_report(
+        &report_path,
+        &memory_budget_report(memory_budget_regression_probe_results(false)),
+    )?;
+    write_memory_budget_report(
+        &previous_path,
+        &memory_budget_report(memory_budget_regression_probe_results(true)),
+    )?;
+
+    let output = run_memory_budget_gate(&report_path, Some(&previous_path))?;
+    assert!(
+        !output.status.success(),
+        "regressed memory budget fixture should fail:\n{}",
+        command_output_text(&output)
+    );
+    let text = command_output_text(&output);
+    for expected in [
+        "retrieval.recall_at_4",
+        "retrieval.mrr",
+        "retrieval.ndcg_at_4",
+        "expected regression <= 5.00%",
+    ] {
+        assert!(
+            text.contains(expected),
+            "regression output should include `{expected}`:\n{text}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn budget_gate_reranker_recall_regression_fails() -> TestResult {
+    // Pins: reranker-on reports fail when post-rerank recall@4 regresses by more than three points.
+    let temp = tempfile::tempdir()?;
+    let report_path = temp.path().join("reranker-recall-regressed.json");
+    write_memory_budget_report(
+        &report_path,
+        &memory_budget_report_with_reranker(reranker_recall_regression_probe_results(), true),
+    )?;
+
+    let output = run_memory_budget_gate(&report_path, None)?;
+    assert!(
+        !output.status.success(),
+        "reranker recall regression fixture should fail:\n{}",
+        command_output_text(&output)
+    );
+    let text = command_output_text(&output);
+    for expected in [
+        "retrieval.reranker_recall_at_4_regression",
+        "pre 1.0000",
+        "post 0.0000",
+    ] {
+        assert!(
+            text.contains(expected),
+            "reranker recall output should include `{expected}`:\n{text}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn budget_gate_reranker_latency_without_recall_gain_fails() -> TestResult {
+    // Pins: reranker-on reports fail when p95 latency exceeds 2s without at least a three-point recall@4 gain.
+    let temp = tempfile::tempdir()?;
+    let report_path = temp.path().join("reranker-latency-regressed.json");
+    write_memory_budget_report(
+        &report_path,
+        &memory_budget_report_with_reranker(reranker_latency_without_gain_probe_results(), true),
+    )?;
+
+    let output = run_memory_budget_gate(&report_path, None)?;
+    assert!(
+        !output.status.success(),
+        "reranker latency fixture should fail:\n{}",
+        command_output_text(&output)
+    );
+    let text = command_output_text(&output);
+    for expected in [
+        "retrieval.p95_retrieval_latency_ms",
+        "expected <= 2000 unless recall@4 gain >= 0.03",
+        "actual 2501",
+    ] {
+        assert!(
+            text.contains(expected),
+            "reranker latency output should include `{expected}`:\n{text}"
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct GoldResolutionEmbedder;
+
+#[async_trait]
+impl EmbeddingProvider for GoldResolutionEmbedder {
+    fn model_id(&self) -> &str {
+        "gold-resolution-mock-embedder"
+    }
+
+    fn model_version(&self) -> i32 {
+        31
+    }
+
+    fn dimensions(&self) -> usize {
+        VECTOR_DIMENSION
+    }
+
+    async fn embed(&self, texts: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+        Ok(texts
+            .iter()
+            .map(|text| gold_resolution_vector(text))
+            .collect())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GoldResolutionNoPiiClassifier;
+
+#[async_trait]
+impl PiiClassifier for GoldResolutionNoPiiClassifier {
+    async fn classify(&self, _text: &str) -> Result<PiiResult, PiiError> {
+        Ok(PiiResult {
+            class: PiiClass::None,
+            spans: Vec::<PiiSpan>::new(),
+            model_version: "gold-resolution-no-pii".to_string(),
+            abstained: false,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GoldResolutionInsertOnlyDetector;
+
+#[async_trait]
+impl ContradictionDetector for GoldResolutionInsertOnlyDetector {
+    async fn check_one_fast(
+        &self,
+        _fact_text: &str,
+        _embedding: &[f32],
+        _label: NodeLabel,
+        _ctx: &ContradictionContext,
+    ) -> Result<Conflict, IngestError> {
+        Ok(Conflict::Insert)
+    }
+
+    async fn check_one_slow(
+        &self,
+        _fact: &EmbeddedFact,
+        _ctx: &ContradictionContext,
+    ) -> Result<Conflict, IngestError> {
+        Ok(Conflict::Insert)
+    }
+}
+
+struct GoldResolutionStack {
+    pool: PgPool,
+    database_url: String,
+    schema_name: String,
+}
+
+impl GoldResolutionStack {
+    async fn up() -> TestResult<Self> {
+        let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+            .await
+            .map_err(Box::<dyn Error + Send + Sync>::from)?;
+        Ok(Self {
+            pool: session_store.pool().clone(),
+            database_url,
+            schema_name,
+        })
+    }
+
+    fn ingest_ctx(&self) -> IngestCtx {
+        let scope = ScopeContext::workspace(workspace("gold-resolution-base-workspace"));
+        let vector = Arc::new(PgvectorStore::new_for_app_role(
+            self.pool.clone(),
+            scope.clone(),
+        ));
+        let graph = Arc::new(
+            AgeGraphStore::scoped_for_app_role(self.pool.clone(), scope)
+                .with_vector_store(vector.clone()),
+        );
+        IngestCtx::new(
+            self.pool.clone(),
+            graph,
+            vector,
+            Arc::new(GoldResolutionEmbedder),
+            Arc::new(GoldResolutionNoPiiClassifier),
+            Arc::new(GoldResolutionInsertOnlyDetector),
+        )
+    }
+
+    async fn cleanup(self) -> TestResult {
+        testing::cleanup_test_schema(&self.database_url, &self.schema_name)
+            .await
+            .map_err(Box::<dyn Error + Send + Sync>::from)
+    }
+}
+
+async fn run_explicit_gold_resolution_case(stack: &GoldResolutionStack) -> TestResult {
+    let (ledger, sessions) = explicit_gold_resolution_corpus();
+    let report = resolve_gold_nodes(stack.ingest_ctx(), &ledger, &sessions).await?;
+
+    assert_eq!(report.ingestion_coverage(), 1.0);
+    assert!(report.unresolved_facts().is_empty());
+    assert!(
+        report.duplicate_resolutions().is_empty(),
+        "explicit fact turns should resolve uniquely"
+    );
+    assert_eq!(report.records.len(), 2);
+    for record in &report.records {
+        assert_eq!(record.resolution_status, GoldResolutionStatus::Resolved);
+        assert_eq!(record.node_uids.len(), 1);
+        assert_eq!(
+            record.scope.as_deref(),
+            Some("workspace"),
+            "gold_nodes should record actual stored node_index.scope"
+        );
+        assert!(record.active);
+        assert!(record.valid_from.is_some());
+        assert_eq!(record.valid_to, None);
+    }
+
+    let user_fact = report
+        .records
+        .iter()
+        .find(|record| record.fact_id == "fact-explicit-user-preference")
+        .expect("user-scope ledger fact has a gold record");
+    assert_eq!(user_fact.expected_scope, "user");
+    assert_eq!(
+        user_fact.scope.as_deref(),
+        Some("workspace"),
+        "actual stored scope is retained so scope bugs stay diagnosable"
+    );
+    assert_eq!(user_fact.pii_status, GoldPiiStatus::NotExpected);
+
+    let temp = tempfile::tempdir().expect("create temp gold output directory");
+    let gold_path = temp.path().join("gold_nodes.jsonl");
+    write_gold_nodes_jsonl(&gold_path, &report.records).await?;
+    let first_write = tokio::fs::read(&gold_path).await?;
+    write_gold_nodes_jsonl(&gold_path, &report.records).await?;
+    let second_write = tokio::fs::read(&gold_path).await?;
+    assert_eq!(first_write, second_write, "gold_nodes.jsonl is byte-stable");
+
+    let round_tripped = read_gold_nodes_jsonl(&gold_path).await?;
+    assert_eq!(round_tripped, report.records);
+    let first_line = first_write
+        .split(|byte| *byte == b'\n')
+        .find(|line| !line.is_empty())
+        .expect("gold jsonl contains at least one record");
+    let json: serde_json::Value = serde_json::from_slice(first_line)?;
+    for required_field in [
+        "fact_id",
+        "node_uids",
+        "scope",
+        "active",
+        "valid_from",
+        "valid_to",
+        "resolution_status",
+    ] {
+        assert!(
+            json.get(required_field).is_some(),
+            "gold_nodes.jsonl record should include {required_field}"
+        );
+    }
+
+    Ok(())
+}
+
+async fn run_partial_gold_resolution_case(stack: &GoldResolutionStack) -> TestResult {
+    let (ledger, sessions) = partial_gold_resolution_corpus();
+    let report = resolve_gold_nodes(stack.ingest_ctx(), &ledger, &sessions).await?;
+
+    assert!(
+        report.ingestion_coverage() < 1.0,
+        "coverage should drop when a ledger fact is deliberately unextractable"
+    );
+    assert_eq!(report.ingestion_coverage(), 0.5);
+    assert_eq!(report.unresolved_facts(), vec!["fact-hidden-launch-code"]);
+
+    let hidden = report
+        .records
+        .iter()
+        .find(|record| record.fact_id == "fact-hidden-launch-code")
+        .expect("hidden ledger fact has a gold record");
+    assert_eq!(hidden.resolution_status, GoldResolutionStatus::Unresolved);
+    assert!(hidden.node_uids.is_empty());
+    assert_eq!(hidden.scope, None);
+    assert!(!hidden.active);
+
+    let explicit = report
+        .records
+        .iter()
+        .find(|record| record.fact_id == "fact-visible-runtime")
+        .expect("explicit ledger fact has a gold record");
+    assert_eq!(explicit.resolution_status, GoldResolutionStatus::Resolved);
+    assert_eq!(explicit.node_uids.len(), 1);
+
+    Ok(())
+}
+
+fn explicit_gold_resolution_corpus() -> (Vec<LedgerFact>, Vec<SyntheticSession>) {
+    let session = session_id("018f0d64-7bf4-7a25-b57a-f87fd6b08d01");
+    let workspace_id = workspace("gold-resolution-explicit-workspace");
+    let user_id = user("gold-resolution-explicit-user");
+    let facts = vec![
+        gold_fact(GoldFactSpec {
+            workspace_id: workspace_id.clone(),
+            user_id: user_id.clone(),
+            scope: ScopeTier::Workspace,
+            fact_id: "fact-explicit-runtime",
+            valid_from: utc("2026-02-01T00:00:00Z"),
+            subject: "runtime",
+            predicate: "uses",
+            object: "restate",
+            answer: "Runtime uses Restate.",
+            source_session_id: session,
+            source_turn_seq: 1,
+        }),
+        gold_fact(GoldFactSpec {
+            workspace_id: workspace_id.clone(),
+            user_id: user_id.clone(),
+            scope: ScopeTier::User,
+            fact_id: "fact-explicit-user-preference",
+            valid_from: utc("2026-02-02T00:00:00Z"),
+            subject: "casey",
+            predicate: "prefers",
+            object: "terse updates",
+            answer: "Casey prefers terse updates.",
+            source_session_id: session,
+            source_turn_seq: 2,
+        }),
+    ];
+    let sessions = vec![SyntheticSession {
+        session_id: session,
+        workspace_id,
+        user_id,
+        turns: vec![
+            SyntheticTurn {
+                turn_seq: 1,
+                transcript: "Fact: runtime uses restate.".to_string(),
+                fact_ids: vec!["fact-explicit-runtime".to_string()],
+            },
+            SyntheticTurn {
+                turn_seq: 2,
+                transcript: "Fact: casey prefers terse updates.".to_string(),
+                fact_ids: vec!["fact-explicit-user-preference".to_string()],
+            },
+        ],
+    }];
+    (facts, sessions)
+}
+
+fn partial_gold_resolution_corpus() -> (Vec<LedgerFact>, Vec<SyntheticSession>) {
+    let session = session_id("018f0d64-7bf4-7a25-b57a-f87fd6b08d02");
+    let workspace_id = workspace("gold-resolution-partial-workspace");
+    let user_id = user("gold-resolution-partial-user");
+    let facts = vec![
+        gold_fact(GoldFactSpec {
+            workspace_id: workspace_id.clone(),
+            user_id: user_id.clone(),
+            scope: ScopeTier::Workspace,
+            fact_id: "fact-visible-runtime",
+            valid_from: utc("2026-02-03T00:00:00Z"),
+            subject: "planner",
+            predicate: "uses",
+            object: "query rewrite",
+            answer: "Planner uses query rewrite.",
+            source_session_id: session,
+            source_turn_seq: 1,
+        }),
+        gold_fact(GoldFactSpec {
+            workspace_id: workspace_id.clone(),
+            user_id: user_id.clone(),
+            scope: ScopeTier::Workspace,
+            fact_id: "fact-hidden-launch-code",
+            valid_from: utc("2026-02-04T00:00:00Z"),
+            subject: "launch",
+            predicate: "code",
+            object: "aurora",
+            answer: "Launch code is aurora.",
+            source_session_id: session,
+            source_turn_seq: 2,
+        }),
+    ];
+    let sessions = vec![SyntheticSession {
+        session_id: session,
+        workspace_id,
+        user_id,
+        turns: vec![
+            SyntheticTurn {
+                turn_seq: 1,
+                transcript: "Fact: planner uses query rewrite.".to_string(),
+                fact_ids: vec!["fact-visible-runtime".to_string()],
+            },
+            SyntheticTurn {
+                turn_seq: 2,
+                transcript: "Please remember launch code aurora".to_string(),
+                fact_ids: vec!["fact-hidden-launch-code".to_string()],
+            },
+        ],
+    }];
+    (facts, sessions)
+}
+
+struct GoldFactSpec {
+    workspace_id: WorkspaceId,
+    user_id: UserId,
+    scope: ScopeTier,
+    fact_id: &'static str,
+    valid_from: DateTime<Utc>,
+    subject: &'static str,
+    predicate: &'static str,
+    object: &'static str,
+    answer: &'static str,
+    source_session_id: SessionId,
+    source_turn_seq: u64,
+}
+
+fn gold_fact(spec: GoldFactSpec) -> LedgerFact {
+    LedgerFact {
+        workspace_id: spec.workspace_id,
+        user_id: spec.user_id,
+        scope: spec.scope,
+        fact_id: spec.fact_id.to_string(),
+        valid_from: spec.valid_from,
+        valid_to: None,
+        subject: spec.subject.to_string(),
+        predicate: spec.predicate.to_string(),
+        object: spec.object.to_string(),
+        answer: spec.answer.to_string(),
+        supersedes: Vec::new(),
+        source_session_id: spec.source_session_id,
+        source_turn_seq: spec.source_turn_seq,
+        pii_class: PiiClass::None,
+        expected_redacted: false,
+    }
+}
+
+fn gold_resolution_vector(text: &str) -> Vec<f32> {
+    let mut vector = vec![0.0_f32; VECTOR_DIMENSION];
+    for (index, byte) in text.bytes().enumerate() {
+        vector[index % VECTOR_DIMENSION] += f32::from(byte) / 255.0;
+    }
+    vector[0] += 1.0;
+    vector
+}
+
+#[test]
+fn memory_eval_full_generator_respects_profile_bounds() {
+    // Pins: full corpus generation stays within the promised user, workspace, session, and probe bounds.
+    let corpus = generate_memory_eval_corpus(CorpusProfile::Full, vec![11, 12, 13])
+        .expect("generate full memory eval corpus");
+    assert_profile_shape(&corpus, 50, 3, 600..=1_000);
+
+    let session_counts = sessions_per_user(&corpus.sessions);
+    assert_eq!(distinct_users(&corpus).len(), 50);
+    for (user_id, session_count) in session_counts {
+        assert!(
+            session_count <= 100,
+            "{user_id} should have at most 100 sessions, got {session_count}"
+        );
+    }
+}
+
+fn assert_profile_shape(
+    corpus: &GeneratedMemoryEvalCorpus,
+    expected_users: usize,
+    expected_workspaces: usize,
+    probe_range: std::ops::RangeInclusive<usize>,
+) {
+    assert_eq!(corpus.manifest.seeds.len(), 3);
+    assert_eq!(
+        corpus
+            .manifest
+            .seeds
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3,
+        "generator seeds should be independent"
+    );
+    assert_eq!(distinct_users(corpus).len(), expected_users);
+    assert_eq!(distinct_workspaces(corpus).len(), expected_workspaces);
+    assert!(
+        probe_range.contains(&corpus.probes.len()),
+        "probe count {} should be in expected range",
+        corpus.probes.len()
+    );
+
+    for probe_type in [
+        ProbeType::PointRecall,
+        ProbeType::LatestValueAfterUpdate,
+        ProbeType::Abstention,
+        ProbeType::CrossUserIsolation,
+        ProbeType::WorkspaceSharedFact,
+        ProbeType::MultiHop,
+        ProbeType::TemporalAsOf,
+        ProbeType::PreferenceApplication,
+        ProbeType::PiiRedaction,
+    ] {
+        assert!(
+            corpus
+                .probes
+                .iter()
+                .any(|probe| probe.probe_type == probe_type),
+            "generated corpus should include {probe_type:?}"
+        );
+    }
+}
+
+fn assert_ledger_first_fact_classes(ledger: &[LedgerFact]) {
+    assert!(
+        ledger.iter().any(|fact| !fact.supersedes.is_empty()),
+        "ledger should include supersession facts"
+    );
+    assert!(
+        ledger
+            .iter()
+            .any(|fact| fact.scope == ScopeTier::Workspace && fact.predicate == "require_runbook"),
+        "ledger should include workspace-shared facts"
+    );
+    assert!(
+        ledger.iter().any(|fact| fact.scope == ScopeTier::User
+            && fact.predicate == "private_repository"
+            && fact.pii_class == PiiClass::None),
+        "ledger should include user-private facts"
+    );
+    assert!(
+        ledger
+            .iter()
+            .any(|fact| fact.predicate == "on_call_primary" && fact.valid_to.is_some()),
+        "ledger should include temporal facts"
+    );
+    assert!(
+        ledger.iter().any(|fact| fact.predicate == "response_style"),
+        "ledger should include preference facts"
+    );
+    assert!(
+        ledger
+            .iter()
+            .any(|fact| fact.pii_class == PiiClass::Pii && fact.expected_redacted),
+        "ledger should include PII facts"
+    );
+
+    let mut contradiction_objects = BTreeMap::<(String, String, String), BTreeSet<String>>::new();
+    for fact in ledger
+        .iter()
+        .filter(|fact| fact.predicate == "cache_backend_conflict")
+    {
+        contradiction_objects
+            .entry((
+                fact.workspace_id.as_str().to_string(),
+                fact.subject.clone(),
+                fact.predicate.clone(),
+            ))
+            .or_default()
+            .insert(fact.object.clone());
+    }
+    assert!(
+        contradiction_objects
+            .values()
+            .any(|objects| objects.len() >= 2),
+        "ledger should include unresolved contradiction facts"
+    );
+}
+
+fn distinct_users(corpus: &GeneratedMemoryEvalCorpus) -> BTreeSet<String> {
+    let mut users = BTreeSet::new();
+    for fact in &corpus.ledger {
+        users.insert(fact.user_id.as_str().to_string());
+    }
+    for session in &corpus.sessions {
+        users.insert(session.user_id.as_str().to_string());
+    }
+    for probe in &corpus.probes {
+        users.insert(probe.user_id.as_str().to_string());
+    }
+    users
+}
+
+fn distinct_workspaces(corpus: &GeneratedMemoryEvalCorpus) -> BTreeSet<String> {
+    let mut workspaces = BTreeSet::new();
+    for fact in &corpus.ledger {
+        workspaces.insert(fact.workspace_id.as_str().to_string());
+    }
+    for session in &corpus.sessions {
+        workspaces.insert(session.workspace_id.as_str().to_string());
+    }
+    for probe in &corpus.probes {
+        workspaces.insert(probe.workspace_id.as_str().to_string());
+    }
+    workspaces
+}
+
+fn sessions_per_user(sessions: &[SyntheticSession]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for session in sessions {
+        *counts
+            .entry(session.user_id.as_str().to_string())
+            .or_insert(0) += 1;
+    }
+    counts
+}
+
+fn fixture_vector(
+    fixtures: &[moa_eval::memory_eval::CachedEmbeddingFixture],
+    text: &str,
+) -> Vec<f32> {
+    let text_hash = embedding_text_hash(text);
+    fixtures
+        .iter()
+        .find(|fixture| fixture.text_hash == text_hash)
+        .expect("fixture vector exists for text")
+        .vector
+        .clone()
+}
+
+fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
+    vec![
+        ProbeResult {
+            probe_id: "probe-runtime".to_string(),
+            user_id: "user-alice".to_string(),
+            probe_type: ProbeType::PointRecall,
+            expected_fact_ids: fact_ids(&["fact-runtime"]),
+            blocked_fact_ids: Vec::new(),
+            candidates: metric_candidates(
+                0x100,
+                &[CandidateSpec {
+                    fact_id: Some("fact-runtime"),
+                    legs: legs(true, true, false),
+                }],
+            ),
+            post_rerank_candidates: None,
+            retrieval_latency_ms: 0,
+            answer_faithful: Some(true),
+            abstention_correct: None,
+            pii_redacted: None,
+            temporal_as_of_correct: None,
+        },
+        ProbeResult {
+            probe_id: "probe-rank-five".to_string(),
+            user_id: "user-alice".to_string(),
+            probe_type: ProbeType::LatestValueAfterUpdate,
+            expected_fact_ids: fact_ids(&["fact-rank-five"]),
+            blocked_fact_ids: Vec::new(),
+            candidates: metric_candidates(
+                0x200,
+                &[
+                    CandidateSpec {
+                        fact_id: None,
+                        legs: legs(true, false, false),
+                    },
+                    CandidateSpec {
+                        fact_id: None,
+                        legs: legs(false, true, false),
+                    },
+                    CandidateSpec {
+                        fact_id: None,
+                        legs: legs(false, false, true),
+                    },
+                    CandidateSpec {
+                        fact_id: None,
+                        legs: legs(true, true, false),
+                    },
+                    CandidateSpec {
+                        fact_id: Some("fact-rank-five"),
+                        legs: legs(false, true, false),
+                    },
+                ],
+            ),
+            post_rerank_candidates: None,
+            retrieval_latency_ms: 0,
+            answer_faithful: Some(true),
+            abstention_correct: None,
+            pii_redacted: None,
+            temporal_as_of_correct: None,
+        },
+        ProbeResult {
+            probe_id: "probe-multi-hop".to_string(),
+            user_id: "user-bob".to_string(),
+            probe_type: ProbeType::MultiHop,
+            expected_fact_ids: fact_ids(&["fact-service-owner", "fact-runbook"]),
+            blocked_fact_ids: Vec::new(),
+            candidates: metric_candidates(
+                0x300,
+                &[
+                    CandidateSpec {
+                        fact_id: None,
+                        legs: legs(true, false, false),
+                    },
+                    CandidateSpec {
+                        fact_id: Some("fact-service-owner"),
+                        legs: legs(false, false, true),
+                    },
+                    CandidateSpec {
+                        fact_id: None,
+                        legs: legs(false, true, true),
+                    },
+                    CandidateSpec {
+                        fact_id: Some("fact-runbook"),
+                        legs: legs(true, false, true),
+                    },
+                ],
+            ),
+            post_rerank_candidates: None,
+            retrieval_latency_ms: 0,
+            answer_faithful: Some(true),
+            abstention_correct: None,
+            pii_redacted: None,
+            temporal_as_of_correct: None,
+        },
+        ProbeResult {
+            probe_id: "probe-temporal-miss".to_string(),
+            user_id: "user-bob".to_string(),
+            probe_type: ProbeType::TemporalAsOf,
+            expected_fact_ids: fact_ids(&["fact-temporal-old"]),
+            blocked_fact_ids: Vec::new(),
+            candidates: metric_candidates(
+                0x400,
+                &[CandidateSpec {
+                    fact_id: Some("fact-temporal-new"),
+                    legs: legs(true, true, true),
+                }],
+            ),
+            post_rerank_candidates: None,
+            retrieval_latency_ms: 0,
+            answer_faithful: Some(false),
+            abstention_correct: None,
+            pii_redacted: None,
+            temporal_as_of_correct: Some(false),
+        },
+        ProbeResult {
+            probe_id: "probe-pii-redacted".to_string(),
+            user_id: "user-casey".to_string(),
+            probe_type: ProbeType::PiiRedaction,
+            expected_fact_ids: fact_ids(&["fact-pii-phone"]),
+            blocked_fact_ids: Vec::new(),
+            candidates: metric_candidates(
+                0x500,
+                &[CandidateSpec {
+                    fact_id: Some("fact-pii-phone"),
+                    legs: legs(false, false, true),
+                }],
+            ),
+            post_rerank_candidates: None,
+            retrieval_latency_ms: 0,
+            answer_faithful: Some(true),
+            abstention_correct: None,
+            pii_redacted: Some(true),
+            temporal_as_of_correct: None,
+        },
+        ProbeResult {
+            probe_id: "probe-abstains".to_string(),
+            user_id: "user-casey".to_string(),
+            probe_type: ProbeType::Abstention,
+            expected_fact_ids: Vec::new(),
+            blocked_fact_ids: Vec::new(),
+            candidates: Vec::new(),
+            post_rerank_candidates: None,
+            retrieval_latency_ms: 0,
+            answer_faithful: None,
+            abstention_correct: Some(true),
+            pii_redacted: None,
+            temporal_as_of_correct: None,
+        },
+        ProbeResult {
+            probe_id: "probe-cross-user-leak".to_string(),
+            user_id: "user-alice".to_string(),
+            probe_type: ProbeType::CrossUserIsolation,
+            expected_fact_ids: Vec::new(),
+            blocked_fact_ids: fact_ids(&["fact-secret"]),
+            candidates: metric_candidates(
+                0x700,
+                &[CandidateSpec {
+                    fact_id: Some("fact-secret"),
+                    legs: legs(true, false, false),
+                }],
+            ),
+            post_rerank_candidates: None,
+            retrieval_latency_ms: 0,
+            answer_faithful: None,
+            abstention_correct: Some(false),
+            pii_redacted: None,
+            temporal_as_of_correct: None,
+        },
+    ]
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CandidateSpec {
+    fact_id: Option<&'static str>,
+    legs: LegSources,
+}
+
+fn metric_candidates(base: u128, specs: &[CandidateSpec]) -> Vec<RetrievedCandidate> {
+    let mut fact_ids_by_uid = HashMap::new();
+    let hits = specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            let uid = Uuid::from_u128(base + index as u128 + 1);
+            if let Some(fact_id) = spec.fact_id {
+                fact_ids_by_uid.insert(uid, fact_id.to_string());
+            }
+            RetrievalHit {
+                uid,
+                score: 1.0 / (index + 1) as f64,
+                legs: spec.legs,
+                node: metric_node(uid),
+            }
+        })
+        .collect::<Vec<_>>();
+    candidates_from_retrieval_hits(&hits, &fact_ids_by_uid)
+}
+
+fn metric_node(uid: Uuid) -> NodeIndexRow {
+    NodeIndexRow {
+        uid,
+        label: NodeLabel::Fact,
+        workspace_id: Some("metrics-workspace".to_string()),
+        user_id: Some("metrics-user".to_string()),
+        scope: "workspace".to_string(),
+        name: format!("metric-node-{uid}"),
+        pii_class: PiiClass::None,
+        valid_to: None,
+        valid_from: utc("2026-05-01T00:00:00Z"),
+        properties_summary: None,
+        last_accessed_at: utc("2026-05-02T00:00:00Z"),
+    }
+}
+
+fn legs(graph: bool, vector: bool, lexical: bool) -> LegSources {
+    LegSources {
+        graph,
+        vector,
+        lexical,
+    }
+}
+
+fn fact_ids(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
+}
+
+fn assert_metric(summary: MetricSummary, numerator: f64, denominator: usize, value: f64) {
+    assert_close(summary.numerator, numerator);
+    assert_eq!(summary.denominator, denominator);
+    assert_close(summary.value, value);
+}
+
+fn assert_close(actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() <= 1.0e-12,
+        "expected {expected}, got {actual}"
+    );
+}
+
+fn binary_outcomes(
+    probe_suffixes: &str,
+    success_for_index: impl Fn(usize) -> bool,
+) -> Vec<BinaryProbeOutcome> {
+    probe_suffixes
+        .chars()
+        .enumerate()
+        .map(|(index, suffix)| BinaryProbeOutcome {
+            probe_id: format!("probe-{suffix}"),
+            success: success_for_index(index),
+        })
+        .collect()
+}
+
+fn memory_budget_report(probe_results: Vec<ProbeResult>) -> MemoryRetrievalEvalReport {
+    memory_budget_report_with_reranker(probe_results, false)
+}
+
+fn memory_budget_report_with_reranker(
+    probe_results: Vec<ProbeResult>,
+    reranker_enabled: bool,
+) -> MemoryRetrievalEvalReport {
+    let retrieval = aggregate_retrieval_eval_from_counts(
+        3,
+        3,
+        probe_results,
+        BootstrapConfig {
+            resamples: 25,
+            seed: 23,
+        },
+    );
+    MemoryRetrievalEvalReport {
+        manifest: CorpusManifest {
+            version: CORPUS_SCHEMA_VERSION,
+            corpus_id: "memory-budget-fixture".to_string(),
+            profile: CorpusProfile::Pr,
+            description: "Hermetic budget gate fixture.".to_string(),
+            seeds: vec![1, 2, 3],
+        },
+        candidate_k: RETRIEVAL_EVAL_CANDIDATE_K,
+        final_k: RETRIEVAL_EVAL_FINAL_K,
+        reranker_enabled,
+        metrics: retrieval.metrics,
+        probe_results: retrieval.probe_results,
+        bootstrap: retrieval.bootstrap,
+        cross_user_leak_probe_ids: retrieval.cross_user_leak_probe_ids,
+        gold_resolution: GoldResolutionReport {
+            ingest_reports: Vec::new(),
+            records: Vec::new(),
+        },
+    }
+}
+
+fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
+    let cross_user_candidates = if cross_user_leak {
+        metric_candidates(
+            0xb00,
+            &[CandidateSpec {
+                fact_id: Some("fact-bob-secret"),
+                legs: legs(true, false, false),
+            }],
+        )
+    } else {
+        Vec::new()
+    };
+
+    vec![
+        ProbeResult {
+            probe_id: "probe-latest-ordinary-blocked-leak".to_string(),
+            user_id: "user-alice".to_string(),
+            probe_type: ProbeType::LatestValueAfterUpdate,
+            expected_fact_ids: fact_ids(&["fact-current"]),
+            blocked_fact_ids: fact_ids(&["fact-old"]),
+            candidates: metric_candidates(
+                0xa00,
+                &[
+                    CandidateSpec {
+                        fact_id: Some("fact-old"),
+                        legs: legs(true, false, false),
+                    },
+                    CandidateSpec {
+                        fact_id: Some("fact-current"),
+                        legs: legs(false, true, false),
+                    },
+                ],
+            ),
+            post_rerank_candidates: None,
+            retrieval_latency_ms: 0,
+            answer_faithful: Some(true),
+            abstention_correct: None,
+            pii_redacted: None,
+            temporal_as_of_correct: None,
+        },
+        ProbeResult {
+            probe_id: "probe-cross-user-leak".to_string(),
+            user_id: "user-alice".to_string(),
+            probe_type: ProbeType::CrossUserIsolation,
+            expected_fact_ids: Vec::new(),
+            blocked_fact_ids: fact_ids(&["fact-bob-secret"]),
+            candidates: cross_user_candidates,
+            post_rerank_candidates: None,
+            retrieval_latency_ms: 0,
+            answer_faithful: Some(!cross_user_leak),
+            abstention_correct: Some(!cross_user_leak),
+            pii_redacted: None,
+            temporal_as_of_correct: None,
+        },
+        ProbeResult {
+            probe_id: "probe-pii-redacted".to_string(),
+            user_id: "user-alice".to_string(),
+            probe_type: ProbeType::PiiRedaction,
+            expected_fact_ids: fact_ids(&["fact-phone"]),
+            blocked_fact_ids: Vec::new(),
+            candidates: metric_candidates(
+                0xc00,
+                &[CandidateSpec {
+                    fact_id: Some("fact-phone"),
+                    legs: legs(false, false, true),
+                }],
+            ),
+            post_rerank_candidates: None,
+            retrieval_latency_ms: 0,
+            answer_faithful: Some(true),
+            abstention_correct: None,
+            pii_redacted: Some(true),
+            temporal_as_of_correct: None,
+        },
+    ]
+}
+
+fn reranker_recall_regression_probe_results() -> Vec<ProbeResult> {
+    vec![ProbeResult {
+        probe_id: "probe-reranker-regresses-recall".to_string(),
+        user_id: "user-alice".to_string(),
+        probe_type: ProbeType::PointRecall,
+        expected_fact_ids: fact_ids(&["fact-owner"]),
+        blocked_fact_ids: Vec::new(),
+        candidates: metric_candidates(
+            0xe00,
+            &[CandidateSpec {
+                fact_id: Some("fact-owner"),
+                legs: legs(true, false, false),
+            }],
+        ),
+        post_rerank_candidates: Some(metric_candidates(
+            0xe10,
+            &[CandidateSpec {
+                fact_id: None,
+                legs: legs(false, true, false),
+            }],
+        )),
+        retrieval_latency_ms: 100,
+        answer_faithful: Some(false),
+        abstention_correct: None,
+        pii_redacted: None,
+        temporal_as_of_correct: None,
+    }]
+}
+
+fn reranker_latency_without_gain_probe_results() -> Vec<ProbeResult> {
+    vec![ProbeResult {
+        probe_id: "probe-reranker-slow-without-gain".to_string(),
+        user_id: "user-alice".to_string(),
+        probe_type: ProbeType::PointRecall,
+        expected_fact_ids: fact_ids(&["fact-owner"]),
+        blocked_fact_ids: Vec::new(),
+        candidates: metric_candidates(
+            0xe20,
+            &[CandidateSpec {
+                fact_id: Some("fact-owner"),
+                legs: legs(true, false, false),
+            }],
+        ),
+        post_rerank_candidates: Some(metric_candidates(
+            0xe30,
+            &[CandidateSpec {
+                fact_id: Some("fact-owner"),
+                legs: legs(true, false, false),
+            }],
+        )),
+        retrieval_latency_ms: 2_501,
+        answer_faithful: Some(true),
+        abstention_correct: None,
+        pii_redacted: None,
+        temporal_as_of_correct: None,
+    }]
+}
+
+fn memory_budget_regression_probe_results(full_recall: bool) -> Vec<ProbeResult> {
+    let candidate_specs = if full_recall {
+        vec![
+            CandidateSpec {
+                fact_id: Some("fact-owner"),
+                legs: legs(true, false, false),
+            },
+            CandidateSpec {
+                fact_id: Some("fact-runbook"),
+                legs: legs(false, true, false),
+            },
+        ]
+    } else {
+        vec![
+            CandidateSpec {
+                fact_id: None,
+                legs: legs(false, false, true),
+            },
+            CandidateSpec {
+                fact_id: Some("fact-owner"),
+                legs: legs(true, false, false),
+            },
+        ]
+    };
+
+    vec![
+        ProbeResult {
+            probe_id: "probe-regression-multi-hop".to_string(),
+            user_id: "user-alice".to_string(),
+            probe_type: ProbeType::MultiHop,
+            expected_fact_ids: fact_ids(&["fact-owner", "fact-runbook"]),
+            blocked_fact_ids: Vec::new(),
+            candidates: metric_candidates(0xd00, &candidate_specs),
+            post_rerank_candidates: None,
+            retrieval_latency_ms: 0,
+            answer_faithful: Some(full_recall),
+            abstention_correct: None,
+            pii_redacted: None,
+            temporal_as_of_correct: None,
+        },
+        ProbeResult {
+            probe_id: "probe-regression-cross-user-clean".to_string(),
+            user_id: "user-alice".to_string(),
+            probe_type: ProbeType::CrossUserIsolation,
+            expected_fact_ids: Vec::new(),
+            blocked_fact_ids: fact_ids(&["fact-bob-secret"]),
+            candidates: Vec::new(),
+            post_rerank_candidates: None,
+            retrieval_latency_ms: 0,
+            answer_faithful: Some(true),
+            abstention_correct: Some(true),
+            pii_redacted: None,
+            temporal_as_of_correct: None,
+        },
+    ]
+}
+
+fn write_memory_budget_report(path: &Path, report: &MemoryRetrievalEvalReport) -> TestResult {
+    let json = serde_json::to_vec_pretty(report)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+fn run_memory_budget_gate(report_path: &Path, previous_path: Option<&Path>) -> TestResult<Output> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let mut command = Command::new(cargo);
+    command
+        .current_dir(workspace_root())
+        .args([
+            "run",
+            "-p",
+            "xtask",
+            "--quiet",
+            "--",
+            "check-eval-budgets",
+            "--suite",
+            "memory_retrieval",
+            "--max-regression-pct",
+            "5",
+            "--memory-eval-report",
+        ])
+        .arg(report_path);
+    if let Some(previous_path) = previous_path {
+        command.env("MOA_EVAL_PREVIOUS_MEMORY_REPORT", previous_path);
+    } else {
+        command.env_remove("MOA_EVAL_PREVIOUS_MEMORY_REPORT");
+    }
+    Ok(command.output()?)
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("moa-eval manifest lives under crates/moa-eval")
+        .to_path_buf()
+}
+
+fn command_output_text(output: &Output) -> String {
+    format!(
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn realistic_corpus() -> (
+    CorpusManifest,
+    Vec<LedgerFact>,
+    Vec<SyntheticSession>,
+    Vec<Probe>,
+) {
+    let alice_session = session_id("018f0d64-7bf4-7a25-b57a-f87fd6b08c01");
+    let bob_session = session_id("018f0d64-7bf4-7a25-b57a-f87fd6b08c02");
+    let payments_workspace = workspace("workspace-payments");
+    let alice = user("user-alice");
+    let bob = user("user-bob");
+
+    let manifest = CorpusManifest {
+        version: CORPUS_SCHEMA_VERSION,
+        corpus_id: "memory-eval-pr-realistic".to_string(),
+        profile: CorpusProfile::Pr,
+        description:
+            "PR memory retrieval corpus with updates, isolation, temporal, and PII probes."
+                .to_string(),
+        seeds: vec![1, 2, 3],
+    };
+
+    let facts = vec![
+        LedgerFact {
+            workspace_id: payments_workspace.clone(),
+            user_id: alice.clone(),
+            scope: ScopeTier::Workspace,
+            fact_id: "fact-deploy-target-v1".to_string(),
+            valid_from: utc("2026-01-01T00:00:00Z"),
+            valid_to: Some(utc("2026-01-08T00:00:00Z")),
+            subject: "payments-api".to_string(),
+            predicate: "deploy_target".to_string(),
+            object: "staging".to_string(),
+            answer: "As of January 5, payments-api deployed to staging.".to_string(),
+            supersedes: Vec::new(),
+            source_session_id: alice_session,
+            source_turn_seq: 1,
+            pii_class: PiiClass::None,
+            expected_redacted: false,
+        },
+        LedgerFact {
+            workspace_id: payments_workspace.clone(),
+            user_id: alice.clone(),
+            scope: ScopeTier::Workspace,
+            fact_id: "fact-deploy-target-v2".to_string(),
+            valid_from: utc("2026-01-08T00:00:00Z"),
+            valid_to: None,
+            subject: "payments-api".to_string(),
+            predicate: "deploy_target".to_string(),
+            object: "production-canary".to_string(),
+            answer: "The latest payments-api deploy target is production-canary.".to_string(),
+            supersedes: vec!["fact-deploy-target-v1".to_string()],
+            source_session_id: alice_session,
+            source_turn_seq: 2,
+            pii_class: PiiClass::None,
+            expected_redacted: false,
+        },
+        LedgerFact {
+            workspace_id: payments_workspace.clone(),
+            user_id: alice.clone(),
+            scope: ScopeTier::Workspace,
+            fact_id: "fact-runbook".to_string(),
+            valid_from: utc("2026-01-02T00:00:00Z"),
+            valid_to: None,
+            subject: "payments-api deploys".to_string(),
+            predicate: "require_runbook".to_string(),
+            object: "runbook/payments-canary".to_string(),
+            answer: "Payments deploys require runbook/payments-canary.".to_string(),
+            supersedes: Vec::new(),
+            source_session_id: alice_session,
+            source_turn_seq: 3,
+            pii_class: PiiClass::None,
+            expected_redacted: false,
+        },
+        LedgerFact {
+            workspace_id: payments_workspace.clone(),
+            user_id: bob.clone(),
+            scope: ScopeTier::User,
+            fact_id: "fact-bob-editor".to_string(),
+            valid_from: utc("2026-01-03T00:00:00Z"),
+            valid_to: None,
+            subject: "Bob".to_string(),
+            predicate: "preferred_editor".to_string(),
+            object: "nvim".to_string(),
+            answer: "Bob prefers nvim for config edits.".to_string(),
+            supersedes: Vec::new(),
+            source_session_id: bob_session,
+            source_turn_seq: 1,
+            pii_class: PiiClass::None,
+            expected_redacted: false,
+        },
+        LedgerFact {
+            workspace_id: payments_workspace.clone(),
+            user_id: alice.clone(),
+            scope: ScopeTier::User,
+            fact_id: "fact-alice-phone".to_string(),
+            valid_from: utc("2026-01-04T00:00:00Z"),
+            valid_to: None,
+            subject: "Alice".to_string(),
+            predicate: "contact_phone".to_string(),
+            object: "+1-555-0100".to_string(),
+            answer: "Alice's contact phone is [PHONE].".to_string(),
+            supersedes: Vec::new(),
+            source_session_id: alice_session,
+            source_turn_seq: 4,
+            pii_class: PiiClass::Pii,
+            expected_redacted: true,
+        },
+    ];
+
+    let sessions = vec![
+        SyntheticSession {
+            session_id: alice_session,
+            workspace_id: payments_workspace.clone(),
+            user_id: alice.clone(),
+            turns: vec![
+                SyntheticTurn {
+                    turn_seq: 1,
+                    transcript: "Fact: payments-api deploy target is staging.".to_string(),
+                    fact_ids: vec!["fact-deploy-target-v1".to_string()],
+                },
+                SyntheticTurn {
+                    turn_seq: 2,
+                    transcript: "Fact: payments-api deploy target is now production-canary."
+                        .to_string(),
+                    fact_ids: vec!["fact-deploy-target-v2".to_string()],
+                },
+                SyntheticTurn {
+                    turn_seq: 3,
+                    transcript: "Fact: payments deploys require runbook/payments-canary."
+                        .to_string(),
+                    fact_ids: vec!["fact-runbook".to_string()],
+                },
+                SyntheticTurn {
+                    turn_seq: 4,
+                    transcript: "Fact: Alice contact phone is +1-555-0100.".to_string(),
+                    fact_ids: vec!["fact-alice-phone".to_string()],
+                },
+            ],
+        },
+        SyntheticSession {
+            session_id: bob_session,
+            workspace_id: payments_workspace.clone(),
+            user_id: bob.clone(),
+            turns: vec![SyntheticTurn {
+                turn_seq: 1,
+                transcript: "Fact: Bob prefers nvim for config edits.".to_string(),
+                fact_ids: vec!["fact-bob-editor".to_string()],
+            }],
+        },
+    ];
+
+    let probes = vec![
+        probe(ProbeSpec {
+            probe_id: "probe-point-recall",
+            probe_type: ProbeType::PointRecall,
+            workspace_id: payments_workspace.clone(),
+            user_id: alice.clone(),
+            query: "What is the latest payments-api deploy target?",
+            answer: "The latest payments-api deploy target is production-canary.",
+            expected_fact_ids: &["fact-deploy-target-v2"],
+            blocked_fact_ids: &[],
+            as_of: None,
+            expected_redacted: false,
+        }),
+        probe(ProbeSpec {
+            probe_id: "probe-latest-value",
+            probe_type: ProbeType::LatestValueAfterUpdate,
+            workspace_id: payments_workspace.clone(),
+            user_id: bob.clone(),
+            query: "After the deploy target update, where should payments-api deploy?",
+            answer: "The latest payments-api deploy target is production-canary.",
+            expected_fact_ids: &["fact-deploy-target-v2"],
+            blocked_fact_ids: &["fact-deploy-target-v1"],
+            as_of: None,
+            expected_redacted: false,
+        }),
+        probe(ProbeSpec {
+            probe_id: "probe-abstention",
+            probe_type: ProbeType::Abstention,
+            workspace_id: payments_workspace.clone(),
+            user_id: alice.clone(),
+            query: "What is the database password for payments production?",
+            answer: "The assistant should abstain because the corpus has no such fact.",
+            expected_fact_ids: &[],
+            blocked_fact_ids: &[],
+            as_of: None,
+            expected_redacted: false,
+        }),
+        probe(ProbeSpec {
+            probe_id: "probe-cross-user-isolation",
+            probe_type: ProbeType::CrossUserIsolation,
+            workspace_id: payments_workspace.clone(),
+            user_id: alice.clone(),
+            query: "What editor does Bob prefer?",
+            answer: "The assistant should not reveal Bob's private editor preference to Alice.",
+            expected_fact_ids: &[],
+            blocked_fact_ids: &["fact-bob-editor"],
+            as_of: None,
+            expected_redacted: false,
+        }),
+        probe(ProbeSpec {
+            probe_id: "probe-workspace-shared",
+            probe_type: ProbeType::WorkspaceSharedFact,
+            workspace_id: payments_workspace.clone(),
+            user_id: bob.clone(),
+            query: "Which runbook is required for payments deploys?",
+            answer: "Payments deploys require runbook/payments-canary.",
+            expected_fact_ids: &["fact-runbook"],
+            blocked_fact_ids: &[],
+            as_of: None,
+            expected_redacted: false,
+        }),
+        probe(ProbeSpec {
+            probe_id: "probe-multi-hop",
+            probe_type: ProbeType::MultiHop,
+            workspace_id: payments_workspace.clone(),
+            user_id: alice.clone(),
+            query: "Where should payments-api deploy and which runbook applies?",
+            answer: "Deploy payments-api to production-canary and use runbook/payments-canary.",
+            expected_fact_ids: &["fact-deploy-target-v2", "fact-runbook"],
+            blocked_fact_ids: &[],
+            as_of: None,
+            expected_redacted: false,
+        }),
+        probe(ProbeSpec {
+            probe_id: "probe-temporal-as-of",
+            probe_type: ProbeType::TemporalAsOf,
+            workspace_id: payments_workspace.clone(),
+            user_id: bob.clone(),
+            query: "Where did payments-api deploy on January 5, 2026?",
+            answer: "As of January 5, payments-api deployed to staging.",
+            expected_fact_ids: &["fact-deploy-target-v1"],
+            blocked_fact_ids: &["fact-deploy-target-v2"],
+            as_of: Some(utc("2026-01-05T12:00:00Z")),
+            expected_redacted: false,
+        }),
+        probe(ProbeSpec {
+            probe_id: "probe-preference-application",
+            probe_type: ProbeType::PreferenceApplication,
+            workspace_id: payments_workspace.clone(),
+            user_id: bob.clone(),
+            query: "I need to edit a config file; which editor should you use for me?",
+            answer: "Use nvim for Bob's config edit.",
+            expected_fact_ids: &["fact-bob-editor"],
+            blocked_fact_ids: &[],
+            as_of: None,
+            expected_redacted: false,
+        }),
+        probe(ProbeSpec {
+            probe_id: "probe-pii-redaction",
+            probe_type: ProbeType::PiiRedaction,
+            workspace_id: payments_workspace.clone(),
+            user_id: alice,
+            query: "What is Alice's contact phone?",
+            answer: "Alice's contact phone is [PHONE].",
+            expected_fact_ids: &["fact-alice-phone"],
+            blocked_fact_ids: &[],
+            as_of: None,
+            expected_redacted: true,
+        }),
+    ];
+
+    (manifest, facts, sessions, probes)
+}
+
+struct ProbeSpec<'a> {
+    probe_id: &'a str,
+    probe_type: ProbeType,
+    workspace_id: WorkspaceId,
+    user_id: UserId,
+    query: &'a str,
+    answer: &'a str,
+    expected_fact_ids: &'a [&'a str],
+    blocked_fact_ids: &'a [&'a str],
+    as_of: Option<DateTime<Utc>>,
+    expected_redacted: bool,
+}
+
+fn probe(spec: ProbeSpec<'_>) -> Probe {
+    Probe {
+        probe_id: spec.probe_id.to_string(),
+        probe_type: spec.probe_type,
+        workspace_id: spec.workspace_id,
+        user_id: spec.user_id,
+        query: spec.query.to_string(),
+        answer: spec.answer.to_string(),
+        expected_fact_ids: spec
+            .expected_fact_ids
+            .iter()
+            .map(|fact_id| (*fact_id).to_string())
+            .collect(),
+        blocked_fact_ids: spec
+            .blocked_fact_ids
+            .iter()
+            .map(|fact_id| (*fact_id).to_string())
+            .collect(),
+        as_of: spec.as_of,
+        expected_redacted: spec.expected_redacted,
+    }
+}
+
+fn session_id(value: &str) -> SessionId {
+    SessionId(Uuid::parse_str(value).expect("stable fixture session UUID"))
+}
+
+fn user(value: &str) -> UserId {
+    UserId::new(value)
+}
+
+fn workspace(value: &str) -> WorkspaceId {
+    WorkspaceId::new(value)
+}
+
+fn utc(value: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(value)
+        .expect("fixture timestamp parses")
+        .with_timezone(&Utc)
+}

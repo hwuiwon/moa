@@ -326,7 +326,7 @@ fn canonicalize(planned: &PlannedQuery, req: &RetrievalRequest) -> String {
     out.push_str("|rerank=");
     out.push_str(if req.use_reranker { "1" } else { "0" });
     out.push_str("|temporal=");
-    if let Some(temporal) = planned.temporal_filter {
+    if let Some(temporal) = req.as_of {
         out.push_str(&temporal.to_rfc3339());
     }
     out
@@ -491,6 +491,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn temporal_cache_fingerprint_uses_request_as_of() {
+        // Pins: cache identity follows the executable retrieval request, not stale plan state.
+        let planned = planned_query(workspace_scope(), "auth service");
+        let current = request(&planned, "what owned auth?");
+        let mut historical = current.clone();
+        historical.as_of = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z")
+                .expect("test timestamp should parse")
+                .with_timezone(&Utc),
+        );
+
+        assert_ne!(
+            fingerprint(&planned, &current),
+            fingerprint(&planned, &historical)
+        );
+    }
+
     #[derive(Default)]
     struct CountingBackend {
         calls: AtomicUsize,
@@ -589,6 +607,7 @@ mod tests {
             k_final: 5,
             use_reranker: false,
             strategy: Some(planned.strategy),
+            as_of: planned.temporal_filter,
         }
     }
 }

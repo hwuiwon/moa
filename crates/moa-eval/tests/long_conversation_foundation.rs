@@ -367,6 +367,7 @@ async fn long_test_case_dispatches_to_run_scenario_with_provider() {
             long: Some(LongTestCase {
                 goal_card: None,
                 transcript: transcript_path.clone(),
+                scripted_user: None,
                 secondary_session: None,
                 expectations: expectations_path,
                 mode: LongConversationMode::Recorded,

@@ -1028,6 +1028,7 @@ struct ScopedDatasetItem {
     workspace_id: WorkspaceId,
     query: String,
     expected_answer: Option<String>,
+    expected_chunk_ids: Vec<Uuid>,
 }
 
 #[derive(Clone, Debug)]
@@ -1048,7 +1049,7 @@ async fn load_dataset_items_for_workspace(
         .map_err(|_| EvalServiceError::IntegerTooLarge { field: "limit" })?;
     let rows = sqlx::query(
         r#"
-        SELECT item_id, workspace_id, query, expected_answer
+        SELECT item_id, workspace_id, query, expected_answer, expected_chunk_ids
         FROM analytics.eval_dataset_items
         WHERE dataset_id = $1 AND workspace_id = $2
         ORDER BY created_at ASC, item_id ASC
@@ -1069,6 +1070,7 @@ async fn load_dataset_items_for_workspace(
                 workspace_id: WorkspaceId::new(row_workspace_id),
                 query: row.try_get("query")?,
                 expected_answer: row.try_get("expected_answer")?,
+                expected_chunk_ids: row.try_get("expected_chunk_ids")?,
             })
         })
         .collect()
@@ -1120,32 +1122,90 @@ async fn replay_items_live(
     };
 
     for (item, result) in items.iter().zip(run.results.iter()) {
-        if let Some(expected) = &item.expected_answer {
-            let actual = result.response.as_deref().unwrap_or_default();
-            let score = token_f1(actual, expected);
-            sink.record(LineageEvent::Eval(ScoreRecord {
-                score_id: Uuid::now_v7(),
-                ts: Utc::now(),
-                target: ScoreTarget::DatasetRunItem {
-                    run_id: replay_config.run_id,
-                    item_id: item.item_id,
-                },
-                workspace_id: item.workspace_id.clone(),
-                user_id: None,
-                name: "answer_f1".to_string(),
-                value: ScoreValue::Numeric(score),
-                source: ScoreSource::OfflineReplay,
-                model_or_evaluator: evaluator.clone(),
-                run_id: Some(replay_config.run_id),
-                dataset_id: Some(replay_config.dataset_id),
-                comment: result.error.clone(),
-            }));
-            report.scores += 1;
+        let records = replay_score_records_for_item(item, result, &replay_config, &evaluator);
+        report.scores += records.len();
+        for record in records {
+            sink.record(LineageEvent::Eval(record));
         }
         report.items += 1;
     }
 
     Ok(report)
+}
+
+fn replay_score_records_for_item(
+    item: &ScopedDatasetItem,
+    result: &EvalResult,
+    replay_config: &ReplayConfig,
+    evaluator: &str,
+) -> Vec<ScoreRecord> {
+    let mut capacity = if item.expected_answer.is_some() { 1 } else { 0 };
+    if !item.expected_chunk_ids.is_empty() {
+        capacity += 4;
+    }
+    let mut records = Vec::with_capacity(capacity);
+
+    if let Some(expected) = &item.expected_answer {
+        let actual = result.response.as_deref().unwrap_or_default();
+        let score = token_f1(actual, expected);
+        records.push(dataset_run_item_score_record(
+            item,
+            replay_config,
+            evaluator,
+            "answer_f1",
+            ScoreValue::Numeric(score),
+            result.error.clone(),
+        ));
+    }
+
+    if !item.expected_chunk_ids.is_empty() {
+        // Replay currently lacks turn-level retrieval lineage, so expected chunks
+        // get the explicit zero-recall fallback until lineage is available here.
+        for (name, value) in [
+            ("retrieval.recall_at_4", ScoreValue::Numeric(0.0)),
+            ("retrieval.mrr", ScoreValue::Numeric(0.0)),
+            ("retrieval.ndcg_at_4", ScoreValue::Numeric(0.0)),
+            ("retrieval.zero_recall", ScoreValue::Boolean(true)),
+        ] {
+            records.push(dataset_run_item_score_record(
+                item,
+                replay_config,
+                evaluator,
+                name,
+                value,
+                result.error.clone(),
+            ));
+        }
+    }
+
+    records
+}
+
+fn dataset_run_item_score_record(
+    item: &ScopedDatasetItem,
+    replay_config: &ReplayConfig,
+    evaluator: &str,
+    name: &str,
+    value: ScoreValue,
+    comment: Option<String>,
+) -> ScoreRecord {
+    ScoreRecord {
+        score_id: Uuid::now_v7(),
+        ts: Utc::now(),
+        target: ScoreTarget::DatasetRunItem {
+            run_id: replay_config.run_id,
+            item_id: item.item_id,
+        },
+        workspace_id: item.workspace_id.clone(),
+        user_id: None,
+        name: name.to_string(),
+        value,
+        source: ScoreSource::OfflineReplay,
+        model_or_evaluator: evaluator.to_string(),
+        run_id: Some(replay_config.run_id),
+        dataset_id: Some(replay_config.dataset_id),
+        comment,
+    }
 }
 
 fn parse_suite_document(source: &str, document: &str) -> Result<TestSuite, EvalServiceError> {
@@ -1276,4 +1336,139 @@ where
         .build()
         .map_err(|error| error.to_string())?;
     Ok(runtime.block_on(future))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit coverage for hosted eval replay score-row construction.
+
+    use super::*;
+
+    #[test]
+    fn replay_score_records_emit_retrieval_fallback_for_expected_chunks() {
+        // Pins: dataset items with expected chunks emit answer_f1 plus the four retrieval fallback scores.
+        let run_id = uuid("11111111-1111-1111-1111-111111111111");
+        let dataset_id = uuid("22222222-2222-2222-2222-222222222222");
+        let item_id = uuid("33333333-3333-3333-3333-333333333333");
+        let item = ScopedDatasetItem {
+            item_id,
+            workspace_id: WorkspaceId::new("workspace-a"),
+            query: "alpha?".to_string(),
+            expected_answer: Some("alpha beta".to_string()),
+            expected_chunk_ids: vec![
+                uuid("44444444-4444-4444-4444-444444444444"),
+                uuid("55555555-5555-5555-5555-555555555555"),
+            ],
+        };
+        let result = EvalResult {
+            response: Some("alpha beta".to_string()),
+            ..EvalResult::default()
+        };
+        let replay_config = replay_config(run_id, dataset_id);
+
+        let records =
+            replay_score_records_for_item(&item, &result, &replay_config, "replay-f1:model");
+
+        assert_eq!(records.len(), 5);
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "answer_f1",
+                "retrieval.recall_at_4",
+                "retrieval.mrr",
+                "retrieval.ndcg_at_4",
+                "retrieval.zero_recall",
+            ]
+        );
+        for record in &records {
+            assert_dataset_run_item_target(record, run_id, item_id);
+            assert_eq!(record.workspace_id, WorkspaceId::new("workspace-a"));
+            assert_eq!(record.run_id, Some(run_id));
+            assert_eq!(record.dataset_id, Some(dataset_id));
+            assert_eq!(record.source, ScoreSource::OfflineReplay);
+            assert_eq!(record.model_or_evaluator, "replay-f1:model");
+        }
+        assert_numeric_score(&records[0], 1.0);
+        assert_numeric_score(&records[1], 0.0);
+        assert_numeric_score(&records[2], 0.0);
+        assert_numeric_score(&records[3], 0.0);
+        assert_boolean_score(&records[4], true);
+    }
+
+    #[test]
+    fn replay_score_records_skip_retrieval_scores_without_expected_chunks() {
+        // Pins: answer-only dataset items do not gain retrieval scores when no expected chunks are present.
+        let run_id = uuid("11111111-1111-1111-1111-111111111111");
+        let dataset_id = uuid("22222222-2222-2222-2222-222222222222");
+        let item_id = uuid("33333333-3333-3333-3333-333333333333");
+        let item = ScopedDatasetItem {
+            item_id,
+            workspace_id: WorkspaceId::new("workspace-a"),
+            query: "alpha?".to_string(),
+            expected_answer: Some("alpha beta".to_string()),
+            expected_chunk_ids: Vec::new(),
+        };
+        let result = EvalResult {
+            response: Some("alpha beta".to_string()),
+            ..EvalResult::default()
+        };
+        let replay_config = replay_config(run_id, dataset_id);
+
+        let records =
+            replay_score_records_for_item(&item, &result, &replay_config, "replay-f1:model");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].name, "answer_f1");
+        assert!(
+            records
+                .iter()
+                .all(|record| !record.name.starts_with("retrieval."))
+        );
+        assert_dataset_run_item_target(&records[0], run_id, item_id);
+        assert_numeric_score(&records[0], 1.0);
+    }
+
+    fn replay_config(run_id: Uuid, dataset_id: Uuid) -> ReplayConfig {
+        ReplayConfig {
+            dataset_id,
+            run_id,
+            model_override: Some("model".to_string()),
+            embedder_override: None,
+            limit: None,
+        }
+    }
+
+    fn uuid(value: &str) -> Uuid {
+        Uuid::parse_str(value).expect("fixture UUID should parse")
+    }
+
+    fn assert_dataset_run_item_target(record: &ScoreRecord, run_id: Uuid, item_id: Uuid) {
+        match &record.target {
+            ScoreTarget::DatasetRunItem {
+                run_id: actual_run_id,
+                item_id: actual_item_id,
+            } => {
+                assert_eq!(*actual_run_id, run_id);
+                assert_eq!(*actual_item_id, item_id);
+            }
+            other => panic!("expected dataset run item target, got {other:?}"),
+        }
+    }
+
+    fn assert_numeric_score(record: &ScoreRecord, expected: f64) {
+        match &record.value {
+            ScoreValue::Numeric(actual) => assert_eq!(*actual, expected),
+            other => panic!("expected numeric score, got {other:?}"),
+        }
+    }
+
+    fn assert_boolean_score(record: &ScoreRecord, expected: bool) {
+        match &record.value {
+            ScoreValue::Boolean(actual) => assert_eq!(*actual, expected),
+            other => panic!("expected boolean score, got {other:?}"),
+        }
+    }
 }

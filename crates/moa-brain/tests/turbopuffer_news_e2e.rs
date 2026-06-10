@@ -149,6 +149,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         k_final: 5,
         use_reranker: false,
         strategy: None,
+        as_of: None,
     };
 
     let dual_read_hits = retriever.retrieve(req.clone()).await?;

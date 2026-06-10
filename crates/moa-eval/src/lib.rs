@@ -8,6 +8,7 @@ pub mod evaluators;
 pub mod golden;
 pub mod loader;
 pub mod long_conversation;
+pub mod memory_eval;
 pub mod pentest;
 pub mod plan;
 pub mod replay;

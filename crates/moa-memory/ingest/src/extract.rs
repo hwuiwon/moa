@@ -42,6 +42,17 @@ pub struct TurnChunk {
     pub token_estimate: usize,
 }
 
+/// Scope hint emitted by extraction for one fact candidate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractedFactScopeHint {
+    /// The fact belongs to the workspace-bound user who produced the turn.
+    #[default]
+    User,
+    /// The fact is intentionally shared with the whole workspace.
+    Workspace,
+}
+
 /// One fact candidate emitted by extraction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtractedFact {
@@ -57,6 +68,9 @@ pub struct ExtractedFact {
     pub summary: String,
     /// Source chunk index.
     pub source_chunk: usize,
+    /// Scope hint used by slow-path ingestion when writing graph rows.
+    #[serde(default)]
+    pub scope_hint: ExtractedFactScopeHint,
 }
 
 /// A fact after PII classification.
@@ -264,6 +278,7 @@ fn is_non_declarative(sentence: &str) -> bool {
 }
 
 fn extracted_fact_from_summary(source_chunk: usize, summary: String) -> ExtractedFact {
+    let (scope_hint, summary) = scope_hint_from_summary(&summary);
     let (subject, predicate, object) = split_summary(&summary);
     let hash = fact_hash_parts(&subject, &predicate, &object, &summary);
     ExtractedFact {
@@ -273,7 +288,45 @@ fn extracted_fact_from_summary(source_chunk: usize, summary: String) -> Extracte
         object,
         summary,
         source_chunk,
+        scope_hint,
     }
+}
+
+fn scope_hint_from_summary(summary: &str) -> (ExtractedFactScopeHint, String) {
+    let scope_hint = if contains_scope_marker(summary, "workspace shared") {
+        ExtractedFactScopeHint::Workspace
+    } else {
+        ExtractedFactScopeHint::User
+    };
+    let summary = strip_scope_marker(summary, "workspace shared");
+    let summary = strip_scope_marker(&summary, "user private");
+    (scope_hint, normalize_stripped_scope_summary(&summary))
+}
+
+fn contains_scope_marker(summary: &str, marker: &str) -> bool {
+    summary.to_ascii_lowercase().contains(marker)
+}
+
+fn strip_scope_marker(summary: &str, marker: &str) -> String {
+    let mut stripped = summary.to_string();
+    loop {
+        let lower = stripped.to_ascii_lowercase();
+        let Some(start) = lower.find(marker) else {
+            break;
+        };
+        stripped.replace_range(start..start + marker.len(), " ");
+    }
+    stripped
+}
+
+fn normalize_stripped_scope_summary(summary: &str) -> String {
+    summary
+        .trim_matches(|ch: char| {
+            ch.is_whitespace() || matches!(ch, ':' | '-' | ',' | ';' | '[' | ']' | '(' | ')')
+        })
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn fact_hash_parts(subject: &str, predicate: &str, object: &str, summary: &str) -> Vec<u8> {
@@ -331,6 +384,35 @@ mod tests {
         let facts = extract_facts(&chunks);
         assert_eq!(facts.len(), 2);
         assert_eq!(facts[0].summary, "auth service uses JWT");
+    }
+
+    #[test]
+    fn extraction_defaults_unmarked_facts_to_user_scope() {
+        let chunks =
+            chunk_turn(&turn("Fact: auth service uses JWT"), 700, 100).expect("chunk one fact");
+        let facts = extract_facts(&chunks);
+
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::User);
+    }
+
+    #[test]
+    fn extraction_strips_scope_markers_before_parsing() {
+        let chunks = chunk_turn(
+            &turn("Fact: workspace shared API runs_on_port 3000\nFact: user private theme uses dark_mode"),
+            700,
+            100,
+        )
+        .expect("chunk marked facts");
+        let facts = extract_facts(&chunks);
+
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::Workspace);
+        assert_eq!(facts[0].summary, "API runs_on_port 3000");
+        assert_eq!(facts[0].subject, "API");
+        assert_eq!(facts[1].scope_hint, ExtractedFactScopeHint::User);
+        assert_eq!(facts[1].summary, "theme uses dark_mode");
+        assert_eq!(facts[1].subject, "theme");
     }
 
     #[test]
