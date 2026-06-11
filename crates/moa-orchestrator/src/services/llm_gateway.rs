@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fs, path::Path};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, Event, LLMProvider, MoaConfig,
@@ -666,22 +666,16 @@ impl LLMGateway for LLMGatewayImpl {
                 .call()
                 .await?;
 
-            if let Some((workspace_id, user_id)) = turn_scope_from_request(&request) {
-                let transcript = turn_transcript(&request.messages, &response.text);
-                if !transcript.trim().is_empty() {
-                    let turn = SessionTurn {
-                        workspace_id,
-                        user_id,
-                        session_id,
-                        turn_seq,
-                        dominant_pii_class: dominant_pii_class_hint(&transcript).to_string(),
-                        transcript,
-                        finalized_at: Utc::now(),
-                    };
-                    ctx.object_client::<IngestionVOClient>(ingestion_object_key(&turn))
-                        .ingest_turn(Json(turn))
-                        .send();
-                }
+            if let Some(turn) = session_turn_from_completion_request(
+                &request,
+                &response.text,
+                session_id,
+                turn_seq,
+                Utc::now(),
+            ) {
+                ctx.object_client::<IngestionVOClient>(ingestion_object_key(&turn))
+                    .ingest_turn(Json(turn))
+                    .send();
             }
         }
 
@@ -952,6 +946,47 @@ fn turn_scope_from_request(request: &CompletionRequest) -> Option<(WorkspaceId, 
     Some((workspace_id, user_id))
 }
 
+fn session_turn_from_completion_request(
+    request: &CompletionRequest,
+    response_text: &str,
+    session_id: SessionId,
+    turn_seq: u64,
+    finalized_at: DateTime<Utc>,
+) -> Option<SessionTurn> {
+    let (workspace_id, user_id) = turn_scope_from_request(request)?;
+    validate_turn_author_scope(request, &user_id);
+    let transcript = turn_transcript(&request.messages, response_text);
+    if transcript.trim().is_empty() {
+        return None;
+    }
+    Some(SessionTurn {
+        workspace_id,
+        user_id,
+        session_id,
+        turn_seq,
+        dominant_pii_class: dominant_pii_class_hint(&transcript).to_string(),
+        transcript,
+        finalized_at,
+    })
+}
+
+fn validate_turn_author_scope(request: &CompletionRequest, turn_user_id: &UserId) {
+    let Some(author_user_id) = string_metadata(request, "_moa.user_id").map(UserId::new) else {
+        return;
+    };
+    if author_user_id != *turn_user_id {
+        debug_assert_eq!(
+            author_user_id, *turn_user_id,
+            "SessionTurn.user_id must match the current turn author"
+        );
+        tracing::warn!(
+            author_user_id = %author_user_id,
+            turn_user_id = %turn_user_id,
+            "SessionTurn user attribution mismatch"
+        );
+    }
+}
+
 fn string_metadata<'a>(request: &'a CompletionRequest, key: &str) -> Option<&'a str> {
     match request.metadata.get(key)? {
         Value::String(raw) => Some(raw.as_str()),
@@ -989,11 +1024,14 @@ fn parse_session_id(raw: &str) -> Option<SessionId> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use moa_core::ModelId;
+    use chrono::{DateTime, Utc};
+    use moa_core::{CompletionRequest, ContextMessage, ModelId, SessionId, UserId, WorkspaceId};
+    use serde_json::json;
 
-    use super::{ProviderKind, ProviderRegistry};
+    use super::{ProviderKind, ProviderRegistry, session_turn_from_completion_request};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1042,5 +1080,55 @@ mod tests {
 
         assert_eq!(kind, ProviderKind::OpenAI);
         assert_eq!(model, ModelId::new("gpt-5.4-mini"));
+    }
+
+    #[test]
+    fn session_turn_user_id_matches_turn_author() {
+        // Pins: finalized LLM turns stamp memory ingestion with the current request's user metadata.
+        let session_id = SessionId::new();
+        let finalized_at = DateTime::parse_from_rfc3339("2026-05-07T12:00:00Z")
+            .expect("test timestamp parses")
+            .with_timezone(&Utc);
+        let mut metadata = HashMap::new();
+        metadata.insert("_moa.session_id".to_string(), json!(session_id.to_string()));
+        metadata.insert("_moa.workspace_id".to_string(), json!("workspace-alpha"));
+        metadata.insert("_moa.user_id".to_string(), json!("user-alpha"));
+        let request = CompletionRequest {
+            model: None,
+            messages: vec![
+                ContextMessage::system("system policy"),
+                ContextMessage::assistant("prior assistant answer"),
+                ContextMessage::user("My email is user-alpha@example.com."),
+            ],
+            tools: Vec::new(),
+            max_output_tokens: None,
+            temperature: None,
+            response_format: None,
+            cache_breakpoints: Vec::new(),
+            cache_controls: Vec::new(),
+            metadata,
+        };
+
+        let turn = session_turn_from_completion_request(
+            &request,
+            "Stored that.",
+            session_id,
+            42,
+            finalized_at,
+        )
+        .expect("request metadata should produce an ingestable turn");
+
+        assert_eq!(turn.workspace_id, WorkspaceId::new("workspace-alpha"));
+        assert_eq!(turn.user_id, UserId::new("user-alpha"));
+        assert_eq!(turn.session_id, session_id);
+        assert_eq!(turn.turn_seq, 42);
+        assert_eq!(turn.finalized_at, finalized_at);
+        assert_eq!(turn.dominant_pii_class, "pii");
+        assert_eq!(
+            turn.transcript,
+            "user: My email is user-alpha@example.com.\nassistant: Stored that."
+        );
+        assert!(!turn.transcript.contains("system policy"));
+        assert!(!turn.transcript.contains("prior assistant answer"));
     }
 }

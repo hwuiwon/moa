@@ -13,7 +13,7 @@ use crate::kernel::{
 };
 
 use super::ProbeType;
-use super::gold::{GoldResolutionReport, GoldResolutionStatus};
+use super::gold::{GoldResolutionReport, GoldResolutionStatus, ScopeMatchBreakdown};
 
 const RECALL_AT_4: usize = 4;
 const RECALL_AT_25: usize = 25;
@@ -236,6 +236,12 @@ pub struct RetrievalMetrics {
     /// Fraction of resolved ledger facts stored with the expected scope.
     #[serde(default)]
     pub scope_match_rate: MetricSummary,
+    /// Fraction of resolved user-expected ledger facts stored with user scope.
+    #[serde(default)]
+    pub scope_match_rate_user: MetricSummary,
+    /// Fraction of resolved workspace-expected ledger facts stored with workspace scope.
+    #[serde(default)]
+    pub scope_match_rate_workspace: MetricSummary,
     /// Fraction of stored Fact nodes that mapped back to a ledger fact.
     #[serde(default)]
     pub extraction_precision: MetricSummary,
@@ -346,12 +352,11 @@ pub fn aggregate_retrieval_eval_with_extraction_precision(
         .iter()
         .filter(|record| record.resolution_status != GoldResolutionStatus::Unresolved)
         .count();
-    let (scope_matches, scope_total) = gold_resolution.scope_match_counts();
-    aggregate_retrieval_eval_from_diagnostic_counts(
+    let scope_breakdown = gold_resolution.scope_match_breakdown();
+    aggregate_retrieval_eval_from_scope_counts(
         resolved,
         gold_resolution.records.len(),
-        scope_matches,
-        scope_total,
+        scope_breakdown,
         extraction_precision,
         probe_results,
         bootstrap_config,
@@ -388,11 +393,36 @@ pub fn aggregate_retrieval_eval_from_diagnostic_counts(
     probe_results: Vec<ProbeResult>,
     bootstrap_config: BootstrapConfig,
 ) -> RetrievalEvalReport {
+    let scope_breakdown = ScopeMatchBreakdown {
+        overall_matches: scope_matched_facts,
+        overall_total: scope_resolved_facts,
+        user_matches: 0,
+        user_total: 0,
+        workspace_matches: 0,
+        workspace_total: 0,
+    };
+    aggregate_retrieval_eval_from_scope_counts(
+        resolved_facts,
+        total_facts,
+        scope_breakdown,
+        extraction_precision,
+        probe_results,
+        bootstrap_config,
+    )
+}
+
+fn aggregate_retrieval_eval_from_scope_counts(
+    resolved_facts: usize,
+    total_facts: usize,
+    scope_breakdown: ScopeMatchBreakdown,
+    extraction_precision: ExtractionPrecisionCounts,
+    probe_results: Vec<ProbeResult>,
+    bootstrap_config: BootstrapConfig,
+) -> RetrievalEvalReport {
     let metrics = aggregate_metrics(
         resolved_facts,
         total_facts,
-        scope_matched_facts,
-        scope_resolved_facts,
+        scope_breakdown,
         extraction_precision,
         &probe_results,
     );
@@ -410,8 +440,7 @@ pub fn aggregate_retrieval_eval_from_diagnostic_counts(
 fn aggregate_metrics(
     resolved_facts: usize,
     total_facts: usize,
-    scope_matched_facts: usize,
-    scope_resolved_facts: usize,
+    scope_breakdown: ScopeMatchBreakdown,
     extraction_precision: ExtractionPrecisionCounts,
     probe_results: &[ProbeResult],
 ) -> RetrievalMetrics {
@@ -441,7 +470,18 @@ fn aggregate_metrics(
             pii_unredacted_count: pii_unredacted_count(probe_results),
         },
         ingestion_coverage: MetricSummary::from_counts(resolved_facts, total_facts),
-        scope_match_rate: MetricSummary::from_counts(scope_matched_facts, scope_resolved_facts),
+        scope_match_rate: MetricSummary::from_counts(
+            scope_breakdown.overall_matches,
+            scope_breakdown.overall_total,
+        ),
+        scope_match_rate_user: MetricSummary::from_counts(
+            scope_breakdown.user_matches,
+            scope_breakdown.user_total,
+        ),
+        scope_match_rate_workspace: MetricSummary::from_counts(
+            scope_breakdown.workspace_matches,
+            scope_breakdown.workspace_total,
+        ),
         extraction_precision: MetricSummary::from_counts(
             extraction_precision.mapped_fact_nodes,
             extraction_precision.total_fact_nodes,

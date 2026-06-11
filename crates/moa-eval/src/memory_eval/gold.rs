@@ -63,18 +63,14 @@ impl GoldResolutionReport {
     /// Returns expected-scope match and resolved-record counts.
     #[must_use]
     pub fn scope_match_counts(&self) -> (usize, usize) {
-        let mut matches = 0_usize;
-        let mut total = 0_usize;
-        for record in &self.records {
-            if record.resolution_status == GoldResolutionStatus::Unresolved {
-                continue;
-            }
-            total += 1;
-            if record.scope.as_deref() == Some(record.expected_scope.as_str()) {
-                matches += 1;
-            }
-        }
-        (matches, total)
+        let breakdown = self.scope_match_breakdown();
+        (breakdown.overall_matches, breakdown.overall_total)
+    }
+
+    /// Returns scope-match counts split by expected ledger scope.
+    #[must_use]
+    pub fn scope_match_breakdown(&self) -> ScopeMatchBreakdown {
+        ScopeMatchBreakdown::from_records(&self.records)
     }
 
     /// Returns unresolved ledger fact identifiers in output order.
@@ -94,6 +90,55 @@ impl GoldResolutionReport {
             .iter()
             .filter(|record| record.resolution_status == GoldResolutionStatus::Duplicate)
             .collect()
+    }
+}
+
+/// Scope-match counts over resolved gold records.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeMatchBreakdown {
+    /// Resolved records whose stored scope matched the expected scope.
+    pub overall_matches: usize,
+    /// Resolved records with any expected scope.
+    pub overall_total: usize,
+    /// Resolved records expected to be user-scoped and stored as user-scoped.
+    pub user_matches: usize,
+    /// Resolved records expected to be user-scoped.
+    pub user_total: usize,
+    /// Resolved records expected to be workspace-scoped and stored as workspace-scoped.
+    pub workspace_matches: usize,
+    /// Resolved records expected to be workspace-scoped.
+    pub workspace_total: usize,
+}
+
+impl ScopeMatchBreakdown {
+    fn from_records(records: &[GoldNodeRecord]) -> Self {
+        let mut breakdown = Self::default();
+        for record in records {
+            if record.resolution_status == GoldResolutionStatus::Unresolved {
+                continue;
+            }
+            let matched = record.scope.as_deref() == Some(record.expected_scope.as_str());
+            breakdown.overall_total += 1;
+            if matched {
+                breakdown.overall_matches += 1;
+            }
+            match record.expected_scope.as_str() {
+                "user" => {
+                    breakdown.user_total += 1;
+                    if matched {
+                        breakdown.user_matches += 1;
+                    }
+                }
+                "workspace" => {
+                    breakdown.workspace_total += 1;
+                    if matched {
+                        breakdown.workspace_matches += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        breakdown
     }
 }
 

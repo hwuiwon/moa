@@ -60,6 +60,61 @@ jobs:
             target/eval-output/
           if-no-files-found: ignore
 
+  memory-retrieval-natural-recorded:
+    name: memory retrieval natural recorded gate
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: ghcr.io/hwuiwon/moa-postgres-age:17.6-age1.7.0
+        ports:
+          - "5432:5432"
+        env:
+          POSTGRES_DB: moa
+          POSTGRES_PASSWORD: ci
+        options: >-
+          --health-cmd "pg_isready -U postgres -d moa"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      MOA_TEST_POSTGRES_URL: postgres://postgres:ci@localhost:5432/moa
+      TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/moa
+      DATABASE_URL: postgres://postgres:ci@localhost:5432/moa
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Probe test database
+        run: cargo run -p xtask --release -- migrate-test-db
+
+      - name: Generate natural memory corpus
+        run: cargo run -p xtask --release -- generate-memory-eval-corpus --profile pr --transcript-style natural --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr-natural
+
+      - name: Run recorded natural memory eval
+        run: cargo run -p xtask --release -- run-memory-retrieval-eval --corpus target/memory-eval/pr-natural --extractor recorded --output target/memory-eval/natural-recorded.json
+
+      - name: Check natural memory floors
+        run: |
+          cargo run -p xtask --release -- check-eval-budgets --suite memory_retrieval \
+            --memory-eval-report target/memory-eval/natural-recorded.json \
+            --min-metric ingestion_coverage=0.85 \
+            --min-metric scope_match_rate=0.90 \
+            --min-metric extraction_precision=0.80
+
+      - name: Upload memory retrieval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-retrieval-natural-recorded-${{ github.run_id }}
+          path: target/memory-eval/natural-recorded.json
+          if-no-files-found: ignore
+
   scripted-user-against-real-anthropic:
     name: scripted-user long-conv
     runs-on: ubuntu-latest

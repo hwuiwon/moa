@@ -11,7 +11,7 @@ use crate::{
 };
 
 /// Version for the LLM extraction prompt and recorded extraction fixtures.
-pub const EXTRACTION_PROMPT_VERSION: &str = "v1";
+pub const EXTRACTION_PROMPT_VERSION: &str = "v2";
 
 const EXTRACTION_SYSTEM_PROMPT: &str = r#"You extract durable, declarative facts from transcripts.
 Skip questions, requests, speculation, small talk, transient scheduling commentary, and provenance-only details like "last sprint" or "per the platform decision".
@@ -21,8 +21,21 @@ For each fact return one JSON object with keys:
 - predicate: concise relation phrase
 - object: concise noun phrase or value
 - summary: one sentence restating the fact
-- scope: "user" for first-person preferences and personal state, "workspace" for team decisions and shared infrastructure
+- scope: "user" or "workspace" using the rubric below
 - confidence: number from 0.0 to 1.0
+Use this scope rubric:
+scope = "user" when the fact is about the speaker personally: preferences ("I prefer", "my setup", "for my work"), personal state, individual habits, or anything phrased in first person about themselves.
+scope = "workspace" when the fact is about shared systems or team agreements: "we decided", "the team", "our service", infrastructure, ownership, processes that apply to everyone.
+When genuinely ambiguous, choose "user".
+Few-shot scope examples:
+Transcript: user: I prefer Linear for bug triage.
+Fact: {"subject":"user","predicate":"prefers","object":"Linear for bug triage","summary":"The user prefers Linear for bug triage.","scope":"user","confidence":0.95}
+Transcript: user: For my work, repo/control-plane is my default repo.
+Fact: {"subject":"user","predicate":"uses as default repository","object":"repo/control-plane","summary":"The user uses repo/control-plane as their default repository.","scope":"user","confidence":0.92}
+Transcript: user: We decided the API gateway runs on port 8443.
+Fact: {"subject":"API gateway","predicate":"runs on port","object":"8443","summary":"The API gateway runs on port 8443.","scope":"workspace","confidence":0.94}
+Transcript: user: Our team owns the billing reconciler service.
+Fact: {"subject":"team","predicate":"owns","object":"billing reconciler service","summary":"The team owns the billing reconciler service.","scope":"workspace","confidence":0.93}
 Return a JSON array and nothing else."#;
 
 /// Fact extractor backed by a Cohere chat model.
@@ -325,6 +338,17 @@ mod tests {
 
         assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::User);
         assert_eq!(facts[0].confidence, Some(1.0));
+    }
+
+    #[test]
+    fn scope_rubric_v2_prompt_contains_few_shot_pairs_and_user_default() {
+        // Pins: v2 extraction prompt makes ambiguous scope privacy-preserving and examples explicit.
+        assert_eq!(EXTRACTION_PROMPT_VERSION, "v2");
+        assert!(EXTRACTION_SYSTEM_PROMPT.contains("When genuinely ambiguous, choose \"user\"."));
+        assert!(EXTRACTION_SYSTEM_PROMPT.contains("I prefer Linear for bug triage"));
+        assert!(EXTRACTION_SYSTEM_PROMPT.contains("For my work, repo/control-plane"));
+        assert!(EXTRACTION_SYSTEM_PROMPT.contains("We decided the API gateway runs on port 8443"));
+        assert!(EXTRACTION_SYSTEM_PROMPT.contains("Our team owns the billing reconciler service"));
     }
 
     #[tokio::test]
