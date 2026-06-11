@@ -8,7 +8,7 @@ use moa_memory_graph::NodeIndexRow;
 use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.
-pub const RANKING_PIPELINE_VERSION: u32 = 2;
+pub const RANKING_PIPELINE_VERSION: u32 = 3;
 
 /// Ranking mode for hydrated hybrid retrieval candidates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

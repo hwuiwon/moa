@@ -21,7 +21,8 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
                 .with_reranker(options.reranker_enabled)
                 .with_ranking_config(options.ranking_config.clone())
                 .with_extractor_mode(options.extractor_mode)
-                .apply_extractions_path(options.extractions_path.clone()),
+                .apply_extractions_path(options.extractions_path.clone())
+                .apply_merges_path(options.merges_path.clone()),
         ))
         .with_context(|| {
             format!(
@@ -54,6 +55,7 @@ struct Options {
     ranking_config: RankingConfig,
     extractor_mode: MemoryEvalExtractorMode,
     extractions_path: Option<PathBuf>,
+    merges_path: Option<PathBuf>,
 }
 
 impl Options {
@@ -64,6 +66,7 @@ impl Options {
         let mut ranking_config = RankingConfig::default();
         let mut extractor_mode = MemoryEvalExtractorMode::Heuristic;
         let mut extractions_path = None;
+        let mut merges_path = None;
         let mut args = args.peekable();
 
         while let Some(arg) = args.next() {
@@ -95,6 +98,10 @@ impl Options {
                 "--extractions" => {
                     let value = args.next().context("--extractions requires a path")?;
                     extractions_path = Some(PathBuf::from(value));
+                }
+                "--merges" => {
+                    let value = args.next().context("--merges requires a path")?;
+                    merges_path = Some(PathBuf::from(value));
                 }
                 "--ranking-subject-match" => {
                     let value = args
@@ -155,12 +162,13 @@ impl Options {
             ranking_config,
             extractor_mode,
             extractions_path,
+            merges_path,
         })
     }
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--extractor heuristic|recorded] [--extractions <path>] [--reranker off|on] [--ranking legacy|feature_v1] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
+    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--reranker off|on] [--ranking legacy|feature_v1] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
 }
 
 fn parse_reranker(value: &str) -> Result<bool> {
@@ -189,12 +197,20 @@ fn parse_extractor_mode(value: &str) -> Result<MemoryEvalExtractorMode> {
 
 trait MemoryRetrievalEvalOptionsExt {
     fn apply_extractions_path(self, path: Option<PathBuf>) -> MemoryRetrievalEvalOptions;
+    fn apply_merges_path(self, path: Option<PathBuf>) -> MemoryRetrievalEvalOptions;
 }
 
 impl MemoryRetrievalEvalOptionsExt for MemoryRetrievalEvalOptions {
     fn apply_extractions_path(self, path: Option<PathBuf>) -> MemoryRetrievalEvalOptions {
         match path {
             Some(path) => self.with_extractions_path(path),
+            None => self,
+        }
+    }
+
+    fn apply_merges_path(self, path: Option<PathBuf>) -> MemoryRetrievalEvalOptions {
+        match path {
+            Some(path) => self.with_merges_path(path),
             None => self,
         }
     }

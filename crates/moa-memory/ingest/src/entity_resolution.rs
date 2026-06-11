@@ -4,14 +4,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::{ScopeContext, ScopedConn};
+use moa_core::{ScopeContext, ScopedConn, traits::EmbeddingProvider};
 use moa_memory_graph::{GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_vector::{VectorQuery, VectorStore};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::Result;
+use crate::{IngestError, Result};
+
+const EMBEDDING_BLOCK_K: usize = 5;
 
 /// Verifies whether an extracted entity mention should merge into an existing candidate.
 #[async_trait]
@@ -42,6 +45,8 @@ pub struct ResolvedEntity {
     pub normalized_name: String,
     /// Whether this resolution created a new graph node.
     pub created: bool,
+    /// Raw mention that should be recorded as an alias on the newly written merge edge.
+    pub alias_mention: Option<String>,
 }
 
 /// Resolves extracted entity mentions to active graph `Entity` nodes.
@@ -49,6 +54,19 @@ pub struct ResolvedEntity {
 pub struct EntityResolver {
     verifier: Arc<dyn EntityMergeVerifier>,
     assume_app_role: bool,
+    embedding_blocker: Option<EmbeddingBlocker>,
+}
+
+#[derive(Clone)]
+struct EmbeddingBlocker {
+    embedder: Arc<dyn EmbeddingProvider>,
+    vector: Arc<dyn VectorStore>,
+    cosine_threshold: f32,
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddingCandidate {
+    row: NodeIndexRow,
 }
 
 impl Default for EntityResolver {
@@ -64,6 +82,7 @@ impl EntityResolver {
         Self {
             verifier,
             assume_app_role: false,
+            embedding_blocker: None,
         }
     }
 
@@ -92,6 +111,28 @@ impl EntityResolver {
         self
     }
 
+    /// Returns a copy of this resolver that uses embedding KNN to block candidates after exact misses.
+    #[must_use]
+    pub fn with_embedding_blocking(
+        mut self,
+        embedder: Arc<dyn EmbeddingProvider>,
+        vector: Arc<dyn VectorStore>,
+        cosine_threshold: f64,
+    ) -> Self {
+        self.embedding_blocker = Some(EmbeddingBlocker {
+            embedder,
+            vector,
+            cosine_threshold: cosine_threshold as f32,
+        });
+        self
+    }
+
+    /// Returns whether this resolver can create and query entity embeddings.
+    #[must_use]
+    pub fn embedding_blocking_enabled(&self) -> bool {
+        self.embedding_blocker.is_some()
+    }
+
     /// Resolves one entity mention, creating an `Entity` node when no active match exists.
     pub async fn resolve(
         &self,
@@ -109,11 +150,53 @@ impl EntityResolver {
                 name: candidate.name,
                 normalized_name,
                 created: false,
+                alias_mention: None,
             });
+        }
+
+        let mut mention_embedding = None;
+        if let Some(blocker) = &self.embedding_blocker {
+            let embedding = self
+                .embed_normalized_name(blocker, &normalized_name)
+                .await?;
+            mention_embedding = Some(embedding.clone());
+            let candidates = self
+                .lookup_embedding_candidates(pool, request.scope, request.pii_class, embedding)
+                .await?;
+            if let Some(candidate) = self
+                .match_embedding_candidate(request.name, &candidates)
+                .await?
+            {
+                let alias_mention = alias_mention(request.name, &candidate.name);
+                return Ok(ResolvedEntity {
+                    uid: candidate.uid,
+                    normalized_name: normalize_entity_name(&candidate.name),
+                    name: candidate.name,
+                    created: false,
+                    alias_mention,
+                });
+            }
         }
 
         let display_name = display_entity_name(request.name, &normalized_name);
         let uid = deterministic_entity_uid(request.scope, &normalized_name);
+        let (embedding, embedding_model, embedding_model_version) =
+            if let Some(blocker) = &self.embedding_blocker {
+                let embedding = match mention_embedding {
+                    Some(embedding) => embedding,
+                    None => {
+                        self.embed_normalized_name(blocker, &normalized_name)
+                            .await?
+                    }
+                };
+                (
+                    Some(embedding),
+                    Some(blocker.embedder.model_name().to_string()),
+                    Some(blocker.embedder.model_version()),
+                )
+            } else {
+                (None, None, None)
+            };
         graph
             .create_node(NodeWriteIntent {
                 uid,
@@ -134,9 +217,9 @@ impl EntityResolver {
                 pii_class: request.pii_class,
                 confidence: Some(request.confidence),
                 valid_from: request.valid_from,
-                embedding: None,
-                embedding_model: None,
-                embedding_model_version: None,
+                embedding,
+                embedding_model,
+                embedding_model_version,
                 actor_id: request.actor_id.to_string(),
                 actor_kind: request.actor_kind.to_string(),
             })
@@ -147,6 +230,7 @@ impl EntityResolver {
             name: display_name,
             normalized_name,
             created: true,
+            alias_mention: None,
         })
     }
 
@@ -193,6 +277,92 @@ impl EntityResolver {
             .collect())
     }
 
+    async fn lookup_embedding_candidates(
+        &self,
+        pool: &PgPool,
+        scope: &ScopeContext,
+        pii_class: PiiClass,
+        embedding: Vec<f32>,
+    ) -> Result<Vec<EmbeddingCandidate>> {
+        let Some(blocker) = &self.embedding_blocker else {
+            return Ok(Vec::new());
+        };
+        let mut matches = blocker
+            .vector
+            .knn(&VectorQuery {
+                workspace_id: scope
+                    .workspace_id()
+                    .map(|workspace_id| workspace_id.to_string()),
+                embedding,
+                k: EMBEDDING_BLOCK_K,
+                label_filter: Some(vec![NodeLabel::Entity.as_str().to_string()]),
+                max_pii_class: pii_class.as_str().to_string(),
+                include_global: false,
+                as_of: None,
+            })
+            .await?
+            .into_iter()
+            .filter(|candidate| candidate.score >= blocker.cosine_threshold)
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.uid.cmp(&right.uid))
+        });
+        if matches.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let workspace_id = scope
+            .workspace_id()
+            .map(|workspace_id| workspace_id.to_string());
+        let user_id = scope.user_id().map(|user_id| user_id.to_string());
+        let uids = matches
+            .iter()
+            .map(|candidate| candidate.uid)
+            .collect::<Vec<_>>();
+        let mut conn = ScopedConn::begin(pool, scope).await?;
+        if self.assume_app_role {
+            sqlx::query("SET LOCAL ROLE moa_app")
+                .execute(conn.as_mut())
+                .await?;
+        }
+        let rows = sqlx::query_as::<_, NodeIndexRow>(
+            r#"
+            SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
+                   valid_to, valid_from, properties_summary, last_accessed_at
+            FROM moa.node_index
+            WHERE valid_to IS NULL
+              AND label = $1
+              AND uid = ANY($2)
+              AND scope = $3
+              AND (($4::text IS NULL AND workspace_id IS NULL) OR workspace_id = $4)
+              AND (($5::text IS NULL AND user_id IS NULL) OR user_id = $5)
+            "#,
+        )
+        .bind(NodeLabel::Entity.as_str())
+        .bind(&uids)
+        .bind(scope.tier_str())
+        .bind(workspace_id.as_deref())
+        .bind(user_id.as_deref())
+        .fetch_all(conn.as_mut())
+        .await?;
+        conn.commit().await?;
+
+        let mut rows_by_uid = rows
+            .into_iter()
+            .map(|row| (row.uid, row))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut ordered = Vec::new();
+        for candidate in matches {
+            if let Some(row) = rows_by_uid.remove(&candidate.uid) {
+                ordered.push(EmbeddingCandidate { row });
+            }
+        }
+        Ok(ordered)
+    }
+
     async fn match_candidate(
         &self,
         mention: &str,
@@ -208,6 +378,40 @@ impl EntityResolver {
             }
         }
         Ok(None)
+    }
+
+    async fn match_embedding_candidate(
+        &self,
+        mention: &str,
+        candidates: &[EmbeddingCandidate],
+    ) -> Result<Option<NodeIndexRow>> {
+        for candidate in candidates {
+            if self.verifier.should_merge(mention, &candidate.row).await? {
+                return Ok(Some(candidate.row.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn embed_normalized_name(
+        &self,
+        blocker: &EmbeddingBlocker,
+        normalized_name: &str,
+    ) -> Result<Vec<f32>> {
+        let embeddings = blocker
+            .embedder
+            .embed(&[normalized_name.to_string()])
+            .await
+            .map_err(|error| {
+                IngestError::EntityResolution(format!(
+                    "failed to embed entity name `{normalized_name}`: {error}"
+                ))
+            })?;
+        embeddings.into_iter().next().ok_or_else(|| {
+            IngestError::EntityResolution(format!(
+                "embedder returned no vector for entity name `{normalized_name}`"
+            ))
+        })
     }
 }
 
@@ -239,7 +443,14 @@ fn display_entity_name(name: &str, normalized_name: &str) -> String {
     }
 }
 
-fn normalize_entity_name(name: &str) -> String {
+fn alias_mention(mention: &str, candidate_name: &str) -> Option<String> {
+    let trimmed = mention.trim();
+    (!trimmed.is_empty() && trimmed != candidate_name.trim()).then(|| trimmed.to_string())
+}
+
+/// Returns the deterministic blocking key for an extracted entity mention.
+#[must_use]
+pub fn normalize_entity_name(name: &str) -> String {
     let mut tokens = Vec::new();
     let mut token = String::new();
     for character in name.chars() {

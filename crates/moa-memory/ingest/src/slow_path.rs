@@ -17,7 +17,7 @@ use moa_memory_graph::{
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiCategory, PiiClassifier, PiiResult, PiiSpan, redact_text,
 };
-use moa_memory_vector::{CohereV4Embedder, PgvectorStore};
+use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
 use restate_sdk::prelude::*;
 use secrecy::SecretString;
 use serde_json::json;
@@ -148,11 +148,13 @@ impl IngestionVO for IngestionVOImpl {
         let upsert_turn = turn.clone();
         let upsert_pool = pool.clone();
         let upsert_entity_resolver = runtime.entity_resolver();
+        let upsert_entity_blocking_embedder = runtime.entity_blocking_embedder();
         let report = ctx
             .run(|| async move {
                 apply_decisions(
                     &upsert_pool,
                     upsert_entity_resolver.as_ref(),
+                    upsert_entity_blocking_embedder,
                     &upsert_turn,
                     &decisions,
                 )
@@ -177,12 +179,15 @@ impl IngestionVO for IngestionVOImpl {
 pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, HandlerError> {
     let runtime = current_runtime().map_err(HandlerError::from)?;
     ingest_turn_direct_with_pool_and_pii(
-        runtime.pool().clone(),
-        runtime.pii_service_url().map(str::to_string),
-        runtime.cohere_api_key_env().to_string(),
-        runtime.extractor(),
-        runtime.entity_resolver(),
-        runtime.contradiction_detector(),
+        DirectIngestDeps {
+            pool: runtime.pool().clone(),
+            pii_service_url: runtime.pii_service_url().map(str::to_string),
+            cohere_api_key_env: runtime.cohere_api_key_env().to_string(),
+            extractor: runtime.extractor(),
+            entity_resolver: runtime.entity_resolver(),
+            entity_blocking_embedder: runtime.entity_blocking_embedder(),
+            contradiction_detector: runtime.contradiction_detector(),
+        },
         turn,
     )
     .await
@@ -201,26 +206,43 @@ pub async fn ingest_turn_direct_with_pool(
     let contradiction_detector = Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(&config));
     let memory = config.memory;
     ingest_turn_direct_with_pool_and_pii(
-        pool,
-        memory.pii_service_url,
-        memory.vector.embedder.cohere.api_key_env,
-        Arc::new(HeuristicFactExtractor),
-        Arc::new(EntityResolver::deterministic_for_app_role()),
-        contradiction_detector,
+        DirectIngestDeps {
+            pool,
+            pii_service_url: memory.pii_service_url,
+            cohere_api_key_env: memory.vector.embedder.cohere.api_key_env,
+            extractor: Arc::new(HeuristicFactExtractor),
+            entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
+            entity_blocking_embedder: None,
+            contradiction_detector,
+        },
         turn,
     )
     .await
 }
 
-async fn ingest_turn_direct_with_pool_and_pii(
+struct DirectIngestDeps {
     pool: PgPool,
     pii_service_url: Option<String>,
     cohere_api_key_env: String,
     extractor: Arc<dyn FactExtractor>,
     entity_resolver: Arc<EntityResolver>,
+    entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
     contradiction_detector: Arc<dyn ContradictionDetector>,
+}
+
+async fn ingest_turn_direct_with_pool_and_pii(
+    deps: DirectIngestDeps,
     turn: SessionTurn,
 ) -> Result<IngestApplyReport, HandlerError> {
+    let DirectIngestDeps {
+        pool,
+        pii_service_url,
+        cohere_api_key_env,
+        extractor,
+        entity_resolver,
+        entity_blocking_embedder,
+        contradiction_detector,
+    } = deps;
     let degraded = workspace_degraded(&pool, &turn).await?;
     if degraded && !should_ingest_degraded(&turn) {
         return Ok(IngestApplyReport {
@@ -244,7 +266,14 @@ async fn ingest_turn_direct_with_pool_and_pii(
         &embedded,
     )
     .await?;
-    apply_decisions(&pool, entity_resolver.as_ref(), &turn, &decisions).await
+    apply_decisions(
+        &pool,
+        entity_resolver.as_ref(),
+        entity_blocking_embedder,
+        &turn,
+        &decisions,
+    )
+    .await
 }
 
 /// Runs the slow-path ingestion steps with explicit deterministic dependencies.
@@ -275,7 +304,15 @@ pub async fn ingest_turn_direct_with_ctx(
     let decisions =
         detect_contradictions_with(ctx.contradict.as_ref(), ctx.pool.clone(), &turn, &embedded)
             .await?;
-    apply_decisions(&ctx.pool, ctx.entity_resolver.as_ref(), &turn, &decisions).await
+    let entity_blocking_embedder = ctx.entity_blocking_enabled.then(|| ctx.embedder.clone());
+    apply_decisions(
+        &ctx.pool,
+        ctx.entity_resolver.as_ref(),
+        entity_blocking_embedder,
+        &turn,
+        &decisions,
+    )
+    .await
 }
 
 /// Builds the object key used to serialize ingestion per workspace/session.
@@ -585,6 +622,7 @@ fn fact_scope(turn: &SessionTurn, fact: &EmbeddedFact) -> ScopeContext {
 async fn apply_decisions(
     pool: &PgPool,
     entity_resolver: &EntityResolver,
+    entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
     turn: &SessionTurn,
     decisions: &[IngestDecision],
 ) -> Result<IngestApplyReport, HandlerError> {
@@ -592,7 +630,16 @@ async fn apply_decisions(
 
     for decision in decisions {
         let scope = decision_scope(turn, decision);
-        match apply_one_decision(pool, &scope, entity_resolver, turn, decision).await {
+        match apply_one_decision(
+            pool,
+            &scope,
+            entity_resolver,
+            entity_blocking_embedder.clone(),
+            turn,
+            decision,
+        )
+        .await
+        {
             Ok(ApplyOutcome::Inserted) => report.inserted += 1,
             Ok(ApplyOutcome::Superseded) => report.superseded += 1,
             Ok(ApplyOutcome::Skipped) => report.skipped += 1,
@@ -617,14 +664,28 @@ async fn apply_one_decision(
     pool: &PgPool,
     scope: &ScopeContext,
     entity_resolver: &EntityResolver,
+    entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
     turn: &SessionTurn,
     decision: &IngestDecision,
 ) -> Result<ApplyOutcome, HandlerError> {
     let Some(fact) = decision_fact(decision) else {
         return Ok(ApplyOutcome::Skipped);
     };
-    let graph = graph_store(pool.clone(), scope.clone(), fact);
-    apply_one_decision_with_graph(pool, scope, &graph, entity_resolver, turn, decision).await
+    let entity_vector = entity_blocking_embedder.as_ref().map(|_| {
+        Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()))
+            as Arc<dyn VectorStore>
+    });
+    let scoped_resolver =
+        entity_blocking_embedder
+            .zip(entity_vector.clone())
+            .map(|(embedder, vector)| {
+                entity_resolver
+                    .clone()
+                    .with_embedding_blocking(embedder, vector, 0.80)
+            });
+    let resolver = scoped_resolver.as_ref().unwrap_or(entity_resolver);
+    let graph = graph_store(pool.clone(), scope.clone(), fact, entity_vector);
+    apply_one_decision_with_graph(pool, scope, &graph, resolver, turn, decision).await
 }
 
 async fn apply_one_decision_with_graph(
@@ -651,7 +712,7 @@ async fn apply_one_decision_with_graph(
                 .create_node(node_intent(turn, scope, fact, &hash, fact_uid))
                 .await
                 .map_err(HandlerError::from)?;
-            attach_fact_entity_edges(graph, turn, scope, uid, &entities).await?;
+            attach_fact_entity_edges(graph, turn, scope, uid, fact, &entities).await?;
             insert_dedup(pool, scope, turn, &hash, uid).await?;
             Ok(ApplyOutcome::Inserted)
         }
@@ -660,7 +721,7 @@ async fn apply_one_decision_with_graph(
                 .supersede_node(*old_uid, node_intent(turn, scope, fact, &hash, fact_uid))
                 .await
                 .map_err(HandlerError::from)?;
-            attach_fact_entity_edges(graph, turn, scope, uid, &entities).await?;
+            attach_fact_entity_edges(graph, turn, scope, uid, fact, &entities).await?;
             insert_dedup(pool, scope, turn, &hash, uid).await?;
             Ok(ApplyOutcome::Superseded)
         }
@@ -668,10 +729,17 @@ async fn apply_one_decision_with_graph(
     }
 }
 
-fn graph_store(pool: PgPool, scope: ScopeContext, fact: &EmbeddedFact) -> AgeGraphStore {
+fn graph_store(
+    pool: PgPool,
+    scope: ScopeContext,
+    fact: &EmbeddedFact,
+    entity_vector: Option<Arc<dyn VectorStore>>,
+) -> AgeGraphStore {
     let store = AgeGraphStore::scoped_for_app_role(pool.clone(), scope.clone());
     if fact.embedding.is_some() {
         store.with_vector_store(Arc::new(PgvectorStore::new_for_app_role(pool, scope)))
+    } else if let Some(vector) = entity_vector {
+        store.with_vector_store(vector)
     } else {
         store
     }
@@ -797,6 +865,7 @@ async fn attach_fact_entity_edges(
     turn: &SessionTurn,
     scope: &ScopeContext,
     fact_uid: uuid::Uuid,
+    fact: &EmbeddedFact,
     entities: &ResolvedFactEntities,
 ) -> Result<(), HandlerError> {
     graph
@@ -806,6 +875,7 @@ async fn attach_fact_entity_edges(
             entities.subject.uid,
             fact_uid,
             "subject",
+            entities.subject.alias_mention.as_deref(),
         ))
         .await
         .map_err(HandlerError::from)?;
@@ -816,6 +886,8 @@ async fn attach_fact_entity_edges(
             fact_uid,
             entities.object.uid,
             "object",
+            &fact.classified.fact.predicate,
+            entities.object.alias_mention.as_deref(),
         ))
         .await
         .map_err(HandlerError::from)?;
@@ -828,13 +900,14 @@ fn entity_fact_edge_intent(
     entity_uid: uuid::Uuid,
     fact_uid: uuid::Uuid,
     role: &str,
+    alias_mention: Option<&str>,
 ) -> EdgeWriteIntent {
     EdgeWriteIntent {
         uid: uuid::Uuid::now_v7(),
         label: EdgeLabel::RelatesTo,
         start_uid: entity_uid,
         end_uid: fact_uid,
-        properties: entity_edge_properties(turn, role),
+        properties: entity_edge_properties(turn, role, alias_mention),
         workspace_id: scope_workspace_id(scope),
         user_id: scope_user_id(scope),
         scope: scope.tier_str().to_string(),
@@ -849,13 +922,15 @@ fn fact_entity_edge_intent(
     fact_uid: uuid::Uuid,
     entity_uid: uuid::Uuid,
     role: &str,
+    predicate: &str,
+    alias_mention: Option<&str>,
 ) -> EdgeWriteIntent {
     EdgeWriteIntent {
         uid: uuid::Uuid::now_v7(),
-        label: EdgeLabel::RelatesTo,
+        label: fact_object_edge_label(predicate),
         start_uid: fact_uid,
         end_uid: entity_uid,
-        properties: entity_edge_properties(turn, role),
+        properties: entity_edge_properties(turn, role, alias_mention),
         workspace_id: scope_workspace_id(scope),
         user_id: scope_user_id(scope),
         scope: scope.tier_str().to_string(),
@@ -864,13 +939,59 @@ fn fact_entity_edge_intent(
     }
 }
 
-fn entity_edge_properties(turn: &SessionTurn, role: &str) -> serde_json::Value {
-    json!({
-        "role": role,
-        "source": "slow_path_entity_resolution",
-        "source_session_id": turn.session_id.to_string(),
-        "source_turn_seq": turn.turn_seq,
-    })
+fn fact_object_edge_label(predicate: &str) -> EdgeLabel {
+    let normalized = normalize_predicate(predicate);
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    if tokens
+        .iter()
+        .any(|token| matches!(*token, "depends" | "uses" | "requires" | "calls" | "built"))
+        || normalized == "require runbook"
+    {
+        return EdgeLabel::DependsOn;
+    }
+    if (tokens.contains(&"owned") && tokens.contains(&"by"))
+        || (tokens.contains(&"belongs") && tokens.contains(&"to"))
+        || (tokens.contains(&"maintained") && tokens.contains(&"by"))
+    {
+        return EdgeLabel::OwnedBy;
+    }
+    EdgeLabel::RelatesTo
+}
+
+fn normalize_predicate(predicate: &str) -> String {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    for character in predicate.chars() {
+        if character.is_alphanumeric() {
+            token.extend(character.to_lowercase());
+        } else if !token.is_empty() {
+            tokens.push(std::mem::take(&mut token));
+        }
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens.join(" ")
+}
+
+fn entity_edge_properties(
+    turn: &SessionTurn,
+    role: &str,
+    alias_mention: Option<&str>,
+) -> serde_json::Value {
+    let mut properties = serde_json::Map::new();
+    properties.insert("role".to_string(), json!(role));
+    properties.insert("source".to_string(), json!("slow_path_entity_resolution"));
+    properties.insert(
+        "source_session_id".to_string(),
+        json!(turn.session_id.to_string()),
+    );
+    properties.insert("source_turn_seq".to_string(), json!(turn.turn_seq));
+    // GraphStore has no node-property update API yet; prompt 09 can consolidate edge aliases onto nodes.
+    if let Some(alias) = alias_mention.filter(|alias| !alias.trim().is_empty()) {
+        properties.insert("alias_mention".to_string(), json!(alias));
+    }
+    serde_json::Value::Object(properties)
 }
 
 async fn workspace_degraded(pool: &PgPool, turn: &SessionTurn) -> Result<bool, HandlerError> {
@@ -1027,10 +1148,15 @@ enum ApplyOutcome {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::ContextMessage;
+    use chrono::Utc;
+    use moa_core::{ContextMessage, SessionId, UserId, WorkspaceId};
+    use moa_memory_graph::EdgeLabel;
     use moa_memory_pii::{PiiCategory, PiiClass, PiiResult, PiiSpan};
 
-    use super::{heuristic_classify, redact_fact, turn_transcript};
+    use super::{
+        entity_fact_edge_intent, fact_entity_edge_intent, fact_object_edge_label,
+        heuristic_classify, redact_fact, turn_transcript,
+    };
     use crate::{ExtractedFact, ExtractedFactScopeHint, fact_hash};
 
     #[test]
@@ -1111,6 +1237,75 @@ mod tests {
         assert_eq!(redacted.object, "[EMAIL_REDACTED]");
     }
 
+    #[test]
+    fn predicate_mapping_covers_every_generator_predicate() {
+        // Pins: every predicate emitted by the memory eval generator has an intentional edge label.
+        let cases = [
+            ("cache_backend_conflict", EdgeLabel::RelatesTo),
+            ("contact_email", EdgeLabel::RelatesTo),
+            ("depends_on", EdgeLabel::DependsOn),
+            ("deploy_target", EdgeLabel::RelatesTo),
+            ("on_call_primary", EdgeLabel::RelatesTo),
+            ("owned_by", EdgeLabel::OwnedBy),
+            ("private_repository", EdgeLabel::RelatesTo),
+            ("require_runbook", EdgeLabel::DependsOn),
+            ("response_style", EdgeLabel::RelatesTo),
+        ];
+
+        for (predicate, expected) in cases {
+            assert_eq!(fact_object_edge_label(predicate), expected, "{predicate}");
+        }
+        assert_eq!(
+            fact_object_edge_label("uses contact email"),
+            EdgeLabel::DependsOn
+        );
+        assert_eq!(fact_object_edge_label("is owned by"), EdgeLabel::OwnedBy);
+    }
+
+    #[test]
+    fn subject_edge_stays_relates_to_object_edge_gets_typed_label() {
+        // Pins: predicate semantics live only on the Fact-to-object edge.
+        let turn = test_turn();
+        let scope = moa_core::ScopeContext::workspace(turn.workspace_id.clone());
+        let entity_uid = uuid::Uuid::now_v7();
+        let fact_uid = uuid::Uuid::now_v7();
+
+        let subject = entity_fact_edge_intent(
+            &turn,
+            &scope,
+            entity_uid,
+            fact_uid,
+            "subject",
+            Some("the checkout service"),
+        );
+        let object = fact_entity_edge_intent(
+            &turn,
+            &scope,
+            fact_uid,
+            entity_uid,
+            "object",
+            "depends_on",
+            Some("Lib Foo"),
+        );
+
+        assert_eq!(subject.label, EdgeLabel::RelatesTo);
+        assert_eq!(object.label, EdgeLabel::DependsOn);
+        assert_eq!(
+            subject
+                .properties
+                .get("alias_mention")
+                .and_then(|value| value.as_str()),
+            Some("the checkout service")
+        );
+        assert_eq!(
+            object
+                .properties
+                .get("alias_mention")
+                .and_then(|value| value.as_str()),
+            Some("Lib Foo")
+        );
+    }
+
     fn pii_fact(summary: &str) -> ExtractedFact {
         let mut fact = ExtractedFact {
             uid: uuid::Uuid::nil(),
@@ -1139,6 +1334,18 @@ mod tests {
             }],
             model_version: "test".to_string(),
             abstained: false,
+        }
+    }
+
+    fn test_turn() -> crate::SessionTurn {
+        crate::SessionTurn {
+            workspace_id: WorkspaceId::new("workspace-a"),
+            user_id: UserId::new("user-a"),
+            session_id: SessionId(uuid::Uuid::now_v7()),
+            turn_seq: 1,
+            transcript: "user: checkout-service depends on libfoo".to_string(),
+            dominant_pii_class: "none".to_string(),
+            finalized_at: Utc::now(),
         }
     }
 }

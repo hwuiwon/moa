@@ -132,6 +132,23 @@ These caveats relate to the gap between "cloud build succeeds" and "cloud deploy
   vendor or a chat consumer outside ingest. The embedder and reranker keep their
   existing clients because their API surfaces differ.
 
+### Entity resolution v2 is scope-local and needs live-geometry monitoring
+
+- `moa-memory-ingest` resolves entities by exact normalized name first, then by
+  same-scope vector blocking plus an `EntityMergeVerifier`. The verifier uses
+  the shared Cohere chat client for live recording and recorded fixtures for
+  hermetic replay.
+- Existing Entity nodes without embeddings are tolerated but cannot appear in
+  the embedding block. Prompt 09 owns any historical backfill of entity
+  embeddings and node-level alias consolidation.
+- Merge aliases are currently written to the newly created entity edge because
+  `GraphStore` has no node-property update operation. This preserves the signal
+  without widening the graph mutation API mid-ingest.
+- The PR hermetic lane uses deterministic cached embeddings; real Cohere
+  geometry can produce a different candidate set at the 0.80 threshold. Prompt
+  08's live lane should report `entity_fragmentation` so the threshold can be
+  calibrated against live vectors.
+
 ### Cloud handler startup requires explicit database, Restate, and provider configuration
 
 - `Dockerfile` builds `moa-orchestrator-bin` and installs it as `/usr/local/bin/moa-orchestrator`.

@@ -10,6 +10,7 @@ pub mod extractor;
 pub mod fast_path;
 pub mod llm_client;
 pub mod llm_extractor;
+pub mod llm_merge;
 pub mod recorded;
 pub mod slow_path;
 
@@ -22,7 +23,7 @@ pub use ctx::{
 };
 pub use entity_resolution::{
     DeterministicEntityMergeVerifier, EntityMergeVerifier, EntityResolutionRequest, EntityResolver,
-    ResolvedEntity,
+    ResolvedEntity, normalize_entity_name,
 };
 pub use error::{IngestError, Result};
 pub use extract::{
@@ -38,6 +39,10 @@ pub use fast_path::{
 };
 pub use llm_client::{LlmChatClient, LlmChatError};
 pub use llm_extractor::{EXTRACTION_PROMPT_VERSION, LlmFactExtractor};
+pub use llm_merge::{
+    EntityMergeFixtureRecord, LlmEntityMergeVerifier, MERGE_PROMPT_VERSION,
+    RecordedEntityMergeStore, RecordedEntityMergeVerifier, merge_fixture_key,
+};
 pub use recorded::{
     ExtractionFixtureRecord, RecordedExtractionStore, RecordedFact, RecordedFactExtractor,
     chunk_hash,

@@ -5,12 +5,15 @@ use std::sync::{Arc, OnceLock};
 use moa_core::{MoaConfig, traits::EmbeddingProvider};
 use moa_memory_graph::GraphStore;
 use moa_memory_pii::PiiClassifier;
+use moa_memory_vector::CohereV4Embedder;
 use moa_memory_vector::VectorStore;
+use secrecy::SecretString;
 use sqlx::PgPool;
 
 use crate::{
     ContradictionDetector, EntityMergeVerifier, EntityResolver, FactExtractor,
-    HeuristicFactExtractor, IngestError, LlmFactExtractor, Result, RrfPlusJudgeDetector,
+    HeuristicFactExtractor, IngestError, LlmEntityMergeVerifier, LlmFactExtractor, Result,
+    RrfPlusJudgeDetector,
 };
 
 static INGEST_RUNTIME: OnceLock<IngestRuntime> = OnceLock::new();
@@ -32,6 +35,8 @@ pub struct IngestCtx {
     pub extractor: Arc<dyn FactExtractor>,
     /// Entity resolver used to connect extracted facts to shared entity nodes.
     pub entity_resolver: Arc<EntityResolver>,
+    /// Whether slow-path ingestion should enable embedding-blocked entity resolution.
+    pub entity_blocking_enabled: bool,
     /// Postgres pool used for sidecar and dedup queries.
     pub pool: PgPool,
 }
@@ -77,6 +82,7 @@ impl IngestCtx {
             contradict,
             extractor,
             entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
+            entity_blocking_enabled: false,
             pool,
         }
     }
@@ -100,6 +106,13 @@ impl IngestCtx {
     pub fn with_entity_merge_verifier(self, verifier: Arc<dyn EntityMergeVerifier>) -> Self {
         self.with_entity_resolver(Arc::new(EntityResolver::for_app_role(verifier)))
     }
+
+    /// Returns a copy of this context with embedding-blocked entity resolution enabled or disabled.
+    #[must_use]
+    pub fn with_entity_embedding_blocking(mut self, enabled: bool) -> Self {
+        self.entity_blocking_enabled = enabled;
+        self
+    }
 }
 
 /// Process-local runtime inputs needed by Restate ingestion handlers.
@@ -111,6 +124,7 @@ pub struct IngestRuntime {
     extractor: Arc<dyn FactExtractor>,
     extractor_name: &'static str,
     entity_resolver: Arc<EntityResolver>,
+    entity_blocking_enabled: bool,
     contradiction_detector: Arc<dyn ContradictionDetector>,
 }
 
@@ -129,6 +143,7 @@ impl IngestRuntime {
             extractor: Arc::new(HeuristicFactExtractor),
             extractor_name: "heuristic",
             entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
+            entity_blocking_enabled: false,
             contradiction_detector,
         }
     }
@@ -137,13 +152,16 @@ impl IngestRuntime {
     #[must_use]
     pub fn from_config(pool: PgPool, config: &MoaConfig) -> Self {
         let (extractor, extractor_name) = extractor_from_config(config);
+        let entity_resolver = entity_resolver_from_config(config);
+        let entity_blocking_enabled = entity_blocking_enabled_from_config(config);
         Self {
             pool,
             pii_service_url: config.memory.pii_service_url.clone(),
             cohere_api_key_env: config.memory.vector.embedder.cohere.api_key_env.clone(),
             extractor,
             extractor_name,
-            entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
+            entity_resolver,
+            entity_blocking_enabled,
             contradiction_detector: Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(
                 config,
             )),
@@ -162,6 +180,13 @@ impl IngestRuntime {
     #[must_use]
     pub fn with_entity_resolver(mut self, entity_resolver: Arc<EntityResolver>) -> Self {
         self.entity_resolver = entity_resolver;
+        self
+    }
+
+    /// Returns a copy of this runtime with embedding-blocked entity resolution enabled or disabled.
+    #[must_use]
+    pub fn with_entity_embedding_blocking(mut self, enabled: bool) -> Self {
+        self.entity_blocking_enabled = enabled;
         self
     }
 
@@ -214,11 +239,60 @@ impl IngestRuntime {
         self.entity_resolver.clone()
     }
 
+    /// Returns an embedder for embedding-blocked entity resolution when configured and credentialed.
+    #[must_use]
+    pub fn entity_blocking_embedder(&self) -> Option<Arc<dyn EmbeddingProvider>> {
+        if !self.entity_blocking_enabled {
+            return None;
+        }
+        let api_key = std::env::var(&self.cohere_api_key_env).ok()?;
+        if api_key.trim().is_empty() {
+            return None;
+        }
+        Some(Arc::new(CohereV4Embedder::new(SecretString::from(api_key))))
+    }
+
     /// Returns the configured contradiction detector.
     #[must_use]
     pub fn contradiction_detector(&self) -> Arc<dyn ContradictionDetector> {
         self.contradiction_detector.clone()
     }
+}
+
+fn entity_resolver_from_config(config: &MoaConfig) -> Arc<EntityResolver> {
+    let extraction = &config.memory.extraction;
+    if extraction.enabled
+        && std::env::var(&extraction.api_key_env).is_ok()
+        && let Ok(verifier) = LlmEntityMergeVerifier::from_env(
+            &extraction.api_key_env,
+            &extraction.model,
+            extraction.timeout_ms,
+        )
+    {
+        tracing::info!(
+            model = %extraction.model,
+            "memory entity merge verifier installed: llm"
+        );
+        return Arc::new(EntityResolver::for_app_role(Arc::new(verifier)));
+    }
+    tracing::info!("memory entity merge verifier installed: deterministic");
+    Arc::new(EntityResolver::deterministic_for_app_role())
+}
+
+fn entity_blocking_enabled_from_config(config: &MoaConfig) -> bool {
+    let api_key_env = &config.memory.vector.embedder.cohere.api_key_env;
+    let enabled = std::env::var(api_key_env)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if enabled {
+        tracing::info!("memory entity embedding block installed: cohere");
+    } else {
+        tracing::info!(
+            api_key_env = %api_key_env,
+            "memory entity embedding block disabled; credential env var is absent"
+        );
+    }
+    enabled
 }
 
 fn extractor_from_config(config: &MoaConfig) -> (Arc<dyn FactExtractor>, &'static str) {

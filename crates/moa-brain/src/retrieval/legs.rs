@@ -19,7 +19,7 @@ use crate::retrieval::ranking::normalize_tokens;
 /// Reciprocal-rank fusion denominator offset.
 pub const RRF_K: f64 = 60.0;
 /// Default graph-leg fusion weight.
-pub const GRAPH_WEIGHT: f64 = 1.2;
+pub const GRAPH_WEIGHT: f64 = 0.4;
 /// Default vector-leg fusion weight.
 pub const VECTOR_WEIGHT: f64 = 1.0;
 /// Default lexical-leg fusion weight.
@@ -85,8 +85,8 @@ fn label_allowed_by_filter(label_filter: Option<&[NodeLabel]>, label: &NodeLabel
 /// Scores graph expansion paths by seed strength, edge weight, and hop decay.
 ///
 /// Edge weights are explicit for all current `EdgeLabel` variants:
-/// `RELATES_TO`, `DEPENDS_ON`, `DERIVED_FROM`, `MENTIONED_IN`, `CAUSED`,
-/// `LEARNED_FROM`, and `APPLIES_TO` carry weight 1.0; `CONTRADICTS` carries
+/// `RELATES_TO`, `DEPENDS_ON`, `OWNED_BY`, `DERIVED_FROM`, `MENTIONED_IN`,
+/// `CAUSED`, `LEARNED_FROM`, and `APPLIES_TO` carry weight 1.0; `CONTRADICTS` carries
 /// 0.0; `SUPERSEDES` carries 0.6 only for as-of retrieval. `supersede_node`
 /// creates `new -[:SUPERSEDES]-> old`, so historical as-of expansion can cross
 /// from an active replacement seed to its superseded predecessor.
@@ -151,6 +151,7 @@ fn edge_weight(edge: EdgeLabel, as_of: Option<DateTime<Utc>>) -> f64 {
     match edge {
         EdgeLabel::RelatesTo
         | EdgeLabel::DependsOn
+        | EdgeLabel::OwnedBy
         | EdgeLabel::DerivedFrom
         | EdgeLabel::MentionedIn
         | EdgeLabel::Caused

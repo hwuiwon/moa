@@ -245,6 +245,9 @@ pub struct RetrievalMetrics {
     /// Fraction of stored Fact nodes that mapped back to a ledger fact.
     #[serde(default)]
     pub extraction_precision: MetricSummary,
+    /// Active Entity node count over distinct normalized ledger entity mentions in their storage scopes.
+    #[serde(default)]
+    pub entity_fragmentation: MetricSummary,
     /// Mean pre-rerank recall@4 over probes with expected facts.
     #[serde(default)]
     pub pre_rerank_recall_at_4: MetricSummary,
@@ -277,6 +280,15 @@ pub struct ExtractionPrecisionCounts {
     pub mapped_fact_nodes: usize,
     /// Total stored Fact nodes observed in the eval workspace.
     pub total_fact_nodes: usize,
+}
+
+/// Counts used to compute entity fragmentation in eval workspaces.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EntityFragmentationCounts {
+    /// Active Entity nodes stored by ingestion.
+    pub active_entity_nodes: usize,
+    /// Distinct normalized subject/object mentions in the corpus ledger, keyed by storage scope.
+    pub distinct_ledger_mentions: usize,
 }
 
 impl Deref for RetrievalMetrics {
@@ -347,6 +359,24 @@ pub fn aggregate_retrieval_eval_with_extraction_precision(
     bootstrap_config: BootstrapConfig,
     extraction_precision: ExtractionPrecisionCounts,
 ) -> RetrievalEvalReport {
+    aggregate_retrieval_eval_with_diagnostics(
+        gold_resolution,
+        probe_results,
+        bootstrap_config,
+        extraction_precision,
+        EntityFragmentationCounts::default(),
+    )
+}
+
+/// Aggregates retrieval metrics with stored-Fact precision and Entity fragmentation counts.
+#[must_use]
+pub fn aggregate_retrieval_eval_with_diagnostics(
+    gold_resolution: &GoldResolutionReport,
+    probe_results: Vec<ProbeResult>,
+    bootstrap_config: BootstrapConfig,
+    extraction_precision: ExtractionPrecisionCounts,
+    entity_fragmentation: EntityFragmentationCounts,
+) -> RetrievalEvalReport {
     let resolved = gold_resolution
         .records
         .iter()
@@ -358,6 +388,7 @@ pub fn aggregate_retrieval_eval_with_extraction_precision(
         gold_resolution.records.len(),
         scope_breakdown,
         extraction_precision,
+        entity_fragmentation,
         probe_results,
         bootstrap_config,
     )
@@ -406,6 +437,7 @@ pub fn aggregate_retrieval_eval_from_diagnostic_counts(
         total_facts,
         scope_breakdown,
         extraction_precision,
+        EntityFragmentationCounts::default(),
         probe_results,
         bootstrap_config,
     )
@@ -416,6 +448,7 @@ fn aggregate_retrieval_eval_from_scope_counts(
     total_facts: usize,
     scope_breakdown: ScopeMatchBreakdown,
     extraction_precision: ExtractionPrecisionCounts,
+    entity_fragmentation: EntityFragmentationCounts,
     probe_results: Vec<ProbeResult>,
     bootstrap_config: BootstrapConfig,
 ) -> RetrievalEvalReport {
@@ -424,6 +457,7 @@ fn aggregate_retrieval_eval_from_scope_counts(
         total_facts,
         scope_breakdown,
         extraction_precision,
+        entity_fragmentation,
         &probe_results,
     );
     let bootstrap = bootstrap_reports(&probe_results, bootstrap_config);
@@ -442,6 +476,7 @@ fn aggregate_metrics(
     total_facts: usize,
     scope_breakdown: ScopeMatchBreakdown,
     extraction_precision: ExtractionPrecisionCounts,
+    entity_fragmentation: EntityFragmentationCounts,
     probe_results: &[ProbeResult],
 ) -> RetrievalMetrics {
     let pre_rerank_recall_at_4 = summarize_probe_values(probe_results, |probe| {
@@ -485,6 +520,10 @@ fn aggregate_metrics(
         extraction_precision: MetricSummary::from_counts(
             extraction_precision.mapped_fact_nodes,
             extraction_precision.total_fact_nodes,
+        ),
+        entity_fragmentation: MetricSummary::from_counts(
+            entity_fragmentation.active_entity_nodes,
+            entity_fragmentation.distinct_ledger_mentions,
         ),
         pre_rerank_recall_at_4,
         pre_rerank_recall_at_25,

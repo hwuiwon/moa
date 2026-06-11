@@ -14,12 +14,14 @@ use moa_brain::planning::{
 use moa_brain::retrieval::{
     CachedHybridRetriever, HybridRetriever, RankingConfig, RankingMode, RetrievalHit,
 };
-use moa_core::{MemoryScope, ScopeContext, WorkspaceId, traits::EmbeddingProvider};
+use moa_core::{MemoryScope, ScopeContext, ScopeTier, WorkspaceId, traits::EmbeddingProvider};
 use moa_memory_graph::{AgeGraphStore, GraphStore, PiiClass};
 use moa_memory_ingest::{
-    Conflict, ContradictionContext, ContradictionDetector, EXTRACTION_PROMPT_VERSION, EmbeddedFact,
-    ExtractionFixtureRecord, FactExtractor, HeuristicFactExtractor, IngestCtx, IngestError,
-    RecordedFactExtractor, SessionTurn, chunk_turn,
+    Conflict, ContradictionContext, ContradictionDetector, DeterministicEntityMergeVerifier,
+    EXTRACTION_PROMPT_VERSION, EmbeddedFact, EntityMergeFixtureRecord, EntityMergeVerifier,
+    EntityResolver, ExtractionFixtureRecord, FactExtractor, HeuristicFactExtractor, IngestCtx,
+    IngestError, MERGE_PROMPT_VERSION, RecordedEntityMergeVerifier, RecordedFactExtractor,
+    SessionTurn, chunk_turn, normalize_entity_name,
 };
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, redact_text};
 use moa_memory_vector::{PgvectorStore, VectorStore};
@@ -59,6 +61,7 @@ pub struct MemoryRetrievalEvalOptions {
     ranking_config: RankingConfig,
     extractor_mode: MemoryEvalExtractorMode,
     extractions_path: Option<PathBuf>,
+    merges_path: Option<PathBuf>,
 }
 
 impl MemoryRetrievalEvalOptions {
@@ -78,6 +81,7 @@ impl MemoryRetrievalEvalOptions {
             ranking_config,
             extractor_mode: MemoryEvalExtractorMode::Heuristic,
             extractions_path: None,
+            merges_path: None,
         }
     }
 
@@ -120,6 +124,13 @@ impl MemoryRetrievalEvalOptions {
     #[must_use]
     pub fn with_extractions_path(mut self, extractions_path: impl Into<PathBuf>) -> Self {
         self.extractions_path = Some(extractions_path.into());
+        self
+    }
+
+    /// Overrides the merge-verifier fixture path for recorded extraction mode.
+    #[must_use]
+    pub fn with_merges_path(mut self, merges_path: impl Into<PathBuf>) -> Self {
+        self.merges_path = Some(merges_path.into());
         self
     }
 
@@ -184,6 +195,35 @@ impl MemoryRetrievalEvalOptions {
             }
         }
     }
+
+    fn entity_merge_verifier_for_corpus(
+        &self,
+        corpus: &LoadedMemoryEvalCorpus,
+    ) -> Result<Arc<dyn EntityMergeVerifier>> {
+        match self.extractor_mode {
+            MemoryEvalExtractorMode::Heuristic => Ok(Arc::new(DeterministicEntityMergeVerifier)),
+            MemoryEvalExtractorMode::Recorded => {
+                let path = self
+                    .merges_path
+                    .clone()
+                    .unwrap_or_else(|| default_merges_path(&corpus.manifest));
+                let remediation = format!(
+                    "cargo run -p xtask -- record-memory-merges --corpus {} --output {}",
+                    self.corpus_dir.display(),
+                    path.display()
+                );
+                let store = FixtureStore::<EntityMergeFixtureRecord>::read_jsonl(
+                    &path,
+                    MERGE_PROMPT_VERSION,
+                )?
+                .with_remediation_command(remediation.clone());
+                Ok(Arc::new(RecordedEntityMergeVerifier::new(
+                    store,
+                    remediation,
+                )))
+            }
+        }
+    }
 }
 
 /// Fact extractor mode used by the memory retrieval eval.
@@ -200,6 +240,13 @@ fn default_extractions_path(manifest: &CorpusManifest) -> PathBuf {
     PathBuf::from("crates/moa-eval/fixtures/memory").join(format!(
         "extractions-{}-{}.jsonl",
         manifest.corpus_id, EXTRACTION_PROMPT_VERSION
+    ))
+}
+
+fn default_merges_path(manifest: &CorpusManifest) -> PathBuf {
+    PathBuf::from("crates/moa-eval/fixtures/memory").join(format!(
+        "merges-{}-{}.jsonl",
+        manifest.corpus_id, MERGE_PROMPT_VERSION
     ))
 }
 
@@ -277,7 +324,14 @@ async fn run_memory_retrieval_eval_in_store(
     let extractor = options.extractor_for_corpus(&corpus)?;
     let embedder =
         Arc::new(cached_embedding_provider_for_corpus(&corpus, extractor.as_ref()).await?);
-    let ingest_ctx = store.ingest_ctx(embedder.clone(), extractor);
+    let entity_merge_verifier = options.entity_merge_verifier_for_corpus(&corpus)?;
+    let entity_blocking_enabled = options.extractor_mode == MemoryEvalExtractorMode::Recorded;
+    let ingest_ctx = store.ingest_ctx(
+        embedder.clone(),
+        extractor,
+        entity_merge_verifier,
+        entity_blocking_enabled,
+    );
     let mut gold_resolution =
         resolve_gold_nodes(ingest_ctx, &corpus.ledger, &corpus.sessions).await?;
     apply_eval_validity_windows(store.pool(), &mut gold_resolution).await?;
@@ -286,6 +340,7 @@ async fn run_memory_retrieval_eval_in_store(
     let fact_ids_by_uid = fact_ids_by_uid(&gold_resolution);
     let extraction_precision =
         extraction_precision_counts(store.pool(), &corpus.ledger, &fact_ids_by_uid).await?;
+    let entity_fragmentation = entity_fragmentation_counts(store.pool(), &corpus.ledger).await?;
     let gold_records_by_fact_id = gold_records_by_fact_id(&gold_resolution);
     let planner = QueryPlanner::new();
     let mut probe_results = Vec::with_capacity(corpus.probes.len());
@@ -317,11 +372,12 @@ async fn run_memory_retrieval_eval_in_store(
         ));
     }
 
-    let retrieval = super::aggregate_retrieval_eval_with_extraction_precision(
+    let retrieval = super::aggregate_retrieval_eval_with_diagnostics(
         &gold_resolution,
         probe_results,
         options.bootstrap_config,
         extraction_precision,
+        entity_fragmentation,
     );
     let report = MemoryRetrievalEvalReport::from_retrieval_report(
         corpus.manifest,
@@ -334,7 +390,7 @@ async fn run_memory_retrieval_eval_in_store(
     Ok(report)
 }
 
-async fn cleanup_eval_graph_rows(pool: &PgPool, ledger: &[LedgerFact]) -> Result<()> {
+pub(crate) async fn cleanup_eval_graph_rows(pool: &PgPool, ledger: &[LedgerFact]) -> Result<()> {
     let workspace_ids = eval_workspace_ids(ledger);
     if workspace_ids.is_empty() {
         return Ok(());
@@ -401,6 +457,7 @@ const AGE_NODE_LABELS: &[&str] = &[
 const AGE_EDGE_LABELS: &[&str] = &[
     "RELATES_TO",
     "DEPENDS_ON",
+    "OWNED_BY",
     "SUPERSEDES",
     "CONTRADICTS",
     "DERIVED_FROM",
@@ -570,7 +627,6 @@ async fn retrieve_probe_hits(
         retrieval_ctx = retrieval_ctx.with_ranking_reference_time(ranking_reference_time);
     }
     retrieval_ctx = retrieval_ctx.with_leg_timeouts_disabled();
-    retrieval_ctx = retrieval_ctx.with_graph_expansion_disabled();
 
     retrieve_for_query(&probe.query, &retrieval_ctx)
         .await
@@ -781,6 +837,64 @@ async fn extraction_precision_counts(
     })
 }
 
+async fn entity_fragmentation_counts(
+    pool: &PgPool,
+    ledger: &[LedgerFact],
+) -> Result<super::EntityFragmentationCounts> {
+    let workspace_ids = eval_workspace_ids(ledger);
+    let active_entity_nodes = if workspace_ids.is_empty() {
+        0_i64
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)
+            FROM moa.node_index
+            WHERE label = 'Entity'
+              AND valid_to IS NULL
+              AND workspace_id = ANY($1)
+            "#,
+        )
+        .bind(&workspace_ids)
+        .fetch_one(pool)
+        .await?
+    };
+    let distinct_ledger_mentions = ledger
+        .iter()
+        .flat_map(|fact| {
+            [&fact.subject, &fact.object].into_iter().map(|mention| {
+                let user_id = match fact.scope {
+                    ScopeTier::User => fact.user_id.to_string(),
+                    ScopeTier::Workspace | ScopeTier::Global => String::new(),
+                };
+                (
+                    scope_tier_name(fact.scope).to_string(),
+                    fact.workspace_id.to_string(),
+                    user_id,
+                    normalize_entity_name(mention),
+                )
+            })
+        })
+        .filter(|(_, _, _, mention)| !mention.trim().is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    Ok(super::EntityFragmentationCounts {
+        active_entity_nodes: usize::try_from(active_entity_nodes).map_err(|_| {
+            EvalError::InvalidConfig(format!(
+                "stored Entity node count {active_entity_nodes} cannot fit usize"
+            ))
+        })?,
+        distinct_ledger_mentions,
+    })
+}
+
+fn scope_tier_name(scope: ScopeTier) -> &'static str {
+    match scope {
+        ScopeTier::Global => "global",
+        ScopeTier::Workspace => "workspace",
+        ScopeTier::User => "user",
+    }
+}
+
 fn gold_records_by_fact_id(
     gold_resolution: &GoldResolutionReport,
 ) -> HashMap<String, super::GoldNodeRecord> {
@@ -806,7 +920,7 @@ async fn write_report(path: &Path, report: &MemoryRetrievalEvalReport) -> Result
         .map_err(|source| io_error(path, source))
 }
 
-async fn cached_embedding_provider_for_corpus(
+pub(crate) async fn cached_embedding_provider_for_corpus(
     corpus: &LoadedMemoryEvalCorpus,
     extractor: &dyn FactExtractor,
 ) -> Result<CachedEmbeddingProvider> {
@@ -892,6 +1006,8 @@ async fn extracted_embedding_texts(
                 ))
             })? {
                 texts.insert(fact.summary.clone(), ());
+                texts.insert(normalize_entity_name(&fact.subject), ());
+                texts.insert(normalize_entity_name(&fact.object), ());
                 let pii = deterministic_pii_result(&fact.summary);
                 let redacted = redact_text(&fact.summary, &pii.spans);
                 if redacted != fact.summary {
@@ -903,17 +1019,17 @@ async fn extracted_embedding_texts(
     Ok(texts.into_keys().collect())
 }
 
-struct LoadedMemoryEvalCorpus {
-    manifest: CorpusManifest,
-    ledger: Vec<LedgerFact>,
-    sessions: Vec<SyntheticSession>,
-    probes: Vec<Probe>,
-    embedding_inputs: Vec<EmbeddingInput>,
-    embeddings: Vec<CachedEmbeddingFixture>,
+pub(crate) struct LoadedMemoryEvalCorpus {
+    pub(crate) manifest: CorpusManifest,
+    pub(crate) ledger: Vec<LedgerFact>,
+    pub(crate) sessions: Vec<SyntheticSession>,
+    pub(crate) probes: Vec<Probe>,
+    pub(crate) embedding_inputs: Vec<EmbeddingInput>,
+    pub(crate) embeddings: Vec<CachedEmbeddingFixture>,
 }
 
 impl LoadedMemoryEvalCorpus {
-    async fn load(corpus_dir: &Path) -> Result<Self> {
+    pub(crate) async fn load(corpus_dir: &Path) -> Result<Self> {
         let manifest = read_manifest_json(&corpus_dir.join("manifest.json")).await?;
         let ledger = read_ledger_jsonl(&corpus_dir.join("ledger.jsonl")).await?;
         let sessions = read_sessions_jsonl(&corpus_dir.join("sessions.jsonl")).await?;
@@ -937,14 +1053,14 @@ impl LoadedMemoryEvalCorpus {
     }
 }
 
-struct IsolatedEvalStore {
+pub(crate) struct IsolatedEvalStore {
     store: PostgresSessionStore,
     database_url: String,
     schema_name: String,
 }
 
 impl IsolatedEvalStore {
-    async fn create() -> Result<Self> {
+    pub(crate) async fn create() -> Result<Self> {
         let database_url = test_database_url()?;
         let schema_name = format!("moa_memory_eval_{}", Uuid::now_v7().simple());
         let store = PostgresSessionStore::new_in_schema(&database_url, &schema_name).await?;
@@ -955,14 +1071,16 @@ impl IsolatedEvalStore {
         })
     }
 
-    fn pool(&self) -> &PgPool {
+    pub(crate) fn pool(&self) -> &PgPool {
         self.store.pool()
     }
 
-    fn ingest_ctx(
+    pub(crate) fn ingest_ctx(
         &self,
         embedder: Arc<dyn EmbeddingProvider>,
         extractor: Arc<dyn FactExtractor>,
+        entity_merge_verifier: Arc<dyn EntityMergeVerifier>,
+        entity_blocking_enabled: bool,
     ) -> IngestCtx {
         let workspace_id = WorkspaceId::new(format!("memory-eval-runner-{}", self.schema_name));
         let scope = ScopeContext::workspace(workspace_id);
@@ -974,6 +1092,7 @@ impl IsolatedEvalStore {
             AgeGraphStore::scoped_for_app_role(self.pool().clone(), scope)
                 .with_vector_store(vector.clone()),
         );
+        let entity_resolver = EntityResolver::for_app_role(entity_merge_verifier);
         IngestCtx::new(
             self.pool().clone(),
             graph,
@@ -983,9 +1102,11 @@ impl IsolatedEvalStore {
             Arc::new(InsertOnlyContradictionDetector),
         )
         .with_extractor(extractor)
+        .with_entity_resolver(Arc::new(entity_resolver))
+        .with_entity_embedding_blocking(entity_blocking_enabled)
     }
 
-    async fn cleanup(self) -> Result<()> {
+    pub(crate) async fn cleanup(self) -> Result<()> {
         let pool = self.store.pool().clone();
         drop(self.store);
         pool.close().await;
