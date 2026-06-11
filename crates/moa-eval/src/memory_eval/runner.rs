@@ -16,8 +16,8 @@ use moa_brain::retrieval::{
     RankingMode, Reranker, RetrievalHit,
 };
 use moa_core::{
-    MemoryScope, ScopeContext, ScopeTier, WorkspaceId, config::MemoryExtractionConfig,
-    traits::EmbeddingProvider,
+    MemoryDigestConfig, MemoryScope, ScopeContext, ScopeTier, WorkspaceId,
+    config::MemoryExtractionConfig, traits::EmbeddingProvider,
 };
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeIndexRow, PiiClass};
 use moa_memory_ingest::{
@@ -34,7 +34,7 @@ use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
 use moa_session::PostgresSessionStore;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use tokio::time::{Instant as TokioInstant, sleep_until};
 use uuid::Uuid;
 
@@ -76,6 +76,7 @@ pub struct MemoryRetrievalEvalOptions {
     lane: EvalLane,
     budget_usd: Option<f64>,
     consolidate: bool,
+    digests: bool,
 }
 
 impl MemoryRetrievalEvalOptions {
@@ -99,6 +100,7 @@ impl MemoryRetrievalEvalOptions {
             lane: EvalLane::Pr,
             budget_usd: None,
             consolidate: false,
+            digests: false,
         }
     }
 
@@ -172,6 +174,13 @@ impl MemoryRetrievalEvalOptions {
         self
     }
 
+    /// Enables standing digest rebuilds and preference-context scoring.
+    #[must_use]
+    pub fn with_digests(mut self, digests: bool) -> Self {
+        self.digests = digests;
+        self
+    }
+
     /// Returns the corpus directory.
     #[must_use]
     pub fn corpus_dir(&self) -> &Path {
@@ -224,6 +233,12 @@ impl MemoryRetrievalEvalOptions {
     #[must_use]
     pub fn consolidate(&self) -> bool {
         self.consolidate
+    }
+
+    /// Returns whether the eval should build digests and score preference context.
+    #[must_use]
+    pub fn digests(&self) -> bool {
+        self.digests
     }
 
     fn validate(&self) -> Result<()> {
@@ -445,11 +460,22 @@ async fn run_memory_retrieval_eval_in_store(
             &fact_ids_by_uid,
             providers.embedder.clone(),
             consolidation_reference_time,
+            digest_config_for_eval(options.digests()),
         )
         .await?;
         Some(outcome)
+    } else if options.digests() {
+        Some(
+            run_eval_digest_rebuild(store.pool(), &corpus.ledger, consolidation_reference_time)
+                .await?,
+        )
     } else {
         None
+    };
+    let equivalent_fact_ids_by_uid = if options.consolidate() {
+        equivalent_fact_ids_by_uid(store.pool(), &corpus.ledger, &fact_ids_by_uid).await?
+    } else {
+        HashMap::new()
     };
     let extraction_precision =
         extraction_precision_counts(store.pool(), &corpus.ledger, &fact_ids_by_uid).await?;
@@ -473,6 +499,12 @@ async fn run_memory_retrieval_eval_in_store(
         return Err(error.into());
     }
     let gold_records_by_fact_id = gold_records_by_fact_id(&gold_resolution);
+    let ledger_by_fact_id = ledger_by_fact_id(&corpus.ledger);
+    let digest_context = if options.digests() {
+        digest_context_by_user(store.pool(), &corpus.ledger).await?
+    } else {
+        HashMap::new()
+    };
     let planner = QueryPlanner::new();
     let mut probe_results = Vec::with_capacity(corpus.probes.len());
 
@@ -491,16 +523,29 @@ async fn run_memory_retrieval_eval_in_store(
             },
         )
         .await?;
-        let candidates =
-            candidates_from_retrieval_hits(&retrieval.pre_rerank_hits, &fact_ids_by_uid);
-        let post_rerank_candidates =
-            candidates_from_retrieval_hits(&retrieval.post_rerank_hits, &fact_ids_by_uid);
+        let candidates = candidates_from_retrieval_hits(
+            &retrieval.pre_rerank_hits,
+            &fact_ids_by_uid,
+            &equivalent_fact_ids_by_uid,
+        );
+        let post_rerank_candidates = candidates_from_retrieval_hits(
+            &retrieval.post_rerank_hits,
+            &fact_ids_by_uid,
+            &equivalent_fact_ids_by_uid,
+        );
+        let preference_context_hit = preference_context_hit(
+            probe,
+            post_rerank_candidates.as_slice(),
+            &digest_context,
+            &ledger_by_fact_id,
+        );
         probe_results.push(probe_result_for(
             probe,
             candidates,
             Some(post_rerank_candidates),
             retrieval.retrieval_latency_ms,
             &gold_records_by_fact_id,
+            preference_context_hit,
         ));
         if options.lane == EvalLane::Live
             && (probe_index + 1) % 10 == 0
@@ -953,6 +998,10 @@ pub(crate) async fn cleanup_eval_graph_rows(pool: &PgPool, ledger: &[LedgerFact]
         .bind(&workspace_ids)
         .execute(pool)
         .await?;
+    sqlx::query("DELETE FROM moa.memory_digests WHERE workspace_id = ANY($1)")
+        .bind(&workspace_ids)
+        .execute(pool)
+        .await?;
     sqlx::query("DELETE FROM moa.graph_changelog WHERE workspace_id = ANY($1)")
         .bind(&workspace_ids)
         .execute(pool)
@@ -1226,6 +1275,7 @@ fn probe_result_for(
     post_rerank_candidates: Option<Vec<RetrievedCandidate>>,
     retrieval_latency_ms: u64,
     gold_records_by_fact_id: &HashMap<String, super::GoldNodeRecord>,
+    preference_context_hit: Option<bool>,
 ) -> ProbeResult {
     let final_candidates = post_rerank_candidates.as_deref().unwrap_or(&candidates);
     let expected_found_at_4 = all_expected_found_at_k(
@@ -1258,6 +1308,7 @@ fn probe_result_for(
         temporal_as_of_correct: temporal_as_of_correct_for_probe(probe, expected_found_at_4),
         temporal_filter_parsed,
         temporal_filter_matches_as_of,
+        preference_context_hit,
     }
 }
 
@@ -1367,6 +1418,64 @@ fn fact_ids_by_uid(gold_resolution: &GoldResolutionReport) -> HashMap<Uuid, Stri
     fact_ids
 }
 
+async fn equivalent_fact_ids_by_uid(
+    pool: &PgPool,
+    ledger: &[LedgerFact],
+    fact_ids_by_uid: &HashMap<Uuid, String>,
+) -> Result<HashMap<Uuid, Vec<String>>> {
+    let workspace_ids = eval_workspace_ids(ledger);
+    if workspace_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT target_uid, (payload->>'replacement_uid')::uuid AS replacement_uid
+        FROM moa.graph_changelog
+        WHERE workspace_id = ANY($1)
+          AND op = 'supersede'
+          AND target_kind = 'node'
+          AND target_label = 'Fact'
+          AND payload ? 'replacement_uid'
+        ORDER BY change_id ASC
+        "#,
+    )
+    .bind(&workspace_ids)
+    .fetch_all(pool)
+    .await?;
+    let mut replacement_by_old = HashMap::<Uuid, Uuid>::new();
+    for row in rows {
+        replacement_by_old.insert(row.try_get("target_uid")?, row.try_get("replacement_uid")?);
+    }
+
+    let mut aliases = HashMap::<Uuid, Vec<String>>::new();
+    for (uid, fact_id) in fact_ids_by_uid {
+        let representative = supersession_representative(*uid, &replacement_by_old);
+        if representative != *uid {
+            aliases
+                .entry(representative)
+                .or_default()
+                .push(fact_id.clone());
+        }
+    }
+    for fact_ids in aliases.values_mut() {
+        fact_ids.sort();
+        fact_ids.dedup();
+    }
+    Ok(aliases)
+}
+
+fn supersession_representative(uid: Uuid, replacement_by_old: &HashMap<Uuid, Uuid>) -> Uuid {
+    let mut current = uid;
+    let mut seen = std::collections::BTreeSet::new();
+    while seen.insert(current) {
+        let Some(next) = replacement_by_old.get(&current).copied() else {
+            return current;
+        };
+        current = next;
+    }
+    uid
+}
+
 async fn run_eval_consolidation(
     pool: &PgPool,
     ledger: &[LedgerFact],
@@ -1374,6 +1483,7 @@ async fn run_eval_consolidation(
     fact_ids_by_uid: &HashMap<Uuid, String>,
     embedder: Arc<dyn EmbeddingProvider>,
     reference_time: DateTime<Utc>,
+    digest_config: MemoryDigestConfig,
 ) -> Result<ConsolidationOutcome> {
     let workspace_ids = eval_workspace_ids(ledger);
     let mut outcome = ConsolidationOutcome::default();
@@ -1381,7 +1491,10 @@ async fn run_eval_consolidation(
         let workspace_outcome = moa_memory_lifecycle::consolidate_workspace(
             pool,
             WorkspaceId::new(workspace_id.clone()),
-            ConsolidationOptions::default(),
+            ConsolidationOptions {
+                digest: digest_config.clone(),
+                ..ConsolidationOptions::default()
+            },
             reference_time,
             Some(embedder.clone()),
         )
@@ -1401,7 +1514,10 @@ async fn run_eval_consolidation(
         let second_outcome = moa_memory_lifecycle::consolidate_workspace(
             pool,
             WorkspaceId::new(workspace_id.clone()),
-            ConsolidationOptions::default(),
+            ConsolidationOptions {
+                digest: digest_config.clone(),
+                ..ConsolidationOptions::default()
+            },
             reference_time,
             Some(embedder.clone()),
         )
@@ -1430,6 +1546,41 @@ fn add_consolidation_outcome(total: &mut ConsolidationOutcome, next: Consolidati
     total.entity_embeddings_backfilled += next.entity_embeddings_backfilled;
     total.aliases_promoted += next.aliases_promoted;
     total.duplicates_remaining += next.duplicates_remaining;
+    total.digests_rebuilt += next.digests_rebuilt;
+    total.digests_skipped_fresh += next.digests_skipped_fresh;
+}
+
+async fn run_eval_digest_rebuild(
+    pool: &PgPool,
+    ledger: &[LedgerFact],
+    reference_time: DateTime<Utc>,
+) -> Result<ConsolidationOutcome> {
+    let mut outcome = ConsolidationOutcome::default();
+    let config = digest_config_for_eval(true);
+    for workspace_id in eval_workspace_ids(ledger) {
+        let stats = moa_memory_lifecycle::rebuild_digests(
+            pool,
+            &WorkspaceId::new(workspace_id.clone()),
+            reference_time,
+            &config,
+        )
+        .await
+        .map_err(|error| {
+            EvalError::InvalidConfig(format!(
+                "memory digest rebuild failed for workspace {workspace_id}: {error}"
+            ))
+        })?;
+        outcome.digests_rebuilt += stats.digests_rebuilt;
+        outcome.digests_skipped_fresh += stats.digests_skipped_fresh;
+    }
+    Ok(outcome)
+}
+
+fn digest_config_for_eval(enabled: bool) -> MemoryDigestConfig {
+    MemoryDigestConfig {
+        enabled,
+        ..MemoryDigestConfig::default()
+    }
 }
 
 async fn verify_restatement_pairs_collapsed(
@@ -1579,6 +1730,128 @@ fn gold_records_by_fact_id(
         .records
         .iter()
         .map(|record| (record.fact_id.clone(), record.clone()))
+        .collect()
+}
+
+fn ledger_by_fact_id(ledger: &[LedgerFact]) -> HashMap<String, LedgerFact> {
+    ledger
+        .iter()
+        .map(|fact| (fact.fact_id.clone(), fact.clone()))
+        .collect()
+}
+
+async fn digest_context_by_user(
+    pool: &PgPool,
+    ledger: &[LedgerFact],
+) -> Result<HashMap<(String, String), String>> {
+    let workspace_ids = eval_workspace_ids(ledger);
+    if workspace_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT workspace_id, user_id, scope, content
+        FROM moa.memory_digests
+        WHERE workspace_id = ANY($1)
+        ORDER BY workspace_id ASC, CASE scope WHEN 'user' THEN 0 ELSE 1 END, user_id ASC NULLS FIRST
+        "#,
+    )
+    .bind(&workspace_ids)
+    .fetch_all(pool)
+    .await?;
+    let mut workspace_content = HashMap::<String, String>::new();
+    let mut user_content = HashMap::<(String, String), String>::new();
+    for row in rows {
+        let workspace_id: String = row.try_get("workspace_id")?;
+        let user_id: Option<String> = row.try_get("user_id")?;
+        let scope: String = row.try_get("scope")?;
+        let content: String = row.try_get("content")?;
+        if scope == "workspace" {
+            workspace_content.insert(workspace_id, content);
+        } else if scope == "user"
+            && let Some(user_id) = user_id
+        {
+            user_content.insert((workspace_id, user_id), content);
+        }
+    }
+
+    let users = ledger
+        .iter()
+        .map(|fact| (fact.workspace_id.to_string(), fact.user_id.to_string()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut contexts = HashMap::new();
+    for (workspace_id, user_id) in users {
+        let mut content = String::new();
+        if let Some(user_digest) = user_content.get(&(workspace_id.clone(), user_id.clone())) {
+            content.push_str(user_digest);
+            content.push('\n');
+        }
+        if let Some(workspace_digest) = workspace_content.get(&workspace_id) {
+            content.push_str(workspace_digest);
+        }
+        contexts.insert((workspace_id, user_id), content);
+    }
+    Ok(contexts)
+}
+
+fn preference_context_hit(
+    probe: &Probe,
+    final_candidates: &[RetrievedCandidate],
+    digest_context: &HashMap<(String, String), String>,
+    ledger_by_fact_id: &HashMap<String, LedgerFact>,
+) -> Option<bool> {
+    if probe.probe_type != ProbeType::PreferenceApplication {
+        return None;
+    }
+
+    let mut context = digest_context
+        .get(&(probe.workspace_id.to_string(), probe.user_id.to_string()))
+        .cloned()
+        .unwrap_or_default();
+    for candidate in final_candidates
+        .iter()
+        .filter(|candidate| candidate.rank > 0 && candidate.rank <= RETRIEVAL_EVAL_FINAL_K)
+    {
+        for fact_id in candidate
+            .fact_id
+            .as_deref()
+            .into_iter()
+            .chain(candidate.equivalent_fact_ids.iter().map(String::as_str))
+        {
+            if let Some(fact) = ledger_by_fact_id.get(fact_id) {
+                context.push('\n');
+                context.push_str(&fact.subject);
+                context.push(' ');
+                context.push_str(&fact.predicate);
+                context.push(' ');
+                context.push_str(&fact.object);
+                context.push('\n');
+                context.push_str(&fact.answer);
+            }
+        }
+    }
+
+    Some(probe.expected_fact_ids.iter().all(|fact_id| {
+        ledger_by_fact_id.get(fact_id).is_some_and(|fact| {
+            tokens_contained(&fact.object, &context) || tokens_contained(&fact.answer, &context)
+        })
+    }))
+}
+
+fn tokens_contained(expected: &str, haystack: &str) -> bool {
+    let haystack_tokens = token_set(haystack);
+    let expected_tokens = token_set(expected);
+    !expected_tokens.is_empty()
+        && expected_tokens
+            .iter()
+            .all(|token| haystack_tokens.contains(token))
+}
+
+fn token_set(text: &str) -> std::collections::BTreeSet<String> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .map(str::trim)
+        .filter(|token| token.len() >= 2)
+        .map(str::to_ascii_lowercase)
         .collect()
 }
 

@@ -49,6 +49,11 @@ All per-turn runtime state belongs in the dynamic tail:
 
 - `QueryRewriter` stores rewritten-query and task-transition metadata without
   altering the stable prefix.
+- `DigestProcessor` injects standing user/workspace memory after query
+  rewriting and before graph-memory retrieval. Digest content changes only on
+  the configured rebuild cadence, so it sits at the largest cacheable position
+  whose invalidation rate matches that derived artifact rather than the active
+  turn.
 - `MemoryRetriever` injects relevant memory after query rewriting and before
   history compilation.
 - `HistoryCompiler` emits replayed conversation, checkpoints, recent turns,
@@ -92,7 +97,9 @@ When adding prompt content:
 - Keep query rewriting, retrieved memory, replayed history, and runtime context
   out of the stable prefix.
 - Preserve the current dynamic order: query rewrite, memory, history, runtime
-  context, compactor, cache optimizer.
+  context, compactor, cache optimizer. Standing digests are the one
+  pre-retrieval memory block and must stay between query rewriting and graph
+  memory retrieval.
 - Put dynamic session or turn state in `RuntimeContextProcessor`.
 - Keep tool definitions sorted deterministically by tool name.
 - Keep rendered skill metadata sorted deterministically by skill name.

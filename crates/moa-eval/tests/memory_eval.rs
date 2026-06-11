@@ -852,6 +852,7 @@ fn reranker_metrics_track_pre_post_windows_and_p95_latency() {
                 temporal_as_of_correct: None,
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
+                preference_context_hit: None,
             },
             ProbeResult {
                 probe_id: "probe-stable-top-hit".to_string(),
@@ -880,6 +881,7 @@ fn reranker_metrics_track_pre_post_windows_and_p95_latency() {
                 temporal_as_of_correct: None,
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
+                preference_context_hit: None,
             },
         ],
         BootstrapConfig {
@@ -998,6 +1000,7 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 temporal_as_of_correct: None,
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
+                preference_context_hit: None,
             },
             ProbeResult {
                 probe_id: "probe-cross-user-clean".to_string(),
@@ -1014,6 +1017,7 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 temporal_as_of_correct: None,
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
+                preference_context_hit: None,
             },
             ProbeResult {
                 probe_id: "probe-pii-unredacted".to_string(),
@@ -1036,6 +1040,7 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 temporal_as_of_correct: None,
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
+                preference_context_hit: None,
             },
         ],
         BootstrapConfig {
@@ -1931,6 +1936,7 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             temporal_as_of_correct: None,
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
+            preference_context_hit: None,
         },
         ProbeResult {
             probe_id: "probe-rank-five".to_string(),
@@ -1971,6 +1977,7 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             temporal_as_of_correct: None,
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
+            preference_context_hit: None,
         },
         ProbeResult {
             probe_id: "probe-multi-hop".to_string(),
@@ -2007,6 +2014,7 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             temporal_as_of_correct: None,
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
+            preference_context_hit: None,
         },
         ProbeResult {
             probe_id: "probe-temporal-miss".to_string(),
@@ -2029,6 +2037,7 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             temporal_as_of_correct: Some(false),
             temporal_filter_parsed: Some(true),
             temporal_filter_matches_as_of: Some(true),
+            preference_context_hit: None,
         },
         ProbeResult {
             probe_id: "probe-pii-redacted".to_string(),
@@ -2051,6 +2060,7 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             temporal_as_of_correct: None,
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
+            preference_context_hit: None,
         },
         ProbeResult {
             probe_id: "probe-abstains".to_string(),
@@ -2067,6 +2077,7 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             temporal_as_of_correct: None,
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
+            preference_context_hit: None,
         },
         ProbeResult {
             probe_id: "probe-cross-user-leak".to_string(),
@@ -2089,6 +2100,7 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             temporal_as_of_correct: None,
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
+            preference_context_hit: None,
         },
     ]
 }
@@ -2117,7 +2129,7 @@ fn metric_candidates(base: u128, specs: &[CandidateSpec]) -> Vec<RetrievedCandid
             }
         })
         .collect::<Vec<_>>();
-    candidates_from_retrieval_hits(&hits, &fact_ids_by_uid)
+    candidates_from_retrieval_hits(&hits, &fact_ids_by_uid, &HashMap::new())
 }
 
 fn metric_node(uid: Uuid) -> NodeIndexRow {
@@ -2163,6 +2175,7 @@ fn parse_metric_probe(
         temporal_as_of_correct: (probe_type == ProbeType::TemporalAsOf).then_some(true),
         temporal_filter_parsed,
         temporal_filter_matches_as_of,
+        preference_context_hit: None,
     }
 }
 
@@ -2306,6 +2319,7 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
             temporal_as_of_correct: None,
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
+            preference_context_hit: None,
         },
         ProbeResult {
             probe_id: "probe-cross-user-leak".to_string(),
@@ -2322,6 +2336,7 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
             temporal_as_of_correct: None,
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
+            preference_context_hit: None,
         },
         ProbeResult {
             probe_id: "probe-pii-redacted".to_string(),
@@ -2344,6 +2359,7 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
             temporal_as_of_correct: None,
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
+            preference_context_hit: None,
         },
     ]
 }
@@ -2376,6 +2392,7 @@ fn reranker_recall_regression_probe_results() -> Vec<ProbeResult> {
         temporal_as_of_correct: None,
         temporal_filter_parsed: None,
         temporal_filter_matches_as_of: None,
+        preference_context_hit: None,
     }]
 }
 
@@ -2407,6 +2424,7 @@ fn reranker_latency_without_gain_probe_results() -> Vec<ProbeResult> {
         temporal_as_of_correct: None,
         temporal_filter_parsed: None,
         temporal_filter_matches_as_of: None,
+        preference_context_hit: None,
     }]
 }
 
@@ -2451,6 +2469,7 @@ fn memory_budget_regression_probe_results(full_recall: bool) -> Vec<ProbeResult>
             temporal_as_of_correct: None,
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
+            preference_context_hit: None,
         },
         ProbeResult {
             probe_id: "probe-regression-cross-user-clean".to_string(),
@@ -2467,6 +2486,7 @@ fn memory_budget_regression_probe_results(full_recall: bool) -> Vec<ProbeResult>
             temporal_as_of_correct: None,
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
+            preference_context_hit: None,
         },
     ]
 }

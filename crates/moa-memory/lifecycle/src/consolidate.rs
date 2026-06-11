@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::{ScopeContext, UserId, WorkspaceId, traits::EmbeddingProvider};
+use moa_core::{MemoryDigestConfig, ScopeContext, UserId, WorkspaceId, traits::EmbeddingProvider};
 use moa_memory_graph::{
     AgeGraphStore, ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodeLabel,
     NodePropertyUpdateIntent, PiiClass,
@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
+
+use crate::digest::rebuild_digests;
 
 const CONSOLIDATION_ACTOR: &str = "consolidation";
 const CONSOLIDATION_ACTOR_KIND: &str = "system";
@@ -41,7 +43,7 @@ pub enum Error {
 }
 
 /// Tuning options for confidence decay.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConsolidationOptions {
     /// Number of idle days before confidence begins to decay.
     pub decay_idle_days: i64,
@@ -49,6 +51,9 @@ pub struct ConsolidationOptions {
     pub decay_half_life_days: f64,
     /// Minimum confidence retained by decay.
     pub decay_floor: f64,
+    /// Standing digest rebuild configuration.
+    #[serde(default)]
+    pub digest: MemoryDigestConfig,
 }
 
 impl Default for ConsolidationOptions {
@@ -57,6 +62,7 @@ impl Default for ConsolidationOptions {
             decay_idle_days: 30,
             decay_half_life_days: 180.0,
             decay_floor: 0.1,
+            digest: MemoryDigestConfig::default(),
         }
     }
 }
@@ -78,6 +84,12 @@ pub struct ConsolidationOutcome {
     pub aliases_promoted: u64,
     /// Exact-duplicate groups that still have more than one active node after merge.
     pub duplicates_remaining: u64,
+    /// Digest rows rebuilt or inserted.
+    #[serde(default)]
+    pub digests_rebuilt: u64,
+    /// Digest rows skipped because they are fresher than the configured interval.
+    #[serde(default)]
+    pub digests_skipped_fresh: u64,
 }
 
 impl ConsolidationOutcome {
@@ -89,6 +101,7 @@ impl ConsolidationOutcome {
             && self.contradiction_supersessions == 0
             && self.entity_embeddings_backfilled == 0
             && self.aliases_promoted == 0
+            && self.digests_rebuilt == 0
             && self.duplicates_remaining == 0
     }
 }
@@ -139,6 +152,7 @@ pub async fn consolidate_workspace(
     let decay = decay_confidence(pool, &workspace_id, now, &opts).await?;
     let sweep = sweep_contradictions(pool, &workspace_id, now).await?;
     let backfill = backfill_entities(pool, &workspace_id, embedder).await?;
+    let digest = rebuild_digests(pool, &workspace_id, now, &opts.digest).await?;
 
     Ok(ConsolidationOutcome {
         merged: merge.merged,
@@ -148,6 +162,8 @@ pub async fn consolidate_workspace(
         entity_embeddings_backfilled: backfill.entity_embeddings_backfilled,
         aliases_promoted: backfill.aliases_promoted,
         duplicates_remaining: merge.duplicates_remaining,
+        digests_rebuilt: digest.digests_rebuilt,
+        digests_skipped_fresh: digest.digests_skipped_fresh,
     })
 }
 
@@ -373,6 +389,9 @@ fn contradiction_groups(rows: &[LifecycleNodeRow]) -> Vec<Vec<LifecycleNodeRow>>
         ) else {
             continue;
         };
+        if !is_sweepable_contradiction_predicate(&predicate) {
+            continue;
+        }
         groups
             .entry(ContradictionKey {
                 workspace_id: row.workspace_id.clone(),
@@ -402,6 +421,14 @@ fn contradiction_groups(rows: &[LifecycleNodeRow]) -> Vec<Vec<LifecycleNodeRow>>
         .collect::<Vec<_>>();
     values.sort_by_key(|left| contradiction_group_key(left));
     values
+}
+
+fn is_sweepable_contradiction_predicate(predicate: &str) -> bool {
+    let normalized = predicate.trim().to_ascii_lowercase().replace('_', " ");
+    matches!(
+        normalized.as_str(),
+        "cache backend conflict" | "deploy target" | "on call primary"
+    )
 }
 
 fn decay_target(
@@ -765,6 +792,7 @@ mod tests {
             decay_idle_days: 30,
             decay_half_life_days: 90.0,
             decay_floor: 0.25,
+            ..ConsolidationOptions::default()
         };
         let mut row = scoped_fact("a", None, "workspace", "h", -720);
         row.confidence = Some(0.5);
@@ -790,6 +818,80 @@ mod tests {
             groups[0][0].uid,
             uuid("00000000-0000-8000-8000-000000000002")
         );
+    }
+
+    #[test]
+    fn contradiction_sweep_skips_broad_preference_predicates() {
+        // Pins: broad extraction verbs do not let unrelated user preferences supersede each other.
+        let style = fact(FactSpec {
+            uid_suffix: "00000000-0000-8000-8000-000000000001",
+            user_id: Some("user-a"),
+            scope: "user",
+            fact_hash: "style",
+            subject: "User 02",
+            predicate: "switched to",
+            object: "step-by-step checklists",
+            day_offset: 1,
+        });
+        let contact = fact(FactSpec {
+            uid_suffix: "00000000-0000-8000-8000-000000000002",
+            user_id: Some("user-a"),
+            scope: "user",
+            fact_hash: "contact",
+            subject: "User 02",
+            predicate: "switched to",
+            object: "[EMAIL_REDACTED]",
+            day_offset: 2,
+        });
+
+        assert!(contradiction_groups(&[style, contact]).is_empty());
+    }
+
+    #[test]
+    fn contradiction_sweep_skips_multi_value_dependency_and_owner_predicates() {
+        // Pins: corpus dependency and owner facts are multi-valued evidence, not v1 contradictions.
+        let dependency_a = fact(FactSpec {
+            uid_suffix: "00000000-0000-8000-8000-000000000001",
+            user_id: Some("user-a"),
+            scope: "user",
+            fact_hash: "dependency-a",
+            subject: "checkout-service",
+            predicate: "depends_on",
+            object: "lib-auth",
+            day_offset: 1,
+        });
+        let dependency_b = fact(FactSpec {
+            uid_suffix: "00000000-0000-8000-8000-000000000002",
+            user_id: Some("user-a"),
+            scope: "user",
+            fact_hash: "dependency-b",
+            subject: "checkout-service",
+            predicate: "depends_on",
+            object: "lib-ledger",
+            day_offset: 2,
+        });
+        let owner_a = fact(FactSpec {
+            uid_suffix: "00000000-0000-8000-8000-000000000003",
+            user_id: None,
+            scope: "workspace",
+            fact_hash: "owner-a",
+            subject: "lib-auth",
+            predicate: "owned_by",
+            object: "identity",
+            day_offset: 1,
+        });
+        let owner_b = fact(FactSpec {
+            uid_suffix: "00000000-0000-8000-8000-000000000004",
+            user_id: None,
+            scope: "workspace",
+            fact_hash: "owner-b",
+            subject: "lib-auth",
+            predicate: "owned_by",
+            object: "platform",
+            day_offset: 2,
+        });
+
+        assert!(contradiction_groups(&[dependency_a, dependency_b, owner_a, owner_b]).is_empty());
     }
 
     fn uids(rows: &[LifecycleNodeRow]) -> Vec<Uuid> {
@@ -822,7 +924,7 @@ mod tests {
             scope: "workspace",
             fact_hash: uid_suffix,
             subject: "service",
-            predicate: "owner",
+            predicate: "cache_backend_conflict",
             object,
             day_offset,
         })

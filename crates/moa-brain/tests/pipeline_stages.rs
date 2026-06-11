@@ -14,23 +14,71 @@ use moa_brain::pipeline::memory::GraphMemoryRetriever;
 use moa_brain::pipeline::query_rewrite::QueryRewriter;
 use moa_brain::pipeline::runtime_context::{Clock, RuntimeContextProcessor};
 use moa_brain::pipeline::tools::ToolDefinitionProcessor;
+use moa_brain::{
+    GraphMemoryPipelineOptions,
+    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
+};
 use moa_core::{
     CacheBreakpoint, CacheBreakpointTarget, CacheTtl, CompletionContent, CompletionRequest,
     CompletionResponse, CompletionStream, ContextMessage, ContextProcessor, LLMProvider,
-    MemoryAction, MemoryScope, MessageRole, ModelCapabilities, ModelId, QueryRewriteConfig,
-    QueryRewriteResult, Result, RewriteSource, ScopeContext, StopReason, TaskKind, TokenUsage,
-    WorkingContext, WorkspaceId,
+    MemoryAction, MemoryScope, MessageRole, MoaConfig, ModelCapabilities, ModelId,
+    NullLineageHandle, QueryRewriteConfig, QueryRewriteResult, Result, RewriteSource, ScopeContext,
+    StopReason, TaskKind, TokenUsage, WorkingContext, WorkspaceId,
 };
 use moa_memory_graph::{NodeLabel, PiiClass};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorItem, VectorStore};
 use moa_session::testing;
 use serde_json::json;
-use support::{MemoryHit, WorkingContextFixture, capabilities, mem_hit, tool_schema};
+use sqlx::postgres::PgPoolOptions;
+use support::{
+    MemoryHit, MockSessionStore, WorkingContextFixture, capabilities, mem_hit, session_meta,
+    tool_schema,
+};
 use uuid::Uuid;
 
 const QUERY_REWRITE_METADATA_KEY: &str = "query_rewrite";
 const HISTORY_END_INDEX_METADATA_KEY: &str = "_moa.history.end_index";
 const MEMORY_REMINDER_PREFIX: &str = "<memory-reminder>";
+
+#[tokio::test]
+async fn digest_processor_registers_at_documented_position() {
+    // Pins: standing digests are assembled after stable skills/query rewriting and before graph memory.
+    let mut config = MoaConfig::default();
+    config.memory.digest.enabled = true;
+    let pool = PgPoolOptions::new()
+        .connect_lazy("postgres://localhost/moa_test")
+        .expect("lazy pool should not connect");
+    let session_store = Arc::new(MockSessionStore::new(
+        session_meta("digest-pipeline", "mock"),
+        Vec::new(),
+    ));
+
+    let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
+        &config,
+        session_store,
+        GraphMemoryPipelineOptions {
+            graph_pool: pool,
+            shared_graph_memory_retriever: None,
+            compaction_llm_provider: None,
+            query_rewrite_llm_provider: None,
+            discovered_workspace_instructions: None,
+            tool_schemas: Vec::new(),
+            lineage: Arc::new(NullLineageHandle),
+        },
+    );
+    let names = pipeline.stage_names();
+    let digest = names
+        .iter()
+        .position(|name| *name == "memory_digest")
+        .expect("digest processor should be registered");
+    let graph_memory = names
+        .iter()
+        .position(|name| *name == "graph_memory")
+        .expect("graph memory processor should be registered");
+
+    assert!(digest < graph_memory);
+    assert_eq!(names[digest + 1], "graph_memory");
+}
 
 #[tokio::test]
 async fn identity_stage_emits_stable_system_message_with_workspace_and_runtime_metadata()

@@ -21,6 +21,8 @@ pub struct MemoryConfig {
     pub extraction: MemoryExtractionConfig,
     /// Graph-memory vector embedding configuration.
     pub vector: MemoryVectorConfig,
+    /// Standing memory digest rebuild and injection configuration.
+    pub digest: MemoryDigestConfig,
 }
 
 impl Default for MemoryConfig {
@@ -33,6 +35,29 @@ impl Default for MemoryConfig {
             retrieval: MemoryRetrievalConfig::default(),
             extraction: MemoryExtractionConfig::default(),
             vector: MemoryVectorConfig::default(),
+            digest: MemoryDigestConfig::default(),
+        }
+    }
+}
+
+/// Standing user/workspace digest configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryDigestConfig {
+    /// Whether the brain context pipeline injects stored digest rows.
+    pub enabled: bool,
+    /// Maximum rendered digest size using the rough chars/4 token estimate.
+    pub max_tokens: usize,
+    /// Minimum interval between digest row rebuilds during consolidation.
+    pub rebuild_min_interval_hours: i64,
+}
+
+impl Default for MemoryDigestConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_tokens: 600,
+            rebuild_min_interval_hours: 6,
         }
     }
 }

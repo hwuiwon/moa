@@ -214,12 +214,6 @@ pub async fn vector_leg(
         return Ok(Vec::new());
     }
 
-    let label_filter = req.label_filter.as_ref().map(|labels| {
-        labels
-            .iter()
-            .map(|label| label.as_str().to_string())
-            .collect::<Vec<_>>()
-    });
     let hits = vector
         .knn(&VectorQuery {
             workspace_id: req
@@ -228,7 +222,7 @@ pub async fn vector_leg(
                 .map(|workspace_id| workspace_id.to_string()),
             embedding: req.query_embedding.clone(),
             k: VECTOR_LIMIT,
-            label_filter,
+            label_filter: Some(effective_label_filter_values(req.label_filter.as_deref())),
             max_pii_class: req.max_pii_class.as_str().to_string(),
             include_global: true,
             as_of: req.as_of,
@@ -271,19 +265,9 @@ pub async fn lexical_leg(
               END <= "#,
     );
     builder.push_bind(pii_rank(req.max_pii_class));
-    if let Some(labels) = req
-        .label_filter
-        .as_ref()
-        .filter(|labels| !labels.is_empty())
-    {
-        let label_values = labels
-            .iter()
-            .map(|label| label.as_str().to_string())
-            .collect::<Vec<_>>();
-        builder.push(" AND label = ANY(");
-        builder.push_bind(label_values);
-        builder.push(")");
-    }
+    builder.push(" AND label = ANY(");
+    builder.push_bind(effective_label_filter_values(req.label_filter.as_deref()));
+    builder.push(")");
     builder.push(
         r#"
         ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', "#,
@@ -347,19 +331,9 @@ async fn lexical_fallback_leg(
               END <= "#,
     );
     builder.push_bind(pii_rank(req.max_pii_class));
-    if let Some(labels) = req
-        .label_filter
-        .as_ref()
-        .filter(|labels| !labels.is_empty())
-    {
-        let label_values = labels
-            .iter()
-            .map(|label| label.as_str().to_string())
-            .collect::<Vec<_>>();
-        builder.push(" AND node.label = ANY(");
-        builder.push_bind(label_values);
-        builder.push(")");
-    }
+    builder.push(" AND node.label = ANY(");
+    builder.push_bind(effective_label_filter_values(req.label_filter.as_deref()));
+    builder.push(")");
     builder.push(
         r#"
         ORDER BY matches.match_count DESC, "#,
@@ -573,17 +547,43 @@ fn pii_rank(class: PiiClass) -> i32 {
     }
 }
 
+fn effective_label_filter_values(label_filter: Option<&[NodeLabel]>) -> Vec<String> {
+    match label_filter.filter(|labels| !labels.is_empty()) {
+        Some(labels) => labels
+            .iter()
+            .map(|label| label.as_str().to_string())
+            .collect(),
+        None => [
+            NodeLabel::Concept,
+            NodeLabel::Decision,
+            NodeLabel::Incident,
+            NodeLabel::Lesson,
+            NodeLabel::Fact,
+            NodeLabel::Source,
+        ]
+        .into_iter()
+        .map(|label| label.as_str().to_string())
+        .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
+    use async_trait::async_trait;
     use chrono::TimeZone;
+    use moa_core::{MemoryScope, WorkspaceId};
     use moa_memory_graph::{EdgeLabel, GraphExpansionHit, NodeIndexRow, NodeLabel, PiiClass};
+    use moa_memory_vector::{Error as VectorError, VectorItem, VectorMatch, VectorQuery};
+    use sqlx::PgConnection;
     use uuid::Uuid;
 
     use super::{
-        GRAPH_WEIGHT, LEXICAL_WEIGHT, LegCandidate, VECTOR_WEIGHT, exact_seed_candidates,
-        lexical_fallback_terms, merge_ordered_uids, rrf_fuse, score_expansion,
+        GRAPH_WEIGHT, LEXICAL_WEIGHT, LegCandidate, RetrievalRequest, VECTOR_WEIGHT,
+        exact_seed_candidates, lexical_fallback_terms, merge_ordered_uids, rrf_fuse,
+        score_expansion, vector_leg,
     };
 
     #[test]
@@ -756,6 +756,39 @@ mod tests {
         assert_eq!(ordered, vec![fact]);
     }
 
+    #[tokio::test]
+    async fn vector_leg_excludes_entity_labels_unless_explicitly_requested() {
+        // Pins: vector retrieval follows the same Entity-conduit default as graph expansion.
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let vector = RecordingVectorStore {
+            observed: Arc::clone(&observed),
+        };
+        let mut request = retrieval_request();
+
+        vector_leg(&vector, &request)
+            .await
+            .expect("default vector leg should run");
+        request.label_filter = Some(vec![NodeLabel::Entity]);
+        vector_leg(&vector, &request)
+            .await
+            .expect("explicit entity vector leg should run");
+
+        let observed = observed.lock().expect("observed label filters").clone();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(
+            observed[0],
+            Some(vec![
+                "Concept".to_string(),
+                "Decision".to_string(),
+                "Incident".to_string(),
+                "Lesson".to_string(),
+                "Fact".to_string(),
+                "Source".to_string(),
+            ])
+        );
+        assert_eq!(observed[1], Some(vec!["Entity".to_string()]));
+    }
+
     #[test]
     fn score_expansion_orders_by_activation_then_uid() {
         // Pins: activation ties sort by uid for byte-stable reports.
@@ -863,6 +896,73 @@ mod tests {
 
     fn uid(value: u128) -> Uuid {
         Uuid::from_u128(value)
+    }
+
+    fn retrieval_request() -> RetrievalRequest {
+        RetrievalRequest {
+            seeds: Vec::new(),
+            query_text: "who owns the dependency".to_string(),
+            query_embedding: vec![0.1, 0.2],
+            scope: MemoryScope::Workspace {
+                workspace_id: WorkspaceId::new("workspace-a"),
+            },
+            label_filter: None,
+            max_pii_class: PiiClass::Restricted,
+            k_final: 4,
+            use_reranker: false,
+            strategy: None,
+            as_of: None,
+            ranking_reference_time: None,
+            disable_leg_timeouts: true,
+            disable_graph_expansion: false,
+        }
+    }
+
+    struct RecordingVectorStore {
+        observed: Arc<Mutex<Vec<Option<Vec<String>>>>>,
+    }
+
+    #[async_trait]
+    impl moa_memory_vector::VectorStore for RecordingVectorStore {
+        fn backend(&self) -> &'static str {
+            "recording"
+        }
+
+        fn dimension(&self) -> usize {
+            2
+        }
+
+        async fn upsert(&self, _items: &[VectorItem]) -> Result<(), VectorError> {
+            Ok(())
+        }
+
+        async fn upsert_in_tx(
+            &self,
+            _conn: &mut PgConnection,
+            _items: &[VectorItem],
+        ) -> Result<(), VectorError> {
+            Ok(())
+        }
+
+        async fn knn(&self, query: &VectorQuery) -> Result<Vec<VectorMatch>, VectorError> {
+            self.observed
+                .lock()
+                .expect("observed label filters")
+                .push(query.label_filter.clone());
+            Ok(Vec::new())
+        }
+
+        async fn delete(&self, _uids: &[Uuid]) -> Result<(), VectorError> {
+            Ok(())
+        }
+
+        async fn delete_in_tx(
+            &self,
+            _conn: &mut PgConnection,
+            _uids: &[Uuid],
+        ) -> Result<(), VectorError> {
+            Ok(())
+        }
     }
 
     fn expansion_hit(seed: Uuid, uid: Uuid, hop: u8, edges: Vec<EdgeLabel>) -> GraphExpansionHit {

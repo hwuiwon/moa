@@ -23,6 +23,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
                 .with_extractor_mode(options.extractor_mode)
                 .with_lane(options.lane)
                 .with_consolidation(options.consolidate)
+                .with_digests(options.digests)
                 .apply_budget_usd(options.budget_usd)
                 .apply_extractions_path(options.extractions_path.clone())
                 .apply_merges_path(options.merges_path.clone()),
@@ -41,7 +42,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .map(str::to_string)
         .unwrap_or_else(|| format!("{:?}", options.extractor_mode));
     println!(
-        "wrote memory retrieval eval report: output={} probes={} lane={:?} ranking={:?} reranker={} extractor={} consolidate={} merged={} duplicates_remaining={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} p95_retrieval_latency_ms={}",
+        "wrote memory retrieval eval report: output={} probes={} lane={:?} ranking={:?} reranker={} extractor={} consolidate={} digests={} merged={} duplicates_remaining={} digests_rebuilt={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} preference_context_rate={:.3} p95_retrieval_latency_ms={}",
         options.output.display(),
         report.probe_results.len(),
         options.lane,
@@ -49,6 +50,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         if report.reranker_enabled { "on" } else { "off" },
         reported_extractor,
         options.consolidate,
+        options.digests,
         report
             .consolidation
             .as_ref()
@@ -57,12 +59,17 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
             .consolidation
             .as_ref()
             .map_or(0, |value| value.duplicates_remaining),
+        report
+            .consolidation
+            .as_ref()
+            .map_or(0, |value| value.digests_rebuilt),
         report.cost.as_ref().map_or(0.0, |cost| cost.est_usd),
         report.aborted_over_budget,
         report.metrics.pre_rerank_recall_at_4.value,
         report.metrics.pre_rerank_recall_at_25.value,
         report.metrics.post_rerank_recall_at_4.value,
         report.metrics.ndcg_at_4.value,
+        report.metrics.preference_context_rate.value,
         report.metrics.p95_retrieval_latency_ms
     );
     Ok(())
@@ -80,6 +87,7 @@ struct Options {
     lane: EvalLane,
     budget_usd: Option<f64>,
     consolidate: bool,
+    digests: bool,
 }
 
 impl Options {
@@ -94,6 +102,7 @@ impl Options {
         let mut lane = EvalLane::Pr;
         let mut budget_usd = None;
         let mut consolidate = false;
+        let mut digests = false;
         let mut extractor_specified = false;
         let mut args = args.peekable();
 
@@ -123,6 +132,9 @@ impl Options {
                 }
                 "--consolidate" => {
                     consolidate = true;
+                }
+                "--digests" => {
+                    digests = true;
                 }
                 "--ranking" => {
                     let value = args
@@ -219,12 +231,13 @@ impl Options {
             lane,
             budget_usd,
             consolidate,
+            digests,
         })
     }
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--reranker off|on] [--ranking legacy|feature_v1] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
+    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--reranker off|on] [--ranking legacy|feature_v1] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
 }
 
 fn parse_reranker(value: &str) -> Result<bool> {

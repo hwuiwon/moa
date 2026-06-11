@@ -116,6 +116,12 @@ pub struct MoaEnvOverlay {
     pub memory_embedding_model: Option<String>,
     /// `MOA_MEMORY_RETRIEVAL_RERANKER_MODE`.
     pub memory_retrieval_reranker_mode: Option<MemoryRerankerMode>,
+    /// `MOA_MEMORY_DIGEST_ENABLED`.
+    pub memory_digest_enabled: Option<bool>,
+    /// `MOA_MEMORY_DIGEST_MAX_TOKENS`.
+    pub memory_digest_max_tokens: Option<usize>,
+    /// `MOA_MEMORY_DIGEST_REBUILD_MIN_INTERVAL_HOURS`.
+    pub memory_digest_rebuild_min_interval_hours: Option<i64>,
     /// `MOA_MEMORY_EXTRACTION_ENABLED`.
     pub memory_extraction_enabled: Option<bool>,
     /// `MOA_MEMORY_EXTRACTION_API_KEY_ENV`.
@@ -454,6 +460,18 @@ impl MoaEnvOverlay {
         set_copy_if_some(
             &mut config.memory.retrieval.reranker_mode,
             self.memory_retrieval_reranker_mode,
+        );
+        set_copy_if_some(
+            &mut config.memory.digest.enabled,
+            self.memory_digest_enabled,
+        );
+        set_copy_if_some(
+            &mut config.memory.digest.max_tokens,
+            self.memory_digest_max_tokens,
+        );
+        set_copy_if_some(
+            &mut config.memory.digest.rebuild_min_interval_hours,
+            self.memory_digest_rebuild_min_interval_hours,
         );
         set_copy_if_some(
             &mut config.memory.extraction.enabled,
@@ -1029,6 +1047,9 @@ struct RawMoaEnvOverlay {
     memory_embedding_provider: Option<String>,
     memory_embedding_model: Option<String>,
     memory_retrieval_reranker_mode: Option<String>,
+    memory_digest_enabled: Option<String>,
+    memory_digest_max_tokens: Option<String>,
+    memory_digest_rebuild_min_interval_hours: Option<String>,
     memory_extraction_enabled: Option<String>,
     memory_extraction_api_key_env: Option<String>,
     memory_extraction_model: Option<String>,
@@ -1273,6 +1294,18 @@ impl TryFrom<RawMoaEnvOverlay> for MoaEnvOverlay {
             memory_retrieval_reranker_mode: parse_optional(
                 "MOA_MEMORY_RETRIEVAL_RERANKER_MODE",
                 raw.memory_retrieval_reranker_mode,
+            )?,
+            memory_digest_enabled: parse_optional(
+                "MOA_MEMORY_DIGEST_ENABLED",
+                raw.memory_digest_enabled,
+            )?,
+            memory_digest_max_tokens: parse_optional(
+                "MOA_MEMORY_DIGEST_MAX_TOKENS",
+                raw.memory_digest_max_tokens,
+            )?,
+            memory_digest_rebuild_min_interval_hours: parse_optional(
+                "MOA_MEMORY_DIGEST_REBUILD_MIN_INTERVAL_HOURS",
+                raw.memory_digest_rebuild_min_interval_hours,
             )?,
             memory_extraction_enabled: parse_optional(
                 "MOA_MEMORY_EXTRACTION_ENABLED",
@@ -1773,6 +1806,9 @@ mod tests {
             ("MOA_LOCAL_SANDBOX_DIR", "/tmp/moa-sandbox"),
             ("MOA_PII_SERVICE_URL", "http://pii.example:8080"),
             ("MOA_MEMORY_RETRIEVAL_RERANKER_MODE", "eval_only"),
+            ("MOA_MEMORY_DIGEST_ENABLED", "true"),
+            ("MOA_MEMORY_DIGEST_MAX_TOKENS", "384"),
+            ("MOA_MEMORY_DIGEST_REBUILD_MIN_INTERVAL_HOURS", "12"),
             ("MOA_MEMORY_VECTOR_EMBEDDER_OUTPUT_DIM", "1536"),
             ("MOA_TURBOPUFFER_API_KEY_ENV", "CUSTOM_TURBOPUFFER_KEY"),
             ("MOA_TURBOPUFFER_BASE_URL", "https://tpuf.example"),
@@ -1829,6 +1865,9 @@ mod tests {
             config.memory.retrieval.reranker_mode,
             MemoryRerankerMode::EvalOnly
         );
+        assert!(config.memory.digest.enabled);
+        assert_eq!(config.memory.digest.max_tokens, 384);
+        assert_eq!(config.memory.digest.rebuild_min_interval_hours, 12);
         assert_eq!(
             config.memory.vector.turbopuffer.api_key_env,
             "CUSTOM_TURBOPUFFER_KEY"

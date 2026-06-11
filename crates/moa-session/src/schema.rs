@@ -133,6 +133,14 @@ const SESSION_MIGRATIONS: &[SessionMigration] = &[
         name: "030_skill_packages.sql",
         sql: include_str!("../migrations/postgres/030_skill_packages.sql"),
     },
+    SessionMigration {
+        name: "031_age_owned_by_edge.sql",
+        sql: include_str!("../migrations/postgres/031_age_owned_by_edge.sql"),
+    },
+    SessionMigration {
+        name: "032_memory_digests.sql",
+        sql: include_str!("../migrations/postgres/032_memory_digests.sql"),
+    },
 ];
 
 pub(crate) const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;

@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use chrono::{Duration, TimeZone, Utc};
 use moa_core::WorkspaceId;
 use moa_memory_lifecycle::{
-    BackfillStats, ConsolidationOutcome, DecayStats, MergeStats, SweepStats,
+    BackfillStats, ConsolidationOutcome, DecayStats, DigestStats, MergeStats, SweepStats,
 };
 use moa_orchestrator::workflows::consolidate::{
     ConsolidateDurableSteps, ConsolidateReport, ConsolidateRequest, run_consolidate_workflow,
@@ -105,6 +105,14 @@ impl ConsolidateDurableSteps for RecordedConsolidateSteps<'_> {
             .run("backfill", request, BackfillStats::default))
     }
 
+    async fn rebuild_digests(
+        &mut self,
+        request: &ConsolidateRequest,
+        _now: chrono::DateTime<Utc>,
+    ) -> Result<DigestStats, HandlerError> {
+        Ok(self.recorder.run("digest", request, DigestStats::default))
+    }
+
     async fn build_consolidate_report(
         &mut self,
         request: &ConsolidateRequest,
@@ -134,6 +142,7 @@ impl ConsolidateDurableSteps for RecordedConsolidateSteps<'_> {
             && report.duplicates_merged == 0
             && report.entity_embeddings_backfilled == 0
             && report.aliases_promoted == 0
+            && report.digests_rebuilt == 0
             && report.errors.is_empty()
         {
             return Ok(());

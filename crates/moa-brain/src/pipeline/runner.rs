@@ -54,6 +54,11 @@ impl ContextPipeline {
         self.stages.len()
     }
 
+    /// Returns the configured processor names in execution order.
+    pub fn stage_names(&self) -> Vec<&str> {
+        self.stages.iter().map(|stage| stage.name()).collect()
+    }
+
     /// Returns the snapshot configuration used by history compilation.
     pub fn snapshot_config(&self) -> &ContextSnapshotConfig {
         &self.snapshot_config

@@ -49,6 +49,7 @@ The metric surface is:
 - `temporal_as_of_accuracy`
 - `temporal_parse_rate`
 - `temporal_parse_mismatch_count`
+- `preference_context_rate`
 - `per_leg_recall`
 
 `per_leg_recall` attributes expected fact recall to graph, vector, and lexical
@@ -58,8 +59,16 @@ ranking or indexing feature.
 When present, `consolidation` is the `moa-memory-lifecycle`
 `ConsolidationOutcome`: `merged`, `decayed`, `at_floor`,
 `contradiction_supersessions`, `entity_embeddings_backfilled`,
-`aliases_promoted`, and `duplicates_remaining`. Old reports omit this section
-and still deserialize with `consolidation: null`.
+`aliases_promoted`, `duplicates_remaining`, `digests_rebuilt`, and
+`digests_skipped_fresh`. Old reports omit this section and still deserialize
+with `consolidation: null`.
+
+`preference_context_rate` is a memory-suite extension for standing digests. For
+each `preference_application` probe, the runner checks whether the expected
+preference appears in the union of that user's digest content and the probe's
+final top-4 candidate facts. The existing `preference_application` retrieval
+slice remains retrieval-only; the gap between the two numbers shows how much
+standing context is helping without hiding ranking misses.
 
 The graph leg is a seeded expansion leg. Retrieval runs vector and lexical
 first, then expands from planner NER seeds plus the top phase-one fused hits.
@@ -202,6 +211,20 @@ runs a second pass in the same invocation. The second pass must report no
 mutating work; otherwise the run fails as non-idempotent. For every
 `restates` pair, the runner verifies via the gold UID map and a direct active
 row count that exactly one node remains active.
+
+To build standing profile digests and score preference context, add
+`--digests`. When combined with `--consolidate`, the digest rebuild runs as the
+consolidation digest step. Without `--consolidate`, the eval calls
+`moa_memory_lifecycle::rebuild_digests` directly after gold resolution:
+
+```bash
+env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+  --corpus target/memory-eval/pr-natural \
+  --extractor recorded \
+  --consolidate \
+  --digests \
+  --output target/memory-eval/natural-recorded-digests.json
+```
 
 Extraction fixtures are keyed by the SHA-256 hex hash of the raw chunk text the
 extractor saw. The file name and every record carry the extraction prompt

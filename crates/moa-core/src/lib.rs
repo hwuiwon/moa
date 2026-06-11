@@ -31,11 +31,12 @@ pub use config::{
     CohereEmbedderConfig, CompactionConfig, ContextSnapshotConfig, DatabaseConfig,
     DatabaseNeonConfig, GatewayConfig, GeminiEmbedderConfig, GeneralConfig, LineageConfig,
     LocalConfig, McpCredentialConfig, McpServerConfig, McpTransportConfig, MemoryConfig,
-    MemoryRankingConfig, MemoryRankingMode, MemoryRankingWeights, MemoryRerankerMode,
-    MemoryRetrievalConfig, MemoryVectorConfig, MetricsConfig, MoaConfig, ModelsConfig,
-    ObservabilityConfig, OpenFgaConfig, OrchestratorConfig, OtlpProtocol, PermissionsConfig,
-    ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig, ResolutionConfig,
-    ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig, VectorEmbedderConfig,
+    MemoryDigestConfig, MemoryRankingConfig, MemoryRankingMode, MemoryRankingWeights,
+    MemoryRerankerMode, MemoryRetrievalConfig, MemoryVectorConfig, MetricsConfig, MoaConfig,
+    ModelsConfig, ObservabilityConfig, OpenFgaConfig, OrchestratorConfig, OtlpProtocol,
+    PermissionsConfig, ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig,
+    ResolutionConfig, ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig,
+    VectorEmbedderConfig,
 };
 pub use db::ScopedConn;
 pub use diff::compute_unified_diff;

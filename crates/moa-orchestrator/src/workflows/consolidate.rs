@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use moa_core::{LearningEntry, WorkspaceId};
 use moa_memory_lifecycle::{
-    BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, MergeStats, SweepStats,
+    BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, DigestStats, MergeStats,
+    SweepStats,
 };
 use restate_sdk::prelude::*;
 use uuid::Uuid;
@@ -56,6 +57,12 @@ pub struct ConsolidateReport {
     /// Alias mentions promoted onto Entity node properties.
     #[serde(default)]
     pub aliases_promoted: u64,
+    /// Digest rows rebuilt or inserted.
+    #[serde(default)]
+    pub digests_rebuilt: u64,
+    /// Digest rows skipped because they were fresher than the rebuild interval.
+    #[serde(default)]
+    pub digests_skipped_fresh: u64,
     /// Orphaned graph record identifiers detected during the pass.
     pub orphaned_records: Vec<String>,
     /// Summary record count before consolidation.
@@ -91,6 +98,8 @@ impl ConsolidateReport {
             confidence_at_floor: 0,
             entity_embeddings_backfilled: 0,
             aliases_promoted: 0,
+            digests_rebuilt: 0,
+            digests_skipped_fresh: 0,
             orphaned_records: Vec::new(),
             summary_records_before: 0,
             summary_records_after: 0,
@@ -122,6 +131,8 @@ impl ConsolidateReport {
             confidence_at_floor: 0,
             entity_embeddings_backfilled: 0,
             aliases_promoted: 0,
+            digests_rebuilt: 0,
+            digests_skipped_fresh: 0,
             orphaned_records: Vec::new(),
             summary_records_before: 0,
             summary_records_after: 0,
@@ -143,7 +154,8 @@ impl ConsolidateReport {
             + outcome.decayed
             + outcome.contradiction_supersessions
             + outcome.entity_embeddings_backfilled
-            + outcome.aliases_promoted;
+            + outcome.aliases_promoted
+            + outcome.digests_rebuilt;
         Self {
             workspace_id,
             target_date,
@@ -158,6 +170,8 @@ impl ConsolidateReport {
             confidence_at_floor: outcome.at_floor,
             entity_embeddings_backfilled: outcome.entity_embeddings_backfilled,
             aliases_promoted: outcome.aliases_promoted,
+            digests_rebuilt: outcome.digests_rebuilt,
+            digests_skipped_fresh: outcome.digests_skipped_fresh,
             orphaned_records: Vec::new(),
             summary_records_before: 0,
             summary_records_after: 0,
@@ -234,6 +248,13 @@ pub trait ConsolidateDurableSteps {
         request: &ConsolidateRequest,
     ) -> Result<BackfillStats, HandlerError>;
 
+    /// Runs the deterministic standing digest rebuild step.
+    async fn rebuild_digests(
+        &mut self,
+        request: &ConsolidateRequest,
+        now: DateTime<Utc>,
+    ) -> Result<DigestStats, HandlerError>;
+
     /// Builds the final consolidation report behind a journaled durable step.
     async fn build_consolidate_report(
         &mut self,
@@ -266,6 +287,7 @@ pub async fn run_consolidate_workflow(
     let decay = steps.decay_confidence(&request, ran_at).await?;
     let sweep = steps.sweep_contradictions(&request, ran_at).await?;
     let backfill = steps.backfill_entities(&request).await?;
+    let digest = steps.rebuild_digests(&request, ran_at).await?;
     let outcome = ConsolidationOutcome {
         merged: merge.merged,
         decayed: decay.decayed,
@@ -274,6 +296,8 @@ pub async fn run_consolidate_workflow(
         entity_embeddings_backfilled: backfill.entity_embeddings_backfilled,
         aliases_promoted: backfill.aliases_promoted,
         duplicates_remaining: merge.duplicates_remaining,
+        digests_rebuilt: digest.digests_rebuilt,
+        digests_skipped_fresh: digest.digests_skipped_fresh,
     };
     let report = steps
         .build_consolidate_report(&request, ran_at, outcome)
@@ -396,6 +420,28 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
             .map_err(HandlerError::from)
     }
 
+    async fn rebuild_digests(
+        &mut self,
+        request: &ConsolidateRequest,
+        now: DateTime<Utc>,
+    ) -> Result<DigestStats, HandlerError> {
+        let runtime = OrchestratorCtx::current();
+        let pool = runtime.graph_pool.clone();
+        let workspace_id = request.workspace_id.clone();
+        let digest_config = runtime.config.memory.digest.clone();
+        self.ctx
+            .run(|| async move {
+                moa_memory_lifecycle::rebuild_digests(&pool, &workspace_id, now, &digest_config)
+                    .await
+                    .map(Json::from)
+                    .map_err(lifecycle_handler_error)
+            })
+            .name("digest")
+            .await
+            .map(Json::into_inner)
+            .map_err(HandlerError::from)
+    }
+
     async fn build_consolidate_report(
         &mut self,
         request: &ConsolidateRequest,
@@ -454,6 +500,7 @@ async fn record_memory_learning(
         && report.duplicates_merged == 0
         && report.entity_embeddings_backfilled == 0
         && report.aliases_promoted == 0
+        && report.digests_rebuilt == 0
     {
         return Ok(());
     }
@@ -479,6 +526,8 @@ async fn record_memory_learning(
                     "confidence_at_floor": report.confidence_at_floor,
                     "entity_embeddings_backfilled": report.entity_embeddings_backfilled,
                     "aliases_promoted": report.aliases_promoted,
+                    "digests_rebuilt": report.digests_rebuilt,
+                    "digests_skipped_fresh": report.digests_skipped_fresh,
                 }),
                 confidence: Some(1.0),
                 source_refs: Vec::new(),

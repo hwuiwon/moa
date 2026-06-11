@@ -50,6 +50,9 @@ pub struct RetrievedCandidate {
     pub score: f64,
     /// Ledger fact resolved to this candidate, when known.
     pub fact_id: Option<String>,
+    /// Other ledger facts represented by this candidate after consolidation supersession.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equivalent_fact_ids: Vec<String>,
     /// Retrieval legs that contributed this candidate.
     pub legs: CandidateLegs,
 }
@@ -92,6 +95,9 @@ pub struct ProbeResult {
     /// Whether the parsed temporal filter matched the probe's encoded `as_of` instant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temporal_filter_matches_as_of: Option<bool>,
+    /// Whether preference context was present in digest content or the top-4 retrieval window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preference_context_hit: Option<bool>,
 }
 
 impl ProbeResult {
@@ -136,9 +142,8 @@ impl ProbeResult {
             .filter(|candidate| candidate.rank > 0)
             .filter_map(|candidate| {
                 candidate
-                    .fact_id
-                    .as_deref()
-                    .filter(|fact_id| expected.contains(*fact_id))
+                    .matching_expected_fact_ids(&expected)
+                    .next()
                     .map(|_| candidate.rank)
             })
             .min()
@@ -161,11 +166,11 @@ impl ProbeResult {
             .iter()
             .filter(|candidate| candidate.rank > 0 && candidate.rank <= k)
         {
-            let Some(fact_id) = candidate.fact_id.as_deref() else {
-                continue;
-            };
-            if expected.contains(fact_id) && seen.insert(fact_id.to_string()) {
-                dcg += discount(candidate.rank);
+            for fact_id in candidate.matching_expected_fact_ids(&expected) {
+                if seen.insert(fact_id.to_string()) {
+                    dcg += discount(candidate.rank);
+                    break;
+                }
             }
         }
 
@@ -203,11 +208,7 @@ impl ProbeResult {
             .iter()
             .filter(|candidate| candidate.rank > 0 && candidate.rank <= RECALL_AT_25)
         {
-            if let Some(fact_id) = candidate
-                .fact_id
-                .as_deref()
-                .filter(|fact_id| blocked.contains(*fact_id))
-            {
+            for fact_id in candidate.matching_expected_fact_ids(&blocked) {
                 leaked.insert(fact_id.to_string());
             }
         }
@@ -222,6 +223,23 @@ impl ProbeResult {
         self.post_rerank_candidates
             .as_deref()
             .unwrap_or(&self.candidates)
+    }
+}
+
+impl RetrievedCandidate {
+    fn fact_ids(&self) -> impl Iterator<Item = &str> {
+        self.fact_id
+            .as_deref()
+            .into_iter()
+            .chain(self.equivalent_fact_ids.iter().map(String::as_str))
+    }
+
+    fn matching_expected_fact_ids<'a>(
+        &'a self,
+        expected: &'a BTreeSet<&'a str>,
+    ) -> impl Iterator<Item = &'a str> {
+        self.fact_ids()
+            .filter(|fact_id| expected.contains(*fact_id))
     }
 }
 
@@ -271,6 +289,9 @@ pub struct RetrievalMetrics {
     /// Number of temporal probes where the parser fired but produced the wrong instant.
     #[serde(default)]
     pub temporal_parse_mismatch_count: usize,
+    /// Fraction of preference probes whose expected preference appears in digest or top-4 context.
+    #[serde(default)]
+    pub preference_context_rate: MetricSummary,
 }
 
 /// Counts used to compute stored-Fact extraction precision.
@@ -323,6 +344,7 @@ pub struct RetrievalEvalReport {
 pub fn candidates_from_retrieval_hits(
     hits: &[RetrievalHit],
     fact_ids_by_uid: &HashMap<Uuid, String>,
+    equivalent_fact_ids_by_uid: &HashMap<Uuid, Vec<String>>,
 ) -> Vec<RetrievedCandidate> {
     hits.iter()
         .enumerate()
@@ -331,6 +353,10 @@ pub fn candidates_from_retrieval_hits(
             rank: index + 1,
             score: hit.score,
             fact_id: fact_ids_by_uid.get(&hit.uid).cloned(),
+            equivalent_fact_ids: equivalent_fact_ids_by_uid
+                .get(&hit.uid)
+                .cloned()
+                .unwrap_or_default(),
             legs: CandidateLegs::from(hit.legs),
         })
         .collect()
@@ -542,6 +568,7 @@ fn aggregate_metrics(
         }),
         temporal_parse_rate: temporal_parse_rate(probe_results),
         temporal_parse_mismatch_count: temporal_parse_mismatch_count(probe_results),
+        preference_context_rate: preference_context_rate(probe_results),
     }
 }
 
@@ -559,11 +586,7 @@ fn retrieved_expected_fact_ids(
         if !leg_filter(candidate.legs) {
             continue;
         }
-        if let Some(fact_id) = candidate
-            .fact_id
-            .as_deref()
-            .filter(|fact_id| expected.contains(*fact_id))
-        {
+        for fact_id in candidate.matching_expected_fact_ids(expected) {
             found.insert(fact_id.to_string());
         }
     }
@@ -614,6 +637,15 @@ fn temporal_parse_mismatch_count(probe_results: &[ProbeResult]) -> usize {
         .filter(|probe| probe.temporal_filter_parsed == Some(true))
         .filter(|probe| probe.temporal_filter_matches_as_of == Some(false))
         .count()
+}
+
+fn preference_context_rate(probe_results: &[ProbeResult]) -> MetricSummary {
+    summarize_probe_values(probe_results, |probe| {
+        (probe.probe_type == ProbeType::PreferenceApplication)
+            .then_some(probe.preference_context_hit)
+            .flatten()
+            .map(bool_value)
+    })
 }
 
 fn summarize_probe_values(
@@ -743,4 +775,137 @@ fn percentile_retrieval_latency_ms(probe_results: &[ProbeResult], percentile: f6
     values.sort_unstable();
     let rank = (values.len() as f64 * percentile).ceil() as usize;
     values[rank.saturating_sub(1).min(values.len() - 1)]
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn preference_context_rate_unions_digest_and_top4() {
+        // Pins: preference context scoring aggregates the per-probe digest/top-4 hit flag.
+        let report = aggregate_retrieval_eval_from_counts(
+            0,
+            0,
+            vec![
+                probe_result("pref-hit", Some(true)),
+                probe_result("pref-miss", Some(false)),
+                ProbeResult {
+                    probe_id: "point".to_string(),
+                    probe_type: ProbeType::PointRecall,
+                    preference_context_hit: None,
+                    ..probe_result("point", None)
+                },
+            ],
+            BootstrapConfig {
+                resamples: 0,
+                seed: 1,
+            },
+        );
+
+        assert_eq!(report.metrics.preference_context_rate.numerator, 1.0);
+        assert_eq!(report.metrics.preference_context_rate.denominator, 2);
+        assert_eq!(report.metrics.preference_context_rate.value, 0.5);
+    }
+
+    #[test]
+    fn retrieval_metrics_deserialize_without_preference_context_rate() {
+        // Pins: pre-digest reports load with a default preference_context_rate.
+        let metrics = serde_json::from_value::<RetrievalMetrics>(json!({
+            "recall_at_4": metric(),
+            "recall_at_25": metric(),
+            "mrr": metric(),
+            "ndcg_at_4": metric(),
+            "zero_recall_rate": metric(),
+            "per_leg_recall": {
+                "graph": metric(),
+                "vector": metric(),
+                "lexical": metric()
+            },
+            "cross_user_leak_count": 0,
+            "ingestion_coverage": metric(),
+            "answer_faithfulness": metric(),
+            "abstention_correctness": metric(),
+            "pii_redaction_rate": metric(),
+            "temporal_as_of_accuracy": metric()
+        }))
+        .expect("old metrics JSON should deserialize");
+
+        assert_eq!(metrics.preference_context_rate, MetricSummary::default());
+    }
+
+    #[test]
+    fn candidate_equivalent_fact_ids_count_for_ranked_metrics() {
+        // Pins: consolidation aliases preserve recall when an active canonical represents a merged fact.
+        let probe = ProbeResult {
+            probe_id: "probe-a".to_string(),
+            user_id: "user-a".to_string(),
+            probe_type: ProbeType::PointRecall,
+            expected_fact_ids: vec!["fact-merged".to_string()],
+            blocked_fact_ids: Vec::new(),
+            candidates: vec![RetrievedCandidate {
+                uid: Uuid::from_u128(1),
+                rank: 1,
+                score: 1.0,
+                fact_id: Some("fact-canonical".to_string()),
+                equivalent_fact_ids: vec!["fact-merged".to_string()],
+                legs: CandidateLegs::default(),
+            }],
+            post_rerank_candidates: None,
+            retrieval_latency_ms: 0,
+            answer_faithful: None,
+            abstention_correct: None,
+            pii_redacted: None,
+            temporal_as_of_correct: None,
+            temporal_filter_parsed: None,
+            temporal_filter_matches_as_of: None,
+            preference_context_hit: None,
+        };
+
+        assert_eq!(probe.recall_at(4), Some(1.0));
+        assert_eq!(probe.reciprocal_rank(), Some(1.0));
+        assert_eq!(probe.ndcg_at(4), Some(1.0));
+    }
+
+    fn probe_result(probe_id: &str, preference_context_hit: Option<bool>) -> ProbeResult {
+        ProbeResult {
+            probe_id: probe_id.to_string(),
+            user_id: "user-a".to_string(),
+            probe_type: ProbeType::PreferenceApplication,
+            expected_fact_ids: vec!["fact-a".to_string()],
+            blocked_fact_ids: Vec::new(),
+            candidates: vec![RetrievedCandidate {
+                uid: Uuid::from_u128(1),
+                rank: 1,
+                score: 1.0,
+                fact_id: Some("fact-a".to_string()),
+                equivalent_fact_ids: Vec::new(),
+                legs: CandidateLegs {
+                    graph: true,
+                    vector: false,
+                    lexical: false,
+                },
+            }],
+            post_rerank_candidates: None,
+            retrieval_latency_ms: 0,
+            answer_faithful: None,
+            abstention_correct: None,
+            pii_redacted: None,
+            temporal_as_of_correct: None,
+            temporal_filter_parsed: None,
+            temporal_filter_matches_as_of: None,
+            preference_context_hit,
+        }
+    }
+
+    fn metric() -> serde_json::Value {
+        json!({
+            "numerator": 0.0,
+            "denominator": 0,
+            "value": 0.0
+        })
+    }
 }

@@ -61,6 +61,8 @@ PII classification runs before durable memory writes. Sensitive text is either f
 
 ## Context Pipeline Integration
 
+The standing digest processor runs after query rewriting and before graph-memory retrieval when `memory.digest.enabled` is true. It reads exactly the current user's digest row and the workspace digest row from `moa.memory_digests` and injects them as background context. Digest rows are rebuilt on the consolidation cadence with a minimum interval, so this block changes on the digest rebuild cadence rather than every turn.
+
 The memory processor runs after query rewriting and before history compilation. It uses the rewritten query when available, otherwise it extracts keywords from the latest user message.
 
 It inserts ranked graph hits with labels, names, properties, provenance, and concise snippets. Memory content is inserted near the active turn so static prompt prefix caching remains stable.
@@ -69,14 +71,15 @@ It inserts ranked graph hits with labels, names, properties, provenance, and con
 
 Workspace consolidation is a scheduled maintenance pass. In cloud mode it is the `Consolidate` Restate workflow. Locally and in eval it runs through the shared `moa-memory-lifecycle` crate. The workflow is a thin durable wrapper; the memory logic does not depend on Restate, so hermetic eval runs and scheduled maintenance call the same code.
 
-Consolidation v1 runs four deterministic operations:
+Consolidation v1 runs five deterministic operations:
 
 - **Exact duplicate merge** groups active `Fact` nodes by `(workspace_id, user_id, scope, fact_hash)`. The canonical is the earliest `valid_from` row with UID as the tiebreak. Other active rows are closed with a `SUPERSEDES` edge in the same direction as normal graph supersession: replacement/canonical `-> SUPERSEDES -> old`.
 - **Anchored confidence decay** lowers confidence for idle facts. On first decay the current confidence is copied to `properties.base_confidence`; future runs recompute from that base instead of multiplying against the current value. This makes rerunning at the same `now` idempotent. Decay floors at the configured minimum and never deletes or invalidates a fact.
-- **Contradiction sweep** groups active facts by `(workspace_id, user_id, scope, subject, predicate)`. If a group contains multiple objects, the newest `valid_from` row wins with UID as the deterministic tiebreak, and older rows are superseded. No LLM judge runs in v1.
+- **Contradiction sweep** groups active facts by `(workspace_id, user_id, scope, subject, predicate)` only for explicit v1 update/contradiction predicates such as `cache_backend_conflict`, `deploy_target`, and `on_call_primary`. If a group contains multiple objects, the newest `valid_from` row wins with UID as the deterministic tiebreak, and older rows are superseded. Broad or multi-valued predicates such as preferences, contact email, dependency, owner, editor, `uses`, `is`, and `switched to` are not swept in v1 because recorded extraction can use them across unrelated facts. No LLM judge runs in v1.
 - **Entity backfill** embeds active `Entity` nodes that lack vector rows when an embedder is available, and promotes edge-level `alias_mention` values into `properties.aliases` through the graph property-update operation.
+- **Digest rebuild** renders deterministic standing user and workspace summaries from active `Fact` nodes above the decay floor. Preference-like predicates render first, then other facts, newest first within each tier. The renderer truncates at whole lines using a chars/4 token estimate and stores the included source fact UIDs in `moa.memory_digests`.
 
-The v1 pass deliberately does not do semantic near-duplicate merging, digest building, episode building, scope-drift repair, or destructive expiry. `at_floor` is reported for future policy design, but floor-bound facts remain active unless another write supersedes them.
+The v1 pass deliberately does not do semantic near-duplicate merging, LLM-polished digest prose, episode building, scope-drift repair, or destructive expiry. `at_floor` is reported for future policy design, but floor-bound facts remain active unless another write supersedes them.
 
 Successful consolidation appends a `memory_updated` entry to `learning_log`.
 

@@ -19,4 +19,6 @@ uuid.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+moa-brain = { path = "../../moa-brain" }
+moa-test-support = { path = "../../moa-test-support" }
 tokio.workspace = true

@@ -4236,10 +4236,12 @@ name = "moa-memory-lifecycle"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "moa-brain",
  "moa-core",
  "moa-memory-graph",
  "moa-memory-ingest",
  "moa-memory-vector",
+ "moa-test-support",
  "serde",
  "serde_json",
  "sqlx",

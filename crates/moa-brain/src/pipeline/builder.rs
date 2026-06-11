@@ -11,6 +11,7 @@ use moa_memory_vector::{EmbedderConstructionRole, build_embedder_from_config};
 
 use super::cache::CacheOptimizer;
 use super::compactor::Compactor;
+use super::digest::DigestProcessor;
 use super::history::HistoryCompiler;
 use super::identity::IdentityProcessor;
 use super::instructions::InstructionProcessor;
@@ -192,6 +193,12 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
     ];
     if let Some(query_rewriter) = query_rewriter {
         stages.push(query_rewriter);
+    }
+    if config.memory.digest.enabled {
+        stages.push(Box::new(DigestProcessor::new(
+            graph_pool.clone(),
+            config.memory.digest.clone(),
+        )));
     }
     stages.extend([
         graph_memory,

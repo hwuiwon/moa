@@ -35,9 +35,10 @@ pub use env_overlay::MoaEnvOverlay;
 pub use gateway::GatewayConfig;
 pub use lineage::LineageConfig;
 pub use memory::{
-    CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryExtractionConfig,
-    MemoryRankingConfig, MemoryRankingMode, MemoryRankingWeights, MemoryRerankerMode,
-    MemoryRetrievalConfig, MemoryVectorConfig, TurbopufferVectorConfig, VectorEmbedderConfig,
+    CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryDigestConfig,
+    MemoryExtractionConfig, MemoryRankingConfig, MemoryRankingMode, MemoryRankingWeights,
+    MemoryRerankerMode, MemoryRetrievalConfig, MemoryVectorConfig, TurbopufferVectorConfig,
+    VectorEmbedderConfig,
 };
 pub use orchestrator::OrchestratorConfig;
 pub use providers::{GeneralConfig, ModelsConfig, ProviderCredentialConfig, ProvidersConfig};
@@ -174,6 +175,9 @@ mod tests {
         "MOA_DATABASE_NEON_PROJECT_ID",
         "MOA_DATABASE_NEON_MAX_CHECKPOINTS",
         "MOA_MEMORY_RETRIEVAL_RERANKER_MODE",
+        "MOA_MEMORY_DIGEST_ENABLED",
+        "MOA_MEMORY_DIGEST_MAX_TOKENS",
+        "MOA_MEMORY_DIGEST_REBUILD_MIN_INTERVAL_HOURS",
         "MOA_MEMORY_EXTRACTION_ENABLED",
         "MOA_MEMORY_EXTRACTION_API_KEY_ENV",
         "MOA_MEMORY_EXTRACTION_MODEL",
