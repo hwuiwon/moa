@@ -115,6 +115,23 @@ These caveats are deliberate security trade-offs where the current implementatio
 
 These caveats relate to the gap between "cloud build succeeds" and "cloud deployment is fully self-service."
 
+### LLM fact extraction is journal-safe but still rollout-gated
+
+- `moa-memory-ingest` keeps the slow-path Restate step name as `"extract"` and
+  only extends `ExtractedFact` with an optional `confidence` field that defaults
+  during deserialization. Old journal entries without confidence still replay.
+- `memory.extraction.enabled` defaults to `false`. The orchestrator installs
+  the LLM extractor only when that flag is enabled and the configured
+  `memory.extraction.api_key_env` exists; otherwise it logs that the heuristic
+  extractor is active.
+- Production rollout order should be: deploy with extraction disabled, verify
+  normal ingestion and contradiction behavior, then enable per environment.
+- The shared Cohere chat transport now lives inside `moa-memory-ingest` because
+  the current chat consumers are ingestion-local. Do not create a
+  `moa-providers` chat abstraction for this alone; the trigger is a second
+  vendor or a chat consumer outside ingest. The embedder and reranker keep their
+  existing clients because their API surfaces differ.
+
 ### Cloud handler startup requires explicit database, Restate, and provider configuration
 
 - `Dockerfile` builds `moa-orchestrator-bin` and installs it as `/usr/local/bin/moa-orchestrator`.

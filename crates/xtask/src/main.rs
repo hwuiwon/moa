@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 mod check_eval_budgets;
 mod compare_eval_reports;
 mod generate_memory_eval_corpus;
+mod record_memory_extractions;
 mod run_memory_retrieval_eval;
 
 fn main() -> Result<()> {
@@ -20,6 +21,7 @@ fn main() -> Result<()> {
         Some("compare-eval-reports") => compare_eval_reports::run(args),
         Some("generate-memory-eval-corpus") => generate_memory_eval_corpus::run(args),
         Some("migrate-test-db") => cmd_migrate_test_db(),
+        Some("record-memory-extractions") => record_memory_extractions::run(args),
         Some("run-memory-retrieval-eval") => run_memory_retrieval_eval::run(args),
         Some(command) => bail!("unknown xtask command: {command}"),
         None => bail!("missing xtask command; try `cargo xtask audit-paths`"),

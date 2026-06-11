@@ -35,9 +35,9 @@ pub use env_overlay::MoaEnvOverlay;
 pub use gateway::GatewayConfig;
 pub use lineage::LineageConfig;
 pub use memory::{
-    CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryRankingConfig,
-    MemoryRankingMode, MemoryRankingWeights, MemoryRerankerMode, MemoryRetrievalConfig,
-    MemoryVectorConfig, TurbopufferVectorConfig, VectorEmbedderConfig,
+    CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryExtractionConfig,
+    MemoryRankingConfig, MemoryRankingMode, MemoryRankingWeights, MemoryRerankerMode,
+    MemoryRetrievalConfig, MemoryVectorConfig, TurbopufferVectorConfig, VectorEmbedderConfig,
 };
 pub use orchestrator::OrchestratorConfig;
 pub use providers::{GeneralConfig, ModelsConfig, ProviderCredentialConfig, ProvidersConfig};
@@ -174,6 +174,11 @@ mod tests {
         "MOA_DATABASE_NEON_PROJECT_ID",
         "MOA_DATABASE_NEON_MAX_CHECKPOINTS",
         "MOA_MEMORY_RETRIEVAL_RERANKER_MODE",
+        "MOA_MEMORY_EXTRACTION_ENABLED",
+        "MOA_MEMORY_EXTRACTION_API_KEY_ENV",
+        "MOA_MEMORY_EXTRACTION_MODEL",
+        "MOA_MEMORY_EXTRACTION_MAX_FACTS_PER_CHUNK",
+        "MOA_MEMORY_EXTRACTION_TIMEOUT_MS",
         "MOA_ORCHESTRATOR_ENDPOINT",
     ];
 
@@ -271,5 +276,27 @@ mod tests {
                 .to_string()
                 .contains("database.neon.max_checkpoints must be greater than zero")
         );
+    }
+
+    #[test]
+    fn env_only_loads_memory_extraction_config() {
+        // Pins: model-backed memory extraction uses flat MOA env names.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let _env = EnvRestore::clear(CONFIG_ENV_KEYS);
+        unsafe {
+            std::env::set_var("MOA_MEMORY_EXTRACTION_ENABLED", "true");
+            std::env::set_var("MOA_MEMORY_EXTRACTION_API_KEY_ENV", "MOA_TEST_COHERE_KEY");
+            std::env::set_var("MOA_MEMORY_EXTRACTION_MODEL", "command-test");
+            std::env::set_var("MOA_MEMORY_EXTRACTION_MAX_FACTS_PER_CHUNK", "5");
+            std::env::set_var("MOA_MEMORY_EXTRACTION_TIMEOUT_MS", "2500");
+        }
+
+        let config = MoaConfig::load_from_env().expect("load config from env");
+
+        assert!(config.memory.extraction.enabled);
+        assert_eq!(config.memory.extraction.api_key_env, "MOA_TEST_COHERE_KEY");
+        assert_eq!(config.memory.extraction.model, "command-test");
+        assert_eq!(config.memory.extraction.max_facts_per_chunk, 5);
+        assert_eq!(config.memory.extraction.timeout_ms, 2500);
     }
 }

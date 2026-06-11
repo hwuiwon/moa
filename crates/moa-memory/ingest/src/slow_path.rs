@@ -7,8 +7,8 @@ use crate::{
     ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
     EntityResolutionRequest, EntityResolver, ExtractedFact, ExtractedFactScopeHint, FactExtractor,
     HeuristicFactExtractor, IngestApplyReport, IngestCtx, IngestDecision, ResolvedEntity,
-    RrfPlusJudgeDetector, SessionTurn, TurnChunk, chunk_turn, current_runtime, extract_facts,
-    extraction_confidence_hint, fact_hash, scoped_fact_uid, should_ingest_degraded,
+    RrfPlusJudgeDetector, SessionTurn, chunk_turn, current_runtime, extraction_confidence_hint,
+    fact_hash, fact_uid_from_hash, scoped_fact_uid, should_ingest_degraded,
 };
 use moa_core::{MoaConfig, ScopeContext, ScopedConn, traits::EmbeddingProvider};
 use moa_memory_graph::{
@@ -343,21 +343,74 @@ async fn classify_facts_with(
 
 fn redact_fact(fact: &ExtractedFact, result: &PiiResult) -> ExtractedFact {
     let redacted_summary = redact_text(&fact.summary, &result.spans);
-    if redacted_summary == fact.summary {
+    let redacted_subject = redact_fact_part(&fact.subject, &fact.summary, &result.spans);
+    let redacted_predicate = redact_fact_part(&fact.predicate, &fact.summary, &result.spans);
+    let redacted_object = redact_fact_part(&fact.object, &fact.summary, &result.spans);
+    if redacted_summary == fact.summary
+        && redacted_subject == fact.subject
+        && redacted_predicate == fact.predicate
+        && redacted_object == fact.object
+    {
         return fact.clone();
     }
 
-    let mut redacted = extract_facts(&[TurnChunk {
-        index: fact.source_chunk,
-        text: format!("Fact: {redacted_summary}"),
-        token_estimate: 1,
-    }])
-    .into_iter()
-    .next()
-    .unwrap_or_else(|| fact.clone());
-    redacted.source_chunk = fact.source_chunk;
-    redacted.scope_hint = fact.scope_hint;
+    let mut redacted = ExtractedFact {
+        uid: fact.uid,
+        subject: redacted_subject,
+        predicate: redacted_predicate,
+        object: redacted_object,
+        summary: redacted_summary,
+        source_chunk: fact.source_chunk,
+        scope_hint: fact.scope_hint,
+        confidence: fact.confidence,
+    };
+    match fact_hash(&redacted) {
+        Ok(hash) => redacted.uid = fact_uid_from_hash(&hash),
+        Err(error) => tracing::warn!(
+            error = %error,
+            "failed to recompute redacted fact uid; preserving original extracted uid"
+        ),
+    }
     redacted
+}
+
+fn redact_fact_part(part: &str, summary: &str, spans: &[PiiSpan]) -> String {
+    let mut redacted = part.to_string();
+    for span in spans {
+        if span.start >= span.end
+            || span.end > summary.len()
+            || !summary.is_char_boundary(span.start)
+            || !summary.is_char_boundary(span.end)
+        {
+            continue;
+        }
+        let source_text = &summary[span.start..span.end];
+        if source_text.is_empty() {
+            continue;
+        }
+        let replacement = redaction_replacement(source_text, span);
+        redacted = redacted.replace(source_text, &replacement);
+        let trimmed_source = source_text.trim_matches(|character: char| {
+            character.is_ascii_punctuation() && !matches!(character, '[' | ']')
+        });
+        if !trimmed_source.is_empty() && trimmed_source != source_text {
+            let trimmed_replacement = redaction_replacement(trimmed_source, span);
+            redacted = redacted.replace(trimmed_source, &trimmed_replacement);
+        }
+    }
+    redacted
+}
+
+fn redaction_replacement(source_text: &str, span: &PiiSpan) -> String {
+    redact_text(
+        source_text,
+        &[PiiSpan {
+            start: 0,
+            end: source_text.len(),
+            category: span.category,
+            confidence: span.confidence,
+        }],
+    )
 }
 
 fn heuristic_classify(text: &str) -> PiiResult {
@@ -660,7 +713,7 @@ fn node_intent(
             "pii_class": fact.classified.pii_class.as_str(),
         }),
         pii_class: fact.classified.pii_class,
-        confidence: Some(extraction_confidence_hint(&extracted.summary)),
+        confidence: Some(extracted_confidence(extracted)),
         valid_from: turn.finalized_at,
         embedding: fact.embedding.clone(),
         embedding_model: fact.embedding_model.clone(),
@@ -695,7 +748,7 @@ async fn resolve_fact_entities(
     fact: &EmbeddedFact,
 ) -> Result<ResolvedFactEntities, HandlerError> {
     let extracted = &fact.classified.fact;
-    let confidence = extraction_confidence_hint(&extracted.summary);
+    let confidence = extracted_confidence(extracted);
     let actor_id = turn.user_id.to_string();
     let subject = entity_resolver
         .resolve(
@@ -731,6 +784,12 @@ async fn resolve_fact_entities(
         .map_err(HandlerError::from)?;
 
     Ok(ResolvedFactEntities { subject, object })
+}
+
+fn extracted_confidence(fact: &ExtractedFact) -> f64 {
+    fact.confidence
+        .unwrap_or_else(|| extraction_confidence_hint(&fact.summary))
+        .clamp(0.0, 1.0)
 }
 
 async fn attach_fact_entity_edges(
@@ -969,9 +1028,10 @@ enum ApplyOutcome {
 #[cfg(test)]
 mod tests {
     use moa_core::ContextMessage;
-    use moa_memory_pii::{PiiCategory, PiiClass};
+    use moa_memory_pii::{PiiCategory, PiiClass, PiiResult, PiiSpan};
 
-    use super::{heuristic_classify, turn_transcript};
+    use super::{heuristic_classify, redact_fact, turn_transcript};
+    use crate::{ExtractedFact, ExtractedFactScopeHint, fact_hash};
 
     #[test]
     fn turn_transcript_keeps_user_messages_and_response() {
@@ -1000,5 +1060,85 @@ mod tests {
                 .iter()
                 .any(|span| matches!(span.category, PiiCategory::Secret))
         );
+    }
+
+    #[test]
+    fn redact_fact_scrubs_subject_object_without_reextraction() {
+        // Pins: redaction preserves LLM-produced structure instead of heuristic re-extraction.
+        let fact = pii_fact("alice@example.com owns secret sk-live");
+        let result = pii_result(&fact.summary, "alice@example.com", PiiCategory::Email);
+
+        let redacted = redact_fact(&fact, &result);
+
+        assert_eq!(redacted.subject, "[EMAIL_REDACTED]");
+        assert_eq!(redacted.predicate, "owns");
+        assert_eq!(redacted.object, "secret sk-live");
+        assert_eq!(redacted.summary, "[EMAIL_REDACTED] owns secret sk-live");
+        assert_eq!(redacted.source_chunk, fact.source_chunk);
+        assert_eq!(redacted.scope_hint, fact.scope_hint);
+        assert_eq!(redacted.confidence, fact.confidence);
+    }
+
+    #[test]
+    fn redact_fact_recomputes_uid_from_redacted_parts() {
+        // Pins: redacted fact dedup identity follows the redacted structured fields.
+        let fact = pii_fact("alice@example.com owns secret sk-live");
+        let result = pii_result(&fact.summary, "sk-live", PiiCategory::Secret);
+
+        let redacted = redact_fact(&fact, &result);
+        let hash = fact_hash(&redacted).expect("redacted fact hashes");
+
+        assert_ne!(redacted.uid, fact.uid);
+        assert_eq!(redacted.uid, crate::fact_uid_from_hash(&hash));
+        assert_eq!(redacted.object, "secret [SECRET_REDACTED]");
+    }
+
+    #[test]
+    fn redact_fact_replaces_field_value_when_summary_span_has_punctuation() {
+        // Pins: field redaction works even when summary tokenization includes punctuation.
+        let mut fact = pii_fact("User 00 uses contact email alice@example.com.");
+        fact.subject = "User 00".to_string();
+        fact.predicate = "uses contact email".to_string();
+        fact.object = "alice@example.com".to_string();
+        let result = pii_result(&fact.summary, "alice@example.com.", PiiCategory::Email);
+
+        let redacted = redact_fact(&fact, &result);
+
+        assert_eq!(
+            redacted.summary,
+            "User 00 uses contact email [EMAIL_REDACTED]"
+        );
+        assert_eq!(redacted.object, "[EMAIL_REDACTED]");
+    }
+
+    fn pii_fact(summary: &str) -> ExtractedFact {
+        let mut fact = ExtractedFact {
+            uid: uuid::Uuid::nil(),
+            subject: "alice@example.com".to_string(),
+            predicate: "owns".to_string(),
+            object: "secret sk-live".to_string(),
+            summary: summary.to_string(),
+            source_chunk: 3,
+            scope_hint: ExtractedFactScopeHint::User,
+            confidence: Some(0.93),
+        };
+        let hash = fact_hash(&fact).expect("fact hashes");
+        fact.uid = crate::fact_uid_from_hash(&hash);
+        fact
+    }
+
+    fn pii_result(summary: &str, needle: &str, category: PiiCategory) -> PiiResult {
+        let start = summary.find(needle).expect("needle present");
+        PiiResult {
+            class: PiiClass::Pii,
+            spans: vec![PiiSpan {
+                start,
+                end: start + needle.len(),
+                category,
+                confidence: 0.99,
+            }],
+            model_version: "test".to_string(),
+            abstained: false,
+        }
     }
 }

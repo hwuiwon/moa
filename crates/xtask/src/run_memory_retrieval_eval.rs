@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use moa_eval::memory_eval::{
-    MemoryRetrievalEvalOptions, RankingConfig, RankingMode, run_memory_retrieval_eval,
+    MemoryEvalExtractorMode, MemoryRetrievalEvalOptions, RankingConfig, RankingMode,
+    run_memory_retrieval_eval,
 };
 
 /// Runs the hermetic memory retrieval evaluation command.
@@ -18,7 +19,9 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .block_on(run_memory_retrieval_eval(
             MemoryRetrievalEvalOptions::new(&options.corpus, &options.output)
                 .with_reranker(options.reranker_enabled)
-                .with_ranking_config(options.ranking_config.clone()),
+                .with_ranking_config(options.ranking_config.clone())
+                .with_extractor_mode(options.extractor_mode)
+                .apply_extractions_path(options.extractions_path.clone()),
         ))
         .with_context(|| {
             format!(
@@ -28,11 +31,12 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
             )
         })?;
     println!(
-        "wrote memory retrieval eval report: output={} probes={} ranking={:?} reranker={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} p95_retrieval_latency_ms={}",
+        "wrote memory retrieval eval report: output={} probes={} ranking={:?} reranker={} extractor={:?} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} p95_retrieval_latency_ms={}",
         options.output.display(),
         report.probe_results.len(),
         options.ranking_config.mode,
         if report.reranker_enabled { "on" } else { "off" },
+        options.extractor_mode,
         report.metrics.pre_rerank_recall_at_4.value,
         report.metrics.pre_rerank_recall_at_25.value,
         report.metrics.post_rerank_recall_at_4.value,
@@ -48,6 +52,8 @@ struct Options {
     output: PathBuf,
     reranker_enabled: bool,
     ranking_config: RankingConfig,
+    extractor_mode: MemoryEvalExtractorMode,
+    extractions_path: Option<PathBuf>,
 }
 
 impl Options {
@@ -56,6 +62,8 @@ impl Options {
         let mut output = None;
         let mut reranker_enabled = false;
         let mut ranking_config = RankingConfig::default();
+        let mut extractor_mode = MemoryEvalExtractorMode::Heuristic;
+        let mut extractions_path = None;
         let mut args = args.peekable();
 
         while let Some(arg) = args.next() {
@@ -77,6 +85,16 @@ impl Options {
                         .next()
                         .context("--ranking requires legacy|feature_v1")?;
                     ranking_config.mode = parse_ranking_mode(&value)?;
+                }
+                "--extractor" => {
+                    let value = args
+                        .next()
+                        .context("--extractor requires heuristic|recorded")?;
+                    extractor_mode = parse_extractor_mode(&value)?;
+                }
+                "--extractions" => {
+                    let value = args.next().context("--extractions requires a path")?;
+                    extractions_path = Some(PathBuf::from(value));
                 }
                 "--ranking-subject-match" => {
                     let value = args
@@ -135,12 +153,14 @@ impl Options {
             output: output.context("--output <path> is required")?,
             reranker_enabled,
             ranking_config,
+            extractor_mode,
+            extractions_path,
         })
     }
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--reranker off|on] [--ranking legacy|feature_v1] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
+    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--extractor heuristic|recorded] [--extractions <path>] [--reranker off|on] [--ranking legacy|feature_v1] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
 }
 
 fn parse_reranker(value: &str) -> Result<bool> {
@@ -156,6 +176,27 @@ fn parse_ranking_mode(value: &str) -> Result<RankingMode> {
         "legacy" => Ok(RankingMode::Legacy),
         "feature_v1" => Ok(RankingMode::FeatureV1),
         other => bail!("unsupported --ranking value `{other}`; expected legacy|feature_v1"),
+    }
+}
+
+fn parse_extractor_mode(value: &str) -> Result<MemoryEvalExtractorMode> {
+    match value {
+        "heuristic" => Ok(MemoryEvalExtractorMode::Heuristic),
+        "recorded" => Ok(MemoryEvalExtractorMode::Recorded),
+        other => bail!("unsupported --extractor value `{other}`; expected heuristic|recorded"),
+    }
+}
+
+trait MemoryRetrievalEvalOptionsExt {
+    fn apply_extractions_path(self, path: Option<PathBuf>) -> MemoryRetrievalEvalOptions;
+}
+
+impl MemoryRetrievalEvalOptionsExt for MemoryRetrievalEvalOptions {
+    fn apply_extractions_path(self, path: Option<PathBuf>) -> MemoryRetrievalEvalOptions {
+        match path {
+            Some(path) => self.with_extractions_path(path),
+            None => self,
+        }
     }
 }
 

@@ -116,6 +116,16 @@ pub struct MoaEnvOverlay {
     pub memory_embedding_model: Option<String>,
     /// `MOA_MEMORY_RETRIEVAL_RERANKER_MODE`.
     pub memory_retrieval_reranker_mode: Option<MemoryRerankerMode>,
+    /// `MOA_MEMORY_EXTRACTION_ENABLED`.
+    pub memory_extraction_enabled: Option<bool>,
+    /// `MOA_MEMORY_EXTRACTION_API_KEY_ENV`.
+    pub memory_extraction_api_key_env: Option<String>,
+    /// `MOA_MEMORY_EXTRACTION_MODEL`.
+    pub memory_extraction_model: Option<String>,
+    /// `MOA_MEMORY_EXTRACTION_MAX_FACTS_PER_CHUNK`.
+    pub memory_extraction_max_facts_per_chunk: Option<usize>,
+    /// `MOA_MEMORY_EXTRACTION_TIMEOUT_MS`.
+    pub memory_extraction_timeout_ms: Option<u64>,
     /// `MOA_MEMORY_VECTOR_EMBEDDER_NAME`.
     pub memory_vector_embedder_name: Option<String>,
     /// `MOA_MEMORY_VECTOR_EMBEDDER_OUTPUT_DIM`.
@@ -444,6 +454,26 @@ impl MoaEnvOverlay {
         set_copy_if_some(
             &mut config.memory.retrieval.reranker_mode,
             self.memory_retrieval_reranker_mode,
+        );
+        set_copy_if_some(
+            &mut config.memory.extraction.enabled,
+            self.memory_extraction_enabled,
+        );
+        set_if_some(
+            &mut config.memory.extraction.api_key_env,
+            &self.memory_extraction_api_key_env,
+        );
+        set_if_some(
+            &mut config.memory.extraction.model,
+            &self.memory_extraction_model,
+        );
+        set_copy_if_some(
+            &mut config.memory.extraction.max_facts_per_chunk,
+            self.memory_extraction_max_facts_per_chunk,
+        );
+        set_copy_if_some(
+            &mut config.memory.extraction.timeout_ms,
+            self.memory_extraction_timeout_ms,
         );
         set_if_some(
             &mut config.memory.vector.embedder.name,
@@ -999,6 +1029,11 @@ struct RawMoaEnvOverlay {
     memory_embedding_provider: Option<String>,
     memory_embedding_model: Option<String>,
     memory_retrieval_reranker_mode: Option<String>,
+    memory_extraction_enabled: Option<String>,
+    memory_extraction_api_key_env: Option<String>,
+    memory_extraction_model: Option<String>,
+    memory_extraction_max_facts_per_chunk: Option<String>,
+    memory_extraction_timeout_ms: Option<String>,
     memory_vector_embedder_name: Option<String>,
     memory_vector_embedder_output_dim: Option<String>,
     memory_vector_embedder_cohere_api_key_env: Option<String>,
@@ -1238,6 +1273,20 @@ impl TryFrom<RawMoaEnvOverlay> for MoaEnvOverlay {
             memory_retrieval_reranker_mode: parse_optional(
                 "MOA_MEMORY_RETRIEVAL_RERANKER_MODE",
                 raw.memory_retrieval_reranker_mode,
+            )?,
+            memory_extraction_enabled: parse_optional(
+                "MOA_MEMORY_EXTRACTION_ENABLED",
+                raw.memory_extraction_enabled,
+            )?,
+            memory_extraction_api_key_env: raw.memory_extraction_api_key_env,
+            memory_extraction_model: raw.memory_extraction_model,
+            memory_extraction_max_facts_per_chunk: parse_optional(
+                "MOA_MEMORY_EXTRACTION_MAX_FACTS_PER_CHUNK",
+                raw.memory_extraction_max_facts_per_chunk,
+            )?,
+            memory_extraction_timeout_ms: parse_optional(
+                "MOA_MEMORY_EXTRACTION_TIMEOUT_MS",
+                raw.memory_extraction_timeout_ms,
             )?,
             memory_vector_embedder_name: raw.memory_vector_embedder_name,
             memory_vector_embedder_output_dim: parse_optional(

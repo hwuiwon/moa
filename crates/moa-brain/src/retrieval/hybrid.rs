@@ -27,7 +27,7 @@ use crate::retrieval::ranking::{
 use crate::retrieval::reranker::{CohereReranker, NoopReranker, Reranker};
 
 const RERANK_MODEL: &str = "rerank-v4.0-fast";
-const FUSED_CANDIDATE_LIMIT: usize = 25;
+const FUSED_CANDIDATE_LIMIT: usize = 26;
 const PHASE_ONE_GRAPH_SEED_LIMIT: usize = FUSED_CANDIDATE_LIMIT;
 const PHASE_ONE_SEED_DECAY: f64 = 0.85;
 
@@ -79,6 +79,10 @@ pub struct RetrievalRequest {
     pub as_of: Option<DateTime<Utc>>,
     /// Optional deterministic clock for post-hydration ranking features.
     pub ranking_reference_time: Option<DateTime<Utc>>,
+    /// Whether retrieval legs should run without timeout budgets.
+    pub disable_leg_timeouts: bool,
+    /// Whether graph expansion should be skipped for this request.
+    pub disable_graph_expansion: bool,
 }
 
 /// Retrieval legs that contributed to one fused candidate.
@@ -213,22 +217,31 @@ impl HybridRetriever {
         }
 
         let strategy = req.strategy.unwrap_or(Strategy::Both);
-        let vector_future = timed_leg("vector", VECTOR_BUDGET, self.vector_leg(&req));
-        let lexical_future = timed_leg(
+        let vector_future = run_leg(
+            req.disable_leg_timeouts,
+            "vector",
+            VECTOR_BUDGET,
+            self.vector_leg(&req),
+        );
+        let lexical_future = run_leg(
+            req.disable_leg_timeouts,
             "lexical",
             LEXICAL_BUDGET,
             lexical_leg(&self.pool, &req, self.assume_app_role),
         );
-        let (vector_result, lexical_result) = tokio::join!(vector_future, lexical_future);
-
-        let vector_hits = leg_or_empty("vector", vector_result)?;
-        let lexical_hits = leg_or_empty("lexical", lexical_result)?;
+        let (vector_hits, lexical_hits) = tokio::join!(vector_future, lexical_future);
+        let vector_hits = vector_hits?;
+        let lexical_hits = lexical_hits?;
         let interim = rrf_fuse(&[], &vector_hits, &lexical_hits, weights_for(strategy));
         let graph_seed_rows =
             hydrate_graph_seed_rows(&self.pool, &req, &interim, self.assume_app_role).await?;
-        let graph_seed_strengths =
-            interim_graph_seed_strengths(&req.seeds, &interim, &graph_seed_rows, &req.query_text);
-        let graph_result = timed_leg(
+        let graph_seed_strengths = if req.disable_graph_expansion {
+            Vec::new()
+        } else {
+            interim_graph_seed_strengths(&req.seeds, &interim, &graph_seed_rows, &req.query_text)
+        };
+        let graph_hits = run_leg(
+            req.disable_leg_timeouts,
             "graph",
             GRAPH_BUDGET,
             graph_expansion_leg(
@@ -238,8 +251,7 @@ impl HybridRetriever {
                 &graph_seed_rows,
             ),
         )
-        .await;
-        let graph_hits = leg_or_empty("graph", graph_result)?;
+        .await?;
         let fusion_started = std::time::Instant::now();
         let mut fused = rrf_fuse(
             &graph_hits,
@@ -542,6 +554,22 @@ where
     }
 }
 
+async fn run_leg<T, F>(
+    disable_timeout: bool,
+    name: &'static str,
+    budget: std::time::Duration,
+    future: F,
+) -> Result<T>
+where
+    T: Default,
+    F: std::future::Future<Output = Result<T>>,
+{
+    if disable_timeout {
+        return future.await;
+    }
+    leg_or_empty(name, timed_leg(name, budget, future).await)
+}
+
 fn is_turbopuffer_as_of_unsupported(error: &RetrievalError) -> bool {
     if let RetrievalError::Vector(VectorError::UnsupportedQueryFeature { backend, feature }) = error
     {
@@ -666,6 +694,8 @@ mod tests {
             strategy: None,
             as_of: None,
             ranking_reference_time: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: false,
         };
         let first = hit(Uuid::now_v7(), "workspace", 2.0);
         let second = hit(Uuid::now_v7(), "workspace", 1.0);
@@ -711,6 +741,8 @@ mod tests {
                 strategy: None,
                 as_of: None,
                 ranking_reference_time: None,
+                disable_leg_timeouts: false,
+                disable_graph_expansion: false,
             },
         );
 
@@ -771,6 +803,8 @@ mod tests {
                 strategy: None,
                 as_of: None,
                 ranking_reference_time: Some(reference_time),
+                disable_leg_timeouts: false,
+                disable_graph_expansion: false,
             },
         );
 
@@ -824,6 +858,8 @@ mod tests {
                 strategy: None,
                 as_of: None,
                 ranking_reference_time: Some(reference_time),
+                disable_leg_timeouts: false,
+                disable_graph_expansion: false,
             },
         );
 
@@ -877,6 +913,8 @@ mod tests {
                 strategy: None,
                 as_of: None,
                 ranking_reference_time: Some(reference_time),
+                disable_leg_timeouts: false,
+                disable_graph_expansion: false,
             },
         );
 

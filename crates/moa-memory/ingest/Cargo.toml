@@ -32,3 +32,4 @@ moa-hands = { path = "../../moa-hands" }
 moa-session = { path = "../../moa-session" }
 moa-test-support.workspace = true
 tempfile.workspace = true
+wiremock = "0.6"

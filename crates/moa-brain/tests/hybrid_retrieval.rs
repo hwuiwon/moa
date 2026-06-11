@@ -278,6 +278,8 @@ async fn hybrid_retrieval_e2e_returns_fused_annotated_results() {
         strategy: None,
         as_of: None,
         ranking_reference_time: None,
+        disable_leg_timeouts: false,
+        disable_graph_expansion: false,
     };
     let lexical_hits = lexical_leg(session_store.pool(), &request, true)
         .await
@@ -317,6 +319,8 @@ async fn hybrid_retrieval_e2e_returns_fused_annotated_results() {
             strategy: None,
             as_of: None,
             ranking_reference_time: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: false,
         })
         .await
         .expect("retrieve graph-only entity seed hits");
@@ -327,6 +331,31 @@ async fn hybrid_retrieval_e2e_returns_fused_annotated_results() {
     assert!(graph_only_fact.legs.graph, "{graph_only_fact:?}");
     assert!(!graph_only_fact.legs.vector, "{graph_only_fact:?}");
     assert!(!graph_only_fact.legs.lexical, "{graph_only_fact:?}");
+
+    let graph_disabled_hits = retriever
+        .retrieve(RetrievalRequest {
+            seeds: vec![seed_uid],
+            query_text: String::new(),
+            query_embedding: Vec::new(),
+            scope: MemoryScope::Workspace {
+                workspace_id: WorkspaceId::new(workspace_id.clone()),
+            },
+            label_filter: Some(vec![NodeLabel::Fact]),
+            max_pii_class: PiiClass::Restricted,
+            k_final: 5,
+            use_reranker: false,
+            strategy: None,
+            as_of: None,
+            ranking_reference_time: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: true,
+        })
+        .await
+        .expect("retrieve with graph expansion disabled");
+    assert!(
+        graph_disabled_hits.iter().all(|hit| hit.uid != related_uid),
+        "{graph_disabled_hits:?}"
+    );
 
     delete_filler_rows(session_store.pool(), &workspace_id, &prefix).await;
     let _ = graph.hard_purge(exact_uid, "redacted:hybrid-test").await;
@@ -390,6 +419,8 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
         strategy: None,
         as_of: Some(utc("2026-03-01T00:00:00Z")),
         ranking_reference_time: None,
+        disable_leg_timeouts: false,
+        disable_graph_expansion: false,
     };
 
     let lexical_hits = lexical_leg(session_store.pool(), &historical, true)
@@ -416,6 +447,8 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
         strategy: None,
         as_of: None,
         ranking_reference_time: None,
+        disable_leg_timeouts: false,
+        disable_graph_expansion: false,
     };
     let current_hits = retriever
         .retrieve(current)
@@ -492,6 +525,8 @@ async fn temporal_turbopuffer_unsupported_as_of_falls_back_to_pgvector() {
             strategy: None,
             as_of: Some(utc("2026-03-01T00:00:00Z")),
             ranking_reference_time: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: false,
         })
         .await
         .expect("retrieve through pgvector fallback");

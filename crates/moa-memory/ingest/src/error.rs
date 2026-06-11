@@ -27,6 +27,9 @@ pub enum IngestError {
     /// Fact extraction failed.
     #[error("fact extraction: {0}")]
     Extraction(String),
+    /// LLM chat transport failed.
+    #[error(transparent)]
+    LlmChat(#[from] crate::llm_client::LlmChatError),
     /// The process-local ingestion runtime was not installed.
     #[error("ingestion runtime has not been installed")]
     RuntimeNotInstalled,

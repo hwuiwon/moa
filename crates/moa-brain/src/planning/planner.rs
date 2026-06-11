@@ -83,6 +83,8 @@ impl PlannedQuery {
             strategy: Some(self.strategy),
             as_of: self.temporal_filter,
             ranking_reference_time: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: false,
         }
     }
 }
@@ -180,6 +182,10 @@ pub struct QueryRetrievalCtx<'a> {
     pub use_reranker: bool,
     /// Optional deterministic reference time for ranking features.
     pub ranking_reference_time: Option<DateTime<Utc>>,
+    /// Whether retrieval leg timeout budgets are disabled.
+    pub disable_leg_timeouts: bool,
+    /// Whether graph expansion should be skipped.
+    pub disable_graph_expansion: bool,
 }
 
 impl<'a> QueryRetrievalCtx<'a> {
@@ -201,6 +207,8 @@ impl<'a> QueryRetrievalCtx<'a> {
             k_final: 5,
             use_reranker: false,
             ranking_reference_time: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: false,
         }
     }
 
@@ -222,6 +230,20 @@ impl<'a> QueryRetrievalCtx<'a> {
     #[must_use]
     pub fn with_ranking_reference_time(mut self, reference_time: DateTime<Utc>) -> Self {
         self.ranking_reference_time = Some(reference_time);
+        self
+    }
+
+    /// Disables retrieval leg timeout budgets for deterministic offline evaluation.
+    #[must_use]
+    pub fn with_leg_timeouts_disabled(mut self) -> Self {
+        self.disable_leg_timeouts = true;
+        self
+    }
+
+    /// Disables graph expansion for deterministic compatibility evals.
+    #[must_use]
+    pub fn with_graph_expansion_disabled(mut self) -> Self {
+        self.disable_graph_expansion = true;
         self
     }
 }
@@ -249,6 +271,8 @@ pub async fn retrieve_for_query(
         ctx.use_reranker,
     );
     request.ranking_reference_time = ctx.ranking_reference_time;
+    request.disable_leg_timeouts = ctx.disable_leg_timeouts;
+    request.disable_graph_expansion = ctx.disable_graph_expansion;
     ctx.hybrid
         .retrieve(&planned, request)
         .await

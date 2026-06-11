@@ -54,7 +54,7 @@ pub enum ExtractedFactScopeHint {
 }
 
 /// One fact candidate emitted by extraction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExtractedFact {
     /// Stable fact identifier derived from the fact hash.
     pub uid: Uuid,
@@ -71,6 +71,9 @@ pub struct ExtractedFact {
     /// Scope hint used by slow-path ingestion when writing graph rows.
     #[serde(default)]
     pub scope_hint: ExtractedFactScopeHint,
+    /// Optional model-provided confidence for this extracted fact.
+    #[serde(default)]
+    pub confidence: Option<f64>,
 }
 
 /// A fact after PII classification.
@@ -289,6 +292,7 @@ fn extracted_fact_from_summary(source_chunk: usize, summary: String) -> Extracte
         summary,
         source_chunk,
         scope_hint,
+        confidence: None,
     }
 }
 
@@ -432,6 +436,26 @@ mod tests {
         let facts = extract_facts(&chunks);
         let hash = fact_hash(&facts[0]).expect("hash fact");
         assert_eq!(facts[0].uid, fact_uid_from_hash(&hash));
+    }
+
+    #[test]
+    fn extracted_fact_deserializes_without_confidence_field() {
+        // Pins: old Restate journal entries without model confidence keep deserializing.
+        let json = serde_json::json!({
+            "uid": uuid::Uuid::now_v7(),
+            "subject": "auth",
+            "predicate": "uses",
+            "object": "JWT",
+            "summary": "auth uses JWT",
+            "source_chunk": 0,
+            "scope_hint": "workspace"
+        });
+
+        let fact: ExtractedFact =
+            serde_json::from_value(json).expect("old extracted fact JSON should deserialize");
+
+        assert_eq!(fact.confidence, None);
+        assert_eq!(fact.scope_hint, ExtractedFactScopeHint::Workspace);
     }
 
     #[test]
