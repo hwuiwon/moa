@@ -185,6 +185,57 @@ pub struct NodeWriteIntent {
     pub actor_kind: String,
 }
 
+/// Intent to update one active graph node's stored properties in place.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodePropertyUpdateIntent {
+    /// Stable graph-node identity to update.
+    pub uid: Uuid,
+    /// Replacement node properties serialized into AGE and the SQL sidecar.
+    pub properties: serde_json::Value,
+    /// Replacement confidence. `None` preserves the existing sidecar confidence.
+    pub confidence: Option<f64>,
+    /// Principal identifier that triggered the mutation.
+    pub actor_id: String,
+    /// Principal kind written to the graph changelog.
+    pub actor_kind: String,
+}
+
+/// Intent to close one active graph node into an already-existing replacement node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExistingSupersessionIntent {
+    /// Node to invalidate.
+    pub old_uid: Uuid,
+    /// Existing active replacement node.
+    pub replacement_uid: Uuid,
+    /// Application-time validity end to write on the old node.
+    pub valid_to: DateTime<Utc>,
+    /// Transaction-time invalidation instant to write on the old node.
+    pub invalidated_at: DateTime<Utc>,
+    /// Audit reason written to invalidation metadata.
+    pub reason: String,
+    /// Principal identifier that triggered the mutation.
+    pub actor_id: String,
+    /// Principal kind written to the graph changelog.
+    pub actor_kind: String,
+}
+
+/// Intent to attach a vector embedding to an existing graph node.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeEmbeddingIntent {
+    /// Node whose vector row should be inserted or replaced.
+    pub uid: Uuid,
+    /// Dense embedding vector.
+    pub embedding: Vec<f32>,
+    /// Embedding model identifier.
+    pub embedding_model: String,
+    /// Embedding model version.
+    pub embedding_model_version: i32,
+    /// Principal identifier that triggered the mutation.
+    pub actor_id: String,
+    /// Principal kind written to the graph changelog.
+    pub actor_kind: String,
+}
+
 /// Looks up graph nodes by name using the `moa.node_index` full-text projection.
 ///
 /// Results are ordered first by text rank and then by the documented memory rank:

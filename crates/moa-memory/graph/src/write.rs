@@ -15,7 +15,10 @@ use crate::{
     changelog::{ChangelogRecord, write_and_bump},
     cypher::{self, Cypher},
     edge::{EdgeLabel, EdgeWriteIntent},
-    node::{NodeLabel, NodeWriteIntent, PiiClass},
+    node::{
+        ExistingSupersessionIntent, NodeEmbeddingIntent, NodeLabel, NodePropertyUpdateIntent,
+        NodeWriteIntent, PiiClass,
+    },
 };
 
 /// Creates a graph node, sidecar row, optional vector, and changelog row atomically.
@@ -203,6 +206,227 @@ pub async fn invalidate_node(store: &AgeGraphStore, uid: Uuid, reason: &str) -> 
     Ok(())
 }
 
+/// Closes one active graph node into an already-existing replacement node atomically.
+pub async fn close_existing_node_with_supersession(
+    store: &AgeGraphStore,
+    intent: ExistingSupersessionIntent,
+) -> Result<()> {
+    let mut conn = store.begin_required().await?;
+    let old = fetch_stored_node(conn.as_mut(), intent.old_uid)
+        .await?
+        .ok_or(GraphError::NotFound(intent.old_uid))?;
+    let replacement = fetch_stored_node(conn.as_mut(), intent.replacement_uid)
+        .await?
+        .ok_or(GraphError::NotFound(intent.replacement_uid))?;
+    if old.valid_to.is_some() {
+        return Err(GraphError::BiTemporal(format!(
+            "{} is already invalidated",
+            intent.old_uid
+        )));
+    }
+    if replacement.valid_to.is_some() {
+        return Err(GraphError::BiTemporal(format!(
+            "{} is not an active replacement",
+            intent.replacement_uid
+        )));
+    }
+    validate_same_scope(&old, &replacement)?;
+
+    cypher::node::CLOSE_WITH_SUPERSESSION
+        .execute(&json!({
+            "old_uid": intent.old_uid.to_string(),
+            "new_uid": intent.replacement_uid.to_string(),
+            "valid_to": intent.valid_to.to_rfc3339(),
+            "invalidated_at": intent.invalidated_at.to_rfc3339(),
+            "actor": intent.actor_id.clone(),
+            "reason": intent.reason.clone(),
+            "edge_uid": Uuid::now_v7().to_string(),
+            "workspace_id": old.workspace_id.clone().unwrap_or_default(),
+            "user_id": old.user_id.clone().unwrap_or_default(),
+            "scope": old.scope.clone(),
+        }))
+        .execute(conn.as_mut())
+        .await
+        .map_err(|error| GraphError::Cypher(error.to_string()))?;
+    close_node_index(
+        conn.as_mut(),
+        intent.old_uid,
+        intent.valid_to,
+        intent.invalidated_at,
+        actor_uuid(&intent.actor_id),
+        &intent.reason,
+    )
+    .await?;
+    if let Some(vector) = store.vector() {
+        vector
+            .delete_in_tx(conn.as_mut(), &[intent.old_uid])
+            .await?;
+    }
+    write_and_bump(
+        conn.as_mut(),
+        ChangelogRecord {
+            workspace_id: old.workspace_id,
+            user_id: old.user_id,
+            scope: old.scope,
+            actor_id: Some(intent.actor_id),
+            actor_kind: intent.actor_kind,
+            op: "supersede".to_string(),
+            target_kind: "node".to_string(),
+            target_label: old.label.as_str().to_string(),
+            target_uid: intent.old_uid,
+            payload: json!({
+                "before": old.properties_summary,
+                "valid_to": intent.valid_to.to_rfc3339(),
+                "replacement_uid": intent.replacement_uid,
+                "reason": intent.reason,
+            }),
+            redaction_marker: None,
+            pii_class: old.pii_class.as_str().to_string(),
+            audit_metadata: None,
+            cause_change_id: None,
+        },
+    )
+    .await?;
+
+    conn.commit().await?;
+    Ok(())
+}
+
+/// Updates one active graph node's mutable properties atomically.
+pub async fn update_node_properties(
+    store: &AgeGraphStore,
+    intent: NodePropertyUpdateIntent,
+) -> Result<()> {
+    if !intent.properties.is_object() {
+        return Err(GraphError::Conflict(
+            "node properties must be a JSON object".to_string(),
+        ));
+    }
+
+    let mut conn = store.begin_required().await?;
+    let old = fetch_stored_node(conn.as_mut(), intent.uid)
+        .await?
+        .ok_or(GraphError::NotFound(intent.uid))?;
+    if old.valid_to.is_some() {
+        return Err(GraphError::BiTemporal(format!(
+            "{} is not active",
+            intent.uid
+        )));
+    }
+    let confidence = intent.confidence.or(old.confidence);
+    cypher::node::UPDATE_PROPERTIES
+        .execute(&json!({
+            "uid": intent.uid.to_string(),
+            "properties": intent.properties.clone(),
+        }))
+        .execute(conn.as_mut())
+        .await
+        .map_err(|error| GraphError::Cypher(error.to_string()))?;
+    sqlx::query(
+        r#"
+        UPDATE moa.node_index
+        SET properties_summary = $1,
+            confidence = $2,
+            reference_count = $3
+        WHERE uid = $4
+          AND valid_to IS NULL
+        "#,
+    )
+    .bind(&intent.properties)
+    .bind(confidence)
+    .bind(reference_count_from_properties(&intent.properties))
+    .bind(intent.uid)
+    .execute(conn.as_mut())
+    .await?;
+    write_and_bump(
+        conn.as_mut(),
+        ChangelogRecord {
+            workspace_id: old.workspace_id,
+            user_id: old.user_id,
+            scope: old.scope,
+            actor_id: Some(intent.actor_id),
+            actor_kind: intent.actor_kind,
+            op: "update".to_string(),
+            target_kind: "node".to_string(),
+            target_label: old.label.as_str().to_string(),
+            target_uid: intent.uid,
+            payload: json!({
+                "before": old.properties_summary,
+                "after": intent.properties,
+                "confidence": confidence,
+            }),
+            redaction_marker: None,
+            pii_class: old.pii_class.as_str().to_string(),
+            audit_metadata: None,
+            cause_change_id: None,
+        },
+    )
+    .await?;
+
+    conn.commit().await?;
+    Ok(())
+}
+
+/// Attaches a vector embedding to one active graph node atomically.
+pub async fn upsert_node_embedding(
+    store: &AgeGraphStore,
+    intent: NodeEmbeddingIntent,
+) -> Result<()> {
+    let mut conn = store.begin_required().await?;
+    let node = fetch_stored_node(conn.as_mut(), intent.uid)
+        .await?
+        .ok_or(GraphError::NotFound(intent.uid))?;
+    if node.valid_to.is_some() {
+        return Err(GraphError::BiTemporal(format!(
+            "{} is not active",
+            intent.uid
+        )));
+    }
+    let vector = require_vector_store(store)?;
+    vector
+        .upsert_in_tx(
+            conn.as_mut(),
+            &[VectorItem {
+                uid: intent.uid,
+                workspace_id: node.workspace_id.clone(),
+                user_id: node.user_id.clone(),
+                label: node.label.as_str().to_string(),
+                pii_class: node.pii_class.as_str().to_string(),
+                embedding: intent.embedding,
+                embedding_model: intent.embedding_model.clone(),
+                embedding_model_version: intent.embedding_model_version,
+                valid_to: None,
+            }],
+        )
+        .await?;
+    write_and_bump(
+        conn.as_mut(),
+        ChangelogRecord {
+            workspace_id: node.workspace_id,
+            user_id: node.user_id,
+            scope: node.scope,
+            actor_id: Some(intent.actor_id),
+            actor_kind: intent.actor_kind,
+            op: "update".to_string(),
+            target_kind: "node".to_string(),
+            target_label: node.label.as_str().to_string(),
+            target_uid: intent.uid,
+            payload: json!({
+                "embedding_model": intent.embedding_model,
+                "embedding_model_version": intent.embedding_model_version,
+            }),
+            redaction_marker: None,
+            pii_class: node.pii_class.as_str().to_string(),
+            audit_metadata: None,
+            cause_change_id: None,
+        },
+    )
+    .await?;
+
+    conn.commit().await?;
+    Ok(())
+}
+
 /// Hard-purges one graph node while preserving a redacted audit changelog row.
 pub async fn hard_purge(store: &AgeGraphStore, uid: Uuid, redaction_marker: &str) -> Result<()> {
     hard_purge_with_audit(store, uid, redaction_marker, None).await
@@ -347,6 +571,19 @@ fn validate_scope_shape(
         Err(GraphError::Conflict(format!(
             "scope `{scope}` does not match computed scope `{expected}`"
         )))
+    }
+}
+
+fn validate_same_scope(old: &StoredNode, replacement: &StoredNode) -> Result<()> {
+    if old.workspace_id == replacement.workspace_id
+        && old.user_id == replacement.user_id
+        && old.scope == replacement.scope
+    {
+        Ok(())
+    } else {
+        Err(GraphError::Conflict(
+            "supersession nodes must share the same scope".to_string(),
+        ))
     }
 }
 
@@ -538,7 +775,7 @@ fn hash_properties(properties: Option<&Value>) -> Result<String> {
 async fn fetch_stored_node(conn: &mut PgConnection, uid: Uuid) -> Result<Option<StoredNode>> {
     let row = sqlx::query(
         r#"
-        SELECT label, workspace_id, user_id, scope, pii_class,
+        SELECT label, workspace_id, user_id, scope, pii_class, confidence,
                valid_from, valid_to, properties_summary
         FROM moa.node_index
         WHERE uid = $1
@@ -658,6 +895,7 @@ fn stored_node_from_row(row: sqlx::postgres::PgRow) -> Result<StoredNode> {
         user_id: row.try_get("user_id")?,
         scope: row.try_get("scope")?,
         pii_class: pii_class_text.parse()?,
+        confidence: row.try_get("confidence")?,
         valid_from: row.try_get("valid_from")?,
         valid_to: row.try_get("valid_to")?,
         properties_summary: row.try_get("properties_summary")?,
@@ -671,6 +909,7 @@ struct StoredNode {
     user_id: Option<String>,
     scope: String,
     pii_class: PiiClass,
+    confidence: Option<f64>,
     valid_from: DateTime<Utc>,
     valid_to: Option<DateTime<Utc>>,
     properties_summary: Option<Value>,

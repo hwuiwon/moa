@@ -1,0 +1,22 @@
+[package]
+name = "moa-memory-lifecycle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+moa-core = { path = "../../moa-core" }
+moa-memory-graph = { path = "../graph" }
+moa-memory-ingest = { path = "../ingest" }
+moa-memory-vector = { path = "../vector" }
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid", "json"] }
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[dev-dependencies]
+tokio.workspace = true

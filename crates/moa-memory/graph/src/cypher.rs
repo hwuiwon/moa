@@ -141,6 +141,21 @@ pub mod node {
              n.invalidated_by = $actor, n.invalidated_reason = $reason \
          RETURN n.uid AS result"
     ));
+
+    /// Close an existing node into an already-existing replacement node.
+    pub const CLOSE_WITH_SUPERSESSION: Cypher = Cypher::new(cypher_sql!(
+        "MATCH (old {uid: $old_uid}), (new {uid: $new_uid}) \
+         SET old.valid_to = $valid_to, old.invalidated_at = $invalidated_at, \
+             old.invalidated_by = $actor, old.invalidated_reason = $reason \
+         CREATE (new)-[:SUPERSEDES {uid: $edge_uid, workspace_id: $workspace_id, \
+                                    user_id: $user_id, scope: $scope}]->(old) \
+         RETURN old.uid AS result"
+    ));
+
+    /// Replace a node's mutable property bag.
+    pub const UPDATE_PROPERTIES: Cypher = Cypher::new(cypher_sql!(
+        "MATCH (n {uid: $uid}) SET n.properties = $properties RETURN n.uid AS result"
+    ));
 }
 
 pub mod edge {

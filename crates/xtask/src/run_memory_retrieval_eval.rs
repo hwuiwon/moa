@@ -22,6 +22,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
                 .with_ranking_config(options.ranking_config.clone())
                 .with_extractor_mode(options.extractor_mode)
                 .with_lane(options.lane)
+                .with_consolidation(options.consolidate)
                 .apply_budget_usd(options.budget_usd)
                 .apply_extractions_path(options.extractions_path.clone())
                 .apply_merges_path(options.merges_path.clone()),
@@ -40,13 +41,22 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .map(str::to_string)
         .unwrap_or_else(|| format!("{:?}", options.extractor_mode));
     println!(
-        "wrote memory retrieval eval report: output={} probes={} lane={:?} ranking={:?} reranker={} extractor={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} p95_retrieval_latency_ms={}",
+        "wrote memory retrieval eval report: output={} probes={} lane={:?} ranking={:?} reranker={} extractor={} consolidate={} merged={} duplicates_remaining={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} p95_retrieval_latency_ms={}",
         options.output.display(),
         report.probe_results.len(),
         options.lane,
         options.ranking_config.mode,
         if report.reranker_enabled { "on" } else { "off" },
         reported_extractor,
+        options.consolidate,
+        report
+            .consolidation
+            .as_ref()
+            .map_or(0, |value| value.merged),
+        report
+            .consolidation
+            .as_ref()
+            .map_or(0, |value| value.duplicates_remaining),
         report.cost.as_ref().map_or(0.0, |cost| cost.est_usd),
         report.aborted_over_budget,
         report.metrics.pre_rerank_recall_at_4.value,
@@ -69,6 +79,7 @@ struct Options {
     merges_path: Option<PathBuf>,
     lane: EvalLane,
     budget_usd: Option<f64>,
+    consolidate: bool,
 }
 
 impl Options {
@@ -82,6 +93,7 @@ impl Options {
         let mut merges_path = None;
         let mut lane = EvalLane::Pr;
         let mut budget_usd = None;
+        let mut consolidate = false;
         let mut extractor_specified = false;
         let mut args = args.peekable();
 
@@ -108,6 +120,9 @@ impl Options {
                         .next()
                         .context("--budget-usd requires a numeric value")?;
                     budget_usd = Some(parse_f64(&value, "--budget-usd")?);
+                }
+                "--consolidate" => {
+                    consolidate = true;
                 }
                 "--ranking" => {
                     let value = args
@@ -203,12 +218,13 @@ impl Options {
             merges_path,
             lane,
             budget_usd,
+            consolidate,
         })
     }
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--reranker off|on] [--ranking legacy|feature_v1] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
+    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--reranker off|on] [--ranking legacy|feature_v1] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
 }
 
 fn parse_reranker(value: &str) -> Result<bool> {

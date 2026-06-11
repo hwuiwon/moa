@@ -378,6 +378,44 @@ impl ScheduleBuilder {
             object: draft.object,
             answer: draft.answer,
             supersedes: draft.supersedes,
+            restates: None,
+            source_session_id: assignment.plan.session_id,
+            source_turn_seq: turn_seq,
+            pii_class: draft.pii_class,
+            expected_redacted: draft.expected_redacted,
+        };
+        self.facts.push(ScheduledFact {
+            category: draft.category,
+            session_key: assignment.key,
+            fact,
+        });
+        Ok(fact_id)
+    }
+
+    fn push_restatement(
+        &mut self,
+        assignment: SessionAssignment,
+        canonical_fact_id: &str,
+        draft: FactDraft,
+    ) -> Result<String> {
+        self.sessions
+            .entry(assignment.key.clone())
+            .or_insert_with(|| assignment.plan.clone());
+        let turn_seq = next_turn_seq(&mut self.next_turn_seq, &assignment.key)?;
+        let fact_id = draft.fact_id;
+        let fact = LedgerFact {
+            workspace_id: assignment.plan.workspace_id,
+            user_id: assignment.plan.user_id,
+            scope: draft.scope,
+            fact_id: fact_id.clone(),
+            valid_from: draft.valid_from,
+            valid_to: draft.valid_to,
+            subject: draft.subject,
+            predicate: draft.predicate,
+            object: draft.object,
+            answer: draft.answer,
+            supersedes: draft.supersedes,
+            restates: Some(canonical_fact_id.to_string()),
             source_session_id: assignment.plan.session_id,
             source_turn_seq: turn_seq,
             pii_class: draft.pii_class,
@@ -928,6 +966,41 @@ fn schedule_user_facts(
                 expected_redacted: false,
             },
         )?;
+        if should_restate_dependency(&dependency_fact_id) {
+            let restatement_fact_id = fact_id(
+                profile,
+                seed_index,
+                workspace_index,
+                Some(user_index),
+                &format!("depends-on-{pair_index}-restatement"),
+            );
+            builder.push_restatement(
+                user_aux_session(
+                    profile,
+                    seed_index,
+                    seed,
+                    user_index,
+                    19 + pair_index as u128,
+                    users,
+                    workspaces,
+                ),
+                &dependency_fact_id,
+                FactDraft {
+                    category: FactCategory::WorkspaceShared,
+                    fact_id: restatement_fact_id,
+                    scope: ScopeTier::Workspace,
+                    valid_from: fixed_time(base_day + 35 + pair_index as i64 * 2, 0)?,
+                    valid_to: None,
+                    subject: service.clone(),
+                    predicate: "depends_on".to_string(),
+                    object: library.to_string(),
+                    answer: format!("{service} depends on {library}."),
+                    supersedes: Vec::new(),
+                    pii_class: PiiClass::None,
+                    expected_redacted: false,
+                },
+            )?;
+        }
 
         let owner_fact_id = fact_id(
             profile,
@@ -1284,6 +1357,10 @@ fn build_embedding_inputs(facts: &[LedgerFact], probes: &[Probe]) -> Vec<Embeddi
     inputs
 }
 
+fn should_restate_dependency(fact_id: &str) -> bool {
+    matches!(natural_frames::workspace_frame_index(fact_id), 1 | 3)
+}
+
 fn validate_seeds(seeds: &[u64]) -> Result<()> {
     if seeds.len() != REQUIRED_SEED_COUNT {
         return invalid_config(format!(
@@ -1416,6 +1493,14 @@ fn render_fact_transcript(
     fact: &LedgerFact,
     facts_by_id: &BTreeMap<&str, &LedgerFact>,
 ) -> String {
+    if let Some(canonical) = fact
+        .restates
+        .as_deref()
+        .and_then(|canonical_id| facts_by_id.get(canonical_id))
+    {
+        return render_fact_transcript(transcript_style, category, canonical, facts_by_id);
+    }
+
     match transcript_style {
         TranscriptStyle::Marked => render_marked_fact_transcript(category, fact),
         TranscriptStyle::Natural => {
@@ -1551,6 +1636,11 @@ mod natural_frames {
             "response_style" => "uses response style",
             _ => "is",
         }
+    }
+
+    /// Returns the deterministic workspace-frame index selected for a fact key.
+    pub(super) fn workspace_frame_index(key: &str) -> usize {
+        stable_index(key, WORKSPACE_FRAMES.len())
     }
 
     fn select<'a>(key: &str, frames: &'a [&str]) -> &'a str {
@@ -2026,5 +2116,81 @@ fn io_error(path: &Path, source: std::io::Error) -> EvalError {
     EvalError::Io {
         path: path.to_path_buf(),
         source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::{
+        CorpusProfile, SyntheticSession, SyntheticTurn, TranscriptStyle,
+        generate_memory_eval_corpus_with_style,
+    };
+
+    #[test]
+    fn generator_restatement_transcripts_are_verbatim_repeats() {
+        // Pins: exact-hash consolidation is exercised by byte-identical restatement transcripts.
+        let corpus = generate_memory_eval_corpus_with_style(
+            CorpusProfile::Pr,
+            vec![1, 2, 3],
+            TranscriptStyle::Natural,
+        )
+        .expect("generate PR natural corpus");
+        let turns = turns_by_fact_id(&corpus.sessions);
+        let restating = corpus
+            .ledger
+            .iter()
+            .filter(|fact| fact.restates.is_some())
+            .collect::<Vec<_>>();
+
+        assert!(restating.len() >= 10);
+        for fact in restating {
+            let canonical_id = fact.restates.as_deref().expect("canonical id");
+            let canonical = turns
+                .get(canonical_id)
+                .expect("canonical turn should exist");
+            let restatement = turns
+                .get(fact.fact_id.as_str())
+                .expect("restating turn should exist");
+
+            assert_eq!(restatement.transcript, canonical.transcript);
+        }
+    }
+
+    #[test]
+    fn probes_never_target_restating_fact_ids() {
+        // Pins: restating facts exist only to be merged, not queried.
+        let corpus = generate_memory_eval_corpus_with_style(
+            CorpusProfile::Pr,
+            vec![1, 2, 3],
+            TranscriptStyle::Marked,
+        )
+        .expect("generate PR marked corpus");
+        let restating = corpus
+            .ledger
+            .iter()
+            .filter(|fact| fact.restates.is_some())
+            .map(|fact| fact.fact_id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(restating.len() >= 10);
+        for probe in &corpus.probes {
+            for fact_id in probe.referenced_fact_ids() {
+                assert!(!restating.contains(fact_id));
+            }
+        }
+    }
+
+    fn turns_by_fact_id(sessions: &[SyntheticSession]) -> BTreeMap<&str, &SyntheticTurn> {
+        let mut turns = BTreeMap::new();
+        for session in sessions {
+            for turn in &session.turns {
+                for fact_id in &turn.fact_ids {
+                    turns.insert(fact_id.as_str(), turn);
+                }
+            }
+        }
+        turns
     }
 }

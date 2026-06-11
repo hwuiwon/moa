@@ -3941,6 +3941,7 @@ dependencies = [
  "moa-lineage-core",
  "moa-memory-graph",
  "moa-memory-ingest",
+ "moa-memory-lifecycle",
  "moa-memory-pii",
  "moa-memory-vector",
  "moa-providers",
@@ -4231,6 +4232,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-memory-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "moa-core",
+ "moa-memory-graph",
+ "moa-memory-ingest",
+ "moa-memory-vector",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "moa-memory-pii"
 version = "0.1.0"
 dependencies = [
@@ -4321,6 +4341,7 @@ dependencies = [
  "moa-lineage-sink",
  "moa-memory-graph",
  "moa-memory-ingest",
+ "moa-memory-lifecycle",
  "moa-memory-vector",
  "moa-ocsf",
  "moa-providers",

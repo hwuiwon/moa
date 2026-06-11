@@ -6,7 +6,10 @@ use moa_core::{ScopeContext, ScopedConn};
 use moa_memory_vector::VectorStore;
 use sqlx::{PgConnection, PgPool};
 
-use crate::{GraphError, NodeWriteIntent};
+use crate::{
+    ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodePropertyUpdateIntent,
+    NodeWriteIntent,
+};
 
 /// Graph store backed by Apache AGE plus SQL sidecar tables.
 #[derive(Clone)]
@@ -85,6 +88,30 @@ impl AgeGraphStore {
         intent: NodeWriteIntent,
     ) -> Result<uuid::Uuid, GraphError> {
         crate::write::create_node_in_conn(self, conn, intent).await
+    }
+
+    /// Closes an active node into an already-existing replacement node.
+    pub async fn close_existing_node_with_supersession(
+        &self,
+        intent: ExistingSupersessionIntent,
+    ) -> Result<(), GraphError> {
+        crate::write::close_existing_node_with_supersession(self, intent).await
+    }
+
+    /// Updates a node's mutable properties in place.
+    pub async fn update_node_properties(
+        &self,
+        intent: NodePropertyUpdateIntent,
+    ) -> Result<(), GraphError> {
+        crate::write::update_node_properties(self, intent).await
+    }
+
+    /// Attaches a vector embedding to an existing node.
+    pub async fn upsert_node_embedding(
+        &self,
+        intent: NodeEmbeddingIntent,
+    ) -> Result<(), GraphError> {
+        crate::write::upsert_node_embedding(self, intent).await
     }
 
     pub(crate) async fn begin(&self) -> Result<Option<ScopedConn<'_>>, GraphError> {

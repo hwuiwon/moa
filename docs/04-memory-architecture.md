@@ -67,15 +67,16 @@ It inserts ranked graph hits with labels, names, properties, provenance, and con
 
 ## Consolidation
 
-Workspace consolidation is a scheduled maintenance pass. In cloud mode it is the `Consolidate` Restate workflow. Locally it runs through the local maintenance path.
+Workspace consolidation is a scheduled maintenance pass. In cloud mode it is the `Consolidate` Restate workflow. Locally and in eval it runs through the shared `moa-memory-lifecycle` crate. The workflow is a thin durable wrapper; the memory logic does not depend on Restate, so hermetic eval runs and scheduled maintenance call the same code.
 
-Consolidation can:
+Consolidation v1 runs four deterministic operations:
 
-- resolve contradictions with superseding edges
-- prune or expire stale facts
-- merge duplicate nodes
-- refresh sidecar and vector projections
-- record memory learning entries for audit
+- **Exact duplicate merge** groups active `Fact` nodes by `(workspace_id, user_id, scope, fact_hash)`. The canonical is the earliest `valid_from` row with UID as the tiebreak. Other active rows are closed with a `SUPERSEDES` edge in the same direction as normal graph supersession: replacement/canonical `-> SUPERSEDES -> old`.
+- **Anchored confidence decay** lowers confidence for idle facts. On first decay the current confidence is copied to `properties.base_confidence`; future runs recompute from that base instead of multiplying against the current value. This makes rerunning at the same `now` idempotent. Decay floors at the configured minimum and never deletes or invalidates a fact.
+- **Contradiction sweep** groups active facts by `(workspace_id, user_id, scope, subject, predicate)`. If a group contains multiple objects, the newest `valid_from` row wins with UID as the deterministic tiebreak, and older rows are superseded. No LLM judge runs in v1.
+- **Entity backfill** embeds active `Entity` nodes that lack vector rows when an embedder is available, and promotes edge-level `alias_mention` values into `properties.aliases` through the graph property-update operation.
+
+The v1 pass deliberately does not do semantic near-duplicate merging, digest building, episode building, scope-drift repair, or destructive expiry. `at_floor` is reported for future policy design, but floor-bound facts remain active unless another write supersedes them.
 
 Successful consolidation appends a `memory_updated` entry to `learning_log`.
 

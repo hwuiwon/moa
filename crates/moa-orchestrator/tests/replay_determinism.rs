@@ -4,8 +4,8 @@
 //
 // Consolidate:
 // - `Instant::now` and `Utc::now` were previously consulted directly in `Consolidate::run`.
-//   They now live inside the journaled `build_consolidate_report` durable step, so Restate
-//   captures the first-run report and replays that value instead of consulting live time.
+//   `Utc::now` now lives inside the journaled `now` durable step, so Restate captures the
+//   first-run timestamp and replays it instead of consulting live time.
 // - `Uuid::now_v7` and `Utc::now` in `record_memory_learning` are inside the journaled
 //   `record_memory_learning` durable step. The current graph no-op report skips that step, but
 //   the nondeterministic sources are still behind `ctx.run(...)` when it becomes active.
@@ -16,6 +16,9 @@ mod support;
 use async_trait::async_trait;
 use chrono::{Duration, TimeZone, Utc};
 use moa_core::WorkspaceId;
+use moa_memory_lifecycle::{
+    BackfillStats, ConsolidationOutcome, DecayStats, MergeStats, SweepStats,
+};
 use moa_orchestrator::workflows::consolidate::{
     ConsolidateDurableSteps, ConsolidateReport, ConsolidateRequest, run_consolidate_workflow,
 };
@@ -63,16 +66,58 @@ impl ConsolidateDurableSteps for RecordedConsolidateSteps<'_> {
         Ok(())
     }
 
+    async fn capture_now(&mut self) -> Result<chrono::DateTime<Utc>, HandlerError> {
+        Ok(self.recorder.run("now", &json!({}), || self.clock.now()))
+    }
+
+    async fn merge_duplicates(
+        &mut self,
+        request: &ConsolidateRequest,
+        _now: chrono::DateTime<Utc>,
+    ) -> Result<MergeStats, HandlerError> {
+        Ok(self.recorder.run("merge", request, MergeStats::default))
+    }
+
+    async fn decay_confidence(
+        &mut self,
+        request: &ConsolidateRequest,
+        _now: chrono::DateTime<Utc>,
+    ) -> Result<DecayStats, HandlerError> {
+        Ok(self.recorder.run("decay", request, DecayStats::default))
+    }
+
+    async fn sweep_contradictions(
+        &mut self,
+        request: &ConsolidateRequest,
+        _now: chrono::DateTime<Utc>,
+    ) -> Result<SweepStats, HandlerError> {
+        Ok(self
+            .recorder
+            .run("contradict", request, SweepStats::default))
+    }
+
+    async fn backfill_entities(
+        &mut self,
+        request: &ConsolidateRequest,
+    ) -> Result<BackfillStats, HandlerError> {
+        Ok(self
+            .recorder
+            .run("backfill", request, BackfillStats::default))
+    }
+
     async fn build_consolidate_report(
         &mut self,
         request: &ConsolidateRequest,
+        ran_at: chrono::DateTime<Utc>,
+        outcome: ConsolidationOutcome,
     ) -> Result<ConsolidateReport, HandlerError> {
-        Ok(self.recorder.run("build_consolidate_report", request, || {
-            ConsolidateReport::graph_noop(
+        Ok(self.recorder.run("report", request, || {
+            ConsolidateReport::from_outcome(
                 request.workspace_id.clone(),
                 request.target_date,
-                self.clock.now(),
+                ran_at,
                 self.duration_ms,
+                outcome,
             )
         }))
     }
@@ -86,6 +131,9 @@ impl ConsolidateDurableSteps for RecordedConsolidateSteps<'_> {
             && report.relative_dates_normalized == 0
             && report.contradictions_resolved == 0
             && report.confidence_decayed == 0
+            && report.duplicates_merged == 0
+            && report.entity_embeddings_backfilled == 0
+            && report.aliases_promoted == 0
             && report.errors.is_empty()
         {
             return Ok(());

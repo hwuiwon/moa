@@ -18,6 +18,7 @@ moa-hands = { path = "../moa-hands" }
 moa-lineage-core = { path = "../moa-lineage/core" }
 moa-memory-graph = { path = "../moa-memory/graph" }
 moa-memory-ingest = { path = "../moa-memory/ingest" }
+moa-memory-lifecycle = { path = "../moa-memory/lifecycle" }
 moa-memory-pii = { path = "../moa-memory/pii" }
 moa-memory-vector = { path = "../moa-memory/vector" }
 moa-providers = { path = "../moa-providers" }

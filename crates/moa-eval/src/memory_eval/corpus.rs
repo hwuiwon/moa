@@ -94,6 +94,9 @@ pub struct LedgerFact {
     /// Prior facts superseded by this fact.
     #[serde(default)]
     pub supersedes: Vec<String>,
+    /// Canonical fact id restated verbatim by this fact.
+    #[serde(default)]
+    pub restates: Option<String>,
     /// Synthetic session containing the source turn for this fact.
     pub source_session_id: SessionId,
     /// Synthetic source turn sequence inside the session.
@@ -116,6 +119,9 @@ impl LedgerFact {
         ensure_non_empty("ledger fact answer", &self.answer)?;
         for superseded in &self.supersedes {
             ensure_non_empty("ledger fact supersedes", superseded)?;
+        }
+        if let Some(restates) = &self.restates {
+            ensure_non_empty("ledger fact restates", restates)?;
         }
         Ok(())
     }
@@ -334,6 +340,43 @@ pub fn validate_ledger(facts: &[LedgerFact]) -> Result<()> {
             return invalid_config(format!("duplicate ledger fact_id {}", fact.fact_id));
         }
     }
+    let facts_by_id = facts
+        .iter()
+        .map(|fact| (fact.fact_id.as_str(), fact))
+        .collect::<HashMap<_, _>>();
+    for fact in facts {
+        let Some(canonical_id) = fact.restates.as_deref() else {
+            continue;
+        };
+        if canonical_id == fact.fact_id {
+            return invalid_config(format!(
+                "ledger fact {} cannot restate itself",
+                fact.fact_id
+            ));
+        }
+        let canonical = facts_by_id.get(canonical_id).ok_or_else(|| {
+            EvalError::InvalidConfig(format!(
+                "ledger fact {} restates missing canonical fact_id {}",
+                fact.fact_id, canonical_id
+            ))
+        })?;
+        if fact.subject != canonical.subject
+            || fact.predicate != canonical.predicate
+            || fact.object != canonical.object
+            || fact.answer != canonical.answer
+        {
+            return invalid_config(format!(
+                "ledger fact {} restates {} with mismatched subject/predicate/object/answer",
+                fact.fact_id, canonical_id
+            ));
+        }
+        if fact.source_session_id == canonical.source_session_id {
+            return invalid_config(format!(
+                "ledger fact {} restates {} in the same source session",
+                fact.fact_id, canonical_id
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -381,6 +424,12 @@ pub fn validate_probes(probes: &[Probe], facts: &[LedgerFact]) -> Result<()> {
                 return invalid_config(format!(
                     "cross-user isolation probe {} asks as owning user {} for fact_id {}",
                     probe.probe_id, probe.user_id, fact_id
+                ));
+            }
+            if fact.restates.is_some() {
+                return invalid_config(format!(
+                    "probe {} references restating fact_id {}; probes must target the canonical fact",
+                    probe.probe_id, fact_id
                 ));
             }
         }
@@ -469,5 +518,95 @@ fn io_error(path: &Path, source: std::io::Error) -> EvalError {
     EvalError::Io {
         path: path.to_path_buf(),
         source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+    use moa_core::{ScopeTier, SessionId, UserId, WorkspaceId};
+    use moa_memory_graph::PiiClass;
+    use uuid::Uuid;
+
+    use super::{
+        CORPUS_SCHEMA_VERSION, CorpusManifest, CorpusProfile, LedgerFact, TranscriptStyle,
+        validate_corpus,
+    };
+
+    #[test]
+    fn ledger_fact_deserializes_without_restates_field() {
+        // Pins: old corpus ledger rows remain readable after adding restatement metadata.
+        let raw = serde_json::json!({
+            "workspace_id": "workspace-a",
+            "user_id": "user-a",
+            "scope": "workspace",
+            "fact_id": "fact-a",
+            "valid_from": "2026-01-01T00:00:00Z",
+            "valid_to": null,
+            "subject": "service",
+            "predicate": "deploy_target",
+            "object": "staging",
+            "answer": "service deploys to staging.",
+            "supersedes": [],
+            "source_session_id": "00000000-0000-8000-8000-000000000001",
+            "source_turn_seq": 1,
+            "pii_class": "none",
+            "expected_redacted": false
+        });
+
+        let fact: LedgerFact = serde_json::from_value(raw).expect("legacy ledger fact parses");
+
+        assert_eq!(fact.restates, None);
+    }
+
+    #[test]
+    fn validate_corpus_rejects_restatement_with_mismatched_spo() {
+        // Pins: restatement pairs must be exact structured duplicates of their canonical fact.
+        let manifest = CorpusManifest {
+            version: CORPUS_SCHEMA_VERSION,
+            corpus_id: "restatement-validation".to_string(),
+            profile: CorpusProfile::Pr,
+            description: "test".to_string(),
+            seeds: vec![1, 2, 3],
+            transcript_style: TranscriptStyle::Marked,
+        };
+        let canonical = fact("canonical", "repo/control-plane", None, 1);
+        let restating = fact(
+            "restating",
+            "repo/different",
+            Some("canonical".to_string()),
+            2,
+        );
+
+        let error = validate_corpus(&manifest, &[canonical, restating], &[], &[])
+            .expect_err("mismatched restatement should be rejected");
+
+        assert!(error.to_string().contains("mismatched"));
+    }
+
+    fn fact(
+        fact_id: &str,
+        object: &str,
+        restates: Option<String>,
+        session_suffix: u128,
+    ) -> LedgerFact {
+        LedgerFact {
+            workspace_id: WorkspaceId::new("workspace-a"),
+            user_id: UserId::new("user-a"),
+            scope: ScopeTier::User,
+            fact_id: fact_id.to_string(),
+            valid_from: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            valid_to: None,
+            subject: "user-a".to_string(),
+            predicate: "private_repository".to_string(),
+            object: object.to_string(),
+            answer: format!("user-a uses {object}."),
+            supersedes: Vec::new(),
+            restates,
+            source_session_id: SessionId(Uuid::from_u128(session_suffix)),
+            source_turn_seq: 1,
+            pii_class: PiiClass::None,
+            expected_redacted: false,
+        }
     }
 }

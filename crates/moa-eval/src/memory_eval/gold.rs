@@ -1251,6 +1251,7 @@ mod tests {
             object: object.to_string(),
             answer: format!("{subject} {predicate} {object}."),
             supersedes: Vec::new(),
+            restates: None,
             source_session_id: SessionId(uuid::Uuid::from_u128(1)),
             source_turn_seq: 1,
             pii_class: PiiClass::None,

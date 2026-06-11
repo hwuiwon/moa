@@ -23,7 +23,8 @@ coverage is already known.
 `run-memory-retrieval-eval` writes a JSON report with the loaded corpus
 manifest, retrieval cutoffs, gold-resolution details, per-probe results,
 bootstrap intervals, cross-user leak probe ids, optional provider `cost`,
-optional provider provenance, and `RetrievalMetrics`.
+optional provider provenance, optional `consolidation`, and
+`RetrievalMetrics`.
 
 The metric surface is:
 
@@ -53,6 +54,12 @@ The metric surface is:
 `per_leg_recall` attributes expected fact recall to graph, vector, and lexical
 retrieval legs. Use it to localize the first bottleneck before proposing a new
 ranking or indexing feature.
+
+When present, `consolidation` is the `moa-memory-lifecycle`
+`ConsolidationOutcome`: `merged`, `decayed`, `at_floor`,
+`contradiction_supersessions`, `entity_embeddings_backfilled`,
+`aliases_promoted`, and `duplicates_remaining`. Old reports omit this section
+and still deserialize with `consolidation: null`.
 
 The graph leg is a seeded expansion leg. Retrieval runs vector and lexical
 first, then expands from planner NER seeds plus the top phase-one fused hits.
@@ -145,6 +152,11 @@ credentials and gates `ingestion_coverage >= 0.85`,
 `entity_fragmentation >= 0.90`, plus the hard blockers
 `cross_user_leak_count == 0` and `pii_unredacted_count == 0`.
 
+The PR natural corpus also plants verbatim restatement pairs in later sessions
+for the same user. These restating facts carry `restates: <canonical fact_id>`
+and probes target only the canonical fact. They exist to prove exact
+`fact_hash` consolidation without changing recall targets.
+
 ## Recorded Extraction Lane
 
 The natural profile can run with model-backed extraction without making CI or
@@ -172,6 +184,24 @@ env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
   --extractor recorded \
   --output target/memory-eval/natural-recorded.json
 ```
+
+To exercise lifecycle consolidation in the same hermetic lane, add
+`--consolidate` after gold resolution and before probes:
+
+```bash
+env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+  --corpus target/memory-eval/pr-natural \
+  --extractor recorded \
+  --consolidate \
+  --output target/memory-eval/natural-recorded-consolidated.json
+```
+
+The runner invokes `moa_memory_lifecycle::consolidate_workspace` once per eval
+workspace with the corpus reference time and the eval embedding provider, then
+runs a second pass in the same invocation. The second pass must report no
+mutating work; otherwise the run fails as non-idempotent. For every
+`restates` pair, the runner verifies via the gold UID map and a direct active
+row count that exactly one node remains active.
 
 Extraction fixtures are keyed by the SHA-256 hex hash of the raw chunk text the
 extractor saw. The file name and every record carry the extraction prompt

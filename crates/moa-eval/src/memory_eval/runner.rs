@@ -28,6 +28,7 @@ use moa_memory_ingest::{
     RecordedEntityMergeVerifier, RecordedFactExtractor, SessionTurn, TurnChunk, chunk_turn,
     normalize_entity_name,
 };
+use moa_memory_lifecycle::{ConsolidationOptions, ConsolidationOutcome};
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, redact_text};
 use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
 use moa_session::PostgresSessionStore;
@@ -41,10 +42,10 @@ use super::{
     BootstrapConfig, CachedEmbeddingFixture, CachedEmbeddingProvider, ClusterBootstrapReport,
     CorpusManifest, DEFAULT_BOOTSTRAP_RESAMPLES, EmbeddingInput, ExtractionPrecisionCounts,
     GoldPiiStatus, GoldResolutionReport, LedgerFact, Probe, ProbeResult, ProbeType,
-    RetrievalEvalReport, RetrievalMetrics, RetrievedCandidate, SyntheticSession,
-    candidates_from_retrieval_hits, embedding_text_hash, read_embedding_inputs_jsonl,
-    read_embeddings_jsonl, read_ledger_jsonl, read_manifest_json, read_probes_jsonl,
-    read_sessions_jsonl, resolve_gold_nodes, validate_corpus,
+    RetrievalMetrics, RetrievedCandidate, SyntheticSession, candidates_from_retrieval_hits,
+    embedding_text_hash, read_embedding_inputs_jsonl, read_embeddings_jsonl, read_ledger_jsonl,
+    read_manifest_json, read_probes_jsonl, read_sessions_jsonl, resolve_gold_nodes,
+    validate_corpus,
 };
 use crate::kernel::{
     CostLedger, CountingEmbedder, CountingExtractor, CountingMergeVerifier, CountingReranker,
@@ -74,6 +75,7 @@ pub struct MemoryRetrievalEvalOptions {
     merges_path: Option<PathBuf>,
     lane: EvalLane,
     budget_usd: Option<f64>,
+    consolidate: bool,
 }
 
 impl MemoryRetrievalEvalOptions {
@@ -96,6 +98,7 @@ impl MemoryRetrievalEvalOptions {
             merges_path: None,
             lane: EvalLane::Pr,
             budget_usd: None,
+            consolidate: false,
         }
     }
 
@@ -162,6 +165,13 @@ impl MemoryRetrievalEvalOptions {
         self
     }
 
+    /// Enables the post-gold memory consolidation pass.
+    #[must_use]
+    pub fn with_consolidation(mut self, consolidate: bool) -> Self {
+        self.consolidate = consolidate;
+        self
+    }
+
     /// Returns the corpus directory.
     #[must_use]
     pub fn corpus_dir(&self) -> &Path {
@@ -208,6 +218,12 @@ impl MemoryRetrievalEvalOptions {
     #[must_use]
     pub fn budget_usd(&self) -> Option<f64> {
         self.budget_usd
+    }
+
+    /// Returns whether the eval should run graph-memory consolidation before probes.
+    #[must_use]
+    pub fn consolidate(&self) -> bool {
+        self.consolidate
     }
 
     fn validate(&self) -> Result<()> {
@@ -375,33 +391,9 @@ pub struct MemoryRetrievalEvalReport {
     pub cross_user_leak_probe_ids: Vec<String>,
     /// Gold-resolution ingestion and fact-to-node mapping details.
     pub gold_resolution: GoldResolutionReport,
-}
-
-impl MemoryRetrievalEvalReport {
-    fn from_retrieval_report(
-        manifest: CorpusManifest,
-        gold_resolution: GoldResolutionReport,
-        retrieval: RetrievalEvalReport,
-        reranker_enabled: bool,
-        aborted_over_budget: bool,
-        cost: Option<CostLedger>,
-        providers: Option<ProviderProvenance>,
-    ) -> Self {
-        Self {
-            manifest,
-            candidate_k: RETRIEVAL_EVAL_CANDIDATE_K,
-            final_k: RETRIEVAL_EVAL_FINAL_K,
-            reranker_enabled,
-            aborted_over_budget,
-            cost,
-            providers,
-            metrics: retrieval.metrics,
-            probe_results: retrieval.probe_results,
-            bootstrap: retrieval.bootstrap,
-            cross_user_leak_probe_ids: retrieval.cross_user_leak_probe_ids,
-            gold_resolution,
-        }
-    }
+    /// Optional consolidation outcome collected after gold resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consolidation: Option<ConsolidationOutcome>,
 }
 
 /// Runs the hermetic memory-retrieval eval and writes `report.json`.
@@ -442,8 +434,23 @@ async fn run_memory_retrieval_eval_in_store(
         resolve_gold_nodes(ingest_ctx, &corpus.ledger, &corpus.sessions).await?;
     apply_eval_validity_windows(store.pool(), &mut gold_resolution).await?;
     stabilize_eval_access_times(store.pool(), &corpus.ledger).await?;
-    let ranking_reference_time = Some(deterministic_ranking_reference_time(&corpus.ledger));
+    let ranking_reference_time = deterministic_ranking_reference_time(&corpus.ledger);
+    let consolidation_reference_time = deterministic_consolidation_reference_time(&corpus.ledger);
     let fact_ids_by_uid = fact_ids_by_uid(&gold_resolution);
+    let consolidation = if options.consolidate() {
+        let outcome = run_eval_consolidation(
+            store.pool(),
+            &corpus.ledger,
+            &gold_resolution,
+            &fact_ids_by_uid,
+            providers.embedder.clone(),
+            consolidation_reference_time,
+        )
+        .await?;
+        Some(outcome)
+    } else {
+        None
+    };
     let extraction_precision =
         extraction_precision_counts(store.pool(), &corpus.ledger, &fact_ids_by_uid).await?;
     let entity_fragmentation = entity_fragmentation_counts(store.pool(), &corpus.ledger).await?;
@@ -459,6 +466,7 @@ async fn run_memory_retrieval_eval_in_store(
             aborted_over_budget: true,
             cost: Some(cost_snapshot(&providers.ledger).await),
             providers: Some(providers.provenance),
+            consolidation: consolidation.clone(),
         });
         write_report(options.output_path(), &report).await?;
         cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
@@ -478,7 +486,7 @@ async fn run_memory_retrieval_eval_in_store(
             ProbeRetrieveOptions {
                 use_reranker: options.reranker_enabled(),
                 ranking_config: options.ranking_config().clone(),
-                ranking_reference_time,
+                ranking_reference_time: Some(ranking_reference_time),
                 deterministic_replay: providers.deterministic_replay,
             },
         )
@@ -509,6 +517,7 @@ async fn run_memory_retrieval_eval_in_store(
                 aborted_over_budget: true,
                 cost: Some(cost_snapshot(&providers.ledger).await),
                 providers: Some(providers.provenance),
+                consolidation: consolidation.clone(),
             });
             write_report(options.output_path(), &report).await?;
             cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
@@ -528,6 +537,7 @@ async fn run_memory_retrieval_eval_in_store(
             aborted_over_budget: true,
             cost: Some(cost_snapshot(&providers.ledger).await),
             providers: Some(providers.provenance),
+            consolidation: consolidation.clone(),
         });
         write_report(options.output_path(), &report).await?;
         cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
@@ -545,6 +555,7 @@ async fn run_memory_retrieval_eval_in_store(
         aborted_over_budget: false,
         cost: Some(cost_snapshot(&providers.ledger).await),
         providers: Some(providers.provenance),
+        consolidation,
     });
     write_report(options.output_path(), &report).await?;
     cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
@@ -882,6 +893,7 @@ struct ReportBuildInput {
     aborted_over_budget: bool,
     cost: Option<CostLedger>,
     providers: Option<ProviderProvenance>,
+    consolidation: Option<ConsolidationOutcome>,
 }
 
 fn build_eval_report(input: ReportBuildInput) -> MemoryRetrievalEvalReport {
@@ -892,15 +904,21 @@ fn build_eval_report(input: ReportBuildInput) -> MemoryRetrievalEvalReport {
         input.extraction_precision,
         input.entity_fragmentation,
     );
-    MemoryRetrievalEvalReport::from_retrieval_report(
-        input.manifest,
-        input.gold_resolution,
-        retrieval,
-        input.reranker_enabled,
-        input.aborted_over_budget,
-        input.cost,
-        input.providers,
-    )
+    MemoryRetrievalEvalReport {
+        manifest: input.manifest,
+        candidate_k: RETRIEVAL_EVAL_CANDIDATE_K,
+        final_k: RETRIEVAL_EVAL_FINAL_K,
+        reranker_enabled: input.reranker_enabled,
+        aborted_over_budget: input.aborted_over_budget,
+        cost: input.cost,
+        providers: input.providers,
+        metrics: retrieval.metrics,
+        probe_results: retrieval.probe_results,
+        bootstrap: retrieval.bootstrap,
+        cross_user_leak_probe_ids: retrieval.cross_user_leak_probe_ids,
+        gold_resolution: input.gold_resolution,
+        consolidation: input.consolidation,
+    }
 }
 
 async fn check_budget(
@@ -1176,6 +1194,15 @@ fn deterministic_ranking_reference_time(ledger: &[LedgerFact]) -> DateTime<Utc> 
         + chrono::Duration::days(7)
 }
 
+fn deterministic_consolidation_reference_time(ledger: &[LedgerFact]) -> DateTime<Utc> {
+    ledger
+        .iter()
+        .map(|fact| fact.valid_from)
+        .min()
+        .unwrap_or_else(Utc::now)
+        + chrono::Duration::days(7)
+}
+
 struct ProbeRetrieval {
     pre_rerank_hits: Vec<RetrievalHit>,
     post_rerank_hits: Vec<RetrievalHit>,
@@ -1338,6 +1365,127 @@ fn fact_ids_by_uid(gold_resolution: &GoldResolutionReport) -> HashMap<Uuid, Stri
         }
     }
     fact_ids
+}
+
+async fn run_eval_consolidation(
+    pool: &PgPool,
+    ledger: &[LedgerFact],
+    gold_resolution: &GoldResolutionReport,
+    fact_ids_by_uid: &HashMap<Uuid, String>,
+    embedder: Arc<dyn EmbeddingProvider>,
+    reference_time: DateTime<Utc>,
+) -> Result<ConsolidationOutcome> {
+    let workspace_ids = eval_workspace_ids(ledger);
+    let mut outcome = ConsolidationOutcome::default();
+    for workspace_id in &workspace_ids {
+        let workspace_outcome = moa_memory_lifecycle::consolidate_workspace(
+            pool,
+            WorkspaceId::new(workspace_id.clone()),
+            ConsolidationOptions::default(),
+            reference_time,
+            Some(embedder.clone()),
+        )
+        .await
+        .map_err(|error| {
+            EvalError::InvalidConfig(format!(
+                "memory consolidation failed for workspace {workspace_id}: {error}"
+            ))
+        })?;
+        add_consolidation_outcome(&mut outcome, workspace_outcome);
+    }
+
+    verify_restatement_pairs_collapsed(pool, ledger, gold_resolution, fact_ids_by_uid).await?;
+
+    let mut second = ConsolidationOutcome::default();
+    for workspace_id in &workspace_ids {
+        let second_outcome = moa_memory_lifecycle::consolidate_workspace(
+            pool,
+            WorkspaceId::new(workspace_id.clone()),
+            ConsolidationOptions::default(),
+            reference_time,
+            Some(embedder.clone()),
+        )
+        .await
+        .map_err(|error| {
+            EvalError::InvalidConfig(format!(
+                "second memory consolidation failed for workspace {workspace_id}: {error}"
+            ))
+        })?;
+        add_consolidation_outcome(&mut second, second_outcome);
+    }
+    if !second.has_no_work() {
+        return Err(EvalError::InvalidConfig(format!(
+            "second consolidation pass was not idempotent: {second:?}"
+        )));
+    }
+
+    Ok(outcome)
+}
+
+fn add_consolidation_outcome(total: &mut ConsolidationOutcome, next: ConsolidationOutcome) {
+    total.merged += next.merged;
+    total.decayed += next.decayed;
+    total.at_floor += next.at_floor;
+    total.contradiction_supersessions += next.contradiction_supersessions;
+    total.entity_embeddings_backfilled += next.entity_embeddings_backfilled;
+    total.aliases_promoted += next.aliases_promoted;
+    total.duplicates_remaining += next.duplicates_remaining;
+}
+
+async fn verify_restatement_pairs_collapsed(
+    pool: &PgPool,
+    ledger: &[LedgerFact],
+    gold_resolution: &GoldResolutionReport,
+    fact_ids_by_uid: &HashMap<Uuid, String>,
+) -> Result<()> {
+    let records = gold_records_by_fact_id(gold_resolution);
+    for fact in ledger.iter().filter(|fact| fact.restates.is_some()) {
+        let canonical_id = fact
+            .restates
+            .as_deref()
+            .expect("filtered restating facts should have canonical ids");
+        let canonical = records.get(canonical_id).ok_or_else(|| {
+            EvalError::InvalidConfig(format!(
+                "restating fact {} references missing gold record {}",
+                fact.fact_id, canonical_id
+            ))
+        })?;
+        let restating = records.get(&fact.fact_id).ok_or_else(|| {
+            EvalError::InvalidConfig(format!(
+                "restating fact {} has no gold record",
+                fact.fact_id
+            ))
+        })?;
+        let mut uids = canonical
+            .node_uids
+            .iter()
+            .chain(restating.node_uids.iter())
+            .copied()
+            .collect::<Vec<_>>();
+        uids.sort_unstable();
+        uids.dedup();
+        for uid in &uids {
+            if !fact_ids_by_uid.contains_key(uid) {
+                return Err(EvalError::InvalidConfig(format!(
+                    "restatement pair {} -> {} resolved uid {} missing from fact_ids_by_uid",
+                    fact.fact_id, canonical_id, uid
+                )));
+            }
+        }
+        let active = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM moa.node_index WHERE uid = ANY($1) AND valid_to IS NULL",
+        )
+        .bind(&uids)
+        .fetch_one(pool)
+        .await?;
+        if active != 1 {
+            return Err(EvalError::InvalidConfig(format!(
+                "restatement pair {} -> {} has {active} active nodes after consolidation",
+                fact.fact_id, canonical_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn extraction_precision_counts(
@@ -1535,8 +1683,8 @@ async fn extracted_embedding_texts(
                 ))
             })? {
                 texts.insert(fact.summary.clone(), ());
-                texts.insert(normalize_entity_name(&fact.subject), ());
-                texts.insert(normalize_entity_name(&fact.object), ());
+                insert_entity_embedding_texts(&mut texts, &fact.subject);
+                insert_entity_embedding_texts(&mut texts, &fact.object);
                 let pii = deterministic_pii_result(&fact.summary);
                 let redacted = redact_text(&fact.summary, &pii.spans);
                 if redacted != fact.summary {
@@ -1546,6 +1694,22 @@ async fn extracted_embedding_texts(
         }
     }
     Ok(texts.into_keys().collect())
+}
+
+fn insert_entity_embedding_texts(texts: &mut BTreeMap<String, ()>, mention: &str) {
+    let normalized = normalize_entity_name(mention);
+    if !normalized.trim().is_empty() {
+        texts.insert(normalized, ());
+    }
+
+    let pii = deterministic_pii_result(mention);
+    let redacted = redact_text(mention, &pii.spans);
+    if redacted != mention {
+        let normalized_redacted = normalize_entity_name(&redacted);
+        if !normalized_redacted.trim().is_empty() {
+            texts.insert(normalized_redacted, ());
+        }
+    }
 }
 
 pub(crate) struct LoadedMemoryEvalCorpus {
@@ -1781,6 +1945,17 @@ mod tests {
             .expect_err("PR lane with a live budget should fail");
 
         assert!(error.to_string().contains("--budget-usd"));
+    }
+
+    #[test]
+    fn entity_embedding_texts_include_redacted_mentions() {
+        // Pins: hermetic eval fixture preload covers entity names after deterministic PII redaction.
+        let mut texts = BTreeMap::new();
+
+        insert_entity_embedding_texts(&mut texts, "ops@example.com");
+
+        let keys = texts.into_keys().collect::<Vec<_>>();
+        assert_eq!(keys, vec!["email redacted", "ops example com"]);
     }
 
     #[tokio::test]

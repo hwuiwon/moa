@@ -21,9 +21,13 @@ pub use edge::{EdgeLabel, EdgeWriteIntent};
 pub use error::GraphError;
 pub use lexical::LexicalStore;
 pub use node::{
-    NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass, bump_last_accessed, lookup_seed_by_name,
+    ExistingSupersessionIntent, NodeEmbeddingIntent, NodeIndexRow, NodeLabel,
+    NodePropertyUpdateIntent, NodeWriteIntent, PiiClass, bump_last_accessed, lookup_seed_by_name,
 };
 pub use validity::push_validity_filter;
+pub use write::{
+    close_existing_node_with_supersession, update_node_properties, upsert_node_embedding,
+};
 
 /// Result type returned by graph-memory helpers.
 pub type Result<T> = std::result::Result<T, GraphError>;

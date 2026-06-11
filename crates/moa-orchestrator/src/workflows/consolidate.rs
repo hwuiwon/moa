@@ -1,10 +1,11 @@
 //! Restate workflow that runs one workspace memory-consolidation pass.
 
-use std::time::Instant;
-
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use moa_core::{LearningEntry, WorkspaceId};
+use moa_memory_lifecycle::{
+    BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, MergeStats, SweepStats,
+};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
@@ -40,6 +41,21 @@ pub struct ConsolidateReport {
     pub contradictions_resolved: u64,
     /// Number of confidence decays performed.
     pub confidence_decayed: u64,
+    /// Number of duplicate facts merged into canonicals.
+    #[serde(default)]
+    pub duplicates_merged: u64,
+    /// Exact-duplicate groups still active after consolidation.
+    #[serde(default)]
+    pub duplicates_remaining: u64,
+    /// Active facts currently at the confidence floor.
+    #[serde(default)]
+    pub confidence_at_floor: u64,
+    /// Entity nodes that received missing embeddings.
+    #[serde(default)]
+    pub entity_embeddings_backfilled: u64,
+    /// Alias mentions promoted onto Entity node properties.
+    #[serde(default)]
+    pub aliases_promoted: u64,
     /// Orphaned graph record identifiers detected during the pass.
     pub orphaned_records: Vec<String>,
     /// Summary record count before consolidation.
@@ -70,6 +86,11 @@ impl ConsolidateReport {
             relative_dates_normalized: 0,
             contradictions_resolved: 0,
             confidence_decayed: 0,
+            duplicates_merged: 0,
+            duplicates_remaining: 0,
+            confidence_at_floor: 0,
+            entity_embeddings_backfilled: 0,
+            aliases_promoted: 0,
             orphaned_records: Vec::new(),
             summary_records_before: 0,
             summary_records_after: 0,
@@ -96,11 +117,52 @@ impl ConsolidateReport {
             relative_dates_normalized: 0,
             contradictions_resolved: 0,
             confidence_decayed: 0,
+            duplicates_merged: 0,
+            duplicates_remaining: 0,
+            confidence_at_floor: 0,
+            entity_embeddings_backfilled: 0,
+            aliases_promoted: 0,
             orphaned_records: Vec::new(),
             summary_records_before: 0,
             summary_records_after: 0,
             duration_ms,
             errors: vec![error.into()],
+        }
+    }
+
+    /// Builds a report from lifecycle operation outcomes.
+    #[must_use]
+    pub fn from_outcome(
+        workspace_id: WorkspaceId,
+        target_date: NaiveDate,
+        ran_at: DateTime<Utc>,
+        duration_ms: u64,
+        outcome: ConsolidationOutcome,
+    ) -> Self {
+        let records_updated = outcome.merged
+            + outcome.decayed
+            + outcome.contradiction_supersessions
+            + outcome.entity_embeddings_backfilled
+            + outcome.aliases_promoted;
+        Self {
+            workspace_id,
+            target_date,
+            ran_at,
+            records_updated,
+            records_deleted: 0,
+            relative_dates_normalized: 0,
+            contradictions_resolved: outcome.contradiction_supersessions,
+            confidence_decayed: outcome.decayed,
+            duplicates_merged: outcome.merged,
+            duplicates_remaining: outcome.duplicates_remaining,
+            confidence_at_floor: outcome.at_floor,
+            entity_embeddings_backfilled: outcome.entity_embeddings_backfilled,
+            aliases_promoted: outcome.aliases_promoted,
+            orphaned_records: Vec::new(),
+            summary_records_before: 0,
+            summary_records_after: 0,
+            duration_ms,
+            errors: Vec::new(),
         }
     }
 }
@@ -142,10 +204,42 @@ pub trait ConsolidateDurableSteps {
         request: &ConsolidateRequest,
     ) -> Result<(), HandlerError>;
 
-    /// Builds the consolidation report behind a journaled durable step.
+    /// Captures the pass timestamp behind a journaled durable step.
+    async fn capture_now(&mut self) -> Result<DateTime<Utc>, HandlerError>;
+
+    /// Runs the exact-duplicate merge step.
+    async fn merge_duplicates(
+        &mut self,
+        request: &ConsolidateRequest,
+        now: DateTime<Utc>,
+    ) -> Result<MergeStats, HandlerError>;
+
+    /// Runs the anchored confidence decay step.
+    async fn decay_confidence(
+        &mut self,
+        request: &ConsolidateRequest,
+        now: DateTime<Utc>,
+    ) -> Result<DecayStats, HandlerError>;
+
+    /// Runs the deterministic contradiction sweep step.
+    async fn sweep_contradictions(
+        &mut self,
+        request: &ConsolidateRequest,
+        now: DateTime<Utc>,
+    ) -> Result<SweepStats, HandlerError>;
+
+    /// Runs the entity embedding and alias backfill step.
+    async fn backfill_entities(
+        &mut self,
+        request: &ConsolidateRequest,
+    ) -> Result<BackfillStats, HandlerError>;
+
+    /// Builds the final consolidation report behind a journaled durable step.
     async fn build_consolidate_report(
         &mut self,
         request: &ConsolidateRequest,
+        ran_at: DateTime<Utc>,
+        outcome: ConsolidationOutcome,
     ) -> Result<ConsolidateReport, HandlerError>;
 
     /// Persists any memory-learning entry derived from the report.
@@ -167,7 +261,23 @@ pub async fn run_consolidate_workflow(
     request: ConsolidateRequest,
 ) -> Result<ConsolidateReport, HandlerError> {
     steps.mark_consolidation_started(&request).await?;
-    let report = steps.build_consolidate_report(&request).await?;
+    let ran_at = steps.capture_now().await?;
+    let merge = steps.merge_duplicates(&request, ran_at).await?;
+    let decay = steps.decay_confidence(&request, ran_at).await?;
+    let sweep = steps.sweep_contradictions(&request, ran_at).await?;
+    let backfill = steps.backfill_entities(&request).await?;
+    let outcome = ConsolidationOutcome {
+        merged: merge.merged,
+        decayed: decay.decayed,
+        at_floor: decay.at_floor,
+        contradiction_supersessions: sweep.contradiction_supersessions,
+        entity_embeddings_backfilled: backfill.entity_embeddings_backfilled,
+        aliases_promoted: backfill.aliases_promoted,
+        duplicates_remaining: merge.duplicates_remaining,
+    };
+    let report = steps
+        .build_consolidate_report(&request, ran_at, outcome)
+        .await?;
     steps.record_memory_learning(&report).await?;
     steps.consolidation_completed(&report).await?;
     Ok(report)
@@ -191,25 +301,119 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
             .map_err(HandlerError::from)
     }
 
+    async fn capture_now(&mut self) -> Result<DateTime<Utc>, HandlerError> {
+        self.ctx
+            .run(|| async move { Ok(Json::from(Utc::now())) })
+            .name("now")
+            .await
+            .map(Json::into_inner)
+            .map_err(HandlerError::from)
+    }
+
+    async fn merge_duplicates(
+        &mut self,
+        request: &ConsolidateRequest,
+        now: DateTime<Utc>,
+    ) -> Result<MergeStats, HandlerError> {
+        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let workspace_id = request.workspace_id.clone();
+        self.ctx
+            .run(|| async move {
+                moa_memory_lifecycle::merge_duplicates(&pool, &workspace_id, now)
+                    .await
+                    .map(Json::from)
+                    .map_err(lifecycle_handler_error)
+            })
+            .name("merge")
+            .await
+            .map(Json::into_inner)
+            .map_err(HandlerError::from)
+    }
+
+    async fn decay_confidence(
+        &mut self,
+        request: &ConsolidateRequest,
+        now: DateTime<Utc>,
+    ) -> Result<DecayStats, HandlerError> {
+        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let workspace_id = request.workspace_id.clone();
+        self.ctx
+            .run(|| async move {
+                moa_memory_lifecycle::decay_confidence(
+                    &pool,
+                    &workspace_id,
+                    now,
+                    &ConsolidationOptions::default(),
+                )
+                .await
+                .map(Json::from)
+                .map_err(lifecycle_handler_error)
+            })
+            .name("decay")
+            .await
+            .map(Json::into_inner)
+            .map_err(HandlerError::from)
+    }
+
+    async fn sweep_contradictions(
+        &mut self,
+        request: &ConsolidateRequest,
+        now: DateTime<Utc>,
+    ) -> Result<SweepStats, HandlerError> {
+        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let workspace_id = request.workspace_id.clone();
+        self.ctx
+            .run(|| async move {
+                moa_memory_lifecycle::sweep_contradictions(&pool, &workspace_id, now)
+                    .await
+                    .map(Json::from)
+                    .map_err(lifecycle_handler_error)
+            })
+            .name("contradict")
+            .await
+            .map(Json::into_inner)
+            .map_err(HandlerError::from)
+    }
+
+    async fn backfill_entities(
+        &mut self,
+        request: &ConsolidateRequest,
+    ) -> Result<BackfillStats, HandlerError> {
+        let runtime = OrchestratorCtx::current();
+        let pool = runtime.graph_pool.clone();
+        let workspace_id = request.workspace_id.clone();
+        let embedder = runtime.embedding_provider.clone();
+        self.ctx
+            .run(|| async move {
+                moa_memory_lifecycle::backfill_entities(&pool, &workspace_id, embedder)
+                    .await
+                    .map(Json::from)
+                    .map_err(lifecycle_handler_error)
+            })
+            .name("backfill")
+            .await
+            .map(Json::into_inner)
+            .map_err(HandlerError::from)
+    }
+
     async fn build_consolidate_report(
         &mut self,
         request: &ConsolidateRequest,
+        ran_at: DateTime<Utc>,
+        outcome: ConsolidationOutcome,
     ) -> Result<ConsolidateReport, HandlerError> {
         let request = request.clone();
         self.ctx
             .run(|| async move {
-                let started_at = Instant::now();
-                let ran_at = Utc::now();
-                // Graph memory maintains indexes incrementally on writes. The scheduled workflow
-                // remains as a durable checkpoint hook and currently has no graph-local work to run.
-                Ok(Json::from(ConsolidateReport::graph_noop(
+                Ok(Json::from(ConsolidateReport::from_outcome(
                     request.workspace_id,
                     request.target_date,
                     ran_at,
-                    started_at.elapsed().as_millis() as u64,
+                    0,
+                    outcome,
                 )))
             })
-            .name("build_consolidate_report")
+            .name("report")
             .await
             .map(Json::into_inner)
             .map_err(HandlerError::from)
@@ -247,6 +451,9 @@ async fn record_memory_learning(
         && report.relative_dates_normalized == 0
         && report.contradictions_resolved == 0
         && report.confidence_decayed == 0
+        && report.duplicates_merged == 0
+        && report.entity_embeddings_backfilled == 0
+        && report.aliases_promoted == 0
     {
         return Ok(());
     }
@@ -267,6 +474,11 @@ async fn record_memory_learning(
                     "relative_dates_normalized": report.relative_dates_normalized,
                     "contradictions_resolved": report.contradictions_resolved,
                     "confidence_decayed": report.confidence_decayed,
+                    "duplicates_merged": report.duplicates_merged,
+                    "duplicates_remaining": report.duplicates_remaining,
+                    "confidence_at_floor": report.confidence_at_floor,
+                    "entity_embeddings_backfilled": report.entity_embeddings_backfilled,
+                    "aliases_promoted": report.aliases_promoted,
                 }),
                 confidence: Some(1.0),
                 source_refs: Vec::new(),
@@ -282,4 +494,8 @@ async fn record_memory_learning(
     .name("record_memory_learning")
     .await?;
     Ok(())
+}
+
+fn lifecycle_handler_error(error: moa_memory_lifecycle::consolidate::Error) -> HandlerError {
+    TerminalError::new(error.to_string()).into()
 }

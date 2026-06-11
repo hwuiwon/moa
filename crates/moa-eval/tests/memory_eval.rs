@@ -1720,6 +1720,7 @@ fn gold_fact(spec: GoldFactSpec) -> LedgerFact {
         object: spec.object.to_string(),
         answer: spec.answer.to_string(),
         supersedes: Vec::new(),
+        restates: None,
         source_session_id: spec.source_session_id,
         source_turn_seq: spec.source_turn_seq,
         pii_class: PiiClass::None,
@@ -2208,6 +2209,22 @@ fn memory_budget_report(probe_results: Vec<ProbeResult>) -> MemoryRetrievalEvalR
     memory_budget_report_with_reranker(probe_results, false)
 }
 
+#[test]
+fn consolidation_outcome_section_serde_default() {
+    // Pins: reports written before the consolidation section was added still deserialize.
+    let report = memory_budget_report(Vec::new());
+    let mut value = serde_json::to_value(&report).expect("report serializes");
+    value
+        .as_object_mut()
+        .expect("report should serialize to an object")
+        .remove("consolidation");
+
+    let loaded: MemoryRetrievalEvalReport =
+        serde_json::from_value(value).expect("old report without consolidation parses");
+
+    assert_eq!(loaded.consolidation, None);
+}
+
 fn memory_budget_report_with_reranker(
     probe_results: Vec<ProbeResult>,
     reranker_enabled: bool,
@@ -2244,6 +2261,7 @@ fn memory_budget_report_with_reranker(
             ingest_reports: Vec::new(),
             records: Vec::new(),
         },
+        consolidation: None,
     }
 }
 
@@ -2539,6 +2557,7 @@ fn realistic_corpus() -> (
             object: "staging".to_string(),
             answer: "As of January 5, payments-api deployed to staging.".to_string(),
             supersedes: Vec::new(),
+            restates: None,
             source_session_id: alice_session,
             source_turn_seq: 1,
             pii_class: PiiClass::None,
@@ -2556,6 +2575,7 @@ fn realistic_corpus() -> (
             object: "production-canary".to_string(),
             answer: "The latest payments-api deploy target is production-canary.".to_string(),
             supersedes: vec!["fact-deploy-target-v1".to_string()],
+            restates: None,
             source_session_id: alice_session,
             source_turn_seq: 2,
             pii_class: PiiClass::None,
@@ -2573,6 +2593,7 @@ fn realistic_corpus() -> (
             object: "runbook/payments-canary".to_string(),
             answer: "Payments deploys require runbook/payments-canary.".to_string(),
             supersedes: Vec::new(),
+            restates: None,
             source_session_id: alice_session,
             source_turn_seq: 3,
             pii_class: PiiClass::None,
@@ -2590,6 +2611,7 @@ fn realistic_corpus() -> (
             object: "nvim".to_string(),
             answer: "Bob prefers nvim for config edits.".to_string(),
             supersedes: Vec::new(),
+            restates: None,
             source_session_id: bob_session,
             source_turn_seq: 1,
             pii_class: PiiClass::None,
@@ -2607,6 +2629,7 @@ fn realistic_corpus() -> (
             object: "+1-555-0100".to_string(),
             answer: "Alice's contact phone is [PHONE].".to_string(),
             supersedes: Vec::new(),
+            restates: None,
             source_session_id: alice_session,
             source_turn_seq: 4,
             pii_class: PiiClass::Pii,

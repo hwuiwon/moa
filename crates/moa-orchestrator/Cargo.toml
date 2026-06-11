@@ -38,6 +38,7 @@ moa-lineage-audit = { path = "../moa-lineage/audit" }
 moa-lineage-core = { path = "../moa-lineage/core" }
 moa-lineage-sink = { path = "../moa-lineage/sink" }
 moa-memory-graph = { path = "../moa-memory/graph" }
+moa-memory-lifecycle = { path = "../moa-memory/lifecycle" }
 moa-memory-vector = { path = "../moa-memory/vector" }
 moa-ocsf.workspace = true
 memory-ingest = { package = "moa-memory-ingest", path = "../moa-memory/ingest" }
