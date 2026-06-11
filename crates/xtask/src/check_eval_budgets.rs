@@ -277,6 +277,20 @@ fn previous_memory_report_path() -> Option<PathBuf> {
 
 fn memory_retrieval_gate_violations(report: &MemoryRetrievalEvalReport) -> Vec<Violation> {
     let mut violations = Vec::new();
+    if report.aborted_over_budget {
+        let actual = report
+            .cost
+            .as_ref()
+            .map(|cost| {
+                format!(
+                    "estimated ${:.4} over budget ${:.4}",
+                    cost.est_usd, cost.budget_usd
+                )
+            })
+            .unwrap_or_else(|| "true".to_string());
+        violations.push(Violation::new("aborted_over_budget", "false", actual));
+    }
+
     let cross_user_leak_probe_ids = cross_user_leak_probe_ids(&report.probe_results);
     let cross_user_leak_count = cross_user_leak_count(&report.probe_results);
     if cross_user_leak_count != 0 {

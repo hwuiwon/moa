@@ -5,10 +5,16 @@
 
 pub mod compare;
 pub mod core_metrics;
+pub mod cost;
+pub mod counting;
 pub mod fixtures;
 pub mod stats;
 
 pub use core_metrics::{MetricSummary, PerLegRecall, RetrievalCoreMetrics};
+pub use cost::{CostError, CostLedger, ProviderProvenance};
+pub use counting::{
+    CountingEmbedder, CountingExtractor, CountingMergeVerifier, CountingReranker, SharedCostLedger,
+};
 pub use fixtures::{FixtureRecord, FixtureStore};
 pub use stats::{
     BinaryProbeOutcome, BootstrapConfig, ClusterBootstrapReport, ClusterObservation,

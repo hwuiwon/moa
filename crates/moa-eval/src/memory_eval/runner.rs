@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -12,22 +12,29 @@ use moa_brain::planning::{
     PlanningCtx, QueryPlanner, QueryRetrievalCtx, parse_temporal, retrieve_for_query,
 };
 use moa_brain::retrieval::{
-    CachedHybridRetriever, HybridRetriever, RankingConfig, RankingMode, RetrievalHit,
+    CachedHybridRetriever, CohereReranker, HybridRetriever, NoopReranker, RankingConfig,
+    RankingMode, Reranker, RetrievalHit,
 };
-use moa_core::{MemoryScope, ScopeContext, ScopeTier, WorkspaceId, traits::EmbeddingProvider};
-use moa_memory_graph::{AgeGraphStore, GraphStore, PiiClass};
+use moa_core::{
+    MemoryScope, ScopeContext, ScopeTier, WorkspaceId, config::MemoryExtractionConfig,
+    traits::EmbeddingProvider,
+};
+use moa_memory_graph::{AgeGraphStore, GraphStore, NodeIndexRow, PiiClass};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, DeterministicEntityMergeVerifier,
     EXTRACTION_PROMPT_VERSION, EmbeddedFact, EntityMergeFixtureRecord, EntityMergeVerifier,
-    EntityResolver, ExtractionFixtureRecord, FactExtractor, HeuristicFactExtractor, IngestCtx,
-    IngestError, MERGE_PROMPT_VERSION, RecordedEntityMergeVerifier, RecordedFactExtractor,
-    SessionTurn, chunk_turn, normalize_entity_name,
+    EntityResolver, ExtractedFact, ExtractionFixtureRecord, FactExtractor, HeuristicFactExtractor,
+    IngestCtx, IngestError, LlmEntityMergeVerifier, LlmFactExtractor, MERGE_PROMPT_VERSION,
+    RecordedEntityMergeVerifier, RecordedFactExtractor, SessionTurn, TurnChunk, chunk_turn,
+    normalize_entity_name,
 };
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, redact_text};
-use moa_memory_vector::{PgvectorStore, VectorStore};
+use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
 use moa_session::PostgresSessionStore;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use tokio::time::{Instant as TokioInstant, sleep_until};
 use uuid::Uuid;
 
 use super::{
@@ -39,7 +46,10 @@ use super::{
     read_embeddings_jsonl, read_ledger_jsonl, read_manifest_json, read_probes_jsonl,
     read_sessions_jsonl, resolve_gold_nodes, validate_corpus,
 };
-use crate::kernel::FixtureStore;
+use crate::kernel::{
+    CostLedger, CountingEmbedder, CountingExtractor, CountingMergeVerifier, CountingReranker,
+    FixtureStore, ProviderProvenance, SharedCostLedger,
+};
 use crate::{EvalError, Result};
 
 /// Number of fused candidates collected for each probe before metric truncation.
@@ -62,6 +72,8 @@ pub struct MemoryRetrievalEvalOptions {
     extractor_mode: MemoryEvalExtractorMode,
     extractions_path: Option<PathBuf>,
     merges_path: Option<PathBuf>,
+    lane: EvalLane,
+    budget_usd: Option<f64>,
 }
 
 impl MemoryRetrievalEvalOptions {
@@ -82,6 +94,8 @@ impl MemoryRetrievalEvalOptions {
             extractor_mode: MemoryEvalExtractorMode::Heuristic,
             extractions_path: None,
             merges_path: None,
+            lane: EvalLane::Pr,
+            budget_usd: None,
         }
     }
 
@@ -134,6 +148,20 @@ impl MemoryRetrievalEvalOptions {
         self
     }
 
+    /// Overrides the eval lane provider preset.
+    #[must_use]
+    pub fn with_lane(mut self, lane: EvalLane) -> Self {
+        self.lane = lane;
+        self
+    }
+
+    /// Overrides the live-lane cost budget in USD.
+    #[must_use]
+    pub fn with_budget_usd(mut self, budget_usd: f64) -> Self {
+        self.budget_usd = Some(budget_usd);
+        self
+    }
+
     /// Returns the corpus directory.
     #[must_use]
     pub fn corpus_dir(&self) -> &Path {
@@ -168,6 +196,62 @@ impl MemoryRetrievalEvalOptions {
     #[must_use]
     pub fn extractor_mode(&self) -> MemoryEvalExtractorMode {
         self.extractor_mode
+    }
+
+    /// Returns the selected eval lane.
+    #[must_use]
+    pub fn lane(&self) -> EvalLane {
+        self.lane
+    }
+
+    /// Returns the explicitly configured cost budget, when present.
+    #[must_use]
+    pub fn budget_usd(&self) -> Option<f64> {
+        self.budget_usd
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.validate_with_env(|name| env::var(name).ok())
+    }
+
+    fn validate_with_env(&self, env_lookup: impl Fn(&str) -> Option<String>) -> Result<()> {
+        if self
+            .budget_usd
+            .is_some_and(|budget_usd| !budget_usd.is_finite() || budget_usd < 0.0)
+        {
+            return Err(EvalError::InvalidConfig(
+                "--budget-usd must be a finite non-negative number".to_string(),
+            ));
+        }
+        if self.lane == EvalLane::Pr {
+            if self.budget_usd.is_some() {
+                return Err(EvalError::InvalidConfig(
+                    "--budget-usd is only valid with --lane live".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+
+        if self.extractions_path.is_some() || self.merges_path.is_some() {
+            return Err(EvalError::InvalidConfig(
+                "--extractions and --merges are PR-lane fixture flags; live lane uses live providers"
+                    .to_string(),
+            ));
+        }
+        let extraction = MemoryExtractionConfig::default();
+        let api_key = env_lookup(&extraction.api_key_env).ok_or_else(|| {
+            EvalError::InvalidConfig(format!(
+                "live lane requires {} to be set",
+                extraction.api_key_env
+            ))
+        })?;
+        if api_key.trim().is_empty() {
+            return Err(EvalError::InvalidConfig(format!(
+                "live lane requires {} to be non-empty",
+                extraction.api_key_env
+            )));
+        }
+        Ok(())
     }
 
     fn extractor_for_corpus(
@@ -226,6 +310,16 @@ impl MemoryRetrievalEvalOptions {
     }
 }
 
+/// Provider preset used by the memory retrieval eval runner.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EvalLane {
+    /// Hermetic PR lane using cached embeddings and configured extractor fixtures.
+    #[default]
+    Pr,
+    /// Live provider lane using Cohere embedding, extraction, merge verification, and reranking.
+    Live,
+}
+
 /// Fact extractor mode used by the memory retrieval eval.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MemoryEvalExtractorMode {
@@ -262,6 +356,15 @@ pub struct MemoryRetrievalEvalReport {
     /// Whether the eval collected a post-rerank top-4 retrieval pass.
     #[serde(default)]
     pub reranker_enabled: bool,
+    /// Whether the runner stopped after crossing the configured live-lane budget.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aborted_over_budget: bool,
+    /// Optional provider cost ledger for the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<CostLedger>,
+    /// Optional provider provenance for the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<ProviderProvenance>,
     /// Aggregated retrieval metrics.
     pub metrics: RetrievalMetrics,
     /// Per-probe retrieval results with candidate attribution.
@@ -280,12 +383,18 @@ impl MemoryRetrievalEvalReport {
         gold_resolution: GoldResolutionReport,
         retrieval: RetrievalEvalReport,
         reranker_enabled: bool,
+        aborted_over_budget: bool,
+        cost: Option<CostLedger>,
+        providers: Option<ProviderProvenance>,
     ) -> Self {
         Self {
             manifest,
             candidate_k: RETRIEVAL_EVAL_CANDIDATE_K,
             final_k: RETRIEVAL_EVAL_FINAL_K,
             reranker_enabled,
+            aborted_over_budget,
+            cost,
+            providers,
             metrics: retrieval.metrics,
             probe_results: retrieval.probe_results,
             bootstrap: retrieval.bootstrap,
@@ -299,7 +408,8 @@ impl MemoryRetrievalEvalReport {
 pub async fn run_memory_retrieval_eval(
     options: MemoryRetrievalEvalOptions,
 ) -> Result<MemoryRetrievalEvalReport> {
-    let corpus = LoadedMemoryEvalCorpus::load(options.corpus_dir()).await?;
+    options.validate()?;
+    let corpus = LoadedMemoryEvalCorpus::load_for_lane(options.corpus_dir(), options.lane).await?;
     let store = IsolatedEvalStore::create().await?;
     let result = run_memory_retrieval_eval_in_store(&options, corpus, &store).await;
     let cleanup = store.cleanup().await;
@@ -321,16 +431,12 @@ async fn run_memory_retrieval_eval_in_store(
     store: &IsolatedEvalStore,
 ) -> Result<MemoryRetrievalEvalReport> {
     cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
-    let extractor = options.extractor_for_corpus(&corpus)?;
-    let embedder =
-        Arc::new(cached_embedding_provider_for_corpus(&corpus, extractor.as_ref()).await?);
-    let entity_merge_verifier = options.entity_merge_verifier_for_corpus(&corpus)?;
-    let entity_blocking_enabled = options.extractor_mode == MemoryEvalExtractorMode::Recorded;
+    let providers = options.providers_for_corpus(&corpus).await?;
     let ingest_ctx = store.ingest_ctx(
-        embedder.clone(),
-        extractor,
-        entity_merge_verifier,
-        entity_blocking_enabled,
+        providers.embedder.clone(),
+        providers.extractor.clone(),
+        providers.entity_merge_verifier.clone(),
+        providers.entity_blocking_enabled,
     );
     let mut gold_resolution =
         resolve_gold_nodes(ingest_ctx, &corpus.ledger, &corpus.sessions).await?;
@@ -341,21 +447,39 @@ async fn run_memory_retrieval_eval_in_store(
     let extraction_precision =
         extraction_precision_counts(store.pool(), &corpus.ledger, &fact_ids_by_uid).await?;
     let entity_fragmentation = entity_fragmentation_counts(store.pool(), &corpus.ledger).await?;
+    if let Err(error) = check_budget(&providers.ledger).await {
+        let report = build_eval_report(ReportBuildInput {
+            manifest: corpus.manifest,
+            gold_resolution,
+            probe_results: Vec::new(),
+            bootstrap_config: options.bootstrap_config,
+            extraction_precision,
+            entity_fragmentation,
+            reranker_enabled: options.reranker_enabled(),
+            aborted_over_budget: true,
+            cost: Some(cost_snapshot(&providers.ledger).await),
+            providers: Some(providers.provenance),
+        });
+        write_report(options.output_path(), &report).await?;
+        cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
+        return Err(error.into());
+    }
     let gold_records_by_fact_id = gold_records_by_fact_id(&gold_resolution);
     let planner = QueryPlanner::new();
     let mut probe_results = Vec::with_capacity(corpus.probes.len());
 
-    for probe in &corpus.probes {
+    for (probe_index, probe) in corpus.probes.iter().enumerate() {
         let retrieval = retrieve_probe(
             store.pool(),
             &planner,
-            embedder.as_ref(),
+            providers.embedder.as_ref(),
+            providers.reranker.clone(),
             probe,
             ProbeRetrieveOptions {
                 use_reranker: options.reranker_enabled(),
                 ranking_config: options.ranking_config().clone(),
                 ranking_reference_time,
-                deterministic_replay: options.extractor_mode == MemoryEvalExtractorMode::Recorded,
+                deterministic_replay: providers.deterministic_replay,
             },
         )
         .await?;
@@ -370,24 +494,427 @@ async fn run_memory_retrieval_eval_in_store(
             retrieval.retrieval_latency_ms,
             &gold_records_by_fact_id,
         ));
+        if options.lane == EvalLane::Live
+            && (probe_index + 1) % 10 == 0
+            && let Err(error) = check_budget(&providers.ledger).await
+        {
+            let report = build_eval_report(ReportBuildInput {
+                manifest: corpus.manifest,
+                gold_resolution,
+                probe_results,
+                bootstrap_config: options.bootstrap_config,
+                extraction_precision,
+                entity_fragmentation,
+                reranker_enabled: options.reranker_enabled(),
+                aborted_over_budget: true,
+                cost: Some(cost_snapshot(&providers.ledger).await),
+                providers: Some(providers.provenance),
+            });
+            write_report(options.output_path(), &report).await?;
+            cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
+            return Err(error.into());
+        }
     }
 
-    let retrieval = super::aggregate_retrieval_eval_with_diagnostics(
-        &gold_resolution,
+    if let Err(error) = check_budget(&providers.ledger).await {
+        let report = build_eval_report(ReportBuildInput {
+            manifest: corpus.manifest,
+            gold_resolution,
+            probe_results,
+            bootstrap_config: options.bootstrap_config,
+            extraction_precision,
+            entity_fragmentation,
+            reranker_enabled: options.reranker_enabled(),
+            aborted_over_budget: true,
+            cost: Some(cost_snapshot(&providers.ledger).await),
+            providers: Some(providers.provenance),
+        });
+        write_report(options.output_path(), &report).await?;
+        cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
+        return Err(error.into());
+    }
+
+    let report = build_eval_report(ReportBuildInput {
+        manifest: corpus.manifest,
+        gold_resolution,
         probe_results,
-        options.bootstrap_config,
+        bootstrap_config: options.bootstrap_config,
         extraction_precision,
         entity_fragmentation,
-    );
-    let report = MemoryRetrievalEvalReport::from_retrieval_report(
-        corpus.manifest,
-        gold_resolution,
-        retrieval,
-        options.reranker_enabled(),
-    );
+        reranker_enabled: options.reranker_enabled(),
+        aborted_over_budget: false,
+        cost: Some(cost_snapshot(&providers.ledger).await),
+        providers: Some(providers.provenance),
+    });
     write_report(options.output_path(), &report).await?;
     cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
     Ok(report)
+}
+
+struct RunProviders {
+    embedder: Arc<dyn EmbeddingProvider>,
+    extractor: Arc<dyn FactExtractor>,
+    entity_merge_verifier: Arc<dyn EntityMergeVerifier>,
+    reranker: Arc<dyn Reranker>,
+    entity_blocking_enabled: bool,
+    deterministic_replay: bool,
+    ledger: SharedCostLedger,
+    provenance: ProviderProvenance,
+}
+
+impl MemoryRetrievalEvalOptions {
+    async fn providers_for_corpus(&self, corpus: &LoadedMemoryEvalCorpus) -> Result<RunProviders> {
+        match self.lane {
+            EvalLane::Pr => self.pr_providers_for_corpus(corpus).await,
+            EvalLane::Live => self.live_providers_for_corpus(corpus).await,
+        }
+    }
+
+    async fn pr_providers_for_corpus(
+        &self,
+        corpus: &LoadedMemoryEvalCorpus,
+    ) -> Result<RunProviders> {
+        let extractor = self.extractor_for_corpus(corpus)?;
+        let embedder =
+            Arc::new(cached_embedding_provider_for_corpus(corpus, extractor.as_ref()).await?);
+        let entity_merge_verifier = self.entity_merge_verifier_for_corpus(corpus)?;
+        let entity_blocking_enabled = self.extractor_mode == MemoryEvalExtractorMode::Recorded;
+        let ledger = Arc::new(tokio::sync::Mutex::new(CostLedger::new(0.0)));
+        let provenance = ProviderProvenance {
+            lane: "pr".to_string(),
+            embedding_model: embedder.model_id().to_string(),
+            embedding_model_version: embedder.model_version(),
+            extractor_model: match self.extractor_mode {
+                MemoryEvalExtractorMode::Heuristic => "heuristic".to_string(),
+                MemoryEvalExtractorMode::Recorded => "recorded-extraction-fixtures".to_string(),
+            },
+            extraction_prompt_version: (self.extractor_mode == MemoryEvalExtractorMode::Recorded)
+                .then(|| EXTRACTION_PROMPT_VERSION.to_string()),
+            merge_verifier_model: match self.extractor_mode {
+                MemoryEvalExtractorMode::Heuristic => "deterministic".to_string(),
+                MemoryEvalExtractorMode::Recorded => "recorded-merge-fixtures".to_string(),
+            },
+            merge_prompt_version: (self.extractor_mode == MemoryEvalExtractorMode::Recorded)
+                .then(|| MERGE_PROMPT_VERSION.to_string()),
+            reranker_model: "noop".to_string(),
+        };
+        Ok(RunProviders {
+            embedder,
+            extractor,
+            entity_merge_verifier,
+            reranker: Arc::new(NoopReranker),
+            entity_blocking_enabled,
+            deterministic_replay: self.extractor_mode == MemoryEvalExtractorMode::Recorded,
+            ledger,
+            provenance,
+        })
+    }
+
+    async fn live_providers_for_corpus(
+        &self,
+        corpus: &LoadedMemoryEvalCorpus,
+    ) -> Result<RunProviders> {
+        let extraction = MemoryExtractionConfig {
+            enabled: true,
+            ..MemoryExtractionConfig::default()
+        };
+        let api_key = env::var(&extraction.api_key_env).map_err(|_| {
+            EvalError::InvalidConfig(format!(
+                "live lane requires {} to be set",
+                extraction.api_key_env
+            ))
+        })?;
+        if api_key.trim().is_empty() {
+            return Err(EvalError::InvalidConfig(format!(
+                "live lane requires {} to be non-empty",
+                extraction.api_key_env
+            )));
+        }
+        let budget = self
+            .budget_usd
+            .unwrap_or_else(|| default_live_budget_usd(corpus.manifest.profile));
+        let ledger = Arc::new(tokio::sync::Mutex::new(CostLedger::new(budget)));
+        let chat_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(3_200)));
+        let embed_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(700)));
+        let rerank_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(6_500)));
+        let secret = SecretString::from(api_key);
+        let raw_embedder = CohereV4Embedder::new(secret.clone());
+        let embedding_model = raw_embedder.model_id().to_string();
+        let embedding_model_version = raw_embedder.model_version();
+        let embedder = Arc::new(ThrottledEmbedder::new(
+            CountingEmbedder::new(raw_embedder, ledger.clone()),
+            embed_throttle,
+        )) as Arc<dyn EmbeddingProvider>;
+        let live_extractor = LlmFactExtractor::from_config(&extraction).map_err(|error| {
+            EvalError::InvalidConfig(format!("failed to initialize live fact extractor: {error}"))
+        })?;
+        let extractor = Arc::new(MemoizedThrottledFactExtractor::new(
+            CountingExtractor::new(live_extractor, ledger.clone()),
+            chat_throttle.clone(),
+        )) as Arc<dyn FactExtractor>;
+        let live_merge_verifier = LlmEntityMergeVerifier::from_env(
+            &extraction.api_key_env,
+            &extraction.model,
+            extraction.timeout_ms,
+        )
+        .map_err(|error| {
+            EvalError::InvalidConfig(format!("failed to initialize live merge verifier: {error}"))
+        })?;
+        let entity_merge_verifier = Arc::new(ThrottledMergeVerifier::new(
+            CountingMergeVerifier::new(live_merge_verifier, ledger.clone()),
+            chat_throttle,
+        )) as Arc<dyn EntityMergeVerifier>;
+        let reranker_model = if self.reranker_enabled {
+            "rerank-v4.0-fast"
+        } else {
+            "noop"
+        };
+        let reranker: Arc<dyn Reranker> = if self.reranker_enabled {
+            Arc::new(ThrottledReranker::new(
+                CountingReranker::new(CohereReranker::new(secret), ledger.clone()),
+                rerank_throttle,
+            ))
+        } else {
+            Arc::new(NoopReranker)
+        };
+        let provenance = ProviderProvenance {
+            lane: "live".to_string(),
+            embedding_model,
+            embedding_model_version,
+            extractor_model: extraction.model.clone(),
+            extraction_prompt_version: Some(EXTRACTION_PROMPT_VERSION.to_string()),
+            merge_verifier_model: extraction.model.clone(),
+            merge_prompt_version: Some(MERGE_PROMPT_VERSION.to_string()),
+            reranker_model: reranker_model.to_string(),
+        };
+        Ok(RunProviders {
+            embedder,
+            extractor,
+            entity_merge_verifier,
+            reranker,
+            entity_blocking_enabled: true,
+            deterministic_replay: false,
+            ledger,
+            provenance,
+        })
+    }
+}
+
+struct LiveChatThrottle {
+    interval: Duration,
+    next_allowed_at: tokio::sync::Mutex<TokioInstant>,
+}
+
+impl LiveChatThrottle {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            next_allowed_at: tokio::sync::Mutex::new(TokioInstant::now()),
+        }
+    }
+
+    async fn wait(&self) {
+        let sleep_until_instant = {
+            let mut next_allowed_at = self.next_allowed_at.lock().await;
+            let now = TokioInstant::now();
+            let scheduled = (*next_allowed_at).max(now);
+            *next_allowed_at = scheduled + self.interval;
+            (scheduled > now).then_some(scheduled)
+        };
+        if let Some(instant) = sleep_until_instant {
+            sleep_until(instant).await;
+        }
+    }
+}
+
+struct MemoizedThrottledFactExtractor<T> {
+    inner: T,
+    throttle: Arc<LiveChatThrottle>,
+    cache: tokio::sync::Mutex<BTreeMap<String, Vec<ExtractedFact>>>,
+}
+
+impl<T> MemoizedThrottledFactExtractor<T> {
+    fn new(inner: T, throttle: Arc<LiveChatThrottle>) -> Self {
+        Self {
+            inner,
+            throttle,
+            cache: tokio::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl<T> FactExtractor for MemoizedThrottledFactExtractor<T>
+where
+    T: FactExtractor,
+{
+    async fn extract(&self, chunks: &[TurnChunk]) -> moa_memory_ingest::Result<Vec<ExtractedFact>> {
+        let key = extractor_cache_key(chunks);
+        if let Some(facts) = self.cache.lock().await.get(&key).cloned() {
+            return Ok(facts);
+        }
+
+        self.throttle.wait().await;
+        let facts = self.inner.extract(chunks).await?;
+        self.cache.lock().await.insert(key, facts.clone());
+        Ok(facts)
+    }
+}
+
+fn extractor_cache_key(chunks: &[TurnChunk]) -> String {
+    let mut key = String::new();
+    for chunk in chunks {
+        key.push_str(&chunk.index.to_string());
+        key.push('\0');
+        key.push_str(&chunk.text);
+        key.push('\0');
+    }
+    key
+}
+
+struct ThrottledEmbedder<T> {
+    inner: T,
+    throttle: Arc<LiveChatThrottle>,
+}
+
+impl<T> ThrottledEmbedder<T> {
+    fn new(inner: T, throttle: Arc<LiveChatThrottle>) -> Self {
+        Self { inner, throttle }
+    }
+}
+
+#[async_trait]
+impl<T> EmbeddingProvider for ThrottledEmbedder<T>
+where
+    T: EmbeddingProvider,
+{
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+
+    fn model_version(&self) -> i32 {
+        self.inner.model_version()
+    }
+
+    fn model_name(&self) -> &str {
+        self.inner.model_name()
+    }
+
+    async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+        self.throttle.wait().await;
+        self.inner.embed(inputs).await
+    }
+}
+
+struct ThrottledMergeVerifier<T> {
+    inner: T,
+    throttle: Arc<LiveChatThrottle>,
+}
+
+impl<T> ThrottledMergeVerifier<T> {
+    fn new(inner: T, throttle: Arc<LiveChatThrottle>) -> Self {
+        Self { inner, throttle }
+    }
+}
+
+#[async_trait]
+impl<T> EntityMergeVerifier for ThrottledMergeVerifier<T>
+where
+    T: EntityMergeVerifier,
+{
+    async fn should_merge(
+        &self,
+        mention: &str,
+        candidate: &NodeIndexRow,
+    ) -> moa_memory_ingest::Result<bool> {
+        self.throttle.wait().await;
+        self.inner.should_merge(mention, candidate).await
+    }
+}
+
+struct ThrottledReranker<T> {
+    inner: T,
+    throttle: Arc<LiveChatThrottle>,
+}
+
+impl<T> ThrottledReranker<T> {
+    fn new(inner: T, throttle: Arc<LiveChatThrottle>) -> Self {
+        Self { inner, throttle }
+    }
+}
+
+#[async_trait]
+impl<T> Reranker for ThrottledReranker<T>
+where
+    T: Reranker,
+{
+    async fn rerank(
+        &self,
+        model: &str,
+        query: &str,
+        documents: &[String],
+        top_n: usize,
+    ) -> moa_brain::retrieval::hybrid::Result<Vec<moa_brain::retrieval::RerankHit>> {
+        self.throttle.wait().await;
+        self.inner.rerank(model, query, documents, top_n).await
+    }
+}
+
+fn default_live_budget_usd(profile: super::CorpusProfile) -> f64 {
+    match profile {
+        super::CorpusProfile::Pr => 5.0,
+        super::CorpusProfile::Full => 15.0,
+    }
+}
+
+struct ReportBuildInput {
+    manifest: CorpusManifest,
+    gold_resolution: GoldResolutionReport,
+    probe_results: Vec<ProbeResult>,
+    bootstrap_config: BootstrapConfig,
+    extraction_precision: ExtractionPrecisionCounts,
+    entity_fragmentation: super::EntityFragmentationCounts,
+    reranker_enabled: bool,
+    aborted_over_budget: bool,
+    cost: Option<CostLedger>,
+    providers: Option<ProviderProvenance>,
+}
+
+fn build_eval_report(input: ReportBuildInput) -> MemoryRetrievalEvalReport {
+    let retrieval = super::aggregate_retrieval_eval_with_diagnostics(
+        &input.gold_resolution,
+        input.probe_results,
+        input.bootstrap_config,
+        input.extraction_precision,
+        input.entity_fragmentation,
+    );
+    MemoryRetrievalEvalReport::from_retrieval_report(
+        input.manifest,
+        input.gold_resolution,
+        retrieval,
+        input.reranker_enabled,
+        input.aborted_over_budget,
+        input.cost,
+        input.providers,
+    )
+}
+
+async fn check_budget(
+    ledger: &SharedCostLedger,
+) -> std::result::Result<(), crate::kernel::CostError> {
+    ledger.lock().await.check_budget()
+}
+
+async fn cost_snapshot(ledger: &SharedCostLedger) -> CostLedger {
+    ledger.lock().await.clone()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub(crate) async fn cleanup_eval_graph_rows(pool: &PgPool, ledger: &[LedgerFact]) -> Result<()> {
@@ -527,6 +1054,7 @@ async fn retrieve_probe(
     pool: &PgPool,
     planner: &QueryPlanner,
     embedder: &dyn EmbeddingProvider,
+    reranker: Arc<dyn Reranker>,
     probe: &Probe,
     options: ProbeRetrieveOptions,
 ) -> Result<ProbeRetrieval> {
@@ -553,6 +1081,7 @@ async fn retrieve_probe(
     let hybrid = Arc::new(
         HybridRetriever::new(pool.clone(), graph.clone(), vector)
             .with_ranking_config(ranking_config)
+            .with_reranker(reranker)
             .with_assume_app_role(true),
     );
     let cached = CachedHybridRetriever::new_for_app_role(hybrid, pool.clone());
@@ -1030,18 +1559,29 @@ pub(crate) struct LoadedMemoryEvalCorpus {
 
 impl LoadedMemoryEvalCorpus {
     pub(crate) async fn load(corpus_dir: &Path) -> Result<Self> {
+        Self::load_for_lane(corpus_dir, EvalLane::Pr).await
+    }
+
+    pub(crate) async fn load_for_lane(corpus_dir: &Path, lane: EvalLane) -> Result<Self> {
         let manifest = read_manifest_json(&corpus_dir.join("manifest.json")).await?;
         let ledger = read_ledger_jsonl(&corpus_dir.join("ledger.jsonl")).await?;
         let sessions = read_sessions_jsonl(&corpus_dir.join("sessions.jsonl")).await?;
         let probes = read_probes_jsonl(&corpus_dir.join("probes.jsonl"), &ledger).await?;
         validate_corpus(&manifest, &ledger, &sessions, &probes)?;
-        let embedding_inputs = read_embedding_inputs_jsonl(
-            &corpus_dir.join("embedding_inputs.jsonl"),
-            &ledger,
-            &probes,
-        )
-        .await?;
-        let embeddings = read_embeddings_jsonl(&corpus_dir.join("embeddings.jsonl")).await?;
+        let (embedding_inputs, embeddings) = match lane {
+            EvalLane::Pr => {
+                let embedding_inputs = read_embedding_inputs_jsonl(
+                    &corpus_dir.join("embedding_inputs.jsonl"),
+                    &ledger,
+                    &probes,
+                )
+                .await?;
+                let embeddings =
+                    read_embeddings_jsonl(&corpus_dir.join("embeddings.jsonl")).await?;
+                (embedding_inputs, embeddings)
+            }
+            EvalLane::Live => (Vec::new(), Vec::new()),
+        };
         Ok(Self {
             manifest,
             ledger,
@@ -1205,5 +1745,65 @@ fn io_error(path: &Path, source: std::io::Error) -> EvalError {
     EvalError::Io {
         path: path.to_path_buf(),
         source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory_eval::{
+        CorpusProfile, generate_memory_eval_corpus, write_memory_eval_corpus,
+    };
+
+    #[test]
+    fn live_lane_refuses_to_start_without_credentials() {
+        // Pins: live eval cannot silently fall back to recorded or deterministic providers.
+        let options =
+            MemoryRetrievalEvalOptions::new("target/missing-corpus", "target/report.json")
+                .with_lane(EvalLane::Live);
+
+        let error = options
+            .validate_with_env(|_| None)
+            .expect_err("live lane without credentials should fail");
+
+        assert!(error.to_string().contains("COHERE_API_KEY"));
+    }
+
+    #[test]
+    fn pr_lane_refuses_live_only_flags() {
+        // Pins: PR eval cannot accept budget-only live-lane flags and pretend it ran hermetically.
+        let options =
+            MemoryRetrievalEvalOptions::new("target/missing-corpus", "target/report.json")
+                .with_budget_usd(1.0);
+
+        let error = options
+            .validate_with_env(|_| Some("unused".to_string()))
+            .expect_err("PR lane with a live budget should fail");
+
+        assert!(error.to_string().contains("--budget-usd"));
+    }
+
+    #[tokio::test]
+    async fn live_lane_skips_fixture_coverage_check() {
+        // Pins: live provider runs do not load or require hermetic embedding fixtures.
+        let corpus = generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3])
+            .expect("generate a small deterministic corpus");
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let corpus_dir = temp.path().join("corpus");
+        write_memory_eval_corpus(&corpus_dir, &corpus)
+            .await
+            .expect("corpus files should be written without embeddings.jsonl");
+
+        let live = LoadedMemoryEvalCorpus::load_for_lane(&corpus_dir, EvalLane::Live)
+            .await
+            .expect("live lane should not load embeddings.jsonl");
+        let pr = LoadedMemoryEvalCorpus::load_for_lane(&corpus_dir, EvalLane::Pr).await;
+        let error = match pr {
+            Ok(_) => panic!("PR lane should require embeddings.jsonl"),
+            Err(error) => error,
+        };
+
+        assert_eq!(live.embeddings.len(), 0);
+        assert!(error.to_string().contains("embeddings.jsonl"));
     }
 }

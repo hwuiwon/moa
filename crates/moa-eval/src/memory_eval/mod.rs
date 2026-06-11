@@ -52,7 +52,7 @@ pub use recording::{
     MemoryMergeRecordingReport, record_memory_extractions, record_memory_merges,
 };
 pub use runner::{
-    MemoryEvalExtractorMode, MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport,
+    EvalLane, MemoryEvalExtractorMode, MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport,
     RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K, run_memory_retrieval_eval,
 };
 

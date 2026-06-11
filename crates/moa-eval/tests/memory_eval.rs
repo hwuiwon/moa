@@ -12,6 +12,7 @@ use moa_core::{
     MoaError, ScopeContext, ScopeTier, SessionId, UserId, WorkspaceId, traits::EmbeddingProvider,
 };
 use moa_eval::EvalError;
+use moa_eval::kernel::{CostLedger, ProviderProvenance};
 use moa_eval::memory_eval::{
     BinaryProbeOutcome, BootstrapConfig, CORPUS_SCHEMA_VERSION, CachedEmbeddingProvider,
     CandidateLegs, CorpusManifest, CorpusProfile, EmbeddingInputKind, EntityFragmentationCounts,
@@ -1140,6 +1141,45 @@ fn retrieval_metrics_flatten_round_trips_checked_in_baseline() -> TestResult {
 }
 
 #[test]
+fn report_serializes_cost_and_providers_sections() -> TestResult {
+    // Pins: live eval reports carry spend and provider provenance without breaking old report reads.
+    let mut report = memory_budget_report(Vec::new());
+    report.cost = Some(CostLedger::new(5.0));
+    report.providers = Some(ProviderProvenance {
+        lane: "live".to_string(),
+        embedding_model: "cohere-embed-v4".to_string(),
+        embedding_model_version: 1,
+        extractor_model: "command-a-plus-05-2026".to_string(),
+        extraction_prompt_version: Some("v2".to_string()),
+        merge_verifier_model: "command-a-plus-05-2026".to_string(),
+        merge_prompt_version: Some("v1".to_string()),
+        reranker_model: "rerank-v4.0-fast".to_string(),
+    });
+
+    let value = serde_json::to_value(&report)?;
+
+    assert_eq!(value["cost"]["budget_usd"], 5.0);
+    assert_eq!(value["providers"]["lane"], "live");
+    assert_eq!(value["providers"]["embedding_model"], "cohere-embed-v4");
+    let old_report = serde_json::json!({
+        "manifest": report.manifest,
+        "candidate_k": report.candidate_k,
+        "final_k": report.final_k,
+        "reranker_enabled": false,
+        "metrics": report.metrics,
+        "probe_results": [],
+        "bootstrap": report.bootstrap,
+        "cross_user_leak_probe_ids": [],
+        "gold_resolution": report.gold_resolution
+    });
+    let parsed: MemoryRetrievalEvalReport = serde_json::from_value(old_report)?;
+    assert_eq!(parsed.cost, None);
+    assert_eq!(parsed.providers, None);
+    assert!(!parsed.aborted_over_budget);
+    Ok(())
+}
+
+#[test]
 fn temporal_parse_rate_aggregates_over_temporal_probes_only() {
     // Pins: parser diagnostics count temporal probes only and separate wrong-date parses.
     let report = aggregate_retrieval_eval_from_counts(
@@ -2193,6 +2233,9 @@ fn memory_budget_report_with_reranker(
         candidate_k: RETRIEVAL_EVAL_CANDIDATE_K,
         final_k: RETRIEVAL_EVAL_FINAL_K,
         reranker_enabled,
+        aborted_over_budget: false,
+        cost: None,
+        providers: None,
         metrics: retrieval.metrics,
         probe_results: retrieval.probe_results,
         bootstrap: retrieval.bootstrap,
