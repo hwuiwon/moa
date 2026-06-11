@@ -22,7 +22,8 @@ coverage is already known.
 
 `run-memory-retrieval-eval` writes a JSON report with the loaded corpus
 manifest, retrieval cutoffs, gold-resolution details, per-probe results,
-bootstrap intervals, cross-user leak probe ids, and `RetrievalMetrics`.
+bootstrap intervals, cross-user leak probe ids, optional provider `cost`,
+optional provider provenance, and `RetrievalMetrics`.
 
 The metric surface is:
 
@@ -228,6 +229,85 @@ Object edges now carry deterministic typed labels for dependency and ownership
 predicates (`DEPENDS_ON`, `OWNED_BY`); subject attachment edges remain
 `RELATES_TO`. The ranking pipeline version is `3` because typed edges and graph
 candidate weighting change cacheable candidate pools.
+
+## Nightly Live Lane
+
+PR and natural recorded lanes are hermetic by design: they use deterministic
+sha256 embeddings, recorded extraction and merge fixtures, and a `Noop`
+reranker. The live lane measures the assumptions those fixtures cannot cover:
+real Cohere embedding geometry, live extraction and merge-verifier calls, and
+Cohere reranking.
+
+Run the PR preset with no live providers:
+
+```bash
+env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+  --corpus target/memory-eval/pr-natural \
+  --lane pr \
+  --extractor recorded \
+  --output target/memory-eval/hermetic.json
+```
+
+Run the live PR-natural pair with bounded spend:
+
+```bash
+cargo run -p xtask -- run-memory-retrieval-eval \
+  --corpus target/memory-eval/pr-natural \
+  --lane live \
+  --reranker off \
+  --budget-usd 5 \
+  --output target/memory-eval/live.json
+
+cargo run -p xtask -- run-memory-retrieval-eval \
+  --corpus target/memory-eval/pr-natural \
+  --lane live \
+  --reranker on \
+  --budget-usd 5 \
+  --output target/memory-eval/live-rerank.json
+```
+
+`--lane live` requires `COHERE_API_KEY`. It ignores hermetic embedding fixtures
+entirely and refuses fixture flags such as `--extractor`, `--extractions`, and
+`--merges`. `--budget-usd` is live-only; PR runs reject it so accidental billing
+flags do not become inert configuration.
+
+The live lane writes `cost` and `providers` sections into the report. Cost is an
+estimate, not an invoice: wrappers count embed input tokens, chat input/output
+tokens, and rerank searches, using provider-reported counts where available and
+falling back to chars/4 estimates otherwise. The estimate constants are
+date-stamped in `moa-eval::kernel::cost` and are used only to enforce the eval
+ceiling. The report's `providers` block records the embedding model and
+version, extractor model and prompt version, merge prompt version, reranker
+model, and lane.
+
+Budget enforcement checks after ingestion and every 10 probes. If the estimate
+exceeds the ceiling, the runner writes a partial report marked
+`aborted_over_budget: true` and exits nonzero. `check-eval-budgets` also treats
+that marker as a hard blocker when reading an uploaded partial report.
+
+Nightly live runs are informational. They fail only for hard blockers
+(`cross_user_leak_count != 0`, `pii_unredacted_count != 0`) or budget aborts.
+They do not regression-gate recall, MRR, nDCG, scope, or fragmentation because
+provider behavior can drift outside a code change. The nightly workflow pairs
+the same PR-natural corpus three ways:
+
+```bash
+cargo run -p xtask -- compare-eval-reports \
+  --baseline target/memory-eval/hermetic.json \
+  --candidate target/memory-eval/live.json
+
+cargo run -p xtask -- compare-eval-reports \
+  --baseline target/memory-eval/live.json \
+  --candidate target/memory-eval/live-rerank.json
+```
+
+Read vector-leg and entity-fragmentation deltas as calibration data. A
+`per_leg_recall.vector` difference is expected and is the point of the lane:
+the hermetic PR geometry is a deterministic stand-in, not a quality claim about
+Cohere vectors. The prompt-07 `0.80` entity-blocking threshold was tuned against
+pseudo-embeddings; live `entity_fragmentation` is the number that should drive
+any threshold change. Reranker A/B deltas decide whether the live reranker earns
+its latency and spend.
 
 ## Paired Comparison
 

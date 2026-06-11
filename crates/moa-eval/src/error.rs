@@ -45,6 +45,9 @@ pub enum EvalError {
     /// A config or fixture path was invalid for eval execution.
     #[error("invalid eval configuration: {0}")]
     InvalidConfig(String),
+    /// A live eval exceeded its configured cost budget.
+    #[error(transparent)]
+    Cost(#[from] crate::kernel::CostError),
     /// A run could not complete because it was waiting on a human approval decision.
     #[error("eval run blocked on approval for tool {tool}")]
     ApprovalRequired {
