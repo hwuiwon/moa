@@ -6,6 +6,7 @@ pub mod generator;
 pub mod gold;
 pub mod judge;
 pub mod metrics;
+pub mod recording;
 pub mod runner;
 
 pub use crate::kernel::{
@@ -44,7 +45,28 @@ pub use metrics::{
     aggregate_retrieval_eval_with_extraction_precision, candidates_from_retrieval_hits,
 };
 pub use moa_brain::retrieval::{RankingConfig, RankingMode, RankingWeights};
-pub use runner::{
-    MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport, RETRIEVAL_EVAL_CANDIDATE_K,
-    RETRIEVAL_EVAL_FINAL_K, run_memory_retrieval_eval,
+pub use recording::{
+    MemoryExtractionRecordingOptions, MemoryExtractionRecordingReport, record_memory_extractions,
 };
+pub use runner::{
+    MemoryEvalExtractorMode, MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport,
+    RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K, run_memory_retrieval_eval,
+};
+
+impl crate::kernel::FixtureRecord for moa_memory_ingest::ExtractionFixtureRecord {
+    fn fixture_key(&self) -> &str {
+        self.key()
+    }
+
+    fn fixture_version(&self) -> &str {
+        self.version()
+    }
+}
+
+impl moa_memory_ingest::RecordedExtractionStore
+    for crate::kernel::FixtureStore<moa_memory_ingest::ExtractionFixtureRecord>
+{
+    fn get_optional(&self, key: &str) -> Option<&moa_memory_ingest::ExtractionFixtureRecord> {
+        crate::kernel::FixtureStore::get_optional(self, key)
+    }
+}

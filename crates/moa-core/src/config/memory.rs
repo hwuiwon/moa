@@ -17,6 +17,8 @@ pub struct MemoryConfig {
     pub embedding_model: String,
     /// Graph-memory retrieval behavior.
     pub retrieval: MemoryRetrievalConfig,
+    /// Fact extraction behavior for slow-path graph ingestion.
+    pub extraction: MemoryExtractionConfig,
     /// Graph-memory vector embedding configuration.
     pub vector: MemoryVectorConfig,
 }
@@ -29,7 +31,36 @@ impl Default for MemoryConfig {
             embedding_provider: "openai".to_string(),
             embedding_model: "text-embedding-3-small".to_string(),
             retrieval: MemoryRetrievalConfig::default(),
+            extraction: MemoryExtractionConfig::default(),
             vector: MemoryVectorConfig::default(),
+        }
+    }
+}
+
+/// Slow-path fact extraction configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryExtractionConfig {
+    /// Whether model-backed fact extraction is enabled.
+    pub enabled: bool,
+    /// Environment variable containing the Cohere API key.
+    pub api_key_env: String,
+    /// Cohere chat model used for extraction and memory-ingest chat judging.
+    pub model: String,
+    /// Maximum facts accepted from one chunk.
+    pub max_facts_per_chunk: usize,
+    /// Chat request timeout in milliseconds.
+    pub timeout_ms: u64,
+}
+
+impl Default for MemoryExtractionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key_env: "COHERE_API_KEY".to_string(),
+            model: "command-a-plus-05-2026".to_string(),
+            max_facts_per_chunk: 12,
+            timeout_ms: 10_000,
         }
     }
 }

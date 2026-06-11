@@ -17,8 +17,9 @@ use moa_brain::retrieval::{
 use moa_core::{MemoryScope, ScopeContext, WorkspaceId, traits::EmbeddingProvider};
 use moa_memory_graph::{AgeGraphStore, GraphStore, PiiClass};
 use moa_memory_ingest::{
-    Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, IngestCtx, IngestError,
-    SessionTurn, chunk_turn, extract_facts,
+    Conflict, ContradictionContext, ContradictionDetector, EXTRACTION_PROMPT_VERSION, EmbeddedFact,
+    ExtractionFixtureRecord, FactExtractor, HeuristicFactExtractor, IngestCtx, IngestError,
+    RecordedFactExtractor, SessionTurn, chunk_turn,
 };
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, redact_text};
 use moa_memory_vector::{PgvectorStore, VectorStore};
@@ -36,6 +37,7 @@ use super::{
     read_embeddings_jsonl, read_ledger_jsonl, read_manifest_json, read_probes_jsonl,
     read_sessions_jsonl, resolve_gold_nodes, validate_corpus,
 };
+use crate::kernel::FixtureStore;
 use crate::{EvalError, Result};
 
 /// Number of fused candidates collected for each probe before metric truncation.
@@ -55,11 +57,16 @@ pub struct MemoryRetrievalEvalOptions {
     bootstrap_config: BootstrapConfig,
     reranker_enabled: bool,
     ranking_config: RankingConfig,
+    extractor_mode: MemoryEvalExtractorMode,
+    extractions_path: Option<PathBuf>,
 }
 
 impl MemoryRetrievalEvalOptions {
     /// Creates options for a corpus directory and JSON report output path.
     pub fn new(corpus_dir: impl Into<PathBuf>, output_path: impl Into<PathBuf>) -> Self {
+        let mut ranking_config = RankingConfig::default();
+        ranking_config.weights.recency = 0.0;
+        ranking_config.weights.access = 0.0;
         Self {
             corpus_dir: corpus_dir.into(),
             output_path: output_path.into(),
@@ -68,7 +75,9 @@ impl MemoryRetrievalEvalOptions {
                 seed: 13_579,
             },
             reranker_enabled: false,
-            ranking_config: RankingConfig::default(),
+            ranking_config,
+            extractor_mode: MemoryEvalExtractorMode::Heuristic,
+            extractions_path: None,
         }
     }
 
@@ -97,6 +106,20 @@ impl MemoryRetrievalEvalOptions {
     #[must_use]
     pub fn with_ranking_config(mut self, ranking_config: RankingConfig) -> Self {
         self.ranking_config = ranking_config;
+        self
+    }
+
+    /// Overrides the fact extractor used by ingestion and gold matching.
+    #[must_use]
+    pub fn with_extractor_mode(mut self, extractor_mode: MemoryEvalExtractorMode) -> Self {
+        self.extractor_mode = extractor_mode;
+        self
+    }
+
+    /// Overrides the extraction fixture path for recorded extraction mode.
+    #[must_use]
+    pub fn with_extractions_path(mut self, extractions_path: impl Into<PathBuf>) -> Self {
+        self.extractions_path = Some(extractions_path.into());
         self
     }
 
@@ -129,6 +152,55 @@ impl MemoryRetrievalEvalOptions {
     pub fn ranking_config(&self) -> &RankingConfig {
         &self.ranking_config
     }
+
+    /// Returns the configured eval extractor mode.
+    #[must_use]
+    pub fn extractor_mode(&self) -> MemoryEvalExtractorMode {
+        self.extractor_mode
+    }
+
+    fn extractor_for_corpus(
+        &self,
+        corpus: &LoadedMemoryEvalCorpus,
+    ) -> Result<Arc<dyn FactExtractor>> {
+        match self.extractor_mode {
+            MemoryEvalExtractorMode::Heuristic => Ok(Arc::new(HeuristicFactExtractor)),
+            MemoryEvalExtractorMode::Recorded => {
+                let path = self
+                    .extractions_path
+                    .clone()
+                    .unwrap_or_else(|| default_extractions_path(&corpus.manifest));
+                let remediation = format!(
+                    "cargo run -p xtask -- record-memory-extractions --corpus {} --output {}",
+                    self.corpus_dir.display(),
+                    path.display()
+                );
+                let store = FixtureStore::<ExtractionFixtureRecord>::read_jsonl(
+                    &path,
+                    EXTRACTION_PROMPT_VERSION,
+                )?
+                .with_remediation_command(remediation.clone());
+                Ok(Arc::new(RecordedFactExtractor::new(store, remediation)))
+            }
+        }
+    }
+}
+
+/// Fact extractor mode used by the memory retrieval eval.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MemoryEvalExtractorMode {
+    /// Use the deterministic heuristic extractor.
+    #[default]
+    Heuristic,
+    /// Replay committed extraction fixtures with no network access.
+    Recorded,
+}
+
+fn default_extractions_path(manifest: &CorpusManifest) -> PathBuf {
+    PathBuf::from("crates/moa-eval/fixtures/memory").join(format!(
+        "extractions-{}-{}.jsonl",
+        manifest.corpus_id, EXTRACTION_PROMPT_VERSION
+    ))
 }
 
 /// JSON report written by `run-memory-retrieval-eval`.
@@ -202,11 +274,14 @@ async fn run_memory_retrieval_eval_in_store(
     store: &IsolatedEvalStore,
 ) -> Result<MemoryRetrievalEvalReport> {
     cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
-    let embedder = Arc::new(cached_embedding_provider_for_corpus(&corpus)?);
-    let ingest_ctx = store.ingest_ctx(embedder.clone());
+    let extractor = options.extractor_for_corpus(&corpus)?;
+    let embedder =
+        Arc::new(cached_embedding_provider_for_corpus(&corpus, extractor.as_ref()).await?);
+    let ingest_ctx = store.ingest_ctx(embedder.clone(), extractor);
     let mut gold_resolution =
         resolve_gold_nodes(ingest_ctx, &corpus.ledger, &corpus.sessions).await?;
     apply_eval_validity_windows(store.pool(), &mut gold_resolution).await?;
+    stabilize_eval_access_times(store.pool(), &corpus.ledger).await?;
     let ranking_reference_time = Some(deterministic_ranking_reference_time(&corpus.ledger));
     let fact_ids_by_uid = fact_ids_by_uid(&gold_resolution);
     let extraction_precision =
@@ -221,9 +296,12 @@ async fn run_memory_retrieval_eval_in_store(
             &planner,
             embedder.as_ref(),
             probe,
-            options.reranker_enabled(),
-            options.ranking_config().clone(),
-            ranking_reference_time,
+            ProbeRetrieveOptions {
+                use_reranker: options.reranker_enabled(),
+                ranking_config: options.ranking_config().clone(),
+                ranking_reference_time,
+                deterministic_replay: options.extractor_mode == MemoryEvalExtractorMode::Recorded,
+            },
         )
         .await?;
         let candidates =
@@ -261,6 +339,11 @@ async fn cleanup_eval_graph_rows(pool: &PgPool, ledger: &[LedgerFact]) -> Result
     if workspace_ids.is_empty() {
         return Ok(());
     }
+    cleanup_eval_age_rows(pool, &workspace_ids).await?;
+    sqlx::query("DELETE FROM moa.embeddings WHERE workspace_id = ANY($1)")
+        .bind(&workspace_ids)
+        .execute(pool)
+        .await?;
     sqlx::query("DELETE FROM moa.ingest_dlq WHERE workspace_id = ANY($1)")
         .bind(&workspace_ids)
         .execute(pool)
@@ -283,6 +366,49 @@ async fn cleanup_eval_graph_rows(pool: &PgPool, ledger: &[LedgerFact]) -> Result
         .await?;
     Ok(())
 }
+
+async fn cleanup_eval_age_rows(pool: &PgPool, workspace_ids: &[String]) -> Result<()> {
+    for label in AGE_EDGE_LABELS {
+        cleanup_eval_age_table(pool, label, workspace_ids).await?;
+    }
+    for label in AGE_NODE_LABELS {
+        cleanup_eval_age_table(pool, label, workspace_ids).await?;
+    }
+    Ok(())
+}
+
+async fn cleanup_eval_age_table(
+    pool: &PgPool,
+    label: &str,
+    workspace_ids: &[String],
+) -> Result<()> {
+    let sql = format!(
+        r#"
+        DELETE FROM moa_graph."{label}"
+        WHERE trim(both '"' from moa.age_property(properties, 'workspace_id')::text) = $1
+        "#
+    );
+    for workspace_id in workspace_ids {
+        sqlx::query(&sql).bind(workspace_id).execute(pool).await?;
+    }
+    Ok(())
+}
+
+const AGE_NODE_LABELS: &[&str] = &[
+    "Entity", "Concept", "Decision", "Incident", "Lesson", "Fact", "Source",
+];
+
+const AGE_EDGE_LABELS: &[&str] = &[
+    "RELATES_TO",
+    "DEPENDS_ON",
+    "SUPERSEDES",
+    "CONTRADICTS",
+    "DERIVED_FROM",
+    "MENTIONED_IN",
+    "CAUSED",
+    "LEARNED_FROM",
+    "APPLIES_TO",
+];
 
 fn eval_workspace_ids(ledger: &[LedgerFact]) -> Vec<String> {
     ledger
@@ -326,25 +452,44 @@ async fn apply_eval_validity_windows(
     Ok(())
 }
 
+async fn stabilize_eval_access_times(pool: &PgPool, ledger: &[LedgerFact]) -> Result<()> {
+    let workspace_ids = eval_workspace_ids(ledger);
+    if workspace_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE moa.node_index SET last_accessed_at = valid_from WHERE workspace_id = ANY($1)",
+    )
+    .bind(&workspace_ids)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn retrieve_probe(
     pool: &PgPool,
     planner: &QueryPlanner,
     embedder: &dyn EmbeddingProvider,
     probe: &Probe,
-    use_reranker: bool,
-    ranking_config: RankingConfig,
-    ranking_reference_time: Option<DateTime<Utc>>,
+    options: ProbeRetrieveOptions,
 ) -> Result<ProbeRetrieval> {
+    let ProbeRetrieveOptions {
+        use_reranker,
+        ranking_config,
+        ranking_reference_time,
+        deterministic_replay,
+    } = options;
     let started = Instant::now();
     let scope = MemoryScope::User {
         workspace_id: probe.workspace_id.clone(),
         user_id: probe.user_id.clone(),
     };
     let scope_context = ScopeContext::new(scope.clone());
-    let vector: Arc<dyn VectorStore> = Arc::new(PgvectorStore::new_for_app_role(
-        pool.clone(),
-        scope_context.clone(),
-    ));
+    let mut vector_store = PgvectorStore::new_for_app_role(pool.clone(), scope_context.clone());
+    if deterministic_replay {
+        vector_store = vector_store.with_exact_search(true);
+    }
+    let vector: Arc<dyn VectorStore> = Arc::new(vector_store);
     let graph_store = AgeGraphStore::scoped_for_app_role(pool.clone(), scope_context)
         .with_vector_store(vector.clone());
     let graph: Arc<dyn GraphStore> = Arc::new(graph_store);
@@ -394,8 +539,19 @@ async fn retrieve_probe(
     Ok(ProbeRetrieval {
         pre_rerank_hits,
         post_rerank_hits,
-        retrieval_latency_ms: duration_ms_u64(started.elapsed()),
+        retrieval_latency_ms: if deterministic_replay {
+            0
+        } else {
+            duration_ms_u64(started.elapsed())
+        },
     })
+}
+
+struct ProbeRetrieveOptions {
+    use_reranker: bool,
+    ranking_config: RankingConfig,
+    ranking_reference_time: Option<DateTime<Utc>>,
+    deterministic_replay: bool,
 }
 
 async fn retrieve_probe_hits(
@@ -413,6 +569,8 @@ async fn retrieve_probe_hits(
     if let Some(ranking_reference_time) = options.ranking_reference_time {
         retrieval_ctx = retrieval_ctx.with_ranking_reference_time(ranking_reference_time);
     }
+    retrieval_ctx = retrieval_ctx.with_leg_timeouts_disabled();
+    retrieval_ctx = retrieval_ctx.with_graph_expansion_disabled();
 
     retrieve_for_query(&probe.query, &retrieval_ctx)
         .await
@@ -648,8 +806,9 @@ async fn write_report(path: &Path, report: &MemoryRetrievalEvalReport) -> Result
         .map_err(|source| io_error(path, source))
 }
 
-fn cached_embedding_provider_for_corpus(
+async fn cached_embedding_provider_for_corpus(
     corpus: &LoadedMemoryEvalCorpus,
+    extractor: &dyn FactExtractor,
 ) -> Result<CachedEmbeddingProvider> {
     let mut fixtures_by_hash = BTreeMap::<String, CachedEmbeddingFixture>::new();
     for fixture in corpus.embeddings.clone() {
@@ -657,7 +816,7 @@ fn cached_embedding_provider_for_corpus(
     }
     ensure_embedding_input_coverage(&corpus.embedding_inputs, &fixtures_by_hash)?;
 
-    for text in extracted_embedding_texts(&corpus.sessions)? {
+    for text in extracted_embedding_texts(&corpus.sessions, extractor).await? {
         insert_fixture(
             &mut fixtures_by_hash,
             CachedEmbeddingFixture::for_text(&text),
@@ -700,7 +859,10 @@ fn ensure_embedding_input_coverage(
     Ok(())
 }
 
-fn extracted_embedding_texts(sessions: &[SyntheticSession]) -> Result<Vec<String>> {
+async fn extracted_embedding_texts(
+    sessions: &[SyntheticSession],
+    extractor: &dyn FactExtractor,
+) -> Result<Vec<String>> {
     let finalized_at = DateTime::<Utc>::from_timestamp(0, 0).ok_or_else(|| {
         EvalError::InvalidConfig("failed to construct deterministic eval timestamp".to_string())
     })?;
@@ -723,7 +885,12 @@ fn extracted_embedding_texts(sessions: &[SyntheticSession]) -> Result<Vec<String
                         session.session_id, turn.turn_seq
                     ))
                 })?;
-            for fact in extract_facts(&chunks) {
+            for fact in extractor.extract(&chunks).await.map_err(|error| {
+                EvalError::InvalidConfig(format!(
+                    "failed to extract embedding texts for synthetic session {} turn {}: {error}",
+                    session.session_id, turn.turn_seq
+                ))
+            })? {
                 texts.insert(fact.summary.clone(), ());
                 let pii = deterministic_pii_result(&fact.summary);
                 let redacted = redact_text(&fact.summary, &pii.spans);
@@ -792,7 +959,11 @@ impl IsolatedEvalStore {
         self.store.pool()
     }
 
-    fn ingest_ctx(&self, embedder: Arc<dyn EmbeddingProvider>) -> IngestCtx {
+    fn ingest_ctx(
+        &self,
+        embedder: Arc<dyn EmbeddingProvider>,
+        extractor: Arc<dyn FactExtractor>,
+    ) -> IngestCtx {
         let workspace_id = WorkspaceId::new(format!("memory-eval-runner-{}", self.schema_name));
         let scope = ScopeContext::workspace(workspace_id);
         let vector = Arc::new(PgvectorStore::new_for_app_role(
@@ -811,6 +982,7 @@ impl IsolatedEvalStore {
             Arc::new(MemoryEvalPiiClassifier),
             Arc::new(InsertOnlyContradictionDetector),
         )
+        .with_extractor(extractor)
     }
 
     async fn cleanup(self) -> Result<()> {

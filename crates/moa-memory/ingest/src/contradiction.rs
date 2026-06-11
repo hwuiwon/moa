@@ -17,7 +17,7 @@ use sqlx::PgPool;
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use crate::{EmbeddedFact, IngestError, Result};
+use crate::{EmbeddedFact, IngestError, LlmChatClient, Result};
 
 const VECTOR_K: usize = 10;
 const LEXICAL_K: i64 = 10;
@@ -28,6 +28,7 @@ const DEFAULT_SLOW_BUDGET: Duration = Duration::from_secs(5);
 const DEFAULT_JUDGE_BUDGET: Duration = Duration::from_millis(200);
 const COHERE_RERANK_URL: &str = "https://api.cohere.com/v2/rerank";
 const COHERE_RERANK_MODEL: &str = "rerank-v4.0-fast";
+const DEFAULT_JUDGE_MODEL: &str = "command-a-plus-05-2026";
 const CACHE_CAPACITY: u64 = 10_000;
 const JUDGE_PROMPT: &str = include_str!("../prompts/judge.txt");
 
@@ -301,6 +302,31 @@ impl JudgeModel for HeuristicJudge {
     }
 }
 
+/// Cohere chat-backed judge using the shared LLM transport.
+#[derive(Clone)]
+struct CohereJudge {
+    client: LlmChatClient,
+}
+
+impl CohereJudge {
+    fn new(client: LlmChatClient) -> Self {
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl JudgeModel for CohereJudge {
+    async fn judge(
+        &self,
+        prompt: &str,
+        _fact_text: &str,
+        _candidates: &[NodeIndexRow],
+    ) -> Result<JudgeResponse> {
+        let response = self.client.chat("", prompt).await?;
+        parse_judge_response(&response)
+    }
+}
+
 /// RRF plus rerank plus judge contradiction detector.
 #[derive(Clone)]
 pub struct RrfPlusJudgeDetector {
@@ -329,31 +355,53 @@ impl RrfPlusJudgeDetector {
     /// Creates a local detector, using Cohere Rerank when an API key is present.
     #[must_use]
     pub fn from_env_or_heuristic() -> Self {
-        let reranker: Arc<dyn Reranker> = std::env::var("COHERE_API_KEY")
-            .map(|api_key| {
-                Arc::new(CohereReranker::new(SecretString::from(api_key))) as Arc<dyn Reranker>
-            })
-            .unwrap_or_else(|_| Arc::new(NoopReranker));
-        Self::new(reranker, Arc::new(HeuristicJudge))
+        Self::from_cohere_api_key_env_or_heuristic("COHERE_API_KEY")
     }
 
     /// Creates a detector using the Cohere env-var name from shared MOA config.
     #[must_use]
     pub fn from_config_or_heuristic(config: &MoaConfig) -> Self {
-        Self::from_cohere_api_key_env_or_heuristic(
+        Self::from_cohere_api_key_env_model_or_heuristic(
             &config.memory.vector.embedder.cohere.api_key_env,
+            &config.memory.extraction.model,
+            config.memory.extraction.timeout_ms,
         )
     }
 
     /// Creates a detector using a configured Cohere API-key env-var name.
     #[must_use]
     pub fn from_cohere_api_key_env_or_heuristic(api_key_env: &str) -> Self {
+        Self::from_cohere_api_key_env_model_or_heuristic(
+            api_key_env,
+            DEFAULT_JUDGE_MODEL,
+            DEFAULT_JUDGE_BUDGET.as_millis() as u64,
+        )
+    }
+
+    /// Creates a detector using a configured Cohere API-key env-var name and judge model.
+    #[must_use]
+    pub fn from_cohere_api_key_env_model_or_heuristic(
+        api_key_env: &str,
+        judge_model: &str,
+        timeout_ms: u64,
+    ) -> Self {
         let reranker: Arc<dyn Reranker> = std::env::var(api_key_env)
             .map(|api_key| {
                 Arc::new(CohereReranker::new(SecretString::from(api_key))) as Arc<dyn Reranker>
             })
             .unwrap_or_else(|_| Arc::new(NoopReranker));
-        Self::new(reranker, Arc::new(HeuristicJudge))
+        let judge: Arc<dyn JudgeModel> =
+            LlmChatClient::from_env(api_key_env, judge_model, timeout_ms)
+                .map(|client| Arc::new(CohereJudge::new(client)) as Arc<dyn JudgeModel>)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(
+                        error = %error,
+                        api_key_env,
+                        "falling back to heuristic contradiction judge"
+                    );
+                    Arc::new(HeuristicJudge)
+                });
+        Self::new(reranker, judge)
     }
 
     /// Overrides all latency budgets, primarily for deterministic tests.
@@ -645,6 +693,22 @@ fn conflict_from_judge(response: JudgeResponse) -> Conflict {
     }
 }
 
+fn parse_judge_response(response: &str) -> Result<JudgeResponse> {
+    let stripped = strip_json_code_fence(response);
+    serde_json::from_str::<JudgeResponse>(stripped)
+        .map_err(|error| IngestError::Judge(format!("failed to parse judge JSON: {error}")))
+}
+
+fn strip_json_code_fence(response: &str) -> &str {
+    let trimmed = response.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix("json").unwrap_or(rest).trim_start();
+    rest.strip_suffix("```").unwrap_or(rest).trim()
+}
+
 fn heuristic_judge(fact_text: &str, candidates: &[NodeIndexRow]) -> JudgeResponse {
     let normalized_fact = normalize_fact_text(fact_text);
     if let Some(candidate) = candidates
@@ -853,7 +917,10 @@ mod tests {
 
     use chrono::Utc;
     use moa_memory_graph::PiiClass;
+    use secrecy::SecretString;
     use tokio::time::sleep;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
 
@@ -905,6 +972,42 @@ mod tests {
             .expect("judge empty candidates");
 
         assert_eq!(conflict, Conflict::Insert);
+    }
+
+    #[tokio::test]
+    async fn contradiction_judge_parsing_unchanged_on_shared_client() {
+        // Pins: the shared Cohere chat transport preserves judge prompt content and JSON parsing.
+        let candidate = candidate("we deploy to fly.io", None);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/chat"))
+            .and(body_string_contains("NEW FACT:"))
+            .and(body_string_contains(candidate.uid.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {
+                    "content": [{
+                        "type": "text",
+                        "text": format!(
+                            "```json\n{{\"verdict\":\"CONTRADICTS\",\"candidate_uid\":\"{}\",\"rationale\":\"deployment provider changed\"}}\n```",
+                            candidate.uid
+                        )
+                    }]
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client =
+            LlmChatClient::from_api_key(SecretString::from("test-key"), "command-test", 1_000)
+                .with_endpoint(format!("{}/v2/chat", server.uri()));
+        let detector =
+            RrfPlusJudgeDetector::new(Arc::new(NoopReranker), Arc::new(CohereJudge::new(client)));
+
+        let conflict = detector
+            .judge_candidates("we deploy to AWS", std::slice::from_ref(&candidate))
+            .await
+            .expect("judge should parse shared-client response");
+
+        assert_eq!(conflict, Conflict::Supersede(candidate.uid));
     }
 
     #[tokio::test]

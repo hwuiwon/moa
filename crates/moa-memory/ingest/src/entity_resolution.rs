@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use moa_core::{ScopeContext, ScopedConn};
 use moa_memory_graph::{GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -112,7 +113,7 @@ impl EntityResolver {
         }
 
         let display_name = display_entity_name(request.name, &normalized_name);
-        let uid = Uuid::now_v7();
+        let uid = deterministic_entity_uid(request.scope, &normalized_name);
         graph
             .create_node(NodeWriteIntent {
                 uid,
@@ -260,9 +261,34 @@ fn normalize_entity_name(name: &str) -> String {
     }
 }
 
+fn deterministic_entity_uid(scope: &ScopeContext, normalized_name: &str) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(b"moa:entity:v1");
+    hasher.update([0]);
+    hasher.update(scope.tier_str().as_bytes());
+    hasher.update([0]);
+    if let Some(workspace_id) = scope.workspace_id() {
+        hasher.update(workspace_id.to_string().as_bytes());
+    }
+    hasher.update([0]);
+    if let Some(user_id) = scope.user_id() {
+        hasher.update(user_id.to_string().as_bytes());
+    }
+    hasher.update([0]);
+    hasher.update(normalized_name.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::normalize_entity_name;
+    use moa_core::{ScopeContext, UserId, WorkspaceId};
+
+    use super::{deterministic_entity_uid, normalize_entity_name};
 
     #[test]
     fn entity_name_normalization_blocks_case_and_punctuation_variants() {
@@ -270,5 +296,31 @@ mod tests {
         assert_eq!(normalize_entity_name(" API_Service "), "api service");
         assert_eq!(normalize_entity_name("api-service"), "api service");
         assert_eq!(normalize_entity_name("api.service"), "api service");
+    }
+
+    #[test]
+    fn deterministic_entity_uid_is_stable_inside_scope() {
+        // Pins: eval graph expansion is not perturbed by fresh entity UUIDs.
+        let scope = ScopeContext::workspace(WorkspaceId::new("workspace-a"));
+        let normalized = normalize_entity_name("Lib Audit Wire");
+
+        let first = deterministic_entity_uid(&scope, &normalized);
+        let second = deterministic_entity_uid(&scope, &normalized);
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn deterministic_entity_uid_includes_user_scope() {
+        // Pins: same entity text in different user scopes does not alias.
+        let workspace_id = WorkspaceId::new("workspace-a");
+        let user_a = ScopeContext::user(workspace_id.clone(), UserId::new("user-a"));
+        let user_b = ScopeContext::user(workspace_id, UserId::new("user-b"));
+        let normalized = normalize_entity_name("repo/search-platform");
+
+        let uid_a = deterministic_entity_uid(&user_a, &normalized);
+        let uid_b = deterministic_entity_uid(&user_b, &normalized);
+
+        assert_ne!(uid_a, uid_b);
     }
 }

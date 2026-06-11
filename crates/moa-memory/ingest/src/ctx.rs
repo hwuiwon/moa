@@ -10,7 +10,7 @@ use sqlx::PgPool;
 
 use crate::{
     ContradictionDetector, EntityMergeVerifier, EntityResolver, FactExtractor,
-    HeuristicFactExtractor, IngestError, Result, RrfPlusJudgeDetector,
+    HeuristicFactExtractor, IngestError, LlmFactExtractor, Result, RrfPlusJudgeDetector,
 };
 
 static INGEST_RUNTIME: OnceLock<IngestRuntime> = OnceLock::new();
@@ -109,6 +109,7 @@ pub struct IngestRuntime {
     pii_service_url: Option<String>,
     cohere_api_key_env: String,
     extractor: Arc<dyn FactExtractor>,
+    extractor_name: &'static str,
     entity_resolver: Arc<EntityResolver>,
     contradiction_detector: Arc<dyn ContradictionDetector>,
 }
@@ -126,6 +127,7 @@ impl IngestRuntime {
             pii_service_url: None,
             cohere_api_key_env: default_config.memory.vector.embedder.cohere.api_key_env,
             extractor: Arc::new(HeuristicFactExtractor),
+            extractor_name: "heuristic",
             entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
             contradiction_detector,
         }
@@ -134,11 +136,13 @@ impl IngestRuntime {
     /// Creates a runtime from a Postgres pool and shared MOA config.
     #[must_use]
     pub fn from_config(pool: PgPool, config: &MoaConfig) -> Self {
+        let (extractor, extractor_name) = extractor_from_config(config);
         Self {
             pool,
             pii_service_url: config.memory.pii_service_url.clone(),
             cohere_api_key_env: config.memory.vector.embedder.cohere.api_key_env.clone(),
-            extractor: Arc::new(HeuristicFactExtractor),
+            extractor,
+            extractor_name,
             entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
             contradiction_detector: Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(
                 config,
@@ -150,6 +154,7 @@ impl IngestRuntime {
     #[must_use]
     pub fn with_extractor(mut self, extractor: Arc<dyn FactExtractor>) -> Self {
         self.extractor = extractor;
+        self.extractor_name = "custom";
         self
     }
 
@@ -197,6 +202,12 @@ impl IngestRuntime {
         self.extractor.clone()
     }
 
+    /// Returns the configured extractor kind for startup logging and tests.
+    #[must_use]
+    pub fn extractor_name(&self) -> &'static str {
+        self.extractor_name
+    }
+
     /// Returns the configured entity resolver.
     #[must_use]
     pub fn entity_resolver(&self) -> Arc<EntityResolver> {
@@ -207,6 +218,38 @@ impl IngestRuntime {
     #[must_use]
     pub fn contradiction_detector(&self) -> Arc<dyn ContradictionDetector> {
         self.contradiction_detector.clone()
+    }
+}
+
+fn extractor_from_config(config: &MoaConfig) -> (Arc<dyn FactExtractor>, &'static str) {
+    let extraction = &config.memory.extraction;
+    if !extraction.enabled {
+        tracing::info!("memory fact extractor installed: heuristic");
+        return (Arc::new(HeuristicFactExtractor), "heuristic");
+    }
+    if std::env::var(&extraction.api_key_env).is_err() {
+        tracing::warn!(
+            api_key_env = %extraction.api_key_env,
+            "memory extraction enabled but credential env var is absent; installing heuristic extractor"
+        );
+        return (Arc::new(HeuristicFactExtractor), "heuristic");
+    }
+    match LlmFactExtractor::from_config(extraction) {
+        Ok(extractor) => {
+            tracing::info!(
+                model = %extraction.model,
+                max_facts_per_chunk = extraction.max_facts_per_chunk,
+                "memory fact extractor installed: llm"
+            );
+            (Arc::new(extractor), "llm")
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "memory extraction enabled but LLM extractor could not initialize; installing heuristic extractor"
+            );
+            (Arc::new(HeuristicFactExtractor), "heuristic")
+        }
     }
 }
 
@@ -239,10 +282,14 @@ pub fn current_runtime() -> Result<IngestRuntime> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::Mutex;
 
+    use moa_core::MoaConfig;
     use sqlx::postgres::PgPoolOptions;
 
     use super::IngestRuntime;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[tokio::test]
     async fn ingest_runtime_reuses_contradiction_detector() {
@@ -256,5 +303,37 @@ mod tests {
         let second = runtime.contradiction_detector();
 
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn runtime_installs_llm_extractor_only_when_enabled_and_credentialed() {
+        // Pins: model-backed extraction is gated by both config and the configured credential env.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/moa_test")
+            .expect("lazy test pool should not connect");
+        let mut config = MoaConfig::default();
+        config.memory.extraction.enabled = true;
+        config.memory.extraction.api_key_env = "MOA_TEST_EXTRACTION_KEY".to_string();
+        unsafe {
+            std::env::remove_var("MOA_TEST_EXTRACTION_KEY");
+        }
+
+        let missing = IngestRuntime::from_config(pool.clone(), &config);
+        assert_eq!(missing.extractor_name(), "heuristic");
+
+        unsafe {
+            std::env::set_var("MOA_TEST_EXTRACTION_KEY", "test-key");
+        }
+        let credentialed = IngestRuntime::from_config(pool.clone(), &config);
+        assert_eq!(credentialed.extractor_name(), "llm");
+
+        config.memory.extraction.enabled = false;
+        let disabled = IngestRuntime::from_config(pool, &config);
+        assert_eq!(disabled.extractor_name(), "heuristic");
+
+        unsafe {
+            std::env::remove_var("MOA_TEST_EXTRACTION_KEY");
+        }
     }
 }

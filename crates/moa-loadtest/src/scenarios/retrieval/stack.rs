@@ -164,6 +164,8 @@ impl WorkspaceRetriever {
             strategy: Some(Strategy::Both),
             as_of: None,
             ranking_reference_time: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: false,
         };
         let hits = self
             .cache

@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use moa_core::ScopeContext;
 use moa_memory_graph::{AgeGraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_ingest::{
-    IngestApplyReport, IngestCtx, SessionTurn, chunk_turn, extract_facts, fact_hash,
+    FactExtractor, IngestApplyReport, IngestCtx, SessionTurn, chunk_turn, fact_hash,
     ingest_turn_direct_with_ctx,
 };
 use moa_memory_vector::PgvectorStore;
@@ -278,7 +278,7 @@ async fn resolve_fact_nodes(
     source: &FactSource<'_>,
 ) -> Result<Vec<NodeIndexRow>> {
     let source_candidates = fetch_source_candidates(ctx, fact).await?;
-    let expected_hashes = expected_fact_hashes(fact, source)?;
+    let expected_hashes = expected_fact_hashes(ctx.extractor.as_ref(), fact, source).await?;
     let hash_matches = match_by_hash(&source_candidates, &expected_hashes);
     if !hash_matches.is_empty() {
         return Ok(hash_matches);
@@ -294,6 +294,11 @@ async fn resolve_fact_nodes(
     let structured_source_matches = match_by_structured_fact(&source_candidates, fact);
     if !structured_source_matches.is_empty() {
         return Ok(structured_source_matches);
+    }
+
+    let source_overlap_matches = match_by_source_overlap(&source_candidates, fact);
+    if !source_overlap_matches.is_empty() {
+        return Ok(source_overlap_matches);
     }
 
     let containment_matches = match_by_provenance_containment(&source_candidates, fact);
@@ -398,6 +403,41 @@ fn match_by_provenance_containment(
         .collect()
 }
 
+fn match_by_source_overlap(candidates: &[NodeIndexRow], fact: &LedgerFact) -> Vec<NodeIndexRow> {
+    let subject_tokens = match_tokens(&fact.subject);
+    let object_tokens = match_tokens(&fact.object);
+    let predicate_tokens = match_tokens(&fact.predicate);
+    candidates
+        .iter()
+        .filter(|candidate| {
+            let candidate_tokens = candidate_match_tokens(candidate);
+            let subject_matches = !subject_tokens.is_empty()
+                && contains_all_tokens(&candidate_tokens, &subject_tokens);
+            let object_matches = token_overlap_count(&candidate_tokens, &object_tokens)
+                >= object_match_threshold(fact);
+            let predicate_matches = !predicate_tokens.is_empty()
+                && token_overlap_count(&candidate_tokens, &predicate_tokens) > 0;
+            let redacted_pii_match = fact.expected_redacted
+                && candidate.pii_class != PiiClass::None
+                && (subject_matches || predicate_matches);
+            redacted_pii_match || (object_matches && (subject_matches || predicate_matches))
+        })
+        .cloned()
+        .collect()
+}
+
+fn object_match_threshold(fact: &LedgerFact) -> usize {
+    let object_tokens = match_tokens(&fact.object);
+    if object_tokens.is_empty() || fact.expected_redacted {
+        return 1;
+    }
+    if object_tokens.len() <= 2 {
+        object_tokens.len()
+    } else {
+        1
+    }
+}
+
 fn candidate_match_tokens(candidate: &NodeIndexRow) -> BTreeSet<String> {
     let mut text = String::new();
     text.push_str(&candidate.name);
@@ -414,6 +454,13 @@ fn candidate_match_tokens(candidate: &NodeIndexRow) -> BTreeSet<String> {
 
 fn contains_all_tokens(candidate: &BTreeSet<String>, required: &BTreeSet<String>) -> bool {
     required.iter().all(|token| candidate.contains(token))
+}
+
+fn token_overlap_count(candidate: &BTreeSet<String>, required: &BTreeSet<String>) -> usize {
+    required
+        .iter()
+        .filter(|token| candidate.contains(*token))
+        .count()
 }
 
 fn structured_fact_matches(properties: Option<&Value>, fact: &LedgerFact) -> bool {
@@ -443,11 +490,11 @@ fn structured_fact_matches(properties: Option<&Value>, fact: &LedgerFact) -> boo
         .is_some_and(|summary| summary.contains(&expected_phrase))
 }
 
-fn expected_fact_hashes(fact: &LedgerFact, source: &FactSource<'_>) -> Result<BTreeSet<String>> {
-    if !is_marked_transcript(&source.turn.transcript) {
-        return Ok(BTreeSet::new());
-    }
-
+async fn expected_fact_hashes(
+    extractor: &dyn FactExtractor,
+    fact: &LedgerFact,
+    source: &FactSource<'_>,
+) -> Result<BTreeSet<String>> {
     let turn = SessionTurn {
         workspace_id: source.session.workspace_id.clone(),
         user_id: source.session.user_id.clone(),
@@ -463,20 +510,25 @@ fn expected_fact_hashes(fact: &LedgerFact, source: &FactSource<'_>) -> Result<BT
             fact.fact_id
         ))
     })?;
-    let extracted = extract_facts(&chunks);
+    let extracted = extractor.extract(&chunks).await.map_err(|error| {
+        EvalError::InvalidConfig(format!(
+            "failed to extract expected source facts for {}: {error}",
+            fact.fact_id
+        ))
+    })?;
     let mut hashes = BTreeSet::new();
     for candidate in extracted {
-        let candidate_matches = source.turn.fact_ids.len() == 1
-            || extracted_fact_matches_ledger(
-                &candidate.subject,
-                &candidate.predicate,
-                &candidate.object,
-                fact,
-            )
-            || normalize_match_text(&candidate.summary).contains(&normalize_match_text(&format!(
-                "{} {} {}",
-                fact.subject, fact.predicate, fact.object
-            )));
+        let candidate_matches =
+            is_marked_transcript(&source.turn.transcript) && source.turn.fact_ids.len() == 1
+                || extracted_fact_matches_ledger(
+                    &candidate.subject,
+                    &candidate.predicate,
+                    &candidate.object,
+                    fact,
+                )
+                || normalize_match_text(&candidate.summary).contains(&normalize_match_text(
+                    &format!("{} {} {}", fact.subject, fact.predicate, fact.object),
+                ));
         if candidate_matches {
             let hash = fact_hash(&candidate).map_err(|error| {
                 EvalError::InvalidConfig(format!(
@@ -573,6 +625,8 @@ fn ingest_ctx_for_turn(base: &IngestCtx, turn: &SessionTurn) -> IngestCtx {
         base.pii.clone(),
         base.contradict.clone(),
     )
+    .with_extractor(base.extractor.clone())
+    .with_entity_resolver(base.entity_resolver.clone())
 }
 
 fn pii_status(fact: &LedgerFact, nodes: &[NodeIndexRow]) -> GoldPiiStatus {
@@ -753,7 +807,7 @@ fn sources_by_fact_id<'a>(
     Ok(sources)
 }
 
-fn session_turn(
+pub(crate) fn session_turn(
     source: &FactSource<'_>,
     facts: &HashMap<&str, &LedgerFact>,
 ) -> Result<SessionTurn> {
@@ -768,7 +822,10 @@ fn session_turn(
     })
 }
 
-fn dominant_pii_class(turn: &SyntheticTurn, facts: &HashMap<&str, &LedgerFact>) -> Result<String> {
+pub(crate) fn dominant_pii_class(
+    turn: &SyntheticTurn,
+    facts: &HashMap<&str, &LedgerFact>,
+) -> Result<String> {
     let mut rank = 0_u8;
     let mut class = "none";
     for fact_id in &turn.fact_ids {
@@ -796,7 +853,7 @@ fn pii_rank(class: PiiClass) -> u8 {
     }
 }
 
-fn turn_finalized_at(
+pub(crate) fn turn_finalized_at(
     turn: &SyntheticTurn,
     facts: &HashMap<&str, &LedgerFact>,
 ) -> Result<DateTime<Utc>> {
@@ -820,7 +877,7 @@ fn turn_finalized_at(
     })
 }
 
-fn facts_by_id(ledger: &[LedgerFact]) -> Result<HashMap<&str, &LedgerFact>> {
+pub(crate) fn facts_by_id(ledger: &[LedgerFact]) -> Result<HashMap<&str, &LedgerFact>> {
     let mut facts = HashMap::new();
     for fact in ledger {
         if facts.insert(fact.fact_id.as_str(), fact).is_some() {
@@ -950,9 +1007,9 @@ fn io_error(path: &Path, source: std::io::Error) -> EvalError {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct FactSource<'a> {
-    session: &'a SyntheticSession,
-    turn: &'a SyntheticTurn,
+pub(crate) struct FactSource<'a> {
+    pub(crate) session: &'a SyntheticSession,
+    pub(crate) turn: &'a SyntheticTurn,
 }
 
 #[cfg(test)]
@@ -960,6 +1017,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use moa_core::{ScopeTier, SessionId, UserId, WorkspaceId};
+    use moa_memory_ingest::ScriptedFactExtractor;
     use serde_json::json;
 
     #[test]
@@ -1028,6 +1086,50 @@ mod tests {
     }
 
     #[test]
+    fn gold_source_overlap_resolves_llm_predicate_paraphrase() {
+        // Pins: same-source natural LLM facts can match by subject/object overlap.
+        let mut fact = test_fact(
+            "fact-owned-by",
+            "lib-audit-wire",
+            "owned_by",
+            "profile-experience",
+        );
+        fact.answer = "The profile-experience team owns lib-audit-wire.".to_string();
+        let candidate = node_row(
+            5,
+            "The team agreed that lib-audit-wire is owned by profile-experience.",
+            "profile-experience",
+        );
+
+        let matches = match_by_source_overlap(std::slice::from_ref(&candidate), &fact);
+
+        assert_eq!(matches, vec![candidate]);
+    }
+
+    #[test]
+    fn gold_source_overlap_resolves_redacted_pii_by_source_and_subject() {
+        // Pins: expected-redacted source candidates do not need to retain raw object text.
+        let mut fact = test_fact(
+            "fact-email",
+            "User 00",
+            "contact_email",
+            "alice@example.com",
+        );
+        fact.expected_redacted = true;
+        fact.pii_class = PiiClass::Pii;
+        let mut candidate = node_row(
+            6,
+            "User 00 uses contact email [EMAIL_REDACTED]",
+            "[EMAIL_REDACTED]",
+        );
+        candidate.pii_class = PiiClass::Pii;
+
+        let matches = match_by_source_overlap(std::slice::from_ref(&candidate), &fact);
+
+        assert_eq!(matches, vec![candidate]);
+    }
+
+    #[test]
     fn scope_match_rate_counts_mixed_scope_as_mismatch() {
         // Pins: mixed-scope gold resolution is a scope bug, not partial credit.
         let report = GoldResolutionReport {
@@ -1056,6 +1158,34 @@ mod tests {
 
         assert_eq!(report.scope_match_counts(), (1, 2));
         assert_eq!(report.scope_match_rate(), 0.5);
+    }
+
+    #[tokio::test]
+    async fn gold_hash_matching_uses_ctx_extractor() {
+        // Pins: expected hash matching follows the configured extractor, not the free heuristic.
+        let fact = test_fact("fact-runtime", "runtime", "uses", "restate");
+        let turn = SyntheticTurn {
+            turn_seq: fact.source_turn_seq,
+            transcript: "user: I was told the runtime choice earlier.".to_string(),
+            fact_ids: vec![fact.fact_id.clone()],
+        };
+        let session = SyntheticSession {
+            session_id: fact.source_session_id,
+            workspace_id: fact.workspace_id.clone(),
+            user_id: fact.user_id.clone(),
+            turns: vec![turn],
+        };
+        let source = FactSource {
+            session: &session,
+            turn: &session.turns[0],
+        };
+        let extractor = ScriptedFactExtractor::from_summaries(["runtime uses restate"]);
+
+        let hashes = expected_fact_hashes(&extractor, &fact, &source)
+            .await
+            .expect("expected hashes");
+
+        assert_eq!(hashes.len(), 1);
     }
 
     fn test_fact(

@@ -414,6 +414,8 @@ async fn retrieve_hits(
             strategy: None,
             as_of: None,
             ranking_reference_time: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: false,
         })
         .await
         .map_err(memory_handler_error)

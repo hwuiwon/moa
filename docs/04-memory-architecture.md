@@ -55,6 +55,8 @@ Memory enters the graph through two routes:
 - **Slow path**: `moa-memory-ingest` processes longer source text or turns through the ingestion VO. It chunks content, extracts facts/entities, classifies privacy, writes nodes and edges, embeds retrievable records, and records contradictions.
 - **Fast path**: short observations use remember/forget/supersede APIs for direct graph writes with the same scope and privacy controls.
 
+Slow-path fact extraction is behind the `FactExtractor` seam. The heuristic extractor remains the default and journal-safe fallback. Environments can opt into the Cohere-backed `LlmFactExtractor` with `memory.extraction.enabled` plus the configured API-key env var; eval replay uses recorded extraction fixtures so the natural transcript lane stays hermetic after live recording.
+
 PII classification runs before durable memory writes. Sensitive text is either filtered, redacted, or tagged according to the privacy class and policy.
 
 ## Context Pipeline Integration

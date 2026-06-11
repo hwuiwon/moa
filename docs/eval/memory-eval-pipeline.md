@@ -87,6 +87,13 @@ text and embedding fingerprint, cutoff, reranker flag, temporal filter, ranking
 reference time, and a stable ranking fingerprint made from the ranking config
 plus `RANKING_PIPELINE_VERSION`.
 
+The memory eval runner still uses the production planner, cache, and hybrid
+retriever, but its default ranking config is time-neutral and it disables graph
+expansion through the retrieval request. That keeps the checked-in marked PR
+baseline comparable while extraction work changes. Recorded extraction replay
+also forces exact pgvector scans and writes `0` latency values so two hermetic
+runs can produce byte-identical reports.
+
 ## PR Hermetic Check
 
 PR checks use the `pr` corpus profile with marked transcripts. The run is
@@ -128,6 +135,41 @@ that is the signal this profile exists to preserve. Natural reports enforce
 hard blockers (`cross_user_leak_count == 0` and `pii_unredacted_count == 0`)
 but do not gate quality metrics until the Section 2 extraction work can move
 them.
+
+## Recorded Extraction Lane
+
+The natural profile can run with model-backed extraction without making CI or
+PR checks call a live provider. Recording is a deliberate, billed maintainer
+step; replay is hermetic.
+
+Record fixtures after changing the natural corpus, the extraction prompt, or
+the extractor model:
+
+```bash
+cargo run -p xtask -- record-memory-extractions --corpus target/memory-eval/pr-natural
+```
+
+The default fixture path is:
+
+```bash
+crates/moa-eval/fixtures/memory/extractions-<corpus_id>-v1.jsonl
+```
+
+Replay with no credentials required:
+
+```bash
+env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+  --corpus target/memory-eval/pr-natural \
+  --extractor recorded \
+  --output target/memory-eval/natural-recorded.json
+```
+
+Extraction fixtures are keyed by the SHA-256 hex hash of the raw chunk text the
+extractor saw. The file name and every record carry the extraction prompt
+version. If the prompt changes, bump `EXTRACTION_PROMPT_VERSION`, record a new
+file, and commit the fixture diff. The kernel `FixtureStore` rejects version
+mismatches and missing keys; missing-key errors include the exact recording
+command to regenerate the fixture set.
 
 Corpus realism v2 also expands PR-profile multi-hop probes from 6 to 30 using
 cross-session `depends_on`/`owned_by` fact pairs. Recall@4 is mechanically lower

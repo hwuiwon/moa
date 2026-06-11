@@ -17,6 +17,7 @@ pub struct PgvectorStore {
     pool: PgPool,
     scope: ScopeContext,
     assume_app_role: bool,
+    exact_search: bool,
 }
 
 impl PgvectorStore {
@@ -26,6 +27,7 @@ impl PgvectorStore {
             pool,
             scope,
             assume_app_role: false,
+            exact_search: false,
         }
     }
 
@@ -38,7 +40,15 @@ impl PgvectorStore {
             pool,
             scope,
             assume_app_role: true,
+            exact_search: false,
         }
+    }
+
+    /// Forces exact KNN scans instead of the approximate HNSW index.
+    #[must_use]
+    pub fn with_exact_search(mut self, exact_search: bool) -> Self {
+        self.exact_search = exact_search;
+        self
     }
 
     /// Returns the underlying Postgres pool.
@@ -93,6 +103,14 @@ impl VectorStore for PgvectorStore {
         }
 
         let mut conn = self.begin().await?;
+        if self.exact_search {
+            sqlx::query("SET LOCAL enable_indexscan = off")
+                .execute(conn.as_mut())
+                .await?;
+            sqlx::query("SET LOCAL enable_bitmapscan = off")
+                .execute(conn.as_mut())
+                .await?;
+        }
         guard_workspace_embedder(conn.as_mut(), query).await?;
         validate_dimension(&query.embedding)?;
         let halfvec = HalfVector::from_f32_slice(&query.embedding);
@@ -141,6 +159,7 @@ impl VectorStore for PgvectorStore {
         }
         builder.push(" ORDER BY embedding.embedding <=> ");
         builder.push_bind(halfvec);
+        builder.push(", embedding.uid ASC");
         builder.push(" LIMIT ");
         builder.push_bind(limit);
 

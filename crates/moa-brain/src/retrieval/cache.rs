@@ -681,6 +681,8 @@ mod tests {
             strategy: Some(planned.strategy),
             as_of: planned.temporal_filter,
             ranking_reference_time: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: false,
         }
     }
 }

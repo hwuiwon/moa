@@ -8,6 +8,9 @@ pub mod error;
 pub mod extract;
 pub mod extractor;
 pub mod fast_path;
+pub mod llm_client;
+pub mod llm_extractor;
+pub mod recorded;
 pub mod slow_path;
 
 pub use contradiction::{
@@ -32,6 +35,12 @@ pub use extractor::{FactExtractor, HeuristicFactExtractor, ScriptedFactExtractor
 pub use fast_path::{
     FastError, FastMemoryToolExecutor, FastPathCtx, FastRememberRequest, ForgetPattern,
     execute_memory_tool, fast_forget, fast_remember, fast_supersede, is_fast_memory_tool,
+};
+pub use llm_client::{LlmChatClient, LlmChatError};
+pub use llm_extractor::{EXTRACTION_PROMPT_VERSION, LlmFactExtractor};
+pub use recorded::{
+    ExtractionFixtureRecord, RecordedExtractionStore, RecordedFact, RecordedFactExtractor,
+    chunk_hash,
 };
 pub use slow_path::{
     IngestionVO, IngestionVOClient, IngestionVOImpl, ingest_turn_direct,

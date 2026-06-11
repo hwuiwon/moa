@@ -5,9 +5,11 @@
 
 pub mod compare;
 pub mod core_metrics;
+pub mod fixtures;
 pub mod stats;
 
 pub use core_metrics::{MetricSummary, PerLegRecall, RetrievalCoreMetrics};
+pub use fixtures::{FixtureRecord, FixtureStore};
 pub use stats::{
     BinaryProbeOutcome, BootstrapConfig, ClusterBootstrapReport, ClusterObservation,
     DEFAULT_BOOTSTRAP_RESAMPLES, PairedComparison, benjamini_hochberg,
