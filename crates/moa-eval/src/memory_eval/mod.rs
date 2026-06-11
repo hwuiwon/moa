@@ -40,14 +40,16 @@ pub use judge::{
     AnswerJudge, DeterministicJudge, JudgeInput, JudgeOutcome, PairwiseLlmJudge, PairwiseWinner,
 };
 pub use metrics::{
-    CandidateLegs, ExtractionPrecisionCounts, ProbeResult, RetrievalEvalReport, RetrievalMetrics,
-    RetrievedCandidate, aggregate_retrieval_eval, aggregate_retrieval_eval_from_counts,
-    aggregate_retrieval_eval_from_diagnostic_counts,
-    aggregate_retrieval_eval_with_extraction_precision, candidates_from_retrieval_hits,
+    CandidateLegs, EntityFragmentationCounts, ExtractionPrecisionCounts, ProbeResult,
+    RetrievalEvalReport, RetrievalMetrics, RetrievedCandidate, aggregate_retrieval_eval,
+    aggregate_retrieval_eval_from_counts, aggregate_retrieval_eval_from_diagnostic_counts,
+    aggregate_retrieval_eval_with_diagnostics, aggregate_retrieval_eval_with_extraction_precision,
+    candidates_from_retrieval_hits,
 };
 pub use moa_brain::retrieval::{RankingConfig, RankingMode, RankingWeights};
 pub use recording::{
-    MemoryExtractionRecordingOptions, MemoryExtractionRecordingReport, record_memory_extractions,
+    MemoryExtractionRecordingOptions, MemoryExtractionRecordingReport, MemoryMergeRecordingOptions,
+    MemoryMergeRecordingReport, record_memory_extractions, record_memory_merges,
 };
 pub use runner::{
     MemoryEvalExtractorMode, MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport,
@@ -68,6 +70,24 @@ impl moa_memory_ingest::RecordedExtractionStore
     for crate::kernel::FixtureStore<moa_memory_ingest::ExtractionFixtureRecord>
 {
     fn get_optional(&self, key: &str) -> Option<&moa_memory_ingest::ExtractionFixtureRecord> {
+        crate::kernel::FixtureStore::get_optional(self, key)
+    }
+}
+
+impl crate::kernel::FixtureRecord for moa_memory_ingest::EntityMergeFixtureRecord {
+    fn fixture_key(&self) -> &str {
+        self.fixture_key()
+    }
+
+    fn fixture_version(&self) -> &str {
+        self.fixture_version()
+    }
+}
+
+impl moa_memory_ingest::RecordedEntityMergeStore
+    for crate::kernel::FixtureStore<moa_memory_ingest::EntityMergeFixtureRecord>
+{
+    fn get_optional(&self, key: &str) -> Option<&moa_memory_ingest::EntityMergeFixtureRecord> {
         crate::kernel::FixtureStore::get_optional(self, key)
     }
 }

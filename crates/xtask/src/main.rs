@@ -11,6 +11,7 @@ mod check_eval_budgets;
 mod compare_eval_reports;
 mod generate_memory_eval_corpus;
 mod record_memory_extractions;
+mod record_memory_merges;
 mod run_memory_retrieval_eval;
 
 fn main() -> Result<()> {
@@ -22,6 +23,7 @@ fn main() -> Result<()> {
         Some("generate-memory-eval-corpus") => generate_memory_eval_corpus::run(args),
         Some("migrate-test-db") => cmd_migrate_test_db(),
         Some("record-memory-extractions") => record_memory_extractions::run(args),
+        Some("record-memory-merges") => record_memory_merges::run(args),
         Some("run-memory-retrieval-eval") => run_memory_retrieval_eval::run(args),
         Some(command) => bail!("unknown xtask command: {command}"),
         None => bail!("missing xtask command; try `cargo xtask audit-paths`"),

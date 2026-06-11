@@ -171,6 +171,7 @@ pub mod edge {
         "DEPENDS_ON",
         "Create a `DEPENDS_ON` edge."
     );
+    create_edge_template!(CREATE_OWNED_BY, "OWNED_BY", "Create an `OWNED_BY` edge.");
     create_edge_template!(
         CREATE_SUPERSEDES,
         "SUPERSEDES",

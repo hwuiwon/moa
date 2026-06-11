@@ -41,6 +41,7 @@ AS $$
     SELECT ARRAY[
         'RELATES_TO',
         'DEPENDS_ON',
+        'OWNED_BY',
         'SUPERSEDES',
         'CONTRADICTS',
         'DERIVED_FROM',

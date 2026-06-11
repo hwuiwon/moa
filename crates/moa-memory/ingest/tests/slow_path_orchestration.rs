@@ -17,9 +17,10 @@ use uuid::Uuid;
 use support::{
     SLOW_PATH_USER_ID, TEST_LOCK, active_user_entity_rows, active_user_fact_rows,
     active_workspace_entity_rows, active_workspace_fact_rows, configured_test_db,
-    contradiction_edge_count, create_changelog_payloads, create_fact, entity_rows, fact_rows,
-    fixed_time, ingest_ctx, ingest_ctx_with_pii, node_confidence, node_valid_to, relates_to_edges,
-    supersede_protocol_count, supersedes_edge_exists, turn, user_fact_rows,
+    contradiction_edge_count, create_changelog_payloads, create_fact, entity_resolution_edges,
+    entity_rows, fact_rows, fixed_time, ingest_ctx, ingest_ctx_with_pii, node_confidence,
+    node_valid_to, relates_to_edges, supersede_protocol_count, supersedes_edge_exists, turn,
+    user_fact_rows,
 };
 
 #[derive(Debug, Deserialize)]
@@ -448,9 +449,9 @@ async fn slow_path_resolves_entity_nodes_and_reuses_subject_across_sessions() {
         .map(|row| row.uid.to_string())
         .collect::<HashSet<_>>();
     assert_eq!(fact_uids.len(), 2);
-    let edges = relates_to_edges(test_db.store().pool(), workspace_id).await;
+    let relates_to_edges = relates_to_edges(test_db.store().pool(), workspace_id).await;
     assert_eq!(
-        edges
+        relates_to_edges
             .iter()
             .filter(|(start_uid, end_uid, role)| {
                 role == "subject" && start_uid == &api_uid && fact_uids.contains(end_uid)
@@ -458,10 +459,11 @@ async fn slow_path_resolves_entity_nodes_and_reuses_subject_across_sessions() {
             .count(),
         2
     );
+    let all_entity_edges = entity_resolution_edges(test_db.store().pool(), workspace_id).await;
     assert_eq!(
-        edges
+        all_entity_edges
             .iter()
-            .filter(|(start_uid, end_uid, role)| {
+            .filter(|(_, start_uid, end_uid, role)| {
                 role == "object" && fact_uids.contains(start_uid) && entity_uids.contains(end_uid)
             })
             .count(),
@@ -528,7 +530,7 @@ async fn slow_path_multi_hop_facts_expand_through_shared_object_entity() {
     assert_eq!(owner_hit.hop, 2);
     assert_eq!(
         owner_hit.edges,
-        vec![EdgeLabel::RelatesTo, EdgeLabel::RelatesTo]
+        vec![EdgeLabel::DependsOn, EdgeLabel::RelatesTo]
     );
 }
 

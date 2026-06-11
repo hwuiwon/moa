@@ -366,6 +366,7 @@ fn edge_create_template(label: EdgeLabel) -> &'static Cypher {
     match label {
         EdgeLabel::RelatesTo => &cypher::edge::CREATE_RELATES_TO,
         EdgeLabel::DependsOn => &cypher::edge::CREATE_DEPENDS_ON,
+        EdgeLabel::OwnedBy => &cypher::edge::CREATE_OWNED_BY,
         EdgeLabel::Supersedes => &cypher::edge::CREATE_SUPERSEDES,
         EdgeLabel::Contradicts => &cypher::edge::CREATE_CONTRADICTS,
         EdgeLabel::DerivedFrom => &cypher::edge::CREATE_DERIVED_FROM,

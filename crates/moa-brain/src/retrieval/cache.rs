@@ -573,8 +573,8 @@ mod tests {
 
     #[test]
     fn cache_key_changes_with_pipeline_version_bump() {
-        // Pins: graph-expansion candidate-pool changes require ranking fingerprint version 2.
-        assert_eq!(RANKING_PIPELINE_VERSION, 2);
+        // Pins: entity-resolution and typed-edge candidate-pool changes require ranking fingerprint version 3.
+        assert_eq!(RANKING_PIPELINE_VERSION, 3);
     }
 
     #[derive(Default)]

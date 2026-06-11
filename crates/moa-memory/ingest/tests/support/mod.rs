@@ -486,6 +486,44 @@ pub(crate) async fn relates_to_edges(
         .collect()
 }
 
+pub(crate) async fn entity_resolution_edges(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Vec<(String, String, String, String)> {
+    let mut conn = user_scoped_conn(pool, workspace_id).await;
+    let rows = sqlx::query(
+        "SELECT target_label, \
+                payload->>'start_uid' AS start_uid, \
+                payload->>'end_uid' AS end_uid, \
+                payload->'after'->>'role' AS role \
+         FROM moa.graph_changelog \
+         WHERE workspace_id = $1 AND op = 'create' AND target_kind = 'edge' \
+           AND payload->'after'->>'source' = 'slow_path_entity_resolution' \
+         ORDER BY change_id",
+    )
+    .bind(workspace_id.to_string())
+    .fetch_all(conn.as_mut())
+    .await
+    .expect("read entity-resolution edges");
+    conn.commit()
+        .await
+        .expect("commit entity-resolution edge read");
+    rows.into_iter()
+        .map(|row| {
+            (
+                row.try_get::<String, _>("target_label")
+                    .expect("edge label in changelog"),
+                row.try_get::<String, _>("start_uid")
+                    .expect("start uid in edge payload"),
+                row.try_get::<String, _>("end_uid")
+                    .expect("end uid in edge payload"),
+                row.try_get::<String, _>("role")
+                    .expect("role in edge payload"),
+            )
+        })
+        .collect()
+}
+
 pub(crate) async fn create_changelog_payloads(pool: &PgPool, workspace_id: Uuid) -> Vec<Value> {
     let mut conn = user_scoped_conn(pool, workspace_id).await;
     let rows = sqlx::query(

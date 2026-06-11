@@ -16,6 +16,8 @@ pub enum EdgeLabel {
     RelatesTo,
     /// Dependency relationship.
     DependsOn,
+    /// Ownership or stewardship relationship.
+    OwnedBy,
     /// Supersession relationship.
     Supersedes,
     /// Contradiction relationship.
@@ -38,6 +40,7 @@ impl EdgeLabel {
         match self {
             Self::RelatesTo => "RELATES_TO",
             Self::DependsOn => "DEPENDS_ON",
+            Self::OwnedBy => "OWNED_BY",
             Self::Supersedes => "SUPERSEDES",
             Self::Contradicts => "CONTRADICTS",
             Self::DerivedFrom => "DERIVED_FROM",
@@ -56,6 +59,7 @@ impl FromStr for EdgeLabel {
         match value {
             "RELATES_TO" => Ok(Self::RelatesTo),
             "DEPENDS_ON" => Ok(Self::DependsOn),
+            "OWNED_BY" => Ok(Self::OwnedBy),
             "SUPERSEDES" => Ok(Self::Supersedes),
             "CONTRADICTS" => Ok(Self::Contradicts),
             "DERIVED_FROM" => Ok(Self::DerivedFrom),

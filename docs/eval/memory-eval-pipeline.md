@@ -31,6 +31,7 @@ The metric surface is:
 - `scope_match_rate_user`
 - `scope_match_rate_workspace`
 - `extraction_precision`
+- `entity_fragmentation`
 - `recall_at_4`
 - `recall_at_25`
 - `mrr`
@@ -71,7 +72,11 @@ matches the ledger scope; `mixed` counts as a mismatch.
 expected ledger scope so a one-sided privacy or recall drift cannot hide behind
 the overall rate. `extraction_precision` is the fraction of stored `Fact` nodes
 in the eval workspaces that map back to a ledger fact, including superseded
-nodes in both numerator and denominator.
+nodes in both numerator and denominator. `entity_fragmentation` is active
+`Entity` nodes over distinct normalized ledger subject/object mentions in their
+storage scopes. A value near 1.0 means mentions are neither fragmented nor
+over-merged; the natural lane gates a floor of 0.90 and reviews values above
+1.30 as fragmentation.
 
 ## Eval Layering
 
@@ -93,11 +98,9 @@ reference time, and a stable ranking fingerprint made from the ranking config
 plus `RANKING_PIPELINE_VERSION`.
 
 The memory eval runner still uses the production planner, cache, and hybrid
-retriever, but its default ranking config is time-neutral and it disables graph
-expansion through the retrieval request. That keeps the checked-in marked PR
-baseline comparable while extraction work changes. Recorded extraction replay
-also forces exact pgvector scans and writes `0` latency values so two hermetic
-runs can produce byte-identical reports.
+retriever, but its default ranking config is time-neutral. Recorded extraction
+replay also forces exact pgvector scans and writes `0` latency values so two
+hermetic runs can produce byte-identical reports.
 
 ## PR Hermetic Check
 
@@ -132,12 +135,13 @@ rendering.
 `Fact:` and scope markers so retrieval and ranking changes can be validated
 without depending on model extraction.
 
-`natural` is the recorded extractor gate. It renders conversational
-deterministic sentences, includes at least one distractor turn per session, and
-contains no `Fact:`, `workspace shared`, or `user private` markers. CI replays
-committed extraction fixtures with no provider credentials and gates
-`ingestion_coverage >= 0.85`, `scope_match_rate >= 0.90`, and
-`extraction_precision >= 0.80`, plus the hard blockers
+`natural` is the recorded extractor and merge-verifier gate. It renders
+conversational deterministic sentences, includes at least one distractor turn
+per session, and contains no `Fact:`, `workspace shared`, or `user private`
+markers. CI replays committed extraction and merge fixtures with no provider
+credentials and gates `ingestion_coverage >= 0.85`,
+`scope_match_rate >= 0.90`, `extraction_precision >= 0.80`,
+`entity_fragmentation >= 0.90`, plus the hard blockers
 `cross_user_leak_count == 0` and `pii_unredacted_count == 0`.
 
 ## Recorded Extraction Lane
@@ -184,13 +188,46 @@ cargo run -p xtask -- check-eval-budgets --suite memory_retrieval \
   --memory-eval-report target/memory-eval/natural-recorded.json \
   --min-metric ingestion_coverage=0.85 \
   --min-metric scope_match_rate=0.90 \
-  --min-metric extraction_precision=0.80
+  --min-metric extraction_precision=0.80 \
+  --min-metric entity_fragmentation=0.90
 ```
 
 Corpus realism v2 also expands PR-profile multi-hop probes from 6 to 30 using
 cross-session `depends_on`/`owned_by` fact pairs. Recall@4 is mechanically lower
 than prompt-02 baselines because multi-hop probes require both supporting facts
 inside the final window.
+
+## Recorded Merge Lane
+
+Entity-resolution v2 embeds normalized entity mentions at creation and uses
+same-scope KNN as a bounded candidate block before asking the merge verifier.
+The verifier has a live Cohere-backed implementation for recording and a
+recorded implementation over the kernel `FixtureStore` for CI replay. The
+default fixture path is:
+
+```bash
+crates/moa-eval/fixtures/memory/merges-<corpus_id>-v1.jsonl
+```
+
+Record merge fixtures after changing entity blocking, the merge prompt, the
+natural corpus, or recorded extraction fixtures:
+
+```bash
+cargo run -p xtask -- record-memory-merges --corpus target/memory-eval/pr-natural
+```
+
+Replay uses `--extractor recorded`; the runner resolves both extraction and
+merge fixture paths from the corpus id unless `--extractions` or `--merges`
+override them. The current deterministic PR-natural corpus does not generate
+any verifier calls at the 0.80 KNN threshold, so its v1 merge fixture is an
+empty but versioned JSONL file. Live embedding geometry may produce a different
+candidate set; prompt 08's live lane must report `entity_fragmentation` so that
+threshold can be recalibrated against real vectors.
+
+Object edges now carry deterministic typed labels for dependency and ownership
+predicates (`DEPENDS_ON`, `OWNED_BY`); subject attachment edges remain
+`RELATES_TO`. The ranking pipeline version is `3` because typed edges and graph
+candidate weighting change cacheable candidate pools.
 
 ## Paired Comparison
 
