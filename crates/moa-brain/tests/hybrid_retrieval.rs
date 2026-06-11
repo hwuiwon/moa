@@ -4,10 +4,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::{MemoryScope, ScopeContext, ScopedConn, WorkspaceId};
+use moa_core::{MemoryScope, ScopeContext, ScopedConn, SessionId, UserId, WorkspaceId};
 use moa_memory_graph::{
     AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
 };
+use moa_memory_ingest::{
+    ExtractedFact, ExtractedFactScopeHint, IngestCtx, RrfPlusJudgeDetector, ScriptedFactExtractor,
+    SessionTurn, fact_hash, fact_uid_from_hash, ingest_turn_direct_with_ctx,
+};
+use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
 use moa_memory_vector::{PgvectorStore, TurbopufferStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use secrecy::SecretString;
@@ -85,6 +90,21 @@ impl moa_core::traits::EmbeddingProvider for RerankerDefaultEmbedder {
     }
 }
 
+#[derive(Debug, Clone)]
+struct FixedPiiClassifier;
+
+#[async_trait]
+impl PiiClassifier for FixedPiiClassifier {
+    async fn classify(&self, _text: &str) -> Result<PiiResult, PiiError> {
+        Ok(PiiResult {
+            class: PiiClass::None,
+            spans: Vec::<PiiSpan>::new(),
+            model_version: "hybrid-retrieval-test".to_string(),
+            abstained: false,
+        })
+    }
+}
+
 fn deterministic_vector(text: &str) -> Vec<f32> {
     let mut vector = vec![0.0; VECTOR_DIMENSION];
     for (index, byte) in text.bytes().enumerate() {
@@ -104,6 +124,36 @@ fn graph_store(pool: &PgPool, workspace_id: &str) -> AgeGraphStore {
     let scope = ScopeContext::workspace(WorkspaceId::new(workspace_id));
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
     AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
+}
+
+fn user_graph_store(pool: &PgPool, workspace_id: &str, user_id: &str) -> AgeGraphStore {
+    let scope = ScopeContext::user(WorkspaceId::new(workspace_id), UserId::new(user_id));
+    let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
+    AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
+}
+
+fn scripted_user_fact(summary: &str) -> ExtractedFact {
+    let mut fact = ExtractedFact {
+        uid: Uuid::nil(),
+        subject: "user".to_string(),
+        predicate: "prefers".to_string(),
+        object: summary.to_string(),
+        summary: summary.to_string(),
+        source_chunk: 0,
+        scope_hint: ExtractedFactScopeHint::User,
+        confidence: Some(0.92),
+    };
+    let hash = fact_hash(&fact).expect("scripted fact hashes");
+    fact.uid = fact_uid_from_hash(&hash);
+    fact
+}
+
+fn hit_summary(hit: &moa_brain::retrieval::RetrievalHit) -> Option<&str> {
+    hit.node
+        .properties_summary
+        .as_ref()
+        .and_then(|properties| properties.get("summary"))
+        .and_then(serde_json::Value::as_str)
 }
 
 fn node_intent(
@@ -361,6 +411,127 @@ async fn hybrid_retrieval_e2e_returns_fused_annotated_results() {
     let _ = graph.hard_purge(exact_uid, "redacted:hybrid-test").await;
     let _ = graph.hard_purge(related_uid, "redacted:hybrid-test").await;
     let _ = graph.hard_purge(seed_uid, "redacted:hybrid-test").await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres test database"]
+async fn user_scope_fact_invisible_to_other_user_at_any_k() {
+    // Pins: user-scoped facts written by ingestion are structurally hidden from other users.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool().clone();
+    let workspace_id = format!("scope-isolation-{}", Uuid::now_v7().simple());
+    let user_a = "user-scope-owner";
+    let user_b = "user-scope-other";
+    let workspace = WorkspaceId::new(workspace_id.clone());
+    let workspace_scope = ScopeContext::workspace(workspace.clone());
+    let ingest_vector = Arc::new(PgvectorStore::new_for_app_role(
+        pool.clone(),
+        workspace_scope.clone(),
+    ));
+    let ingest_graph = Arc::new(
+        AgeGraphStore::scoped_for_app_role(pool.clone(), workspace_scope)
+            .with_vector_store(ingest_vector.clone()),
+    );
+    let summary = "The user prefers the private green deployment dashboard";
+    let fact = scripted_user_fact(summary);
+    let ctx = IngestCtx::new(
+        pool.clone(),
+        ingest_graph,
+        ingest_vector,
+        Arc::new(RerankerDefaultEmbedder),
+        Arc::new(FixedPiiClassifier),
+        Arc::new(RrfPlusJudgeDetector::default()),
+    )
+    .with_extractor(Arc::new(ScriptedFactExtractor::new(vec![fact.clone()])));
+    let report = ingest_turn_direct_with_ctx(
+        ctx,
+        SessionTurn {
+            workspace_id: workspace.clone(),
+            user_id: UserId::new(user_a),
+            session_id: SessionId::new(),
+            turn_seq: 1,
+            transcript: format!("user: {summary}"),
+            dominant_pii_class: "none".to_string(),
+            finalized_at: utc("2026-05-07T12:00:00Z"),
+        },
+    )
+    .await
+    .expect("ingest user-scoped fact");
+    assert_eq!(report.inserted, 1);
+
+    let owner_graph = user_graph_store(&pool, &workspace_id, user_a);
+    let owner_scope = ScopeContext::user(workspace.clone(), UserId::new(user_a));
+    let owner_vector = PgvectorStore::new_for_app_role(pool.clone(), owner_scope);
+    let owner_hits =
+        HybridRetriever::new(pool.clone(), Arc::new(owner_graph), Arc::new(owner_vector))
+            .with_assume_app_role(true)
+            .retrieve(RetrievalRequest {
+                seeds: Vec::new(),
+                query_text: summary.to_string(),
+                query_embedding: deterministic_vector(summary),
+                scope: MemoryScope::User {
+                    workspace_id: workspace.clone(),
+                    user_id: UserId::new(user_a),
+                },
+                label_filter: Some(vec![NodeLabel::Fact]),
+                max_pii_class: PiiClass::Restricted,
+                k_final: 25,
+                use_reranker: false,
+                strategy: None,
+                as_of: None,
+                ranking_reference_time: None,
+                disable_leg_timeouts: true,
+                disable_graph_expansion: false,
+            })
+            .await
+            .expect("owner retrieval succeeds");
+    assert!(
+        owner_hits
+            .iter()
+            .any(|hit| hit_summary(hit) == Some(summary)),
+        "{owner_hits:?}"
+    );
+
+    let other_graph = user_graph_store(&pool, &workspace_id, user_b);
+    let other_scope = ScopeContext::user(workspace.clone(), UserId::new(user_b));
+    let other_vector = PgvectorStore::new_for_app_role(pool.clone(), other_scope);
+    let other_hits =
+        HybridRetriever::new(pool.clone(), Arc::new(other_graph), Arc::new(other_vector))
+            .with_assume_app_role(true)
+            .retrieve(RetrievalRequest {
+                seeds: Vec::new(),
+                query_text: summary.to_string(),
+                query_embedding: deterministic_vector(summary),
+                scope: MemoryScope::User {
+                    workspace_id: workspace,
+                    user_id: UserId::new(user_b),
+                },
+                label_filter: Some(vec![NodeLabel::Fact]),
+                max_pii_class: PiiClass::Restricted,
+                k_final: 25,
+                use_reranker: false,
+                strategy: None,
+                as_of: None,
+                ranking_reference_time: None,
+                disable_leg_timeouts: true,
+                disable_graph_expansion: false,
+            })
+            .await
+            .expect("other-user retrieval succeeds");
+    assert!(
+        other_hits
+            .iter()
+            .all(|hit| hit_summary(hit) != Some(summary)),
+        "{other_hits:?}"
+    );
+
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)
         .await

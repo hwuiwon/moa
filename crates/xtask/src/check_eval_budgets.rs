@@ -6,7 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use moa_eval::memory_eval::{CorpusProfile, MemoryRetrievalEvalReport, ProbeResult, ProbeType};
+use moa_eval::memory_eval::{
+    CorpusProfile, MemoryRetrievalEvalReport, ProbeResult, ProbeType, TranscriptStyle,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -125,6 +127,7 @@ struct Options {
     max_regression_pct: Option<f64>,
     analytics_scores_jsonl: Option<PathBuf>,
     memory_eval_report: Option<PathBuf>,
+    min_metrics: Vec<MinMetricFloor>,
 }
 
 impl Options {
@@ -150,9 +153,14 @@ impl Options {
                     options.memory_eval_report =
                         Some(PathBuf::from(next_arg(args, "--memory-eval-report")?));
                 }
+                "--min-metric" => {
+                    options
+                        .min_metrics
+                        .push(parse_min_metric(&next_arg(args, "--min-metric")?)?);
+                }
                 "-h" | "--help" => {
                     println!(
-                        "usage: cargo xtask check-eval-budgets [--suite long_conversation|memory_retrieval] [--max-regression-pct N] [--analytics-scores-jsonl path] [--memory-eval-report path]"
+                        "usage: cargo xtask check-eval-budgets [--suite long_conversation|memory_retrieval] [--max-regression-pct N] [--analytics-scores-jsonl path] [--memory-eval-report path] [--min-metric name=value]"
                     );
                     std::process::exit(0);
                 }
@@ -161,6 +169,30 @@ impl Options {
         }
         Ok(options)
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct MinMetricFloor {
+    name: String,
+    floor: f64,
+}
+
+fn parse_min_metric(raw: &str) -> Result<MinMetricFloor> {
+    let (name, value) = raw
+        .split_once('=')
+        .with_context(|| format!("--min-metric value `{raw}` must use name=value"))?;
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("--min-metric value `{raw}` has an empty metric name");
+    }
+    let floor = value
+        .trim()
+        .parse::<f64>()
+        .with_context(|| format!("parse --min-metric floor `{value}` for `{name}`"))?;
+    Ok(MinMetricFloor {
+        name: name.to_string(),
+        floor,
+    })
 }
 
 fn next_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
@@ -174,12 +206,16 @@ fn run_memory_retrieval_budget_gate(options: Options) -> Result<()> {
         .as_deref()
         .context("--memory-eval-report is required for --suite memory_retrieval")?;
     let max_regression_pct = options.max_regression_pct.unwrap_or(DEFAULT_REGRESSION_PCT);
+    let raw_report = load_json_report(report_path)?;
     let report = load_memory_retrieval_report(report_path)?;
 
     let mut failure = ScenarioFailure::new(MEMORY_RETRIEVAL_SUITE.to_string());
     failure
         .violations
         .extend(memory_retrieval_gate_violations(&report));
+    failure
+        .violations
+        .extend(min_metric_violations(&raw_report, &options.min_metrics));
 
     let mut regression_compared = 0_usize;
     if let Some(previous_path) = previous_memory_report_path() {
@@ -198,8 +234,18 @@ fn run_memory_retrieval_budget_gate(options: Options) -> Result<()> {
     }
 
     if failure.violations.is_empty() {
+        let floors = if options.min_metrics.is_empty() {
+            "none".to_string()
+        } else {
+            options
+                .min_metrics
+                .iter()
+                .map(|floor| floor.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         println!(
-            "Memory-retrieval budgets passed: 1 report checked, {regression_compared} regression baseline(s) compared."
+            "Memory-retrieval budgets passed: 1 report checked, {regression_compared} regression baseline(s) compared, floors met: {floors}."
         );
         return Ok(());
     }
@@ -207,6 +253,13 @@ fn run_memory_retrieval_budget_gate(options: Options) -> Result<()> {
     let violation_count = failure.violations.len();
     print_failures(&[failure]);
     bail!("memory-retrieval budget gate failed: {violation_count} metric violation(s)");
+}
+
+fn load_json_report(path: &Path) -> Result<Value> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("read memory retrieval report {}", path.display()))?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("parse memory retrieval report {}", path.display()))
 }
 
 fn load_memory_retrieval_report(path: &Path) -> Result<MemoryRetrievalEvalReport> {
@@ -249,7 +302,9 @@ fn memory_retrieval_gate_violations(report: &MemoryRetrievalEvalReport) -> Vec<V
         );
     }
 
-    if report.manifest.profile == CorpusProfile::Pr {
+    if report.manifest.profile == CorpusProfile::Pr
+        && report.manifest.transcript_style == TranscriptStyle::Marked
+    {
         check_max_f64(
             &mut violations,
             "zero_recall_rate",
@@ -289,6 +344,46 @@ fn memory_retrieval_gate_violations(report: &MemoryRetrievalEvalReport) -> Vec<V
     }
 
     violations
+}
+
+fn min_metric_violations(report: &Value, floors: &[MinMetricFloor]) -> Vec<Violation> {
+    floors
+        .iter()
+        .filter_map(|floor| match resolve_metric_number(report, &floor.name) {
+            Ok(actual) if actual < floor.floor => Some(Violation::new(
+                floor.name.clone(),
+                format!(">= {:.4}", floor.floor),
+                format!("{actual:.4}"),
+            )),
+            Ok(_) => None,
+            Err(error) => Some(Violation::new(
+                floor.name.clone(),
+                format!(">= {:.4}", floor.floor),
+                error.to_string(),
+            )),
+        })
+        .collect()
+}
+
+fn resolve_metric_number(report: &Value, name: &str) -> Result<f64> {
+    let mut current = report
+        .get("metrics")
+        .context("report is missing metrics object")?;
+    for part in name.split('.') {
+        if part.is_empty() {
+            bail!("metric path `{name}` contains an empty segment");
+        }
+        current = current
+            .get(part)
+            .with_context(|| format!("metric `{name}` is missing path segment `{part}`"))?;
+    }
+    if let Some(value) = current.as_f64() {
+        return Ok(value);
+    }
+    if let Some(value) = current.get("value").and_then(Value::as_f64) {
+        return Ok(value);
+    }
+    bail!("metric `{name}` did not resolve to a numeric value")
 }
 
 fn compare_memory_regression(
@@ -1187,4 +1282,59 @@ fn print_failures(failures: &[ScenarioFailure]) {
         "\nTotal: {} scenario(s) failed, {violation_count} metric violation(s).",
         failures.len()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_eval_budgets_min_metric_fails_below_floor() {
+        // Pins: --min-metric compares MetricSummary.value from raw report JSON.
+        let report = serde_json::json!({
+            "metrics": {
+                "ingestion_coverage": {
+                    "numerator": 8.0,
+                    "denominator": 10,
+                    "value": 0.80
+                }
+            }
+        });
+        let floors = vec![parse_min_metric("ingestion_coverage=0.85").expect("parse floor")];
+
+        let violations = min_metric_violations(&report, &floors);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].metric, "ingestion_coverage");
+        assert_eq!(violations[0].expected, ">= 0.8500");
+        assert_eq!(violations[0].actual, "0.8000");
+    }
+
+    #[test]
+    fn check_eval_budgets_min_metric_resolves_nested_per_leg_names() {
+        // Pins: suite-agnostic metric floors walk dotted JSON paths and MetricSummary.value leaves.
+        let report = serde_json::json!({
+            "metrics": {
+                "per_leg_recall": {
+                    "graph": {
+                        "numerator": 9.0,
+                        "denominator": 10,
+                        "value": 0.90
+                    }
+                }
+            }
+        });
+
+        let actual =
+            resolve_metric_number(&report, "per_leg_recall.graph").expect("resolve nested metric");
+
+        assert_eq!(actual, 0.90);
+        assert!(
+            min_metric_violations(
+                &report,
+                &[parse_min_metric("per_leg_recall.graph=0.90").expect("parse floor")]
+            )
+            .is_empty()
+        );
+    }
 }

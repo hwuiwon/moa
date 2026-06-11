@@ -15,11 +15,12 @@ use moa_eval::EvalError;
 use moa_eval::memory_eval::{
     BinaryProbeOutcome, BootstrapConfig, CORPUS_SCHEMA_VERSION, CachedEmbeddingProvider,
     CandidateLegs, CorpusManifest, CorpusProfile, EmbeddingInputKind, ExtractionPrecisionCounts,
-    GeneratedMemoryEvalCorpus, GoldPiiStatus, GoldResolutionReport, GoldResolutionStatus,
-    LedgerFact, MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport, MetricSummary, Probe,
-    ProbeResult, ProbeType, RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K, RetrievedCandidate,
-    SyntheticSession, SyntheticTurn, TranscriptStyle, aggregate_retrieval_eval_from_counts,
-    aggregate_retrieval_eval_from_diagnostic_counts, benjamini_hochberg,
+    GeneratedMemoryEvalCorpus, GoldNodeRecord, GoldPiiStatus, GoldResolutionReport,
+    GoldResolutionStatus, LedgerFact, MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport,
+    MetricSummary, Probe, ProbeResult, ProbeType, RETRIEVAL_EVAL_CANDIDATE_K,
+    RETRIEVAL_EVAL_FINAL_K, RetrievedCandidate, SyntheticSession, SyntheticTurn, TranscriptStyle,
+    aggregate_retrieval_eval_from_counts, aggregate_retrieval_eval_from_diagnostic_counts,
+    aggregate_retrieval_eval_with_extraction_precision, benjamini_hochberg,
     build_cached_embedding_fixtures, candidates_from_retrieval_hits, embedding_text_hash,
     generate_memory_eval_corpus, generate_memory_eval_corpus_with_style, mcnemar_paired_test,
     read_embedding_inputs_jsonl, read_embeddings_jsonl, read_gold_nodes_jsonl, read_ledger_jsonl,
@@ -716,6 +717,65 @@ fn extraction_precision_counts_unmapped_fact_nodes_as_spurious() {
 }
 
 #[test]
+fn scope_match_rate_slices_partition_the_overall_tally() {
+    // Pins: scope-match slices expose user/workspace drift without changing the overall tally.
+    fn scope_record(fact_id: &str, expected_scope: &str, stored_scope: &str) -> GoldNodeRecord {
+        GoldNodeRecord {
+            fact_id: fact_id.to_string(),
+            node_uids: vec![Uuid::now_v7()],
+            scope: Some(stored_scope.to_string()),
+            active: true,
+            valid_from: Some(utc("2026-05-07T12:00:00Z")),
+            valid_to: None,
+            resolution_status: GoldResolutionStatus::Resolved,
+            expected_scope: expected_scope.to_string(),
+            expected_valid_from: utc("2026-05-07T12:00:00Z"),
+            expected_valid_to: None,
+            pii_status: GoldPiiStatus::NotExpected,
+            stored_pii_classes: vec!["none".to_string()],
+            supersedes: Vec::new(),
+            superseded_by: Vec::new(),
+            supersession_chain: vec![fact_id.to_string()],
+            nodes: Vec::new(),
+        }
+    }
+
+    let gold = GoldResolutionReport {
+        ingest_reports: Vec::new(),
+        records: vec![
+            scope_record("fact-user-match", "user", "user"),
+            scope_record("fact-user-miss", "user", "workspace"),
+            scope_record("fact-workspace-match", "workspace", "workspace"),
+            scope_record("fact-workspace-miss", "workspace", "user"),
+        ],
+    };
+
+    let report = aggregate_retrieval_eval_with_extraction_precision(
+        &gold,
+        Vec::new(),
+        BootstrapConfig {
+            resamples: 25,
+            seed: 43,
+        },
+        ExtractionPrecisionCounts::default(),
+    );
+
+    assert_metric(report.metrics.scope_match_rate, 2.0, 4, 0.5);
+    assert_metric(report.metrics.scope_match_rate_user, 1.0, 2, 0.5);
+    assert_metric(report.metrics.scope_match_rate_workspace, 1.0, 2, 0.5);
+    assert_eq!(
+        report.metrics.scope_match_rate_user.numerator
+            + report.metrics.scope_match_rate_workspace.numerator,
+        report.metrics.scope_match_rate.numerator
+    );
+    assert_eq!(
+        report.metrics.scope_match_rate_user.denominator
+            + report.metrics.scope_match_rate_workspace.denominator,
+        report.metrics.scope_match_rate.denominator
+    );
+}
+
+#[test]
 fn reranker_metrics_track_pre_post_windows_and_p95_latency() {
     // Pins: reranker eval reports pre-rerank recall, post-rerank recall, nDCG@4, and p95 latency separately.
     let report = aggregate_retrieval_eval_from_counts(
@@ -1021,6 +1081,8 @@ fn retrieval_metrics_deserialize_without_new_fields() -> TestResult {
     let metrics: moa_eval::memory_eval::RetrievalMetrics = serde_json::from_value(json)?;
 
     assert_eq!(metrics.scope_match_rate, MetricSummary::default());
+    assert_eq!(metrics.scope_match_rate_user, MetricSummary::default());
+    assert_eq!(metrics.scope_match_rate_workspace, MetricSummary::default());
     assert_eq!(metrics.extraction_precision, MetricSummary::default());
     Ok(())
 }
@@ -1034,7 +1096,18 @@ fn retrieval_metrics_flatten_round_trips_checked_in_baseline() -> TestResult {
     let raw = std::fs::read_to_string(&baseline_path)?;
     let before: serde_json::Value = serde_json::from_str(&raw)?;
     let report: MemoryRetrievalEvalReport = serde_json::from_str(&raw)?;
-    let after = serde_json::to_value(report)?;
+    let mut after = serde_json::to_value(report)?;
+    if before
+        .get("metrics")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|metrics| !metrics.contains_key("scope_match_rate_user"))
+        && let Some(metrics) = after
+            .get_mut("metrics")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        metrics.remove("scope_match_rate_user");
+        metrics.remove("scope_match_rate_workspace");
+    }
 
     assert_eq!(after, before);
     Ok(())

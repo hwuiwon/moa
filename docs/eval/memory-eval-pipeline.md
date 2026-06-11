@@ -28,6 +28,8 @@ The metric surface is:
 
 - `ingestion_coverage`
 - `scope_match_rate`
+- `scope_match_rate_user`
+- `scope_match_rate_workspace`
 - `extraction_precision`
 - `recall_at_4`
 - `recall_at_25`
@@ -64,9 +66,12 @@ hydration. Vector retrieval can only serve historical rows whose embedding rows
 were retained.
 
 `scope_match_rate` is the fraction of resolved gold facts whose stored scope
-matches the ledger scope; `mixed` counts as a mismatch. `extraction_precision`
-is the fraction of stored `Fact` nodes in the eval workspaces that map back to a
-ledger fact, including superseded nodes in both numerator and denominator.
+matches the ledger scope; `mixed` counts as a mismatch.
+`scope_match_rate_user` and `scope_match_rate_workspace` split that tally by
+expected ledger scope so a one-sided privacy or recall drift cannot hide behind
+the overall rate. `extraction_precision` is the fraction of stored `Fact` nodes
+in the eval workspaces that map back to a ledger fact, including superseded
+nodes in both numerator and denominator.
 
 ## Eval Layering
 
@@ -123,18 +128,17 @@ Corpus size and transcript realism are separate axes. `--profile pr|full`
 controls size, and `--transcript-style marked|natural` controls source-turn
 rendering.
 
-`marked` is the CI-gated style. It keeps the legacy `Fact:` and scope markers
-so deterministic retrieval and ranking changes can be validated without
-depending on a better extractor.
+`marked` is the deterministic heuristic regression style. It keeps the legacy
+`Fact:` and scope markers so retrieval and ranking changes can be validated
+without depending on model extraction.
 
-`natural` is an observed profile. It renders conversational deterministic
-sentences, includes at least one distractor turn per session, and contains no
-`Fact:`, `workspace shared`, or `user private` markers. The heuristic extractor
-is expected to lose facts, drift scope, and extract spurious distractors here;
-that is the signal this profile exists to preserve. Natural reports enforce
-hard blockers (`cross_user_leak_count == 0` and `pii_unredacted_count == 0`)
-but do not gate quality metrics until the Section 2 extraction work can move
-them.
+`natural` is the recorded extractor gate. It renders conversational
+deterministic sentences, includes at least one distractor turn per session, and
+contains no `Fact:`, `workspace shared`, or `user private` markers. CI replays
+committed extraction fixtures with no provider credentials and gates
+`ingestion_coverage >= 0.85`, `scope_match_rate >= 0.90`, and
+`extraction_precision >= 0.80`, plus the hard blockers
+`cross_user_leak_count == 0` and `pii_unredacted_count == 0`.
 
 ## Recorded Extraction Lane
 
@@ -152,7 +156,7 @@ cargo run -p xtask -- record-memory-extractions --corpus target/memory-eval/pr-n
 The default fixture path is:
 
 ```bash
-crates/moa-eval/fixtures/memory/extractions-<corpus_id>-v1.jsonl
+crates/moa-eval/fixtures/memory/extractions-<corpus_id>-v2.jsonl
 ```
 
 Replay with no credentials required:
@@ -170,6 +174,18 @@ version. If the prompt changes, bump `EXTRACTION_PROMPT_VERSION`, record a new
 file, and commit the fixture diff. The kernel `FixtureStore` rejects version
 mismatches and missing keys; missing-key errors include the exact recording
 command to regenerate the fixture set.
+
+The natural CI lane runs:
+
+```bash
+cargo run -p xtask -- generate-memory-eval-corpus --profile pr --transcript-style natural --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr-natural
+env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr-natural --extractor recorded --output target/memory-eval/natural-recorded.json
+cargo run -p xtask -- check-eval-budgets --suite memory_retrieval \
+  --memory-eval-report target/memory-eval/natural-recorded.json \
+  --min-metric ingestion_coverage=0.85 \
+  --min-metric scope_match_rate=0.90 \
+  --min-metric extraction_precision=0.80
+```
 
 Corpus realism v2 also expands PR-profile multi-hop probes from 6 to 30 using
 cross-session `depends_on`/`owned_by` fact pairs. Recall@4 is mechanically lower
@@ -228,7 +244,7 @@ The current PR-profile baseline is checked in at:
 docs/eval/baselines/memory-retrieval-pr-baseline.json
 ```
 
-The observed natural PR-profile baseline is checked in at:
+The gated recorded natural PR-profile baseline is checked in at:
 
 ```bash
 docs/eval/baselines/memory-retrieval-pr-natural-baseline.json
@@ -268,8 +284,9 @@ Examples:
 - Add LLM extraction or scope classification only after the natural profile's
   `ingestion_coverage` and `scope_match_rate` show the marked extractor signal
   no longer represents production transcripts.
-- Add entity-resolution upgrades only after `extraction_precision` and graph-leg
-  attribution show spurious facts or unresolved entity links are the bottleneck.
+- Add entity-resolution upgrades only after `extraction_precision`, entity
+  fragmentation diagnostics, and natural-profile graph-leg attribution show
+  spurious facts or unresolved entity links are the bottleneck.
 
 The report decides the next architecture step. A feature without a named report
 bottleneck stays out of the shipping path.
@@ -281,6 +298,7 @@ When the budget gate fails, triage in this order:
 1. Hard blockers: fix any `cross_user_leak_count != 0` or
    `pii_unredacted_count != 0` before reading quality metrics.
 2. Ingestion: inspect `ingestion_coverage`, `scope_match_rate`,
+   `scope_match_rate_user`, `scope_match_rate_workspace`,
    `extraction_precision`, and the gold-resolution section.
 3. Retrieval: inspect `recall_at_4`, `recall_at_25`, `mrr`, `ndcg_at_4`,
    `zero_recall_rate`, and `per_leg_recall`.

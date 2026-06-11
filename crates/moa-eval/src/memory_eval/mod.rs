@@ -33,7 +33,8 @@ pub use generator::{
 };
 pub use gold::{
     GoldIngestTurnReport, GoldNodeRecord, GoldNodeSnapshot, GoldPiiStatus, GoldResolutionReport,
-    GoldResolutionStatus, read_gold_nodes_jsonl, resolve_gold_nodes, write_gold_nodes_jsonl,
+    GoldResolutionStatus, ScopeMatchBreakdown, read_gold_nodes_jsonl, resolve_gold_nodes,
+    write_gold_nodes_jsonl,
 };
 pub use judge::{
     AnswerJudge, DeterministicJudge, JudgeInput, JudgeOutcome, PairwiseLlmJudge, PairwiseWinner,

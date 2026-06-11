@@ -218,6 +218,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fixture_loader_rejects_v1_fixtures_after_version_bump() {
+        // Pins: recorded replay fails closed when fixture prompt versions lag the extractor prompt.
+        let chunk = TurnChunk {
+            index: 0,
+            text: "user: I prefer Linear.".to_string(),
+            token_estimate: 5,
+        };
+        let key = chunk_hash(&chunk.text);
+        let record = ExtractionFixtureRecord {
+            chunk_hash: key.clone(),
+            model: "command-test".to_string(),
+            prompt_version: "v1".to_string(),
+            facts: vec![RecordedFact {
+                subject: "user".to_string(),
+                predicate: "prefers".to_string(),
+                object: "Linear".to_string(),
+                summary: "The user prefers Linear.".to_string(),
+                scope_hint: ExtractedFactScopeHint::User,
+                confidence: Some(0.9),
+            }],
+        };
+        let extractor = RecordedFactExtractor::new(
+            MapStore {
+                records: BTreeMap::from([(key, record)]),
+            },
+            "cargo run -p xtask -- record-memory-extractions --corpus target/memory-eval/pr-natural",
+        );
+
+        let error = extractor
+            .extract(&[chunk])
+            .await
+            .expect_err("reject v1 fixture");
+
+        assert!(
+            error.to_string().contains("prompt_version v1; expected v2"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
     async fn recorded_extractor_applies_llm_durability_filter() {
         // Pins: recorded replay follows the same ingestion filter as live LLM extraction.
         let chunk = TurnChunk {
