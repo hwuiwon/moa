@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
-use memory_ingest::{IngestApplyReport, SessionTurn, should_ingest_degraded};
 use moa_core::{SessionId, UserId, WorkspaceId};
+use moa_memory_ingest::{IngestApplyReport, SessionTurn, should_ingest_degraded};
+use moa_test_support::postgres::test_database_url;
 use sqlx::PgPool;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
@@ -19,8 +20,6 @@ use crate::support::restate_runtime::{
 };
 
 mod support;
-
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
 
 static LIVE_E2E_LOCK: Mutex<()> = Mutex::const_new(());
 
@@ -124,12 +123,6 @@ fn spawn_orchestrator(
     command
         .spawn()
         .context("spawn moa-orchestrator binary for ingestion e2e")
-}
-
-fn test_database_url() -> String {
-    std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string())
 }
 
 fn restate_ingress_url() -> String {

@@ -5,13 +5,13 @@ use std::time::Duration;
 use std::{fs, path::Path};
 
 use chrono::{DateTime, Utc};
-use memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, Event, LLMProvider, MoaConfig,
     MoaError, ModelCapabilities, ModelId, ModelTier, QueryRewriteConfig, SessionId, StopReason,
     TokenPricing, TokenUsage, ToolCallContent, ToolCallFormat, ToolInvocation, UserId, WorkspaceId,
     record_llm_cost_cents,
 };
+use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_providers::{
     AnthropicProvider, GeminiProvider, OpenAIProvider, ScriptedProvider, ScriptedResponse,
 };
@@ -706,7 +706,7 @@ impl LLMGateway for LLMGatewayImpl {
 /// Computes the normalized completion cost in cents for one model response.
 #[must_use]
 pub fn compute_cost_cents(model: &str, usage: TokenUsage) -> u32 {
-    let pricing = pricing_for_model(model);
+    let pricing = moa_providers::pricing_for_model(model).unwrap_or_else(zero_token_pricing);
     let input_cost = usage.input_tokens_uncached as f64 / 1_000_000.0 * pricing.input_per_mtok;
     let cache_write_cost =
         usage.input_tokens_cache_write as f64 / 1_000_000.0 * pricing.cache_write_per_mtok();
@@ -717,6 +717,16 @@ pub fn compute_cost_cents(model: &str, usage: TokenUsage) -> u32 {
     let output_cost = usage.output_tokens as f64 / 1_000_000.0 * pricing.output_per_mtok;
 
     ((input_cost + cache_write_cost + cache_read_cost + output_cost) * 100.0).round() as u32
+}
+
+fn zero_token_pricing() -> TokenPricing {
+    TokenPricing {
+        input_per_mtok: 0.0,
+        output_per_mtok: 0.0,
+        cached_input_per_mtok: None,
+        cache_write_5m_per_mtok: None,
+        cache_write_1h_per_mtok: None,
+    }
 }
 
 fn configured_env(key: &str) -> bool {
@@ -798,116 +808,6 @@ fn infer_provider_kind(model: &str) -> Option<ProviderKind> {
     }
 
     None
-}
-
-fn pricing_for_model(model: &str) -> TokenPricing {
-    if model.starts_with("claude-haiku-4-5") {
-        return TokenPricing {
-            input_per_mtok: 0.8,
-            output_per_mtok: 4.0,
-            cached_input_per_mtok: Some(0.08),
-            cache_write_5m_per_mtok: Some(1.0),
-            cache_write_1h_per_mtok: Some(1.6),
-        };
-    }
-    if model.starts_with("claude-opus-4-6") {
-        return TokenPricing {
-            input_per_mtok: 5.0,
-            output_per_mtok: 25.0,
-            cached_input_per_mtok: Some(0.5),
-            cache_write_5m_per_mtok: Some(6.25),
-            cache_write_1h_per_mtok: Some(10.0),
-        };
-    }
-    if model.starts_with("claude-sonnet-4-6") {
-        return TokenPricing {
-            input_per_mtok: 3.0,
-            output_per_mtok: 15.0,
-            cached_input_per_mtok: Some(0.3),
-            cache_write_5m_per_mtok: Some(3.75),
-            cache_write_1h_per_mtok: Some(6.0),
-        };
-    }
-    if model.starts_with("gpt-5.4-mini") {
-        return TokenPricing {
-            input_per_mtok: 0.75,
-            output_per_mtok: 4.50,
-            cached_input_per_mtok: Some(0.075),
-            cache_write_5m_per_mtok: None,
-            cache_write_1h_per_mtok: None,
-        };
-    }
-    if model.starts_with("gpt-5.4-nano") {
-        return TokenPricing {
-            input_per_mtok: 0.20,
-            output_per_mtok: 1.25,
-            cached_input_per_mtok: Some(0.02),
-            cache_write_5m_per_mtok: None,
-            cache_write_1h_per_mtok: None,
-        };
-    }
-    if model.starts_with("gpt-5.4") {
-        return TokenPricing {
-            input_per_mtok: 2.50,
-            output_per_mtok: 15.0,
-            cached_input_per_mtok: Some(0.25),
-            cache_write_5m_per_mtok: None,
-            cache_write_1h_per_mtok: None,
-        };
-    }
-    if model.starts_with("gpt-5-mini") {
-        return TokenPricing {
-            input_per_mtok: 0.25,
-            output_per_mtok: 2.0,
-            cached_input_per_mtok: Some(0.025),
-            cache_write_5m_per_mtok: None,
-            cache_write_1h_per_mtok: None,
-        };
-    }
-    if model.starts_with("gpt-5-nano") {
-        return TokenPricing {
-            input_per_mtok: 0.05,
-            output_per_mtok: 0.40,
-            cached_input_per_mtok: Some(0.005),
-            cache_write_5m_per_mtok: None,
-            cache_write_1h_per_mtok: None,
-        };
-    }
-    if model.starts_with("gemini-3-pro-preview") || model.starts_with("gemini-3.1-pro") {
-        return TokenPricing {
-            input_per_mtok: 2.0,
-            output_per_mtok: 12.0,
-            cached_input_per_mtok: Some(0.2),
-            cache_write_5m_per_mtok: None,
-            cache_write_1h_per_mtok: None,
-        };
-    }
-    if model.starts_with("gemini-3.1-flash-lite") {
-        return TokenPricing {
-            input_per_mtok: 0.25,
-            output_per_mtok: 1.5,
-            cached_input_per_mtok: Some(0.025),
-            cache_write_5m_per_mtok: None,
-            cache_write_1h_per_mtok: None,
-        };
-    }
-    if model.starts_with("gemini-3-flash-preview") {
-        return TokenPricing {
-            input_per_mtok: 0.5,
-            output_per_mtok: 3.0,
-            cached_input_per_mtok: Some(0.05),
-            cache_write_5m_per_mtok: None,
-            cache_write_1h_per_mtok: None,
-        };
-    }
-
-    TokenPricing {
-        input_per_mtok: 0.0,
-        output_per_mtok: 0.0,
-        cached_input_per_mtok: None,
-        cache_write_5m_per_mtok: None,
-        cache_write_1h_per_mtok: None,
-    }
 }
 
 fn llm_run_retry_policy() -> RunRetryPolicy {

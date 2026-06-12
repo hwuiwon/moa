@@ -11,7 +11,7 @@ telegram = ["dep:teloxide"]
 slack = ["dep:slack-morphism"]
 
 [dependencies]
-moa-core = { path = "../moa-core" }
+moa-core = { workspace = true }
 async-trait.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
@@ -22,7 +22,7 @@ uuid.workspace = true
 teloxide = { version = "0.17", default-features = false, features = ["ctrlc_handler", "rustls"], optional = true }
 slack-morphism = { version = "2.19.0", features = ["hyper"], optional = true }
 serenity = { version = "0.12.5", default-features = false, features = ["builder", "client", "gateway", "http", "model", "rustls_backend"], optional = true }
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+workspace-hack = { workspace = true }
 
 [dev-dependencies]
 insta.workspace = true
@@ -31,4 +31,4 @@ reqwest.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-test = "0.4"
-wiremock = "0.6"
+wiremock.workspace = true

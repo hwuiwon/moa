@@ -96,12 +96,7 @@ fn real_model_aliases_map_to_moa_categories() {
     );
 
     let class = resolve_class(
-        &[PiiSpan {
-            start: 0,
-            end: 12,
-            category: PiiCategory::Secret,
-            confidence: 0.99,
-        }],
+        &[PiiSpan::new(0, 12, PiiCategory::Secret, 0.99)],
         PrivacyFilterThresholds::default(),
     );
     assert_eq!(class, PiiClass::Restricted);

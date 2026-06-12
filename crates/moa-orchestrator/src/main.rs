@@ -216,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
         lineage_writer: lineage.writer.clone(),
     });
     OrchestratorCtx::install(ctx).expect("install orchestrator ctx");
-    let _ = memory_ingest::install_runtime_with_config(pool.clone(), moa_config.as_ref());
+    let _ = moa_memory_ingest::install_runtime_with_config(pool.clone(), moa_config.as_ref());
     let scim_base_url = std::env::var("MOA_SCIM_BASE_URL")
         .unwrap_or_else(|_| format!("http://localhost:{}/scim/v2", args.scim_port));
     let scim_state = ScimState::new(

@@ -2,8 +2,9 @@
 
 use super::tools::native_google_search_tools;
 use super::*;
+use crate::core::models::{self, PROVIDER_GOOGLE};
 
-pub(super) fn canonical_model_id(model: &str) -> Result<String> {
+pub(crate) fn canonical_model_id(model: &str) -> Result<String> {
     let model = model.trim();
     if model.starts_with("gemini-2.") {
         return Err(MoaError::Unsupported(
@@ -11,7 +12,7 @@ pub(super) fn canonical_model_id(model: &str) -> Result<String> {
                 .to_string(),
         ));
     }
-    if model.starts_with("gemini-") {
+    if models::find_for_provider_model(PROVIDER_GOOGLE, model).is_some() {
         return Ok(model.to_string());
     }
 
@@ -20,86 +21,6 @@ pub(super) fn canonical_model_id(model: &str) -> Result<String> {
     )))
 }
 
-pub(super) fn capabilities_for_model(model: &str) -> ModelCapabilities {
-    if model.starts_with("gemini-3-pro") || model.starts_with("gemini-3.1-pro") {
-        return ModelCapabilities {
-            model_id: ModelId::new(model),
-            context_window: 1_048_576,
-            max_output: 64_000,
-            supports_tools: true,
-            supports_vision: true,
-            supports_prefix_caching: true,
-            cache_ttl: None,
-            tool_call_format: ToolCallFormat::Gemini,
-            pricing: TokenPricing {
-                input_per_mtok: 2.0,
-                output_per_mtok: 12.0,
-                cached_input_per_mtok: Some(0.2),
-                cache_write_5m_per_mtok: None,
-                cache_write_1h_per_mtok: None,
-            },
-            native_tools: native_google_search_tools(),
-        };
-    }
-
-    if model.starts_with("gemini-3.1-flash-lite") {
-        return ModelCapabilities {
-            model_id: ModelId::new(model),
-            context_window: 1_048_576,
-            max_output: 64_000,
-            supports_tools: true,
-            supports_vision: true,
-            supports_prefix_caching: true,
-            cache_ttl: None,
-            tool_call_format: ToolCallFormat::Gemini,
-            pricing: TokenPricing {
-                input_per_mtok: 0.25,
-                output_per_mtok: 1.5,
-                cached_input_per_mtok: Some(0.025),
-                cache_write_5m_per_mtok: None,
-                cache_write_1h_per_mtok: None,
-            },
-            native_tools: native_google_search_tools(),
-        };
-    }
-
-    if model.starts_with("gemini-3-flash") {
-        return ModelCapabilities {
-            model_id: ModelId::new(model),
-            context_window: 1_048_576,
-            max_output: 64_000,
-            supports_tools: true,
-            supports_vision: true,
-            supports_prefix_caching: true,
-            cache_ttl: None,
-            tool_call_format: ToolCallFormat::Gemini,
-            pricing: TokenPricing {
-                input_per_mtok: 0.5,
-                output_per_mtok: 3.0,
-                cached_input_per_mtok: Some(0.05),
-                cache_write_5m_per_mtok: None,
-                cache_write_1h_per_mtok: None,
-            },
-            native_tools: native_google_search_tools(),
-        };
-    }
-
-    ModelCapabilities {
-        model_id: ModelId::new(model),
-        context_window: 1_048_576,
-        max_output: 64_000,
-        supports_tools: true,
-        supports_vision: true,
-        supports_prefix_caching: true,
-        cache_ttl: None,
-        tool_call_format: ToolCallFormat::Gemini,
-        pricing: TokenPricing {
-            input_per_mtok: 0.0,
-            output_per_mtok: 0.0,
-            cached_input_per_mtok: None,
-            cache_write_5m_per_mtok: None,
-            cache_write_1h_per_mtok: None,
-        },
-        native_tools: native_google_search_tools(),
-    }
+pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
+    models::capabilities_for_provider_model(PROVIDER_GOOGLE, model, native_google_search_tools())
 }

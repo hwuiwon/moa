@@ -6,19 +6,19 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
-moa-core = { path = "../../moa-core" }
-moa-memory-graph = { path = "../graph" }
-moa-memory-ingest = { path = "../ingest" }
-moa-memory-vector = { path = "../vector" }
+moa-core = { workspace = true }
+moa-memory-graph = { workspace = true }
+moa-memory-ingest = { workspace = true }
+moa-memory-vector = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid", "json"] }
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+workspace-hack = { workspace = true }
 
 [dev-dependencies]
-moa-brain = { path = "../../moa-brain" }
-moa-test-support = { path = "../../moa-test-support" }
+moa-brain = { workspace = true }
+moa-test-support = { workspace = true }
 tokio.workspace = true

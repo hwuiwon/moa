@@ -43,6 +43,7 @@ use crate::turn::util::{
     allowed_tool_names, denied_tool_output, disallowed_tool_output, meaningful_cancel_reason,
     response_tool_calls, stable_tool_call_id, tool_call_is_allowed, turn_outcome_for_response,
 };
+use crate::workflows::approval_wait;
 
 const K_CANCEL_REASON_PROMISE: &str = "cancel_reason";
 const K_PENDING_APPROVAL: &str = "pending_approval";
@@ -199,15 +200,16 @@ async fn run_sub_agent_inside_workflow(
             .call()
             .await?
             .into_inner();
-        let (mut completion_request, meta, parent_session) = match preparation {
+        let (mut completion_request, active_canary, meta, parent_session) = match preparation {
             SubAgentTurnPreparation::Outcome { outcome } => {
                 return Ok(workflow_outcome_from_core(request, outcome));
             }
             SubAgentTurnPreparation::Request {
                 request,
+                active_canary,
                 session_meta,
                 parent_session,
-            } => (*request, *session_meta, parent_session),
+            } => (*request, active_canary, *session_meta, parent_session),
         };
         attach_active_segment_metadata(ctx, parent_session, &mut completion_request).await?;
         let allowed_tools = allowed_tool_names(&completion_request);
@@ -255,16 +257,13 @@ async fn run_sub_agent_inside_workflow(
                     message: reason,
                 });
             }
-            handle_tool_call(
-                ctx,
-                &request.sub_agent_id,
-                &meta,
-                parent_session,
-                &allowed_tools,
-                index,
-                tool_call,
-            )
-            .await?;
+            let tool_context = SubAgentToolContext {
+                sub_agent_id: &request.sub_agent_id,
+                meta: &meta,
+                session_id: parent_session,
+                active_canary: active_canary.as_deref(),
+            };
+            handle_tool_call(ctx, tool_context, &allowed_tools, index, tool_call).await?;
         }
 
         let outcome = turn_outcome_for_response(&response);
@@ -331,16 +330,24 @@ async fn attach_active_segment_metadata(
     Ok(())
 }
 
+struct SubAgentToolContext<'a> {
+    sub_agent_id: &'a str,
+    meta: &'a SessionMeta,
+    session_id: SessionId,
+    active_canary: Option<&'a str>,
+}
+
 async fn handle_tool_call(
     ctx: &WorkflowContext<'_>,
-    sub_agent_id: &str,
-    meta: &SessionMeta,
-    session_id: SessionId,
+    tool_context: SubAgentToolContext<'_>,
     allowed_tools: &BTreeSet<String>,
     index: usize,
     tool_call: &ToolCallContent,
 ) -> Result<(), HandlerError> {
     ctx.set(K_PHASE, Json::from(TurnPhase::Tooling));
+    let sub_agent_id = tool_context.sub_agent_id;
+    let meta = tool_context.meta;
+    let session_id = tool_context.session_id;
     let tool_id = stable_tool_call_id(session_id, index, tool_call);
     let invocation = tool_call.invocation.clone();
 
@@ -434,6 +441,7 @@ async fn handle_tool_call(
             provider_tool_use_id: invocation.id.clone(),
             tool_name: invocation.name.clone(),
             input: invocation.input.clone(),
+            active_canary: tool_context.active_canary.map(ToOwned::to_owned),
             session_id: Some(session_id),
             workspace_id: meta.workspace_id.clone(),
             user_id: meta.user_id.clone(),
@@ -902,10 +910,7 @@ async fn handle_approval_gate(
     .await?;
 
     let approval_timeout = approval_wait_timeout();
-    let timed_out_reason = format!(
-        "Auto-denied: no decision within {} minutes",
-        approval_timeout.as_secs() / 60
-    );
+    let timed_out_reason = approval_wait::timeout_reason(approval_timeout);
     let approval_started = Instant::now();
     let decision = restate_sdk::select! {
         decision = awakeable => {
@@ -913,7 +918,7 @@ async fn handle_approval_gate(
         },
         reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
             ApprovalDecision::Deny {
-                reason: Some(format!("Cancelled while waiting for approval: {}", reason?)),
+                reason: Some(approval_wait::cancel_reason(&reason?)),
             }
         },
         _ = ctx.sleep(approval_timeout) => {
@@ -924,7 +929,7 @@ async fn handle_approval_gate(
     };
     record_approval_wait(
         approval_started.elapsed(),
-        approval_outcome_label(&decision, &timed_out_reason),
+        approval_wait::outcome_label(&decision, &timed_out_reason),
     );
 
     ctx.clear(K_PENDING_APPROVAL);
@@ -933,17 +938,9 @@ async fn handle_approval_gate(
         .call()
         .await?;
 
-    let decided_by = match &decision {
-        ApprovalDecision::Deny {
-            reason: Some(reason),
-        } if reason == &timed_out_reason => "system:auto-timeout".to_string(),
-        ApprovalDecision::Deny {
-            reason: Some(reason),
-        } if reason.starts_with("Cancelled while waiting for approval:") => {
-            "system:cancel".to_string()
-        }
-        _ => meta.user_id.to_string(),
-    };
+    let decided_by = approval_wait::system_decider_for(&decision, &timed_out_reason)
+        .unwrap_or_else(|| meta.user_id.as_str())
+        .to_string();
 
     append_session_event(
         ctx,
@@ -996,7 +993,7 @@ async fn cleanup_pending_approval_after_cancel(
     };
 
     let decision = ApprovalDecision::Deny {
-        reason: Some(format!("Cancelled while waiting for approval: {reason}")),
+        reason: Some(approval_wait::cancel_reason(reason)),
     };
     let serialized = serialize_awakeable_decision(&decision)?;
     ctx.resolve_awakeable(&pending.awakeable_id, serialized);
@@ -1213,34 +1210,10 @@ fn parse_sub_agent_result(raw: &str) -> Result<SubAgentResult, HandlerError> {
 }
 
 fn approval_wait_timeout() -> Duration {
-    approval_wait_timeout_from_env(
+    approval_wait::timeout_from_env(
         std::env::var(APPROVAL_TIMEOUT_SECS_ENV).ok().as_deref(),
         DEFAULT_APPROVAL_TIMEOUT_SECS,
     )
-}
-
-fn approval_wait_timeout_from_env(raw: Option<&str>, default_secs: u64) -> Duration {
-    raw.and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(default_secs))
-}
-
-fn approval_outcome_label<'a>(
-    decision: &'a ApprovalDecision,
-    timed_out_reason: &'a str,
-) -> &'a str {
-    match decision {
-        ApprovalDecision::AllowOnce => "allow_once",
-        ApprovalDecision::AlwaysAllow { .. } => "always_allow",
-        ApprovalDecision::Deny {
-            reason: Some(reason),
-        } if reason == timed_out_reason => "timeout",
-        ApprovalDecision::Deny {
-            reason: Some(reason),
-        } if reason.starts_with("Cancelled while waiting for approval:") => "cancel",
-        ApprovalDecision::Deny { .. } => "deny",
-    }
 }
 
 async fn durable_utc_now(ctx: &WorkflowContext<'_>) -> Result<DateTime<Utc>, HandlerError> {
@@ -1260,17 +1233,12 @@ fn is_terminal_phase(phase: &TurnPhase) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use moa_core::wire::TurnPhase;
     use moa_core::{ApprovalDecision, SessionId};
 
     use crate::turn::approval::parse_awakeable_decision;
 
-    use super::{
-        approval_outcome_label, approval_wait_timeout_from_env, is_terminal_phase,
-        parent_session_from_initial_message,
-    };
+    use super::{is_terminal_phase, parent_session_from_initial_message};
 
     #[test]
     fn terminal_phase_detection_matches_workflow_lifecycle() {
@@ -1283,51 +1251,6 @@ mod tests {
         assert!(is_terminal_phase(&TurnPhase::Completed));
         assert!(is_terminal_phase(&TurnPhase::Cancelled));
         assert!(is_terminal_phase(&TurnPhase::Failed));
-    }
-
-    #[test]
-    fn approval_timeout_defaults_when_override_is_missing_or_invalid() {
-        // Pins: sub-agent approval gates cannot disable timeout with bad env overrides.
-        assert_eq!(
-            approval_wait_timeout_from_env(None, 1800),
-            Duration::from_secs(1800)
-        );
-        assert_eq!(
-            approval_wait_timeout_from_env(Some("not-a-number"), 1800),
-            Duration::from_secs(1800)
-        );
-        assert_eq!(
-            approval_wait_timeout_from_env(Some("0"), 1800),
-            Duration::from_secs(1800)
-        );
-        assert_eq!(
-            approval_wait_timeout_from_env(Some("45"), 1800),
-            Duration::from_secs(45)
-        );
-    }
-
-    #[test]
-    fn approval_outcome_labels_distinguish_cancel_from_timeout() {
-        // Pins: approval wait metrics classify cancellation separately from user denial and timeout.
-        let timed_out_reason = "Auto-denied: no decision within 30 minutes";
-        assert_eq!(
-            approval_outcome_label(
-                &ApprovalDecision::Deny {
-                    reason: Some(timed_out_reason.to_string())
-                },
-                timed_out_reason
-            ),
-            "timeout"
-        );
-        assert_eq!(
-            approval_outcome_label(
-                &ApprovalDecision::Deny {
-                    reason: Some("Cancelled while waiting for approval: stop".to_string())
-                },
-                timed_out_reason
-            ),
-            "cancel"
-        );
     }
 
     #[test]

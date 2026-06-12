@@ -16,8 +16,8 @@ use futures_util::{Stream, StreamExt, pin_mut};
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
     JsonResponseFormat, LLMProvider, MessageRole, MoaConfig, MoaError, ModelCapabilities, ModelId,
-    ProviderNativeTool, Result, StopReason, TokenPricing, TokenUsage, ToolCallFormat, ToolContent,
-    ToolInvocation, estimate_text_tokens,
+    ProviderNativeTool, Result, StopReason, TokenUsage, ToolContent, ToolInvocation,
+    estimate_text_tokens,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -30,7 +30,7 @@ use crate::core::instrumentation::LLMSpanRecorder;
 use crate::core::retry::RetryPolicy;
 use crate::core::streaming::parse_sse_json;
 
-mod model;
+pub(crate) mod model;
 mod request;
 mod response;
 mod streaming;
@@ -60,7 +60,9 @@ const DEFAULT_STREAM_BUFFER: usize = 64;
 const DEFAULT_MAX_RETRIES: usize = 3;
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4_096;
 const MIN_CACHEABLE_TOKENS: usize = 1_024;
+#[cfg(test)]
 const MODEL_HAIKU_4_5: &str = "claude-haiku-4-5";
+#[cfg(test)]
 const MODEL_OPUS_4_6: &str = "claude-opus-4-6";
 const MODEL_SONNET_4_6: &str = "claude-sonnet-4-6";
 

@@ -8,7 +8,7 @@ use moa_core::{ApprovalDecision, Event, EventRange, ModelId, SessionId, SessionS
 use sqlx::PgPool;
 use tokio::time::sleep;
 
-use crate::support::graph_ingest::{test_database_url, wait_for_ingested_brain_responses};
+use crate::support::graph_ingest::wait_for_ingested_brain_responses;
 use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
     grant_workspace_member, register_deployment, reserve_orchestrator_ports, restate_admin_url,
@@ -17,6 +17,7 @@ use crate::support::restate_runtime::{
 use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, test_session_meta, user_message,
 };
+use moa_test_support::postgres::test_database_url;
 
 fn spawn_orchestrator(
     ports: OrchestratorPorts,
@@ -192,6 +193,115 @@ async fn approval_allow_once_round_trip_through_restate() -> Result<()> {
     result
 }
 
+#[tokio::test]
+#[ignore = "requires a local restate-server, Postgres, and at least one provider API key"]
+async fn approval_wait_cancel_records_system_denial_without_running_tool() -> Result<()> {
+    let _guard = RESTATE_E2E_LOCK.lock().await;
+    let Some(model) = live_model() else {
+        return Ok(());
+    };
+
+    let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
+    let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
+    let ports = reserve_orchestrator_ports()?;
+    let endpoint_url = deployment_endpoint_url(ports.restate);
+    let ingress = restate_ingress_url();
+    let ingress = ingress.as_str();
+    let client = reqwest::Client::new();
+    let mut meta = test_session_meta("session-approval-cancel-e2e");
+    meta.model = ModelId::new(model);
+    let identity = test_user_identity();
+    grant_workspace_member(&identity, &meta.workspace_id).await?;
+    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
+    let approval_token = format!("APPROVAL-CANCEL-{}", uuid::Uuid::now_v7());
+
+    let result = async {
+        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+
+        let create_request = client.post(format!(
+            "{}/SessionStore/create_session",
+            ingress.trim_end_matches('/')
+        ));
+        let session_id = with_identity(create_request, &identity)
+            .json(&meta)
+            .send()
+            .await
+            .context("create session via restate ingress")?
+            .json::<SessionId>()
+            .await
+            .context("deserialize create_session response")?;
+        grant_session_participant(&identity, session_id).await?;
+
+        client
+            .post(format!(
+                "{}/SessionStore/init_session_vo",
+                ingress.trim_end_matches('/')
+            ))
+            .json(&init_session_vo_request(session_id, meta.clone()))
+            .send()
+            .await
+            .context("initialize session VO state")?
+            .error_for_status()
+            .context("init_session_vo should succeed")?;
+
+        let prompt = format!(
+            "Use the bash tool exactly once to run `printf '{approval_token}\\n'`. \
+             Do not answer from memory. Wait for approval before running the tool."
+        );
+        let post_message = client.post(object_url(ingress, session_id, "post_message"));
+        with_identity(post_message, &identity)
+            .json(&user_message(prompt))
+            .send()
+            .await
+            .context("call Session/post_message")?
+            .error_for_status()
+            .context("post_message should succeed")?;
+
+        wait_for_approval_request(&client, ingress, &identity, session_id).await?;
+
+        client
+            .post(object_url(ingress, session_id, "request_cancel"))
+            .json("cancel while approval is pending")
+            .send()
+            .await
+            .context("call Session/request_cancel during approval wait")?
+            .error_for_status()
+            .context("request_cancel should succeed")?;
+
+        wait_for_status(&client, ingress, session_id, SessionStatus::Cancelled).await?;
+        let events = wait_for_approval_decision(&client, ingress, &identity, session_id).await?;
+        assert!(
+            events.iter().any(|record| matches!(
+                &record.event,
+                Event::ApprovalDecided {
+                    sub_agent_id: None,
+                    decision: ApprovalDecision::Deny { reason: Some(reason) },
+                    decided_by,
+                    ..
+                } if reason == "Cancelled while waiting for approval: cancel while approval is pending"
+                    && decided_by == "system:cancel"
+            )),
+            "expected system:cancel ApprovalDecided denial for session {session_id}"
+        );
+        assert!(
+            !events.iter().any(|record| matches!(
+                &record.event,
+                Event::ToolResult { success: true, output, .. }
+                    if output.to_text().contains(&approval_token)
+            )),
+            "cancelled approval wait must not execute the approved tool for session {session_id}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    let _ = orchestrator.kill();
+    let _ = orchestrator.wait();
+
+    result
+}
+
 async fn wait_for_status(
     client: &reqwest::Client,
     ingress: &str,
@@ -217,6 +327,39 @@ async fn wait_for_status(
     }
 
     bail!("timed out waiting for status {expected:?} for session {session_id}")
+}
+
+async fn wait_for_approval_decision(
+    client: &reqwest::Client,
+    ingress: &str,
+    identity: &moa_core::traits::Identity,
+    session_id: SessionId,
+) -> Result<Vec<moa_core::EventRecord>> {
+    for _attempt in 0..60 {
+        let request = client.post(format!(
+            "{}/SessionStore/get_events",
+            ingress.trim_end_matches('/')
+        ));
+        let response = with_identity(request, identity)
+            .json(&get_events_request(session_id, EventRange::all()))
+            .send()
+            .await
+            .context("fetch events via restate ingress")?;
+        let events = response
+            .json::<Vec<moa_core::EventRecord>>()
+            .await
+            .context("deserialize event response")?;
+        if events
+            .iter()
+            .any(|record| matches!(record.event, Event::ApprovalDecided { .. }))
+        {
+            return Ok(events);
+        }
+
+        sleep(Duration::from_secs(1)).await;
+    }
+
+    bail!("timed out waiting for approval decision for session {session_id}")
 }
 
 async fn wait_for_approval_request(

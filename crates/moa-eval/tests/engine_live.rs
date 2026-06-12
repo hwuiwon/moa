@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use moa_core::MoaConfig;
 use moa_eval::{AgentConfig, EngineOptions, EvalEngine, EvalStatus, TestCase, ToolOverride};
+use moa_test_support::postgres::test_database_url;
 use tempfile::tempdir;
 
 fn live_model() -> Option<&'static str> {
@@ -19,13 +20,6 @@ fn live_model() -> Option<&'static str> {
         return Some("gemini-3-flash-preview");
     }
     None
-}
-
-fn test_database_url() -> String {
-    std::env::var("MOA_TEST_POSTGRES_URL")
-        .or_else(|_| std::env::var("TEST_DATABASE_URL"))
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| "postgres://moa_owner:dev@127.0.0.1:10040/moa".to_string())
 }
 
 #[tokio::test]

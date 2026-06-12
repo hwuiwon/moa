@@ -2478,19 +2478,9 @@ fn deterministic_pii_result(text: &str) -> PiiResult {
         let end = start + token.len();
         cursor = end;
         if token.contains('@') {
-            spans.push(PiiSpan {
-                start,
-                end,
-                category: PiiCategory::Email,
-                confidence: 0.95,
-            });
+            spans.push(PiiSpan::new(start, end, PiiCategory::Email, 0.95));
         } else if token.contains("sk-") || token.to_ascii_lowercase().contains("secret") {
-            spans.push(PiiSpan {
-                start,
-                end,
-                category: PiiCategory::Secret,
-                confidence: 0.90,
-            });
+            spans.push(PiiSpan::new(start, end, PiiCategory::Secret, 0.90));
         }
     }
 

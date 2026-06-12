@@ -212,12 +212,19 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-memory-ingest`](crates/moa-memory/ingest/) | Slow-path graph ingestion and fast memory write APIs |
 | [`moa-memory-vector`](crates/moa-memory/vector/) | pgvector-backed graph embeddings and vector lookup |
 | [`moa-memory-pii`](crates/moa-memory/pii/) | PII classification and privacy filtering for memory writes |
+| [`moa-memory-lifecycle`](crates/moa-memory/lifecycle/) | Memory lifecycle jobs for consolidation, promotion, and quality scoring |
 | [`moa-lineage-core`](crates/moa-lineage/core/) | Lineage records and score record types |
+| [`moa-lineage-citation`](crates/moa-lineage/citation/) | Provider citation normalization and BM25/NLI verification helpers |
 | [`moa-lineage-sink`](crates/moa-lineage/sink/) | Async lineage sink writers |
 | [`moa-lineage-otel`](crates/moa-lineage/otel/) | OTel/OpenInference bridge |
-| [`moa-lineage-citation`](crates/moa-lineage/citation/) | Citation/provenance adapters |
-| [`moa-lineage-cold`](crates/moa-lineage/cold/) | Cold lineage export and partition support |
 | [`moa-lineage-audit`](crates/moa-lineage/audit/) | Compliance audit hashes, Merkle roots, signing, DSAR support |
+| [`moa-authz-schema`](crates/moa-auth/authz-schema/) | Typed OpenFGA object, relation, and tuple-key constants |
+| [`moa-authz`](crates/moa-auth/authz/) | OpenFGA authorization checks, tuple outbox, and delegated access helpers |
+| [`moa-auth-providers`](crates/moa-auth/providers/) | Local API keys, disabled auth, token vault, and provider bundle construction |
+| [`moa-auth-providers-auth0`](crates/moa-auth/auth0/) | Auth0 and generic OIDC providers gated by the auth0 feature |
+| [`moa-fga-bootstrap`](crates/moa-auth/fga-bootstrap/) | OpenFGA store and authorization model bootstrap binary |
+| [`moa-ocsf`](crates/moa-ocsf/) | OCSF security event types, signing, and persistence helpers |
+| [`moa-edge`](crates/moa-edge/) | Hosted HTTP edge service and public API routing |
 | [`moa-hands`](crates/moa-hands/) | Tool router, local/Docker hands, Daytona, E2B, MCP client |
 | [`moa-providers`](crates/moa-providers/) | LLM and embedding providers |
 | [`moa-orchestrator`](crates/moa-orchestrator/) | Restate services, virtual objects, workflows, and handler binary |
@@ -226,6 +233,7 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-skills`](crates/moa-skills/) | Agent Skills parsing, distillation, improvement, regression suites |
 | [`moa-eval`](crates/moa-eval/) | Evaluation harness |
 | [`moa-loadtest`](crates/moa-loadtest/) | Direct HTTP load-test harness for hosted orchestrator APIs |
+| [`moa-test-support`](crates/moa-test-support/) | Shared integration-test fixtures, Postgres helpers, and contract checks |
 | [`workspace-hack`](crates/workspace-hack/) | Generated `cargo-hakari` crate for dependency feature unification |
 | [`xtask`](crates/xtask/) | Repo-local audit and maintenance commands |
 

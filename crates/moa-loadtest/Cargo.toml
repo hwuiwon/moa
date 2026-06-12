@@ -14,11 +14,11 @@ humantime = "2"
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 moa-authz = { workspace = true }
-moa-brain = { path = "../moa-brain" }
-moa-core = { path = "../moa-core" }
-moa-memory-graph = { path = "../moa-memory/graph" }
-moa-memory-vector = { path = "../moa-memory/vector" }
-moa-session = { path = "../moa-session" }
+moa-brain = { workspace = true }
+moa-core = { workspace = true }
+moa-memory-graph = { workspace = true }
+moa-memory-vector = { workspace = true }
+moa-session = { workspace = true }
 rand = "0.8"
 reqwest.workspace = true
 secrecy.workspace = true
@@ -27,9 +27,9 @@ serde_json.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid", "json"] }
 thiserror.workspace = true
 tokio.workspace = true
-url = "2.5"
+url.workspace = true
 uuid.workspace = true
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+workspace-hack = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }

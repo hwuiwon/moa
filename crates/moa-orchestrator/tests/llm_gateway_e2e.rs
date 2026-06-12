@@ -12,13 +12,14 @@ use serde_json::json;
 use sqlx::PgPool;
 use tokio::time::sleep;
 
-use crate::support::graph_ingest::{test_database_url, wait_for_ingested_brain_responses};
+use crate::support::graph_ingest::wait_for_ingested_brain_responses;
 use crate::support::restate_runtime::{
     OrchestratorPorts, deployment_endpoint_url, grant_session_participant, grant_workspace_member,
     register_deployment, reserve_orchestrator_ports, restate_admin_url, restate_ingress_url,
     test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{get_events_request, test_session_meta};
+use moa_test_support::postgres::test_database_url;
 
 mod support;
 

@@ -3,6 +3,7 @@
 use super::*;
 use crate::workflows::sub_agent_turn_execution::SubAgentTurnExecutionClient;
 use moa_core::wire::{RunSubAgentTurnRequest, TurnOutcomeKind};
+use moa_security::{canary_system_message, new_canary_token};
 
 impl SubAgent for SubAgentImpl {
     #[tracing::instrument(skip(self, ctx, msg))]
@@ -367,6 +368,15 @@ async fn prepare_turn_inner(
 
     let mut request = build_completion_request(&state)?;
     request.messages.extend(state.history.clone());
+    let active_canary = if request.tools.is_empty() {
+        None
+    } else {
+        let canary = new_canary_token();
+        request
+            .messages
+            .push(ContextMessage::system(canary_system_message(&canary)));
+        Some(canary)
+    };
     request.metadata.insert(
         "_moa.session_id".to_string(),
         json!(parent_session.to_string()),
@@ -390,6 +400,7 @@ async fn prepare_turn_inner(
 
     Ok(SubAgentTurnPreparation::Request {
         request: Box::new(request),
+        active_canary,
         session_meta: Box::new(session_meta),
         parent_session,
     })

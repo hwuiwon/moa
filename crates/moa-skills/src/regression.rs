@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use memory_graph::GraphStore;
 use moa_core::{
     Event, EventRecord, LLMProvider, MoaConfig, MoaError, Result, SessionMeta, SkillMetadata,
     WorkspaceId,
@@ -13,6 +12,7 @@ use moa_eval::{
     PermissionOverride, SkillOverride, TestCase, TestSuite, build_evaluators, evaluate_run,
     load_suite,
 };
+use moa_memory_graph::GraphStore;
 use moa_session::{PostgresSessionStore, create_session_store};
 use tokio::fs;
 use uuid::Uuid;

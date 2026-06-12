@@ -12,18 +12,18 @@ langfuse = ["dep:reqwest"]
 async-trait.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
-moa-brain = { path = "../moa-brain" }
-moa-core = { path = "../moa-core" }
-moa-hands = { path = "../moa-hands" }
-moa-lineage-core = { path = "../moa-lineage/core" }
-moa-memory-graph = { path = "../moa-memory/graph" }
-moa-memory-ingest = { path = "../moa-memory/ingest" }
-moa-memory-lifecycle = { path = "../moa-memory/lifecycle" }
-moa-memory-pii = { path = "../moa-memory/pii" }
-moa-memory-vector = { path = "../moa-memory/vector" }
-moa-providers = { path = "../moa-providers" }
-moa-security = { path = "../moa-security" }
-moa-session = { path = "../moa-session" }
+moa-brain = { workspace = true }
+moa-core = { workspace = true }
+moa-hands = { workspace = true }
+moa-lineage-core = { workspace = true }
+moa-memory-graph = { workspace = true }
+moa-memory-ingest = { workspace = true }
+moa-memory-lifecycle = { workspace = true }
+moa-memory-pii = { workspace = true }
+moa-memory-vector = { workspace = true }
+moa-providers = { workspace = true }
+moa-security = { workspace = true }
+moa-session = { workspace = true }
 opentelemetry.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, optional = true }
@@ -39,8 +39,8 @@ toml.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 uuid.workspace = true
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+workspace-hack = { workspace = true }
 
 [dev-dependencies]
-moa-test-support = { path = "../moa-test-support" }
+moa-test-support = { workspace = true }
 tempfile.workspace = true

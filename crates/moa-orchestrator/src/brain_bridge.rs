@@ -14,6 +14,7 @@ use moa_core::{
     record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
     session_engine::session_requires_processing,
 };
+use moa_security::inject_canary;
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
@@ -45,6 +46,9 @@ pub(crate) enum PreparedTurnRequest {
 pub(crate) struct PreparedTurnRequestOutput {
     /// Request compilation outcome.
     pub prepared: PreparedTurnRequest,
+    /// Active canary injected into this prepared request, when tools were available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_canary: Option<String>,
     /// Query rewrite cache entry observed during compilation.
     pub query_rewrite_cache: Option<QueryRewriteCacheEntry>,
 }
@@ -66,6 +70,7 @@ pub(crate) async fn prepare_turn_request(
     if !session_requires_processing(&session, &recent_events) {
         return Ok(PreparedTurnRequestOutput {
             prepared: PreparedTurnRequest::Idle,
+            active_canary: None,
             query_rewrite_cache: None,
         });
     }
@@ -117,6 +122,11 @@ pub(crate) async fn prepare_turn_request(
     let compile_duration = compile_started.elapsed();
     record_pipeline_compile_duration(compile_duration);
     record_turn_pipeline_compile_duration(compile_duration);
+    let active_canary = if context.tools().is_empty() {
+        None
+    } else {
+        Some(inject_canary(&mut context))
+    };
     persist_context_snapshot(
         session_store.as_ref(),
         &context,
@@ -137,6 +147,7 @@ pub(crate) async fn prepare_turn_request(
     let query_rewrite_cache = query_rewrite_cache_from_context(active_user_sequence_num, &context);
     Ok(PreparedTurnRequestOutput {
         prepared: PreparedTurnRequest::Request(Box::new(context.into_request())),
+        active_canary,
         query_rewrite_cache,
     })
 }

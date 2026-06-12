@@ -16,8 +16,8 @@ use futures_util::{Stream, StreamExt, pin_mut};
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
     JsonResponseFormat, LLMProvider, MessageRole, MoaConfig, MoaError, ModelCapabilities, ModelId,
-    ProviderNativeTool, ProviderToolCallMetadata, Result, StopReason, TokenPricing, TokenUsage,
-    ToolCallContent, ToolCallFormat, ToolContent, ToolInvocation,
+    ProviderNativeTool, ProviderToolCallMetadata, Result, StopReason, TokenUsage, ToolCallContent,
+    ToolContent, ToolInvocation,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,7 @@ use crate::core::provider_tools::enabled_native_tools;
 use crate::core::retry::RetryPolicy;
 use crate::core::streaming::parse_sse_json;
 
-mod model;
+pub(crate) mod model;
 mod request;
 mod response;
 mod streaming;
@@ -66,7 +66,7 @@ pub fn debug_build_gemini_request_body(
         .map(ModelId::as_str)
         .unwrap_or("gemini-3-flash-preview");
     let resolved_model = canonical_model_id(requested_model)?;
-    let capabilities = capabilities_for_model(&resolved_model);
+    let capabilities = capabilities_for_model(&resolved_model)?;
     request::build_request_body(
         request,
         &resolved_model,
@@ -100,7 +100,7 @@ impl GeminiProvider {
         default_reasoning_effort: impl Into<String>,
     ) -> Result<Self> {
         let default_model = canonical_model_id(&default_model.into())?;
-        let default_capabilities = capabilities_for_model(&default_model);
+        let default_capabilities = capabilities_for_model(&default_model)?;
 
         Ok(Self {
             client: build_http_client()?,
@@ -147,7 +147,7 @@ impl GeminiProvider {
     /// Clones this provider while swapping the default model id.
     pub(crate) fn clone_with_model(&self, default_model: impl Into<String>) -> Result<Self> {
         let default_model = canonical_model_id(&default_model.into())?;
-        let default_capabilities = capabilities_for_model(&default_model);
+        let default_capabilities = capabilities_for_model(&default_model)?;
         Ok(Self {
             client: self.client.clone(),
             api_key: self.api_key.clone(),
@@ -197,7 +197,7 @@ impl LLMProvider for GeminiProvider {
             .unwrap_or(self.default_model.as_str())
             .to_string();
         let resolved_model = canonical_model_id(&requested_model)?;
-        let model_capabilities = capabilities_for_model(&resolved_model);
+        let model_capabilities = capabilities_for_model(&resolved_model)?;
         let max_output_tokens = Some(
             request
                 .max_output_tokens

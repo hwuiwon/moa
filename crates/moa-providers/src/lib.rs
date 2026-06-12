@@ -17,6 +17,9 @@ pub use core::factory::{
     ProviderSelection, build_provider_from_config, build_provider_from_selection,
     resolve_provider_selection, resolve_rewriter_provider,
 };
-pub use core::models::{CATALOG, ProviderModel, by_provider, context_window, find};
+pub use core::models::{
+    CATALOG, ProviderModel, by_provider, capabilities_for_provider_model, context_window, find,
+    find_for_provider_model, find_model, pricing_for_model,
+};
 pub use core::router::ModelRouter;
 pub use embedding::{MockEmbedding, OpenAIEmbedding, build_embedding_provider_from_config};

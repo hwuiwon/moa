@@ -8,7 +8,7 @@ license.workspace = true
 async-trait.workspace = true
 backon = "1"
 chrono.workspace = true
-moa-core = { path = "../../moa-core" }
+moa-core = { workspace = true }
 pgvector = { version = "0.4.1", features = ["sqlx", "halfvec"] }
 reqwest = { workspace = true, features = ["gzip"] }
 secrecy.workspace = true
@@ -19,10 +19,10 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+workspace-hack = { workspace = true }
 
 [dev-dependencies]
 moa-test-support.workspace = true
-moa-session = { path = "../../moa-session" }
-proptest = "1"
-wiremock = "0.6"
+moa-session = { workspace = true }
+proptest.workspace = true
+wiremock.workspace = true

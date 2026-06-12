@@ -9,7 +9,7 @@ use moa_core::{
     ToolCallContent, ToolCallId, ToolCardStatus, ToolInvocation, ToolUpdate,
 };
 use moa_hands::ToolRouter;
-use moa_security::{InputClassification, check_canary, contains_canary_tokens, inspect_input};
+use moa_security::{InputClassification, ToolInputCanaryScreening, inspect_input};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -47,11 +47,10 @@ pub(super) async fn handle_tool_call(
     let tool_id = parse_tool_id(invocation);
     let serialized_input = serde_json::to_string(&invocation.input)?;
 
-    if contains_canary_tokens(&serialized_input)
-        || active_canary
-            .map(|canary| check_canary(canary, &serialized_input))
-            .unwrap_or(false)
-    {
+    if matches!(
+        moa_security::screen_tool_input_for_canary(active_canary, &serialized_input),
+        ToolInputCanaryScreening::Blocked(_)
+    ) {
         append_tool_call_event(
             &session_store,
             event_tx,

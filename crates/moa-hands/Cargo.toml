@@ -16,8 +16,8 @@ chrono.workspace = true
 futures-util.workspace = true
 globset.workspace = true
 ignore = "0.4"
-moa-core = { path = "../moa-core" }
-moa-security = { path = "../moa-security" }
+moa-core = { workspace = true }
+moa-security = { workspace = true }
 opentelemetry.workspace = true
 regex.workspace = true
 reqwest.workspace = true
@@ -29,8 +29,8 @@ tokio-util.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 uuid.workspace = true
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+workspace-hack = { workspace = true }
 
 [dev-dependencies]
-moa-session = { path = "../moa-session" }
+moa-session = { workspace = true }
 tempfile.workspace = true

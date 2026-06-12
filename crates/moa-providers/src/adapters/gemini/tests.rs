@@ -184,19 +184,31 @@ fn legacy_gemini_models_are_rejected() {
 }
 
 #[test]
+fn uncatalogued_gemini_models_are_rejected() {
+    let error = canonical_model_id("gemini-3-unpriced-experimental")
+        .expect_err("uncatalogued Gemini model should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported Google Gemini model")
+    );
+    assert!(capabilities_for_model("gemini-3-unpriced-experimental").is_err());
+}
+
+#[test]
 fn gemini_3_flash_preview_uses_documented_price_envelope() {
-    let capabilities = capabilities_for_model("gemini-3-flash-preview");
+    let capabilities = capabilities_for_model("gemini-3-flash-preview").unwrap();
     assert_eq!(capabilities.context_window, 1_048_576);
-    assert_eq!(capabilities.max_output, 64_000);
+    assert_eq!(capabilities.max_output, 65_536);
     assert_eq!(capabilities.pricing.input_per_mtok, 0.5);
     assert_eq!(capabilities.pricing.output_per_mtok, 3.0);
 }
 
 #[test]
 fn gemini_3_1_flash_lite_preview_uses_documented_price_envelope() {
-    let capabilities = capabilities_for_model("gemini-3.1-flash-lite-preview");
+    let capabilities = capabilities_for_model("gemini-3.1-flash-lite-preview").unwrap();
     assert_eq!(capabilities.context_window, 1_048_576);
-    assert_eq!(capabilities.max_output, 64_000);
+    assert_eq!(capabilities.max_output, 65_536);
     assert_eq!(capabilities.pricing.input_per_mtok, 0.25);
     assert_eq!(capabilities.pricing.output_per_mtok, 1.5);
 }

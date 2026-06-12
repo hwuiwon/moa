@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-moa-lineage-core = { path = "../core" }
+moa-lineage-core = { workspace = true }
 opentelemetry.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+workspace-hack = { workspace = true }

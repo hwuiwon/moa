@@ -16,10 +16,9 @@ The root workspace currently contains:
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification client and privacy-class aggregation helpers |
 | `moa-memory/vector` (`moa-memory-vector`) | VectorStore trait, Gemini/Cohere embedders, pgvector halfvec backend, and Turbopuffer opt-in backend |
 | `moa-lineage/core` (`moa-lineage-core`) | Lineage record and score record types |
+| `moa-lineage/citation` (`moa-lineage-citation`) | Provider citation normalization and answer-source verification |
 | `moa-lineage/sink` (`moa-lineage-sink`) | Async lineage sink writers |
 | `moa-lineage/otel` (`moa-lineage-otel`) | OTel/OpenInference bridge |
-| `moa-lineage/citation` (`moa-lineage-citation`) | Citation/provenance adapters |
-| `moa-lineage/cold` (`moa-lineage-cold`) | Cold lineage export and partition support |
 | `moa-lineage/audit` (`moa-lineage-audit`) | Compliance audit hash chain, Merkle root, signing, and DSAR support |
 | `moa-auth/authz-schema` (`moa-authz-schema`) | Typed OpenFGA tuple keys and model constants |
 | `moa-auth/authz` (`moa-authz`) | OpenFGA client, authorization checks, transactional outbox, and outbox poller |

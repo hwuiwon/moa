@@ -2,8 +2,8 @@
 
 mod support;
 
-use memory_graph::GraphStore;
 use moa_core::{MoaError, Result, WorkspaceId};
+use moa_memory_graph::GraphStore;
 use moa_skills::{
     LessonContext, NewSkill, SkillRegistry, SkillRenderContext, learn_lesson, render,
 };

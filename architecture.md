@@ -143,10 +143,9 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification and memory privacy helpers |
 | `moa-memory/vector` (`moa-memory-vector`) | pgvector and Turbopuffer vector stores |
 | `moa-lineage-core` | Lineage record types and score records |
+| `moa-lineage-citation` | Provider citation normalization and answer-source verification |
 | `moa-lineage-sink` | Async lineage sink writers |
 | `moa-lineage-otel` | OTel/OpenInference bridge |
-| `moa-lineage-citation` | Citation/provenance adapters |
-| `moa-lineage-cold` | Cold storage partition/export support |
 | `moa-lineage-audit` | Compliance audit hashes, roots, signing, and DSAR support |
 | `moa-auth/authz-schema` (`moa-authz-schema`) | Typed OpenFGA tuple keys and model constants |
 | `moa-auth/authz` (`moa-authz`) | OpenFGA client, authz checks, transactional outbox, and poller |
@@ -273,7 +272,7 @@ from Postgres events plus Restate journals.
 | Identity | `moa-auth/providers`, optional `moa-auth/auth0`, `moa-edge` | API keys by default; disabled mode for local/isolated tests; Auth0/OIDC behind the `auth0` feature |
 | Authorization | `moa-auth/authz`, `moa-auth/authz-schema` | OpenFGA checks and transactional tuple outbox |
 | Security events | `moa-ocsf` | OCSF v1.3 events in Postgres, shipped to tenant audit buckets |
-| Lineage | `moa-lineage-*` | Hot lineage, scores, OTel bridge, cold export, audit tier |
+| Lineage | `moa-lineage-*` | Hot lineage, citations, scores, OTel bridge, audit tier |
 | Orchestration | Restate | VO/workflow state and invocation journals only |
 
 ---

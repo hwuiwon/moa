@@ -6,7 +6,7 @@ use std::time::Instant;
 use async_openai::config::OpenAIConfig;
 use moa_core::{
     CompletionRequest, CompletionStream, LLMProvider, MoaConfig, MoaError, ModelCapabilities,
-    ModelId, ProviderNativeTool, Result, TokenPricing, ToolCallFormat,
+    ModelId, ProviderNativeTool, Result,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -16,16 +16,15 @@ use crate::adapters::openai_responses::{
     build_openai_client, build_responses_request, stream_responses_with_retry,
 };
 use crate::core::instrumentation::LLMSpanRecorder;
+use crate::core::models::{self, PROVIDER_OPENAI};
 use crate::core::provider_tools::enabled_native_tools;
 use crate::core::retry::RetryPolicy;
 
 const DEFAULT_STREAM_BUFFER: usize = 128;
 const DEFAULT_MAX_RETRIES: usize = 3;
 const MODEL_GPT_5_4: &str = "gpt-5.4";
+#[cfg(test)]
 const MODEL_GPT_5_4_MINI: &str = "gpt-5.4-mini";
-const MODEL_GPT_5_4_NANO: &str = "gpt-5.4-nano";
-const MODEL_GPT_5_MINI: &str = "gpt-5-mini";
-const MODEL_GPT_5_NANO: &str = "gpt-5-nano";
 
 /// Builds an OpenAI Responses request body for inspection tests without sending it.
 pub fn debug_build_openai_request_body(
@@ -220,19 +219,7 @@ impl LLMProvider for OpenAIProvider {
 }
 
 pub(crate) fn canonical_model_id(model: &str) -> Result<String> {
-    if model.starts_with(MODEL_GPT_5_4_MINI) {
-        return Ok(model.to_string());
-    }
-    if model.starts_with(MODEL_GPT_5_4_NANO) {
-        return Ok(model.to_string());
-    }
-    if model.starts_with(MODEL_GPT_5_4) {
-        return Ok(model.to_string());
-    }
-    if model.starts_with(MODEL_GPT_5_MINI) {
-        return Ok(model.to_string());
-    }
-    if model.starts_with(MODEL_GPT_5_NANO) {
+    if models::find_for_provider_model(PROVIDER_OPENAI, model).is_some() {
         return Ok(model.to_string());
     }
 
@@ -242,114 +229,7 @@ pub(crate) fn canonical_model_id(model: &str) -> Result<String> {
 }
 
 pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
-    if model.starts_with(MODEL_GPT_5_4_MINI) {
-        return Ok(ModelCapabilities {
-            model_id: ModelId::new(model),
-            context_window: 400_000,
-            max_output: 128_000,
-            supports_tools: true,
-            supports_vision: true,
-            supports_prefix_caching: true,
-            cache_ttl: None,
-            tool_call_format: ToolCallFormat::OpenAiCompatible,
-            pricing: TokenPricing {
-                input_per_mtok: 0.75,
-                output_per_mtok: 4.50,
-                cached_input_per_mtok: Some(0.075),
-                cache_write_5m_per_mtok: None,
-                cache_write_1h_per_mtok: None,
-            },
-            native_tools: native_web_search_tools(),
-        });
-    }
-
-    if model.starts_with(MODEL_GPT_5_4_NANO) {
-        return Ok(ModelCapabilities {
-            model_id: ModelId::new(model),
-            context_window: 400_000,
-            max_output: 128_000,
-            supports_tools: true,
-            supports_vision: true,
-            supports_prefix_caching: true,
-            cache_ttl: None,
-            tool_call_format: ToolCallFormat::OpenAiCompatible,
-            pricing: TokenPricing {
-                input_per_mtok: 0.20,
-                output_per_mtok: 1.25,
-                cached_input_per_mtok: Some(0.02),
-                cache_write_5m_per_mtok: None,
-                cache_write_1h_per_mtok: None,
-            },
-            native_tools: native_web_search_tools(),
-        });
-    }
-
-    if model.starts_with(MODEL_GPT_5_4) {
-        return Ok(ModelCapabilities {
-            model_id: ModelId::new(model),
-            context_window: 1_050_000,
-            max_output: 128_000,
-            supports_tools: true,
-            supports_vision: true,
-            supports_prefix_caching: true,
-            cache_ttl: None,
-            tool_call_format: ToolCallFormat::OpenAiCompatible,
-            pricing: TokenPricing {
-                input_per_mtok: 2.50,
-                output_per_mtok: 15.0,
-                cached_input_per_mtok: Some(0.25),
-                cache_write_5m_per_mtok: None,
-                cache_write_1h_per_mtok: None,
-            },
-            native_tools: native_web_search_tools(),
-        });
-    }
-
-    if model.starts_with(MODEL_GPT_5_MINI) {
-        return Ok(ModelCapabilities {
-            model_id: ModelId::new(model),
-            context_window: 400_000,
-            max_output: 128_000,
-            supports_tools: true,
-            supports_vision: true,
-            supports_prefix_caching: true,
-            cache_ttl: None,
-            tool_call_format: ToolCallFormat::OpenAiCompatible,
-            pricing: TokenPricing {
-                input_per_mtok: 0.25,
-                output_per_mtok: 2.0,
-                cached_input_per_mtok: Some(0.025),
-                cache_write_5m_per_mtok: None,
-                cache_write_1h_per_mtok: None,
-            },
-            native_tools: native_web_search_tools(),
-        });
-    }
-
-    if model.starts_with(MODEL_GPT_5_NANO) {
-        return Ok(ModelCapabilities {
-            model_id: ModelId::new(model),
-            context_window: 400_000,
-            max_output: 128_000,
-            supports_tools: true,
-            supports_vision: true,
-            supports_prefix_caching: true,
-            cache_ttl: None,
-            tool_call_format: ToolCallFormat::OpenAiCompatible,
-            pricing: TokenPricing {
-                input_per_mtok: 0.05,
-                output_per_mtok: 0.40,
-                cached_input_per_mtok: Some(0.005),
-                cache_write_5m_per_mtok: None,
-                cache_write_1h_per_mtok: None,
-            },
-            native_tools: native_web_search_tools(),
-        });
-    }
-
-    Err(MoaError::Unsupported(format!(
-        "unsupported OpenAI model '{model}'"
-    )))
+    models::capabilities_for_provider_model(PROVIDER_OPENAI, model, native_web_search_tools())
 }
 
 fn native_web_search_tools() -> Vec<ProviderNativeTool> {

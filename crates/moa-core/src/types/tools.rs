@@ -360,6 +360,9 @@ pub struct ToolCallRequest {
     pub tool_name: String,
     /// Raw JSON input passed to the tool implementation.
     pub input: Value,
+    /// Active per-turn canary that must not appear in tool input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_canary: Option<String>,
     /// Owning session when the tool call is part of a durable MOA turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,

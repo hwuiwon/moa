@@ -5,10 +5,10 @@ use moa_core::{ContextProcessor, ProcessorOutput, Result, WorkingContext};
 
 use super::estimate_tokens;
 
-// WARNING: This file contributes to the cached system prompt prefix.
+// WARNING: This file contributes to the provider-cacheable stable system prefix.
 // Do not add dynamic content here (datetime, workspace path, git branch, user identity, etc.).
 // Dynamic per-turn context belongs in `RuntimeContextProcessor`.
-// See `moa/docs/prompt-caching-architecture.md`.
+// See `docs/prompt-caching-architecture.md`; providers own concrete cache markers.
 
 macro_rules! identity_core_prompt {
     () => {

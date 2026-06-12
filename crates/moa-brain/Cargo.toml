@@ -9,14 +9,15 @@ async-trait.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 metrics.workspace = true
-moa-core = { path = "../moa-core" }
-moa-hands = { path = "../moa-hands" }
-moa-lineage-core = { path = "../moa-lineage/core" }
-moa-memory-graph = { path = "../moa-memory/graph" }
-moa-memory-vector = { path = "../moa-memory/vector" }
-moa-providers = { path = "../moa-providers" }
-moa-session = { path = "../moa-session" }
-moa-security = { path = "../moa-security" }
+moa-core = { workspace = true }
+moa-hands = { workspace = true }
+moa-lineage-citation = { workspace = true }
+moa-lineage-core = { workspace = true }
+moa-memory-graph = { workspace = true }
+moa-memory-vector = { workspace = true }
+moa-providers = { workspace = true }
+moa-session = { workspace = true }
+moa-security = { workspace = true }
 moka.workspace = true
 reqwest.workspace = true
 rust-stemmers.workspace = true
@@ -29,16 +30,16 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+workspace-hack = { workspace = true }
 
 [dev-dependencies]
 insta.workspace = true
-moa-memory-ingest = { path = "../moa-memory/ingest" }
-moa-memory-pii = { path = "../moa-memory/pii" }
-moa-providers = { path = "../moa-providers", features = ["test-util"] }
-moa-session = { path = "../moa-session" }
-moa-skills = { path = "../moa-skills" }
-proptest = "1"
+moa-memory-ingest = { workspace = true }
+moa-memory-pii = { workspace = true }
+moa-providers = { workspace = true, features = ["test-util"] }
+moa-session = { workspace = true }
+moa-skills = { workspace = true }
+proptest.workspace = true
 tempfile.workspace = true
 tracing-subscriber.workspace = true
-wiremock = "0.6"
+wiremock.workspace = true

@@ -93,6 +93,7 @@ fn tool_request(
         provider_tool_use_id: None,
         tool_name: tool_name.to_string(),
         input: json!({}),
+        active_canary: None,
         session_id: None,
         workspace_id: WorkspaceId::new("workspace-1"),
         user_id: UserId::new("user-1"),

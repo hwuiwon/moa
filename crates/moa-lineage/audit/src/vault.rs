@@ -8,6 +8,7 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use hmac::{Hmac, Mac};
+use moa_memory_pii::classify_heuristic;
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -206,48 +207,81 @@ fn redact_text(
     subject_pseudonym: &[u8],
     text: &str,
 ) -> (String, Vec<RedactionEvent>, Vec<(String, String)>) {
-    let mut redacted = text.to_string();
+    let result = classify_heuristic(text);
+    let mut spans = result
+        .spans
+        .iter()
+        .filter(|span| {
+            span.start < span.end
+                && span.end <= text.len()
+                && text.is_char_boundary(span.start)
+                && text.is_char_boundary(span.end)
+        })
+        .collect::<Vec<_>>();
+    spans.sort_by_key(|span| span.start);
+
+    let mut redacted = String::with_capacity(text.len());
     let mut events = Vec::new();
     let mut plaintexts = Vec::new();
-    for token in text.split_whitespace() {
-        let trimmed = token.trim_matches(|ch: char| ch.is_ascii_punctuation());
-        let field = classify_token(trimmed);
-        if let Some(field) = field {
-            let stable = blake3::hash([subject_pseudonym, trimmed.as_bytes()].concat().as_slice());
-            let replacement = format!("PII:{field}:{}", &stable.to_hex().to_string()[..8]);
-            redacted = redacted.replace(trimmed, &replacement);
-            events.push(RedactionEvent {
-                field: field.to_string(),
-                detector: "moa-lineage-audit-local".to_string(),
-                confidence: 0.9,
-                token: replacement,
-            });
-            plaintexts.push((field.to_string(), trimmed.to_string()));
+    let mut cursor = 0;
+    for span in spans {
+        if span.start < cursor {
+            continue;
         }
+        redacted.push_str(&text[cursor..span.start]);
+        let source = &text[span.start..span.end];
+        let (trim_start, trim_end) = trim_ascii_punctuation_range(source);
+        if trim_start >= trim_end {
+            redacted.push_str(source);
+            cursor = span.end;
+            continue;
+        }
+        let plaintext = &source[trim_start..trim_end];
+        let field = span.category.field_name();
+        let stable = blake3::hash(
+            [subject_pseudonym, plaintext.as_bytes()]
+                .concat()
+                .as_slice(),
+        );
+        let replacement = format!("PII:{field}:{}", &stable.to_hex().to_string()[..8]);
+        redacted.push_str(&source[..trim_start]);
+        redacted.push_str(&replacement);
+        redacted.push_str(&source[trim_end..]);
+        events.push(RedactionEvent {
+            field: field.to_string(),
+            detector: result.model_version.clone(),
+            confidence: span.confidence,
+            token: replacement,
+        });
+        plaintexts.push((field.to_string(), plaintext.to_string()));
+        cursor = span.end;
     }
+    redacted.push_str(&text[cursor..]);
     (redacted, events, plaintexts)
 }
 
-fn classify_token(token: &str) -> Option<&'static str> {
-    if token.contains('@') && token.contains('.') {
-        return Some("email");
+fn trim_ascii_punctuation_range(source: &str) -> (usize, usize) {
+    let mut start = 0;
+    for (index, character) in source.char_indices() {
+        if character.is_ascii_punctuation() {
+            start = index + character.len_utf8();
+        } else {
+            break;
+        }
     }
-    let digits = token.chars().filter(|ch| ch.is_ascii_digit()).count();
-    if digits >= 10
-        && token
-            .chars()
-            .all(|ch| ch.is_ascii_digit() || "+-().".contains(ch))
-    {
-        return Some("phone");
+
+    let mut end = source.len();
+    for (index, character) in source.char_indices().rev() {
+        if index < start {
+            break;
+        }
+        if character.is_ascii_punctuation() {
+            end = index;
+        } else {
+            break;
+        }
     }
-    if digits == 9
-        && token.len() == 11
-        && token.as_bytes().get(3) == Some(&b'-')
-        && token.as_bytes().get(6) == Some(&b'-')
-    {
-        return Some("ssn");
-    }
-    None
+    (start, end)
 }
 
 #[cfg(test)]
@@ -277,6 +311,55 @@ mod tests {
         assert_eq!(first.subject_pseudonym, second.subject_pseudonym);
         assert!(first.redacted_text.contains("PII:email:"));
         assert_eq!(first.redactions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pii_vault_uses_shared_classifier_but_keeps_audit_token_format() {
+        let vault = PiiVault::new_dev(b"workspace-secret".to_vec());
+        let first = vault
+            .pseudonymize(
+                "workspace",
+                "alice@example.com",
+                "Email alice@example.com phone 555-123-4567 ssn 123-45-6789",
+            )
+            .await
+            .expect("pseudonymize PII text");
+        let second = vault
+            .pseudonymize(
+                "workspace",
+                "alice@example.com",
+                "Email alice@example.com phone 555-123-4567 ssn 123-45-6789",
+            )
+            .await
+            .expect("pseudonymize PII text again");
+
+        assert_eq!(first.redacted_text, second.redacted_text);
+        assert!(!first.redacted_text.contains("alice@example.com"));
+        assert!(!first.redacted_text.contains("555-123-4567"));
+        assert!(!first.redacted_text.contains("123-45-6789"));
+        assert_eq!(
+            first
+                .redactions
+                .iter()
+                .map(|event| event.field.as_str())
+                .collect::<Vec<_>>(),
+            vec!["email", "phone", "ssn"]
+        );
+        assert_eq!(
+            first
+                .redactions
+                .iter()
+                .map(|event| event.confidence)
+                .collect::<Vec<_>>(),
+            vec![0.80, 0.90, 0.90]
+        );
+        for event in &first.redactions {
+            assert_eq!(event.detector, "moa-heuristic:v1");
+            assert!(
+                event.token.starts_with(&format!("PII:{}:", event.field)),
+                "{event:?}"
+            );
+        }
     }
 
     #[test]

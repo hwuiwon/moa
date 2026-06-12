@@ -6,8 +6,9 @@ pub mod policies;
 pub mod vault;
 
 pub use injection::{
-    InputClassification, InputInspection, check_canary, classify_input, contains_canary_tokens,
-    inject_canary, inspect_input, wrap_untrusted_tool_output,
+    InputClassification, InputInspection, ToolInputCanaryLeak, ToolInputCanaryScreening,
+    canary_system_message, check_canary, classify_input, contains_canary_tokens, inject_canary,
+    inspect_input, new_canary_token, screen_tool_input_for_canary, wrap_untrusted_tool_output,
 };
 pub use mcp_proxy::{EnvironmentCredentialVault, MCPCredentialProxy, McpSessionToken};
 pub use policies::{

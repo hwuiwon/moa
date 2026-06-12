@@ -2,10 +2,10 @@
 
 use std::{error::Error, process::Command, time::Duration};
 
+use moa_test_support::postgres::test_database_url;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
 const M22_PGAUDIT_SQL: &str = include_str!("../migrations/postgres/019_pgaudit.sql");
 
 fn pgaudit_smoke_requested() -> bool {
@@ -13,12 +13,6 @@ fn pgaudit_smoke_requested() -> bool {
         std::env::var("MOA_RUN_PGAUDIT_SMOKE").as_deref(),
         Ok("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
     )
-}
-
-fn test_database_url() -> String {
-    std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string())
 }
 
 #[tokio::test]

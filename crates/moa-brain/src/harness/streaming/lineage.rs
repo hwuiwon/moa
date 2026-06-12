@@ -1,9 +1,10 @@
 //! Lineage emission helpers for streamed turns.
 
 use moa_core::{
-    CompletionContent, CompletionResponse, ContextMessage, LineageHandle, SessionMeta,
+    CompletionContent, CompletionResponse, ContextMessage, LineageHandle, MessageRole, SessionMeta,
     WorkingContext,
 };
+use moa_lineage_citation::{CascadeConfig, CascadeVerifier, ChunkRef, NliVerifier};
 use moa_lineage_core::{
     CitationLineage, ContextChunk, ContextLineage, GenerationLineage, LineageEvent, ScoreRecord,
     ScoreSource, ScoreTarget, ScoreValue, TokenUsage, ToolCallSummary, TurnId,
@@ -15,12 +16,23 @@ pub(super) fn emit_context_lineage(
     session: &SessionMeta,
     ctx: &WorkingContext,
     span: &tracing::Span,
-) {
-    let chunks = ctx
+) -> Vec<ChunkRef> {
+    let source_chunks = ctx
         .messages
         .iter()
         .enumerate()
-        .map(|(idx, message)| context_chunk(session, idx, message))
+        .map(|(idx, message)| SourceContextChunk {
+            chunk: context_chunk(session, idx, message),
+            message,
+        })
+        .collect::<Vec<_>>();
+    let chunks = source_chunks
+        .iter()
+        .map(|source| source.chunk.clone())
+        .collect::<Vec<_>>();
+    let citation_sources = source_chunks
+        .into_iter()
+        .filter_map(citation_source_chunk)
         .collect::<Vec<_>>();
     let record = ContextLineage {
         turn_id,
@@ -65,6 +77,8 @@ pub(super) fn emit_context_lineage(
         Ok(json) => lineage.record(json),
         Err(error) => tracing::warn!(%error, "failed to serialize context score"),
     }
+
+    citation_sources
 }
 
 fn context_chunk(session: &SessionMeta, idx: usize, message: &ContextMessage) -> ContextChunk {
@@ -77,6 +91,34 @@ fn context_chunk(session: &SessionMeta, idx: usize, message: &ContextMessage) ->
     }
 }
 
+struct SourceContextChunk<'a> {
+    chunk: ContextChunk,
+    message: &'a ContextMessage,
+}
+
+fn citation_source_chunk(source: SourceContextChunk<'_>) -> Option<ChunkRef> {
+    if !is_citable_source_message(source.message) {
+        return None;
+    }
+    Some(ChunkRef {
+        chunk_id: source.chunk.chunk_id,
+        source_node_uid: Some(source.chunk.source_uid),
+        text: source.message.content.clone(),
+        provider_doc_id: source.chunk.chunk_id.to_string(),
+    })
+}
+
+fn is_citable_source_message(message: &ContextMessage) -> bool {
+    let content = message.content.trim();
+    if content.is_empty() {
+        return false;
+    }
+
+    matches!(message.role, MessageRole::Tool)
+        || content.contains("<memory-reminder>")
+        || content.contains("<graph_memory>")
+}
+
 fn estimate_tokens(text: &str) -> u32 {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -87,13 +129,14 @@ fn estimate_tokens(text: &str) -> u32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn emit_generation_lineage(
+pub(super) async fn emit_generation_lineage(
     lineage: &dyn LineageHandle,
     turn_id: TurnId,
     session: &SessionMeta,
     provider: &str,
     request_model: &str,
     response: &CompletionResponse,
+    citation_sources: &[ChunkRef],
     cost_cents: u32,
     duration: std::time::Duration,
     span: &tracing::Span,
@@ -156,21 +199,112 @@ pub(super) fn emit_generation_lineage(
     )
     .set(record.cost_micros as f64);
 
-    let citation = CitationLineage {
+    let citation = build_citation_lineage(turn_id, session, response, citation_sources).await;
+    match serde_json::to_value(LineageEvent::Citation(citation.clone())) {
+        Ok(json) => lineage.record(json),
+        Err(error) => tracing::warn!(%error, "failed to serialize citation lineage"),
+    }
+    emit_citation_scores(lineage, &citation);
+}
+
+async fn build_citation_lineage(
+    turn_id: TurnId,
+    session: &SessionMeta,
+    response: &CompletionResponse,
+    citation_sources: &[ChunkRef],
+) -> CitationLineage {
+    let answer_sentence_offsets = sentence_offsets(&response.text);
+    let citations = if citation_sources.is_empty() || response.text.trim().is_empty() {
+        Vec::new()
+    } else {
+        context_citation_verifier()
+            .verify_all(
+                &response.text,
+                &answer_sentence_offsets,
+                &[],
+                citation_sources,
+            )
+            .await
+    };
+
+    CitationLineage {
         turn_id,
         session_id: session.id,
         workspace_id: session.workspace_id.clone(),
         user_id: session.user_id.clone(),
         ts: chrono::Utc::now(),
         answer_text: response.text.clone(),
-        answer_sentence_offsets: sentence_offsets(&response.text),
-        citations: Vec::new(),
-        vendor_used: Some(provider.to_string()),
-        verifier_used: Some("cascade-bm25-hhem".to_string()),
-    };
-    match serde_json::to_value(LineageEvent::Citation(citation)) {
-        Ok(json) => lineage.record(json),
-        Err(error) => tracing::warn!(%error, "failed to serialize citation lineage"),
+        answer_sentence_offsets,
+        citations,
+        vendor_used: None,
+        verifier_used: if citation_sources.is_empty() {
+            None
+        } else {
+            Some("cascade-bm25+nli-lexical".to_string())
+        },
+    }
+}
+
+fn context_citation_verifier() -> CascadeVerifier {
+    CascadeVerifier::new(
+        CascadeConfig {
+            bm25_min_candidates: 1,
+            ..CascadeConfig::default()
+        },
+        Some(NliVerifier::new("hhem-2.1-open-lexical-fallback")),
+    )
+}
+
+fn emit_citation_scores(lineage: &dyn LineageHandle, citation: &CitationLineage) {
+    for source in &citation.citations {
+        let score = ScoreRecord {
+            score_id: uuid::Uuid::now_v7(),
+            ts: chrono::Utc::now(),
+            target: ScoreTarget::Turn {
+                turn_id: citation.turn_id,
+            },
+            workspace_id: citation.workspace_id.clone(),
+            user_id: Some(citation.user_id.clone()),
+            name: "citation_verified".to_string(),
+            value: ScoreValue::Boolean(source.verifier.verified),
+            source: ScoreSource::OnlineJudge,
+            model_or_evaluator: source.verifier.method.clone(),
+            run_id: None,
+            dataset_id: None,
+            comment: None,
+        };
+        match serde_json::to_value(LineageEvent::Eval(score)) {
+            Ok(json) => lineage.record(json),
+            Err(error) => tracing::warn!(%error, "failed to serialize citation score"),
+        }
+        metrics::gauge!(
+            "moa_grounding_verified_rate",
+            "workspace_id" => citation.workspace_id.to_string()
+        )
+        .set(if source.verifier.verified { 1.0 } else { 0.0 });
+
+        if let Some(entailment) = source.verifier.nli_entailment {
+            let score = ScoreRecord {
+                score_id: uuid::Uuid::now_v7(),
+                ts: chrono::Utc::now(),
+                target: ScoreTarget::Turn {
+                    turn_id: citation.turn_id,
+                },
+                workspace_id: citation.workspace_id.clone(),
+                user_id: Some(citation.user_id.clone()),
+                name: "nli_entailment".to_string(),
+                value: ScoreValue::Numeric(f64::from(entailment)),
+                source: ScoreSource::OnlineJudge,
+                model_or_evaluator: source.verifier.method.clone(),
+                run_id: None,
+                dataset_id: None,
+                comment: None,
+            };
+            match serde_json::to_value(LineageEvent::Eval(score)) {
+                Ok(json) => lineage.record(json),
+                Err(error) => tracing::warn!(%error, "failed to serialize nli score"),
+            }
+        }
     }
 }
 
@@ -224,4 +358,84 @@ fn tool_call_summaries(response: &CompletionResponse) -> Vec<ToolCallSummary> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use moa_core::{
+        CompletionResponse, ContextMessage, ModelCapabilities, ModelId, NullLineageHandle,
+        SessionMeta, StopReason, TokenUsage, WorkingContext,
+    };
+    use moa_lineage_citation::ChunkRef;
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn context_lineage_returns_memory_and_tool_citation_sources() {
+        // Pins: citation candidates come from retrieved memory and tool output, not generic prompt text.
+        let session = SessionMeta::default();
+        let mut ctx = WorkingContext::new(&session, ModelCapabilities::default());
+        ctx.append_message(ContextMessage::system("You are MOA."));
+        ctx.append_message(ContextMessage::user("What does OAuth use?"));
+        ctx.append_message(ContextMessage::user(
+            "<memory-reminder>\n<graph_memory>OAuth uses access tokens.</graph_memory>\n</memory-reminder>",
+        ));
+        ctx.append_message(ContextMessage::tool(
+            "Fetched source: OAuth access tokens authorize delegated API calls.",
+        ));
+
+        let sources = emit_context_lineage(
+            &NullLineageHandle,
+            TurnId::new_v7(),
+            &session,
+            &ctx,
+            &tracing::Span::none(),
+        );
+
+        assert_eq!(sources.len(), 2);
+        assert!(sources[0].text.contains("<graph_memory>"));
+        assert!(sources[1].text.contains("Fetched source"));
+    }
+
+    #[tokio::test]
+    async fn citation_lineage_cites_context_source_for_answer() {
+        // Pins: generation lineage emits a citation when answer text overlaps a citable context chunk.
+        let session = SessionMeta::default();
+        let turn_id = TurnId::new_v7();
+        let source_chunk_id = Uuid::now_v7();
+        let sources = vec![ChunkRef {
+            chunk_id: source_chunk_id,
+            source_node_uid: Some(Uuid::now_v7()),
+            text: "OAuth uses access tokens for delegated API access.".to_string(),
+            provider_doc_id: "memory-oauth".to_string(),
+        }];
+        let response = CompletionResponse {
+            text: "OAuth uses access tokens.".to_string(),
+            content: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            model: ModelId::new("test-model"),
+            usage: TokenUsage::default(),
+            duration_ms: 1,
+            thought_signature: None,
+        };
+
+        let record = build_citation_lineage(turn_id, &session, &response, &sources).await;
+
+        assert_eq!(record.turn_id, turn_id);
+        assert_eq!(record.answer_sentence_offsets, vec![(0, 25)]);
+        assert_eq!(record.vendor_used, None);
+        assert_eq!(
+            record.verifier_used.as_deref(),
+            Some("cascade-bm25+nli-lexical")
+        );
+        assert_eq!(record.citations.len(), 1);
+        assert_eq!(record.citations[0].source_chunk_id, source_chunk_id);
+        assert!(record.citations[0].verifier.verified);
+        assert_eq!(record.citations[0].verifier.method, "bm25+nli");
+        assert_eq!(
+            record.citations[0].cited_text.as_deref(),
+            Some("OAuth uses access tokens for delegated API access.")
+        );
+    }
 }

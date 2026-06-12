@@ -8,10 +8,10 @@ license.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 metrics.workspace = true
-moa-core = { path = "../../moa-core" }
-moa-lineage-core = { path = "../core" }
+moa-core = { workspace = true }
+moa-lineage-core = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 uuid.workspace = true
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+workspace-hack = { workspace = true }

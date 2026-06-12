@@ -2,8 +2,8 @@
 
 mod support;
 
-use memory_graph::GraphStore;
 use moa_core::{MoaError, Result, ScopeContext, ScopedConn};
+use moa_memory_graph::GraphStore;
 use moa_skills::{LessonContext, NewSkill, SkillRegistry, learn_lesson};
 use sqlx::Row;
 use uuid::Uuid;

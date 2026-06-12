@@ -518,14 +518,6 @@ fn register_metric_descriptions() {
         "Approximate lineage events pending in the durable journal."
     );
     describe_gauge!(
-        "moa_lineage_cold_last_export_timestamp_seconds",
-        "Unix timestamp for the latest successful cold-tier lineage export."
-    );
-    describe_counter!(
-        "moa_lineage_cold_put_errors_total",
-        "Cold-tier object-store write failures."
-    );
-    describe_gauge!(
         "moa_grounding_verified_rate",
         "Latest citation verifier outcome per workspace, encoded as 0 or 1."
     );

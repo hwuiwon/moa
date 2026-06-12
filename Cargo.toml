@@ -10,10 +10,9 @@ members = [
     "crates/moa-memory/pii",
     "crates/moa-memory/vector",
     "crates/moa-lineage/core",
+    "crates/moa-lineage/citation",
     "crates/moa-lineage/sink",
     "crates/moa-lineage/otel",
-    "crates/moa-lineage/citation",
-    "crates/moa-lineage/cold",
     "crates/moa-lineage/audit",
     "crates/moa-auth/authz-schema",
     "crates/moa-auth/authz",
@@ -44,15 +43,15 @@ default-members = [
     "crates/moa-memory/pii",
     "crates/moa-memory/vector",
     "crates/moa-lineage/core",
+    "crates/moa-lineage/citation",
     "crates/moa-lineage/sink",
     "crates/moa-lineage/otel",
-    "crates/moa-lineage/citation",
-    "crates/moa-lineage/cold",
     "crates/moa-lineage/audit",
     "crates/moa-auth/authz-schema",
     "crates/moa-auth/authz",
     "crates/moa-ocsf",
     "crates/moa-auth/providers",
+    "crates/moa-auth/auth0",
     "crates/moa-auth/fga-bootstrap",
     "crates/moa-edge",
     "crates/moa-hands",
@@ -71,12 +70,37 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+moa-auth-providers = { path = "crates/moa-auth/providers" }
+moa-auth-providers-auth0 = { path = "crates/moa-auth/auth0" }
 moa-authz = { path = "crates/moa-auth/authz" }
 moa-authz-schema = { path = "crates/moa-auth/authz-schema" }
-moa-ocsf = { path = "crates/moa-ocsf" }
-moa-auth-providers = { path = "crates/moa-auth/providers" }
+moa-brain = { path = "crates/moa-brain" }
 moa-core = { path = "crates/moa-core" }
+moa-edge = { path = "crates/moa-edge" }
+moa-eval = { path = "crates/moa-eval" }
+moa-fga-bootstrap = { path = "crates/moa-auth/fga-bootstrap" }
+moa-gateway = { path = "crates/moa-gateway" }
+moa-hands = { path = "crates/moa-hands" }
+moa-lineage-audit = { path = "crates/moa-lineage/audit" }
+moa-lineage-citation = { path = "crates/moa-lineage/citation" }
+moa-lineage-core = { path = "crates/moa-lineage/core" }
+moa-lineage-otel = { path = "crates/moa-lineage/otel" }
+moa-lineage-sink = { path = "crates/moa-lineage/sink" }
+moa-loadtest = { path = "crates/moa-loadtest" }
+moa-memory-graph = { path = "crates/moa-memory/graph" }
+moa-memory-ingest = { path = "crates/moa-memory/ingest" }
+moa-memory-lifecycle = { path = "crates/moa-memory/lifecycle" }
+moa-memory-pii = { path = "crates/moa-memory/pii" }
+moa-memory-vector = { path = "crates/moa-memory/vector" }
+moa-ocsf = { path = "crates/moa-ocsf" }
+moa-orchestrator = { path = "crates/moa-orchestrator" }
+moa-providers = { path = "crates/moa-providers" }
+moa-security = { path = "crates/moa-security" }
+moa-session = { path = "crates/moa-session" }
+moa-skills = { path = "crates/moa-skills" }
 moa-test-support = { path = "crates/moa-test-support" }
+workspace-hack = { path = "crates/workspace-hack" }
+xtask = { path = "crates/xtask" }
 anyhow = "1"
 argon2 = "0.5"
 arrow = "53"
@@ -109,7 +133,9 @@ object_store = { version = "0.11", features = ["aws"] }
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-rustls"] }
 opentelemetry_sdk = "0.31"
+httpmock = "0.7"
 parquet = { version = "53", features = ["async", "arrow"] }
+proptest = "1"
 rand = "0.8"
 regex = "1"
 restate-sdk = "0.8"
@@ -145,7 +171,10 @@ tracing-appender = "0.2"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-http = "0.6"
+url = "2.5"
 uuid = { version = "1", features = ["serde", "v7"] }
+wiremock = "0.6"
+testcontainers = "0.23"
 
 [workspace.metadata.hakari]
 hakari-package = "workspace-hack"

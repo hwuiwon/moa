@@ -63,6 +63,7 @@ use crate::turn::util::{
     ensure_dispatch_tool_schema, meaningful_cancel_reason, response_tool_calls,
     stable_tool_call_id, summarize_response_text, tool_call_is_allowed, turn_outcome_for_response,
 };
+use crate::workflows::approval_wait;
 
 const K_CANCEL_REASON_PROMISE: &str = "cancel_reason";
 const K_PENDING_APPROVAL: &str = "pending_approval";
@@ -90,6 +91,12 @@ struct BodyOutcome {
 struct SegmentBoundarySequences {
     start_seq: u64,
     completed_seq: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct BuiltTurnRequest {
+    request: CompletionRequest,
+    active_canary: Option<String>,
 }
 
 /// Restate workflow surface for durable turn execution.
@@ -329,9 +336,13 @@ async fn run_once_inside_workflow(
     }
 
     ctx.set(K_PHASE, Json::from(TurnPhase::Compiling));
-    let Some(mut request) = build_request_inside_workflow(ctx, session_id).await? else {
+    let Some(built_request) = build_request_inside_workflow(ctx, session_id).await? else {
         return Ok(CoreTurnOutcome::Idle);
     };
+    let BuiltTurnRequest {
+        mut request,
+        active_canary,
+    } = built_request;
     if let Some(reason) = cancel_requested(ctx).await? {
         *last_summary = Some(reason);
         return Ok(CoreTurnOutcome::Cancelled);
@@ -381,7 +392,16 @@ async fn run_once_inside_workflow(
             *last_summary = Some(reason);
             return Ok(CoreTurnOutcome::Cancelled);
         }
-        handle_tool_call(ctx, &meta, session_id, &allowed_tools, index, tool_call).await?;
+        handle_tool_call(
+            ctx,
+            &meta,
+            session_id,
+            &allowed_tools,
+            index,
+            tool_call,
+            active_canary.as_deref(),
+        )
+        .await?;
     }
 
     Ok(turn_outcome_for_response(&response))
@@ -390,7 +410,7 @@ async fn run_once_inside_workflow(
 async fn build_request_inside_workflow(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
-) -> Result<Option<CompletionRequest>, HandlerError> {
+) -> Result<Option<BuiltTurnRequest>, HandlerError> {
     let active_user_sequence_num = ctx
         .get::<Json<u64>>(K_USER_MESSAGE_SEQUENCE)
         .await?
@@ -417,7 +437,10 @@ async fn build_request_inside_workflow(
 
     Ok(match prepared.prepared {
         PreparedTurnRequest::Idle => None,
-        PreparedTurnRequest::Request(request) => Some(*request),
+        PreparedTurnRequest::Request(request) => Some(BuiltTurnRequest {
+            request: *request,
+            active_canary: prepared.active_canary,
+        }),
     })
 }
 
@@ -428,6 +451,7 @@ async fn handle_tool_call(
     allowed_tools: &std::collections::BTreeSet<String>,
     index: usize,
     tool_call: &ToolCallContent,
+    active_canary: Option<&str>,
 ) -> Result<(), HandlerError> {
     ctx.set(K_PHASE, Json::from(TurnPhase::Tooling));
     let tool_id = stable_tool_call_id(session_id, index, tool_call);
@@ -505,6 +529,7 @@ async fn handle_tool_call(
             provider_tool_use_id: invocation.id.clone(),
             tool_name: invocation.name.clone(),
             input: invocation.input.clone(),
+            active_canary: active_canary.map(ToOwned::to_owned),
             session_id: Some(session_id),
             workspace_id: meta.workspace_id.clone(),
             user_id: meta.user_id.clone(),
@@ -1036,14 +1061,16 @@ async fn handle_approval_gate(
     score_current_active_segment(ctx, session_id, ScoringPhase::Immediate, &[]).await?;
     update_session_status(ctx, session_id, SessionStatus::WaitingApproval).await?;
     let approval_timeout = approval_wait_timeout();
-    let timed_out_reason = format!(
-        "Auto-denied: no decision within {} minutes",
-        approval_timeout.as_secs() / 60
-    );
+    let timed_out_reason = approval_wait::timeout_reason(approval_timeout);
     let approval_started = Instant::now();
     let decision = restate_sdk::select! {
         decision = awakeable => {
             parse_awakeable_decision(&decision?)?
+        },
+        reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
+            ApprovalDecision::Deny {
+                reason: Some(approval_wait::cancel_reason(&reason?)),
+            }
         },
         _ = ctx.sleep(approval_timeout) => {
             ApprovalDecision::Deny {
@@ -1053,17 +1080,14 @@ async fn handle_approval_gate(
     };
     record_approval_wait(
         approval_started.elapsed(),
-        approval_outcome_label(&decision, &timed_out_reason),
+        approval_wait::outcome_label(&decision, &timed_out_reason),
     );
     ctx.clear(K_PENDING_APPROVAL);
     update_session_status(ctx, session_id, SessionStatus::Running).await?;
 
-    let decided_by = match &decision {
-        ApprovalDecision::Deny {
-            reason: Some(reason),
-        } if reason == &timed_out_reason => "system:auto-timeout".to_string(),
-        _ => meta.user_id.to_string(),
-    };
+    let decided_by = approval_wait::system_decider_for(&decision, &timed_out_reason)
+        .unwrap_or_else(|| meta.user_id.as_str())
+        .to_string();
 
     append_session_event(
         ctx,
@@ -1116,7 +1140,7 @@ async fn cleanup_pending_approval_after_cancel(
     };
 
     let decision = ApprovalDecision::Deny {
-        reason: Some(format!("Cancelled while waiting for approval: {reason}")),
+        reason: Some(approval_wait::cancel_reason(reason)),
     };
     let serialized = serialize_awakeable_decision(&decision)?;
     ctx.resolve_awakeable(&pending.awakeable_id, serialized);
@@ -1874,32 +1898,16 @@ fn parse_session_id(raw: &str) -> Result<SessionId, HandlerError> {
 }
 
 fn approval_wait_timeout() -> Duration {
-    std::env::var(APPROVAL_TIMEOUT_SECS_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS))
+    approval_wait::timeout_from_env(
+        std::env::var(APPROVAL_TIMEOUT_SECS_ENV).ok().as_deref(),
+        DEFAULT_APPROVAL_TIMEOUT_SECS,
+    )
 }
 
 async fn cancel_requested(ctx: &WorkflowContext<'_>) -> Result<Option<String>, HandlerError> {
     Ok(meaningful_cancel_reason(
         ctx.peek_promise::<String>(K_CANCEL_REASON_PROMISE).await?,
     ))
-}
-
-fn approval_outcome_label<'a>(
-    decision: &'a ApprovalDecision,
-    timed_out_reason: &'a str,
-) -> &'a str {
-    match decision {
-        ApprovalDecision::AllowOnce => "allow_once",
-        ApprovalDecision::AlwaysAllow { .. } => "always_allow",
-        ApprovalDecision::Deny {
-            reason: Some(reason),
-        } if reason == timed_out_reason => "timeout",
-        ApprovalDecision::Deny { .. } => "deny",
-    }
 }
 
 fn to_handler_error(error: MoaError) -> HandlerError {

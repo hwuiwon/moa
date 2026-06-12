@@ -255,10 +255,9 @@ and replay resistance on the verify path.
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification and privacy helpers |
 | `moa-memory/vector` (`moa-memory-vector`) | Graph-memory vector storage abstraction and pgvector backend |
 | `moa-lineage/core` (`moa-lineage-core`) | Lineage records and score record types |
+| `moa-lineage/citation` (`moa-lineage-citation`) | Provider citation normalization and answer-source verification |
 | `moa-lineage/sink` (`moa-lineage-sink`) | Async lineage sink writers |
 | `moa-lineage/otel` (`moa-lineage-otel`) | OTel/OpenInference bridge |
-| `moa-lineage/citation` (`moa-lineage-citation`) | Citation/provenance adapters |
-| `moa-lineage/cold` (`moa-lineage-cold`) | Cold lineage export and partition support |
 | `moa-lineage/audit` (`moa-lineage-audit`) | Compliance audit hashes, Merkle roots, signing, DSAR support |
 | `moa-auth/authz-schema` (`moa-authz-schema`) | Typed FGA tuple keys and schema constants |
 | `moa-auth/fga-bootstrap` (`moa-fga-bootstrap`) | Idempotent OpenFGA store and model bootstrap binary |

@@ -4,7 +4,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::Utc;
-use memory_ingest::{IngestApplyReport, IngestionVOClient, SessionTurn, ingestion_object_key};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_brain::retrieval::{HybridRetriever, RetrievalHit, RetrievalRequest};
@@ -21,6 +20,7 @@ use moa_lineage_core::{
     StageTimings, TurnId, VecHit,
 };
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeIndexRow, NodeLabel, PiiClass};
+use moa_memory_ingest::{IngestApplyReport, IngestionVOClient, SessionTurn, ingestion_object_key};
 use moa_memory_vector::PgvectorStore;
 use restate_sdk::prelude::*;
 use serde_json::Value;

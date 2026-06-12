@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use moa_core::{Event, EventRange, ToolCallId, ToolCallRequest, ToolOutput};
+use moa_test_support::postgres::test_database_url;
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::time::sleep;
@@ -18,16 +19,12 @@ use crate::support::session_store_service::{
     append_event_request, get_events_request, test_session_meta,
 };
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
-
 fn spawn_orchestrator(
     ports: OrchestratorPorts,
     memory_dir: &TempDir,
     sandbox_dir: &TempDir,
 ) -> Result<Child> {
-    let postgres_url = std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string());
+    let postgres_url = test_database_url();
 
     Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"))
         .arg("--port")
@@ -59,6 +56,7 @@ fn tool_request(
         provider_tool_use_id: None,
         tool_name: tool_name.to_string(),
         input,
+        active_canary: None,
         session_id: Some(session_id),
         workspace_id: meta.workspace_id.clone(),
         user_id: meta.user_id.clone(),
@@ -79,6 +77,7 @@ fn tool_request_with_provider_id(
         provider_tool_use_id: provider_tool_use_id.map(ToOwned::to_owned),
         tool_name: tool_name.to_string(),
         input,
+        active_canary: None,
         session_id: Some(session_id),
         workspace_id: meta.workspace_id.clone(),
         user_id: meta.user_id.clone(),
@@ -258,6 +257,145 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires local restate-server and Postgres"]
+async fn tool_executor_blocks_canary_input_before_backend_execution() -> Result<()> {
+    let _guard = RESTATE_E2E_LOCK.lock().await;
+    let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
+    let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
+    let ports = reserve_orchestrator_ports()?;
+    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
+    let endpoint_url = deployment_endpoint_url(ports.restate);
+
+    let result = async {
+        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+
+        let client = reqwest::Client::new();
+        let ingress = restate_ingress_url();
+        let ingress = ingress.as_str();
+        let meta = test_session_meta("tool-executor-canary-block");
+        let identity = test_user_identity();
+        grant_workspace_member(&identity, &meta.workspace_id).await?;
+
+        let create_request = client.post(format!(
+            "{}/SessionStore/create_session",
+            ingress.trim_end_matches('/')
+        ));
+        let create_response = with_identity(create_request, &identity)
+            .json(&meta)
+            .send()
+            .await
+            .context("create session via restate ingress")?;
+        let session_id = create_response
+            .json::<moa_core::SessionId>()
+            .await
+            .context("deserialize create_session response")?;
+        grant_session_participant(&identity, session_id).await?;
+
+        let canary = moa_security::new_canary_token();
+        let tool_call_id = ToolCallId::new();
+        let mut write_request = tool_request(
+            tool_call_id,
+            "file_write",
+            json!({
+                "path": "blocked-canary.txt",
+                "content": canary.clone(),
+            }),
+            session_id,
+            &meta,
+        );
+        write_request.active_canary = Some(canary);
+
+        let write_output = client
+            .post(format!(
+                "{}/ToolExecutor/execute",
+                ingress.trim_end_matches('/')
+            ))
+            .json(&write_request)
+            .send()
+            .await
+            .context("call ToolExecutor/file_write with canary input")?
+            .error_for_status()
+            .context("canary block should return a successful handler response")?
+            .json::<ToolOutput>()
+            .await
+            .context("deserialize canary block output")?;
+        assert!(write_output.is_error);
+        assert!(
+            write_output.to_text().contains("protected canary token"),
+            "expected blocked output to name the canary leak"
+        );
+        assert!(
+            !file_named_exists_under(sandbox_dir.path(), "blocked-canary.txt")?,
+            "blocked file_write must not reach the sandbox backend"
+        );
+
+        let request = client.post(format!(
+            "{}/SessionStore/get_events",
+            ingress.trim_end_matches('/')
+        ));
+        let events = with_identity(request, &identity)
+            .json(&get_events_request(session_id, EventRange::all()))
+            .send()
+            .await
+            .context("fetch canary block events via restate ingress")?
+            .json::<Vec<moa_core::EventRecord>>()
+            .await
+            .context("deserialize canary block event response")?;
+
+        let warning_count = events
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::Warning { message }
+                    if message.contains("active canary leaked into tool input")
+                )
+            })
+            .count();
+        let error_count = events
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::ToolError {
+                        tool_id,
+                        error,
+                        retryable,
+                        ..
+                    } if *tool_id == tool_call_id
+                        && error.contains("protected canary token")
+                        && !retryable
+                )
+            })
+            .count();
+        let result_count = events
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::ToolResult { tool_id, .. } if *tool_id == tool_call_id
+                )
+            })
+            .count();
+
+        assert_eq!(warning_count, 1, "expected one persisted canary warning");
+        assert_eq!(error_count, 1, "expected one persisted canary ToolError");
+        assert_eq!(
+            result_count, 0,
+            "blocked canary calls must not persist a ToolResult"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    let _ = orchestrator.kill();
+    let _ = orchestrator.wait();
+
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local restate-server and Postgres"]
 async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Result<()> {
     let _guard = RESTATE_E2E_LOCK.lock().await;
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
@@ -362,6 +500,25 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
     let _ = orchestrator.wait();
 
     result
+}
+
+fn file_named_exists_under(root: &std::path::Path, file_name: &str) -> Result<bool> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        for entry in std::fs::read_dir(&path)
+            .with_context(|| format!("read sandbox directory {}", path.display()))?
+        {
+            let entry = entry.with_context(|| format!("read entry under {}", path.display()))?;
+            let path = entry.path();
+            if path.file_name().and_then(|name| name.to_str()) == Some(file_name) {
+                return Ok(true);
+            }
+            if path.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    Ok(false)
 }
 
 async fn wait_for_tool_result_events(

@@ -16,13 +16,6 @@ groups:
           summary: Lineage writer is not flushing
           description: "Capture is alive but the writer has not flushed in 10 minutes. Check Postgres connectivity and fjall disk space."
 
-      - alert: MOAColdTierLagging
-        expr: time() - moa_lineage_cold_last_export_timestamp_seconds > 7200
-        for: 1h
-        annotations:
-          summary: Cold-tier export is more than two hours behind
-          description: "Lineage cold-tier export is lagging; retention can drop hot data before archival."
-
   - name: moa-grounding
     interval: 5m
     rules:

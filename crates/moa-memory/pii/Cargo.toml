@@ -6,14 +6,14 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-moa-memory-graph = { path = "../graph" }
+moa-memory-graph = { workspace = true }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+workspace-hack = { workspace = true }
 
 [dev-dependencies]
 tokio.workspace = true
-wiremock = "0.6"
+wiremock.workspace = true

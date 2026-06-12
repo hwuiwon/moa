@@ -1,7 +1,7 @@
 //! Shared graph-backed skill integration fixtures.
 
-use memory_graph::AgeGraphStore;
 use moa_core::{MoaError, Result, ScopeContext, WorkspaceId};
+use moa_memory_graph::AgeGraphStore;
 use sqlx::PgConnection;
 
 pub(crate) static GRAPH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

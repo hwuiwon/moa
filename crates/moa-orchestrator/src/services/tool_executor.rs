@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use memory_ingest::{execute_memory_tool, is_fast_memory_tool};
 pub use moa_core::wire::ToolDescriptor;
 use moa_core::wire::tool_descriptor;
 use moa_core::{
@@ -13,6 +12,8 @@ use moa_core::{
     record_tool_idempotency_scan,
 };
 use moa_hands::ToolRouter;
+use moa_memory_ingest::{execute_memory_tool, is_fast_memory_tool};
+use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
@@ -95,6 +96,19 @@ impl ToolExecutor for ToolExecutorImpl {
         annotate_restate_handler_span("ToolExecutor", "execute");
         let request = request.into_inner();
         let session = resolve_session(&ctx, &request).await?;
+
+        let serialized_input = serde_json::to_string(&request.input)
+            .map_err(|error| to_handler_error(error.into()))?;
+        if matches!(
+            screen_tool_input_for_canary(request.active_canary.as_deref(), &serialized_input),
+            ToolInputCanaryScreening::Blocked(_)
+        ) {
+            if !prior_tool_call_event_exists(&ctx, &request).await? {
+                append_tool_call_event(&ctx, &request).await?;
+            }
+            append_tool_canary_block_events(&ctx, &request).await?;
+            return Ok(Json::from(blocked_canary_output(&request.tool_name)));
+        }
 
         if !prior_tool_call_event_exists(&ctx, &request).await? {
             append_tool_call_event(&ctx, &request).await?;
@@ -466,6 +480,52 @@ async fn append_tool_error_event(
     Ok(())
 }
 
+async fn append_tool_canary_block_events(
+    ctx: &Context<'_>,
+    request: &ToolCallRequest,
+) -> Result<(), HandlerError> {
+    let Some(session_id) = request.session_id else {
+        return Ok(());
+    };
+
+    ctx.service_client::<RestateSessionStoreClient>()
+        .append_event(Json(AppendEventRequest {
+            session_id,
+            event: Event::Warning {
+                message: format!(
+                    "blocked tool {} because the active canary leaked into tool input",
+                    request.tool_name
+                ),
+            },
+        }))
+        .call()
+        .await?;
+
+    ctx.service_client::<RestateSessionStoreClient>()
+        .append_event(Json(AppendEventRequest {
+            session_id,
+            event: Event::ToolError {
+                tool_id: request.tool_call_id,
+                provider_tool_use_id: request.provider_tool_use_id.clone(),
+                tool_name: request.tool_name.clone(),
+                error: blocked_canary_message(&request.tool_name),
+                retryable: false,
+            },
+        }))
+        .call()
+        .await?;
+
+    Ok(())
+}
+
+fn blocked_canary_output(tool_name: &str) -> ToolOutput {
+    ToolOutput::error(blocked_canary_message(tool_name), Duration::ZERO)
+}
+
+fn blocked_canary_message(tool_name: &str) -> String {
+    format!("tool {tool_name} blocked because it leaked a protected canary token")
+}
+
 fn tool_run_retry_policy(idempotency_class: IdempotencyClass) -> RunRetryPolicy {
     let max_attempts = retry_max_attempts_for(idempotency_class);
     match idempotency_class {
@@ -497,7 +557,7 @@ mod tests {
     use moa_core::{Event, EventRecord, EventType, ToolCallId, WorkspaceId};
     use uuid::Uuid;
 
-    use super::{has_prior_tool_call_event, synthetic_session_id};
+    use super::{blocked_canary_output, has_prior_tool_call_event, synthetic_session_id};
 
     fn tool_call_record(tool_call_id: ToolCallId) -> EventRecord {
         EventRecord {
@@ -539,5 +599,18 @@ mod tests {
         );
         assert_eq!(session_id.0.get_version_num(), 4);
         assert_eq!(session_id.0.get_variant(), uuid::Variant::RFC4122);
+    }
+
+    #[test]
+    fn canary_block_output_is_terminal_tool_error() {
+        // Pins: ToolExecutor reports blocked canary input as a tool error before backend execution.
+        let output = blocked_canary_output("bash");
+
+        assert!(output.is_error);
+        assert_eq!(
+            output.to_text(),
+            "tool bash blocked because it leaked a protected canary token"
+        );
+        assert_eq!(output.duration, std::time::Duration::ZERO);
     }
 }

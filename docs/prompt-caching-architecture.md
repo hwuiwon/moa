@@ -7,6 +7,12 @@ The brain does not emit provider-specific cache breakpoints, TTLs, retention
 policies, or Gemini cached-content names. Its job is to keep repeated prompt
 sections at the beginning and per-turn sections near the active turn.
 
+There is no brain-native cache layer that owns prompt-cache allocation,
+cache-write pricing, or provider retention policy. The removed native layer
+should not be recreated in pipeline processors; OpenAI `prompt_cache_key`,
+Anthropic `cache_control`, provider cache usage metrics, and provider
+cache-write pricing remain provider-owned behavior.
+
 ### Stable Prefix
 
 The long-lived static prefix is produced by the byte-stable pipeline stages:

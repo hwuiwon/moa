@@ -11,21 +11,21 @@ integration = []
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-moa-authz = { path = "../moa-auth/authz" }
-moa-authz-schema = { path = "../moa-auth/authz-schema" }
-moa-core = { path = "../moa-core" }
-moa-security = { path = "../moa-security" }
-moa-session = { path = "../moa-session" }
+moa-authz = { workspace = true }
+moa-authz-schema = { workspace = true }
+moa-core = { workspace = true }
+moa-security = { workspace = true }
+moa-session = { workspace = true }
 nix = { version = "0.29", features = ["signal", "process"] }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "json", "uuid", "chrono"] }
-testcontainers = "0.23"
+testcontainers.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-url = "2.5"
+url.workspace = true
 uuid.workspace = true
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+workspace-hack = { workspace = true }

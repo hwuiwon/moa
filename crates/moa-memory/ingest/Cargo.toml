@@ -8,10 +8,10 @@ license.workspace = true
 async-trait.workspace = true
 blake3.workspace = true
 chrono.workspace = true
-moa-core = { path = "../../moa-core" }
-moa-memory-graph = { path = "../graph" }
-moa-memory-pii = { path = "../pii" }
-moa-memory-vector = { path = "../vector" }
+moa-core = { workspace = true }
+moa-memory-graph = { workspace = true }
+moa-memory-pii = { workspace = true }
+moa-memory-vector = { workspace = true }
 moka.workspace = true
 metrics.workspace = true
 reqwest.workspace = true
@@ -25,11 +25,11 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+workspace-hack = { workspace = true }
 
 [dev-dependencies]
-moa-hands = { path = "../../moa-hands" }
-moa-session = { path = "../../moa-session" }
+moa-hands = { workspace = true }
+moa-session = { workspace = true }
 moa-test-support.workspace = true
 tempfile.workspace = true
-wiremock = "0.6"
+wiremock.workspace = true

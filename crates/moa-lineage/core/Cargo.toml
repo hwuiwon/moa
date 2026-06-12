@@ -6,8 +6,8 @@ license.workspace = true
 
 [dependencies]
 chrono = { workspace = true, features = ["serde"] }
-moa-core = { path = "../../moa-core" }
+moa-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 uuid.workspace = true
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+workspace-hack = { workspace = true }

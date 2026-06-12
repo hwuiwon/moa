@@ -9,13 +9,13 @@ age = "0.11"
 async-trait.workspace = true
 chrono.workspace = true
 globset.workspace = true
-moa-core = { path = "../moa-core" }
+moa-core = { workspace = true }
 serde_json.workspace = true
 shell-words.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+workspace-hack = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

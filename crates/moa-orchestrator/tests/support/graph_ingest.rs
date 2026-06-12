@@ -7,15 +7,6 @@ use moa_core::{Event, EventRecord, SessionId, WorkspaceId};
 use sqlx::PgPool;
 use tokio::time::sleep;
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
-
-/// Returns the Postgres URL used by local Restate e2e tests.
-pub fn test_database_url() -> String {
-    std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string())
-}
-
 /// Waits until the asynchronous turn-ingestion invocation has written graph nodes.
 pub async fn wait_for_ingested_turn(
     pool: &PgPool,

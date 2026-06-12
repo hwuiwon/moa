@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use moa_core::{Event, EventRange, EventRecord, SessionId};
+use moa_test_support::postgres::test_database_url;
 use std::process::{Child, Command, Stdio};
 
 use crate::support::restate_runtime::{
@@ -13,12 +14,8 @@ use crate::support::session_store_service::{
     append_event_request, get_events_request, test_session_meta, user_message_event,
 };
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
-
 fn spawn_orchestrator(ports: OrchestratorPorts) -> Result<Child> {
-    let postgres_url = std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string());
+    let postgres_url = test_database_url();
 
     Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"))
         .arg("--port")

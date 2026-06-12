@@ -8,7 +8,7 @@ publish = false
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 uuid = { workspace = true, features = ["v4"] }
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+workspace-hack = { workspace = true }
 
 [dev-dependencies]
 serde_json.workspace = true

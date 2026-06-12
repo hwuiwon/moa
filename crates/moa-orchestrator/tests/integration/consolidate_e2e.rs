@@ -9,6 +9,7 @@ use moa_orchestrator::objects::workspace::{
     WorkspaceApprovalPolicy, WorkspaceConfig, WorkspaceStatus,
 };
 use moa_orchestrator::workflows::consolidate::{ConsolidateReport, ConsolidateRequest};
+use moa_test_support::postgres::test_database_url;
 use tempfile::TempDir;
 
 use crate::support::restate_runtime::{
@@ -16,16 +17,12 @@ use crate::support::restate_runtime::{
     reserve_orchestrator_ports, restate_admin_url, restate_ingress_url,
 };
 
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
-
 fn spawn_orchestrator(
     ports: OrchestratorPorts,
     memory_dir: &TempDir,
     sandbox_dir: &TempDir,
 ) -> Result<Child> {
-    let postgres_url = std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string());
+    let postgres_url = test_database_url();
 
     Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"))
         .arg("--port")

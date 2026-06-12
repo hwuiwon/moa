@@ -17,7 +17,7 @@ chrono = { workspace = true, features = ["serde"] }
 crc32fast.workspace = true
 moa-authz.workspace = true
 moa-authz-schema.workspace = true
-moa-auth-providers-auth0 = { path = "../auth0", optional = true }
+moa-auth-providers-auth0 = { workspace = true, optional = true }
 moa-core.workspace = true
 moka.workspace = true
 rand.workspace = true
@@ -29,7 +29,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+workspace-hack = { workspace = true }
 
 [dev-dependencies]
 reqwest.workspace = true

@@ -249,7 +249,8 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             .await?;
             pipeline_compile_span.record("moa.pipeline.total_tokens", ctx.token_count as i64);
             register_selected_skill_files(tool_router.as_deref(), &session, &mut ctx).await;
-            emit_context_lineage(lineage.as_ref(), turn_id, &session, &ctx, &pipeline_compile_span);
+            let citation_sources =
+                emit_context_lineage(lineage.as_ref(), turn_id, &session, &ctx, &pipeline_compile_span);
 
             let mut emit_runtime = |event| {
                 let _ = runtime_tx.send(event);
@@ -346,10 +347,12 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 llm_provider.name(),
                 &request_model,
                 &response,
+                &citation_sources,
                 response_cost_cents,
                 llm_call_duration,
                 &llm_call_span,
-            );
+            )
+            .await;
             llm_call_span.record(
                 "gen_ai.usage.input_tokens",
                 response_usage.total_input_tokens() as i64,

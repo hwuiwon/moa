@@ -67,6 +67,24 @@ impl PiiCategory {
             _ => None,
         }
     }
+
+    /// Returns the stable lowercase field name used by redaction event streams.
+    #[must_use]
+    pub const fn field_name(self) -> &'static str {
+        match self {
+            Self::Person => "person",
+            Self::Email => "email",
+            Self::Phone => "phone",
+            Self::Address => "address",
+            Self::Ssn => "ssn",
+            Self::MedicalRecord => "medical_record",
+            Self::FinancialAccount => "financial_account",
+            Self::GovernmentId => "government_id",
+            Self::Url => "url",
+            Self::Date => "date",
+            Self::Secret => "secret",
+        }
+    }
 }
 
 /// One detected PII span in UTF-8 byte offsets.
@@ -80,6 +98,52 @@ pub struct PiiSpan {
     pub category: PiiCategory,
     /// Model confidence for this span.
     pub confidence: f32,
+    /// Optional caller-facing replacement text for redaction.
+    ///
+    /// Older serialized spans may omit this field; callers should use
+    /// [`PiiSpan::redaction_replacement`] rather than reading it directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<String>,
+}
+
+impl PiiSpan {
+    /// Builds a span with the canonical replacement text for its category.
+    #[must_use]
+    pub fn new(start: usize, end: usize, category: PiiCategory, confidence: f32) -> Self {
+        Self::with_replacement(
+            start,
+            end,
+            category,
+            confidence,
+            redaction_replacement(category),
+        )
+    }
+
+    /// Builds a span with an explicit replacement text.
+    #[must_use]
+    pub fn with_replacement(
+        start: usize,
+        end: usize,
+        category: PiiCategory,
+        confidence: f32,
+        replacement: impl Into<String>,
+    ) -> Self {
+        Self {
+            start,
+            end,
+            category,
+            confidence,
+            replacement: Some(replacement.into()),
+        }
+    }
+
+    /// Returns the replacement text to use when redacting this span.
+    #[must_use]
+    pub fn redaction_replacement(&self) -> &str {
+        self.replacement
+            .as_deref()
+            .unwrap_or(redaction_replacement(self.category))
+    }
 }
 
 /// Full classifier result for one input text.
@@ -132,14 +196,16 @@ pub fn redact_text(text: &str, spans: &[PiiSpan]) -> String {
             continue;
         }
         redacted.push_str(&text[cursor..span.start]);
-        redacted.push_str(redaction_token(span.category));
+        redacted.push_str(span.redaction_replacement());
         cursor = span.end;
     }
     redacted.push_str(&text[cursor..]);
     redacted
 }
 
-fn redaction_token(category: PiiCategory) -> &'static str {
+/// Returns the canonical bracketed replacement for a PII category.
+#[must_use]
+pub const fn redaction_replacement(category: PiiCategory) -> &'static str {
     match category {
         PiiCategory::Person => "[PERSON_REDACTED]",
         PiiCategory::Email => "[EMAIL_REDACTED]",
@@ -155,11 +221,148 @@ fn redaction_token(category: PiiCategory) -> &'static str {
     }
 }
 
+/// Deterministic local classifier used when no external PII service is configured.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HeuristicPiiClassifier;
+
+/// Classifies text with MOA's deterministic local PII heuristics.
+///
+/// The heuristic model is intentionally conservative and journal-stable: it
+/// detects the same token-level email, secret, SSN-like, card-like, and MRN-like
+/// samples that the ingestion fallback historically detected, plus the phone
+/// tokens used by the audit vault fallback.
+#[must_use]
+pub fn classify_heuristic(text: &str) -> PiiResult {
+    let tokens = token_spans(text);
+    let mut spans = Vec::new();
+
+    for (index, token) in tokens.iter().enumerate() {
+        if token.text.contains('@') {
+            push_heuristic_span(token, PiiCategory::Email, 0.80, &mut spans);
+        } else if token.text.contains("sk-") || token.text.to_ascii_lowercase().contains("secret") {
+            push_heuristic_span(token, PiiCategory::Secret, 0.80, &mut spans);
+        } else if looks_like_ssn(token.text) {
+            push_heuristic_span(token, PiiCategory::Ssn, 0.90, &mut spans);
+        } else if looks_like_card(token.text) {
+            push_heuristic_span(token, PiiCategory::FinancialAccount, 0.95, &mut spans);
+        } else if looks_like_phone(token.text) {
+            push_heuristic_span(token, PiiCategory::Phone, 0.90, &mut spans);
+        } else if token.text.trim_matches(':').eq_ignore_ascii_case("MRN")
+            && let Some(next) = tokens.get(index + 1)
+        {
+            push_heuristic_span(next, PiiCategory::MedicalRecord, 0.90, &mut spans);
+        }
+    }
+
+    let class = if spans
+        .iter()
+        .any(|span| matches!(span.category, PiiCategory::Secret))
+    {
+        PiiClass::Restricted
+    } else if spans
+        .iter()
+        .any(|span| matches!(span.category, PiiCategory::Ssn))
+    {
+        PiiClass::Phi
+    } else if spans.is_empty() {
+        PiiClass::None
+    } else {
+        PiiClass::Pii
+    };
+
+    PiiResult {
+        class,
+        spans,
+        model_version: "moa-heuristic:v1".to_string(),
+        abstained: false,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TokenSpan<'a> {
+    text: &'a str,
+    start: usize,
+    end: usize,
+}
+
+fn token_spans(text: &str) -> Vec<TokenSpan<'_>> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_whitespace() {
+            if let Some(token_start) = start.take() {
+                tokens.push(TokenSpan {
+                    text: &text[token_start..index],
+                    start: token_start,
+                    end: index,
+                });
+            }
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+    if let Some(token_start) = start {
+        tokens.push(TokenSpan {
+            text: &text[token_start..],
+            start: token_start,
+            end: text.len(),
+        });
+    }
+    tokens
+}
+
+fn push_heuristic_span(
+    token: &TokenSpan<'_>,
+    category: PiiCategory,
+    confidence: f32,
+    spans: &mut Vec<PiiSpan>,
+) {
+    spans.push(PiiSpan::new(token.start, token.end, category, confidence));
+}
+
+fn looks_like_ssn(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    bytes.len() == 11
+        && bytes[3] == b'-'
+        && bytes[6] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 3 || index == 6 || byte.is_ascii_digit())
+}
+
+fn looks_like_card(token: &str) -> bool {
+    let digits = token
+        .bytes()
+        .filter(|byte| byte.is_ascii_digit())
+        .collect::<Vec<_>>();
+    digits.len() >= 13
+        && digits.len() <= 19
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'-' || byte == b' ')
+}
+
+fn looks_like_phone(token: &str) -> bool {
+    let digits = token.chars().filter(|ch| ch.is_ascii_digit()).count();
+    digits >= 10
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || "+-().".contains(ch))
+}
+
 /// Async PII classification abstraction used by ingestion and privacy workflows.
 #[async_trait::async_trait]
 pub trait PiiClassifier: Send + Sync {
     /// Classifies one input string and returns spans plus the aggregate privacy class.
     async fn classify(&self, text: &str) -> Result<PiiResult>;
+}
+
+#[async_trait::async_trait]
+impl PiiClassifier for HeuristicPiiClassifier {
+    async fn classify(&self, text: &str) -> Result<PiiResult> {
+        Ok(classify_heuristic(text))
+    }
 }
 
 /// Errors returned by PII classification helpers.
@@ -189,12 +392,14 @@ mod tests {
                 end: 23,
                 category: PiiCategory::Email,
                 confidence: 0.99,
+                replacement: Some(redaction_replacement(PiiCategory::Email).to_string()),
             },
             PiiSpan {
                 start: 32,
                 end: 43,
                 category: PiiCategory::Ssn,
                 confidence: 0.99,
+                replacement: Some(redaction_replacement(PiiCategory::Ssn).to_string()),
             },
         ];
 
@@ -212,6 +417,7 @@ mod tests {
             end: 100,
             category: PiiCategory::Secret,
             confidence: 0.99,
+            replacement: Some(redaction_replacement(PiiCategory::Secret).to_string()),
         }];
 
         assert_eq!(redact_text(text, &spans), text);

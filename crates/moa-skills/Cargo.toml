@@ -6,11 +6,11 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
-moa-core = { path = "../moa-core" }
-moa-eval = { path = "../moa-eval" }
-memory-graph = { package = "moa-memory-graph", path = "../moa-memory/graph" }
-moa-providers = { path = "../moa-providers" }
-moa-session = { path = "../moa-session" }
+moa-core = { workspace = true }
+moa-eval = { workspace = true }
+moa-memory-graph = { workspace = true }
+moa-providers = { workspace = true }
+moa-session = { workspace = true }
 moka.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,9 +21,9 @@ tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+workspace-hack = { workspace = true }
 
 [dev-dependencies]
 async-trait.workspace = true
-moa-test-support = { path = "../moa-test-support" }
+moa-test-support = { workspace = true }
 tempfile.workspace = true

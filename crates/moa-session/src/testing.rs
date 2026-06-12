@@ -13,7 +13,8 @@ static TEST_SCHEMA_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// Returns the Postgres URL used by workspace tests.
 pub fn test_database_url() -> String {
-    std::env::var("TEST_DATABASE_URL")
+    std::env::var("MOA_TEST_POSTGRES_URL")
+        .or_else(|_| std::env::var("TEST_DATABASE_URL"))
         .or_else(|_| std::env::var("DATABASE_URL"))
         .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string())
 }

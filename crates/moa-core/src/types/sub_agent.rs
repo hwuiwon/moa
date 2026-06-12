@@ -246,6 +246,9 @@ pub enum SubAgentTurnPreparation {
     Request {
         /// Completion request to send through `LLMGateway`.
         request: Box<CompletionRequest>,
+        /// Active per-turn canary injected into the request when tools were available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_canary: Option<String>,
         /// Synthetic session metadata used for policies and tool routing.
         session_meta: Box<SessionMeta>,
         /// Root parent session receiving product-visible events.

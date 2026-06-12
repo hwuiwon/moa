@@ -250,11 +250,6 @@ impl ServiceSpan {
             })
             .or_else(|| self.entity.as_deref().and_then(PiiCategory::parse_label))
             .ok_or_else(|| PiiError::Parse("span missing recognized category".to_string()))?;
-        Ok(PiiSpan {
-            start: self.start,
-            end: self.end,
-            category,
-            confidence,
-        })
+        Ok(PiiSpan::new(self.start, self.end, category, confidence))
     }
 }

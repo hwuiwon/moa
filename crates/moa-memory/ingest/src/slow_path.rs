@@ -12,10 +12,11 @@ use crate::{
 };
 use moa_core::{MoaConfig, ScopeContext, ScopedConn, traits::EmbeddingProvider};
 use moa_memory_graph::{
-    AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
+    AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent,
 };
 use moa_memory_pii::{
-    OpenAiPrivacyFilterClassifier, PiiCategory, PiiClassifier, PiiResult, PiiSpan, redact_text,
+    OpenAiPrivacyFilterClassifier, PiiClassifier, PiiResult, PiiSpan, classify_heuristic,
+    redact_text,
 };
 use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
 use restate_sdk::prelude::*;
@@ -347,7 +348,7 @@ async fn classify_facts(
 
     let mut classified = Vec::with_capacity(facts.len());
     for fact in facts {
-        let result = heuristic_classify(&fact.summary);
+        let result = classify_heuristic(&fact.summary);
         let redacted_fact = redact_fact(fact, &result);
         classified.push(ClassifiedFact {
             fact: redacted_fact,
@@ -441,94 +442,14 @@ fn redact_fact_part(part: &str, summary: &str, spans: &[PiiSpan]) -> String {
 fn redaction_replacement(source_text: &str, span: &PiiSpan) -> String {
     redact_text(
         source_text,
-        &[PiiSpan {
-            start: 0,
-            end: source_text.len(),
-            category: span.category,
-            confidence: span.confidence,
-        }],
+        &[PiiSpan::with_replacement(
+            0,
+            source_text.len(),
+            span.category,
+            span.confidence,
+            span.redaction_replacement(),
+        )],
     )
-}
-
-fn heuristic_classify(text: &str) -> PiiResult {
-    let mut spans = Vec::new();
-    let tokens = text.split_whitespace().collect::<Vec<_>>();
-    for (index, token) in tokens.iter().enumerate() {
-        if token.contains('@') {
-            push_span(text, token, PiiCategory::Email, 0.80, &mut spans);
-        } else if token.contains("sk-") || token.to_ascii_lowercase().contains("secret") {
-            push_span(text, token, PiiCategory::Secret, 0.80, &mut spans);
-        } else if looks_like_ssn(token) {
-            push_span(text, token, PiiCategory::Ssn, 0.90, &mut spans);
-        } else if looks_like_card(token) {
-            push_span(text, token, PiiCategory::FinancialAccount, 0.95, &mut spans);
-        } else if token.trim_matches(':').eq_ignore_ascii_case("MRN")
-            && let Some(next) = tokens.get(index + 1)
-        {
-            push_span(text, next, PiiCategory::MedicalRecord, 0.90, &mut spans);
-        }
-    }
-    let class = if spans
-        .iter()
-        .any(|span| matches!(span.category, PiiCategory::Secret))
-    {
-        PiiClass::Restricted
-    } else if spans
-        .iter()
-        .any(|span| matches!(span.category, PiiCategory::Ssn))
-    {
-        PiiClass::Phi
-    } else if spans.is_empty() {
-        PiiClass::None
-    } else {
-        PiiClass::Pii
-    };
-    PiiResult {
-        class,
-        spans,
-        model_version: "moa-heuristic:v1".to_string(),
-        abstained: false,
-    }
-}
-
-fn push_span(
-    text: &str,
-    token: &str,
-    category: PiiCategory,
-    confidence: f32,
-    spans: &mut Vec<PiiSpan>,
-) {
-    if let Some(start) = text.find(token) {
-        spans.push(PiiSpan {
-            start,
-            end: start + token.len(),
-            category,
-            confidence,
-        });
-    }
-}
-
-fn looks_like_ssn(token: &str) -> bool {
-    let bytes = token.as_bytes();
-    bytes.len() == 11
-        && bytes[3] == b'-'
-        && bytes[6] == b'-'
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(index, byte)| index == 3 || index == 6 || byte.is_ascii_digit())
-}
-
-fn looks_like_card(token: &str) -> bool {
-    let digits = token
-        .bytes()
-        .filter(|byte| byte.is_ascii_digit())
-        .collect::<Vec<_>>();
-    digits.len() >= 13
-        && digits.len() <= 19
-        && token
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte == b'-' || byte == b' ')
 }
 
 async fn embed_batch(
@@ -1151,11 +1072,11 @@ mod tests {
     use chrono::Utc;
     use moa_core::{ContextMessage, SessionId, UserId, WorkspaceId};
     use moa_memory_graph::EdgeLabel;
-    use moa_memory_pii::{PiiCategory, PiiClass, PiiResult, PiiSpan};
+    use moa_memory_pii::{PiiCategory, PiiClass, PiiResult, PiiSpan, classify_heuristic};
 
     use super::{
-        entity_fact_edge_intent, fact_entity_edge_intent, fact_object_edge_label,
-        heuristic_classify, redact_fact, turn_transcript,
+        entity_fact_edge_intent, fact_entity_edge_intent, fact_object_edge_label, redact_fact,
+        turn_transcript,
     };
     use crate::{ExtractedFact, ExtractedFactScopeHint, fact_hash};
 
@@ -1176,8 +1097,9 @@ mod tests {
     }
 
     #[test]
-    fn heuristic_classifier_marks_secrets_restricted() {
-        let result = heuristic_classify("The API secret is sk-test-123.");
+    fn pii_heuristic_classifier_marks_secrets_restricted() {
+        // Pins: ingest fallback PII classification uses the shared heuristic classifier.
+        let result = classify_heuristic("The API secret is sk-test-123.");
 
         assert_eq!(result.class, PiiClass::Restricted);
         assert!(
@@ -1326,12 +1248,7 @@ mod tests {
         let start = summary.find(needle).expect("needle present");
         PiiResult {
             class: PiiClass::Pii,
-            spans: vec![PiiSpan {
-                start,
-                end: start + needle.len(),
-                category,
-                confidence: 0.99,
-            }],
+            spans: vec![PiiSpan::new(start, start + needle.len(), category, 0.99)],
             model_version: "test".to_string(),
             abstained: false,
         }
