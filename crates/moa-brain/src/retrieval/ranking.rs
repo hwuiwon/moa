@@ -8,7 +8,7 @@ use moa_memory_graph::NodeIndexRow;
 use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.
-pub const RANKING_PIPELINE_VERSION: u32 = 5;
+pub const RANKING_PIPELINE_VERSION: u32 = 6;
 
 /// Ranking mode for hydrated hybrid retrieval candidates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,12 +197,24 @@ impl<'a> FeatureRanker<'a> {
 }
 
 /// Tokenizes text using lowercase ASCII alphanumeric token splits.
+///
+/// Pure-alphabetic tokens are Snowball-stemmed so morphological variants
+/// match across query and fact text (`deploys` ↔ `deploy`, `required` ↔
+/// `require`). Tokens containing digits are kept verbatim because they act
+/// as stable identifiers.
 #[must_use]
 pub fn normalize_tokens(text: &str) -> BTreeSet<String> {
+    let stemmer = rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English);
     text.split(|ch: char| !ch.is_ascii_alphanumeric())
         .filter_map(|raw| {
             let token = raw.to_ascii_lowercase();
-            (token.len() >= 3 || token.chars().any(|ch| ch.is_ascii_digit())).then_some(token)
+            if token.len() < 3 && !token.chars().any(|ch| ch.is_ascii_digit()) {
+                return None;
+            }
+            if token.chars().any(|ch| ch.is_ascii_digit()) {
+                return Some(token);
+            }
+            Some(stemmer.stem(&token).into_owned())
         })
         .collect()
 }

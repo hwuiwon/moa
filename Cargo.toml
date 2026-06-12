@@ -113,6 +113,7 @@ parquet = { version = "53", features = ["async", "arrow"] }
 rand = "0.8"
 regex = "1"
 restate-sdk = "0.8"
+rust-stemmers = "1"
 restate-sdk-shared-core = "0.8"
 reqwest = { version = "0.13", default-features = false, features = [
     "http2",
