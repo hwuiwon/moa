@@ -10,9 +10,10 @@ use moa_core::wire::{
     TurnOutcomeKind as ExecutionTurnOutcomeKind,
 };
 use moa_core::{
-    ActiveSegment, ApprovalDecision, CancelMode, Event, EventRange, MoaError, Result as MoaResult,
-    SessionId, SessionMeta, SessionStatus, SubAgentChildRef, TurnOutcome, UserMessage,
-    record_turn_event_persist_duration,
+    ActiveSegment, ApprovalDecision, CancelMode, ConsumeSubAgentChildResultInput,
+    ConsumeSubAgentChildResultOutput, Event, EventRange, MarkSubAgentChildTerminalInput, MoaError,
+    Result as MoaResult, SessionId, SessionMeta, SessionStatus, SubAgentChildRef,
+    SubAgentTerminalResult, TurnOutcome, UserMessage, record_turn_event_persist_duration,
 };
 use restate_sdk::prelude::*;
 use tracing::Instrument;
@@ -89,6 +90,16 @@ pub trait Session {
 
     /// Removes a root-owned child sub-agent from the active registry.
     async fn remove_child(sub_agent_id: String) -> Result<(), HandlerError>;
+
+    /// Caches a root child terminal result until a wait consumes it.
+    async fn mark_child_terminal(
+        input: Json<MarkSubAgentChildTerminalInput>,
+    ) -> Result<(), HandlerError>;
+
+    /// Consumes a cached root child terminal result.
+    async fn consume_child_result(
+        input: Json<ConsumeSubAgentChildResultInput>,
+    ) -> Result<Json<ConsumeSubAgentChildResultOutput>, HandlerError>;
 
     /// Lists root-owned active child sub-agents.
     #[shared]

@@ -53,7 +53,11 @@ pub fn validate_dispatch_limits(
         ))
         .into());
     }
-    if children.len() >= MAX_SUB_AGENT_FAN_OUT {
+    let active_children = children
+        .iter()
+        .filter(|child| child.terminal.is_none())
+        .collect::<Vec<_>>();
+    if active_children.len() >= MAX_SUB_AGENT_FAN_OUT {
         return Err(TerminalError::new(format!(
             "sub-agent fan-out limit reached ({MAX_SUB_AGENT_FAN_OUT})"
         ))
@@ -61,7 +65,7 @@ pub fn validate_dispatch_limits(
     }
 
     let hash = task_hash(task, tool_subset);
-    if children.iter().any(|child| child.task_hash == hash) {
+    if active_children.iter().any(|child| child.task_hash == hash) {
         return Err(TerminalError::new(
             "duplicate sub-agent task detected (loop prevention)".to_string(),
         )
@@ -119,6 +123,7 @@ pub(crate) fn child_is_owned(children: &[SubAgentChildRef], sub_agent_id: &str) 
 }
 
 /// Removes a completed or cancelled child reference from parent state.
+#[cfg(test)]
 pub(crate) fn remove_child_ref(children: &mut Vec<SubAgentChildRef>, sub_agent_id: &str) {
     children.retain(|child| child.id != sub_agent_id);
 }
@@ -231,6 +236,7 @@ mod tests {
                 id: format!("child-{index}"),
                 task_hash: format!("hash-{index}"),
                 budget_tokens: 0,
+                terminal: None,
             })
             .collect::<Vec<_>>();
         let error = validate_dispatch_limits(0, &children, "task", &[])
@@ -246,6 +252,7 @@ mod tests {
             id: "child-1".to_string(),
             task_hash: existing_hash,
             budget_tokens: 0,
+            terminal: None,
         }];
         let error = validate_dispatch_limits(0, &children, "repeat", &["bash".to_string()])
             .expect_err("duplicate task hash should fail");
@@ -260,6 +267,36 @@ mod tests {
             .expect("parent just before max depth should be able to create the deepest child");
 
         assert_eq!(hash, task_hash("task", &[]));
+    }
+
+    #[test]
+    fn validate_dispatch_limits_ignores_terminal_cached_children() {
+        // Pins: consumed-later terminal children prove ownership but do not consume active fan-out.
+        let terminal = moa_core::SubAgentTerminalResult {
+            state: moa_core::SubAgentState::Completed,
+            result: moa_core::SubAgentResult {
+                sub_agent_id: "child-done".to_string(),
+                success: true,
+                output: "done".to_string(),
+                tokens_used: 10,
+                tools_invoked: 1,
+                error: None,
+            },
+        };
+        let children = (0..MAX_SUB_AGENT_FAN_OUT)
+            .map(|index| SubAgentChildRef {
+                id: format!("child-{index}"),
+                task_hash: task_hash("repeat", &[]),
+                budget_tokens: 0,
+                terminal: Some(terminal.clone()),
+            })
+            .collect::<Vec<_>>();
+
+        let hash = validate_dispatch_limits(0, &children, "repeat", &[])
+            .expect("terminal cached children should not block active fan-out");
+
+        assert_eq!(hash, task_hash("repeat", &[]));
+        assert!(super::child_is_owned(&children, "child-0"));
     }
 
     #[test]
@@ -319,11 +356,13 @@ mod tests {
                 id: "child-a".to_string(),
                 task_hash: "hash-a".to_string(),
                 budget_tokens: 100,
+                terminal: None,
             },
             SubAgentChildRef {
                 id: "child-b".to_string(),
                 task_hash: "hash-b".to_string(),
                 budget_tokens: 200,
+                terminal: None,
             },
         ];
 
@@ -336,6 +375,7 @@ mod tests {
                 id: "child-b".to_string(),
                 task_hash: "hash-b".to_string(),
                 budget_tokens: 200,
+                terminal: None,
             }]
         );
     }

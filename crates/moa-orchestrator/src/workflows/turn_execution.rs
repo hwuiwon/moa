@@ -24,16 +24,14 @@ use moa_core::restate_observability::{
 };
 use moa_core::wire::{RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress};
 use moa_core::{
-    ActiveSegment, ApprovalDecision, ApprovalPrompt, CancelSubAgentInput, CompletionRequest,
-    CompletionResponse, DispatchSubAgentInput, Event, EventRange, EventRecord, EventType,
-    LearningEntry, ListSubAgentsInput, ListSubAgentsOutput, MessageSubAgentInput, MoaError,
-    PolicyAction, QueryRewriteResult, ScoringPhase, SegmentId, SessionId, SessionMeta,
-    SessionStatus, SessionStore as _, SpawnSubAgentInput, SpawnSubAgentOutput, SubAgentChildRef,
+    ActiveSegment, ApprovalDecision, ApprovalPrompt, CompletionRequest, CompletionResponse, Event,
+    EventRange, EventRecord, EventType, LearningEntry, MoaError, PolicyAction, QueryRewriteResult,
+    ScoringPhase, SegmentId, SessionId, SessionMeta, SessionStatus, SessionStore as _,
     ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput, TurnLatencyCounters,
-    TurnOutcome as CoreTurnOutcome, TurnReplayCounters, WaitSubAgentInput, WaitSubAgentOutput,
-    is_delegation_tool_name, record_approval_wait, record_session_error,
-    record_turn_event_persist_duration, record_turn_latency, record_turn_llm_call_duration,
-    record_turn_tool_dispatch_duration, scope_turn_latency_counters, scope_turn_replay_counters,
+    TurnOutcome as CoreTurnOutcome, TurnReplayCounters, is_delegation_tool_name,
+    record_approval_wait, record_session_error, record_turn_event_persist_duration,
+    record_turn_latency, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
+    scope_turn_latency_counters, scope_turn_replay_counters,
 };
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -41,8 +39,6 @@ use tracing::Instrument;
 
 use crate::OrchestratorCtx;
 use crate::brain_bridge::{PreparedTurnRequest, QueryRewriteCacheEntry, prepare_turn_request};
-use crate::objects::session::SessionClient;
-use crate::objects::sub_agent::SubAgentClient;
 use crate::services::{
     llm_gateway::LLMGatewayClient,
     session_store::{
@@ -52,10 +48,6 @@ use crate::services::{
     },
     tool_executor::ToolExecutorClient,
     workspace_store::{PrepareToolApprovalRequest, StoreApprovalRuleRequest, WorkspaceStoreClient},
-};
-use crate::sub_agent_dispatch::{
-    DispatchedSubAgent, child_agent_path, child_is_owned, sub_agent_result_tool_output,
-    validate_dispatch_budget, validate_dispatch_limits,
 };
 use crate::turn::approval::{parse_awakeable_decision, serialize_awakeable_decision};
 use crate::turn::util::{
@@ -554,42 +546,7 @@ async fn handle_dispatch(
     tool_id: ToolCallId,
     tool_call: &ToolCallContent,
 ) -> Result<(), HandlerError> {
-    let invocation = tool_call.invocation.clone();
-    let dispatch_input: DispatchSubAgentInput = serde_json::from_value(invocation.input.clone())
-        .map_err(|error| {
-            TerminalError::new(format!(
-                "failed to deserialize dispatch_sub_agent input: {error}"
-            ))
-        })?;
-
-    append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
-
-    let span = tool_dispatch_span("dispatch_sub_agent");
-    let dispatch_started = Instant::now();
-    let dispatched = dispatch_child(ctx, session_id, meta, dispatch_input)
-        .instrument(span)
-        .await?;
-    record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
-
-    let output = sub_agent_result_tool_output(&dispatched.result);
-    append_session_event(
-        ctx,
-        session_id,
-        Event::ToolResult {
-            tool_id,
-            provider_tool_use_id: invocation.id.clone(),
-            output: output.clone(),
-            original_output_tokens: output.original_output_tokens,
-            success: !output.is_error,
-            duration_ms: 0,
-        },
-    )
-    .await?;
-
-    if !output.is_error {
-        record_segment_tool_use(ctx, session_id, &invocation.name).await?;
-    }
-    Ok(())
+    handle_delegation_tool(ctx, meta, session_id, tool_id, tool_call).await
 }
 
 async fn handle_delegation_tool(
@@ -601,80 +558,23 @@ async fn handle_delegation_tool(
 ) -> Result<(), HandlerError> {
     let invocation = tool_call.invocation.clone();
     append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
+    let Some(tool) =
+        moa_core::DelegationTool::from_invocation(&invocation).map_err(to_handler_error)?
+    else {
+        return Err(
+            TerminalError::new(format!("unsupported delegation tool {}", invocation.name)).into(),
+        );
+    };
 
     let span = tool_dispatch_span(&invocation.name);
     let dispatch_started = Instant::now();
-    let output = match invocation.name.as_str() {
-        "spawn_sub_agent" => {
-            let input: SpawnSubAgentInput = serde_json::from_value(invocation.input.clone())
-                .map_err(|error| {
-                    TerminalError::new(format!(
-                        "failed to deserialize spawn_sub_agent input: {error}"
-                    ))
-                })?;
-            let output = spawn_child_detached(ctx, session_id, meta, input)
-                .instrument(span)
-                .await?;
-            crate::delegation::spawn_output(output)
-        }
-        "wait_sub_agent" => {
-            let input: WaitSubAgentInput = serde_json::from_value(invocation.input.clone())
-                .map_err(|error| {
-                    TerminalError::new(format!(
-                        "failed to deserialize wait_sub_agent input: {error}"
-                    ))
-                })?;
-            crate::delegation::wait_output(
-                wait_child(ctx, session_id, input).instrument(span).await?,
-            )
-        }
-        "message_sub_agent" => {
-            let input: MessageSubAgentInput = serde_json::from_value(invocation.input.clone())
-                .map_err(|error| {
-                    TerminalError::new(format!(
-                        "failed to deserialize message_sub_agent input: {error}"
-                    ))
-                })?;
-            let sub_agent_id = input.sub_agent_id.clone();
-            message_child(ctx, session_id, input)
-                .instrument(span)
-                .await?;
-            crate::delegation::message_output(&sub_agent_id)
-        }
-        "list_sub_agents" => {
-            let input: ListSubAgentsInput = serde_json::from_value(invocation.input.clone())
-                .map_err(|error| {
-                    TerminalError::new(format!(
-                        "failed to deserialize list_sub_agents input: {error}"
-                    ))
-                })?;
-            crate::delegation::list_output(
-                list_children(ctx, session_id, input)
-                    .instrument(span)
-                    .await?,
-            )
-        }
-        "cancel_sub_agent" => {
-            let input: CancelSubAgentInput = serde_json::from_value(invocation.input.clone())
-                .map_err(|error| {
-                    TerminalError::new(format!(
-                        "failed to deserialize cancel_sub_agent input: {error}"
-                    ))
-                })?;
-            let sub_agent_id = input.sub_agent_id.clone();
-            cancel_child(ctx, session_id, input)
-                .instrument(span)
-                .await?;
-            crate::delegation::cancel_output(&sub_agent_id)
-        }
-        _ => {
-            return Err(TerminalError::new(format!(
-                "unsupported delegation tool {}",
-                invocation.name
-            ))
-            .into());
-        }
-    };
+    let output = crate::delegation::execute_delegation_tool(
+        ctx,
+        crate::delegation::DelegationParent::RootSession { session_id, meta },
+        tool,
+    )
+    .instrument(span)
+    .await?;
     record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
 
     append_session_event(
@@ -695,307 +595,6 @@ async fn handle_delegation_tool(
         record_segment_tool_use(ctx, session_id, &invocation.name).await?;
     }
     Ok(())
-}
-
-async fn spawn_child_detached(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    meta: &SessionMeta,
-    request: SpawnSubAgentInput,
-) -> Result<SpawnSubAgentOutput, HandlerError> {
-    let children = session_child_refs(ctx, session_id).await?;
-    let dispatch_input = DispatchSubAgentInput::from(request.clone());
-    let task = dispatch_input.task.clone();
-    let budget_tokens = dispatch_input.budget_tokens;
-    let hash = validate_dispatch_limits(
-        0,
-        &children,
-        dispatch_input.task.as_str(),
-        &dispatch_input.tool_subset,
-    )?;
-    validate_dispatch_budget(dispatch_input.budget_tokens, None)?;
-    let sub_id = ctx
-        .run(|| async { Ok::<_, HandlerError>(Json::from(uuid::Uuid::now_v7().to_string())) })
-        .name("spawn_sub_agent_id")
-        .await?
-        .into_inner();
-    let sub_id = format!("{}-{sub_id}", ctx.key());
-    register_session_child(
-        ctx,
-        session_id,
-        SubAgentChildRef {
-            id: sub_id.clone(),
-            task_hash: hash,
-            budget_tokens,
-        },
-    )
-    .await?;
-
-    let initial = dispatch_input.into_initial_message(
-        session_id,
-        None,
-        1,
-        String::new(),
-        meta.workspace_id.clone(),
-        meta.user_id.clone(),
-        meta.model.clone(),
-    );
-
-    let path = child_agent_path(ctx.key(), &sub_id, request.task_name.as_deref());
-    ctx.object_client::<SubAgentClient>(sub_id.clone())
-        .post_message(Json::from(initial))
-        .send();
-    append_session_event(
-        ctx,
-        session_id,
-        Event::SubAgentSpawned {
-            sub_agent_id: sub_id.clone(),
-            parent_sub_agent_id: None,
-            path: path.clone(),
-            task,
-            budget_tokens,
-        },
-    )
-    .await?;
-
-    Ok(SpawnSubAgentOutput {
-        sub_agent_id: sub_id.clone(),
-        path,
-        status: moa_core::SubAgentState::Running,
-    })
-}
-
-async fn wait_child(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    input: WaitSubAgentInput,
-) -> Result<WaitSubAgentOutput, HandlerError> {
-    let timeout_ms = crate::delegation::clamp_wait_timeout_ms(input.timeout_ms);
-    let mut waited_ms = 0;
-    ensure_child_owned_by_session(ctx, session_id, &input.sub_agent_id).await?;
-    loop {
-        let status = ctx
-            .object_client::<SubAgentClient>(input.sub_agent_id.clone())
-            .status()
-            .call()
-            .await?
-            .into_inner();
-        if crate::delegation::is_terminal_sub_agent_state(status.state) {
-            let result = ctx
-                .object_client::<SubAgentClient>(input.sub_agent_id.clone())
-                .result()
-                .call()
-                .await?
-                .into_inner()
-                .ok_or_else(|| TerminalError::new("terminal sub-agent result missing"))?;
-            remove_session_child(ctx, session_id, &input.sub_agent_id).await?;
-            return Ok(WaitSubAgentOutput {
-                sub_agent_id: input.sub_agent_id,
-                state: status.state,
-                result: Some(result),
-                timed_out: false,
-            });
-        }
-
-        if waited_ms >= timeout_ms {
-            return Ok(WaitSubAgentOutput {
-                sub_agent_id: input.sub_agent_id,
-                state: status.state,
-                result: None,
-                timed_out: true,
-            });
-        }
-
-        let sleep_ms = crate::delegation::WAIT_POLL_INTERVAL_MS.min(timeout_ms - waited_ms);
-        ctx.sleep(Duration::from_millis(sleep_ms)).await?;
-        waited_ms += sleep_ms;
-    }
-}
-
-async fn message_child(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    input: MessageSubAgentInput,
-) -> Result<(), HandlerError> {
-    ensure_child_owned_by_session(ctx, session_id, &input.sub_agent_id).await?;
-    let sub_agent_id = input.sub_agent_id.clone();
-    ctx.object_client::<SubAgentClient>(sub_agent_id.clone())
-        .post_message(Json::from(moa_core::SubAgentMessage::FollowUp {
-            text: input.text.clone(),
-        }))
-        .send();
-    append_session_event(
-        ctx,
-        session_id,
-        Event::SubAgentMessageSent {
-            sub_agent_id,
-            parent_sub_agent_id: None,
-            text: input.text,
-        },
-    )
-    .await?;
-    Ok(())
-}
-
-async fn list_children(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    _input: ListSubAgentsInput,
-) -> Result<ListSubAgentsOutput, HandlerError> {
-    let children = session_child_refs(ctx, session_id).await?;
-    let mut sub_agents = Vec::with_capacity(children.len());
-    for child in children {
-        let status = ctx
-            .object_client::<SubAgentClient>(child.id.clone())
-            .status()
-            .call()
-            .await?
-            .into_inner();
-        sub_agents.push(crate::delegation::listed_sub_agent(child.id, status));
-    }
-    Ok(ListSubAgentsOutput { sub_agents })
-}
-
-async fn cancel_child(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    input: CancelSubAgentInput,
-) -> Result<(), HandlerError> {
-    ensure_child_owned_by_session(ctx, session_id, &input.sub_agent_id).await?;
-    let sub_agent_id = input.sub_agent_id.clone();
-    ctx.object_client::<SubAgentClient>(input.sub_agent_id)
-        .cancel(input.reason)
-        .send();
-    append_session_event(
-        ctx,
-        session_id,
-        Event::SubAgentStatusChanged {
-            sub_agent_id,
-            from: None,
-            to: moa_core::SubAgentState::Cancelled,
-            summary: Some("cancel requested by parent".to_string()),
-        },
-    )
-    .await?;
-    Ok(())
-}
-
-async fn ensure_child_owned_by_session(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    sub_agent_id: &str,
-) -> Result<(), HandlerError> {
-    let children = session_child_refs(ctx, session_id).await?;
-    if child_is_owned(&children, sub_agent_id) {
-        return Ok(());
-    }
-    Err(TerminalError::new(format!(
-        "sub-agent {sub_agent_id} is not owned by this parent"
-    ))
-    .into())
-}
-
-async fn session_child_refs(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-) -> Result<Vec<SubAgentChildRef>, HandlerError> {
-    Ok(ctx
-        .object_client::<SessionClient>(session_id.to_string())
-        .child_refs()
-        .call()
-        .await?
-        .into_inner())
-}
-
-async fn register_session_child(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    child: SubAgentChildRef,
-) -> Result<(), HandlerError> {
-    ctx.object_client::<SessionClient>(session_id.to_string())
-        .register_child(Json::from(child))
-        .call()
-        .await?;
-    Ok(())
-}
-
-async fn remove_session_child(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    sub_agent_id: &str,
-) -> Result<(), HandlerError> {
-    ctx.object_client::<SessionClient>(session_id.to_string())
-        .remove_child(sub_agent_id.to_string())
-        .call()
-        .await?;
-    Ok(())
-}
-
-async fn dispatch_child(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    meta: &SessionMeta,
-    request: DispatchSubAgentInput,
-) -> Result<DispatchedSubAgent, HandlerError> {
-    let children = session_child_refs(ctx, session_id).await?;
-    let hash = validate_dispatch_limits(0, &children, request.task.as_str(), &request.tool_subset)?;
-    validate_dispatch_budget(request.budget_tokens, None)?;
-    let task = request.task.clone();
-    let budget_tokens = request.budget_tokens;
-    let sub_id = ctx
-        .run(|| async { Ok::<_, HandlerError>(Json::from(uuid::Uuid::now_v7().to_string())) })
-        .name("dispatch_sub_agent_id")
-        .await?
-        .into_inner();
-    let sub_id = format!("{}-{sub_id}", ctx.key());
-    register_session_child(
-        ctx,
-        session_id,
-        SubAgentChildRef {
-            id: sub_id.clone(),
-            task_hash: hash,
-            budget_tokens,
-        },
-    )
-    .await?;
-
-    let (awakeable_id, result_future) = ctx.awakeable::<String>();
-    let initial = request.into_initial_message(
-        session_id,
-        None,
-        1,
-        awakeable_id,
-        meta.workspace_id.clone(),
-        meta.user_id.clone(),
-        meta.model.clone(),
-    );
-
-    ctx.object_client::<SubAgentClient>(sub_id.clone())
-        .post_message(Json::from(initial))
-        .send();
-    append_session_event(
-        ctx,
-        session_id,
-        Event::SubAgentSpawned {
-            sub_agent_id: sub_id.clone(),
-            parent_sub_agent_id: None,
-            path: child_agent_path(ctx.key(), &sub_id, None),
-            task,
-            budget_tokens,
-        },
-    )
-    .await?;
-
-    let result: moa_core::SubAgentResult =
-        serde_json::from_str(&result_future.await?).map_err(|error| {
-            TerminalError::new(format!(
-                "failed to deserialize sub-agent result from awakeable: {error}"
-            ))
-        })?;
-
-    remove_session_child(ctx, session_id, &sub_id).await?;
-
-    Ok(DispatchedSubAgent { id: sub_id, result })
 }
 
 struct ApprovalOutcome {

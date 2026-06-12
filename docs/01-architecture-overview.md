@@ -91,9 +91,9 @@ Phase 1 auth work adds `AuthProvider`, `TokenVaultProvider`, and
   `GraphMemoryMaint`, `Health`, `LineageAdmin`, `LLMGateway`, `Memory`,
   `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`,
   `WorkspaceStore`, `Whoami`
-- Workflows: `Consolidate`, `EvalRun`, `TurnExecution`
+- Workflows: `Consolidate`, `EvalRun`, `TurnExecution`, `SubAgentTurnExecution`
 
-`Session` is the durable actor for one session key. It queues messages, calls `run_turn`, tracks the active task segment, records tool/skill usage, scores resolution, and writes learning entries. `SubAgent` is the same actor pattern for delegated work with depth and budget limits.
+`Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, scores resolution, and writes learning entries. `SubAgent` owns conversational delegated state with depth and budget limits, while `SubAgentTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
 
 ### Hosted API Clients
 

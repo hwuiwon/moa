@@ -18,7 +18,7 @@ what must stay out of Restate state.
 |---|---|---|
 | Service | Stateless calls such as `ToolExecutor`, `LLMGateway`, `SessionStore`, `Authz`, `Analytics`, `Memory`, `Skills`, `Tenants` | Durable RPC with retries, no keyed state. |
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` | Single-writer-per-key semantics and small hot state. |
-| Workflow | `TurnExecution`, `Consolidate`, `EvalRun` | One logical run per ID with explicit progress and completion. |
+| Workflow | `TurnExecution`, `SubAgentTurnExecution`, `Consolidate`, `EvalRun` | One logical run per ID with explicit progress and completion. |
 
 Use the weakest primitive that gives the needed correctness property. Do not
 use a workflow for conversational actors; do not use virtual-object state as a
@@ -31,6 +31,7 @@ product database.
 | Session | Virtual Object | `session_id` |
 | Top-level turn | Workflow | `turn_id` |
 | Sub-agent | Virtual Object | `sub_agent_id` |
+| Sub-agent turn | Workflow | `turn_id` |
 | Tool execution | Service | none |
 | LLM call | Service | none |
 | Graph-memory ingestion | Virtual Object | ingestion key |
@@ -39,9 +40,9 @@ product database.
 | Human approval | Awakeable plus Postgres event | awakeable id |
 
 Sessions and sub-agents are virtual objects because they receive multiple
-messages over time. `TurnExecution` is a workflow because one turn should have
-one observable durable run. Consolidation and eval replays are workflows for
-the same reason.
+messages over time. `TurnExecution` and `SubAgentTurnExecution` are workflows
+because one admitted turn should have one observable durable run. Consolidation
+and eval replays are workflows for the same reason.
 
 ## Runtime Flow
 
@@ -69,7 +70,7 @@ Current orchestrator surfaces are bound by `moa-orchestrator` at startup:
 | Primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` |
-| Workflow | `TurnExecution`, `Consolidate`, `EvalRun` |
+| Workflow | `TurnExecution`, `SubAgentTurnExecution`, `Consolidate`, `EvalRun` |
 | Service | `Agents`, `AdminMaintenance`, `Analytics`, `Approvals`, `ApiKeys`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `WorkspaceStore`, `Whoami` |
 
 When adding a handler, place it by ownership:
@@ -87,8 +88,10 @@ Restate state should be small, replay-safe, and useful only for orchestration.
 | Full session event history | Postgres `events` table |
 | Session metadata and status record | Postgres, mirrored in VO hot state as needed |
 | Pending message queue | `Session` VO |
-| Current turn progress | `TurnExecution` workflow |
+| Current session turn progress | `TurnExecution` workflow |
+| Current sub-agent turn progress | `SubAgentTurnExecution` workflow |
 | Pending approval awakeable id | Workflow/VO state plus Postgres event |
+| Detached sub-agent result waiters | `SubAgent` VO, resolved by child terminal delivery |
 | Tool result and assistant output | Postgres event log |
 | Graph memory, vectors, changelog | Postgres |
 | Learning log | Postgres |
@@ -213,13 +216,17 @@ services up.
 
 `docs/02-brain-orchestration.md` describes the current boot sequence and the
 turn flow implemented by `Session` plus `TurnExecution`.
+Sub-agent conversational state is held by `SubAgent`; each admitted child turn
+runs in `SubAgentTurnExecution`, and detached waits use child-owned result
+awakeables plus parent-cached terminal results instead of status polling.
 
 ## Current Decisions
 
 1. Postgres is the system of record; Restate is the orchestration engine.
 2. Sessions and sub-agents are virtual objects.
 3. Top-level turns run in `TurnExecution` workflows keyed by turn ID.
-4. Human approvals use awakeables plus persisted session events.
-5. Product-visible events, learning, memory, lineage, and audit stay in
+4. Sub-agent turns run in `SubAgentTurnExecution` workflows keyed by turn ID.
+5. Human approvals use awakeables plus persisted session events.
+6. Product-visible events, learning, memory, lineage, and audit stay in
    Postgres.
-6. Gateways and clients can always rebuild visible state from Postgres events.
+7. Gateways and clients can always rebuild visible state from Postgres events.

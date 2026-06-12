@@ -1,10 +1,12 @@
 //! Sub-agent message, result, and status types used by Restate orchestration.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+use crate::error::{MoaError, Result};
 
 use super::{
-    CompletionRequest, ModelId, SessionId, SessionMeta, ToolCallId, ToolInvocation, ToolOutput,
-    TurnOutcome, UserId, WorkspaceId,
+    CompletionRequest, CompletionResponse, ModelId, SessionId, SessionMeta, ToolCallId,
+    ToolInvocation, ToolOutput, TurnOutcome, UserId, WorkspaceId,
 };
 
 /// Stable sub-agent identifier keyed under the parent session or sub-agent.
@@ -90,6 +92,8 @@ pub struct SubAgentStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubAgentState {
+    /// Child key exists but has not received its initial task payload.
+    Uninitialized,
     /// Child is actively running turns.
     Running,
     /// Child is blocked on human approval.
@@ -112,6 +116,18 @@ pub struct SubAgentChildRef {
     /// Token budget reserved for this child.
     #[serde(default)]
     pub budget_tokens: u64,
+    /// Terminal result cached on the parent until a wait or dispatch consumes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<SubAgentTerminalResult>,
+}
+
+/// Terminal child state and result delivered from a sub-agent to its parent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubAgentTerminalResult {
+    /// Final lifecycle state observed for the child.
+    pub state: SubAgentState,
+    /// Final child output payload.
+    pub result: SubAgentResult,
 }
 
 /// Synthetic dispatch-tool input parsed from provider tool-call JSON.
@@ -233,6 +249,50 @@ pub struct WaitSubAgentOutput {
     pub timed_out: bool,
 }
 
+/// Input for registering an awakeable that should resolve when a child terminates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachSubAgentResultWaiterInput {
+    /// Awakeable id owned by the waiting workflow.
+    pub awakeable_id: String,
+}
+
+/// Output returned when registering a terminal result waiter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachSubAgentResultWaiterOutput {
+    /// Already available terminal result, if the child had finished before registration.
+    pub terminal: Option<SubAgentTerminalResult>,
+}
+
+/// Input for removing a terminal result waiter after timeout or cancellation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoveSubAgentResultWaiterInput {
+    /// Awakeable id that should no longer be resolved by the child.
+    pub awakeable_id: String,
+}
+
+/// Input for caching a child's terminal result on its parent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkSubAgentChildTerminalInput {
+    /// Child sub-agent id.
+    pub sub_agent_id: SubAgentId,
+    /// Terminal state and result to cache.
+    pub terminal: SubAgentTerminalResult,
+}
+
+/// Input for consuming a cached child result from a parent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsumeSubAgentChildResultInput {
+    /// Child sub-agent id.
+    pub sub_agent_id: SubAgentId,
+}
+
+/// Output returned when consuming a cached child result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsumeSubAgentChildResultOutput {
+    /// Terminal result, if one was cached and consumed.
+    pub terminal: Option<SubAgentTerminalResult>,
+}
+
 /// Prepared state returned by `SubAgent/prepare_turn` to the turn workflow.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -256,15 +316,52 @@ pub enum SubAgentTurnPreparation {
     },
 }
 
+/// Turn-scoped LLM response record applied to a sub-agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubAgentTurnResponseRecord {
+    /// Workflow turn id that produced the response.
+    pub turn_id: String,
+    /// LLM response to append to child-local history.
+    pub response: CompletionResponse,
+}
+
 /// Tool-result record applied to a sub-agent's local conversation history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubAgentToolRecord {
+    /// Workflow turn id that produced the tool result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
     /// Stable tool-call id used in parent session events.
     pub tool_id: ToolCallId,
     /// Provider-emitted invocation payload.
     pub invocation: ToolInvocation,
     /// Tool output visible to the child model on the next turn.
     pub output: ToolOutput,
+}
+
+/// Turn-scoped core outcome applied to a sub-agent lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubAgentTurnOutcomeRecord {
+    /// Workflow turn id that produced the outcome.
+    pub turn_id: String,
+    /// Core turn outcome to apply.
+    pub outcome: TurnOutcome,
+}
+
+/// Turn-scoped pending approval marker for a sub-agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetSubAgentPendingApprovalInput {
+    /// Workflow turn id that requested approval.
+    pub turn_id: String,
+    /// Approval awakeable id that `SubAgent::approve` should resolve.
+    pub awakeable_id: String,
+}
+
+/// Turn-scoped pending approval clear request for a sub-agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClearSubAgentPendingApprovalInput {
+    /// Workflow turn id that completed the approval wait.
+    pub turn_id: String,
 }
 
 /// Request to reserve a child sub-agent under another sub-agent.
@@ -302,6 +399,127 @@ pub struct CompleteSubAgentChildInput {
     pub sub_agent_id: SubAgentId,
     /// Tokens consumed by the child so unused budget can be refunded.
     pub tokens_used: u64,
+}
+
+/// Stable kind for one built-in sub-agent delegation tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelegationToolKind {
+    /// Legacy synchronous child dispatch tool.
+    Dispatch,
+    /// Detached child spawn tool.
+    Spawn,
+    /// Detached child wait tool.
+    Wait,
+    /// Follow-up message tool.
+    Message,
+    /// Child-listing tool.
+    List,
+    /// Child cancellation tool.
+    Cancel,
+}
+
+impl DelegationToolKind {
+    /// Returns the stable provider-facing tool name.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Dispatch => "dispatch_sub_agent",
+            Self::Spawn => "spawn_sub_agent",
+            Self::Wait => "wait_sub_agent",
+            Self::Message => "message_sub_agent",
+            Self::List => "list_sub_agents",
+            Self::Cancel => "cancel_sub_agent",
+        }
+    }
+
+    /// Returns the kind for a provider-facing delegation tool name.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "dispatch_sub_agent" => Some(Self::Dispatch),
+            "spawn_sub_agent" => Some(Self::Spawn),
+            "wait_sub_agent" => Some(Self::Wait),
+            "message_sub_agent" => Some(Self::Message),
+            "list_sub_agents" => Some(Self::List),
+            "cancel_sub_agent" => Some(Self::Cancel),
+            _ => None,
+        }
+    }
+
+    /// Returns the provider-facing JSON schema for this tool.
+    #[must_use]
+    pub fn schema(self) -> serde_json::Value {
+        match self {
+            Self::Dispatch => dispatch_sub_agent_tool_schema(),
+            Self::Spawn => spawn_sub_agent_tool_schema(),
+            Self::Wait => wait_sub_agent_tool_schema(),
+            Self::Message => message_sub_agent_tool_schema(),
+            Self::List => list_sub_agents_tool_schema(),
+            Self::Cancel => cancel_sub_agent_tool_schema(),
+        }
+    }
+
+    /// Returns whether this kind belongs to the v2 detached schema set.
+    #[must_use]
+    pub fn is_v2_detached(self) -> bool {
+        !matches!(self, Self::Dispatch)
+    }
+}
+
+/// Parsed payload for one built-in sub-agent delegation tool invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DelegationTool {
+    /// Legacy synchronous child dispatch payload.
+    Dispatch(DispatchSubAgentInput),
+    /// Detached child spawn payload.
+    Spawn(SpawnSubAgentInput),
+    /// Detached child wait payload.
+    Wait(WaitSubAgentInput),
+    /// Follow-up message payload.
+    Message(MessageSubAgentInput),
+    /// Child-listing payload.
+    List(ListSubAgentsInput),
+    /// Child cancellation payload.
+    Cancel(CancelSubAgentInput),
+}
+
+impl DelegationTool {
+    /// Parses a provider invocation into a typed delegation tool when recognized.
+    pub fn from_invocation(invocation: &ToolInvocation) -> Result<Option<Self>> {
+        let Some(kind) = DelegationToolKind::from_name(&invocation.name) else {
+            return Ok(None);
+        };
+
+        Ok(Some(match kind {
+            DelegationToolKind::Dispatch => {
+                Self::Dispatch(parse_delegation_tool_input(invocation)?)
+            }
+            DelegationToolKind::Spawn => Self::Spawn(parse_delegation_tool_input(invocation)?),
+            DelegationToolKind::Wait => Self::Wait(parse_delegation_tool_input(invocation)?),
+            DelegationToolKind::Message => Self::Message(parse_delegation_tool_input(invocation)?),
+            DelegationToolKind::List => Self::List(parse_delegation_tool_input(invocation)?),
+            DelegationToolKind::Cancel => Self::Cancel(parse_delegation_tool_input(invocation)?),
+        }))
+    }
+
+    /// Returns the parsed tool kind.
+    #[must_use]
+    pub fn kind(&self) -> DelegationToolKind {
+        match self {
+            Self::Dispatch(_) => DelegationToolKind::Dispatch,
+            Self::Spawn(_) => DelegationToolKind::Spawn,
+            Self::Wait(_) => DelegationToolKind::Wait,
+            Self::Message(_) => DelegationToolKind::Message,
+            Self::List(_) => DelegationToolKind::List,
+            Self::Cancel(_) => DelegationToolKind::Cancel,
+        }
+    }
+
+    /// Returns the stable provider-facing tool name.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        self.kind().name()
+    }
 }
 
 impl DispatchSubAgentInput {
@@ -481,37 +699,37 @@ pub fn cancel_sub_agent_tool_schema() -> serde_json::Value {
 /// Returns all v2 delegation tool schemas.
 pub fn delegation_tool_schemas() -> Vec<serde_json::Value> {
     vec![
-        spawn_sub_agent_tool_schema(),
-        wait_sub_agent_tool_schema(),
-        message_sub_agent_tool_schema(),
-        list_sub_agents_tool_schema(),
-        cancel_sub_agent_tool_schema(),
+        DelegationToolKind::Spawn.schema(),
+        DelegationToolKind::Wait.schema(),
+        DelegationToolKind::Message.schema(),
+        DelegationToolKind::List.schema(),
+        DelegationToolKind::Cancel.schema(),
     ]
 }
 
 /// Returns one v2 delegation tool schema by name.
 pub fn delegation_tool_schema(name: &str) -> Option<serde_json::Value> {
-    match name {
-        "spawn_sub_agent" => Some(spawn_sub_agent_tool_schema()),
-        "wait_sub_agent" => Some(wait_sub_agent_tool_schema()),
-        "message_sub_agent" => Some(message_sub_agent_tool_schema()),
-        "list_sub_agents" => Some(list_sub_agents_tool_schema()),
-        "cancel_sub_agent" => Some(cancel_sub_agent_tool_schema()),
-        _ => None,
-    }
+    DelegationToolKind::from_name(name)
+        .filter(|kind| kind.is_v2_detached())
+        .map(DelegationToolKind::schema)
 }
 
 /// Returns whether `name` is one of MOA's built-in delegation tools.
 pub fn is_delegation_tool_name(name: &str) -> bool {
-    matches!(
-        name,
-        "dispatch_sub_agent"
-            | "spawn_sub_agent"
-            | "wait_sub_agent"
-            | "message_sub_agent"
-            | "list_sub_agents"
-            | "cancel_sub_agent"
-    )
+    DelegationToolKind::from_name(name).is_some()
+}
+
+/// Parses a delegation tool invocation input while preserving the tool name in errors.
+pub fn parse_delegation_tool_input<T>(invocation: &ToolInvocation) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(invocation.input.clone()).map_err(|error| {
+        MoaError::SerializationError(format!(
+            "failed to deserialize {} input: {error}",
+            invocation.name
+        ))
+    })
 }
 
 /// Default token budget reserved for one dispatched child when the model omits it.
@@ -555,6 +773,173 @@ mod tests {
                 "list_sub_agents",
                 "cancel_sub_agent",
             ]
+        );
+    }
+
+    #[test]
+    fn stable_delegation_names_map_to_expected_kind() {
+        // Pins: each stable tool name remains classified under the intended delegation kind.
+        let expected = [
+            ("dispatch_sub_agent", DelegationToolKind::Dispatch),
+            ("spawn_sub_agent", DelegationToolKind::Spawn),
+            ("wait_sub_agent", DelegationToolKind::Wait),
+            ("message_sub_agent", DelegationToolKind::Message),
+            ("list_sub_agents", DelegationToolKind::List),
+            ("cancel_sub_agent", DelegationToolKind::Cancel),
+        ];
+
+        for (name, expected_kind) in expected {
+            assert!(
+                is_delegation_tool_name(name),
+                "{name} should be recognized as a delegation tool"
+            );
+            let observed_kind = DelegationToolKind::from_name(name)
+                .unwrap_or_else(|| panic!("{name} should map to a delegation kind"));
+            assert_eq!(observed_kind, expected_kind, "{name} kind changed");
+        }
+
+        assert!(!is_delegation_tool_name("unknown_sub_agent"));
+        assert!(delegation_tool_schema("unknown_sub_agent").is_none());
+    }
+
+    #[test]
+    fn legacy_dispatch_is_not_exposed_in_v2_delegation_schema_set() {
+        // Pins: legacy synchronous dispatch remains recognized without being advertised as a v2 detached tool.
+        assert!(is_delegation_tool_name("dispatch_sub_agent"));
+        assert_eq!(
+            dispatch_sub_agent_tool_schema()
+                .get("name")
+                .and_then(serde_json::Value::as_str),
+            Some("dispatch_sub_agent")
+        );
+        assert!(delegation_tool_schema("dispatch_sub_agent").is_none());
+
+        let names = delegation_tool_schemas()
+            .into_iter()
+            .map(|schema| {
+                schema
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("delegation schema should have a string name")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "spawn_sub_agent",
+                "wait_sub_agent",
+                "message_sub_agent",
+                "list_sub_agents",
+                "cancel_sub_agent",
+            ]
+        );
+    }
+
+    #[test]
+    fn known_delegation_tool_parse_error_names_tool() {
+        // Pins: delegation input parsing errors identify the offending tool call.
+        let invocation = ToolInvocation {
+            id: Some("toolu_1".to_string()),
+            name: "spawn_sub_agent".to_string(),
+            input: serde_json::json!("not an object"),
+        };
+
+        let error = parse_delegation_tool_input::<SpawnSubAgentInput>(&invocation)
+            .expect_err("invalid spawn_sub_agent input should fail");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("spawn_sub_agent"),
+            "error should name the tool, got: {message}"
+        );
+        assert!(
+            message.contains("failed to deserialize"),
+            "error should describe a parse failure, got: {message}"
+        );
+    }
+
+    #[test]
+    fn typed_delegation_parser_covers_every_builtin_tool() {
+        // Pins: every built-in delegation tool has exactly one typed payload branch.
+        let cases = [
+            (
+                "dispatch_sub_agent",
+                serde_json::json!({
+                    "task": "research",
+                    "tool_subset": ["web_fetch"],
+                    "budget_tokens": 123
+                }),
+                DelegationToolKind::Dispatch,
+            ),
+            (
+                "spawn_sub_agent",
+                serde_json::json!({
+                    "task": "research",
+                    "task_name": "research-task",
+                    "tool_subset": ["web_fetch"],
+                    "budget_tokens": 123
+                }),
+                DelegationToolKind::Spawn,
+            ),
+            (
+                "wait_sub_agent",
+                serde_json::json!({
+                    "sub_agent_id": "child-1",
+                    "timeout_ms": 50
+                }),
+                DelegationToolKind::Wait,
+            ),
+            (
+                "message_sub_agent",
+                serde_json::json!({
+                    "sub_agent_id": "child-1",
+                    "text": "continue"
+                }),
+                DelegationToolKind::Message,
+            ),
+            (
+                "list_sub_agents",
+                serde_json::json!({}),
+                DelegationToolKind::List,
+            ),
+            (
+                "cancel_sub_agent",
+                serde_json::json!({
+                    "sub_agent_id": "child-1",
+                    "reason": "no longer needed"
+                }),
+                DelegationToolKind::Cancel,
+            ),
+        ];
+
+        for (name, input, expected_kind) in cases {
+            let invocation = ToolInvocation {
+                id: Some(format!("{name}-id")),
+                name: name.to_string(),
+                input,
+            };
+            let parsed = DelegationTool::from_invocation(&invocation)
+                .expect("known delegation tool should parse")
+                .unwrap_or_else(|| panic!("{name} should be recognized"));
+
+            assert_eq!(parsed.kind(), expected_kind, "{name} parsed to wrong kind");
+            assert_eq!(parsed.name(), name);
+        }
+    }
+
+    #[test]
+    fn typed_delegation_parser_ignores_unknown_tools() {
+        // Pins: non-delegation tools stay on the regular tool-executor path.
+        let invocation = ToolInvocation {
+            id: Some("regular-tool".to_string()),
+            name: "bash".to_string(),
+            input: serde_json::json!({"cmd": "true"}),
+        };
+
+        assert_eq!(
+            DelegationTool::from_invocation(&invocation).expect("unknown tool should not fail"),
+            None
         );
     }
 

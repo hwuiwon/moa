@@ -142,6 +142,31 @@ impl SessionVoState {
         true
     }
 
+    /// Caches a terminal child result until the parent consumes it.
+    pub fn mark_child_terminal(&mut self, input: MarkSubAgentChildTerminalInput) -> bool {
+        let Some(child) = self
+            .children
+            .iter_mut()
+            .find(|child| child.id == input.sub_agent_id)
+        else {
+            return false;
+        };
+        if child.terminal.is_some() {
+            return false;
+        }
+        child.terminal = Some(input.terminal);
+        true
+    }
+
+    /// Removes and returns a cached terminal child result.
+    pub fn consume_child_terminal(&mut self, sub_agent_id: &str) -> Option<SubAgentTerminalResult> {
+        let index = self
+            .children
+            .iter()
+            .position(|child| child.id == sub_agent_id && child.terminal.is_some())?;
+        self.children.remove(index).terminal
+    }
+
     /// Removes a root-owned child sub-agent reference by id.
     pub fn remove_child(&mut self, sub_agent_id: &str) -> bool {
         let before = self.children.len();
@@ -281,6 +306,7 @@ mod tests {
             id: "child-1".to_string(),
             task_hash: "hash-1".to_string(),
             budget_tokens: 0,
+            terminal: None,
         });
         state.last_turn_summary = Some("summary".to_string());
         state.set_cancel_flag(moa_core::CancelMode::Hard);
@@ -297,6 +323,7 @@ mod tests {
             id: "child-1".to_string(),
             task_hash: "hash-1".to_string(),
             budget_tokens: 128,
+            terminal: None,
         };
 
         assert!(state.register_child(child.clone()));
@@ -313,11 +340,13 @@ mod tests {
             id: "child-1".to_string(),
             task_hash: "hash-1".to_string(),
             budget_tokens: 128,
+            terminal: None,
         });
         state.register_child(moa_core::SubAgentChildRef {
             id: "child-2".to_string(),
             task_hash: "hash-2".to_string(),
             budget_tokens: 256,
+            terminal: None,
         });
 
         assert!(state.remove_child("child-1"));
@@ -328,7 +357,47 @@ mod tests {
                 id: "child-2".to_string(),
                 task_hash: "hash-2".to_string(),
                 budget_tokens: 256,
+                terminal: None,
             }]
         );
+    }
+
+    #[test]
+    fn session_child_terminal_result_is_consumed_once() {
+        // Pins: root wait consumes a cached terminal child result exactly once.
+        let mut state = SessionVoState::default();
+        state.register_child(moa_core::SubAgentChildRef {
+            id: "child-1".to_string(),
+            task_hash: "hash-1".to_string(),
+            budget_tokens: 128,
+            terminal: None,
+        });
+        let terminal = moa_core::SubAgentTerminalResult {
+            state: moa_core::SubAgentState::Completed,
+            result: moa_core::SubAgentResult {
+                sub_agent_id: "child-1".to_string(),
+                success: true,
+                output: "done".to_string(),
+                tokens_used: 17,
+                tools_invoked: 2,
+                error: None,
+            },
+        };
+
+        assert!(
+            state.mark_child_terminal(moa_core::MarkSubAgentChildTerminalInput {
+                sub_agent_id: "child-1".to_string(),
+                terminal: terminal.clone(),
+            })
+        );
+        assert!(
+            !state.mark_child_terminal(moa_core::MarkSubAgentChildTerminalInput {
+                sub_agent_id: "child-1".to_string(),
+                terminal: terminal.clone(),
+            })
+        );
+        assert_eq!(state.consume_child_terminal("child-1"), Some(terminal));
+        assert_eq!(state.consume_child_terminal("child-1"), None);
+        assert!(!state.owns_child("child-1"));
     }
 }

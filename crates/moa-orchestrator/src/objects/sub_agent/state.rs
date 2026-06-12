@@ -24,6 +24,7 @@ pub(super) const K_CANCEL_REASON: &str = "cancel_reason";
 pub(super) const K_ACTIVE_TURN_ID: &str = "active_turn_id";
 pub(super) const K_LAST_OUTCOME: &str = "last_outcome";
 pub(super) const K_NOTIFICATION_DELIVERED: &str = "notification_delivered";
+pub(super) const K_RESULT_WAITERS: &str = "result_waiters";
 pub(super) const MAX_TURNS_PER_POST: usize = 50;
 
 /// Serializable projection of the SubAgent VO's durable state keys.
@@ -73,6 +74,8 @@ pub struct SubAgentVoState {
     pub last_outcome: Option<moa_core::wire::TurnOutcome>,
     /// Whether the terminal parent-session notification has been appended.
     pub notification_delivered: bool,
+    /// Awakeable ids waiting for this sub-agent's terminal result.
+    pub result_waiters: Vec<String>,
 }
 
 impl SubAgentVoState {
@@ -125,13 +128,14 @@ impl SubAgentVoState {
         self.active_turn_id = None;
         self.last_outcome = None;
         self.notification_delivered = false;
+        self.result_waiters.clear();
         Ok(())
     }
 
-    /// Returns the current lifecycle state, defaulting to `Completed` when empty.
+    /// Returns the current lifecycle state, defaulting to `Uninitialized` when empty.
     #[must_use]
     pub(super) fn current_status(&self) -> SubAgentState {
-        self.status.unwrap_or(SubAgentState::Completed)
+        self.status.unwrap_or(SubAgentState::Uninitialized)
     }
 
     /// Ensures the child was initialized before handling follow-up messages or turns.
@@ -218,8 +222,29 @@ impl SubAgentVoState {
             depth: self.depth,
             tokens_used: self.tokens_used,
             budget_remaining: self.budget_remaining,
-            active_children: self.children.iter().map(|child| child.id.clone()).collect(),
+            active_children: self
+                .children
+                .iter()
+                .filter(|child| child.terminal.is_none())
+                .map(|child| child.id.clone())
+                .collect(),
         }
+    }
+
+    /// Builds a terminal result projection when this child has reached a terminal state.
+    #[must_use]
+    pub(super) fn terminal_result(
+        &self,
+        sub_agent_id: SubAgentId,
+    ) -> Option<SubAgentTerminalResult> {
+        let state = self.current_status();
+        if !crate::delegation::is_terminal_sub_agent_state(state) {
+            return None;
+        }
+        Some(SubAgentTerminalResult {
+            state,
+            result: self.build_result(sub_agent_id),
+        })
     }
 
     /// Builds the final payload resolved back to the parent awakeable.
@@ -239,7 +264,9 @@ impl SubAgentVoState {
                     .unwrap_or_else(|| "sub-agent cancelled".to_string()),
             ),
             SubAgentState::Failed => Some("sub-agent failed".to_string()),
-            SubAgentState::Running | SubAgentState::WaitingApproval => {
+            SubAgentState::Uninitialized
+            | SubAgentState::Running
+            | SubAgentState::WaitingApproval => {
                 Some("sub-agent finished before reaching a terminal state".to_string())
             }
         };
@@ -286,6 +313,7 @@ impl VoState for SubAgentVoState {
                 .get_json(K_NOTIFICATION_DELIVERED)
                 .await?
                 .unwrap_or_default(),
+            result_waiters: reader.get_json(K_RESULT_WAITERS).await?.unwrap_or_default(),
         })
     }
 
@@ -321,6 +349,7 @@ impl VoState for SubAgentVoState {
             self.notification_delivered,
             false,
         );
+        set_or_clear_vec(ctx, K_RESULT_WAITERS, &self.result_waiters);
     }
 }
 
@@ -336,17 +365,71 @@ fn latest_assistant_text(history: &[ContextMessage]) -> Option<String> {
 }
 
 impl SubAgentVoState {
+    /// Returns the duplicate-detection hash for this sub-agent's own task.
     pub(super) fn task_hash(&self) -> String {
         crate::sub_agent_dispatch::task_hash(
             self.task.as_deref().unwrap_or_default(),
             &self.tool_subset,
         )
     }
+
+    /// Adds a result waiter awakeable if it is not already registered.
+    pub(super) fn add_result_waiter(&mut self, awakeable_id: String) -> bool {
+        if self.result_waiters.iter().any(|id| id == &awakeable_id) {
+            return false;
+        }
+        self.result_waiters.push(awakeable_id);
+        true
+    }
+
+    /// Removes a result waiter awakeable after timeout or cancellation.
+    pub(super) fn remove_result_waiter(&mut self, awakeable_id: &str) -> bool {
+        let before = self.result_waiters.len();
+        self.result_waiters.retain(|id| id != awakeable_id);
+        self.result_waiters.len() != before
+    }
+
+    /// Takes all pending result waiters for terminal resolution.
+    pub(super) fn take_result_waiters(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.result_waiters)
+    }
+
+    /// Caches a terminal child result and refunds unused reserved budget once.
+    pub(super) fn mark_child_terminal(
+        &mut self,
+        input: MarkSubAgentChildTerminalInput,
+    ) -> Option<u64> {
+        let child = self
+            .children
+            .iter_mut()
+            .find(|child| child.id == input.sub_agent_id)?;
+        if child.terminal.is_some() {
+            return None;
+        }
+
+        let tokens_used = input.terminal.result.tokens_used;
+        self.budget_remaining =
+            refund_child_budget(self.budget_remaining, child.budget_tokens, tokens_used);
+        child.terminal = Some(input.terminal);
+        Some(tokens_used)
+    }
+
+    /// Removes and returns a cached terminal child result.
+    pub(super) fn consume_child_terminal(
+        &mut self,
+        sub_agent_id: &str,
+    ) -> Option<SubAgentTerminalResult> {
+        let index = self
+            .children
+            .iter()
+            .position(|child| child.id == sub_agent_id && child.terminal.is_some())?;
+        self.children.remove(index).terminal
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{ModelId, SessionId, SubAgentMessage, UserId, WorkspaceId};
+    use moa_core::{ModelId, SessionId, SubAgentMessage, TurnOutcome, UserId, WorkspaceId};
 
     use super::SubAgentVoState;
     use moa_core::SubAgentState;
@@ -421,6 +504,62 @@ mod tests {
     }
 
     #[test]
+    fn default_state_is_not_terminal_successful() {
+        // Pins: an uninitialized SubAgent VO must not look like a completed child result.
+        let state = SubAgentVoState::default();
+
+        assert!(
+            !matches!(
+                state.status_view().state,
+                SubAgentState::Completed | SubAgentState::Failed | SubAgentState::Cancelled
+            ),
+            "default state should not be terminal, got {:?}",
+            state.status_view().state
+        );
+
+        let result = state.build_result("uninitialized-child".to_string());
+        assert!(
+            !result.success,
+            "uninitialized state must not build a successful terminal result"
+        );
+    }
+
+    #[test]
+    fn terminal_result_requires_explicit_terminal_lifecycle() {
+        // Pins: result success comes from an explicit terminal lifecycle, not from resident state.
+        let mut running = SubAgentVoState::default();
+        running
+            .initialize(&initial_task())
+            .expect("initial task should seed running state");
+
+        let running_result = running.build_result("running-child".to_string());
+        assert!(!running_result.success);
+        assert_eq!(
+            running_result.error.as_deref(),
+            Some("sub-agent finished before reaching a terminal state")
+        );
+
+        running.apply_turn_outcome(TurnOutcome::WaitingApproval);
+        let waiting_result = running.build_result("waiting-child".to_string());
+        assert!(!waiting_result.success);
+        assert_eq!(
+            waiting_result.error.as_deref(),
+            Some("sub-agent finished before reaching a terminal state")
+        );
+
+        let mut completed = SubAgentVoState::default();
+        completed
+            .initialize(&initial_task())
+            .expect("initial task should seed completed state");
+        completed.last_turn_summary = Some("finished".to_string());
+        completed.apply_turn_outcome(TurnOutcome::Idle);
+        let completed_result = completed.build_result("completed-child".to_string());
+        assert!(completed_result.success);
+        assert_eq!(completed_result.output, "finished");
+        assert_eq!(completed_result.error, None);
+    }
+
+    #[test]
     fn task_hash_uses_shared_dispatch_hash() {
         let mut state = SubAgentVoState::default();
         state
@@ -456,5 +595,70 @@ mod tests {
         assert_eq!(state.active_turn_id.as_deref(), Some("turn-1"));
         assert!(state.clear_active_turn("turn-1"));
         assert_eq!(state.active_turn_id, None);
+
+        assert!(state.start_workflow_turn("turn-2".to_string()));
+        assert!(!state.clear_active_turn("turn-1"));
+        assert_eq!(state.active_turn_id.as_deref(), Some("turn-2"));
+    }
+
+    #[test]
+    fn nested_child_terminal_result_refunds_once_and_consumes_once() {
+        // Pins: nested child terminal delivery refunds reserved budget once, then wait consumes the cache.
+        let mut state = SubAgentVoState::default();
+        state
+            .initialize(&initial_task())
+            .expect("initial task should seed state");
+        state.children.push(moa_core::SubAgentChildRef {
+            id: "child-1".to_string(),
+            task_hash: "hash-1".to_string(),
+            budget_tokens: 300,
+            terminal: None,
+        });
+        state.budget_remaining = 100;
+        let terminal = moa_core::SubAgentTerminalResult {
+            state: SubAgentState::Completed,
+            result: moa_core::SubAgentResult {
+                sub_agent_id: "child-1".to_string(),
+                success: true,
+                output: "done".to_string(),
+                tokens_used: 125,
+                tools_invoked: 1,
+                error: None,
+            },
+        };
+
+        assert_eq!(
+            state.mark_child_terminal(moa_core::MarkSubAgentChildTerminalInput {
+                sub_agent_id: "child-1".to_string(),
+                terminal: terminal.clone(),
+            }),
+            Some(125)
+        );
+        assert_eq!(state.budget_remaining, 275);
+        assert_eq!(
+            state.mark_child_terminal(moa_core::MarkSubAgentChildTerminalInput {
+                sub_agent_id: "child-1".to_string(),
+                terminal: terminal.clone(),
+            }),
+            None
+        );
+        assert_eq!(state.budget_remaining, 275);
+        assert_eq!(state.consume_child_terminal("child-1"), Some(terminal));
+        assert_eq!(state.consume_child_terminal("child-1"), None);
+    }
+
+    #[test]
+    fn result_waiters_are_unique_and_take_clears_registry() {
+        // Pins: wait timeouts cannot accumulate duplicate result awakeables.
+        let mut state = SubAgentVoState::default();
+
+        assert!(state.add_result_waiter("awake-1".to_string()));
+        assert!(!state.add_result_waiter("awake-1".to_string()));
+        assert!(state.add_result_waiter("awake-2".to_string()));
+        assert_eq!(
+            state.take_result_waiters(),
+            vec!["awake-1".to_string(), "awake-2".to_string()]
+        );
+        assert!(state.result_waiters.is_empty());
     }
 }

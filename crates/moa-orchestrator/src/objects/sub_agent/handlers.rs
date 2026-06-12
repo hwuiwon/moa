@@ -1,6 +1,7 @@
 //! Restate handlers for the SubAgent VO.
 
 use super::*;
+use crate::objects::session::SessionClient;
 use crate::workflows::sub_agent_turn_execution::SubAgentTurnExecutionClient;
 use moa_core::wire::{RunSubAgentTurnRequest, TurnOutcomeKind};
 use moa_security::{canary_system_message, new_canary_token};
@@ -69,14 +70,9 @@ impl SubAgent for SubAgentImpl {
     ) -> Result<Json<Option<SubAgentResult>>, HandlerError> {
         annotate_restate_handler_span("SubAgent", "result");
         let state = SubAgentVoState::load_from(&ctx).await?;
-        let result = if matches!(
-            state.current_status(),
-            SubAgentState::Completed | SubAgentState::Failed | SubAgentState::Cancelled
-        ) {
-            Some(state.build_result(ctx.key().to_string()))
-        } else {
-            None
-        };
+        let result = state
+            .terminal_result(ctx.key().to_string())
+            .map(|terminal| terminal.result);
         Ok(Json::from(result))
     }
 
@@ -84,10 +80,15 @@ impl SubAgent for SubAgentImpl {
     async fn cancel(&self, ctx: ObjectContext<'_>, reason: String) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SubAgent", "cancel");
         let mut state = SubAgentVoState::load_from(&ctx).await?;
-        let active_turn_id = state.active_turn_id.take();
+        let active_turn_id = state.active_turn_id.clone();
         state.cancel_reason = Some(reason.clone());
         state.status = Some(SubAgentState::Cancelled);
-        let children = state.children.clone();
+        let children = state
+            .children
+            .iter()
+            .filter(|child| child.terminal.is_none())
+            .cloned()
+            .collect::<Vec<_>>();
         state.persist_into(&ctx);
 
         if let Some(turn_id) = active_turn_id {
@@ -134,11 +135,21 @@ impl SubAgent for SubAgentImpl {
     async fn record_response(
         &self,
         ctx: ObjectContext<'_>,
-        response: Json<CompletionResponse>,
+        response: Json<SubAgentTurnResponseRecord>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SubAgent", "record_response");
-        let response = response.into_inner();
+        let record = response.into_inner();
         let mut state = SubAgentVoState::load_from(&ctx).await?;
+        if !state.active_turn_matches(&record.turn_id) {
+            tracing::warn!(
+                key = %ctx.key(),
+                record_turn_id = %record.turn_id,
+                active_turn_id = ?state.active_turn_id,
+                "ignored stale sub-agent response"
+            );
+            return Ok(());
+        }
+        let response = record.response;
         let token_usage = response.token_usage();
         let token_cost = (token_usage.total_input_tokens() + token_usage.output_tokens) as u64;
         state.record_token_usage(token_cost);
@@ -184,11 +195,21 @@ impl SubAgent for SubAgentImpl {
     async fn apply_turn_outcome(
         &self,
         ctx: ObjectContext<'_>,
-        outcome: Json<TurnOutcome>,
+        outcome: Json<SubAgentTurnOutcomeRecord>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SubAgent", "apply_turn_outcome");
-        let outcome = outcome.into_inner();
+        let record = outcome.into_inner();
         let mut state = SubAgentVoState::load_from(&ctx).await?;
+        if !state.active_turn_matches(&record.turn_id) {
+            tracing::warn!(
+                key = %ctx.key(),
+                record_turn_id = %record.turn_id,
+                active_turn_id = ?state.active_turn_id,
+                "ignored stale sub-agent turn outcome"
+            );
+            return Ok(());
+        }
+        let outcome = record.outcome;
         if !matches!(
             (state.current_status(), outcome),
             (SubAgentState::Failed, TurnOutcome::Idle)
@@ -199,24 +220,48 @@ impl SubAgent for SubAgentImpl {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self, ctx, awakeable_id))]
+    #[tracing::instrument(skip(self, ctx, input))]
     async fn set_pending_approval(
         &self,
         ctx: ObjectContext<'_>,
-        awakeable_id: Json<String>,
+        input: Json<SetSubAgentPendingApprovalInput>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SubAgent", "set_pending_approval");
+        let input = input.into_inner();
         let mut state = SubAgentVoState::load_from(&ctx).await?;
-        state.pending_approval = Some(awakeable_id.into_inner());
+        if !state.active_turn_matches(&input.turn_id) {
+            tracing::warn!(
+                key = %ctx.key(),
+                record_turn_id = %input.turn_id,
+                active_turn_id = ?state.active_turn_id,
+                "ignored stale sub-agent pending approval marker"
+            );
+            return Ok(());
+        }
+        state.pending_approval = Some(input.awakeable_id);
         state.status = Some(SubAgentState::WaitingApproval);
         state.persist_into(&ctx);
         Ok(())
     }
 
-    #[tracing::instrument(skip(self, ctx))]
-    async fn clear_pending_approval(&self, ctx: ObjectContext<'_>) -> Result<(), HandlerError> {
+    #[tracing::instrument(skip(self, ctx, input))]
+    async fn clear_pending_approval(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<ClearSubAgentPendingApprovalInput>,
+    ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SubAgent", "clear_pending_approval");
+        let input = input.into_inner();
         let mut state = SubAgentVoState::load_from(&ctx).await?;
+        if !state.active_turn_matches(&input.turn_id) {
+            tracing::warn!(
+                key = %ctx.key(),
+                record_turn_id = %input.turn_id,
+                active_turn_id = ?state.active_turn_id,
+                "ignored stale sub-agent pending approval clear"
+            );
+            return Ok(());
+        }
         state.pending_approval = None;
         state.status = Some(SubAgentState::Running);
         state.persist_into(&ctx);
@@ -243,6 +288,73 @@ impl SubAgent for SubAgentImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SubAgent", "complete_child");
         complete_child_inner(&ctx, input.into_inner()).await
+    }
+
+    #[tracing::instrument(skip(self, ctx, input))]
+    async fn mark_child_terminal(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<MarkSubAgentChildTerminalInput>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SubAgent", "mark_child_terminal");
+        let mut state = SubAgentVoState::load_from(&ctx).await?;
+        if state.mark_child_terminal(input.into_inner()).is_some() {
+            state.persist_into(&ctx);
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, input))]
+    async fn consume_child_result(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<ConsumeSubAgentChildResultInput>,
+    ) -> Result<Json<ConsumeSubAgentChildResultOutput>, HandlerError> {
+        annotate_restate_handler_span("SubAgent", "consume_child_result");
+        let input = input.into_inner();
+        let mut state = SubAgentVoState::load_from(&ctx).await?;
+        let terminal = state.consume_child_terminal(&input.sub_agent_id);
+        if terminal.is_some() {
+            state.persist_into(&ctx);
+        }
+        Ok(Json::from(ConsumeSubAgentChildResultOutput { terminal }))
+    }
+
+    #[tracing::instrument(skip(self, ctx, input))]
+    async fn attach_result_waiter(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<AttachSubAgentResultWaiterInput>,
+    ) -> Result<Json<AttachSubAgentResultWaiterOutput>, HandlerError> {
+        annotate_restate_handler_span("SubAgent", "attach_result_waiter");
+        let input = input.into_inner();
+        let mut state = SubAgentVoState::load_from(&ctx).await?;
+        if let Some(terminal) = state.terminal_result(ctx.key().to_string()) {
+            return Ok(Json::from(AttachSubAgentResultWaiterOutput {
+                terminal: Some(terminal),
+            }));
+        }
+        if state.add_result_waiter(input.awakeable_id) {
+            state.persist_into(&ctx);
+        }
+        Ok(Json::from(AttachSubAgentResultWaiterOutput {
+            terminal: None,
+        }))
+    }
+
+    #[tracing::instrument(skip(self, ctx, input))]
+    async fn remove_result_waiter(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<RemoveSubAgentResultWaiterInput>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SubAgent", "remove_result_waiter");
+        let input = input.into_inner();
+        let mut state = SubAgentVoState::load_from(&ctx).await?;
+        if state.remove_result_waiter(&input.awakeable_id) {
+            state.persist_into(&ctx);
+        }
+        Ok(())
     }
 
     #[tracing::instrument(skip(self, ctx))]
@@ -424,6 +536,17 @@ async fn record_tool_result_inner(
     kind: ToolRecordKind,
 ) -> Result<(), HandlerError> {
     let mut state = SubAgentVoState::load_from(ctx).await?;
+    if let Some(turn_id) = record.turn_id.as_deref()
+        && !state.active_turn_matches(turn_id)
+    {
+        tracing::warn!(
+            key = %ctx.key(),
+            record_turn_id = %turn_id,
+            active_turn_id = ?state.active_turn_id,
+            "ignored stale sub-agent tool result"
+        );
+        return Ok(());
+    }
     state.history.push(ContextMessage::tool_result(
         record
             .invocation
@@ -477,6 +600,7 @@ async fn reserve_child_inner(
         id: sub_id.clone(),
         task_hash: hash,
         budget_tokens: input.request.budget_tokens,
+        terminal: None,
     };
     state.children.push(child_ref.clone());
     let path = child_agent_path(&parent_key, &sub_id, input.task_name.as_deref());
@@ -507,23 +631,25 @@ async fn complete_child_inner(
     input: CompleteSubAgentChildInput,
 ) -> Result<(), HandlerError> {
     let mut state = SubAgentVoState::load_from(ctx).await?;
-    let child_ref = state
+    let Some(index) = state
         .children
         .iter()
-        .find(|child| child.id == input.sub_agent_id)
-        .cloned()
-        .ok_or_else(|| {
-            TerminalError::new(format!(
-                "sub-agent {} is not owned by this parent",
-                input.sub_agent_id
-            ))
-        })?;
-    remove_child_ref(&mut state.children, &input.sub_agent_id);
-    state.budget_remaining = refund_child_budget(
-        state.budget_remaining,
-        child_ref.budget_tokens,
-        input.tokens_used,
-    );
+        .position(|child| child.id == input.sub_agent_id)
+    else {
+        return Err(TerminalError::new(format!(
+            "sub-agent {} is not owned by this parent",
+            input.sub_agent_id
+        ))
+        .into());
+    };
+    let child_ref = state.children.remove(index);
+    if child_ref.terminal.is_none() {
+        state.budget_remaining = refund_child_budget(
+            state.budget_remaining,
+            child_ref.budget_tokens,
+            input.tokens_used,
+        );
+    }
     state.persist_into(ctx);
     Ok(())
 }
@@ -539,32 +665,45 @@ fn dispatch_sub_agent_turn_execution(ctx: &ObjectContext<'_>, turn_id: String) {
 
 async fn maybe_resolve_parent_awakeable(ctx: &ObjectContext<'_>) -> Result<(), HandlerError> {
     let mut state = SubAgentVoState::load_from(ctx).await?;
-    let status = state.current_status();
-    if !crate::delegation::is_terminal_sub_agent_state(status) {
-        return Ok(());
-    }
-
-    let delivered = deliver_terminal_notification_once(ctx, &mut state).await?;
-    let Some(awakeable_id) = state.result_awakeable_id.clone() else {
-        if delivered {
-            state.persist_into(ctx);
-        }
+    let Some(terminal) = state.terminal_result(ctx.key().to_string()) else {
         return Ok(());
     };
 
-    let payload =
-        serde_json::to_string(&state.build_result(ctx.key().to_string())).map_err(|error| {
+    let delivered = deliver_terminal_notification_once(ctx, &mut state, terminal.clone()).await?;
+    let waiters = state.take_result_waiters();
+    let waiter_payload = if waiters.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&terminal).map_err(|error| {
+            TerminalError::new(format!(
+                "failed to serialize sub-agent terminal result: {error}"
+            ))
+        })?)
+    };
+    for waiter in waiters {
+        if let Some(payload) = waiter_payload.as_ref() {
+            ctx.resolve_awakeable(&waiter, payload.clone());
+        }
+    }
+
+    if let Some(awakeable_id) = state.result_awakeable_id.clone() {
+        let payload = serde_json::to_string(&terminal.result).map_err(|error| {
             TerminalError::new(format!("failed to serialize sub-agent result: {error}"))
         })?;
-    ctx.resolve_awakeable(&awakeable_id, payload);
-    state.result_awakeable_id = None;
-    state.persist_into(ctx);
+        ctx.resolve_awakeable(&awakeable_id, payload);
+        state.result_awakeable_id = None;
+    }
+
+    if delivered || !state.result_waiters.is_empty() || state.result_awakeable_id.is_none() {
+        state.persist_into(ctx);
+    }
     Ok(())
 }
 
 async fn deliver_terminal_notification_once(
     ctx: &ObjectContext<'_>,
     state: &mut SubAgentVoState,
+    terminal: SubAgentTerminalResult,
 ) -> Result<bool, HandlerError> {
     if state.notification_delivered {
         return Ok(false);
@@ -578,7 +717,8 @@ async fn deliver_terminal_notification_once(
         return Ok(false);
     }
 
-    let result = state.build_result(ctx.key().to_string());
+    let result = terminal.result.clone();
+    cache_parent_terminal_result(ctx, state, terminal).await?;
     persist_parent_session_event(
         ctx,
         parent_session,
@@ -605,4 +745,27 @@ async fn deliver_terminal_notification_once(
     .await?;
     state.notification_delivered = true;
     Ok(true)
+}
+
+async fn cache_parent_terminal_result(
+    ctx: &ObjectContext<'_>,
+    state: &SubAgentVoState,
+    terminal: SubAgentTerminalResult,
+) -> Result<(), HandlerError> {
+    let input = MarkSubAgentChildTerminalInput {
+        sub_agent_id: terminal.result.sub_agent_id.clone(),
+        terminal,
+    };
+    if let Some(parent_sub_agent) = state.parent_sub_agent.clone() {
+        ctx.object_client::<SubAgentClient>(parent_sub_agent)
+            .mark_child_terminal(Json::from(input))
+            .call()
+            .await?;
+    } else if let Some(parent_session) = state.parent_session {
+        ctx.object_client::<SessionClient>(parent_session.to_string())
+            .mark_child_terminal(Json::from(input))
+            .call()
+            .await?;
+    }
+    Ok(())
 }

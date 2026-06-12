@@ -9,8 +9,9 @@ _Restate orchestration, hosted API runtime mode, turn execution, and sub-agents.
 - Cloud runtime: `moa-orchestrator`
 - Client surface: HTTP routes on `moa-edge` and Restate ingress test calls
 - Shared turn helpers: `crates/moa-orchestrator/src/turn/`
-- Session VO: `crates/moa-orchestrator/src/objects/session.rs`
-- Sub-agent VO: `crates/moa-orchestrator/src/objects/sub_agent.rs`
+- Session VO: `crates/moa-orchestrator/src/objects/session/`
+- Sub-agent VO: `crates/moa-orchestrator/src/objects/sub_agent/`
+- Turn workflows: `crates/moa-orchestrator/src/workflows/turn_execution.rs` and `crates/moa-orchestrator/src/workflows/sub_agent_turn_execution.rs`
 - CronJob VO: `crates/moa-orchestrator/src/objects/cron_job.rs`
 - Pipeline assembly: `crates/moa-brain/src/pipeline/mod.rs`
 
@@ -31,7 +32,7 @@ Bound surfaces:
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` |
 | Service | `Agents`, `Approvals`, `ApiKeys`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LLMGateway`, `NeonMaint`, `SessionStore`, `Tenants`, `ToolExecutor`, `WorkspaceStore`, `Whoami` |
-| Workflow | `Consolidate`, `TurnExecution` |
+| Workflow | `Consolidate`, `EvalRun`, `TurnExecution`, `SubAgentTurnExecution` |
 
 Restate state is used for hot orchestration state: queued messages, status, pending approvals, child refs, active segment, cancellation flags, and child budgets. Product-visible history is written to Postgres.
 
@@ -67,7 +68,7 @@ longer drives turn execution.
 7. Apply turn outcome and update session status.
 8. Score idle, cancelled, or completed segments and append `learning_log` entries.
 
-The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries. Cancellation is delivered through a workflow promise plus awakeable ID; the workflow checks it at deterministic boundaries and races it against the in-flight LLM call.
+The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries. Cancellation is delivered through a workflow promise; the workflow checks it at deterministic boundaries and races it against the in-flight LLM call. Awakeables are used for human approvals and sub-agent result waits, not for turn cancellation.
 
 ### Lineage Sink Selection
 
@@ -116,17 +117,21 @@ Sub-agent approvals include `sub_agent_id` and route back through the parent use
 - budget remaining and tokens used
 - task and tool subset
 - pending messages and local history
-- result awakeable ID
-- child refs and cancellation reason
+- direct-dispatch result awakeable ID
+- child refs, cached terminal child results, result waiters, and cancellation reason
 
-Dispatch is bounded by depth, fan-out, repeated task detection, and inherited token budgets. Parent sessions receive results through awakeables or status queries.
+`SubAgent` admits conversational messages and starts at most one `SubAgentTurnExecution` workflow per active child turn. Workflow callbacks carry the admitted `turn_id`; stale responses, tool results, approval clears, and outcomes are ignored rather than mutating a newer turn.
+
+Dispatch is bounded by depth, active fan-out, repeated active task detection, and inherited token budgets. Legacy `dispatch_sub_agent` still waits on the child's direct result awakeable. Detached `spawn_sub_agent` returns immediately, and `wait_sub_agent` first consumes any cached terminal child result; otherwise it registers a child-owned result waiter awakeable and removes that waiter on timeout. Terminal child results are cached on the parent until consumed so finished detached children free active fan-out without losing the final result.
 
 ## Workflows
 
 Only one-shot background jobs use workflows:
 
 - `Consolidate`: one workspace/date memory consolidation pass.
+- `EvalRun`: one eval replay run.
 - `TurnExecution`: one durable session turn keyed by `turn_id`; runs the top-level session brain loop and calls back to `Session` on completion, cancellation, or failure.
+- `SubAgentTurnExecution`: one admitted sub-agent turn keyed by `turn_id`; runs child-local LLM/tool loops and calls back to `SubAgent` with turn-scoped mutations.
 
 These are workflow-shaped because rerunning the same logical job should be explicit and observable.
 

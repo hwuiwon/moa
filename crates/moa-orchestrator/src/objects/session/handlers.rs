@@ -285,6 +285,38 @@ impl Session for SessionImpl {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self, ctx, input))]
+    // SAFETY: called only from SubAgent terminal delivery after parent dispatch authz has already checked.
+    async fn mark_child_terminal(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<MarkSubAgentChildTerminalInput>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("Session", "mark_child_terminal");
+        let mut state = SessionVoState::load_from(&ctx).await?;
+        if state.mark_child_terminal(input.into_inner()) {
+            state.persist_into(&ctx);
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, input))]
+    // SAFETY: called only from TurnExecution after session participant authz has already checked.
+    async fn consume_child_result(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<ConsumeSubAgentChildResultInput>,
+    ) -> Result<Json<ConsumeSubAgentChildResultOutput>, HandlerError> {
+        annotate_restate_handler_span("Session", "consume_child_result");
+        let input = input.into_inner();
+        let mut state = SessionVoState::load_from(&ctx).await?;
+        let terminal = state.consume_child_terminal(&input.sub_agent_id);
+        if terminal.is_some() {
+            state.persist_into(&ctx);
+        }
+        Ok(Json::from(ConsumeSubAgentChildResultOutput { terminal }))
+    }
+
     #[tracing::instrument(skip(self, ctx))]
     // SAFETY: called only from TurnExecution after session participant authz has already checked.
     async fn child_refs(
