@@ -340,4 +340,74 @@ mod tests {
             .expect("delete session blobs");
         assert!(!store.exists(&session_id, &blob_id).await.expect("exists"));
     }
+
+    #[tokio::test]
+    async fn approval_file_diff_strings_are_claim_checked_and_round_trip() {
+        // Pins: approval diff bodies use session event claim checks and still replay as full prompts.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileBlobStore::new(dir.path().join("blobs"));
+        let session_id = SessionId::new();
+        let request_id = uuid::Uuid::now_v7();
+        let before = "old line\n".repeat(32);
+        let after = "new line\n".repeat(32);
+        let event = Event::ApprovalRequested {
+            request_id,
+            awakeable_id: Some("awakeable-1".to_string()),
+            sub_agent_id: None,
+            tool_name: "file_write".to_string(),
+            input_summary: "write src/lib.rs".to_string(),
+            risk_level: moa_core::RiskLevel::High,
+            prompt: moa_core::ApprovalPrompt {
+                request: moa_core::ApprovalRequest {
+                    request_id,
+                    sub_agent_id: None,
+                    tool_name: "file_write".to_string(),
+                    input_summary: "write src/lib.rs".to_string(),
+                    risk_level: moa_core::RiskLevel::High,
+                },
+                pattern: "file_write src/lib.rs".to_string(),
+                parameters: vec![moa_core::ApprovalField {
+                    label: "path".to_string(),
+                    value: "src/lib.rs".to_string(),
+                }],
+                file_diffs: vec![moa_core::ApprovalFileDiff {
+                    path: "src/lib.rs".to_string(),
+                    before,
+                    after,
+                    language_hint: Some("rust".to_string()),
+                }],
+            },
+        };
+
+        let payload = encode_event_for_storage(&store, &session_id, &event, 64)
+            .await
+            .expect("approval event should encode with claim checks");
+        let first_diff = payload
+            .get("data")
+            .and_then(|data| data.get("prompt"))
+            .and_then(|prompt| prompt.get("file_diffs"))
+            .and_then(Value::as_array)
+            .and_then(|diffs| diffs.first())
+            .expect("encoded approval event should include first file diff");
+
+        assert!(
+            first_diff
+                .get("before")
+                .and_then(|value| value.get(BLOB_REF_MARKER))
+                .is_some(),
+            "before diff body should be stored behind a claim check"
+        );
+        assert!(
+            first_diff
+                .get("after")
+                .and_then(|value| value.get(BLOB_REF_MARKER))
+                .is_some(),
+            "after diff body should be stored behind a claim check"
+        );
+
+        let decoded = decode_event_from_storage(&store, &session_id, payload)
+            .await
+            .expect("approval event should decode claim checks");
+        assert_eq!(decoded, event);
+    }
 }

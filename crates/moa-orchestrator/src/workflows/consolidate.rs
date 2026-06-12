@@ -14,6 +14,12 @@ use crate::ctx::OrchestratorCtx;
 use crate::objects::workspace::WorkspaceObjectClient;
 use moa_core::restate_observability::annotate_restate_handler_span;
 
+/// Returns the durable workflow ID for a workspace/date consolidation pass.
+#[must_use]
+pub fn consolidate_workflow_id(workspace_id: &WorkspaceId, target_date: NaiveDate) -> String {
+    format!("{workspace_id}:{target_date}")
+}
+
 /// Workflow input for one workspace/date consolidation run.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConsolidateRequest {

@@ -181,8 +181,6 @@ pub enum Event {
         /// Assigned risk level.
         risk_level: RiskLevel,
         /// Full approval prompt with parsed parameters, diffs, and allow pattern.
-        ///
-        /// TODO: Use a claim-check pattern for large diffs in cloud mode.
         prompt: ApprovalPrompt,
     },
     /// An approval request was decided.

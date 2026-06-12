@@ -11,7 +11,9 @@ use uuid::Uuid;
 
 use crate::OrchestratorCtx;
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar};
-use crate::workflows::consolidate::{ConsolidateClient, ConsolidateReport, ConsolidateRequest};
+use crate::workflows::consolidate::{
+    ConsolidateClient, ConsolidateReport, ConsolidateRequest, consolidate_workflow_id,
+};
 use moa_core::restate_observability::annotate_restate_handler_span;
 
 const K_CONFIG: &str = "config";
@@ -354,7 +356,7 @@ async fn schedule_consolidation_inner(
     let scheduled_at = next + chrono::Duration::seconds(jitter_secs as i64);
     let delay = scheduled_at.signed_duration_since(now);
     let delay = duration_from_chrono(delay);
-    let workflow_id = format!("{}:{}", config.id, next.date_naive());
+    let workflow_id = consolidate_workflow_id(&config.id, next.date_naive());
 
     state.next_consolidation = Some(scheduled_at);
     ctx.workflow_client::<ConsolidateClient>(workflow_id)
