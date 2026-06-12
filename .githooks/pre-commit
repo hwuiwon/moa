@@ -99,7 +99,11 @@ if $root_touched || [ ${#affected[@]} -eq 0 ]; then
   scope_label="workspace"
 else
   scope=()
-  for c in "${affected[@]}"; do scope+=("-p" "$c"); done
+  for c in "${affected[@]}"; do
+    # `-p` takes the package name, not the member path.
+    name="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$c/Cargo.toml" | head -1)"
+    scope+=("-p" "${name:-$c}")
+  done
   scope_label="${affected[*]}"
   echo "[pre-commit] scoped to: $scope_label"
 fi

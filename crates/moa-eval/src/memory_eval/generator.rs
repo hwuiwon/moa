@@ -1566,16 +1566,20 @@ fn render_fact_transcript(
 }
 
 fn render_marked_fact_transcript(category: FactCategory, fact: &LedgerFact) -> String {
+    let scope_marker = match fact.scope {
+        ScopeTier::Workspace | ScopeTier::Global => "workspace shared ",
+        ScopeTier::User => "user private ",
+    };
     match category {
         FactCategory::Supersession => format!(
-            "Fact: {} {} is {}. Supersedes: {}.",
+            "Fact: {scope_marker}{} {} is {}. Supersedes: {}.",
             fact.subject,
             fact.predicate,
             fact.object,
             list_or_none(&fact.supersedes)
         ),
         FactCategory::Contradiction => format!(
-            "Fact: {} {} is {}. This is an unresolved contradictory claim.",
+            "Fact: {scope_marker}{} {} is {}. This is an unresolved contradictory claim.",
             fact.subject, fact.predicate, fact.object
         ),
         FactCategory::WorkspaceShared => format!(
