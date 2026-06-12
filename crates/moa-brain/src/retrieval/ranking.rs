@@ -120,6 +120,7 @@ pub struct FeatureRanker<'a> {
     config: &'a RankingConfig,
     reference_time: DateTime<Utc>,
     request_scope: Option<&'a MemoryScope>,
+    first_person_query: bool,
 }
 
 impl<'a> FeatureRanker<'a> {
@@ -130,6 +131,7 @@ impl<'a> FeatureRanker<'a> {
             config,
             reference_time,
             request_scope: None,
+            first_person_query: false,
         }
     }
 
@@ -137,6 +139,16 @@ impl<'a> FeatureRanker<'a> {
     #[must_use]
     pub fn with_request_scope(mut self, request_scope: &'a MemoryScope) -> Self {
         self.request_scope = Some(request_scope);
+        self
+    }
+
+    /// Doubles the caller's user-scope term for first-person queries.
+    ///
+    /// "What do I prefer" should favor the caller's own facts over
+    /// workspace facts with similar text.
+    #[must_use]
+    pub fn with_first_person_query(mut self, query_text: &str) -> Self {
+        self.first_person_query = is_first_person_query(query_text);
         self
     }
 
@@ -167,9 +179,14 @@ impl<'a> FeatureRanker<'a> {
         );
         let subject = subject_match_score(query_tokens, &row.name);
         let overlap = overlap_score(query_tokens, row);
+        let user_scope_weight = if self.first_person_query {
+            weights.scope_user * 2.0
+        } else {
+            weights.scope_user
+        };
         let scope_term = match row.scope.as_str() {
-            "user" if self.user_row_matches_request(row) => weights.scope_user,
-            "user" if self.request_scope.is_none() => weights.scope_user,
+            "user" if self.user_row_matches_request(row) => user_scope_weight,
+            "user" if self.request_scope.is_none() => user_scope_weight,
             "workspace" => weights.scope_workspace,
             _ => 0.0,
         };
@@ -228,6 +245,17 @@ pub fn ranking_fingerprint(config: &RankingConfig) -> [u8; 32] {
             .expect("ranking config contains only serializable primitive fields"),
     );
     *blake3::hash(canonical.as_bytes()).as_bytes()
+}
+
+fn is_first_person_query(query_text: &str) -> bool {
+    query_text
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "i" | "me" | "my" | "mine"
+            )
+        })
 }
 
 fn subject_match_score(query_tokens: &BTreeSet<String>, name: &str) -> f64 {
