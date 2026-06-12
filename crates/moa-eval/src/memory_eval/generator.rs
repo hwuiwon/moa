@@ -527,6 +527,7 @@ struct FactDraft {
 
 #[derive(Debug, Clone)]
 struct WorkspaceFactRefs {
+    component: String,
     deploy_old_fact_id: String,
     deploy_new_fact_id: String,
     deploy_target: String,
@@ -803,6 +804,7 @@ fn schedule_workspace_facts(
     )?;
 
     Ok(WorkspaceFactRefs {
+        component: component.to_string(),
         deploy_old_fact_id,
         deploy_new_fact_id,
         deploy_target: new_target.to_string(),
@@ -1119,8 +1121,10 @@ fn build_probes(
                 probe_type: ProbeType::LatestValueAfterUpdate,
                 workspace_id: workspace.clone(),
                 user_id: user.clone(),
-                query: "After the latest deploy-target update, where should the service deploy?"
-                    .to_string(),
+                query: format!(
+                    "After the latest deploy-target update, where should {} deploy?",
+                    workspace_fact_refs.component
+                ),
                 answer: format!(
                     "The latest deploy target is {}.",
                     workspace_fact_refs.deploy_target
