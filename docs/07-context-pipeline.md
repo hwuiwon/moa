@@ -23,7 +23,7 @@ The code reports fixed stage numbers through each `ContextProcessor`. With query
 | 2 | `InstructionProcessor` | Stable prefix | user/workspace instructions |
 | 3 | `ToolDefinitionProcessor` | Stable prefix | deterministic tool schema list, capped at 30 |
 | 4 | `QueryRewriter` | Dynamic metadata | retrieval query preparation and task transition signal |
-| 5 | `SkillInjector` | Dynamic tail | budgeted skill manifest ranked for the task |
+| 5 | `SkillInjector` | Dynamic tail | budgeted visible skill manifest ranked for the task |
 | 6 | `DigestProcessor` | Dynamic tail | standing user/workspace memory digests |
 | 7 | `MemoryRetriever` | Dynamic tail | user/workspace indexes and relevant memory pages |
 | 8 | `HistoryCompiler` | Dynamic/history tail | replayed events, checkpoints, recent turns, errors |
@@ -56,12 +56,17 @@ Compatibility fields such as `task_kind`, `suggested_tools`, `needs_clarificatio
 
 ## Skill Injection
 
-`SkillInjector` loads workspace skill metadata from memory and ranks skills with:
+`SkillInjector` loads visible global, workspace, and user skill metadata from Postgres and ranks skills with:
 
 - keyword overlap against the current query
 - tenant-level skill resolution rates from `skill_resolution_rates`
 - normalized use count
 - recency
+
+When multiple visible skills share a name, the most specific scope wins: user
+scope overrides workspace scope, and workspace scope overrides global scope.
+Global skills are the deployment-wide fallback; workspace and user skills let a
+tenant or person specialize behavior without mutating the shared package.
 
 It emits only a compact dynamic manifest. Full skill bodies and supporting package files
 are materialized in the active hand under `.moa/skills/<skill>/...` when a hand

@@ -49,11 +49,11 @@ Platform
        -> Workspaces
        -> Tenant learning log
        -> Workspace memory
-       -> Workspace skills ranked by tenant-level outcomes
+       -> Global, workspace, and user skills ranked by tenant-level outcomes
        -> Lineage, analytics, and optional compliance evidence
 ```
 
-Learning entries and outcome aggregates are tenant-scoped because teams tend to repeat work patterns across projects. Memory and skills remain workspace-scoped, but ranking signals aggregate at tenant level.
+Learning entries and outcome aggregates are tenant-scoped because teams tend to repeat work patterns across projects. Skill packages use the same three-tier scope model as durable memory: global skills are visible to every workspace, workspace skills are visible inside one workspace, and user skills are visible only to that workspace-bound user. Ranking signals aggregate at tenant level.
 
 ## Core Traits
 
@@ -140,7 +140,7 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 | Task segmentation | Postgres | `task_segments`, segment baselines, skill resolution rates |
 | Graph memory | Postgres | Nodes, edges, sidecar indexes, changelog, and RLS-protected scope state |
 | Memory vectors | Postgres | pgvector embeddings for graph retrieval |
-| Skill packages | Postgres | `moa.skill` metadata and `moa.skill_file` package bytes materialized into hands on demand |
+| Skill packages | Postgres | `moa.skill` metadata and `moa.skill_file` package bytes for global, workspace, and user scopes; selected packages are materialized into hands on demand |
 | Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity |
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
 | Optional checkpoints | Neon | branch manager for database checkpoints |

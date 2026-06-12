@@ -30,6 +30,21 @@ Postgres is the only durable skill package store:
 - `moa.skill_file` stores each package file as `BYTEA`, keyed by skill revision
   and normalized package path.
 
+Skill packages are scoped with the same `MemoryScope` tiers used by memory:
+
+| Scope | Stored as | Visibility | Typical use |
+|---|---|---|---|
+| Global | `workspace_id IS NULL`, `user_id IS NULL` | Every workspace and user | Operator-curated deployment-wide skills |
+| Workspace | `workspace_id` set, `user_id IS NULL` | All users in one workspace | Team/project conventions and reusable workflows |
+| User | `workspace_id` and `user_id` set | One user inside one workspace | Personal preferences, shortcuts, and learned habits |
+
+Visible skill resolution is name-based. If global, workspace, and user scopes
+all provide the same skill name, the user-scoped package is selected first, then
+the workspace package, then the global package. Global imports require a service
+identity with tenant-admin authorization and can be bootstrapped through
+`/v1/skills/bootstrap-global`; workspace and user imports go through
+`/v1/skills/import` after workspace authorization.
+
 MOA does not duplicate skill package bytes in object storage. Import/export uses
 package documents containing base64-encoded files. On each turn, selected skill
 packages are registered with the tool router and materialized into the active
@@ -47,7 +62,7 @@ The skill manifest is budgeted and sorted deterministically for cache stability.
 
 ## Skill Ranking
 
-`SkillInjector` ranks workspace skills using:
+`SkillInjector` ranks all visible skills using:
 
 - keyword overlap with the current task
 - tenant-level resolution rate for the skill
@@ -58,14 +73,17 @@ Resolution-rate data comes from the `skill_resolution_rates` materialized view o
 
 ## Distillation And Improvement
 
-Skill distillation runs after successful multi-step work. Current flow:
+Skill distillation runs after successful multi-step work. The current learning
+flow creates or improves workspace-scoped skills; deployment-wide global skills
+are operator imported, and user-scoped skills are imported explicitly. Current
+flow:
 
 1. Count tool calls; short/simple sessions are skipped.
 2. Extract a task summary from recent user input.
-3. Compare against existing workspace skills.
+3. Compare against existing workspace-scoped skills.
 4. If a similar skill exists, attempt improvement.
 5. Otherwise ask the configured model to produce a complete skill document.
-6. Write the skill package into workspace memory.
+6. Write the skill package into the workspace skill scope.
 7. Generate a regression test suite for the skill.
 8. Append a `skill_created` learning entry when a learning store is present.
 
