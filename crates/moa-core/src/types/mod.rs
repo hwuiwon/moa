@@ -30,9 +30,8 @@ pub use approval::{
     ApprovalRule, PolicyAction, PolicyScope, RiskLevel,
 };
 pub use completion::{
-    CacheBreakpoint, CacheBreakpointTarget, CacheTtl, CompletionContent, CompletionRequest,
-    CompletionResponse, CompletionStream, JsonResponseFormat, ProviderToolCallMetadata, StopReason,
-    TokenUsage, ToolCallContent, ToolInvocation,
+    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, JsonResponseFormat,
+    ProviderToolCallMetadata, StopReason, TokenUsage, ToolCallContent, ToolInvocation,
 };
 pub use context::{
     ContextMessage, ExcludedItem, MessageRole, ProcessorOutput, WorkingContext,

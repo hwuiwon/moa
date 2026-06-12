@@ -15,28 +15,28 @@ The implementation lives in `crates/moa-brain/src/pipeline/`.
 
 ## Current Stage Order
 
-The code reports fixed stage numbers through each `ContextProcessor`. With query rewriting enabled, the default pipeline contains ten processors:
+The code reports fixed stage numbers through each `ContextProcessor`. With query rewriting and memory digests enabled, the default graph-backed pipeline contains ten processors:
 
 | Stage | Processor | Cache role | Purpose |
 |---|---|---|---|
 | 1 | `IdentityProcessor` | Stable prefix | MOA identity and high-level behavior |
 | 2 | `InstructionProcessor` | Stable prefix | user/workspace instructions |
 | 3 | `ToolDefinitionProcessor` | Stable prefix | deterministic tool schema list, capped at 30 |
-| 4 | `SkillInjector` | Stable prefix breakpoint | budgeted skill manifest ranked for the task |
-| 5 | `QueryRewriter` | Dynamic metadata | retrieval query preparation and task transition signal |
-| 6 | `MemoryRetriever` | Dynamic tail | user/workspace indexes and relevant memory pages |
-| 7 | `HistoryCompiler` | Dynamic/history prefix | replayed events, checkpoints, recent turns, errors |
-| 8 | `RuntimeContextProcessor` | Dynamic tail | current date, workspace, working directory, branch, user |
-| 9 | `Compactor` | Dynamic maintenance | checkpoint/compaction when thresholds are exceeded |
-| 10 | `CacheOptimizer` | Final pass | cache breakpoints and provider-specific cache metadata |
+| 4 | `QueryRewriter` | Dynamic metadata | retrieval query preparation and task transition signal |
+| 5 | `SkillInjector` | Dynamic tail | budgeted skill manifest ranked for the task |
+| 6 | `DigestProcessor` | Dynamic tail | standing user/workspace memory digests |
+| 7 | `MemoryRetriever` | Dynamic tail | user/workspace indexes and relevant memory pages |
+| 8 | `HistoryCompiler` | Dynamic/history tail | replayed events, checkpoints, recent turns, errors |
+| 9 | `RuntimeContextProcessor` | Dynamic tail | current date, workspace, working directory, branch, user |
+| 10 | `Compactor` | Dynamic maintenance | checkpoint/compaction when thresholds are exceeded |
 
-If query rewriting is disabled, the stage-5 processor is omitted and the pipeline has nine processors; later processors keep their configured stage numbers.
+If query rewriting or memory digests are disabled, those processors are omitted; later processors keep their configured stage numbers.
 
 ## Stable Prefix
 
-The stable prefix is produced by stages 1-4. These stages avoid per-turn values such as timestamps, working directory, branch, counters, or usage stats that would break byte-stable prompt caching.
+The stable prefix is produced by stages 1-3. These stages avoid per-turn values such as timestamps, working directory, branch, counters, usage stats, query-shaped ranking signals, or retrieved memory that would break byte-stable prompt caching.
 
-`SkillInjector` marks a one-hour cache breakpoint after the skill manifest. It sorts and budgets the manifest so the stable prefix remains deterministic for the same inputs.
+The brain does not emit provider cache breakpoints, TTLs, or cached-content names. Provider-specific prompt-cache mechanics belong in the LLM gateway/provider layer. The brain's cache responsibility is only prompt section ordering: keep static instructions and deterministic tool schemas first, then put task-shaped sections in the dynamic tail.
 
 ## Query Rewriting
 
@@ -63,9 +63,13 @@ Compatibility fields such as `task_kind`, `suggested_tools`, `needs_clarificatio
 - normalized use count
 - recency
 
-It emits only a compact manifest. Full skill bodies and supporting package files
+It emits only a compact dynamic manifest. Full skill bodies and supporting package files
 are materialized in the active hand under `.moa/skills/<skill>/...` when a hand
 tool is first invoked. The manifest is budget-aware through `SkillBudgetConfig`.
+
+The selected manifest is not part of the stable prefix because query keywords,
+tenant-level learning, and recency can legitimately change which skills are
+shown for one turn.
 
 ## Memory Retrieval
 
@@ -99,10 +103,6 @@ These values are intentionally outside the stable prefix.
 
 `Compactor` watches event and token thresholds. When compaction is needed, it can ask an LLM for a checkpoint summary, persist a `Checkpoint` event, and let future history compilation start from a compact representation while preserving durable history.
 
-## Cache Optimizer
-
-`CacheOptimizer` finalizes provider cache hints and records cache metrics. Prompt-cache rules are documented in `prompt-caching-architecture.md`.
-
 ## Observability
 
 Each processor returns `ProcessorOutput` with:
@@ -113,4 +113,4 @@ Each processor returns `ProcessorOutput` with:
 - duration
 - metadata
 
-The pipeline records structured tracing spans with session, user, workspace, model, stage number, stage name, token counts, and cache metrics.
+The pipeline records structured tracing spans with session, user, workspace, model, stage number, stage name, token counts, and stable-prefix metrics derived from prompt ordering.

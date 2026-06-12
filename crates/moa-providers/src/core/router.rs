@@ -60,7 +60,7 @@ impl ModelRouter {
 
 enum ProviderInstance {
     Anthropic(AnthropicProvider),
-    OpenAI(OpenAIProvider),
+    OpenAI(Box<OpenAIProvider>),
     Gemini(GeminiProvider),
 }
 
@@ -71,10 +71,9 @@ impl ProviderInstance {
                 config,
                 selection.model_id.clone(),
             )?)),
-            PROVIDER_OPENAI => Ok(Self::OpenAI(OpenAIProvider::from_config_with_model(
-                config,
-                selection.model_id.clone(),
-            )?)),
+            PROVIDER_OPENAI => Ok(Self::OpenAI(Box::new(
+                OpenAIProvider::from_config_with_model(config, selection.model_id.clone())?,
+            ))),
             PROVIDER_GOOGLE => Ok(Self::Gemini(GeminiProvider::from_config_with_model(
                 config,
                 selection.model_id.clone(),
@@ -88,7 +87,7 @@ impl ProviderInstance {
     fn into_arc(self) -> Arc<dyn LLMProvider> {
         match self {
             Self::Anthropic(provider) => Arc::new(provider),
-            Self::OpenAI(provider) => Arc::new(provider),
+            Self::OpenAI(provider) => Arc::new(*provider),
             Self::Gemini(provider) => Arc::new(provider),
         }
     }

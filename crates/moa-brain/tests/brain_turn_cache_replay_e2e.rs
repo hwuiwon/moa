@@ -10,10 +10,9 @@ use moa_brain::{
     run_brain_turn_with_tools,
 };
 use moa_core::{
-    CacheTtl, CompletionRequest, CountedSessionStore, Event, EventRange, EventRecord,
-    ModelCapabilities, Result, SessionMeta, SessionStore, TokenPricing, TokenUsage, ToolCallFormat,
-    ToolOutput, TurnReplayCounters, TurnReplaySnapshot, UserId, WorkspaceId,
-    scope_turn_replay_counters,
+    CompletionRequest, CountedSessionStore, Event, EventRange, EventRecord, ModelCapabilities,
+    Result, SessionMeta, SessionStore, TokenPricing, TokenUsage, ToolCallFormat, ToolOutput,
+    TurnReplayCounters, TurnReplaySnapshot, UserId, WorkspaceId, scope_turn_replay_counters,
 };
 use moa_hands::ToolRouter;
 use moa_providers::{ScriptedProvider, ScriptedResponse, debug_build_anthropic_request_body};
@@ -265,8 +264,8 @@ async fn brain_turn_cache_replay_e2e() -> Result<()> {
     assert!(
         requests
             .iter()
-            .all(|request| !request.cache_breakpoints.is_empty()),
-        "all scripted requests should carry cache breakpoints"
+            .all(|request| static_prefix_message_count(request) > 0),
+        "all scripted requests should carry stable system prefix sections"
     );
     let first_prefix = stable_prefix_bytes(&requests[0])?;
     let last_prefix = stable_prefix_bytes(
@@ -299,25 +298,18 @@ async fn brain_turn_cache_replay_e2e() -> Result<()> {
         workspace.display()
     )));
     let turn_six_body = debug_build_anthropic_request_body(&turn_six_request, false)?;
-    let cache_control_ttls = collect_cache_control_ttls(&turn_six_body);
     assert_eq!(
-        cache_control_ttls,
-        vec!["1h", "1h", "1h", "5m"],
-        "expected 3 static 1h markers plus 1 rolling 5m conversation marker; breakpoints={:?}, controls={:?}, body={turn_six_body:#}",
-        turn_six_request.cache_breakpoints,
-        turn_six_request.cache_controls,
+        turn_six_body
+            .get("cache_control")
+            .and_then(|value| value.get("type"))
+            .and_then(Value::as_str),
+        Some("ephemeral"),
+        "Anthropic caching should be enabled by provider-owned top-level cache_control; body={turn_six_body:#}"
     );
     assert_eq!(
-        turn_six_request.cache_controls.len(),
-        4,
-        "expected exactly four explicit cache controls"
-    );
-    assert!(
-        turn_six_request
-            .cache_controls
-            .iter()
-            .any(|breakpoint| breakpoint.ttl == moa_core::CacheTtl::FiveMinutes),
-        "expected one short-lived conversation cache breakpoint"
+        nested_cache_control_count(&turn_six_body),
+        0,
+        "brain requests should not annotate provider block-level cache markers"
     );
 
     let turn_seven_request = requests
@@ -527,39 +519,27 @@ fn stable_prefix_bytes(request: &CompletionRequest) -> Result<Vec<u8>> {
 
 fn static_prefix_message_count(request: &CompletionRequest) -> usize {
     request
-        .cache_controls
+        .messages
         .iter()
-        .filter(|breakpoint| breakpoint.ttl == CacheTtl::OneHour)
-        .filter_map(moa_core::CacheBreakpoint::message_index)
-        .max()
-        .or_else(|| request.cache_breakpoints.last().copied())
-        .unwrap_or_default()
-        .min(request.messages.len())
+        .take_while(|message| message.role == moa_core::MessageRole::System)
+        .count()
 }
 
-fn collect_cache_control_ttls(body: &Value) -> Vec<&str> {
-    let mut ttls = Vec::new();
+fn nested_cache_control_count(body: &Value) -> usize {
+    let mut count = 0;
 
     if let Some(system) = body["system"].as_array() {
         for block in system {
-            if let Some(ttl) = block
-                .get("cache_control")
-                .and_then(|value| value.get("ttl"))
-                .and_then(Value::as_str)
-            {
-                ttls.push(ttl);
+            if block.get("cache_control").is_some() {
+                count += 1;
             }
         }
     }
 
     if let Some(tools) = body["tools"].as_array() {
         for tool in tools {
-            if let Some(ttl) = tool
-                .get("cache_control")
-                .and_then(|value| value.get("ttl"))
-                .and_then(Value::as_str)
-            {
-                ttls.push(ttl);
+            if tool.get("cache_control").is_some() {
+                count += 1;
             }
         }
     }
@@ -568,20 +548,15 @@ fn collect_cache_control_ttls(body: &Value) -> Vec<&str> {
         for message in messages {
             if let Some(content) = message["content"].as_array() {
                 for block in content {
-                    if let Some(ttl) = block
-                        .get("cache_control")
-                        .and_then(|value| value.get("ttl"))
-                        .and_then(Value::as_str)
-                    {
-                        ttls.push(ttl);
+                    if block.get("cache_control").is_some() {
+                        count += 1;
                     }
                 }
             }
         }
     }
 
-    ttls.sort_unstable();
-    ttls
+    count
 }
 
 #[derive(Debug, Clone)]

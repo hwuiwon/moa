@@ -8,7 +8,7 @@ use moa_brain::{
     run_brain_turn_with_tools,
 };
 use moa_core::{
-    CacheTtl, CompletionRequest, Event, ModelCapabilities, Result, SessionMeta, SessionStore,
+    CompletionRequest, Event, MessageRole, ModelCapabilities, Result, SessionMeta, SessionStore,
     TokenPricing, ToolCallFormat, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
@@ -19,6 +19,7 @@ use tempfile::TempDir;
 
 #[tokio::test]
 async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
+    // Pins: tools and leading system sections remain byte-identical across sessions.
     let root = TempDir::new()?;
     let workspace = root.path().join("workspace");
     tokio::fs::create_dir_all(&workspace).await?;
@@ -179,14 +180,10 @@ fn extend_tool_schemas(mut schemas: Vec<serde_json::Value>) -> Vec<serde_json::V
 
 fn stable_prefix_bytes(request: &CompletionRequest) -> Result<Vec<u8>> {
     let stable_message_count = request
-        .cache_controls
+        .messages
         .iter()
-        .filter(|breakpoint| breakpoint.ttl == CacheTtl::OneHour)
-        .filter_map(moa_core::CacheBreakpoint::message_index)
-        .max()
-        .or_else(|| request.cache_breakpoints.last().copied())
-        .unwrap_or_default()
-        .min(request.messages.len());
+        .take_while(|message| message.role == MessageRole::System)
+        .count();
     serde_json::to_vec(&json!({
         "messages": request.messages[..stable_message_count],
         "tools": request.tools,

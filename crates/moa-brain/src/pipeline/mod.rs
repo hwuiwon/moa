@@ -4,7 +4,6 @@ mod builder;
 mod runner;
 mod util;
 
-pub mod cache;
 pub mod compactor;
 pub mod digest;
 pub mod history;

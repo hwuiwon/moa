@@ -7,7 +7,6 @@
 //! 4. finalize one normalized `CompletionResponse`
 //! 5. record provider-private stream snapshots for tracing/debugging
 
-use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
 use std::time::Instant;
@@ -15,15 +14,15 @@ use std::time::Instant;
 use eventsource_stream::{Event as SseEvent, Eventsource};
 use futures_util::{Stream, StreamExt, pin_mut};
 use moa_core::{
-    CacheTtl, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
-    ContextMessage, JsonResponseFormat, LLMProvider, MessageRole, MoaConfig, MoaError,
-    ModelCapabilities, ModelId, ProviderNativeTool, ProviderToolCallMetadata, Result, StopReason,
-    TokenPricing, TokenUsage, ToolCallContent, ToolCallFormat, ToolContent, ToolInvocation,
+    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
+    JsonResponseFormat, LLMProvider, MessageRole, MoaConfig, MoaError, ModelCapabilities, ModelId,
+    ProviderNativeTool, ProviderToolCallMetadata, Result, StopReason, TokenPricing, TokenUsage,
+    ToolCallContent, ToolCallFormat, ToolContent, ToolInvocation,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::core::http::build_http_client;
@@ -45,7 +44,7 @@ use model::{canonical_model_id, capabilities_for_model};
 use streaming::consume_sse_events;
 
 #[cfg(test)]
-use request::{build_explicit_cache_plan, build_request_body};
+use request::build_request_body;
 #[cfg(test)]
 use response::{GeminiUsageMetadata, token_usage_from_gemini_usage};
 #[cfg(test)]
@@ -86,7 +85,6 @@ pub struct GeminiProvider {
     default_capabilities: ModelCapabilities,
     retry_policy: RetryPolicy,
     web_search_enabled: bool,
-    explicit_cache_names: Mutex<HashMap<String, String>>,
 }
 
 impl GeminiProvider {
@@ -113,7 +111,6 @@ impl GeminiProvider {
             default_capabilities,
             retry_policy: RetryPolicy::default().with_max_retries(DEFAULT_MAX_RETRIES),
             web_search_enabled: true,
-            explicit_cache_names: Mutex::new(HashMap::new()),
         })
     }
 
@@ -160,7 +157,6 @@ impl GeminiProvider {
             default_capabilities,
             retry_policy: self.retry_policy.clone(),
             web_search_enabled: self.web_search_enabled,
-            explicit_cache_names: Mutex::new(HashMap::new()),
         })
     }
 
@@ -218,15 +214,12 @@ impl LLMProvider for GeminiProvider {
         );
         span_recorder.set_phase("build_request");
         let span = span_recorder.span().clone();
-        let request_body = match self
-            .build_request_body_with_cache(
-                &request,
-                &resolved_model,
-                &self.default_reasoning_effort,
-                native_tools,
-            )
-            .await
-        {
+        let request_body = match request::build_request_body(
+            &request,
+            &resolved_model,
+            &self.default_reasoning_effort,
+            native_tools,
+        ) {
             Ok(body) => body,
             Err(error) => {
                 span_recorder.fail_at_stage("build_request", &error);

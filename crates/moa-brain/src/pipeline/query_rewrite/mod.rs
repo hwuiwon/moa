@@ -63,7 +63,7 @@ impl ContextProcessor for QueryRewriter {
     }
 
     fn stage(&self) -> u8 {
-        5
+        4
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {

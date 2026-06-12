@@ -138,7 +138,7 @@ counter that invalidates stale delayed ticks after reconfiguration.
 
 On boot, the orchestrator installs two periodic jobs via the `CronJob` virtual object:
 
-- `graph_memory_compact`: fires at HH:00 UTC every hour and invokes `GraphMemoryMaint/compact`. It is currently a no-op shell.
+- `graph_memory_compact`: fires at HH:00 UTC every hour and invokes `GraphMemoryMaint/compact`, which queues one `Consolidate` workflow for each active graph-memory workspace.
 - `neon_prune_branches`: fires at 00:00, 06:00, 12:00, and 18:00 UTC and invokes `NeonMaint/prune_branches`. It is a no-op when `MOA_NEON_API_KEY` is unset.
 
 To inspect the schedule:

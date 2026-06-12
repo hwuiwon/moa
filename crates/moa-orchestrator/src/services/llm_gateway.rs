@@ -1104,8 +1104,6 @@ mod tests {
             max_output_tokens: None,
             temperature: None,
             response_format: None,
-            cache_breakpoints: Vec::new(),
-            cache_controls: Vec::new(),
             metadata,
         };
 

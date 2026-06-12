@@ -9,9 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use super::{
-    GeminiProvider, GeminiUsageMetadata, build_explicit_cache_plan, build_request_body,
-    canonical_model_id, capabilities_for_model, thinking_config_for_model,
-    token_usage_from_gemini_usage,
+    GeminiProvider, GeminiUsageMetadata, build_request_body, canonical_model_id,
+    capabilities_for_model, thinking_config_for_model, token_usage_from_gemini_usage,
 };
 
 fn sse_stream(frames: &[Value]) -> String {
@@ -129,8 +128,6 @@ async fn gemini_provider_serializes_system_messages_and_tools() {
             max_output_tokens: Some(1024),
             temperature: Some(0.2),
             response_format: None,
-            cache_breakpoints: Vec::new(),
-            cache_controls: Vec::new(),
             metadata: Default::default(),
         })
         .await
@@ -228,7 +225,8 @@ fn gemini_3_flash_uses_minimal_thinking_for_tiny_output_caps() {
 }
 
 #[test]
-fn gemini_explicit_cache_plan_skips_tail_system_instruction() {
+fn gemini_request_body_keeps_cacheable_prompt_inline() {
+    // Pins: Gemini adapter relies on implicit caching and does not create cachedContent references.
     let request = CompletionRequest {
         model: None,
         messages: vec![
@@ -252,16 +250,16 @@ fn gemini_explicit_cache_plan_skips_tail_system_instruction() {
         max_output_tokens: Some(256),
         temperature: None,
         response_format: None,
-        cache_breakpoints: vec![2],
-        cache_controls: Vec::new(),
         metadata: Default::default(),
     };
 
-    let plan =
-        build_explicit_cache_plan(&request, "gemini-3-flash-preview", "medium", &[]).unwrap();
-    assert!(
-        plan.is_none(),
-        "tail requests with a system instruction must not use cachedContent"
+    let body = build_request_body(&request, "gemini-3-flash-preview", "medium", &[])
+        .expect("request body should build");
+
+    assert!(body.get("cachedContent").is_none());
+    assert_eq!(
+        body["systemInstruction"]["parts"][0]["text"],
+        "cached rules"
     );
 }
 
@@ -336,8 +334,6 @@ async fn gemini_provider_groups_tool_history_and_preserves_thought_signatures() 
             max_output_tokens: Some(1024),
             temperature: None,
             response_format: None,
-            cache_breakpoints: Vec::new(),
-            cache_controls: Vec::new(),
             metadata: Default::default(),
         })
         .await

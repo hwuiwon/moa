@@ -5,8 +5,8 @@ use std::time::Instant;
 use eventsource_stream::Eventsource;
 use futures_util::stream;
 use moa_core::{
-    CacheBreakpoint, CacheTtl, CompletionContent, CompletionRequest, ContextMessage,
-    JsonResponseFormat, LLMProvider, ModelId, StopReason, ToolContent,
+    CompletionContent, CompletionRequest, ContextMessage, JsonResponseFormat, LLMProvider, ModelId,
+    StopReason, ToolContent,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -42,8 +42,6 @@ fn completion_request_serializes_to_anthropic_format() {
         max_output_tokens: Some(512),
         temperature: Some(0.2),
         response_format: None,
-        cache_breakpoints: Vec::new(),
-        cache_controls: Vec::new(),
         metadata: Default::default(),
     };
 
@@ -101,7 +99,8 @@ fn completion_request_sets_structured_output_config() {
 }
 
 #[test]
-fn completion_request_prefers_deepest_breakpoint_when_static_prefix_fits_window() {
+fn completion_request_enables_top_level_cache_control_for_large_prompt() {
+    // Pins: Anthropic cache behavior is provider-owned and top-level, not block-annotated.
     let request = CompletionRequest {
         model: Some(ModelId::new(MODEL_SONNET_4_6)),
         messages: vec![
@@ -122,8 +121,6 @@ fn completion_request_prefers_deepest_breakpoint_when_static_prefix_fits_window(
         max_output_tokens: Some(512),
         temperature: None,
         response_format: None,
-        cache_breakpoints: vec![1],
-        cache_controls: vec![CacheBreakpoint::message(1, CacheTtl::OneHour)],
         metadata: Default::default(),
     };
 
@@ -135,25 +132,25 @@ fn completion_request_prefers_deepest_breakpoint_when_static_prefix_fits_window(
     )
     .expect("request should build");
 
-    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
-    assert_eq!(body["system"][0]["cache_control"]["ttl"], "1h");
+    assert_eq!(body["cache_control"]["type"], "ephemeral");
+    assert!(body["system"][0].get("cache_control").is_none());
     assert!(body["tools"][0].get("cache_control").is_none());
+    assert!(
+        !body["messages"].to_string().contains("cache_control"),
+        "message blocks should not contain nested cache_control markers"
+    );
 }
 
 #[test]
-fn completion_request_applies_cache_control_to_message_breakpoints() {
+fn completion_request_omits_top_level_cache_control_for_small_prompt() {
+    // Pins: small Anthropic requests avoid sending cache_control when there is no cacheable prefix.
     let request = CompletionRequest {
         model: Some(ModelId::new(MODEL_SONNET_4_6)),
-        messages: vec![
-            ContextMessage::user("U".repeat(5_000)),
-            ContextMessage::assistant("ack"),
-        ],
+        messages: vec![ContextMessage::user("Hello")],
         tools: Vec::new(),
         max_output_tokens: Some(512),
         temperature: None,
         response_format: None,
-        cache_breakpoints: vec![1],
-        cache_controls: vec![CacheBreakpoint::message(1, CacheTtl::FiveMinutes)],
         metadata: Default::default(),
     };
 
@@ -165,79 +162,12 @@ fn completion_request_applies_cache_control_to_message_breakpoints() {
     )
     .expect("request should build");
 
-    assert_eq!(
-        body["messages"][0]["content"][0]["cache_control"]["type"],
-        "ephemeral"
-    );
-    assert_eq!(
-        body["messages"][0]["content"][0]["cache_control"]["ttl"],
-        "5m"
-    );
+    assert!(body.get("cache_control").is_none());
 }
 
 #[test]
-fn completion_request_limits_cache_control_markers_to_four_total() {
-    let request = CompletionRequest {
-        model: Some(ModelId::new(MODEL_SONNET_4_6)),
-        messages: vec![
-            ContextMessage::user("A".repeat(5_000)),
-            ContextMessage::user("B".repeat(5_000)),
-            ContextMessage::user("C".repeat(5_000)),
-            ContextMessage::user("D".repeat(5_000)),
-            ContextMessage::user("E".repeat(5_000)),
-            ContextMessage::assistant("done"),
-        ],
-        tools: vec![json!({
-            "name": "bash",
-            "description": "Run shell commands",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "cmd": { "type": "string" }
-                },
-                "required": ["cmd"]
-            }
-        })],
-        max_output_tokens: Some(512),
-        temperature: None,
-        response_format: None,
-        cache_breakpoints: vec![1, 2, 3, 4, 5],
-        cache_controls: vec![
-            CacheBreakpoint::tools(CacheTtl::OneHour),
-            CacheBreakpoint::message(1, CacheTtl::OneHour),
-            CacheBreakpoint::message(3, CacheTtl::OneHour),
-            CacheBreakpoint::message(5, CacheTtl::FiveMinutes),
-            CacheBreakpoint::message(6, CacheTtl::FiveMinutes),
-        ],
-        metadata: Default::default(),
-    };
-
-    let body = build_request_body(
-        &request,
-        &canonical_model_id(MODEL_SONNET_4_6).expect("valid model"),
-        &capabilities_for_model(MODEL_SONNET_4_6).expect("valid capabilities"),
-        false,
-    )
-    .expect("request should build");
-
-    let message_markers = body["messages"]
-        .as_array()
-        .expect("messages array")
-        .iter()
-        .filter(|message| message["content"][0].get("cache_control").is_some())
-        .count();
-    let tool_markers = body["tools"]
-        .as_array()
-        .expect("tools array")
-        .iter()
-        .filter(|tool| tool.get("cache_control").is_some())
-        .count();
-
-    assert_eq!(message_markers + tool_markers, 4);
-}
-
-#[test]
-fn completion_request_counts_tool_tokens_toward_breakpoint_eligibility() {
+fn completion_request_counts_tool_tokens_toward_automatic_cache_control() {
+    // Pins: large tool schemas can make an Anthropic request cacheable without explicit markers.
     let request = CompletionRequest {
         model: Some(ModelId::new(MODEL_SONNET_4_6)),
         messages: vec![
@@ -252,11 +182,6 @@ fn completion_request_counts_tool_tokens_toward_breakpoint_eligibility() {
         max_output_tokens: Some(512),
         temperature: None,
         response_format: None,
-        cache_breakpoints: vec![1],
-        cache_controls: vec![
-            CacheBreakpoint::tools(CacheTtl::OneHour),
-            CacheBreakpoint::message(1, CacheTtl::OneHour),
-        ],
         metadata: Default::default(),
     };
 
@@ -268,64 +193,8 @@ fn completion_request_counts_tool_tokens_toward_breakpoint_eligibility() {
     )
     .expect("request should build");
 
-    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
-    assert_eq!(body["tools"][0]["cache_control"]["ttl"], "1h");
-}
-
-#[test]
-fn completion_request_marks_explicit_tool_breakpoint() {
-    let request = CompletionRequest {
-        model: Some(ModelId::new(MODEL_SONNET_4_6)),
-        messages: vec![
-            ContextMessage::system("S".repeat(5_000)),
-            ContextMessage::user("Hello"),
-        ],
-        tools: (0..25)
-            .map(|index| {
-                json!({
-                    "name": format!("tool_{index}"),
-                    "description": "Run shell commands ".repeat(80),
-                    "input_schema": { "type": "object" }
-                })
-            })
-            .collect(),
-        max_output_tokens: Some(512),
-        temperature: None,
-        response_format: None,
-        cache_breakpoints: vec![1],
-        cache_controls: vec![
-            CacheBreakpoint::tools(CacheTtl::OneHour),
-            CacheBreakpoint::message(1, CacheTtl::OneHour),
-        ],
-        metadata: Default::default(),
-    };
-
-    let body = build_request_body(
-        &request,
-        &canonical_model_id(MODEL_SONNET_4_6).expect("valid model"),
-        &capabilities_for_model(MODEL_SONNET_4_6).expect("valid capabilities"),
-        false,
-    )
-    .expect("request should build");
-
-    let tools = body["tools"].as_array().expect("tools array");
-    assert_eq!(
-        tools
-            .last()
-            .and_then(|tool| tool.get("cache_control"))
-            .and_then(|value| value.get("type"))
-            .and_then(serde_json::Value::as_str),
-        Some("ephemeral")
-    );
-    assert_eq!(
-        tools
-            .last()
-            .and_then(|tool| tool.get("cache_control"))
-            .and_then(|value| value.get("ttl"))
-            .and_then(serde_json::Value::as_str),
-        Some("1h")
-    );
-    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(body["cache_control"]["type"], "ephemeral");
+    assert!(body["tools"][0].get("cache_control").is_none());
 }
 
 #[test]

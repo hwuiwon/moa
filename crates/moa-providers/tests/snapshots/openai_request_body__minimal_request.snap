@@ -1,5 +1,6 @@
 ---
 source: crates/moa-providers/tests/request_body_snapshots.rs
+assertion_line: 52
 expression: body
 ---
 {
@@ -14,7 +15,7 @@ expression: body
   "max_output_tokens": 256,
   "model": "gpt-5.4-mini",
   "parallel_tool_calls": true,
-  "prompt_cache_key": "moa:gpt-5.4-mini:2196cbee5b219241",
+  "prompt_cache_key": "moa:gpt-5.4-mini:f6c1200a0f6933d3",
   "prompt_cache_retention": "in_memory",
   "reasoning": {
     "effort": "medium"

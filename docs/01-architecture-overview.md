@@ -72,7 +72,7 @@ Current trait definitions live under `crates/moa-core/src/traits/` and
 | `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, Gemini embedding, and test/mock adapters |
 | `PlatformAdapter` | Gateway inbound/outbound normalization | Telegram, Slack, Discord |
 | `BuiltInTool` | Built-in tool execution | memory/search/web and other built-ins |
-| `ContextProcessor` | One stage in context compilation | identity, instructions, tools, skills, query rewrite, memory, history, runtime context, compactor, cache |
+| `ContextProcessor` | One stage in context compilation | identity, instructions, tools, query rewrite, skills, memory, history, runtime context, compactor |
 | `CredentialVault` | Secret storage and retrieval | local encrypted vault; environment-backed MCP vault |
 | `LineageHandle` | Transport-neutral lineage capture | null handle, async sink, OTel bridge |
 
@@ -113,13 +113,13 @@ User message
        1 identity
        2 instructions
        3 tools
-       4 skills
-       5 query_rewrite (when enabled)
-       6 memory
-       7 history
-       8 runtime_context
-       9 compactor
-       10 cache
+       4 query_rewrite (when enabled)
+       5 skills
+       6 memory_digest (when enabled)
+       7 memory
+       8 history
+       9 runtime_context
+       10 compactor
   -> Query rewrite may mark `is_new_task`
   -> SegmentTracker opens or rolls a task segment
   -> LLM response is streamed/collected

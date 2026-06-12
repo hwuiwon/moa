@@ -68,7 +68,7 @@ impl ContextProcessor for Compactor {
     }
 
     fn stage(&self) -> u8 {
-        9
+        10
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {

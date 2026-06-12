@@ -238,7 +238,7 @@ impl ContextProcessor for GraphMemoryRetriever {
     }
 
     fn stage(&self) -> u8 {
-        6
+        7
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {

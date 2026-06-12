@@ -9,7 +9,6 @@ use moa_core::{
 };
 use moa_memory_vector::{EmbedderConstructionRole, build_embedder_from_config};
 
-use super::cache::CacheOptimizer;
 use super::compactor::Compactor;
 use super::digest::DigestProcessor;
 use super::history::HistoryCompiler;
@@ -64,7 +63,6 @@ pub fn build_default_pipeline_with_tools(
             session_store,
             None,
         )) as Box<dyn ContextProcessor>,
-        Box::new(CacheOptimizer) as Box<dyn ContextProcessor>,
     ]);
 
     ContextPipeline::with_runtime_limits(
@@ -185,15 +183,15 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
             discovered_workspace_instructions,
         )),
         Box::new(ToolDefinitionProcessor::new(tool_schemas)),
-        Box::new(
-            SkillInjector::new(graph_pool.clone())
-                .with_session_store(session_store.clone())
-                .with_budget_config(config.skill_budget.clone()),
-        ),
     ];
     if let Some(query_rewriter) = query_rewriter {
         stages.push(query_rewriter);
     }
+    stages.push(Box::new(
+        SkillInjector::new(graph_pool.clone())
+            .with_session_store(session_store.clone())
+            .with_budget_config(config.skill_budget.clone()),
+    ));
     if config.memory.digest.enabled {
         stages.push(Box::new(DigestProcessor::new(
             graph_pool.clone(),
@@ -209,7 +207,6 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
             session_store,
             compaction_llm_provider,
         )) as Box<dyn ContextProcessor>,
-        Box::new(CacheOptimizer) as Box<dyn ContextProcessor>,
     ]);
 
     let pipeline = ContextPipeline::with_runtime_limits(

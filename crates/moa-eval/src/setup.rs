@@ -7,7 +7,6 @@ use std::sync::Arc;
 use moa_brain::{
     ContextPipeline,
     pipeline::{
-        cache::CacheOptimizer,
         history::HistoryCompiler,
         identity::{DEFAULT_IDENTITY_PROMPT, IdentityProcessor},
         instructions::InstructionProcessor,
@@ -207,7 +206,6 @@ async fn build_pipeline(
             base_config.compaction.clone(),
         )) as Box<dyn ContextProcessor>,
         Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
-        Box::new(CacheOptimizer) as Box<dyn ContextProcessor>,
     ]);
 
     Ok(ContextPipeline::new(stages))

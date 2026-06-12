@@ -1,7 +1,6 @@
-//! Stage 4: injects a budgeted skill manifest and marks the stable cache breakpoint.
+//! Stage 5: injects a budgeted skill manifest as dynamic turn context.
 
 mod activation;
-mod cache_break;
 mod registry;
 #[cfg(test)]
 mod test_support;
@@ -12,8 +11,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    ContextProcessor, ProcessorOutput, Result, SessionStore, SkillBudgetConfig, SkillMetadata,
-    WorkingContext,
+    ContextMessage, ContextProcessor, ProcessorOutput, Result, SessionStore, SkillBudgetConfig,
+    SkillMetadata, WorkingContext,
 };
 use serde_json::json;
 use sqlx::PgPool;
@@ -33,7 +32,7 @@ pub const SELECTED_SKILL_NAMES_METADATA_KEY: &str = "selected_skill_names";
 /// Context metadata key containing the selected skill sandbox file count.
 pub const SELECTED_SKILL_FILE_COUNT_METADATA_KEY: &str = "selected_skill_sandbox_file_count";
 
-/// Injects workspace skill metadata into the stable prompt prefix.
+/// Injects workspace skill metadata into dynamic turn context.
 pub struct SkillInjector {
     source: SkillSource,
     session_store: Option<Arc<dyn SessionStore>>,
@@ -107,7 +106,7 @@ impl ContextProcessor for SkillInjector {
     }
 
     fn stage(&self) -> u8 {
-        4
+        5
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
@@ -115,7 +114,6 @@ impl ContextProcessor for SkillInjector {
         let tokens_before = ctx.token_count;
 
         if skills.is_empty() {
-            cache_break::mark_stable_prefix_breakpoint(ctx);
             return Ok(ProcessorOutput::default());
         }
 
@@ -140,9 +138,8 @@ impl ContextProcessor for SkillInjector {
         let selected_file_count = selected_files.len();
 
         if !manifest.is_empty() {
-            ctx.append_system(manifest);
+            ctx.append_message(ContextMessage::user(manifest));
         }
-        cache_break::mark_stable_prefix_breakpoint(ctx);
 
         let items_included = selection
             .selected
@@ -211,7 +208,8 @@ mod tests {
     use super::tier1_metadata::{MANIFEST_FOOTER, MANIFEST_PREAMBLE};
 
     #[tokio::test]
-    async fn skill_injector_marks_cache_breakpoint_and_formats_metadata() {
+    async fn skill_injector_formats_dynamic_metadata() {
+        // Pins: selected skill manifests are dynamic context and do not require cache markers.
         let mut ctx = moa_core::WorkingContext::new(&session(), capabilities(200_000));
         let skills = skills(vec![(
             "debug-oauth",
@@ -225,7 +223,7 @@ mod tests {
             .await
             .expect("skill injection should succeed");
 
-        assert_eq!(ctx.cache_breakpoints, vec![1]);
+        assert_eq!(ctx.messages[0].role, moa_core::MessageRole::User);
         assert!(ctx.messages[0].content.contains("<available_skills>"));
         assert!(ctx.messages[0].content.contains("debug-oauth"));
         assert!(
@@ -239,7 +237,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skill_injector_marks_breakpoint_without_skills() {
+    async fn skill_injector_injects_nothing_without_skills() {
+        // Pins: an empty skill registry leaves the compiled prompt unchanged.
         let mut ctx = moa_core::WorkingContext::new(&session(), capabilities(200_000));
 
         let output = SkillInjector::from_skills(Vec::new())
@@ -247,7 +246,6 @@ mod tests {
             .await
             .expect("skill injection should succeed");
 
-        assert_eq!(ctx.cache_breakpoints, vec![0]);
         assert!(ctx.messages.is_empty());
         assert_eq!(output.tokens_added, 0);
         assert!(output.items_included.is_empty());

@@ -2,7 +2,9 @@
 
 use std::time::Instant;
 
-use moa_core::{ContextProcessor, ContextSnapshotConfig, ProcessorOutput, Result, WorkingContext};
+use moa_core::{
+    ContextProcessor, ContextSnapshotConfig, MessageRole, ProcessorOutput, Result, WorkingContext,
+};
 use tracing::Instrument;
 
 use super::util::estimate_tokens;
@@ -79,7 +81,6 @@ impl ContextPipeline {
             moa.pipeline.stage_count = self.stages.len() as i64,
             moa.pipeline.total_tokens = tracing::field::Empty,
             moa.pipeline.cache_ratio = tracing::field::Empty,
-            moa.pipeline.cache_breakpoints = tracing::field::Empty,
         );
 
         let instrument_pipeline_span = pipeline_span.clone();
@@ -162,10 +163,6 @@ impl ContextPipeline {
             let cache_ratio = cache_prefix_ratio(ctx);
             pipeline_span.record("moa.pipeline.total_tokens", ctx.token_count as i64);
             pipeline_span.record("moa.pipeline.cache_ratio", cache_ratio);
-            pipeline_span.record(
-                "moa.pipeline.cache_breakpoints",
-                ctx.cache_breakpoints.len() as i64,
-            );
             ctx.insert_metadata("_moa.context_tokens", serde_json::json!(ctx.token_count));
             ctx.insert_metadata("_moa.cache_ratio", serde_json::json!(cache_ratio));
 
@@ -188,11 +185,12 @@ fn cache_prefix_ratio(ctx: &WorkingContext) -> f64 {
         return 1.0;
     }
 
-    let Some(cache_breakpoint) = ctx.cache_breakpoints.last().copied() else {
-        return 0.0;
-    };
-
-    let prefix_tokens = ctx.messages[..cache_breakpoint.min(ctx.messages.len())]
+    let stable_message_count = ctx
+        .messages
+        .iter()
+        .take_while(|message| message.role == MessageRole::System)
+        .count();
+    let prefix_tokens = ctx.messages[..stable_message_count]
         .iter()
         .map(|message| estimate_tokens(&message.content))
         .sum::<usize>()
@@ -294,6 +292,7 @@ mod tests {
 
     #[test]
     fn cache_prefix_ratio_includes_tool_tokens() {
+        // Pins: stable-prefix ratio counts deterministic tool schemas and leading system messages only.
         let session = SessionMeta {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
@@ -314,7 +313,6 @@ mod tests {
             }
         })]);
         ctx.append_system("identity");
-        ctx.mark_cache_breakpoint();
         ctx.append_message(ContextMessage::user("hello"));
 
         let ratio = cache_prefix_ratio(&ctx);

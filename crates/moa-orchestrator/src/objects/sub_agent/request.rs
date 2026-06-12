@@ -17,8 +17,6 @@ pub(super) fn build_completion_request(
         max_output_tokens: Some(capabilities.max_output),
         temperature: None,
         response_format: None,
-        cache_breakpoints: Vec::new(),
-        cache_controls: Vec::new(),
         metadata: HashMap::new(),
     };
     request

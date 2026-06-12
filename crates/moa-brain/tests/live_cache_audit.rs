@@ -16,9 +16,9 @@ use moa_brain::{
 };
 use moa_core::workspace::discover_workspace_instructions;
 use moa_core::{
-    CacheTtl, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage, Event,
-    EventRange, LLMProvider, MessageRole, MoaConfig, Result, SessionMeta, SessionStore,
-    ToolContent, UserId, WorkspaceId, estimate_text_tokens,
+    CompletionRequest, CompletionResponse, CompletionStream, ContextMessage, Event, EventRange,
+    LLMProvider, MessageRole, MoaConfig, Result, SessionMeta, SessionStore, ToolContent, UserId,
+    WorkspaceId, estimate_text_tokens,
 };
 use moa_hands::ToolRouter;
 use moa_providers::build_provider_from_config;
@@ -51,7 +51,6 @@ struct CacheTurnAudit {
     model: String,
     tool_count: usize,
     message_count: usize,
-    cache_breakpoints: Vec<usize>,
     tool_tokens_estimate: usize,
     stable_message_tokens_estimate: usize,
     stable_total_tokens_estimate: usize,
@@ -76,7 +75,6 @@ struct CacheTurnPlan {
     model: String,
     tool_count: usize,
     message_count: usize,
-    cache_breakpoints: Vec<usize>,
     tool_tokens_estimate: usize,
     stable_message_tokens_estimate: usize,
     stable_total_tokens_estimate: usize,
@@ -154,7 +152,6 @@ impl CacheTurnPlan {
             model: model.to_string(),
             tool_count: request.tools.len(),
             message_count: request.messages.len(),
-            cache_breakpoints: request.cache_breakpoints.clone(),
             tool_tokens_estimate,
             stable_message_tokens_estimate,
             stable_total_tokens_estimate,
@@ -186,7 +183,6 @@ impl CacheTurnPlan {
             model: self.model,
             tool_count: self.tool_count,
             message_count: self.message_count,
-            cache_breakpoints: self.cache_breakpoints,
             tool_tokens_estimate: self.tool_tokens_estimate,
             stable_message_tokens_estimate: self.stable_message_tokens_estimate,
             stable_total_tokens_estimate: self.stable_total_tokens_estimate,
@@ -809,14 +805,10 @@ fn stable_prefix_payload(request: &CompletionRequest, stable_message_count: usiz
 
 fn static_prefix_message_count(request: &CompletionRequest) -> usize {
     request
-        .cache_controls
+        .messages
         .iter()
-        .filter(|breakpoint| breakpoint.ttl == CacheTtl::OneHour)
-        .filter_map(moa_core::CacheBreakpoint::message_index)
-        .max()
-        .or_else(|| request.cache_breakpoints.last().copied())
-        .unwrap_or_default()
-        .min(request.messages.len())
+        .take_while(|message| message.role == MessageRole::System)
+        .count()
 }
 
 fn full_request_payload(request: &CompletionRequest) -> String {

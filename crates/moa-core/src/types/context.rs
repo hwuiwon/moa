@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    CacheBreakpoint, CacheTtl, CompletionRequest, ModelCapabilities, SandboxFile, SessionId,
-    SessionMeta, ToolContent, ToolInvocation, UserId, WorkspaceId,
+    CompletionRequest, ModelCapabilities, SandboxFile, SessionId, SessionMeta, ToolContent,
+    ToolInvocation, UserId, WorkspaceId,
 };
 
 /// Role of a context message passed to the LLM.
@@ -167,10 +167,6 @@ pub struct WorkingContext {
     pub user_id: UserId,
     /// Workspace identifier.
     pub workspace_id: WorkspaceId,
-    /// Cache breakpoint indexes within `messages`.
-    pub cache_breakpoints: Vec<usize>,
-    /// Detailed cache controls emitted to providers that support TTL-aware prompt caching.
-    pub cache_controls: Vec<CacheBreakpoint>,
     /// Active tool schemas compiled for the request.
     tool_schemas: Vec<Value>,
     /// Arbitrary processor metadata.
@@ -193,8 +189,6 @@ impl WorkingContext {
             session_id: session.id,
             user_id: session.user_id.clone(),
             workspace_id: session.workspace_id.clone(),
-            cache_breakpoints: Vec::new(),
-            cache_controls: Vec::new(),
             tool_schemas: Vec::new(),
             metadata: HashMap::new(),
             trusted_sandbox_files: Vec::new(),
@@ -217,18 +211,6 @@ impl WorkingContext {
         let bounded_index = index.min(self.messages.len());
         self.token_count += estimate_text_tokens(&message.content);
         self.messages.insert(bounded_index, message);
-        for breakpoint in &mut self.cache_breakpoints {
-            if *breakpoint > bounded_index {
-                *breakpoint += 1;
-            }
-        }
-        for breakpoint in &mut self.cache_controls {
-            if let Some(index) = breakpoint.message_index()
-                && index > bounded_index
-            {
-                *breakpoint = CacheBreakpoint::message(index + 1, breakpoint.ttl);
-            }
-        }
     }
 
     /// Extends the context with multiple messages and updates token counts.
@@ -279,19 +261,6 @@ impl WorkingContext {
         std::mem::take(&mut self.trusted_sandbox_files)
     }
 
-    /// Marks the current message index as a cache breakpoint.
-    pub fn mark_cache_breakpoint(&mut self) {
-        self.mark_cache_breakpoint_with_ttl(CacheTtl::OneHour);
-    }
-
-    /// Marks the current message index as a cache breakpoint with an explicit TTL.
-    pub fn mark_cache_breakpoint_with_ttl(&mut self, ttl: CacheTtl) {
-        let index = self.messages.len();
-        self.cache_breakpoints.push(index);
-        self.cache_controls
-            .push(CacheBreakpoint::message(index, ttl));
-    }
-
     /// Returns the most recent user-authored message text, if one exists.
     pub fn last_user_message(&self) -> Option<&str> {
         self.messages
@@ -312,8 +281,6 @@ impl WorkingContext {
             max_output_tokens: Some(max_output),
             temperature: None,
             response_format: None,
-            cache_breakpoints: self.cache_breakpoints,
-            cache_controls: self.cache_controls,
             metadata: self.metadata,
         }
     }
@@ -359,14 +326,8 @@ pub fn estimate_text_tokens(text: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::{ContextMessage, MessageRole};
-    use crate::types::{
-        CacheBreakpoint, CacheTtl, ModelCapabilities, ModelId, Platform, SessionId, SessionMeta,
-        TokenPricing, ToolCallFormat, ToolContent, ToolInvocation, UserId, WorkingContext,
-        WorkspaceId,
-    };
+    use crate::types::{ToolContent, ToolInvocation};
 
     #[test]
     fn context_message_tool_result_preserves_text_and_blocks() {
@@ -405,47 +366,5 @@ mod tests {
         assert_eq!(message.tool_invocation, Some(invocation));
         assert!(message.content_blocks.is_none());
         assert!(message.tool_use_id.is_none());
-    }
-
-    #[test]
-    fn working_context_into_request_preserves_cache_breakpoints() {
-        let session = SessionMeta {
-            id: SessionId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
-            platform: Platform::Api,
-            model: ModelId::new("claude-sonnet-4-6"),
-            ..SessionMeta::default()
-        };
-        let capabilities = ModelCapabilities {
-            model_id: ModelId::new("claude-sonnet-4-6"),
-            context_window: 200_000,
-            max_output: 8_192,
-            supports_tools: true,
-            supports_vision: true,
-            supports_prefix_caching: true,
-            cache_ttl: Some(Duration::from_secs(300)),
-            tool_call_format: ToolCallFormat::Anthropic,
-            pricing: TokenPricing {
-                input_per_mtok: 3.0,
-                output_per_mtok: 15.0,
-                cached_input_per_mtok: Some(0.3),
-                cache_write_5m_per_mtok: None,
-                cache_write_1h_per_mtok: None,
-            },
-            native_tools: Vec::new(),
-        };
-        let mut ctx = WorkingContext::new(&session, capabilities);
-        ctx.append_system("identity");
-        ctx.mark_cache_breakpoint();
-        ctx.append_message(ContextMessage::user("hello"));
-
-        let request = ctx.into_request();
-
-        assert_eq!(request.cache_breakpoints, vec![1]);
-        assert_eq!(
-            request.cache_controls,
-            vec![CacheBreakpoint::message(1, CacheTtl::OneHour)]
-        );
     }
 }

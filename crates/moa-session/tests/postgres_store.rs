@@ -327,7 +327,6 @@ async fn postgres_session_owned_writes_fail_when_session_is_missing() {
                 messages: Vec::new(),
                 file_read_dedup_state: FileReadDedupState::default(),
                 token_count: 0,
-                cache_controls: Vec::new(),
                 stage_inputs_hash: 0,
             },
         )

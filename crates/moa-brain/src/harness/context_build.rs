@@ -173,7 +173,7 @@ async fn persist_context_snapshot(
         return;
     }
 
-    let mut snapshot = match serde_json::from_value::<ContextSnapshot>(snapshot_value) {
+    let snapshot = match serde_json::from_value::<ContextSnapshot>(snapshot_value) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             tracing::warn!(
@@ -184,8 +184,6 @@ async fn persist_context_snapshot(
             return;
         }
     };
-    snapshot.cache_controls = ctx.cache_controls.clone();
-
     let serialized = match serde_json::to_vec(&snapshot) {
         Ok(payload) => payload,
         Err(error) => {

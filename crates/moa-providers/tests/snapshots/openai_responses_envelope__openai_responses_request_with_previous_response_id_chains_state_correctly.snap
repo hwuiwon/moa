@@ -1,5 +1,6 @@
 ---
 source: crates/moa-providers/tests/openai_responses_envelope.rs
+assertion_line: 159
 expression: value
 ---
 {
@@ -15,7 +16,7 @@ expression: value
   "model": "gpt-5.4-mini",
   "parallel_tool_calls": true,
   "previous_response_id": "resp_previous_123",
-  "prompt_cache_key": "moa:gpt-5.4-mini:27440f1910bfd682",
+  "prompt_cache_key": "moa:gpt-5.4-mini:9eb5d625998be69f",
   "prompt_cache_retention": "in_memory",
   "reasoning": {
     "effort": "medium"

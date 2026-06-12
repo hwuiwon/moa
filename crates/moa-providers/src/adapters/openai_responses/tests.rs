@@ -6,7 +6,7 @@ use async_openai::error::OpenAIError;
 use async_openai::types::responses::{
     PromptCacheRetention, ResponseUsage, TextResponseFormatConfiguration,
 };
-use moa_core::{CacheBreakpoint, CacheTtl, CompletionRequest, ContextMessage, JsonResponseFormat};
+use moa_core::{CompletionRequest, ContextMessage, JsonResponseFormat};
 use serde_json::json;
 
 use super::{
@@ -62,6 +62,7 @@ fn token_usage_from_openai_usage_splits_cached_prompt_tokens() {
 
 #[test]
 fn build_responses_request_sets_prompt_cache_key_and_retention() {
+    // Pins: OpenAI cache keys are provider-derived from the stable prompt prefix.
     let request = CompletionRequest {
         model: None,
         messages: vec![
@@ -81,8 +82,6 @@ fn build_responses_request_sets_prompt_cache_key_and_retention() {
         max_output_tokens: Some(128),
         temperature: None,
         response_format: None,
-        cache_breakpoints: vec![1],
-        cache_controls: vec![CacheBreakpoint::message(1, CacheTtl::OneHour)],
         metadata: HashMap::new(),
     };
 
@@ -111,8 +110,6 @@ fn build_responses_request_omits_temperature_for_reasoning_models() {
         max_output_tokens: Some(128),
         temperature: Some(0.0),
         response_format: None,
-        cache_breakpoints: Vec::new(),
-        cache_controls: Vec::new(),
         metadata: HashMap::new(),
     };
 
@@ -157,6 +154,7 @@ fn build_responses_request_sets_structured_output_schema() {
 
 #[test]
 fn prompt_cache_key_ignores_dynamic_tail_messages() {
+    // Pins: OpenAI prompt_cache_key remains stable when only non-system tail messages change.
     let mut first = CompletionRequest {
         model: None,
         messages: vec![
@@ -167,8 +165,6 @@ fn prompt_cache_key_ignores_dynamic_tail_messages() {
         max_output_tokens: Some(128),
         temperature: None,
         response_format: None,
-        cache_breakpoints: vec![1],
-        cache_controls: vec![CacheBreakpoint::message(1, CacheTtl::OneHour)],
         metadata: HashMap::new(),
     };
     let mut second = first.clone();

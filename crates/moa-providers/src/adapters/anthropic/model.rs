@@ -1,5 +1,7 @@
 //! Anthropic model aliases and capability metadata.
 
+use std::time::Duration;
+
 use super::tools::native_web_search_tools;
 use super::*;
 

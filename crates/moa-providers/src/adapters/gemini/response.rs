@@ -57,11 +57,6 @@ pub(super) struct GeminiUsageMetadata {
     pub(super) cached_content_token_count: Option<usize>,
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct GeminiCachedContent {
-    pub(super) name: String,
-}
-
 pub(super) fn token_usage_from_gemini_usage(metadata: &GeminiUsageMetadata) -> TokenUsage {
     let input_tokens = metadata.prompt_token_count.unwrap_or_default();
     let cached_input_tokens = metadata.cached_content_token_count.unwrap_or_default();

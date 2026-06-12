@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{CacheBreakpoint, ContextMessage, SequenceNum, SessionId, ToolCallId};
+use super::{ContextMessage, SequenceNum, SessionId, ToolCallId};
 
 /// Current serialized context snapshot format version.
-pub const CONTEXT_SNAPSHOT_FORMAT_VERSION: u32 = 2;
+pub const CONTEXT_SNAPSHOT_FORMAT_VERSION: u32 = 3;
 
 /// Serializable cache of compiled history state for one session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27,9 +27,6 @@ pub struct ContextSnapshot {
     pub file_read_dedup_state: FileReadDedupState,
     /// Approximate token count for the compiled history messages.
     pub token_count: usize,
-    /// Cache markers associated with the compiled request when the snapshot was written.
-    #[serde(default)]
-    pub cache_controls: Vec<CacheBreakpoint>,
     /// Fingerprint of the static pre-history stage inputs.
     pub stage_inputs_hash: u64,
 }

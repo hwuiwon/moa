@@ -188,7 +188,7 @@ impl ContextProcessor for HistoryCompiler {
     }
 
     fn stage(&self) -> u8 {
-        7
+        8
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
@@ -246,7 +246,6 @@ impl ContextProcessor for HistoryCompiler {
                     messages: snapshot.messages.clone(),
                     file_read_dedup_state: snapshot.file_read_dedup_state.clone(),
                     token_count: snapshot.token_count,
-                    cache_controls: Vec::new(),
                     stage_inputs_hash,
                 })?,
             );

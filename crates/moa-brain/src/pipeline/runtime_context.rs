@@ -84,7 +84,7 @@ impl ContextProcessor for RuntimeContextProcessor {
     }
 
     fn stage(&self) -> u8 {
-        8
+        9
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {

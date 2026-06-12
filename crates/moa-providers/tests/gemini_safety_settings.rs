@@ -115,8 +115,6 @@ fn base_request() -> CompletionRequest {
         max_output_tokens: Some(256),
         temperature: Some(0.0),
         response_format: None,
-        cache_breakpoints: Vec::new(),
-        cache_controls: Vec::new(),
         metadata: HashMap::new(),
     }
 }

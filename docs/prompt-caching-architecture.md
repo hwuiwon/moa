@@ -1,11 +1,11 @@
 ## Prompt Caching Architecture
 
-MOA treats the prompt prefix as a cache key.
+MOA treats prompt ordering as the cache contract.
 
-Anthropic prompt caching matches on exact-prefix byte equality. If any byte in
-the cached prefix changes between turns, the cache misses and the request pays
-full input cost again. Because of that, the early pipeline stages must stay
-static for identical session inputs.
+Prompt caches are owned by provider APIs and by the LLM gateway/provider layer.
+The brain does not emit provider-specific cache breakpoints, TTLs, retention
+policies, or Gemini cached-content names. Its job is to keep repeated prompt
+sections at the beginning and per-turn sections near the active turn.
 
 ### Stable Prefix
 
@@ -14,7 +14,6 @@ The long-lived static prefix is produced by the byte-stable pipeline stages:
 1. `IdentityProcessor`
 2. `InstructionProcessor`
 3. `ToolDefinitionProcessor`
-4. `SkillInjector`
 
 These stages must not render per-turn dynamic values such as:
 
@@ -23,25 +22,12 @@ These stages must not render per-turn dynamic values such as:
 - current git branch
 - current user identity
 - counters that change every turn
-- workspace-specific ranking stats that reorder tools or skills
+- query-shaped ranking stats that reorder tools or skills
+- retrieved memory
+- current turn text
 
 If a stage above needs to reference dynamic runtime state, it should use a
 placeholder in static text and rely on the runtime reminder described below.
-
-### Rolling Conversation Prefix
-
-Conversation history is cached separately from the static prefix.
-
-MOA uses four logical cache regions:
-
-1. `BP1` — identity + guardrails (`1h`)
-2. `BP2` — workspace instructions + skills (`1h`)
-3. `BP3` — tool definitions (`1h`)
-4. `BP4` — the last frozen assistant/tool message in conversation history (`5m`)
-
-`BP4` rolls forward as the conversation grows so that the cached conversation
-tail stays within Anthropic's 20-block lookback window. The deepest breakpoint
-is therefore not the static prefix; it is the rolling conversation prefix.
 
 ### Dynamic Tail
 
@@ -49,11 +35,11 @@ All per-turn runtime state belongs in the dynamic tail:
 
 - `QueryRewriter` stores rewritten-query and task-transition metadata without
   altering the stable prefix.
+- `SkillInjector` injects a compact selected-skill manifest after query
+  rewriting. The selection can depend on query keywords, tenant-level learning,
+  use count, and recency, so it is not part of the stable prefix.
 - `DigestProcessor` injects standing user/workspace memory after query
-  rewriting and before graph-memory retrieval. Digest content changes only on
-  the configured rebuild cadence, so it sits at the largest cacheable position
-  whose invalidation rate matches that derived artifact rather than the active
-  turn.
+  rewriting and skill selection.
 - `MemoryRetriever` injects relevant memory after query rewriting and before
   history compilation.
 - `HistoryCompiler` emits replayed conversation, checkpoints, recent turns,
@@ -73,21 +59,21 @@ Current user: alice
 </system-reminder>
 ```
 
-This reminder is inserted after the cacheable static and conversation prefix
-boundaries and before the current user turn. That keeps the early prompt
-byte-stable while still giving the model the runtime facts it needs for the
-active turn.
+This reminder is inserted after the stable prefix and before the current user
+turn. That keeps the early prompt byte-stable while still giving the model the
+runtime facts it needs for the active turn.
 
 ### Provider Mapping
 
-- Anthropic uses explicit `cache_control` markers with `1h` and `5m` TTLs.
-- OpenAI does not use message-level breakpoints, but it benefits from the same
-  prompt layout because prompt caching matches exact prefixes. MOA should keep
-  the static prefix stable and the dynamic tail at the end, and provide a
-  stable `prompt_cache_key` for repeated prefixes.
-- Gemini benefits from the same prompt layout for implicit caching. Explicit
-  Gemini cached-content resources are a separate optimization and should not be
-  mixed into the byte-stable prompt stages.
+- OpenAI prompt caching is automatic for supported models. The OpenAI adapter
+  may derive a stable `prompt_cache_key` from the ordered static prefix, but
+  the shared request type does not expose OpenAI cache policy.
+- Anthropic prompt caching is provider-owned. The Anthropic adapter may enable
+  top-level automatic `cache_control` for cache-eligible requests, but the brain
+  does not emit block-level markers.
+- Gemini uses implicit caching for the default request path. Explicit
+  `cachedContents` resources are a separate provider feature and are not part
+  of the default MOA prompt compilation path.
 
 ### Rules For Future Changes
 
@@ -96,13 +82,12 @@ When adding prompt content:
 - Put static instructions in the early pipeline stages.
 - Keep query rewriting, retrieved memory, replayed history, and runtime context
   out of the stable prefix.
-- Preserve the current dynamic order: query rewrite, memory, history, runtime
-  context, compactor, cache optimizer. Standing digests are the one
-  pre-retrieval memory block and must stay between query rewriting and graph
-  memory retrieval.
+- Preserve the current dynamic order: query rewrite, skills, standing memory
+  digest, graph memory, history, runtime context, compactor.
 - Put dynamic session or turn state in `RuntimeContextProcessor`.
 - Keep tool definitions sorted deterministically by tool name.
-- Keep rendered skill metadata sorted deterministically by skill name.
+- Keep rendered skill metadata deterministic, but do not place selected skills
+  in the stable prefix.
 - Do not include usage counters, timestamps, or success-rate fields in the
   cached prefix.
 
@@ -130,5 +115,5 @@ Expected behavior:
 - later turns in the same session should report non-zero cached input tokens
 
 If the stable-prefix test fails or live cache reads stay at zero after the
-prefix is warm, first inspect the static stages for newly introduced dynamic
-content.
+prefix is warm, first inspect the static stages and provider request mapping
+for newly introduced dynamic content before changing retrieval or history logic.

@@ -81,8 +81,6 @@ fn minimal_request(model: &str) -> CompletionRequest {
         max_output_tokens: Some(MAX_OUTPUT_TOKENS),
         temperature: Some(TEMPERATURE),
         response_format: None,
-        cache_breakpoints: Vec::new(),
-        cache_controls: Vec::new(),
         metadata: Default::default(),
     }
 }

@@ -9,16 +9,15 @@
 
 use std::env;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use eventsource_stream::{Event as SseEvent, Eventsource};
 use futures_util::{Stream, StreamExt, pin_mut};
 use moa_core::{
-    CacheBreakpoint, CacheBreakpointTarget, CacheTtl, CompletionContent, CompletionRequest,
-    CompletionResponse, CompletionStream, ContextMessage, JsonResponseFormat, LLMProvider,
-    MessageRole, MoaConfig, MoaError, ModelCapabilities, ModelId, ProviderNativeTool, Result,
-    StopReason, TokenPricing, TokenUsage, ToolCallFormat, ToolContent, ToolInvocation,
-    estimate_text_tokens,
+    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
+    JsonResponseFormat, LLMProvider, MessageRole, MoaConfig, MoaError, ModelCapabilities, ModelId,
+    ProviderNativeTool, Result, StopReason, TokenPricing, TokenUsage, ToolCallFormat, ToolContent,
+    ToolInvocation, estimate_text_tokens,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -60,17 +59,10 @@ const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const DEFAULT_STREAM_BUFFER: usize = 64;
 const DEFAULT_MAX_RETRIES: usize = 3;
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4_096;
-const MAX_CACHE_BREAKPOINTS: usize = 4;
 const MIN_CACHEABLE_TOKENS: usize = 1_024;
 const MODEL_HAIKU_4_5: &str = "claude-haiku-4-5";
 const MODEL_OPUS_4_6: &str = "claude-opus-4-6";
 const MODEL_SONNET_4_6: &str = "claude-sonnet-4-6";
-
-#[derive(Debug, Clone, Copy)]
-enum CacheTarget {
-    System(usize),
-    Message(usize),
-}
 
 /// Anthropic Claude provider backed by the Messages API.
 pub struct AnthropicProvider {

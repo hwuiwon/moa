@@ -1089,7 +1089,6 @@ mod tests {
                 model: ModelId::new("recorded-scripted"),
                 message_count: 3,
                 tool_count: 1,
-                cache_breakpoints: vec![2],
                 tool_tokens_estimate: 100,
                 stable_message_tokens_estimate: 200,
                 stable_total_tokens_estimate: 300,

@@ -384,7 +384,6 @@ mod tests {
             messages: vec![ContextMessage::user("stable")],
             file_read_dedup_state: FileReadDedupState::default(),
             token_count: 1,
-            cache_controls: Vec::new(),
             stage_inputs_hash: 1,
         };
         let delta_events = (1..=51)

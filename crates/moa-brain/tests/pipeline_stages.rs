@@ -2,12 +2,12 @@
 
 mod support;
 
+use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use moa_brain::pipeline::cache::CacheOptimizer;
 use moa_brain::pipeline::identity::IdentityProcessor;
 use moa_brain::pipeline::instructions::InstructionProcessor;
 use moa_brain::pipeline::memory::GraphMemoryRetriever;
@@ -19,11 +19,11 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
 };
 use moa_core::{
-    CacheBreakpoint, CacheBreakpointTarget, CacheTtl, CompletionContent, CompletionRequest,
-    CompletionResponse, CompletionStream, ContextMessage, ContextProcessor, LLMProvider,
-    MemoryAction, MemoryScope, MessageRole, MoaConfig, ModelCapabilities, ModelId,
-    NullLineageHandle, QueryRewriteConfig, QueryRewriteResult, Result, RewriteSource, ScopeContext,
-    StopReason, TaskKind, TokenUsage, WorkingContext, WorkspaceId,
+    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
+    ContextProcessor, LLMProvider, MemoryAction, MemoryScope, MessageRole, MoaConfig,
+    ModelCapabilities, ModelId, NullLineageHandle, QueryRewriteConfig, QueryRewriteResult, Result,
+    RewriteSource, ScopeContext, StopReason, TaskKind, TokenUsage, WorkingContext, WorkspaceId,
+    stable_prefix_fingerprint,
 };
 use moa_memory_graph::{NodeLabel, PiiClass};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorItem, VectorStore};
@@ -37,7 +37,6 @@ use support::{
 use uuid::Uuid;
 
 const QUERY_REWRITE_METADATA_KEY: &str = "query_rewrite";
-const HISTORY_END_INDEX_METADATA_KEY: &str = "_moa.history.end_index";
 const MEMORY_REMINDER_PREFIX: &str = "<memory-reminder>";
 
 #[tokio::test]
@@ -89,7 +88,7 @@ async fn identity_stage_emits_stable_system_message_with_workspace_and_runtime_m
         .with_messages(Vec::new())
         .build();
 
-    // IdentityProcessor owns the stable system identity prompt and first cache breakpoint.
+    // Pins: IdentityProcessor owns the first stable system identity prompt section.
     let output = IdentityProcessor::default()
         .process(&mut fixture.ctx)
         .await?;
@@ -126,11 +125,6 @@ async fn identity_stage_emits_stable_system_message_with_workspace_and_runtime_m
         fixture.ctx.metadata().len(),
         1,
         "IdentityProcessor: should not mutate existing runtime metadata"
-    );
-    assert_eq!(
-        fixture.ctx.cache_controls,
-        vec![CacheBreakpoint::message(1, CacheTtl::OneHour)],
-        "IdentityProcessor: should mark the identity message as a one-hour breakpoint"
     );
     assert_eq!(
         output.items_included,
@@ -486,56 +480,53 @@ async fn memory_stage_includes_top_k_hits_with_lineage_uids_and_excludes_invalid
     Ok(())
 }
 
-#[tokio::test]
-async fn cache_stage_inserts_breakpoints_at_4_segment_boundaries() -> Result<()> {
-    let mut ctx = WorkingContextFixture::new()
-        .with_messages(Vec::new())
-        .build()
-        .ctx;
-    ctx.append_system("identity");
-    ctx.mark_cache_breakpoint_with_ttl(CacheTtl::OneHour);
-    ctx.append_system("instructions");
-    ctx.mark_cache_breakpoint_with_ttl(CacheTtl::OneHour);
-    ctx.set_tools(vec![tool_schema("bash")]);
-    ctx.extend_messages(vec![
-        ContextMessage::assistant("previous reply"),
-        ContextMessage::tool_result("toolu_1", "tool output", None),
-        ContextMessage::user("current question"),
-    ]);
-    ctx.insert_metadata(HISTORY_END_INDEX_METADATA_KEY, json!(4));
-
-    // CacheOptimizer preserves stable prefix boundaries and adds the conversation breakpoint.
-    CacheOptimizer.process(&mut ctx).await?;
-
-    assert_eq!(
-        ctx.cache_controls,
-        vec![
-            CacheBreakpoint::tools(CacheTtl::OneHour),
-            CacheBreakpoint::message(1, CacheTtl::OneHour),
-            CacheBreakpoint::message(2, CacheTtl::OneHour),
-            CacheBreakpoint::message(4, CacheTtl::FiveMinutes),
-        ],
-        "CacheOptimizer: planned cache-control boundaries changed"
-    );
-    assert_eq!(
-        ctx.cache_breakpoints,
-        vec![1, 2, 4],
-        "CacheOptimizer: message-boundary cache breakpoints changed"
-    );
-    assert_eq!(
-        ctx.cache_controls
+#[test]
+fn stable_prefix_fingerprint_uses_tools_and_leading_system_sections_only() {
+    // Pins: provider cache keys stay stable when only dynamic tail messages change.
+    let tools = vec![tool_schema("bash")];
+    let base_messages = vec![
+        ContextMessage::system("identity"),
+        ContextMessage::system("instructions"),
+    ];
+    let first = CompletionRequest {
+        model: Some(ModelId::new("claude-sonnet-4-6")),
+        messages: base_messages
             .iter()
-            .map(cache_target_label)
-            .collect::<Vec<_>>(),
-        vec![
-            "tools".to_string(),
-            "message:1".to_string(),
-            "message:2".to_string(),
-            "message:4".to_string()
-        ],
-        "CacheOptimizer: cache-control targets changed"
+            .cloned()
+            .chain([
+                ContextMessage::assistant("previous reply"),
+                ContextMessage::tool_result("toolu_1", "tool output", None),
+                ContextMessage::user("current question"),
+            ])
+            .collect(),
+        tools: tools.clone(),
+        max_output_tokens: None,
+        temperature: None,
+        response_format: None,
+        metadata: HashMap::new(),
+    };
+    let second = CompletionRequest {
+        model: Some(ModelId::new("claude-sonnet-4-6")),
+        messages: base_messages
+            .into_iter()
+            .chain([
+                ContextMessage::assistant("different previous reply"),
+                ContextMessage::tool_result("toolu_1", "different tool output", None),
+                ContextMessage::user("different current question"),
+            ])
+            .collect(),
+        tools,
+        max_output_tokens: None,
+        temperature: None,
+        response_format: None,
+        metadata: HashMap::new(),
+    };
+
+    assert_eq!(
+        stable_prefix_fingerprint(&first),
+        stable_prefix_fingerprint(&second),
+        "stable prefix should ignore non-system dynamic tail messages"
     );
-    Ok(())
 }
 
 #[test]
@@ -544,10 +535,9 @@ fn pipeline_stage_failure_message_names_the_stage_clearly() {
         "IdentityProcessor",
         "InstructionProcessor",
         "ToolDefinitionProcessor",
-        "RuntimeContextProcessor",
         "QueryRewriter",
         "GraphMemoryRetriever",
-        "CacheOptimizer",
+        "RuntimeContextProcessor",
     ] {
         let panic = catch_unwind(AssertUnwindSafe(|| {
             assert_stage_contract(stage_name, || {
@@ -726,13 +716,6 @@ fn tool_name(schema: &serde_json::Value) -> Result<String> {
         .and_then(serde_json::Value::as_str)
         .map(ToString::to_string)
         .ok_or_else(|| moa_core::MoaError::ValidationError("tool schema missing name".to_string()))
-}
-
-fn cache_target_label(breakpoint: &CacheBreakpoint) -> String {
-    match breakpoint.target {
-        CacheBreakpointTarget::ToolDefinitions => "tools".to_string(),
-        CacheBreakpointTarget::MessageBoundary { index } => format!("message:{index}"),
-    }
 }
 
 fn invalidated_uids_in_content(content: &str, hits: &[MemoryHit]) -> Vec<String> {

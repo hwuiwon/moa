@@ -78,8 +78,6 @@ async fn openai_provider_translates_requests_to_responses_api() {
         max_output_tokens: Some(128),
         temperature: Some(0.2),
         response_format: None,
-        cache_breakpoints: Vec::new(),
-        cache_controls: Vec::new(),
         metadata: Default::default(),
     };
 
@@ -140,8 +138,6 @@ async fn openai_provider_serializes_tool_result_messages_as_function_call_output
         max_output_tokens: Some(128),
         temperature: Some(0.2),
         response_format: None,
-        cache_breakpoints: Vec::new(),
-        cache_controls: Vec::new(),
         metadata: Default::default(),
     };
 
@@ -198,8 +194,6 @@ async fn openai_provider_serializes_assistant_tool_calls_as_function_call_items(
         max_output_tokens: Some(128),
         temperature: Some(0.2),
         response_format: None,
-        cache_breakpoints: Vec::new(),
-        cache_controls: Vec::new(),
         metadata: Default::default(),
     };
 
@@ -332,8 +326,6 @@ async fn openai_provider_streams_tool_calls_from_responses_events() {
         max_output_tokens: None,
         temperature: None,
         response_format: None,
-        cache_breakpoints: Vec::new(),
-        cache_controls: Vec::new(),
         metadata: Default::default(),
     };
 
@@ -465,8 +457,6 @@ async fn openai_provider_drops_oversized_metadata_values() {
             max_output_tokens: Some(32),
             temperature: None,
             response_format: None,
-            cache_breakpoints: Vec::new(),
-            cache_controls: Vec::new(),
             metadata,
         })
         .await
@@ -573,8 +563,6 @@ async fn openai_provider_streams_parallel_tool_calls_in_order() {
         max_output_tokens: None,
         temperature: None,
         response_format: None,
-        cache_breakpoints: Vec::new(),
-        cache_controls: Vec::new(),
         metadata: Default::default(),
     };
 
@@ -622,8 +610,6 @@ async fn openai_provider_rejects_system_only_requests() {
         max_output_tokens: None,
         temperature: None,
         response_format: None,
-        cache_breakpoints: Vec::new(),
-        cache_controls: Vec::new(),
         metadata: Default::default(),
     };
 

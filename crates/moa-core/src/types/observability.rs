@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    CacheTtl, CompletionRequest, ModelId, Platform, SessionId, SessionMeta, UserId, WorkspaceId,
+    CompletionRequest, MessageRole, ModelId, Platform, SessionId, SessionMeta, UserId, WorkspaceId,
     estimate_text_tokens,
 };
 
@@ -24,8 +24,6 @@ pub struct CacheReport {
     pub message_count: usize,
     /// Number of tool schemas sent to the provider.
     pub tool_count: usize,
-    /// Explicit cache breakpoint indexes included in the request.
-    pub cache_breakpoints: Vec<usize>,
     /// Estimated tokens contributed by tool schemas.
     pub tool_tokens_estimate: usize,
     /// Estimated tokens contributed by stable-prefix messages.
@@ -64,7 +62,6 @@ impl Default for CacheReport {
             model: ModelId::new(""),
             message_count: 0,
             tool_count: 0,
-            cache_breakpoints: Vec::new(),
             tool_tokens_estimate: 0,
             stable_message_tokens_estimate: 0,
             stable_total_tokens_estimate: 0,
@@ -129,7 +126,6 @@ impl CacheReport {
             model: model.into(),
             message_count: request.messages.len(),
             tool_count: request.tools.len(),
-            cache_breakpoints: request.cache_breakpoints.clone(),
             tool_tokens_estimate,
             stable_message_tokens_estimate,
             stable_total_tokens_estimate,
@@ -211,14 +207,10 @@ fn stable_prefix_byte_len(request: &CompletionRequest) -> usize {
 
 fn stable_prefix_message_count(request: &CompletionRequest) -> usize {
     request
-        .cache_controls
+        .messages
         .iter()
-        .filter(|breakpoint| breakpoint.ttl == CacheTtl::OneHour)
-        .filter_map(super::completion::CacheBreakpoint::message_index)
-        .max()
-        .or_else(|| request.cache_breakpoints.last().copied())
-        .unwrap_or_default()
-        .min(request.messages.len())
+        .take_while(|message| message.role == MessageRole::System)
+        .count()
 }
 
 /// Context attributes propagated across spans in one logical turn trace.
@@ -379,8 +371,7 @@ mod tests {
         trace_name_from_message,
     };
     use crate::types::{
-        CacheBreakpoint, CacheTtl, CompletionRequest, ContextMessage, Platform, SessionId,
-        SessionMeta, UserId, WorkspaceId,
+        CompletionRequest, ContextMessage, Platform, SessionId, SessionMeta, UserId, WorkspaceId,
     };
     use serde_json::json;
 
@@ -416,6 +407,7 @@ mod tests {
 
     #[test]
     fn completion_request_fingerprints_are_json_object_order_insensitive() {
+        // Pins: stable-prefix fingerprints canonicalize tool-schema object key order.
         let first = CompletionRequest {
             model: None,
             messages: vec![
@@ -439,8 +431,6 @@ mod tests {
             max_output_tokens: Some(128),
             temperature: None,
             response_format: None,
-            cache_breakpoints: Vec::new(),
-            cache_controls: vec![CacheBreakpoint::message(1, CacheTtl::OneHour)],
             metadata: Default::default(),
         };
         let second = CompletionRequest {
